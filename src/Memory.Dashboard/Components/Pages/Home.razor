@@ -1,0 +1,867 @@
+@page "/"
+@implements IAsyncDisposable
+@inject IContextHubApiClient ApiClient
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+@inject IJSRuntime JsRuntime
+@using Memory.Dashboard.Services
+
+<PageTitle>Context Hub | 總覽</PageTitle>
+
+<PageViewport Title="總覽"
+              Subtitle="集中檢視服務健康、資源趨勢、錯誤與背景工作，快速掌握目前 instance 狀態。"
+              BodyClass="page-viewport-body home-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading"
+                       PollingIntervalSeconds="@PollingIntervalSeconds"
+                       WarningText="@SnapshotWarningText()" />
+        <button class="primary-button" @onclick="RefreshAsync" disabled="@_loading">刷新</button>
+    </Actions>
+    <ChildContent>
+
+    @if (!string.IsNullOrWhiteSpace(_loadError))
+    {
+        <div class="inline-error">@_loadError</div>
+    }
+
+    @if (_overview is null || _docker is null)
+    {
+        <div class="metric-grid">
+            @for (var i = 0; i < 4; i++)
+            {
+                <section class="panel metric-card skeleton-panel">
+                    <div class="skeleton-line skeleton-line-sm"></div>
+                    <div class="skeleton-line skeleton-line-lg"></div>
+                    <div class="skeleton-line skeleton-line-xs"></div>
+                </section>
+            }
+        </div>
+
+        <div class="dashboard-grid page-scroll-host">
+            @for (var i = 0; i < 4; i++)
+            {
+                <section class="panel skeleton-panel @(i == 2 ? "span-2" : string.Empty)">
+                    <div class="skeleton-line skeleton-line-md"></div>
+                    <div class="skeleton-stack">
+                        <div class="skeleton-line skeleton-line-lg"></div>
+                        <div class="skeleton-line skeleton-line-md"></div>
+                        <div class="skeleton-line skeleton-line-sm"></div>
+                    </div>
+                </section>
+            }
+        </div>
+    }
+    else
+    {
+        @if (!string.IsNullOrWhiteSpace(_message))
+        {
+            <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
+        }
+
+        <div class="metric-grid">
+            @foreach (var metric in _overview.Metrics)
+            {
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">@metric.Label：</span>
+                        <span class="metric-value-inline">@metric.Value</span>
+                        <span class="metric-meta-inline">@MetricUnitText(metric.Unit)</span>
+                    </div>
+                </section>
+            }
+        </div>
+
+        <div class="dashboard-grid page-scroll-host">
+            <section class="panel">
+                <div class="panel-title">服務健康</div>
+                <div class="badge-strip">
+                    @foreach (var service in _overview.Services)
+                    {
+                        <span class="status-badge @StatusClass(service.Status)">@ServiceDisplayName(service.Name): @StatusText(service.Status)</span>
+                    }
+                </div>
+
+                <dl class="definition-grid">
+                    <div>
+                        <dt>命名空間 (Namespace)</dt>
+                        <dd>@_overview.Namespace</dd>
+                    </div>
+                    <div>
+                        <dt>建置版本 (Build Version)</dt>
+                        <dd>@_overview.BuildVersion</dd>
+                    </div>
+                    <div>
+                        <dt>建置時間 (Build Time)</dt>
+                        <dd><ClientLocalTime Value="_overview.BuildTimestampUtc" /></dd>
+                    </div>
+                    <div>
+                        <dt>向量設定檔 (Embedding Profile)</dt>
+                        <dd>@_overview.EmbeddingProfile</dd>
+                    </div>
+                    <div>
+                        <dt>模型鍵值 (Model Key)</dt>
+                        <dd>@_overview.ModelKey</dd>
+                    </div>
+                    <div>
+                        <dt>維度 (Dimensions)</dt>
+                        <dd>@_overview.Dimensions</dd>
+                    </div>
+                    <div>
+                        <dt>最大 Token 數 (Max Tokens)</dt>
+                        <dd>@_overview.MaxTokens</dd>
+                    </div>
+                    <div>
+                        <dt>快取版本 (Cache Version)</dt>
+                        <dd>@_overview.CacheVersion</dd>
+                    </div>
+                </dl>
+            </section>
+
+            <section class="panel">
+                <div class="panel-title">Docker 主機 (Docker Host)</div>
+                <div class="host-grid">
+                    <div class="host-stat">
+                        <span>狀態</span>
+                        <strong class="@StatusClass(_docker.Status)">@StatusText(_docker.Status)</strong>
+                    </div>
+                    <div class="host-stat">
+                        <span>CPU 核心 (CPU Cores)</span>
+                        <strong>@_docker.Host.CpuCount 核</strong>
+                    </div>
+                    <div class="host-stat">
+                        <span>總記憶體</span>
+                        <strong>@DashboardFormatting.Bytes(_docker.Host.TotalMemoryBytes)</strong>
+                    </div>
+                    <div class="host-stat">
+                        <span>估計可用</span>
+                        <strong>@DashboardFormatting.Bytes(_docker.Host.EstimatedAvailableMemoryBytes)</strong>
+                    </div>
+                    <div class="host-stat">
+                        <span>Images</span>
+                        <strong>@_docker.Host.ImageCount</strong>
+                    </div>
+                    <div class="host-stat">
+                        <span>Volumes</span>
+                        <strong>@_docker.Host.VolumeCount</strong>
+                    </div>
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(_docker.Error))
+                {
+                    <div class="inline-error">@_docker.Error</div>
+                }
+            </section>
+
+            <section class="panel span-2">
+                <div class="panel-heading-row">
+                    <div class="panel-title">資源狀態圖表</div>
+                    <div class="panel-heading-meta resource-chart-panel-meta">@ResourceChartPanelNote()</div>
+                </div>
+                <div class="resource-chart-grid">
+                <article class="resource-chart-card">
+                    <div class="resource-chart-header">
+                        <div>
+                            <div class="resource-chart-title">CPU 使用率 (CPU Usage)</div>
+                            <div class="resource-chart-value">@DashboardFormatting.Percent(CurrentCpuPercent())</div>
+                            <div class="resource-chart-summary">近期平均 @DashboardFormatting.Percent(AverageCpuPercent())</div>
+                        </div>
+                    </div>
+                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="CPU usage trend">
+                        @foreach (var guide in ChartGuideLines())
+                        {
+                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                        }
+                        <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), MaxCpuPercent())"></polyline>
+                    </svg>
+                    <div class="resource-chart-meta">依 `docker stats` 聚合目前服務群組原始 CPU 使用率 / 主機 @_docker.Host.CpuCount 核</div>
+                </article>
+
+                <article class="resource-chart-card">
+                    <div class="resource-chart-header">
+                        <div>
+                            <div class="resource-chart-title">記憶體使用率 (Memory Usage)</div>
+                            <div class="resource-chart-value">@DashboardFormatting.Bytes(CurrentMemoryUsageBytes())</div>
+                            <div class="resource-chart-summary">近期平均 @DashboardFormatting.Bytes(AverageMemoryUsageBytes())</div>
+                        </div>
+                    </div>
+                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Memory usage trend">
+                        @foreach (var guide in ChartGuideLines())
+                        {
+                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                        }
+                        <polyline class="resource-line memory" points="@BuildLinePoints(_resourceSamples.Select(x => (double)x.MemoryUsageBytes), MaxMemoryUsageChartValue())"></polyline>
+                    </svg>
+                    <div class="resource-chart-meta">@DashboardFormatting.Bytes(CurrentMemoryUsageBytes()) / @DashboardFormatting.Bytes(_docker.Host.TotalMemoryBytes) (占主機 @DashboardFormatting.Percent(CurrentMemoryPercent()))</div>
+                </article>
+
+                <article class="resource-chart-card">
+                    <div class="resource-chart-header">
+                        <div>
+                            <div class="resource-chart-title">網路吞吐量 (Network Throughput)</div>
+                            <div class="resource-chart-stats">
+                                <div class="resource-inline-stat">
+                                    <span>接收 (RX)</span>
+                                    <div class="resource-inline-stat-value">
+                                        <strong>@FormatRate(CurrentNetworkRxBytesPerSecond())</strong>
+                                        <small>平均 @FormatRate(AverageNetworkRxBytesPerSecond())</small>
+                                    </div>
+                                </div>
+                                <div class="resource-inline-stat">
+                                    <span>傳送 (TX)</span>
+                                    <div class="resource-inline-stat-value">
+                                        <strong>@FormatRate(CurrentNetworkTxBytesPerSecond())</strong>
+                                        <small>平均 @FormatRate(AverageNetworkTxBytesPerSecond())</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Network throughput trend">
+                        @foreach (var guide in ChartGuideLines())
+                        {
+                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                        }
+                        <polyline class="resource-line rx" points="@BuildLinePoints(_resourceSamples.Select(x => x.NetworkRxBytesPerSecond), MaxNetworkRate())"></polyline>
+                        <polyline class="resource-line tx" points="@BuildLinePoints(_resourceSamples.Select(x => x.NetworkTxBytesPerSecond), MaxNetworkRate())"></polyline>
+                    </svg>
+                    <div class="resource-chart-legend">
+                        <span class="resource-legend-item"><i class="legend-swatch rx"></i>接收 (RX)</span>
+                        <span class="resource-legend-item"><i class="legend-swatch tx"></i>傳送 (TX)</span>
+                    </div>
+                </article>
+
+                <article class="resource-chart-card">
+                    <div class="resource-chart-header">
+                        <div>
+                            <div class="resource-chart-title">近期呼叫趨勢 (Recent Request Traffic)</div>
+                            <div class="resource-chart-stats">
+                                <div class="resource-inline-stat">
+                                    <span>進站 (Inbound)</span>
+                                    <div class="resource-inline-stat-value">
+                                        <strong>@FormatCountRate(CurrentInboundRequestsPerSecond())</strong>
+                                        <small>平均 @FormatCountRate(AverageInboundRequestsPerSecond())</small>
+                                    </div>
+                                </div>
+                                <div class="resource-inline-stat">
+                                    <span>傳出 (Outbound)</span>
+                                    <div class="resource-inline-stat-value">
+                                        <strong>@FormatCountRate(CurrentOutboundRequestsPerSecond())</strong>
+                                        <small>平均 @FormatCountRate(AverageOutboundRequestsPerSecond())</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Recent request traffic trend">
+                        @foreach (var guide in ChartGuideLines())
+                        {
+                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                        }
+                        <polyline class="resource-line inbound" points="@BuildLinePoints(_overview.RequestTraffic.Select(x => (double)x.InboundRequests), MaxRequestTrafficRate())"></polyline>
+                        <polyline class="resource-line outbound" points="@BuildLinePoints(_overview.RequestTraffic.Select(x => (double)x.OutboundRequests), MaxRequestTrafficRate())"></polyline>
+                    </svg>
+                    <div class="resource-chart-legend">
+                        <span class="resource-legend-item"><i class="legend-swatch inbound"></i>進站 (Inbound)</span>
+                        <span class="resource-legend-item"><i class="legend-swatch outbound"></i>傳出 (Outbound)</span>
+                    </div>
+                </article>
+
+                <article class="resource-chart-card">
+                    <div class="resource-chart-header">
+                        <div>
+                            <div class="resource-chart-title">磁碟吞吐量 (Disk Throughput)</div>
+                            <div class="resource-chart-stats">
+                                <div class="resource-inline-stat">
+                                    <span>讀取 (Read)</span>
+                                    <div class="resource-inline-stat-value">
+                                        <strong>@FormatRate(CurrentDiskReadBytesPerSecond())</strong>
+                                        <small>平均 @FormatRate(AverageDiskReadBytesPerSecond())</small>
+                                    </div>
+                                </div>
+                                <div class="resource-inline-stat">
+                                    <span>寫入 (Write)</span>
+                                    <div class="resource-inline-stat-value">
+                                        <strong>@FormatRate(CurrentDiskWriteBytesPerSecond())</strong>
+                                        <small>平均 @FormatRate(AverageDiskWriteBytesPerSecond())</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Disk throughput trend">
+                        @foreach (var guide in ChartGuideLines())
+                        {
+                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                        }
+                        <polyline class="resource-line read" points="@BuildLinePoints(_resourceSamples.Select(x => x.DiskReadBytesPerSecond), MaxDiskRate())"></polyline>
+                        <polyline class="resource-line write" points="@BuildLinePoints(_resourceSamples.Select(x => x.DiskWriteBytesPerSecond), MaxDiskRate())"></polyline>
+                    </svg>
+                    <div class="resource-chart-legend">
+                        <span class="resource-legend-item"><i class="legend-swatch read"></i>讀取 (Read)</span>
+                        <span class="resource-legend-item"><i class="legend-swatch write"></i>寫入 (Write)</span>
+                    </div>
+                </article>
+                </div>
+            </section>
+
+            <section class="panel span-2">
+                <div class="panel-title">Compose 服務資源</div>
+                <div class="table-scroll-shell table-scroll-shell-tall">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>服務 (Service)</th>
+                                <th>容器 (Container)</th>
+                                <th>狀態 (State)</th>
+                                <th>CPU</th>
+                                <th>記憶體 (Memory)</th>
+                                <th>網路 (Network)</th>
+                                <th>磁碟 I/O (Disk I/O)</th>
+                                <th>重啟次數 (Restart)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var container in _docker.Containers)
+                            {
+                                <tr>
+                                    <td>@ServiceDisplayName(container.Service)</td>
+                                    <td>@container.Name</td>
+                                    <td>
+                                        <span class="status-badge @StatusClass(container.State)">@StatusText(container.State)</span>
+                                        <span class="status-badge @StatusClass(container.Health)">@StatusText(container.Health)</span>
+                                    </td>
+                                    <td>@DashboardFormatting.Percent(container.CpuPercent)</td>
+                                    <td>@DashboardFormatting.Bytes(container.MemoryUsageBytes) / @DashboardFormatting.Bytes(container.MemoryLimitBytes)</td>
+                                    <td>@DashboardFormatting.Bytes(container.NetworkRxBytes) / @DashboardFormatting.Bytes(container.NetworkTxBytes)</td>
+                                    <td>@DashboardFormatting.Bytes(container.DiskReadBytes) / @DashboardFormatting.Bytes(container.DiskWriteBytes)</td>
+                                    <td>@container.RestartCount</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-title">最近錯誤日誌</div>
+                <div class="stack-scroll-shell">
+                    <div class="stack-list">
+                        @if (_overview.RecentErrors.Count == 0)
+                        {
+                            <div class="empty-inline">目前沒有 Error / Critical log。</div>
+                        }
+                        else
+                        {
+                            @foreach (var error in RecentErrorsPreview())
+                            {
+                                <article class="stack-item stack-item-split">
+                                    <div class="stack-item-content">
+                                        <div class="stack-item-title">@error.ServiceName / @error.Level</div>
+                                        <div class="stack-item-copy">@error.Message</div>
+                                    </div>
+                                    <div class="stack-item-actions stack-item-actions-inline stack-item-actions-column">
+                                        <button class="ghost-button" @onclick="@(() => CopyLogAsync(error))">複製 JSON</button>
+                                        <div class="stack-item-meta stack-item-meta-compact"><ClientRelativeTime Value="error.CreatedAt" /></div>
+                                    </div>
+                                </article>
+                            }
+                        }
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-title">進行中工作</div>
+                <div class="stack-scroll-shell">
+                    <div class="stack-list">
+                        @if (_overview.ActiveJobs.Count == 0)
+                        {
+                            <div class="empty-inline">目前沒有等待中 / 執行中的工作。</div>
+                        }
+                        else
+                        {
+                            @foreach (var job in ActiveJobsPreview())
+                            {
+                                <article class="stack-item stack-item-split">
+                                    <div class="stack-item-content">
+                                        <div class="stack-item-title">@DashboardText.Label(job.JobType) / @DashboardText.Label(job.Status)</div>
+                                        <div class="stack-item-copy">@job.PayloadJson</div>
+                                    </div>
+                                    <div class="stack-item-actions stack-item-actions-inline stack-item-actions-column">
+                                        <button class="ghost-button" @onclick="@(() => CopyJobAsync(job))">複製 JSON</button>
+                                        <div class="stack-item-meta stack-item-meta-compact"><ClientRelativeTime Value="job.CreatedAt" /></div>
+                                    </div>
+                                </article>
+                            }
+                        }
+                    </div>
+                </div>
+            </section>
+        </div>
+    }
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private const int MaxResourceSamples = 15;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    private readonly List<ResourceSample> _resourceSamples = [];
+    private Task? _monitoringTask;
+    private DashboardOverviewResult? _overview;
+    private DockerStackSnapshotResult? _docker;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _message;
+    private long _messageSequence;
+    private string? _loadError;
+    private InstanceSettingsSnapshot? _settingsSnapshot;
+    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.ResourceChartSeconds ?? 1;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settingsSnapshot = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
+        await RefreshAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            StartPollingLoops();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task RefreshAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            await RefreshSnapshotAsync(waitForLock: true);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("總覽資料", ex, _overview is not null);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task CopyLogAsync(LogEntryResult log)
+    {
+        try
+        {
+            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", LogClipboardFormatter.Format(log));
+            ShowMessage($"已複製日誌 #{log.Id} 的 JSON。");
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (JSException)
+        {
+            ShowMessage("複製失敗，請改用手動複製。");
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task CopyJobAsync(JobListItemResult job)
+    {
+        try
+        {
+            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", JobClipboardFormatter.Format(job));
+            ShowMessage($"已複製工作 {job.Id} 的 JSON。");
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (JSException)
+        {
+            ShowMessage("複製失敗，請改用手動複製。");
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+
+    private void ClearMessage()
+        => _message = null;
+
+    private void StartPollingLoops()
+    {
+        _monitoringTask = PollAsync(PollingIntervalSeconds, () => RefreshSnapshotAsync(waitForLock: false));
+    }
+
+    private Task PollAsync(int intervalSeconds, Func<Task> callback)
+    {
+        if (intervalSeconds <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(_cts.Token))
+                {
+                    try
+                    {
+                        await callback();
+                    }
+                    catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+                    {
+                    }
+                    catch (Exception ex)
+                    {
+                        _loadError = DashboardUiErrorFormatter.BuildLoadError("總覽資料", ex, _overview is not null);
+                    }
+
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
+    }
+
+    private async Task LoadOverviewAsync()
+    {
+        _overview = await ApiClient.GetOverviewAsync(_cts.Token);
+        HydrateDockerSnapshot();
+        ApplyResourceSamples();
+        _loadError = null;
+    }
+
+    private static string StatusClass(string status)
+        => status.ToLowerInvariant() switch
+        {
+            "healthy" or "ready" or "running" => "ok",
+            "degraded" or "warning" => "warn",
+            "error" or "critical" or "failed" or "unhealthy" or "exited" => "bad",
+            _ => "neutral"
+        };
+
+    private static string StatusText(string status)
+        => DashboardText.Status(status);
+
+    private static string ServiceDisplayName(string name)
+        => DashboardText.Service(name);
+
+    private static string MetricUnitText(string unit)
+        => unit.ToLowerInvariant() switch
+        {
+            "items" => "筆",
+            "jobs" => "項",
+            "logs" => "筆",
+            _ => unit
+        };
+
+    private double CurrentCpuPercent()
+        => _resourceSamples.LastOrDefault()?.CpuPercent ?? 0d;
+
+    private double CurrentMemoryPercent()
+        => _resourceSamples.LastOrDefault()?.MemoryPercent ?? 0d;
+
+    private long CurrentMemoryUsageBytes()
+        => _resourceSamples.LastOrDefault()?.MemoryUsageBytes ?? 0L;
+
+    private double AverageCpuPercent()
+        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.CpuPercent);
+
+    private long AverageMemoryUsageBytes()
+        => _resourceSamples.Count == 0 ? 0L : (long)Math.Round(_resourceSamples.Average(x => x.MemoryUsageBytes));
+
+    private string RawCpuPercentText()
+        => _docker is null
+            ? "0%"
+            : $"{_docker.Containers.Sum(x => x.CpuPercent):0.##}%";
+
+    private double CurrentNetworkRxBytesPerSecond()
+        => _resourceSamples.LastOrDefault()?.NetworkRxBytesPerSecond ?? 0d;
+
+    private double CurrentNetworkTxBytesPerSecond()
+        => _resourceSamples.LastOrDefault()?.NetworkTxBytesPerSecond ?? 0d;
+
+    private double AverageNetworkRxBytesPerSecond()
+        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.NetworkRxBytesPerSecond);
+
+    private double AverageNetworkTxBytesPerSecond()
+        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.NetworkTxBytesPerSecond);
+
+    private double CurrentDiskReadBytesPerSecond()
+        => _resourceSamples.LastOrDefault()?.DiskReadBytesPerSecond ?? 0d;
+
+    private double CurrentDiskWriteBytesPerSecond()
+        => _resourceSamples.LastOrDefault()?.DiskWriteBytesPerSecond ?? 0d;
+
+    private double AverageDiskReadBytesPerSecond()
+        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.DiskReadBytesPerSecond);
+
+    private double AverageDiskWriteBytesPerSecond()
+        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.DiskWriteBytesPerSecond);
+
+    private int CurrentInboundRequestsPerSecond()
+        => _overview?.RequestTraffic.LastOrDefault()?.InboundRequests ?? 0;
+
+    private int CurrentOutboundRequestsPerSecond()
+        => _overview?.RequestTraffic.LastOrDefault()?.OutboundRequests ?? 0;
+
+    private int AverageInboundRequestsPerSecond()
+        => _overview?.RequestTraffic.Count > 0
+            ? (int)Math.Round(_overview.RequestTraffic.Average(x => x.InboundRequests))
+            : 0;
+
+    private int AverageOutboundRequestsPerSecond()
+        => _overview?.RequestTraffic.Count > 0
+            ? (int)Math.Round(_overview.RequestTraffic.Average(x => x.OutboundRequests))
+            : 0;
+
+    private int ResourceSampleCount
+        => _resourceSamples.Count;
+
+    private int RequestTrafficSampleCount
+        => _overview?.RequestTraffic.Count ?? 0;
+
+    private IEnumerable<LogEntryResult> RecentErrorsPreview()
+        => _overview?.RecentErrors
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(3)
+            ?? [];
+
+    private IEnumerable<JobListItemResult> ActiveJobsPreview()
+        => _overview?.ActiveJobs
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(3)
+            ?? [];
+
+    private string ResourceChartPanelNote()
+        => $"每 {PollingIntervalSeconds} 秒刷新 / 資源最近 {ResourceSampleCount} 筆 / 呼叫最近 {RequestTrafficSampleCount} 筆";
+
+    private double MaxCpuPercent()
+        => Math.Max(_resourceSamples.Select(x => x.CpuPercent).DefaultIfEmpty(0d).Max(), 5d);
+
+    private double MaxMemoryUsageChartValue()
+        => Math.Max(_resourceSamples.Select(x => (double)x.MemoryUsageBytes).DefaultIfEmpty(0d).Max(), 1d);
+
+    private double MaxNetworkRate()
+        => Math.Max(
+            _resourceSamples.SelectMany(x => new[] { x.NetworkRxBytesPerSecond, x.NetworkTxBytesPerSecond }).DefaultIfEmpty(0d).Max(),
+            1d);
+
+    private double MaxDiskRate()
+        => Math.Max(
+            _resourceSamples.SelectMany(x => new[] { x.DiskReadBytesPerSecond, x.DiskWriteBytesPerSecond }).DefaultIfEmpty(0d).Max(),
+            1d);
+
+    private double MaxRequestTrafficRate()
+        => Math.Max(
+            _overview?.RequestTraffic.SelectMany(x => new[] { (double)x.InboundRequests, x.OutboundRequests }).DefaultIfEmpty(0d).Max() ?? 0d,
+            1d);
+
+    private static IEnumerable<int> ChartGuideLines()
+        => [12, 36, 60, 84];
+
+    private static string BuildLinePoints(IEnumerable<double> values, double? fixedMax = null)
+    {
+        const double width = 240d;
+        const double height = 96d;
+        const double paddingX = 6d;
+        const double paddingY = 8d;
+
+        var points = values.ToArray();
+        if (points.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var max = fixedMax ?? Math.Max(points.Max(), 1d);
+        max = Math.Max(max, 1d);
+
+        if (points.Length == 1)
+        {
+            var singleY = height - paddingY - ((Math.Clamp(points[0], 0d, max) / max) * (height - (paddingY * 2d)));
+            return $"{paddingX:0.##},{singleY:0.##} {width - paddingX:0.##},{singleY:0.##}";
+        }
+
+        var xStep = (width - (paddingX * 2d)) / (points.Length - 1d);
+        return string.Join(
+            " ",
+            points.Select((value, index) =>
+            {
+                var x = paddingX + (xStep * index);
+                var y = height - paddingY - ((Math.Clamp(value, 0d, max) / max) * (height - (paddingY * 2d)));
+                return $"{x:0.##},{y:0.##}";
+            }));
+    }
+
+    private static string FormatRate(double bytesPerSecond)
+        => $"{DashboardFormatting.Bytes((long)Math.Round(bytesPerSecond))}/s";
+
+    private static string FormatCountRate(int value)
+        => $"{value}/s";
+
+    private async Task RefreshSnapshotAsync(bool waitForLock)
+    {
+        var entered = false;
+        try
+        {
+            if (waitForLock)
+            {
+                await _refreshGate.WaitAsync(_cts.Token);
+                entered = true;
+            }
+            else
+            {
+                entered = await _refreshGate.WaitAsync(0, _cts.Token);
+            }
+
+            if (!entered)
+            {
+                return;
+            }
+
+            await LoadOverviewAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        }
+        finally
+        {
+            if (entered)
+            {
+                _refreshGate.Release();
+            }
+        }
+    }
+
+    private void HydrateDockerSnapshot()
+    {
+        if (_overview?.DockerHost is null || _overview.DependencyResources is null)
+        {
+            _docker = null;
+            return;
+        }
+
+        _docker = new DockerStackSnapshotResult(
+            _overview.DockerHost.Status,
+            _overview.DockerHost.Error,
+            new Memory.Dashboard.Services.DockerHostSummaryResult(
+                _overview.DockerHost.Host.HostName,
+                _overview.DockerHost.Host.ServerVersion,
+                _overview.DockerHost.Host.OperatingSystem,
+                _overview.DockerHost.Host.KernelVersion,
+                _overview.DockerHost.Host.CpuCount,
+                _overview.DockerHost.Host.TotalMemoryBytes,
+                _overview.DockerHost.Host.EstimatedAvailableMemoryBytes,
+                _overview.DockerHost.Host.ActiveContainerCount,
+                _overview.DockerHost.Host.ImageCount,
+                _overview.DockerHost.Host.VolumeCount,
+                _overview.DockerHost.Host.CapturedAtUtc),
+            _overview.DependencyResources.Containers
+                .Select(x => new Memory.Dashboard.Services.DockerContainerMetricResult(
+                    x.Name,
+                    x.Service,
+                    x.Image,
+                    x.State,
+                    x.Health,
+                    x.RestartCount,
+                    x.CpuPercent,
+                    x.MemoryUsageBytes,
+                    x.MemoryLimitBytes,
+                    x.NetworkRxBytes,
+                    x.NetworkTxBytes,
+                    x.DiskReadBytes,
+                    x.DiskWriteBytes))
+                .ToArray(),
+            [],
+            _overview.DependencyResources.Volumes
+                .Select(x => new Memory.Dashboard.Services.DockerVolumeSummaryResult(x.Name, x.Driver, x.SizeBytes, x.Mountpoint))
+                .ToArray());
+    }
+
+    private void ApplyResourceSamples()
+    {
+        _resourceSamples.Clear();
+        foreach (var sample in _overview?.ResourceSamples ?? [])
+        {
+            _resourceSamples.Add(new ResourceSample(
+                sample.TimestampUtc,
+                sample.CpuPercent,
+                sample.MemoryPercent,
+                sample.MemoryUsageBytes,
+                sample.NetworkRxBytesPerSecond,
+                sample.NetworkTxBytesPerSecond,
+                sample.DiskReadBytesPerSecond,
+                sample.DiskWriteBytesPerSecond));
+        }
+
+        while (_resourceSamples.Count > MaxResourceSamples)
+        {
+            _resourceSamples.RemoveAt(0);
+        }
+    }
+
+    private DashboardPageSnapshotStatusResult? PageSnapshotStatus()
+        => _overview?.SnapshotStatus;
+
+    private string? SnapshotWarningText()
+    {
+        var snapshotStatus = PageSnapshotStatus();
+        if (snapshotStatus is null || (!snapshotStatus.IsStale && string.IsNullOrWhiteSpace(snapshotStatus.Warning)))
+        {
+            return null;
+        }
+
+        return string.IsNullOrWhiteSpace(snapshotStatus.Warning)
+            ? "Dashboard snapshot 已過期，畫面顯示的是最後一份可用資料。"
+            : snapshotStatus.Warning;
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        if (_monitoringTask is not null)
+        {
+            _ = CompleteDisposeAsync(_monitoringTask, _cts, _refreshGate);
+            return ValueTask.CompletedTask;
+        }
+
+        _cts.Dispose();
+        _refreshGate.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static async Task CompleteDisposeAsync(Task monitoringTask, CancellationTokenSource cts, SemaphoreSlim refreshGate)
+    {
+        try
+        {
+            await monitoringTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            cts.Dispose();
+            refreshGate.Dispose();
+        }
+    }
+
+    private sealed record ResourceSample(
+        DateTimeOffset CapturedAt,
+        double CpuPercent,
+        double MemoryPercent,
+        long MemoryUsageBytes,
+        double NetworkRxBytesPerSecond,
+        double NetworkTxBytesPerSecond,
+        double DiskReadBytesPerSecond,
+        double DiskWriteBytesPerSecond);
+}

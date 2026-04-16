@@ -1,0 +1,254 @@
+.components-reconnect-first-attempt-visible,
+.components-reconnect-repeated-attempt-visible,
+.components-reconnect-failed-visible,
+.components-pause-visible,
+.components-resume-failed-visible,
+.components-rejoining-animation,
+.components-reconnect-state-badge,
+.components-reconnect-actions {
+    display: none;
+}
+
+#components-reconnect-modal.components-reconnect-show .components-reconnect-first-attempt-visible,
+#components-reconnect-modal.components-reconnect-show .components-rejoining-animation,
+#components-reconnect-modal.components-reconnect-show .components-reconnect-state-strip .components-reconnect-first-attempt-visible,
+#components-reconnect-modal.components-reconnect-paused .components-pause-visible,
+#components-reconnect-modal.components-reconnect-paused .components-reconnect-state-strip .components-pause-visible,
+#components-reconnect-modal.components-reconnect-paused .components-reconnect-actions,
+#components-reconnect-modal.components-reconnect-resume-failed .components-resume-failed-visible,
+#components-reconnect-modal.components-reconnect-resume-failed .components-reconnect-state-strip .components-resume-failed-visible,
+#components-reconnect-modal.components-reconnect-resume-failed .components-reconnect-actions,
+#components-reconnect-modal.components-reconnect-retrying .components-reconnect-repeated-attempt-visible,
+#components-reconnect-modal.components-reconnect-retrying .components-rejoining-animation,
+#components-reconnect-modal.components-reconnect-retrying .components-reconnect-state-strip .components-reconnect-repeated-attempt-visible,
+#components-reconnect-modal.components-reconnect-failed .components-reconnect-failed-visible,
+#components-reconnect-modal.components-reconnect-failed .components-reconnect-state-strip .components-reconnect-failed-visible,
+#components-reconnect-modal.components-reconnect-failed .components-reconnect-actions {
+    display: block;
+}
+
+#components-reconnect-modal.components-reconnect-paused .components-reconnect-actions,
+#components-reconnect-modal.components-reconnect-resume-failed .components-reconnect-actions,
+#components-reconnect-modal.components-reconnect-failed .components-reconnect-actions {
+    display: flex;
+}
+
+#components-reconnect-modal.components-reconnect-show .components-reconnect-state-strip .components-reconnect-first-attempt-visible,
+#components-reconnect-modal.components-reconnect-paused .components-reconnect-state-strip .components-pause-visible,
+#components-reconnect-modal.components-reconnect-resume-failed .components-reconnect-state-strip .components-resume-failed-visible,
+#components-reconnect-modal.components-reconnect-retrying .components-reconnect-state-strip .components-reconnect-repeated-attempt-visible,
+#components-reconnect-modal.components-reconnect-failed .components-reconnect-state-strip .components-reconnect-failed-visible {
+    display: inline-flex;
+}
+
+#components-reconnect-modal {
+    width: min(calc(100% - 2rem), 34rem);
+    margin: min(12vh, 5rem) auto;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--bg-elevated) 88%, transparent), color-mix(in srgb, var(--bg-panel) 96%, transparent));
+    color: var(--text);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    backdrop-filter: blur(16px);
+}
+
+#components-reconnect-modal::backdrop {
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--bg) 72%, transparent), color-mix(in srgb, var(--bg) 84%, transparent));
+    backdrop-filter: blur(8px);
+}
+
+.components-reconnect-shell {
+    display: grid;
+    gap: 1rem;
+    padding: 1.15rem;
+}
+
+.components-reconnect-hero {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.components-reconnect-heading-block {
+    min-width: 0;
+}
+
+.components-reconnect-state-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    min-height: 1.95rem;
+    margin-bottom: 0.7rem;
+}
+
+.components-reconnect-state-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-height: 1.95rem;
+    padding: 0.32rem 0.72rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: color-mix(in srgb, var(--accent) 62%, var(--text) 38%);
+    background: color-mix(in srgb, var(--accent-soft) 76%, var(--bg-panel) 24%);
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.components-reconnect-state-badge::before {
+    content: "";
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 0.22rem color-mix(in srgb, currentColor 20%, transparent);
+}
+
+.components-reconnect-state-badge-warn {
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 12%, var(--bg-panel) 88%);
+    border-color: color-mix(in srgb, var(--warn) 24%, transparent);
+}
+
+.components-reconnect-state-badge-bad {
+    color: var(--bad);
+    background: color-mix(in srgb, var(--bad) 12%, var(--bg-panel) 88%);
+    border-color: color-mix(in srgb, var(--bad) 24%, transparent);
+}
+
+.components-reconnect-title {
+    margin: 0;
+    font-size: 1.18rem;
+    line-height: 1.25;
+}
+
+.components-reconnect-caption,
+.components-reconnect-body p {
+    margin: 0;
+    color: var(--text-muted);
+}
+
+.components-reconnect-caption {
+    line-height: 1.55;
+}
+
+.components-reconnect-body {
+    display: grid;
+    gap: 0.7rem;
+    padding: 0.95rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-panel) 82%, var(--bg-elevated) 18%);
+}
+
+.components-reconnect-body p {
+    line-height: 1.5;
+}
+
+.components-reconnect-actions {
+    justify-content: flex-end;
+    gap: 0.7rem;
+}
+
+#components-reconnect-modal button {
+    min-width: 6.75rem;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 90%, white 10%), color-mix(in srgb, var(--accent) 86%, black 14%));
+    color: white;
+    padding: 0.65rem 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+    box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+#components-reconnect-modal button:hover {
+    transform: translateY(-1px);
+}
+
+#components-reconnect-modal button:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+    outline-offset: 2px;
+}
+
+.components-rejoining-animation {
+    position: relative;
+    width: 4rem;
+    height: 4rem;
+    flex: 0 0 auto;
+}
+
+.components-rejoining-animation::before {
+    content: "";
+    position: absolute;
+    inset: 0.4rem;
+    border-radius: 50%;
+    background: radial-gradient(circle, color-mix(in srgb, var(--accent) 24%, transparent) 0%, transparent 72%);
+}
+
+.components-rejoining-animation div {
+    position: absolute;
+    inset: 0;
+    border: 2px solid color-mix(in srgb, var(--accent) 74%, transparent);
+    opacity: 1;
+    border-radius: 50%;
+    animation: components-rejoining-animation 1.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.components-rejoining-animation div:nth-child(2) {
+    animation-delay: -0.6s;
+}
+
+@keyframes components-rejoining-animation {
+    0% {
+        transform: scale(0.25);
+        opacity: 0;
+    }
+
+    20% {
+        opacity: 1;
+    }
+
+    100% {
+        transform: scale(1);
+        opacity: 0;
+    }
+}
+
+@media (max-width: 640px) {
+    #components-reconnect-modal {
+        width: min(calc(100% - 1rem), 30rem);
+        margin: 2rem auto;
+    }
+
+    .components-reconnect-shell {
+        gap: 0.9rem;
+        padding: 1rem;
+    }
+
+    .components-reconnect-hero {
+        grid-template-columns: 1fr;
+        justify-items: center;
+        text-align: center;
+    }
+
+    .components-reconnect-state-strip {
+        justify-content: center;
+    }
+
+    .components-reconnect-actions {
+        justify-content: stretch;
+    }
+
+    #components-reconnect-modal button {
+        width: 100%;
+    }
+}

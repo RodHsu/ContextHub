@@ -1,0 +1,31 @@
+<div class="page-header">
+    <div class="page-header-copy">
+        <div class="breadcrumb">@Breadcrumb</div>
+        <h1>@Title</h1>
+        @if (!string.IsNullOrWhiteSpace(Subtitle))
+        {
+            <p class="page-subtitle">@Subtitle</p>
+        }
+    </div>
+
+    @if (Actions is not null)
+    {
+        <div class="page-actions">
+            @Actions
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public string Breadcrumb { get; set; } = "ContextHub / 主控台";
+
+    [Parameter]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter]
+    public string? Subtitle { get; set; }
+
+    [Parameter]
+    public RenderFragment? Actions { get; set; }
+}

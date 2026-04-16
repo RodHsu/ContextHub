@@ -1,0 +1,201 @@
+x-embedding-config: &embedding-config
+  Embeddings__Profile: ${EMBEDDING_PROFILE:-compact}
+  Embeddings__ModelId: ${EMBEDDING_MODEL_ID:-}
+  Embeddings__Dimensions: ${EMBEDDING_DIMENSIONS:-0}
+  Embeddings__MaxTokens: ${EMBEDDING_MAX_TOKENS:-0}
+  Embeddings__InferenceThreads: ${EMBEDDING_INFERENCE_THREADS:-0}
+  Embeddings__BatchSize: ${EMBEDDING_BATCH_SIZE:-0}
+  Embeddings__ModelCachePath: /models
+
+x-dashboard-config: &dashboard-config
+  Dashboard__AdminUsername: ${DASHBOARD_ADMIN_USERNAME}
+  Dashboard__AdminPasswordHash: ${DASHBOARD_ADMIN_PASSWORD_HASH}
+  Dashboard__SessionTimeoutMinutes: ${DASHBOARD_SESSION_TIMEOUT_MINUTES:-480}
+  Dashboard__ComposeProject: ${DASHBOARD_COMPOSE_PROJECT:-contexthub}
+  Dashboard__Polling__OverviewSeconds: ${DASHBOARD_POLLING_OVERVIEW_SECONDS:-10}
+  Dashboard__Polling__MetricsSeconds: ${DASHBOARD_POLLING_METRICS_SECONDS:-5}
+  Dashboard__Polling__JobsSeconds: ${DASHBOARD_POLLING_JOBS_SECONDS:-8}
+  Dashboard__Polling__LogsSeconds: ${DASHBOARD_POLLING_LOGS_SECONDS:-10}
+  Dashboard__Polling__PerformanceSeconds: ${DASHBOARD_POLLING_PERFORMANCE_SECONDS:-30}
+
+services:
+  embedding-service:
+    image: contexthub-embedding-service:latest
+    build:
+      context: .
+      dockerfile: src/Memory.EmbeddingServer/Dockerfile
+    restart: always
+    environment:
+      <<: *embedding-config
+      ASPNETCORE_URLS: http://0.0.0.0:8081
+    volumes:
+      - embedding-model-cache:/models
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: always
+    environment:
+      POSTGRES_DB: contexthub
+      POSTGRES_USER: contexthub
+      POSTGRES_PASSWORD: contexthub
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contexthub -d contexthub"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7.4-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "no", "--save", "3600", "1", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mcp-server:
+    image: contexthub-mcp-server:latest
+    build:
+      context: .
+      dockerfile: src/Memory.McpServer/Dockerfile
+    restart: always
+    environment:
+      ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
+      <<: *embedding-config
+      Embeddings__Provider: Http
+      Embeddings__BaseUrl: http://embedding-service:8081
+      Dashboard__ComposeProject: ${DASHBOARD_COMPOSE_PROJECT:-contexthub}
+      Dashboard__DockerEndpoint: unix:///var/run/docker.sock
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      ConnectionStrings__Redis: redis:6379
+      Memory__Namespace: contexthub
+      DatabaseLogging__MinimumLevel: Warning
+    depends_on:
+      embedding-service:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${MCP_SERVER_HOST_PORT:-8092}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    image: contexthub-worker:latest
+    build:
+      context: .
+      dockerfile: src/Memory.Worker/Dockerfile
+    restart: always
+    environment:
+      ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
+      <<: *embedding-config
+      ASPNETCORE_URLS: http://0.0.0.0:8082
+      Embeddings__Provider: Http
+      Embeddings__BaseUrl: http://embedding-service:8081
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      ConnectionStrings__Redis: redis:6379
+      Memory__Namespace: contexthub
+      DatabaseLogging__MinimumLevel: Warning
+    depends_on:
+      embedding-service:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  dashboard:
+    image: contexthub-dashboard:latest
+    build:
+      context: .
+      dockerfile: src/Memory.Dashboard/Dockerfile
+    restart: always
+    environment:
+      ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
+      <<: *dashboard-config
+      ASPNETCORE_URLS: http://0.0.0.0:8088
+      Dashboard__BaseUrl: http://mcp-server:8080
+      Dashboard__DockerEndpoint: unix:///var/run/docker.sock
+      Dashboard__DataProtectionPath: /var/lib/contexthub-dashboard/keys
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      Memory__Namespace: contexthub
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    ports:
+      - "${DASHBOARD_HOST_PORT:-8091}:8088"
+    volumes:
+      - dashboard-data-protection:/var/lib/contexthub-dashboard/keys
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8088/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres-data:
+  redis-data:
+  embedding-model-cache:
+  dashboard-data-protection:

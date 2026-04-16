@@ -1,0 +1,67 @@
+@implements IDisposable
+
+@if (!string.IsNullOrWhiteSpace(Message))
+{
+    <div class="@(IsError ? "toast toast-error" : "toast")">@Message</div>
+}
+
+@code {
+    [Parameter] public string? Message { get; set; }
+    [Parameter] public bool IsError { get; set; }
+    [Parameter] public long Sequence { get; set; }
+    [Parameter] public int DurationMilliseconds { get; set; } = 3000;
+    [Parameter] public EventCallback OnDismiss { get; set; }
+
+    private long _activeSequence = -1;
+    private CancellationTokenSource? _dismissCts;
+
+    protected override void OnParametersSet()
+    {
+        if (string.IsNullOrWhiteSpace(Message) || !OnDismiss.HasDelegate)
+        {
+            CancelDismiss();
+            _activeSequence = Sequence;
+            return;
+        }
+
+        if (_activeSequence == Sequence)
+        {
+            return;
+        }
+
+        _activeSequence = Sequence;
+        CancelDismiss();
+        _dismissCts = new CancellationTokenSource();
+        _ = DismissAsync(_dismissCts.Token);
+    }
+
+    private async Task DismissAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(DurationMilliseconds, cancellationToken);
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                await InvokeAsync(() => OnDismiss.InvokeAsync());
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void CancelDismiss()
+    {
+        if (_dismissCts is null)
+        {
+            return;
+        }
+
+        _dismissCts.Cancel();
+        _dismissCts.Dispose();
+        _dismissCts = null;
+    }
+
+    public void Dispose()
+        => CancelDismiss();
+}

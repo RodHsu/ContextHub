@@ -1,0 +1,449 @@
+@page "/logs"
+@implements IAsyncDisposable
+@inject IContextHubApiClient ApiClient
+@inject IJSRuntime JsRuntime
+@inject IOptions<DashboardOptions> DashboardOptionsAccessor
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+@using Memory.Dashboard.Services
+
+<PageTitle>Context Hub | 日誌</PageTitle>
+
+<PageViewport Title="日誌"
+              Subtitle="檢視 DB-first runtime logs，依 service、level、trace 與時間範圍過濾。"
+              BodyClass="page-viewport-body split-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading"
+                       PollingIntervalSeconds="@PollingIntervalSeconds" />
+        <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">查詢</button>
+    </Actions>
+    <ChildContent>
+
+    @if (!string.IsNullOrWhiteSpace(_loadError))
+    {
+        <div class="inline-error">@_loadError</div>
+    }
+
+    <section class="panel filter-panel">
+        <div class="filter-grid logs-filter-grid">
+            <input @bind="_query" placeholder="關鍵字" />
+            <details class="filter-multiselect">
+                <summary>
+                    <span class="filter-multiselect-label">服務名稱 (Service)</span>
+                    <span class="filter-multiselect-value">@FormatMultiSelectSummary(_selectedServiceNames, "全部服務", DashboardText.Service)</span>
+                </summary>
+                <div class="filter-multiselect-menu">
+                    @if (ServiceOptions.Count == 0)
+                    {
+                        <div class="filter-multiselect-empty">尚無可選服務</div>
+                    }
+                    else
+                    {
+                        @foreach (var serviceName in ServiceOptions)
+                        {
+                            <label class="filter-multiselect-option">
+                                <input type="checkbox"
+                                       checked="@IsSelected(_selectedServiceNames, serviceName)"
+                                       @onchange="@(args => ToggleServiceSelection(args, serviceName))" />
+                                <span>@DashboardText.Service(serviceName)</span>
+                            </label>
+                        }
+                    }
+                </div>
+            </details>
+            <details class="filter-multiselect">
+                <summary>
+                    <span class="filter-multiselect-label">層級 (Level)</span>
+                    <span class="filter-multiselect-value">@FormatMultiSelectSummary(_selectedLevels, "全部層級", DashboardText.LogLevel)</span>
+                </summary>
+                <div class="filter-multiselect-menu">
+                    @foreach (var level in LevelOptions)
+                    {
+                        <label class="filter-multiselect-option">
+                            <input type="checkbox"
+                                   checked="@IsSelected(_selectedLevels, level)"
+                                   @onchange="@(args => ToggleLevelSelection(args, level))" />
+                            <span>@DashboardText.LogLevel(level)</span>
+                        </label>
+                    }
+                </div>
+            </details>
+            <input @bind="_traceId" placeholder="追蹤 Id (Trace Id)" />
+            <input @bind="_requestId" placeholder="請求 Id (Request Id)" />
+            <input type="datetime-local" @bind="_from" />
+            <input type="datetime-local" @bind="_to" />
+        </div>
+    </section>
+
+    <div class="split-layout">
+        <section class="panel panel-scroll">
+        <div class="panel-title panel-title-nowrap">日誌條目 (@_logs.Count)</div>
+        <div class="table-scroll-shell table-scroll-shell-tall">
+            <table class="data-table data-table-clickable logs-table">
+                <thead>
+                    <tr>
+                        <th class="logs-time-col">時間</th>
+                        <th class="logs-service-col">服務 (Service)</th>
+                        <th class="logs-level-col">層級 (Level)</th>
+                        <th class="logs-message-col">訊息 (Message)</th>
+                        <th class="logs-trace-col">追蹤 (Trace)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var log in _logs)
+                    {
+                        <tr class="@SelectedClass(log.Id)" @onclick="@(() => SelectAsync(log.Id))">
+                            <td class="logs-time-cell"><ClientLocalTime Value="log.CreatedAt" /></td>
+                            <td class="logs-service-cell">@DashboardText.Service(log.ServiceName)</td>
+                            <td class="logs-level-cell"><span class="status-badge @StatusClass(log.Level)">@DashboardText.LogLevel(log.Level)</span></td>
+                            <td class="logs-message-cell">@log.Message</td>
+                            <td class="logs-trace-cell">@log.TraceId</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+        <section class="panel detail-panel panel-scroll">
+        <div class="panel-title">日誌細節</div>
+        <div class="panel-scroll-body detail-scroll-shell">
+            @if (_selected is null)
+            {
+                <div class="empty-inline">點選左側 log row 顯示詳細內容。</div>
+            }
+            else
+            {
+                <div class="detail-actions">
+                    <button class="ghost-button" @onclick="CopySelectedAsJsonAsync">複製 JSON</button>
+                    <span class="detail-actions-copy">包含 service、trace、message、exception 與 payload，適合直接貼給 agent 分析。</span>
+                </div>
+
+                <dl class="definition-grid">
+                    <div><dt>服務 (Service)</dt><dd>@DashboardText.Service(_selected.ServiceName)</dd></div>
+                    <div><dt>層級 (Level)</dt><dd>@DashboardText.LogLevel(_selected.Level)</dd></div>
+                    <div><dt>Trace ID</dt><dd>@_selected.TraceId</dd></div>
+                    <div><dt>Request ID</dt><dd>@_selected.RequestId</dd></div>
+                    <div><dt>分類 (Category)</dt><dd>@_selected.Category</dd></div>
+                    <div><dt>時間</dt><dd><ClientLocalTime Value="_selected.CreatedAt" /></dd></div>
+                </dl>
+
+                <div class="code-block">@_selected.Message</div>
+
+                @if (!string.IsNullOrWhiteSpace(_selected.Exception))
+                {
+                    <div class="subpanel-title">例外 (Exception)</div>
+                    <div class="code-block">@_selected.Exception</div>
+                }
+
+                <div class="subpanel-title">內容 (Payload)</div>
+                <div class="code-block">@_selected.PayloadJson</div>
+            }
+        </div>
+        </section>
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(_message))
+    {
+        <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
+    }
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private static readonly string[] KnownLogLevels = ["Critical", "Error", "Warning", "Information", "Debug", "Trace"];
+    private readonly CancellationTokenSource _cts = new();
+    private Task? _pollingTask;
+    private string? _query;
+    private string? _traceId;
+    private string? _requestId;
+    private DateTime? _from;
+    private DateTime? _to;
+    private readonly List<string> _selectedServiceNames = [];
+    private readonly List<string> _selectedLevels = [];
+    private readonly List<string> _knownServiceNames = [];
+    private readonly List<string> _knownLevels = [];
+    private IReadOnlyList<LogEntryResult> _logs = [];
+    private LogEntryResult? _selected;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _message;
+    private long _messageSequence;
+    private string? _loadError;
+    private InstanceSettingsSnapshot? _settingsSnapshot;
+    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.LogsPollingSeconds ?? DashboardOptionsAccessor.Value.Polling.LogsSeconds;
+    private IReadOnlyList<string> ServiceOptions => _knownServiceNames
+        .Concat(_selectedServiceNames)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    private IReadOnlyList<string> LevelOptions => KnownLogLevels
+        .Concat(_knownLevels)
+        .Concat(_selectedLevels)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(LevelSortKey)
+        .ThenBy(static value => value, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settingsSnapshot = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
+        await LoadAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _pollingTask = PollAsync(PollingIntervalSeconds);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            _logs = await ApiClient.SearchLogsAsync(
+                new LogQueryRequest(
+                    _query,
+                    BuildFilterValue(_selectedServiceNames),
+                    BuildFilterValue(_selectedLevels),
+                    _traceId,
+                    _requestId,
+                    ParseDateTime(_from),
+                    ParseDateTime(_to),
+                    50),
+                _cts.Token);
+            RememberFilterOptions(_logs);
+
+            if (_selected is not null)
+            {
+                _selected = await ApiClient.GetLogAsync(_selected.Id, _cts.Token);
+            }
+
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("日誌", ex, _logs.Count > 0);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SelectAsync(long id)
+    {
+        try
+        {
+            _selected = await ApiClient.GetLogAsync(id, _cts.Token);
+            _loadError = null;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("讀取日誌細節", ex));
+        }
+    }
+
+    private async Task CopySelectedAsJsonAsync()
+    {
+        if (_selected is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", LogClipboardFormatter.Format(_selected));
+            ShowMessage($"已複製日誌 #{_selected.Id} 的 JSON。");
+        }
+        catch (JSException)
+        {
+            ShowMessage("複製失敗，請改用手動複製日誌內容。");
+        }
+    }
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+
+    private void ClearMessage()
+        => _message = null;
+
+    private Task PollAsync(int intervalSeconds)
+    {
+        if (intervalSeconds <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(_cts.Token))
+                {
+                    try
+                    {
+                        await LoadAsync();
+                    }
+                    catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+                    {
+                    }
+                    catch (Exception ex)
+                    {
+                        _loadError = DashboardUiErrorFormatter.BuildLoadError("日誌", ex, _logs.Count > 0);
+                    }
+
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
+    }
+
+    private static DateTimeOffset? ParseDateTime(DateTime? value)
+        => value.HasValue
+            ? new DateTimeOffset(DateTime.SpecifyKind(value.Value, DateTimeKind.Local))
+            : null;
+
+    private string SelectedClass(long id)
+        => _selected?.Id == id ? "selected-row" : string.Empty;
+
+    private static string StatusClass(string status)
+        => status.ToLowerInvariant() switch
+        {
+            "error" or "critical" => "bad",
+            "warning" => "warn",
+            _ => "neutral"
+        };
+
+    private static string? BuildFilterValue(IReadOnlyList<string> values)
+        => values.Count == 0 ? null : string.Join(',', values);
+
+    private static int LevelSortKey(string level)
+    {
+        var index = Array.FindIndex(KnownLogLevels, item => string.Equals(item, level, StringComparison.OrdinalIgnoreCase));
+        return index >= 0 ? index : KnownLogLevels.Length;
+    }
+
+    private static string FormatMultiSelectSummary(
+        IReadOnlyList<string> values,
+        string fallback,
+        Func<string, string> formatter)
+    {
+        if (values.Count == 0)
+        {
+            return fallback;
+        }
+
+        var labels = values
+            .Take(2)
+            .Select(formatter)
+            .ToArray();
+
+        return values.Count > 2
+            ? $"{string.Join("、", labels)} +{values.Count - 2}"
+            : string.Join("、", labels);
+    }
+
+    private static bool IsSelected(IReadOnlyList<string> values, string candidate)
+        => values.Any(value => string.Equals(value, candidate, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsChecked(ChangeEventArgs args)
+        => args.Value switch
+        {
+            bool value => value,
+            string value when bool.TryParse(value, out var parsed) => parsed,
+            _ => false
+        };
+
+    private void ToggleServiceSelection(ChangeEventArgs args, string serviceName)
+        => SetSelection(_selectedServiceNames, serviceName, IsChecked(args));
+
+    private void ToggleLevelSelection(ChangeEventArgs args, string level)
+        => SetSelection(_selectedLevels, level, IsChecked(args));
+
+    private static void SetSelection(List<string> values, string candidate, bool isSelected)
+    {
+        if (isSelected)
+        {
+            if (!values.Any(value => string.Equals(value, candidate, StringComparison.OrdinalIgnoreCase)))
+            {
+                values.Add(candidate);
+                values.Sort(StringComparer.OrdinalIgnoreCase);
+            }
+
+            return;
+        }
+
+        values.RemoveAll(value => string.Equals(value, candidate, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void RememberFilterOptions(IEnumerable<LogEntryResult> logs)
+    {
+        foreach (var log in logs)
+        {
+            AddKnownValue(_knownServiceNames, log.ServiceName);
+            AddKnownValue(_knownLevels, log.Level);
+        }
+    }
+
+    private static void AddKnownValue(List<string> values, string? candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate) ||
+            values.Any(value => string.Equals(value, candidate, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        values.Add(candidate);
+        values.Sort(StringComparer.OrdinalIgnoreCase);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        if (_pollingTask is not null)
+        {
+            _ = CompleteDisposeAsync(_pollingTask, _cts);
+            return ValueTask.CompletedTask;
+        }
+
+        _cts.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static async Task CompleteDisposeAsync(Task pollingTask, CancellationTokenSource cts)
+    {
+        try
+        {
+            await pollingTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+}

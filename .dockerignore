@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+**/TestResults/
+**/.vs/
+**/.idea/
+**/.vscode/
+.agent/
+deploy/
+docs/
+tests/
+docker-compose.override.yml

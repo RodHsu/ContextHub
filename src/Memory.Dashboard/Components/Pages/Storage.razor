@@ -1,0 +1,336 @@
+@page "/storage"
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>Context Hub | 資料庫檢視</PageTitle>
+
+<PageViewport Title="資料庫檢視"
+              Subtitle="只讀白名單 raw table explorer，可直接查詢目前資料庫已落庫的內容。"
+              BodyClass="page-viewport-body storage-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading" />
+        <button class="primary-button" @onclick="ReloadAsync" disabled="@_loading">刷新</button>
+    </Actions>
+    <ChildContent>
+
+    <div class="storage-layout">
+    <section class="panel panel-scroll storage-table-panel">
+        <div class="panel-title">資料表 (Tables)</div>
+        <div class="table-subtitle">只開放白名單資料表，避免變成任意 SQL console。</div>
+        <div class="panel-scroll-body storage-table-list">
+            <div class="stack-list">
+                @foreach (var table in _tables)
+                {
+                    <article class="stack-item storage-table-item @SelectedClass(table.Name)" @onclick="@(() => SelectTableAsync(table.Name))">
+                        <div class="stack-item-title">@table.Name</div>
+                        <div class="stack-item-copy">@table.Description</div>
+                        <div class="stack-item-meta">@table.RowCount 列 / @string.Join(", ", table.Columns)</div>
+                    </article>
+                }
+            </div>
+        </div>
+    </section>
+
+    <section class="panel detail-panel storage-detail-panel panel-scroll">
+        <div class="panel-title">資料列 (Rows)</div>
+        <div class="panel-scroll-body">
+            @if (_rows is null)
+            {
+                <div class="empty-inline">選取左側資料表後，使用關鍵字或欄位過濾目前資料庫內容。</div>
+            }
+            else
+            {
+                <div class="storage-content-stack">
+                <section class="storage-query-panel">
+                    <div class="filter-grid storage-filter-grid">
+                        <input @bind="_query" placeholder="關鍵字查詢 (可查 text / json / ids)" />
+                        <select @bind="_column">
+                            <option value="">所有可搜尋欄位</option>
+                            @foreach (var column in _rows.SearchableColumns)
+                            {
+                                <option value="@column">@column</option>
+                            }
+                        </select>
+                        <select @bind="_pageSize">
+                            @foreach (var pageSize in PageSizeOptions)
+                            {
+                                <option value="@pageSize">@pageSize 筆 / 頁</option>
+                            }
+                        </select>
+                        <div class="storage-filter-actions">
+                            <button class="primary-button" @onclick="ApplyQueryAsync" disabled="@_loading">查詢</button>
+                            <button class="ghost-button" @onclick="ClearQueryAsync" disabled="@_loading">清除</button>
+                        </div>
+                    </div>
+                </section>
+
+                <div class="storage-summary-grid">
+                    <div class="host-stat">
+                        <span>資料表</span>
+                        <strong>@_rows.Table</strong>
+                    </div>
+                    <div class="host-stat">
+                        <span>結果數</span>
+                        <strong>@_rows.Rows.TotalCount</strong>
+                    </div>
+                    <div class="host-stat">
+                        <span>目前頁</span>
+                        <strong>@_rows.Rows.Page / @TotalPages</strong>
+                    </div>
+                </div>
+
+                <section class="storage-info-panel">
+                    <div class="storage-info-title">@_rows.Description</div>
+                    <div class="storage-info-copy">可搜尋欄位：@string.Join(", ", _rows.SearchableColumns)</div>
+                    <div class="storage-info-meta">顯示欄位：@string.Join(", ", _rows.Columns)</div>
+                    @if (!string.IsNullOrWhiteSpace(_rows.AppliedQuery))
+                    {
+                        <div class="storage-info-meta">已套用查詢：<code>@_rows.AppliedQuery</code> @AppliedColumnText</div>
+                    }
+                </section>
+
+                @if (_rows.Rows.Items.Count == 0)
+                {
+                    <div class="empty-inline">目前查詢沒有命中任何資料列，請調整關鍵字、欄位或清除篩選。</div>
+                }
+                else
+                {
+                    <div class="table-scroll-shell table-scroll-shell-tall">
+                        <table class="data-table data-table-clickable storage-row-table">
+                            <thead>
+                                <tr>
+                                    @foreach (var column in _rows.Columns)
+                                    {
+                                        <th>@column</th>
+                                    }
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var row in _rows.Rows.Items)
+                                {
+                                    <tr class="@SelectedRowClass(row)" @onclick="@(() => _selectedRow = row)">
+                                        @foreach (var column in _rows.Columns)
+                                        {
+                                            <td class="truncate-cell">@GetValue(row, column)</td>
+                                        }
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="storage-pagination">
+                        <div class="table-subtitle">共 @_rows.Rows.TotalCount 筆，這一頁顯示 @_rows.Rows.Items.Count 筆。</div>
+                        <div class="storage-pagination-actions">
+                            <button class="ghost-button" @onclick="PreviousPageAsync" disabled="@(_loading || !CanGoPrevious)">上一頁</button>
+                            <button class="ghost-button" @onclick="NextPageAsync" disabled="@(_loading || !CanGoNext)">下一頁</button>
+                        </div>
+                    </div>
+                }
+
+                <section class="storage-inspector-panel">
+                    <div class="subpanel-title">資料列檢視器 (Row Inspector)</div>
+                    @if (_selectedRow is null)
+                    {
+                        <div class="empty-inline">點選上方資料列可查看完整欄位內容。</div>
+                    }
+                    else
+                    {
+                        <div class="code-block">@System.Text.Json.JsonSerializer.Serialize(_selectedRow.Values, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })</div>
+                    }
+                </section>
+                </div>
+            }
+        </div>
+    </section>
+    </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private static readonly int[] PageSizeOptions = [25, 50, 100];
+
+    private IReadOnlyList<StorageTableSummaryResult> _tables = [];
+    private StorageTableRowsResult? _rows;
+    private StorageRowResult? _selectedRow;
+    private string? _selectedTable;
+    private string? _query;
+    private string? _column;
+    private int _page = 1;
+    private int _pageSize = 25;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+
+    protected override async Task OnInitializedAsync()
+        => await ReloadAsync();
+
+    private bool CanGoPrevious => _rows is not null && _rows.Rows.Page > 1;
+
+    private bool CanGoNext => _rows is not null && _rows.Rows.Page < TotalPages;
+
+    private int TotalPages
+        => _rows is null || _rows.Rows.TotalCount == 0
+            ? 1
+            : (int)Math.Ceiling(_rows.Rows.TotalCount / (double)_rows.Rows.PageSize);
+
+    private MarkupString AppliedColumnText
+        => string.IsNullOrWhiteSpace(_rows?.AppliedColumn)
+            ? new MarkupString(string.Empty)
+            : new MarkupString($"/ 欄位 <code>{_rows.AppliedColumn}</code>");
+
+    private async Task ReloadAsync()
+    {
+        await RunLoadingAsync(async () =>
+        {
+            _tables = await ApiClient.GetStorageTablesAsync(CancellationToken.None);
+            if (_tables.Count == 0)
+            {
+                _selectedTable = null;
+                _rows = null;
+                _selectedRow = null;
+                _lastUpdatedAt = DateTimeOffset.UtcNow;
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(_selectedTable) ||
+                !_tables.Any(x => string.Equals(x.Name, _selectedTable, StringComparison.OrdinalIgnoreCase)))
+            {
+                _selectedTable = _tables[0].Name;
+            }
+
+            await LoadSelectedTableCoreAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+    }
+
+    private async Task SelectTableAsync(string table)
+    {
+        _selectedTable = table;
+        _query = null;
+        _column = null;
+        _page = 1;
+
+        await RunLoadingAsync(async () =>
+        {
+            await LoadSelectedTableCoreAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+    }
+
+    private async Task ApplyQueryAsync()
+    {
+        _page = 1;
+        await RunLoadingAsync(async () =>
+        {
+            await LoadSelectedTableCoreAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+    }
+
+    private async Task ClearQueryAsync()
+    {
+        _query = null;
+        _column = null;
+        _page = 1;
+
+        await RunLoadingAsync(async () =>
+        {
+            await LoadSelectedTableCoreAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+    }
+
+    private async Task PreviousPageAsync()
+    {
+        if (!CanGoPrevious)
+        {
+            return;
+        }
+
+        _page -= 1;
+        await RunLoadingAsync(async () =>
+        {
+            await LoadSelectedTableCoreAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+    }
+
+    private async Task NextPageAsync()
+    {
+        if (!CanGoNext)
+        {
+            return;
+        }
+
+        _page += 1;
+        await RunLoadingAsync(async () =>
+        {
+            await LoadSelectedTableCoreAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+    }
+
+    private async Task LoadSelectedTableCoreAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedTable))
+        {
+            _rows = null;
+            _selectedRow = null;
+            return;
+        }
+
+        var result = await ApiClient.GetStorageRowsAsync(
+            new StorageRowsRequest(
+                _selectedTable,
+                _query,
+                _column,
+                _page,
+                _pageSize),
+            CancellationToken.None);
+
+        if (result.Rows.TotalCount > 0 && result.Rows.Items.Count == 0 && result.Rows.Page > 1)
+        {
+            _page = Math.Max(1, (int)Math.Ceiling(result.Rows.TotalCount / (double)result.Rows.PageSize));
+            result = await ApiClient.GetStorageRowsAsync(
+                new StorageRowsRequest(
+                    _selectedTable,
+                    _query,
+                    _column,
+                    _page,
+                    _pageSize),
+                CancellationToken.None);
+        }
+
+        _rows = result;
+        _selectedRow = null;
+
+        if (!string.IsNullOrWhiteSpace(_column) &&
+            !_rows.SearchableColumns.Any(x => string.Equals(x, _column, StringComparison.OrdinalIgnoreCase)))
+        {
+            _column = null;
+        }
+    }
+
+    private async Task RunLoadingAsync(Func<Task> action)
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            await action();
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private static string? GetValue(StorageRowResult row, string column)
+        => row.Values.TryGetValue(column, out var value) ? value : null;
+
+    private string SelectedClass(string table)
+        => string.Equals(_selectedTable, table, StringComparison.OrdinalIgnoreCase) ? "selected-row" : string.Empty;
+
+    private string SelectedRowClass(StorageRowResult row)
+        => ReferenceEquals(_selectedRow, row) ? "selected-row" : string.Empty;
+}

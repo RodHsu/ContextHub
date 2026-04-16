@@ -1,0 +1,683 @@
+@page "/monitoring"
+@implements IAsyncDisposable
+@inject IContextHubApiClient ApiClient
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+
+<PageTitle>Context Hub | 狀態監控</PageTitle>
+
+<PageViewport Title="狀態監控"
+              Subtitle="集中檢視 Redis、PostgreSQL、Compose 服務與整體資源趨勢，快速定位目前 instance 的壓力與健康狀態。"
+              BodyClass="page-viewport-body monitoring-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading"
+                       PollingIntervalSeconds="@PollingIntervalSeconds"
+                       WarningText="@SnapshotWarningText()" />
+        <button class="primary-button" @onclick="RefreshAsync" disabled="@_loading">刷新</button>
+    </Actions>
+    <ChildContent>
+
+    @if (!string.IsNullOrWhiteSpace(_loadError))
+    {
+        <div class="inline-error">@_loadError</div>
+    }
+
+    @if (_monitoring is null)
+    {
+        <div class="dashboard-grid page-scroll-host">
+            @for (var i = 0; i < 4; i++)
+            {
+                <section class="panel skeleton-panel @(i == 2 ? "span-2" : string.Empty)">
+                    <div class="skeleton-line skeleton-line-md"></div>
+                    <div class="skeleton-stack">
+                        <div class="skeleton-line skeleton-line-lg"></div>
+                        <div class="skeleton-line skeleton-line-md"></div>
+                        <div class="skeleton-line skeleton-line-sm"></div>
+                    </div>
+                </section>
+            }
+        </div>
+    }
+    else
+    {
+        <div class="monitoring-page-stack page-scroll-host">
+            <div class="monitoring-top-grid">
+                <section class="panel">
+                    <div class="panel-title">核心狀態</div>
+                    <div class="badge-strip monitoring-service-strip">
+                        @foreach (var service in _monitoring.Services)
+                        {
+                            <span class="status-badge @StatusClass(service.Status)">@ServiceDisplayName(service.Name): @StatusText(service.Status)</span>
+                        }
+                    </div>
+
+                    <dl class="definition-grid">
+                        <div>
+                            <dt>命名空間 (Namespace)</dt>
+                            <dd>@_monitoring.Namespace</dd>
+                        </div>
+                        <div>
+                            <dt>建置版本 (Build Version)</dt>
+                            <dd>@_monitoring.BuildVersion</dd>
+                        </div>
+                        <div>
+                            <dt>建置時間 (Build Time)</dt>
+                            <dd><ClientLocalTime Value="_monitoring.BuildTimestampUtc" /></dd>
+                        </div>
+                        <div>
+                            <dt>服務數量</dt>
+                            <dd>@_monitoring.Services.Count</dd>
+                        </div>
+                    </dl>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-title">Docker 主機 (Docker Host)</div>
+                    <div class="runtime-host-grid">
+                        <article class="host-stat runtime-host-card">
+                            <span>Host</span>
+                            <strong>@(_monitoring.DockerHost?.Host.HostName ?? "unavailable")</strong>
+                            <div class="stack-item-meta">@(_monitoring.DockerHost?.Host.ServerVersion ?? "unavailable")</div>
+                        </article>
+                        <article class="host-stat runtime-host-card">
+                            <span>CPU</span>
+                            <strong>@((_monitoring.DockerHost?.Host.CpuCount ?? 0).ToString()) cores</strong>
+                            <div class="stack-item-meta">@StatusText(_monitoring.DockerHost?.Status ?? "unavailable")</div>
+                        </article>
+                        <article class="host-stat runtime-host-card">
+                            <span>Total Memory</span>
+                            <strong>@DashboardFormatting.Bytes(_monitoring.DockerHost?.Host.TotalMemoryBytes ?? 0)</strong>
+                            <div class="stack-item-meta">可用 @DashboardFormatting.Bytes(_monitoring.DockerHost?.Host.EstimatedAvailableMemoryBytes ?? 0)</div>
+                        </article>
+                        <article class="host-stat runtime-host-card">
+                            <span>Compose Footprint</span>
+                            <strong>@((_monitoring.DockerHost?.Host.ActiveContainerCount ?? 0).ToString()) containers</strong>
+                            <div class="stack-item-meta">@((_monitoring.DockerHost?.Host.VolumeCount ?? 0).ToString()) volumes / @((_monitoring.DockerHost?.Host.ImageCount ?? 0).ToString()) images</div>
+                        </article>
+                    </div>
+
+                    @if (!string.IsNullOrWhiteSpace(_monitoring.DockerHost?.Error))
+                    {
+                        <div class="inline-error runtime-host-error">@_monitoring.DockerHost.Error</div>
+                    }
+                </section>
+            </div>
+
+            <section class="panel">
+                <div class="panel-heading-row">
+                    <div class="panel-title">資源趨勢</div>
+                    <div class="panel-heading-meta resource-chart-panel-meta">@ResourceChartPanelNote()</div>
+                </div>
+                <div class="resource-chart-grid">
+                    <article class="resource-chart-card">
+                        <div class="resource-chart-header">
+                            <div>
+                                <div class="resource-chart-title">CPU 使用率 (CPU Usage)</div>
+                                <div class="resource-chart-value">@DashboardFormatting.Percent(CurrentCpuPercent())</div>
+                                <div class="resource-chart-summary">近期平均 @DashboardFormatting.Percent(AverageCpuPercent())</div>
+                            </div>
+                        </div>
+                        <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="CPU usage trend">
+                            @foreach (var guide in ChartGuideLines())
+                            {
+                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                            }
+                            <polyline class="resource-line cpu" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => x.CpuPercent) ?? [], MaxCpuPercent())"></polyline>
+                        </svg>
+                        <div class="resource-chart-meta">Compose service 群組原始 CPU 聚合值</div>
+                    </article>
+
+                    <article class="resource-chart-card">
+                        <div class="resource-chart-header">
+                            <div>
+                                <div class="resource-chart-title">記憶體使用量 (Memory Usage)</div>
+                                <div class="resource-chart-value">@DashboardFormatting.Bytes(CurrentMemoryUsageBytes())</div>
+                                <div class="resource-chart-summary">近期平均 @DashboardFormatting.Bytes(AverageMemoryUsageBytes())</div>
+                            </div>
+                        </div>
+                        <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Memory usage trend">
+                            @foreach (var guide in ChartGuideLines())
+                            {
+                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                            }
+                            <polyline class="resource-line memory" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => (double)x.MemoryUsageBytes) ?? [], MaxMemoryUsageChartValue())"></polyline>
+                        </svg>
+                        <div class="resource-chart-meta">占主機 @DashboardFormatting.Percent(CurrentMemoryPercent())</div>
+                    </article>
+
+                    <article class="resource-chart-card">
+                        <div class="resource-chart-header">
+                            <div>
+                                <div class="resource-chart-title">網路吞吐量 (Network Throughput)</div>
+                                <div class="resource-chart-stats">
+                                    <div class="resource-inline-stat">
+                                        <span>接收 (RX)</span>
+                                        <div class="resource-inline-stat-value">
+                                            <strong>@FormatRate(CurrentNetworkRxBytesPerSecond())</strong>
+                                            <small>平均 @FormatRate(AverageNetworkRxBytesPerSecond())</small>
+                                        </div>
+                                    </div>
+                                    <div class="resource-inline-stat">
+                                        <span>傳送 (TX)</span>
+                                        <div class="resource-inline-stat-value">
+                                            <strong>@FormatRate(CurrentNetworkTxBytesPerSecond())</strong>
+                                            <small>平均 @FormatRate(AverageNetworkTxBytesPerSecond())</small>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Network throughput trend">
+                            @foreach (var guide in ChartGuideLines())
+                            {
+                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                            }
+                            <polyline class="resource-line rx" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => x.NetworkRxBytesPerSecond) ?? [], MaxNetworkRate())"></polyline>
+                            <polyline class="resource-line tx" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => x.NetworkTxBytesPerSecond) ?? [], MaxNetworkRate())"></polyline>
+                        </svg>
+                        <div class="resource-chart-legend">
+                            <span class="resource-legend-item"><i class="legend-swatch rx"></i>接收 (RX)</span>
+                            <span class="resource-legend-item"><i class="legend-swatch tx"></i>傳送 (TX)</span>
+                        </div>
+                    </article>
+
+                    <article class="resource-chart-card">
+                        <div class="resource-chart-header">
+                            <div>
+                                <div class="resource-chart-title">磁碟吞吐量 (Disk Throughput)</div>
+                                <div class="resource-chart-stats">
+                                    <div class="resource-inline-stat">
+                                        <span>讀取 (Read)</span>
+                                        <div class="resource-inline-stat-value">
+                                            <strong>@FormatRate(CurrentDiskReadBytesPerSecond())</strong>
+                                            <small>平均 @FormatRate(AverageDiskReadBytesPerSecond())</small>
+                                        </div>
+                                    </div>
+                                    <div class="resource-inline-stat">
+                                        <span>寫入 (Write)</span>
+                                        <div class="resource-inline-stat-value">
+                                            <strong>@FormatRate(CurrentDiskWriteBytesPerSecond())</strong>
+                                            <small>平均 @FormatRate(AverageDiskWriteBytesPerSecond())</small>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Disk throughput trend">
+                            @foreach (var guide in ChartGuideLines())
+                            {
+                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                            }
+                            <polyline class="resource-line read" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => x.DiskReadBytesPerSecond) ?? [], MaxDiskRate())"></polyline>
+                            <polyline class="resource-line write" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => x.DiskWriteBytesPerSecond) ?? [], MaxDiskRate())"></polyline>
+                        </svg>
+                        <div class="resource-chart-legend">
+                            <span class="resource-legend-item"><i class="legend-swatch read"></i>讀取 (Read)</span>
+                            <span class="resource-legend-item"><i class="legend-swatch write"></i>寫入 (Write)</span>
+                        </div>
+                    </article>
+
+                    <article class="resource-chart-card">
+                        <div class="resource-chart-header">
+                            <div>
+                                <div class="resource-chart-title">近期呼叫趨勢 (Recent Request Traffic)</div>
+                                <div class="resource-chart-stats">
+                                    <div class="resource-inline-stat">
+                                        <span>進站 (Inbound)</span>
+                                        <div class="resource-inline-stat-value">
+                                            <strong>@FormatCountRate(CurrentInboundRequestsPerSecond())</strong>
+                                            <small>平均 @FormatCountRate(AverageInboundRequestsPerSecond())</small>
+                                        </div>
+                                    </div>
+                                    <div class="resource-inline-stat">
+                                        <span>傳出 (Outbound)</span>
+                                        <div class="resource-inline-stat-value">
+                                            <strong>@FormatCountRate(CurrentOutboundRequestsPerSecond())</strong>
+                                            <small>平均 @FormatCountRate(AverageOutboundRequestsPerSecond())</small>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Recent request traffic trend">
+                            @foreach (var guide in ChartGuideLines())
+                            {
+                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                            }
+                            <polyline class="resource-line inbound" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => (double)x.InboundRequests) ?? [], MaxRequestTrafficRate())"></polyline>
+                            <polyline class="resource-line outbound" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => (double)x.OutboundRequests) ?? [], MaxRequestTrafficRate())"></polyline>
+                        </svg>
+                        <div class="resource-chart-legend">
+                            <span class="resource-legend-item"><i class="legend-swatch inbound"></i>進站 (Inbound)</span>
+                            <span class="resource-legend-item"><i class="legend-swatch outbound"></i>傳出 (Outbound)</span>
+                        </div>
+                    </article>
+                </div>
+            </section>
+
+            <div class="monitoring-telemetry-grid">
+                <section class="panel monitoring-telemetry-panel">
+                    <div class="monitoring-telemetry-header">
+                        <div>
+                            <div class="panel-title">Redis</div>
+                            <div class="settings-section-meta">快取鍵數、命令處理量、進出流量與容器 I/O。</div>
+                        </div>
+                        <span class="status-badge @StatusClass(_monitoring.Redis.Status)">@StatusText(_monitoring.Redis.Status)</span>
+                    </div>
+
+                    @if (!string.IsNullOrWhiteSpace(_monitoring.Redis.Warning))
+                    {
+                        <div class="inline-error monitoring-inline-warning">@_monitoring.Redis.Warning</div>
+                    }
+
+                    <div class="runtime-dependency-kpi-grid">
+                        <article class="runtime-dependency-kpi">
+                            <span>Used Memory</span>
+                            <strong>@DashboardFormatting.Bytes(_monitoring.Redis.UsedMemoryBytes)</strong>
+                        </article>
+                        <article class="runtime-dependency-kpi">
+                            <span>Key Count</span>
+                            <strong>@_monitoring.Redis.KeyCount</strong>
+                        </article>
+                        <article class="runtime-dependency-kpi">
+                            <span>Storage</span>
+                            <strong>@DashboardFormatting.Bytes(_monitoring.Redis.PersistentStorageBytes)</strong>
+                        </article>
+                    </div>
+
+                    <dl class="definition-grid monitoring-definition-grid">
+                        <div><dt>Max Memory</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.MaxMemoryBytes)</dd></div>
+                        <div><dt>Total Commands</dt><dd>@_monitoring.Redis.TotalCommandsProcessed</dd></div>
+                        <div><dt>Total Net In</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.TotalNetInputBytes)</dd></div>
+                        <div><dt>Total Net Out</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.TotalNetOutputBytes)</dd></div>
+                        <div><dt>Instant In</dt><dd>@($"{_monitoring.Redis.InstantaneousInputKbps:0.##} KB/s")</dd></div>
+                        <div><dt>Instant Out</dt><dd>@($"{_monitoring.Redis.InstantaneousOutputKbps:0.##} KB/s")</dd></div>
+                        <div><dt>Expired Keys</dt><dd>@_monitoring.Redis.ExpiredKeys</dd></div>
+                        <div><dt>Evicted Keys</dt><dd>@_monitoring.Redis.EvictedKeys</dd></div>
+                        <div><dt>Container Network</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.NetworkRxBytes) RX / @DashboardFormatting.Bytes(_monitoring.Redis.NetworkTxBytes) TX</dd></div>
+                        <div><dt>Container Disk I/O</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.DiskReadBytes) Read / @DashboardFormatting.Bytes(_monitoring.Redis.DiskWriteBytes) Write</dd></div>
+                        <div class="monitoring-definition-span"><dt>Storage Target</dt><dd>@_monitoring.Redis.PersistentStorageName</dd></div>
+                        <div class="monitoring-definition-span"><dt>Container</dt><dd>@ContainerSummary("redis")</dd></div>
+                    </dl>
+                </section>
+
+                <section class="panel monitoring-telemetry-panel">
+                    <div class="monitoring-telemetry-header">
+                        <div>
+                            <div class="panel-title">PostgreSQL</div>
+                            <div class="settings-section-meta">資料庫大小、交易次數、I/O 快取命中與容器流量。</div>
+                        </div>
+                        <span class="status-badge @StatusClass(_monitoring.Postgres.Status)">@StatusText(_monitoring.Postgres.Status)</span>
+                    </div>
+
+                    @if (!string.IsNullOrWhiteSpace(_monitoring.Postgres.Warning))
+                    {
+                        <div class="inline-error monitoring-inline-warning">@_monitoring.Postgres.Warning</div>
+                    }
+
+                    <div class="runtime-dependency-kpi-grid">
+                        <article class="runtime-dependency-kpi">
+                            <span>DB Size</span>
+                            <strong>@DashboardFormatting.Bytes(_monitoring.Postgres.DatabaseSizeBytes)</strong>
+                        </article>
+                        <article class="runtime-dependency-kpi">
+                            <span>Connections</span>
+                            <strong>@_monitoring.Postgres.ActiveConnections</strong>
+                        </article>
+                        <article class="runtime-dependency-kpi">
+                            <span>Storage</span>
+                            <strong>@DashboardFormatting.Bytes(_monitoring.Postgres.PersistentStorageBytes)</strong>
+                        </article>
+                    </div>
+
+                    <dl class="definition-grid monitoring-definition-grid">
+                        <div><dt>Committed</dt><dd>@_monitoring.Postgres.TransactionsCommitted</dd></div>
+                        <div><dt>Rolled Back</dt><dd>@_monitoring.Postgres.TransactionsRolledBack</dd></div>
+                        <div><dt>Blocks Read</dt><dd>@_monitoring.Postgres.BlocksRead</dd></div>
+                        <div><dt>Blocks Hit</dt><dd>@_monitoring.Postgres.BlocksHit</dd></div>
+                        <div><dt>Rows Returned</dt><dd>@_monitoring.Postgres.RowsReturned</dd></div>
+                        <div><dt>Rows Fetched</dt><dd>@_monitoring.Postgres.RowsFetched</dd></div>
+                        <div><dt>Rows Inserted</dt><dd>@_monitoring.Postgres.RowsInserted</dd></div>
+                        <div><dt>Rows Updated</dt><dd>@_monitoring.Postgres.RowsUpdated</dd></div>
+                        <div><dt>Rows Deleted</dt><dd>@_monitoring.Postgres.RowsDeleted</dd></div>
+                        <div><dt>Temp Files / Bytes</dt><dd>@_monitoring.Postgres.TempFiles / @DashboardFormatting.Bytes(_monitoring.Postgres.TempBytes)</dd></div>
+                        <div><dt>Deadlocks</dt><dd>@_monitoring.Postgres.Deadlocks</dd></div>
+                        <div><dt>Container Network</dt><dd>@DashboardFormatting.Bytes(_monitoring.Postgres.NetworkRxBytes) RX / @DashboardFormatting.Bytes(_monitoring.Postgres.NetworkTxBytes) TX</dd></div>
+                        <div><dt>Container Disk I/O</dt><dd>@DashboardFormatting.Bytes(_monitoring.Postgres.DiskReadBytes) Read / @DashboardFormatting.Bytes(_monitoring.Postgres.DiskWriteBytes) Write</dd></div>
+                        <div class="monitoring-definition-span"><dt>Storage Target</dt><dd>@_monitoring.Postgres.PersistentStorageName</dd></div>
+                        <div class="monitoring-definition-span"><dt>Container</dt><dd>@ContainerSummary("postgres")</dd></div>
+                    </dl>
+                </section>
+            </div>
+
+            <section class="panel">
+                <div class="panel-title">Compose 服務資源</div>
+                <div class="table-scroll-shell table-scroll-shell-tall">
+                    <table class="data-table monitoring-containers-table">
+                        <thead>
+                            <tr>
+                                <th class="monitoring-service-col">服務 (Service)</th>
+                                <th class="monitoring-container-col">容器 (Container)</th>
+                                <th class="monitoring-state-col">狀態 (State)</th>
+                                <th class="monitoring-cpu-col">CPU</th>
+                                <th class="monitoring-memory-col">記憶體 (Memory)</th>
+                                <th class="monitoring-network-col">網路 (Network)</th>
+                                <th class="monitoring-disk-col">磁碟 I/O (Disk I/O)</th>
+                                <th class="monitoring-restart-col">重啟次數 (Restart)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var container in _monitoring.DependencyResources?.Containers ?? [])
+                            {
+                                <tr>
+                                    <td class="monitoring-service-cell">@ServiceDisplayName(container.Service)</td>
+                                    <td class="monitoring-container-cell">@container.Name</td>
+                                    <td class="monitoring-state-cell">
+                                        <span class="status-badge @StatusClass(container.State)">@StatusText(container.State)</span>
+                                        <span class="status-badge @StatusClass(container.Health)">@StatusText(container.Health)</span>
+                                    </td>
+                                    <td class="monitoring-cpu-cell">@DashboardFormatting.Percent(container.CpuPercent)</td>
+                                    <td class="monitoring-memory-cell">@DashboardFormatting.Bytes(container.MemoryUsageBytes) / @DashboardFormatting.Bytes(container.MemoryLimitBytes)</td>
+                                    <td class="monitoring-network-cell">@DashboardFormatting.Bytes(container.NetworkRxBytes) / @DashboardFormatting.Bytes(container.NetworkTxBytes)</td>
+                                    <td class="monitoring-disk-cell">@DashboardFormatting.Bytes(container.DiskReadBytes) / @DashboardFormatting.Bytes(container.DiskWriteBytes)</td>
+                                    <td class="monitoring-restart-cell">@container.RestartCount</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    }
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private readonly CancellationTokenSource _cts = new();
+    private Task? _pollingTask;
+    private DashboardMonitoringResult? _monitoring;
+    private string? _loadError;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private InstanceSettingsSnapshot? _settingsSnapshot;
+    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.DependencyResourcesSeconds ?? 5;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settingsSnapshot = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
+        await RefreshAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _pollingTask = PollAsync(PollingIntervalSeconds);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAsync()
+    {
+        _monitoring = await ApiClient.GetMonitoringAsync(_cts.Token);
+        _loadError = null;
+    }
+
+    private async Task RefreshAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            await LoadAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("狀態監控", ex, _monitoring is not null);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private Task PollAsync(int intervalSeconds)
+    {
+        if (intervalSeconds <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(_cts.Token))
+                {
+                    try
+                    {
+                        await RefreshAsync();
+                    }
+                    catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+                    {
+                    }
+                    catch (Exception ex)
+                    {
+                        _loadError = DashboardUiErrorFormatter.BuildLoadError("狀態監控", ex, _monitoring is not null);
+                    }
+
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
+    }
+
+    private static string StatusClass(string status)
+        => status.ToLowerInvariant() switch
+        {
+            "healthy" or "ready" or "running" => "ok",
+            "degraded" or "warning" => "warn",
+            "error" or "critical" or "failed" or "unhealthy" or "exited" or "unavailable" => "bad",
+            _ => "neutral"
+        };
+
+    private static string StatusText(string status)
+        => DashboardText.Status(status);
+
+    private static string ServiceDisplayName(string name)
+        => DashboardText.Service(name);
+
+    private string ResourceChartPanelNote()
+        => $"每 {PollingIntervalSeconds} 秒刷新 / 最近 {(_monitoring?.ResourceSamples?.Count ?? 0)} 筆樣本";
+
+    private double CurrentCpuPercent()
+        => _monitoring?.ResourceSamples?.LastOrDefault()?.CpuPercent ?? 0d;
+
+    private double AverageCpuPercent()
+        => _monitoring?.ResourceSamples?.Count > 0
+            ? _monitoring.ResourceSamples.Average(x => x.CpuPercent)
+            : 0d;
+
+    private double CurrentMemoryPercent()
+        => _monitoring?.ResourceSamples?.LastOrDefault()?.MemoryPercent ?? 0d;
+
+    private long CurrentMemoryUsageBytes()
+        => _monitoring?.ResourceSamples?.LastOrDefault()?.MemoryUsageBytes ?? 0L;
+
+    private long AverageMemoryUsageBytes()
+        => _monitoring?.ResourceSamples?.Count > 0
+            ? (long)Math.Round(_monitoring.ResourceSamples.Average(x => x.MemoryUsageBytes))
+            : 0L;
+
+    private double CurrentNetworkRxBytesPerSecond()
+        => _monitoring?.ResourceSamples?.LastOrDefault()?.NetworkRxBytesPerSecond ?? 0d;
+
+    private double CurrentNetworkTxBytesPerSecond()
+        => _monitoring?.ResourceSamples?.LastOrDefault()?.NetworkTxBytesPerSecond ?? 0d;
+
+    private double AverageNetworkRxBytesPerSecond()
+        => _monitoring?.ResourceSamples?.Count > 0
+            ? _monitoring.ResourceSamples.Average(x => x.NetworkRxBytesPerSecond)
+            : 0d;
+
+    private double AverageNetworkTxBytesPerSecond()
+        => _monitoring?.ResourceSamples?.Count > 0
+            ? _monitoring.ResourceSamples.Average(x => x.NetworkTxBytesPerSecond)
+            : 0d;
+
+    private double CurrentDiskReadBytesPerSecond()
+        => _monitoring?.ResourceSamples?.LastOrDefault()?.DiskReadBytesPerSecond ?? 0d;
+
+    private double CurrentDiskWriteBytesPerSecond()
+        => _monitoring?.ResourceSamples?.LastOrDefault()?.DiskWriteBytesPerSecond ?? 0d;
+
+    private double AverageDiskReadBytesPerSecond()
+        => _monitoring?.ResourceSamples?.Count > 0
+            ? _monitoring.ResourceSamples.Average(x => x.DiskReadBytesPerSecond)
+            : 0d;
+
+    private double AverageDiskWriteBytesPerSecond()
+        => _monitoring?.ResourceSamples?.Count > 0
+            ? _monitoring.ResourceSamples.Average(x => x.DiskWriteBytesPerSecond)
+            : 0d;
+
+    private int CurrentInboundRequestsPerSecond()
+        => _monitoring?.ResourceSamples?.LastOrDefault()?.InboundRequests ?? 0;
+
+    private int CurrentOutboundRequestsPerSecond()
+        => _monitoring?.ResourceSamples?.LastOrDefault()?.OutboundRequests ?? 0;
+
+    private int AverageInboundRequestsPerSecond()
+        => _monitoring?.ResourceSamples?.Count > 0
+            ? (int)Math.Round(_monitoring.ResourceSamples.Average(x => x.InboundRequests))
+            : 0;
+
+    private int AverageOutboundRequestsPerSecond()
+        => _monitoring?.ResourceSamples?.Count > 0
+            ? (int)Math.Round(_monitoring.ResourceSamples.Average(x => x.OutboundRequests))
+            : 0;
+
+    private double MaxCpuPercent()
+        => Math.Max(_monitoring?.ResourceSamples?.Select(x => x.CpuPercent).DefaultIfEmpty(0d).Max() ?? 0d, 5d);
+
+    private double MaxMemoryUsageChartValue()
+        => Math.Max(_monitoring?.ResourceSamples?.Select(x => (double)x.MemoryUsageBytes).DefaultIfEmpty(0d).Max() ?? 0d, 1d);
+
+    private double MaxNetworkRate()
+        => Math.Max(
+            _monitoring?.ResourceSamples?.SelectMany(x => new[] { x.NetworkRxBytesPerSecond, x.NetworkTxBytesPerSecond }).DefaultIfEmpty(0d).Max() ?? 0d,
+            1d);
+
+    private double MaxDiskRate()
+        => Math.Max(
+            _monitoring?.ResourceSamples?.SelectMany(x => new[] { x.DiskReadBytesPerSecond, x.DiskWriteBytesPerSecond }).DefaultIfEmpty(0d).Max() ?? 0d,
+            1d);
+
+    private double MaxRequestTrafficRate()
+        => Math.Max(
+            _monitoring?.ResourceSamples?.SelectMany(x => new[] { (double)x.InboundRequests, (double)x.OutboundRequests }).DefaultIfEmpty(0d).Max() ?? 0d,
+            1d);
+
+    private string ContainerSummary(string serviceName)
+    {
+        var container = _monitoring?.DependencyResources?.Containers.FirstOrDefault(x => string.Equals(x.Service, serviceName, StringComparison.OrdinalIgnoreCase));
+        return container is null
+            ? "未偵測 compose 容器"
+            : $"{container.Name} / {StatusText(container.State)} / {StatusText(container.Health)} / restart {container.RestartCount}";
+    }
+
+    private static IEnumerable<int> ChartGuideLines()
+        => [12, 36, 60, 84];
+
+    private static string BuildLinePoints(IEnumerable<double> values, double? fixedMax = null)
+    {
+        const double width = 240d;
+        const double height = 96d;
+        const double paddingX = 6d;
+        const double paddingY = 8d;
+
+        var points = values.ToArray();
+        if (points.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var max = fixedMax ?? Math.Max(points.Max(), 1d);
+        max = Math.Max(max, 1d);
+
+        if (points.Length == 1)
+        {
+            var singleY = height - paddingY - ((Math.Clamp(points[0], 0d, max) / max) * (height - (paddingY * 2d)));
+            return $"{paddingX:0.##},{singleY:0.##} {width - paddingX:0.##},{singleY:0.##}";
+        }
+
+        var xStep = (width - (paddingX * 2d)) / (points.Length - 1d);
+        return string.Join(
+            " ",
+            points.Select((value, index) =>
+            {
+                var x = paddingX + (xStep * index);
+                var y = height - paddingY - ((Math.Clamp(value, 0d, max) / max) * (height - (paddingY * 2d)));
+                return $"{x:0.##},{y:0.##}";
+            }));
+    }
+
+    private static string FormatRate(double bytesPerSecond)
+        => $"{DashboardFormatting.Bytes((long)Math.Round(bytesPerSecond))}/s";
+
+    private static string FormatCountRate(int value)
+        => $"{value}/s";
+
+    private DashboardPageSnapshotStatusResult? PageSnapshotStatus()
+        => _monitoring?.SnapshotStatus;
+
+    private string? SnapshotWarningText()
+    {
+        var snapshotStatus = PageSnapshotStatus();
+        if (snapshotStatus is null || (!snapshotStatus.IsStale && string.IsNullOrWhiteSpace(snapshotStatus.Warning)))
+        {
+            return null;
+        }
+
+        return string.IsNullOrWhiteSpace(snapshotStatus.Warning)
+            ? "Dashboard snapshot 已過期，畫面顯示的是最後一份可用資料。"
+            : snapshotStatus.Warning;
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        if (_pollingTask is not null)
+        {
+            _ = CompleteDisposeAsync(_pollingTask, _cts);
+            return ValueTask.CompletedTask;
+        }
+
+        _cts.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static async Task CompleteDisposeAsync(Task pollingTask, CancellationTokenSource cts)
+    {
+        try
+        {
+            await pollingTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+}

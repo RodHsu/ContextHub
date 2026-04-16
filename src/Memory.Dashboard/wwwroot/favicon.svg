@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="contextHubAccent" x1="96" x2="416" y1="80" y2="432" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22a3f0" />
+      <stop offset="1" stop-color="#0d67ba" />
+    </linearGradient>
+    <linearGradient id="contextHubGlow" x1="168" x2="344" y1="128" y2="384" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8ed8ff" stop-opacity=".62" />
+      <stop offset="1" stop-color="#8ed8ff" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="120" fill="#111418" />
+  <rect x="80" y="80" width="352" height="352" rx="96" fill="url(#contextHubAccent)" />
+  <path d="M184 160h52v76h120v-76h52v192h-52v-72H236v72h-52z" fill="#f8fbff" />
+  <path d="M160 112c42-28 108-36 170-20 28 8 50 18 70 36-28-9-54-13-88-13-54 0-104 10-152 30z" fill="url(#contextHubGlow)" />
+</svg>

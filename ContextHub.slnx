@@ -1,0 +1,19 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Memory.Application/Memory.Application.csproj" />
+    <Project Path="src/Memory.Dashboard/Memory.Dashboard.csproj" />
+    <Project Path="src/Memory.Domain/Memory.Domain.csproj" />
+    <Project Path="src/Memory.EmbeddingServer/Memory.EmbeddingServer.csproj" />
+    <Project Path="src/Memory.Infrastructure/Memory.Infrastructure.csproj" />
+    <Project Path="src/Memory.McpServer/Memory.McpServer.csproj" />
+    <Project Path="src/Memory.Worker/Memory.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Memory.ApiContractTests/Memory.ApiContractTests.csproj" />
+    <Project Path="tests/Memory.ComposeSmokeTests/Memory.ComposeSmokeTests.csproj" />
+    <Project Path="tests/Memory.DashboardTests/Memory.DashboardTests.csproj" />
+    <Project Path="tests/Memory.IntegrationTests/Memory.IntegrationTests.csproj" />
+    <Project Path="tests/Memory.McpProtocolTests/Memory.McpProtocolTests.csproj" />
+    <Project Path="tests/Memory.UnitTests/Memory.UnitTests.csproj" />
+  </Folder>
+</Solution>

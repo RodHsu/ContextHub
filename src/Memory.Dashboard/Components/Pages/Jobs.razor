@@ -1,0 +1,342 @@
+@page "/jobs"
+@implements IAsyncDisposable
+@inject IContextHubApiClient ApiClient
+@inject IJSRuntime JsRuntime
+@inject IOptions<DashboardOptions> DashboardOptionsAccessor
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+@using Memory.Dashboard.Services
+
+<PageTitle>Context Hub | 工作佇列</PageTitle>
+
+<PageViewport Title="工作佇列"
+              Subtitle="觀察 background jobs，並觸發 reindex 來切換 profile / model 後的向量重建。"
+              BodyClass="page-viewport-body jobs-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading"
+                       PollingIntervalSeconds="@PollingIntervalSeconds" />
+        <button class="primary-button" @onclick="RunReindexAsync" disabled="@_loading">執行 Reindex</button>
+    </Actions>
+    <ChildContent>
+
+    @if (!string.IsNullOrWhiteSpace(_loadError))
+    {
+        <div class="inline-error">@_loadError</div>
+    }
+
+    <div class="split-layout">
+    <section class="panel">
+        <div class="panel-title">重新索引</div>
+        <div class="form-grid">
+            <label>
+                <span>模型鍵值 (Model Key)</span>
+                <input @bind="_modelKey" placeholder="可留空使用 active model" />
+            </label>
+            <label>
+                <span>記憶項目 Id (Memory Item Id)</span>
+                <input @bind="_memoryItemId" placeholder="可留空表示全量" />
+            </label>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(_message))
+        {
+            <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
+        }
+    </section>
+
+    <section class="panel detail-panel">
+        <div class="panel-title">工作篩選</div>
+        <div class="filter-grid">
+            <select @bind="_status">
+                <option value="">全部狀態</option>
+                @foreach (var status in Enum.GetValues<MemoryJobStatus>())
+                {
+                    <option value="@status">@DashboardText.Label(status)</option>
+                }
+            </select>
+            <select @bind="_jobType">
+                <option value="">全部類型</option>
+                @foreach (var type in Enum.GetValues<MemoryJobType>())
+                {
+                    <option value="@type">@DashboardText.Label(type)</option>
+                }
+            </select>
+            <button class="ghost-button" @onclick="LoadAsync">查詢</button>
+        </div>
+    </section>
+    </div>
+
+    <div class="split-layout">
+    <section class="panel panel-scroll">
+        <div class="panel-title">背景工作 (@_jobs?.TotalCount)</div>
+        <div class="panel-scroll-body detail-scroll-shell">
+            @if (_jobs is null)
+            {
+                <div class="skeleton-stack">
+                    @for (var i = 0; i < 5; i++)
+                    {
+                        <div class="skeleton-line @(i == 0 ? "skeleton-line-md" : "skeleton-line-lg")"></div>
+                    }
+                </div>
+            }
+            else
+            {
+                <div class="table-scroll-shell">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>建立時間</th>
+                                <th>工作類型 (Job Type)</th>
+                                <th>狀態 (Status)</th>
+                                <th>內容 (Payload)</th>
+                                <th>錯誤 (Error)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var job in _jobs.Items)
+                            {
+                                <tr class="@SelectedClass(job.Id)" @onclick="@(() => SelectJob(job))">
+                                    <td><ClientLocalTime Value="job.CreatedAt" /></td>
+                                    <td>@DashboardText.Label(job.JobType)</td>
+                                    <td><span class="status-badge @StatusClass(job.Status.ToString())">@DashboardText.Label(job.Status)</span></td>
+                                    <td class="truncate-cell">@job.PayloadJson</td>
+                                    <td class="truncate-cell">@job.Error</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    </section>
+
+    <section class="panel detail-panel panel-scroll">
+        <div class="panel-title">工作細節</div>
+        <div class="panel-scroll-body detail-scroll-shell">
+            @if (_selectedJob is null)
+            {
+                <div class="empty-inline">點選左側工作列顯示詳細內容。</div>
+            }
+            else
+            {
+                <div class="detail-actions">
+                    <button class="ghost-button" @onclick="CopySelectedJobAsync">複製 JSON</button>
+                    <span class="detail-actions-copy">包含 job id、status、payload 與 error，適合直接貼給 agent 分析。</span>
+                </div>
+
+                <dl class="definition-grid">
+                    <div><dt>工作 Id</dt><dd>@_selectedJob.Id</dd></div>
+                    <div><dt>工作類型</dt><dd>@DashboardText.Label(_selectedJob.JobType)</dd></div>
+                    <div><dt>狀態</dt><dd>@DashboardText.Label(_selectedJob.Status)</dd></div>
+                    <div><dt>建立時間</dt><dd><ClientLocalTime Value="_selectedJob.CreatedAt" /></dd></div>
+                    <div><dt>開始時間</dt><dd>@if (_selectedJob.StartedAt.HasValue) { <ClientLocalTime Value="_selectedJob.StartedAt.Value" /> } else { <span>-</span> }</dd></div>
+                    <div><dt>完成時間</dt><dd>@if (_selectedJob.CompletedAt.HasValue) { <ClientLocalTime Value="_selectedJob.CompletedAt.Value" /> } else { <span>-</span> }</dd></div>
+                </dl>
+
+                <div class="subpanel-title">內容 (Payload)</div>
+                <div class="code-block">@_selectedJob.PayloadJson</div>
+
+                @if (!string.IsNullOrWhiteSpace(_selectedJob.Error))
+                {
+                    <div class="subpanel-title">錯誤 (Error)</div>
+                    <div class="code-block">@_selectedJob.Error</div>
+                }
+            }
+        </div>
+    </section>
+    </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private readonly CancellationTokenSource _cts = new();
+    private Task? _pollingTask;
+    private string? _status;
+    private string? _jobType;
+    private string? _modelKey;
+    private string? _memoryItemId;
+    private string? _message;
+    private long _messageSequence;
+    private PagedResult<JobListItemResult>? _jobs;
+    private JobListItemResult? _selectedJob;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _loadError;
+    private InstanceSettingsSnapshot? _settingsSnapshot;
+    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.JobsPollingSeconds ?? DashboardOptionsAccessor.Value.Polling.JobsSeconds;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settingsSnapshot = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
+        await LoadAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _pollingTask = PollAsync(PollingIntervalSeconds);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            _jobs = await ApiClient.GetJobsAsync(
+                new JobListRequest(
+                    Parse<MemoryJobStatus>(_status),
+                    Parse<MemoryJobType>(_jobType),
+                    1,
+                    25),
+                _cts.Token);
+            _selectedJob = _selectedJob is null
+                ? _jobs.Items.FirstOrDefault()
+                : _jobs.Items.FirstOrDefault(x => x.Id == _selectedJob.Id) ?? _jobs.Items.FirstOrDefault();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("工作佇列", ex, _jobs is not null);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task RunReindexAsync()
+    {
+        try
+        {
+            Guid? memoryItemId = Guid.TryParse(_memoryItemId, out var parsed) ? parsed : null;
+            var result = await ApiClient.EnqueueReindexAsync(new EnqueueReindexRequest(_modelKey, memoryItemId), _cts.Token);
+            ShowMessage($"已建立 reindex job: {result.JobId}");
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("建立 Reindex 工作", ex));
+        }
+    }
+
+    private void SelectJob(JobListItemResult job)
+        => _selectedJob = job;
+
+    private async Task CopySelectedJobAsync()
+    {
+        if (_selectedJob is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", JobClipboardFormatter.Format(_selectedJob));
+            ShowMessage($"已複製工作 {_selectedJob.Id} 的 JSON。");
+        }
+        catch (JSException)
+        {
+            ShowMessage("複製失敗，請改用手動複製工作內容。");
+        }
+    }
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+
+    private void ClearMessage()
+        => _message = null;
+
+    private Task PollAsync(int intervalSeconds)
+    {
+        if (intervalSeconds <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(_cts.Token))
+                {
+                    try
+                    {
+                        await LoadAsync();
+                    }
+                    catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+                    {
+                    }
+                    catch (Exception ex)
+                    {
+                        _loadError = DashboardUiErrorFormatter.BuildLoadError("工作佇列", ex, _jobs is not null);
+                    }
+
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
+    }
+
+    private static TEnum? Parse<TEnum>(string? value)
+        where TEnum : struct, Enum
+        => Enum.TryParse<TEnum>(value, true, out var parsed) ? parsed : null;
+
+    private static string StatusClass(string status)
+        => status.ToLowerInvariant() switch
+        {
+            "completed" => "ok",
+            "pending" or "running" => "warn",
+            "failed" => "bad",
+            _ => "neutral"
+        };
+
+    private string SelectedClass(Guid id)
+        => _selectedJob?.Id == id ? "selected-row" : string.Empty;
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        if (_pollingTask is not null)
+        {
+            _ = CompleteDisposeAsync(_pollingTask, _cts);
+            return ValueTask.CompletedTask;
+        }
+
+        _cts.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static async Task CompleteDisposeAsync(Task pollingTask, CancellationTokenSource cts)
+    {
+        try
+        {
+            await pollingTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+}

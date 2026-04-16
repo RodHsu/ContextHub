@@ -1,0 +1,8 @@
+@using Memory.Dashboard.Services
+
+<time class="client-local-time" datetime="@Value.ToString("O")">@DashboardFormatting.TimestampWithZone(Value)</time>
+
+@code {
+    [Parameter, EditorRequired]
+    public DateTimeOffset Value { get; set; }
+}

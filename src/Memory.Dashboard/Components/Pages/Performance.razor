@@ -1,0 +1,257 @@
+@page "/performance"
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>Context Hub | 效能</PageTitle>
+
+<PageViewport Title="效能"
+              Subtitle="用目前 active profile / model / PostgreSQL state 量測 chunking、embedding 與 hybrid search，可選固定次數或固定時長模式。"
+              BodyClass="page-viewport-body performance-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading" />
+        <button class="primary-button" @onclick="MeasureAsync" disabled="@_loading">開始量測</button>
+    </Actions>
+    <ChildContent>
+
+        <section class="panel">
+            <div class="form-grid performance-form-grid">
+                <label class="span-2">
+                    <span>查詢文字 (Query)</span>
+                    <input @bind="_query" />
+                </label>
+                <label class="span-2 performance-document-field">
+                    <span>測試文件 (Document)</span>
+                    <textarea @bind="_document"></textarea>
+                </label>
+                <div class="span-2 performance-inline-controls @InlineControlLayoutClass()">
+                    <label>
+                        <span class="field-label">
+                            <span class="field-label-primary">搜尋上限</span>
+                            <span class="field-label-secondary">Search Limit</span>
+                        </span>
+                        <input type="number" min="1" max="50" @bind="_searchLimit" />
+                    </label>
+                    <label>
+                        <span class="field-label">
+                            <span class="field-label-primary">預熱次數</span>
+                            <span class="field-label-secondary">Warmup Iterations</span>
+                        </span>
+                        <input type="number" min="0" max="10" @bind="_warmupIterations" />
+                    </label>
+                    <label>
+                        <span class="field-label">
+                            <span class="field-label-primary">量測模式</span>
+                            <span class="field-label-secondary">Measurement Mode</span>
+                        </span>
+                        <select @bind="_measurementMode">
+                            <option value="@PerformanceMeasurementMode.Iterations">固定次數</option>
+                            <option value="@PerformanceMeasurementMode.Duration">固定時長</option>
+                        </select>
+                    </label>
+                    @if (_measurementMode == PerformanceMeasurementMode.Iterations)
+                    {
+                        <label>
+                            <span class="field-label">
+                                <span class="field-label-primary">量測次數</span>
+                                <span class="field-label-secondary">Measurement Iterations</span>
+                            </span>
+                            <input type="number" min="1" max="50" @bind="_measurementIterations" />
+                        </label>
+                    }
+                    else
+                    {
+                        <label>
+                            <span class="field-label">
+                                <span class="field-label-primary">量測秒數</span>
+                                <span class="field-label-secondary">Measurement Duration Seconds</span>
+                            </span>
+                            <input type="number" min="1" max="300" @bind="_measurementDurationSeconds" />
+                        </label>
+                        <label>
+                            <span class="field-label">
+                                <span class="field-label-primary">最大迭代數</span>
+                                <span class="field-label-secondary">Max Measurement Iterations</span>
+                            </span>
+                            <input type="number" min="1" max="20000" @bind="_maxMeasurementIterations" />
+                        </label>
+                    }
+                </div>
+            </div>
+            <div class="performance-config-footer">
+                <div class="performance-guidance-card">
+                    <div class="metric-label">建議用途</div>
+                    <div class="performance-guidance-copy">@ModeGuidance()</div>
+                    <div class="metric-meta">目前會用 active profile、目前資料庫狀態與既有索引條件進行量測。</div>
+                </div>
+                <div class="performance-mode-inline-card">
+                    <div class="metric-label">目前模式</div>
+                    <div class="performance-mode-inline-value">@ModeLabel(_measurementMode)</div>
+                    <div class="metric-meta">@ModeSummary(_measurementMode)</div>
+                </div>
+            </div>
+        </section>
+
+        <div class="performance-results-shell page-scroll-host">
+            @if (_result is not null)
+            {
+                <section class="panel performance-results-panel">
+                    <div class="panel-title">量測結果總覽</div>
+                    <div class="performance-run-meta">
+                        <div class="performance-run-pill">預熱 @_result.WarmupIterations 次</div>
+                        <div class="performance-run-pill">量測 @_result.MeasurementIterations 次</div>
+                        <div class="performance-run-pill">請求時長 @RequestedDurationText(_result)</div>
+                        <div class="performance-run-pill">迭代上限 @_result.MaxMeasurementIterations</div>
+                    </div>
+
+                    <div class="performance-kpi-grid">
+                        <article class="performance-kpi-card">
+                            <div class="metric-label">向量設定</div>
+                            <div class="performance-kpi-value">@_result.EmbeddingProfile</div>
+                            <div class="performance-kpi-meta">@_result.ModelKey / @_result.Dimensions 維</div>
+                        </article>
+                        <article class="performance-kpi-card">
+                            <div class="metric-label">量測模式</div>
+                            <div class="performance-kpi-value">@ModeLabel(_result.MeasurementMode)</div>
+                            <div class="performance-kpi-meta">@ResultModeMeta(_result)</div>
+                        </article>
+                        <article class="performance-kpi-card">
+                            <div class="metric-label">量測總時長</div>
+                            <div class="performance-kpi-value">@FormatDuration(_result.TotalMeasurementMilliseconds)</div>
+                            <div class="performance-kpi-meta">原始值 @_result.TotalMeasurementMilliseconds.ToString("0") ms</div>
+                        </article>
+                        <article class="performance-kpi-card">
+                            <div class="metric-label">切塊數量</div>
+                            <div class="performance-kpi-value">@_result.ChunkCount</div>
+                            <div class="performance-kpi-meta">Token Estimate @_result.DocumentTokenEstimate</div>
+                        </article>
+                        <article class="performance-kpi-card">
+                            <div class="metric-label">命中筆數</div>
+                            <div class="performance-kpi-value">@_result.HybridHitCount</div>
+                            <div class="performance-kpi-meta">Keyword @_result.KeywordHitCount / Vector @_result.VectorHitCount</div>
+                        </article>
+                    </div>
+
+                    <div class="subpanel-title">效能指標 (Performance Metrics)</div>
+                    <div class="table-scroll-shell performance-metrics-table-shell">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>指標 (Metric)</th>
+                                    <th>平均 (Avg)</th>
+                                    <th>P95</th>
+                                    <th>最小 (Min)</th>
+                                    <th>最大 (Max)</th>
+                                    <th>吞吐量 (Throughput)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var row in Rows())
+                                {
+                                    <tr>
+                                        <td>@DashboardText.PerformanceMetric(row.Name)</td>
+                                        <td>@row.Result.AverageMilliseconds.ToString("0.##") ms</td>
+                                        <td>@row.Result.P95Milliseconds.ToString("0.##") ms</td>
+                                        <td>@row.Result.MinMilliseconds.ToString("0.##") ms</td>
+                                        <td>@row.Result.MaxMilliseconds.ToString("0.##") ms</td>
+                                        <td>@row.Result.ThroughputPerSecond.ToString("0.##") /s</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            }
+            else
+            {
+                <div class="empty-inline">尚未執行量測，填好條件後點選開始量測。</div>
+            }
+        </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private string _query = "compose smoke verification";
+    private string _document = "Measure the current runtime profile and verify the compose deployment is healthy.";
+    private int _searchLimit = 5;
+    private int _warmupIterations = 1;
+    private int _measurementIterations = 5;
+    private PerformanceMeasurementMode _measurementMode = PerformanceMeasurementMode.Duration;
+    private int _measurementDurationSeconds = 10;
+    private int _maxMeasurementIterations = 5000;
+    private PerformanceMeasureResult? _result;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+
+    private async Task MeasureAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            _result = await ApiClient.MeasurePerformanceAsync(
+                new PerformanceMeasureRequest(
+                    Query: _query,
+                    Document: _document,
+                    SearchLimit: _searchLimit,
+                    WarmupIterations: _warmupIterations,
+                    MeasurementIterations: _measurementIterations,
+                    MeasurementMode: _measurementMode,
+                    MeasurementDurationSeconds: _measurementDurationSeconds,
+                    MaxMeasurementIterations: _maxMeasurementIterations),
+                CancellationToken.None);
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private string ModeGuidance()
+        => _measurementMode == PerformanceMeasurementMode.Duration
+            ? "適合看較穩定的平均表現，會持續量測到指定秒數或達到最大迭代上限。"
+            : "適合快速比較參數變更前後差異，但容易受瞬時波動影響。";
+
+    private static string ModeLabel(PerformanceMeasurementMode mode)
+        => mode == PerformanceMeasurementMode.Duration ? "固定時長" : "固定次數";
+
+    private static string ModeSummary(PerformanceMeasurementMode mode)
+        => mode == PerformanceMeasurementMode.Duration
+            ? "偏向看穩定平均值，適合比較 profile、threads 與資料量調整後的整體趨勢。"
+            : "偏向快速驗證單次調整差異，適合前期細部調校。";
+
+    private static string ResultModeMeta(PerformanceMeasureResult result)
+        => result.MeasurementMode == PerformanceMeasurementMode.Duration
+            ? $"指定 {result.RequestedMeasurementDurationSeconds} 秒 / 上限 {result.MaxMeasurementIterations} 次"
+            : $"完成 {result.MeasurementIterations} 次 / 預熱 {result.WarmupIterations} 次";
+
+    private static string RequestedDurationText(PerformanceMeasureResult result)
+        => result.MeasurementMode == PerformanceMeasurementMode.Duration
+            ? $"{result.RequestedMeasurementDurationSeconds} 秒"
+            : "不適用";
+
+    private static string FormatDuration(double milliseconds)
+        => milliseconds >= 1000
+            ? $"{milliseconds / 1000d:0.##} s"
+            : $"{milliseconds:0} ms";
+
+    private string InlineControlLayoutClass()
+        => _measurementMode == PerformanceMeasurementMode.Duration
+            ? "performance-inline-controls-5"
+            : "performance-inline-controls-4";
+
+    private IEnumerable<(string Name, PerformanceMetricResult Result)> Rows()
+    {
+        if (_result is null)
+        {
+            yield break;
+        }
+
+        yield return ("Chunking", _result.Chunking);
+        yield return ("Query Embedding", _result.QueryEmbedding);
+        yield return ("Document Embedding", _result.DocumentEmbedding);
+        yield return ("Keyword Search", _result.KeywordSearch);
+        yield return ("Vector Search", _result.VectorSearch);
+        yield return ("Hybrid Search", _result.HybridSearch);
+    }
+}

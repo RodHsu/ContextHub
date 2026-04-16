@@ -1,0 +1,717 @@
+@page "/settings"
+@inject IInstanceSettingsService InstanceSettingsService
+@inject IInstanceTransferService InstanceTransferService
+@inject IDockerMetricsService DockerMetricsService
+@inject IJSRuntime JsRuntime
+
+<PageTitle>Context Hub | 系統設定</PageTitle>
+
+<PageViewport Title="系統設定"
+              Subtitle="管理目前 instance 的個人化設定、Dashboard 登入資訊與維運操作。"
+              BodyClass="page-viewport-body page-grid-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading" />
+        <button class="ghost-button" @onclick="ReloadAsync" disabled="@_loading">重新讀取</button>
+        <button class="primary-button" @onclick="SaveAsync" disabled="@_loading">儲存設定</button>
+    </Actions>
+    <ChildContent>
+
+    @if (_snapshot is null)
+    {
+        <div class="dashboard-grid page-scroll-host">
+            @for (var i = 0; i < 4; i++)
+            {
+                <section class="panel skeleton-panel">
+                    <div class="skeleton-line skeleton-line-md"></div>
+                    <div class="skeleton-stack">
+                        <div class="skeleton-line skeleton-line-lg"></div>
+                        <div class="skeleton-line skeleton-line-md"></div>
+                        <div class="skeleton-line skeleton-line-sm"></div>
+                    </div>
+                </section>
+            }
+        </div>
+    }
+    else
+    {
+        @if (!string.IsNullOrWhiteSpace(_message))
+        {
+            <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
+        }
+
+        @if (!string.IsNullOrWhiteSpace(_error))
+        {
+            <DashboardToast Message="@_error" IsError="true" Sequence="@_errorSequence" OnDismiss="ClearError" />
+        }
+
+        <div class="settings-layout page-scroll-host">
+            <section class="panel settings-info-panel">
+                <div class="panel-title">Instance 基本資訊</div>
+                <dl class="definition-grid">
+                    <div><dt>Instance Id</dt><dd>@_snapshot.InstanceId</dd></div>
+                    <div><dt>Namespace</dt><dd>@_snapshot.Namespace</dd></div>
+                    <div><dt>Compose Project</dt><dd>@_snapshot.ComposeProject</dd></div>
+                    <div><dt>建置版本 (Build Version)</dt><dd>@_snapshot.BuildVersion</dd></div>
+                    <div><dt>建置時間 (Build Time)</dt><dd><ClientLocalTime Value="_snapshot.BuildTimestampUtc" /></dd></div>
+                    <div><dt>設定版本 (Settings Revision)</dt><dd>@_snapshot.SettingsRevision</dd></div>
+                    <div><dt>最後設定更新</dt><dd>@if (_snapshot.SettingsUpdatedAtUtc is null) { <span>env 預設</span> } else { <ClientLocalTime Value="_snapshot.SettingsUpdatedAtUtc.Value" /> }</dd></div>
+                </dl>
+                <div class="settings-apply-strip">
+                    <span class="status-badge ok">即時生效</span>
+                    <span class="status-badge warn">重新登入</span>
+                    <span class="status-badge neutral">需重啟</span>
+                </div>
+            </section>
+
+            <section class="panel settings-behavior-panel">
+                <div class="panel-title">應用行為設定</div>
+                <div class="settings-section-meta">
+                    對話整理策略與 Dashboard 預設查詢行為集中在這裡；輪詢秒數會在新頁面生命週期中套用。
+                </div>
+                <div class="settings-behavior-stack">
+                    <section class="settings-behavior-card">
+                        <div class="settings-cadence-header">
+                            <div class="subpanel-title">整理與 ingestion</div>
+                            <span class="status-badge neutral">automation</span>
+                        </div>
+                        <div class="settings-cadence-copy">
+                            控制 checkpoint 整理、宿主事件收斂與共用綜合層自動刷新，這些設定會影響背景知識整理流程。
+                        </div>
+                        <div class="settings-toggle-grid settings-toggle-grid-4">
+                            <label class="toggle-field">
+                                <input type="checkbox" @bind="_conversationAutomationEnabled" />
+                                <span>啟用自動整理</span>
+                            </label>
+                            <label class="toggle-field">
+                                <input type="checkbox" @bind="_hostEventIngestionEnabled" />
+                                <span>啟用宿主事件 ingestion</span>
+                            </label>
+                            <label class="toggle-field">
+                                <input type="checkbox" @bind="_agentSupplementalIngestionEnabled" />
+                                <span>啟用 agent 補送 ingestion</span>
+                            </label>
+                            <label class="toggle-field">
+                                <input type="checkbox" @bind="_sharedSummaryAutoRefreshEnabled" />
+                                <span>寫入後自動刷新共用綜合層</span>
+                            </label>
+                        </div>
+                        <div class="settings-form-grid settings-behavior-form-grid">
+                            <label>
+                                <span>Promotion 策略</span>
+                                <input @bind="_promotionMode" />
+                            </label>
+                            <label>
+                                <span>Idle Threshold (minutes)</span>
+                                <input type="number" min="1" max="1440" @bind="_idleThresholdMinutes" />
+                            </label>
+                            <label class="settings-field-span">
+                                <span>Excerpt 長度</span>
+                                <input type="number" min="32" max="4000" @bind="_excerptMaxLength" />
+                            </label>
+                        </div>
+                    </section>
+
+                    <section class="settings-behavior-card">
+                        <div class="settings-cadence-header">
+                            <div class="subpanel-title">預設查詢</div>
+                            <span class="status-badge ok">dashboard default</span>
+                        </div>
+                        <div class="settings-cadence-copy">
+                            定義 dashboard 進入查詢頁時的預設專案與查詢模式，避免每次都從空白狀態重新設定。
+                        </div>
+                        <div class="settings-form-grid settings-behavior-form-grid settings-query-grid">
+                            <label>
+                                <span>預設 Project Id</span>
+                                <input @bind="_defaultProjectId" />
+                            </label>
+                            <label>
+                                <span>預設查詢模式</span>
+                                <select @bind="_defaultQueryMode">
+                                    <option value="@MemoryQueryMode.CurrentOnly">目前專案</option>
+                                    <option value="@MemoryQueryMode.CurrentPlusReferencedProjects">目前 + 參考專案</option>
+                                    <option value="@MemoryQueryMode.SummaryOnly">共用綜合層</option>
+                                </select>
+                            </label>
+                            <div class="settings-checkbox-field">
+                                <span>預設讀取共用綜合層</span>
+                                <label class="toggle-field settings-inline-toggle-field">
+                                    <input type="checkbox" @bind="_defaultUseSummaryLayer" />
+                                    <span>啟用</span>
+                                </label>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="subpanel-title">Snapshot Cadence</div>
+                <div class="settings-section-meta">
+                    背景服務會依下列 cadence 寫入 Redis，Dashboard 與 `/api/status` 只讀取 snapshot，不再做即時計算。資料過期時會標記 stale，但仍顯示最後一份可用快照。
+                </div>
+                <div class="settings-cadence-grid">
+                    <section class="settings-cadence-card">
+                        <div class="settings-cadence-header">
+                            <div class="subpanel-title">核心狀態</div>
+                            <span class="status-badge neutral">stale 可顯示</span>
+                        </div>
+                        <div class="settings-cadence-copy">`/api/status` 與 build/runtime 基本資訊。</div>
+                        <div class="settings-form-grid">
+                            <label>
+                                <span>Status Core</span>
+                                <input type="number" min="1" max="3600" @bind="_statusCorePollingSeconds" />
+                            </label>
+                            <label>
+                                <span>Embedding Runtime</span>
+                                <input type="number" min="1" max="3600" @bind="_embeddingRuntimePollingSeconds" />
+                            </label>
+                        </div>
+                    </section>
+
+                    <section class="settings-cadence-card">
+                        <div class="settings-cadence-header">
+                            <div class="subpanel-title">依賴 / Docker</div>
+                            <span class="status-badge neutral">host 與 compose</span>
+                        </div>
+                        <div class="settings-cadence-copy">健康檢查、Docker Host 與 compose 服務資源由背景 collector 統一整理。</div>
+                        <div class="settings-form-grid">
+                            <label>
+                                <span>Dependencies Health</span>
+                                <input type="number" min="1" max="3600" @bind="_dependenciesHealthPollingSeconds" />
+                            </label>
+                            <label>
+                                <span>Docker Host</span>
+                                <input type="number" min="1" max="3600" @bind="_dockerHostPollingSeconds" />
+                            </label>
+                            <label>
+                                <span>Dependency Resources</span>
+                                <input type="number" min="1" max="3600" @bind="_dependencyResourcesPollingSeconds" />
+                            </label>
+                        </div>
+                    </section>
+
+                    <section class="settings-cadence-card">
+                        <div class="settings-cadence-header">
+                            <div class="subpanel-title">圖表與即時資料</div>
+                            <span class="status-badge ok">高頻</span>
+                        </div>
+                        <div class="settings-cadence-copy">首頁資源圖表與最近呼叫趨勢使用較高頻率的 snapshot。</div>
+                        <div class="settings-form-grid">
+                            <label>
+                                <span>Resource Chart</span>
+                                <input type="number" min="1" max="3600" @bind="_resourceChartPollingSeconds" />
+                            </label>
+                        </div>
+                    </section>
+
+                    <section class="settings-cadence-card">
+                        <div class="settings-cadence-header">
+                            <div class="subpanel-title">近期維運摘要</div>
+                            <span class="status-badge warn">errors / jobs</span>
+                        </div>
+                        <div class="settings-cadence-copy">最近錯誤日誌、進行中工作與 overview metric cards。</div>
+                        <div class="settings-form-grid">
+                            <label>
+                                <span>Recent Operations</span>
+                                <input type="number" min="1" max="3600" @bind="_recentOperationsPollingSeconds" />
+                            </label>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="subpanel-title">Legacy Page Polling</div>
+                <div class="settings-section-meta">
+                    `Jobs`、`Logs`、`Performance` 頁仍使用各自的 page polling；這部分暫時不透過 Redis snapshot。
+                </div>
+                <div class="settings-form-grid settings-form-grid-5">
+                    <label>
+                        <span>Overview</span>
+                        <input type="number" min="1" max="3600" @bind="_overviewPollingSeconds" />
+                    </label>
+                    <label>
+                        <span>Metrics</span>
+                        <input type="number" min="1" max="3600" @bind="_metricsPollingSeconds" />
+                    </label>
+                    <label>
+                        <span>Jobs</span>
+                        <input type="number" min="1" max="3600" @bind="_jobsPollingSeconds" />
+                    </label>
+                    <label>
+                        <span>Logs</span>
+                        <input type="number" min="1" max="3600" @bind="_logsPollingSeconds" />
+                    </label>
+                    <label>
+                        <span>Performance</span>
+                        <input type="number" min="1" max="3600" @bind="_performancePollingSeconds" />
+                    </label>
+                </div>
+            </section>
+
+            <div class="settings-secondary-stack">
+                <section class="panel settings-auth-panel">
+                    <div class="panel-title">Dashboard 登入設定</div>
+                    <div class="settings-section-meta">
+                        使用者名稱、密碼與 session timeout 會在重新登入後生效。密碼只保存 hash。
+                    </div>
+                    <div class="settings-form-grid">
+                        <label>
+                            <span>Admin Username</span>
+                            <input @bind="_adminUsername" />
+                        </label>
+                        <label>
+                            <span>Session Timeout (minutes)</span>
+                            <input type="number" min="30" max="1440" @bind="_sessionTimeoutMinutes" />
+                        </label>
+                        <label>
+                            <span>New Password</span>
+                            <input type="password" @bind="_newPassword" />
+                        </label>
+                        <label>
+                            <span>Confirm Password</span>
+                            <input type="password" @bind="_confirmPassword" />
+                        </label>
+                    </div>
+                </section>
+
+                <section class="panel settings-transfer-panel memory-transfer-panel">
+                    <div class="panel-title">資料匯出 / 匯入</div>
+                    <div class="settings-section-meta">
+                        低頻維運操作集中在系統設定。可選擇單獨或合併處理 `系統設定`、`記憶資料`、`使用者偏好`，不再佔用執行參數頁的大面積版面。
+                    </div>
+
+                    <div class="transfer-scope-grid">
+                        <label class="toggle-field transfer-scope-chip">
+                            <input type="checkbox" @bind="_includeSystemSettingsTransfer" />
+                            <span>系統設定</span>
+                            <div class="stack-item-meta">應用行為、snapshot cadence、Dashboard 帳號與 session timeout</div>
+                        </label>
+                        <label class="toggle-field transfer-scope-chip">
+                            <input type="checkbox" @bind="_includeMemoriesTransfer" />
+                            <span>記憶資料</span>
+                            <div class="stack-item-meta">目前 instance 可匯出的記憶資料與 externalKey 衝突預覽</div>
+                        </label>
+                        <label class="toggle-field transfer-scope-chip">
+                            <input type="checkbox" @bind="_includePreferencesTransfer" />
+                            <span>使用者偏好</span>
+                            <div class="stack-item-meta">使用者偏好以 key 為識別，可單獨攜帶或和設定一起移轉</div>
+                        </label>
+                    </div>
+
+                    <div class="memory-transfer-grid settings-transfer-grid">
+                        <section class="memory-transfer-section settings-transfer-card">
+                            <div class="subpanel-title">匯出</div>
+                            <div class="memory-transfer-copy">
+                                以單一 package 匯出所選項目。若填入密碼，整包會以 AES-256-GCM 加密。
+                            </div>
+                            <div class="memory-transfer-controls">
+                                <input type="password" @bind="_exportTransferPassphrase" placeholder="匯出密碼（可留白）" />
+                                <button class="ghost-button" @onclick="ExportTransferAsync" disabled="@(_loading || !HasAnyTransferSectionSelected)">匯出所選項目</button>
+                            </div>
+                        </section>
+
+                        <section class="memory-transfer-section settings-transfer-card">
+                            <div class="subpanel-title">匯入</div>
+                            <div class="memory-transfer-file-row">
+                                <InputFile OnChange="HandleTransferFileAsync" accept=".json" />
+                                @if (!string.IsNullOrWhiteSpace(_transferFileName))
+                                {
+                                    <div class="stack-item-meta memory-transfer-file-meta">目前檔案：@_transferFileName</div>
+                                }
+                            </div>
+                            <div class="memory-transfer-controls">
+                                <input type="password" @bind="_importTransferPassphrase" placeholder="匯入密碼（加密檔必填）" />
+                                <div class="memory-transfer-action-row">
+                                    <button class="ghost-button" @onclick="PreviewTransferImportAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_transferPackageBase64) || !HasAnyTransferSectionSelected)">預覽匯入</button>
+                                    <button class="primary-button" @onclick="ApplyTransferImportAsync" disabled="@(_loading || _transferPreview is null || !HasAnyTransferSectionSelected)">確認匯入</button>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+
+                    @if (_transferPreview is not null)
+                    {
+                        <section class="memory-transfer-preview settings-transfer-preview">
+                            <div class="subpanel-title">匯入預覽</div>
+                            <div class="memory-import-summary-grid">
+                                @foreach (var section in _transferPreview.Sections)
+                                {
+                                    <div class="host-stat">
+                                        <span>@(section.Label)</span>
+                                        <strong>@(section.TotalItems)</strong>
+                                        <div class="stack-item-meta">新增 @(section.NewItems) / 覆蓋 @(section.ConflictItems)</div>
+                                    </div>
+                                }
+                            </div>
+
+                            @if (_transferPreview.Conflicts.Count > 0)
+                            {
+                                <div class="inline-error">匯入後會覆蓋 @_transferPreview.Conflicts.Count 筆既有設定或同識別資料，請先確認下列衝突項目。</div>
+                                <div class="stack-scroll-shell">
+                                    <div class="stack-list">
+                                        @foreach (var conflict in _transferPreview.Conflicts)
+                                        {
+                                            <article class="stack-item">
+                                                <div class="stack-item-title">@SectionLabel(conflict.Section) / @conflict.Identifier</div>
+                                                <div class="stack-item-copy">既有：@conflict.ExistingTitle | 匯入：@conflict.IncomingTitle</div>
+                                                <div class="stack-item-meta">@conflict.Description</div>
+                                                @if (conflict.ExistingUpdatedAt is { } existingUpdatedAt)
+                                                {
+                                                    <div class="stack-item-meta">既有更新時間：<ClientLocalTime Value="existingUpdatedAt" /></div>
+                                                }
+                                            </article>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                        </section>
+                    }
+                </section>
+
+                <section class="panel settings-ops-panel">
+                    <div class="panel-title">維運操作</div>
+                    <div class="settings-section-meta">
+                        只會作用於目前 instance 的 app 容器，不會重啟 `postgres` 與 `redis`。
+                    </div>
+                    <div class="settings-operation-list">
+                        <div class="host-stat settings-operation-card">
+                            <span>最近 checkpoints</span>
+                            <strong>@_snapshot.AutomationStatus.RecentCheckpoints</strong>
+                        </div>
+                        <div class="host-stat settings-operation-card">
+                            <span>待提升 insights</span>
+                            <strong>@_snapshot.AutomationStatus.PendingInsights</strong>
+                        </div>
+                        <div class="host-stat settings-operation-card">
+                            <span>待 promotion jobs</span>
+                            <strong>@_snapshot.AutomationStatus.PendingPromotions</strong>
+                        </div>
+                    </div>
+
+                    <div class="settings-operation-actions">
+                        <button class="ghost-button" @onclick="ResetAsync" disabled="@_loading">還原預設</button>
+                        <button class="ghost-button" @onclick="RestartAsync" disabled="@_loading">重啟 app 容器</button>
+                    </div>
+
+                    @if (_restartResult is not null)
+                    {
+                        <div class="subpanel-title">最近重啟結果</div>
+                        <dl class="definition-grid">
+                            <div><dt>已重啟服務</dt><dd>@JoinOrDash(_restartResult.RestartedServices)</dd></div>
+                            <div><dt>略過服務</dt><dd>@JoinOrDash(_restartResult.SkippedServices)</dd></div>
+                            <div><dt>重啟時間</dt><dd><ClientLocalTime Value="_restartResult.RestartedAtUtc" /></dd></div>
+                        </dl>
+                    }
+                </section>
+            </div>
+        </div>
+    }
+
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private InstanceSettingsSnapshot? _snapshot;
+    private RestartAppContainersResult? _restartResult;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _message;
+    private long _messageSequence;
+    private string? _error;
+    private long _errorSequence;
+
+    private bool _conversationAutomationEnabled;
+    private bool _hostEventIngestionEnabled;
+    private bool _agentSupplementalIngestionEnabled;
+    private int _idleThresholdMinutes;
+    private string _promotionMode = string.Empty;
+    private int _excerptMaxLength;
+    private string _defaultProjectId = ProjectContext.DefaultProjectId;
+    private MemoryQueryMode _defaultQueryMode = MemoryQueryMode.CurrentOnly;
+    private bool _defaultUseSummaryLayer;
+    private bool _sharedSummaryAutoRefreshEnabled;
+    private int _statusCorePollingSeconds;
+    private int _embeddingRuntimePollingSeconds;
+    private int _dependenciesHealthPollingSeconds;
+    private int _dockerHostPollingSeconds;
+    private int _dependencyResourcesPollingSeconds;
+    private int _recentOperationsPollingSeconds;
+    private int _resourceChartPollingSeconds;
+    private int _overviewPollingSeconds;
+    private int _metricsPollingSeconds;
+    private int _jobsPollingSeconds;
+    private int _logsPollingSeconds;
+    private int _performancePollingSeconds;
+    private string _adminUsername = string.Empty;
+    private int _sessionTimeoutMinutes;
+    private string? _newPassword;
+    private string? _confirmPassword;
+    private bool _includeSystemSettingsTransfer = true;
+    private bool _includeMemoriesTransfer = true;
+    private bool _includePreferencesTransfer = true;
+    private string? _exportTransferPassphrase;
+    private string? _importTransferPassphrase;
+    private string? _transferPackageBase64;
+    private string? _transferFileName;
+    private InstanceTransferPreviewResult? _transferPreview;
+    private bool HasAnyTransferSectionSelected => _includeSystemSettingsTransfer || _includeMemoriesTransfer || _includePreferencesTransfer;
+
+    protected override async Task OnInitializedAsync()
+        => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        await ExecuteAsync(async () =>
+        {
+            _snapshot = await InstanceSettingsService.GetSnapshotAsync(CancellationToken.None);
+            PopulateForm(_snapshot);
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _error = null;
+        });
+    }
+
+    private async Task SaveAsync()
+    {
+        await ExecuteAsync(async () =>
+        {
+            _snapshot = await InstanceSettingsService.UpdateAsync(
+                new InstanceSettingsUpdateRequest(
+                    new InstanceBehaviorSettingsUpdateRequest(
+                        _conversationAutomationEnabled,
+                        _hostEventIngestionEnabled,
+                        _agentSupplementalIngestionEnabled,
+                        _idleThresholdMinutes,
+                        _promotionMode,
+                        _excerptMaxLength,
+                        _defaultProjectId,
+                        _defaultQueryMode,
+                        _defaultUseSummaryLayer,
+                        _sharedSummaryAutoRefreshEnabled,
+                        new DashboardSnapshotPollingSettingsUpdateRequest(
+                            _statusCorePollingSeconds,
+                            _embeddingRuntimePollingSeconds,
+                            _dependenciesHealthPollingSeconds,
+                            _dockerHostPollingSeconds,
+                            _dependencyResourcesPollingSeconds,
+                            _recentOperationsPollingSeconds,
+                            _resourceChartPollingSeconds),
+                        _overviewPollingSeconds,
+                        _metricsPollingSeconds,
+                        _jobsPollingSeconds,
+                        _logsPollingSeconds,
+                        _performancePollingSeconds),
+                    new InstanceDashboardAuthUpdateRequest(
+                        _adminUsername,
+                        NormalizeEmpty(_newPassword),
+                        NormalizeEmpty(_confirmPassword),
+                        _sessionTimeoutMinutes)),
+                "dashboard-ui",
+                CancellationToken.None);
+
+            PopulateForm(_snapshot);
+            ShowMessage("設定已儲存。輪詢設定會在新頁面生命週期套用；登入設定請重新登入後生效。");
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _error = null;
+        });
+    }
+
+    private async Task ResetAsync()
+    {
+        await ExecuteAsync(async () =>
+        {
+            _snapshot = await InstanceSettingsService.ResetAsync("dashboard-ui", CancellationToken.None);
+            PopulateForm(_snapshot);
+            ShowMessage("已還原為 env / compose 預設值。");
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _error = null;
+        });
+    }
+
+    private async Task RestartAsync()
+    {
+        await ExecuteAsync(async () =>
+        {
+            _restartResult = await DockerMetricsService.RestartAppContainersAsync(new RestartAppContainersRequest(), CancellationToken.None);
+            ShowMessage($"已送出 app 容器重啟：{JoinOrDash(_restartResult.RestartedServices)}");
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _error = null;
+        });
+    }
+
+    private async Task ExportTransferAsync()
+    {
+        await ExecuteAsync(async () =>
+        {
+            var result = await InstanceTransferService.ExportAsync(
+                new InstanceTransferExportRequest(
+                    BuildSelectedTransferSections(),
+                    NormalizeEmpty(_exportTransferPassphrase)),
+                CancellationToken.None);
+
+            await JsRuntime.InvokeVoidAsync("contextHubTransfer.downloadBase64", result.FileName, result.ContentType, result.PayloadBase64);
+            ShowMessage($"已匯出 {JoinOrDash(result.Sections.Select(section => section.Label).ToArray())}。");
+        });
+    }
+
+    private async Task HandleTransferFileAsync(InputFileChangeEventArgs args)
+    {
+        var file = args.File;
+        if (file is null)
+        {
+            return;
+        }
+
+        await using var stream = file.OpenReadStream(maxAllowedSize: 64 * 1024 * 1024);
+        using var ms = new MemoryStream();
+        await stream.CopyToAsync(ms);
+        _transferPackageBase64 = Convert.ToBase64String(ms.ToArray());
+        _transferFileName = file.Name;
+        _transferPreview = null;
+    }
+
+    private async Task PreviewTransferImportAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_transferPackageBase64))
+        {
+            return;
+        }
+
+        await ExecuteAsync(async () =>
+        {
+            _transferPreview = await InstanceTransferService.PreviewImportAsync(
+                new InstanceTransferImportRequest(
+                    _transferPackageBase64,
+                    BuildSelectedTransferSections(),
+                    NormalizeEmpty(_importTransferPassphrase)),
+                CancellationToken.None);
+
+            ShowMessage("已完成匯入預覽，請確認衝突摘要後再套用。");
+        });
+    }
+
+    private async Task ApplyTransferImportAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_transferPackageBase64) || _transferPreview is null)
+        {
+            return;
+        }
+
+        await ExecuteAsync(async () =>
+        {
+            var result = await InstanceTransferService.ApplyImportAsync(
+                new InstanceTransferImportRequest(
+                    _transferPackageBase64,
+                    BuildSelectedTransferSections(),
+                    NormalizeEmpty(_importTransferPassphrase),
+                    ForceOverwrite: _transferPreview.Conflicts.Count > 0),
+                CancellationToken.None);
+
+            _snapshot = await InstanceSettingsService.GetSnapshotAsync(CancellationToken.None);
+            PopulateForm(_snapshot);
+            _transferPreview = null;
+            ShowMessage($"匯入完成：新增或套用 {result.AppliedItems} 筆，覆蓋 {result.OverwrittenItems} 筆。");
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+    }
+
+    private async Task ExecuteAsync(Func<Task> action)
+    {
+        _loading = true;
+        _message = null;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            await action();
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex.Message);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+
+    private void ShowError(string message)
+    {
+        _error = message;
+        _errorSequence++;
+    }
+
+    private void ClearMessage()
+        => _message = null;
+
+    private void ClearError()
+        => _error = null;
+
+    private void PopulateForm(InstanceSettingsSnapshot snapshot)
+    {
+        _conversationAutomationEnabled = snapshot.Behavior.ConversationAutomationEnabled;
+        _hostEventIngestionEnabled = snapshot.Behavior.HostEventIngestionEnabled;
+        _agentSupplementalIngestionEnabled = snapshot.Behavior.AgentSupplementalIngestionEnabled;
+        _idleThresholdMinutes = snapshot.Behavior.IdleThresholdMinutes;
+        _promotionMode = snapshot.Behavior.PromotionMode;
+        _excerptMaxLength = snapshot.Behavior.ExcerptMaxLength;
+        _defaultProjectId = snapshot.Behavior.DefaultProjectId;
+        _defaultQueryMode = snapshot.Behavior.DefaultQueryMode;
+        _defaultUseSummaryLayer = snapshot.Behavior.DefaultUseSummaryLayer;
+        _sharedSummaryAutoRefreshEnabled = snapshot.Behavior.SharedSummaryAutoRefreshEnabled;
+        _statusCorePollingSeconds = snapshot.Behavior.SnapshotPolling.StatusCoreSeconds;
+        _embeddingRuntimePollingSeconds = snapshot.Behavior.SnapshotPolling.EmbeddingRuntimeSeconds;
+        _dependenciesHealthPollingSeconds = snapshot.Behavior.SnapshotPolling.DependenciesHealthSeconds;
+        _dockerHostPollingSeconds = snapshot.Behavior.SnapshotPolling.DockerHostSeconds;
+        _dependencyResourcesPollingSeconds = snapshot.Behavior.SnapshotPolling.DependencyResourcesSeconds;
+        _recentOperationsPollingSeconds = snapshot.Behavior.SnapshotPolling.RecentOperationsSeconds;
+        _resourceChartPollingSeconds = snapshot.Behavior.SnapshotPolling.ResourceChartSeconds;
+        _overviewPollingSeconds = snapshot.Behavior.OverviewPollingSeconds;
+        _metricsPollingSeconds = snapshot.Behavior.MetricsPollingSeconds;
+        _jobsPollingSeconds = snapshot.Behavior.JobsPollingSeconds;
+        _logsPollingSeconds = snapshot.Behavior.LogsPollingSeconds;
+        _performancePollingSeconds = snapshot.Behavior.PerformancePollingSeconds;
+        _adminUsername = snapshot.DashboardAuth.AdminUsername;
+        _sessionTimeoutMinutes = snapshot.DashboardAuth.SessionTimeoutMinutes;
+        _newPassword = null;
+        _confirmPassword = null;
+    }
+
+    private IReadOnlyList<InstanceTransferSection> BuildSelectedTransferSections()
+    {
+        var selected = new List<InstanceTransferSection>(3);
+        if (_includeSystemSettingsTransfer)
+        {
+            selected.Add(InstanceTransferSection.SystemSettings);
+        }
+
+        if (_includeMemoriesTransfer)
+        {
+            selected.Add(InstanceTransferSection.Memories);
+        }
+
+        if (_includePreferencesTransfer)
+        {
+            selected.Add(InstanceTransferSection.UserPreferences);
+        }
+
+        return selected;
+    }
+
+    private static string SectionLabel(InstanceTransferSection section)
+        => section switch
+        {
+            InstanceTransferSection.SystemSettings => "系統設定",
+            InstanceTransferSection.Memories => "記憶資料",
+            InstanceTransferSection.UserPreferences => "使用者偏好",
+            _ => section.ToString()
+        };
+
+    private static string JoinOrDash(IReadOnlyList<string> values)
+        => values.Count == 0 ? "-" : string.Join(", ", values);
+
+    private static string? NormalizeEmpty(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value;
+}

@@ -1,0 +1,456 @@
+@page "/memories"
+@inject IContextHubApiClient ApiClient
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+
+<PageTitle>Context Hub | 記憶資料</PageTitle>
+
+<PageViewport Title="記憶資料"
+              Subtitle="以 domain view 檢視 memory items，並展開 revisions / chunks / vectors 摘要。"
+              BodyClass="page-viewport-body memories-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading" />
+        <button class="ghost-button" @onclick="RefreshSharedSummaryAsync" disabled="@_loading">重建共用綜合層</button>
+        <button class="ghost-button" @onclick="LoadSharedSummaryAsync" disabled="@_loading">查看共用綜合層</button>
+        <button class="ghost-button" @onclick="LoadCurrentProjectAsync" disabled="@_loading">回到目前專案</button>
+        <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">查詢</button>
+    </Actions>
+    <ChildContent>
+
+    <section class="panel memories-scope-hint-panel">
+        <div class="memories-scope-hint-title">查詢範圍</div>
+        <div class="memories-scope-hint-copy">
+            `目前專案` 只查當前 `ProjectId`。`目前 + 參考專案` 會帶入上方參考專案清單。`共用綜合層` 會直接查詢唯讀的 shared summary layer。
+        </div>
+        <div class="memories-scope-hint-meta">
+            共用綜合層的正式資料層名稱是 `shared summary layer`，在畫面上就是上方查詢模式的 `共用綜合層`，也可直接按「查看共用綜合層」切換。
+        </div>
+    </section>
+
+    <section class="panel filter-panel">
+        <div class="filter-grid memories-filter-grid">
+            <input @bind="_query" placeholder="搜尋標題 / 摘要 / 來源參照" />
+            <div class="project-suggestion-field">
+                <input @bind="_projectIdInput"
+                       @bind:event="oninput"
+                       @bind:after="HandleProjectIdInputAsync"
+                       @onfocus="ShowProjectSuggestionsAsync"
+                       autocomplete="off"
+                       placeholder="目前專案 (Project Id，可模糊搜尋)" />
+                @if (_projectSuggestions.Count > 0)
+                {
+                    <div class="project-suggestion-list">
+                        @foreach (var suggestion in _projectSuggestions)
+                        {
+                            <button type="button"
+                                    class="project-suggestion-item"
+                                    @onclick="@(() => SelectProjectSuggestionAsync(suggestion.ProjectId))">
+                                <span>@suggestion.ProjectId</span>
+                                <small>@suggestion.ItemCount 筆</small>
+                            </button>
+                        }
+                    </div>
+                }
+            </div>
+            <input @bind="_includedProjectIds" placeholder="參考專案，以逗號分隔" />
+            <select @bind="_queryMode">
+                <option value="@MemoryQueryMode.CurrentOnly">目前專案</option>
+                <option value="@MemoryQueryMode.CurrentPlusReferencedProjects">目前 + 參考專案</option>
+                <option value="@MemoryQueryMode.SummaryOnly">共用綜合層</option>
+            </select>
+            <select @bind="_scope">
+                <option value="">全部範圍</option>
+                @foreach (var scope in Enum.GetValues<MemoryScope>())
+                {
+                    <option value="@scope">@DashboardText.Label(scope)</option>
+                }
+            </select>
+            <select @bind="_memoryType">
+                <option value="">全部類型</option>
+                @foreach (var type in Enum.GetValues<MemoryType>())
+                {
+                    <option value="@type">@DashboardText.Label(type)</option>
+                }
+            </select>
+            <select @bind="_status">
+                <option value="">全部狀態</option>
+                @foreach (var status in Enum.GetValues<MemoryStatus>())
+                {
+                    <option value="@status">@DashboardText.Label(status)</option>
+                }
+            </select>
+            <input @bind="_sourceType" placeholder="來源類型 (Source Type)" />
+            <input @bind="_tag" placeholder="標籤 (Tag)" />
+            <label class="toggle-field">
+                <input type="checkbox" @bind="_useSummaryLayer" />
+                <span>一併讀取綜合層</span>
+            </label>
+        </div>
+    </section>
+
+    @if (_page is null)
+    {
+        <div class="split-layout">
+        <section class="panel skeleton-panel">
+            <div class="skeleton-line skeleton-line-md"></div>
+            <div class="skeleton-stack">
+                @for (var i = 0; i < 6; i++)
+                {
+                    <div class="skeleton-line @(i % 2 == 0 ? "skeleton-line-lg" : "skeleton-line-md")"></div>
+                }
+            </div>
+        </section>
+
+        <section class="panel detail-panel skeleton-panel">
+            <div class="skeleton-line skeleton-line-md"></div>
+            <div class="skeleton-stack">
+                <div class="skeleton-line skeleton-line-lg"></div>
+                <div class="skeleton-line skeleton-line-md"></div>
+                <div class="skeleton-line skeleton-line-sm"></div>
+                <div class="skeleton-block"></div>
+            </div>
+        </section>
+        </div>
+    }
+    else
+    {
+        <div class="split-layout">
+        <section class="panel panel-scroll">
+            <div class="panel-title">記憶條目 (@_page.TotalCount)</div>
+            <div class="table-scroll-shell table-scroll-shell-tall">
+                <table class="data-table data-table-clickable memories-table">
+                    <colgroup>
+                        <col class="memories-table-col-title" />
+                        <col class="memories-table-col-project" />
+                        <col class="memories-table-col-scope" />
+                        <col class="memories-table-col-type" />
+                        <col class="memories-table-col-source" />
+                        <col class="memories-table-col-tags" />
+                        <col class="memories-table-col-status" />
+                        <col class="memories-table-col-updated" />
+                    </colgroup>
+                    <thead>
+                        <tr>
+                            <th class="memories-table-head"><span class="table-head-primary">標題</span><span class="table-head-secondary">Title</span></th>
+                            <th class="memories-table-head"><span class="table-head-primary">專案</span><span class="table-head-secondary">Project</span></th>
+                            <th class="memories-table-head"><span class="table-head-primary">範圍</span><span class="table-head-secondary">Scope</span></th>
+                            <th class="memories-table-head"><span class="table-head-primary">類型</span><span class="table-head-secondary">Type</span></th>
+                            <th class="memories-table-head"><span class="table-head-primary">來源</span><span class="table-head-secondary">Source</span></th>
+                            <th class="memories-table-head"><span class="table-head-primary">標籤</span><span class="table-head-secondary">Tags</span></th>
+                            <th class="memories-table-head"><span class="table-head-primary">狀態</span><span class="table-head-secondary">Status</span></th>
+                            <th class="memories-table-head"><span class="table-head-primary">更新時間</span><span class="table-head-secondary">Updated</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in _page.Items)
+                        {
+                            <tr class="@SelectedClass(item.Id)" @onclick="@(() => SelectAsync(item.Id))">
+                                <td>
+                                    <div class="table-title memories-cell-title" title="@item.Title">@item.Title</div>
+                                    <div class="table-subtitle memories-cell-summary" title="@item.Summary">@item.Summary</div>
+                                </td>
+                                <td>
+                                    <div class="table-title memories-cell-project" title="@item.ProjectId">@item.ProjectId</div>
+                                    @if (item.IsReadOnly)
+                                    {
+                                        <div class="table-subtitle">summary / readonly</div>
+                                    }
+                                </td>
+                                <td><span class="memories-cell-badge" title="@DashboardText.Label(item.Scope)">@DashboardText.Label(item.Scope)</span></td>
+                                <td><span class="memories-cell-badge" title="@DashboardText.Label(item.MemoryType)">@DashboardText.Label(item.MemoryType)</span></td>
+                                <td>
+                                    <div class="memories-cell-clamp" title="@($"{item.SourceType} / {item.SourceRef}")">@item.SourceType / @item.SourceRef</div>
+                                </td>
+                                <td>
+                                    <div class="memories-cell-clamp" title="@string.Join(", ", item.Tags)">@string.Join(", ", item.Tags)</div>
+                                </td>
+                                <td><span class="status-badge @StatusClass(item.Status.ToString())">@DashboardText.Label(item.Status)</span></td>
+                                <td><span class="memories-cell-time"><ClientLocalTime Value="item.UpdatedAt" /></span></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel detail-panel panel-scroll">
+            <div class="panel-title">細節</div>
+            <div class="panel-scroll-body detail-scroll-shell memory-detail-shell">
+                @if (_selected is null)
+                {
+                    <div class="empty-inline">點選左側 memory item 後顯示 revisions、chunks 與 vectors。</div>
+                }
+                else
+                {
+                    <div class="memory-detail-body">
+                        <dl class="definition-grid memory-detail-definition-grid">
+                            <div><dt>外部鍵值 (External Key)</dt><dd>@_selected.Document.ExternalKey</dd></div>
+                            <div><dt>專案 (Project)</dt><dd>@_selected.Document.ProjectId</dd></div>
+                            <div><dt>來源 (Source)</dt><dd>@_selected.Document.SourceType / @_selected.Document.SourceRef</dd></div>
+                            <div><dt>重要性 (Importance)</dt><dd>@_selected.Document.Importance</dd></div>
+                            <div><dt>可信度 (Confidence)</dt><dd>@_selected.Document.Confidence</dd></div>
+                            <div><dt>版本 (Version)</dt><dd>@_selected.Document.Version</dd></div>
+                            <div><dt>狀態 (Status)</dt><dd>@DashboardText.Label(_selected.Document.Status)</dd></div>
+                            <div><dt>建立時間 (Created)</dt><dd><ClientLocalTime Value="_selected.Document.CreatedAt" /></dd></div>
+                            <div><dt>更新時間 (Updated)</dt><dd><ClientLocalTime Value="_selected.Document.UpdatedAt" /></dd></div>
+                        </dl>
+
+                        <div class="code-block memory-detail-content-block">@_selected.Document.Content</div>
+
+                        <section class="memory-detail-section">
+                            <div class="subpanel-title">Revisions</div>
+                            <div class="stack-scroll-shell">
+                                <div class="stack-list">
+                                    @foreach (var revision in _selected.Revisions.Take(5))
+                                    {
+                                        <article class="stack-item">
+                                            <div class="stack-item-title">v@revision.Version / @ChangedByText(revision.ChangedBy)</div>
+                                            <div class="stack-item-copy">@revision.Title - @revision.Summary</div>
+                                            <div class="stack-item-meta"><ClientLocalTime Value="revision.CreatedAt" /></div>
+                                        </article>
+                                    }
+                                </div>
+                            </div>
+                        </section>
+
+                        <section class="memory-detail-section">
+                            <div class="subpanel-title">Chunks</div>
+                            <div class="stack-scroll-shell">
+                                <div class="stack-list">
+                                    @foreach (var chunk in _selected.Chunks)
+                                    {
+                                        <article class="stack-item">
+                                            <div class="stack-item-title">@DashboardText.Label(chunk.ChunkKind) / #@chunk.ChunkIndex</div>
+                                            <div class="stack-item-copy">@chunk.ChunkText</div>
+                                            <div class="stack-item-meta">@chunk.Vectors.Count 筆向量</div>
+                                        </article>
+                                    }
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+                }
+            </div>
+        </section>
+        </div>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(_message))
+    {
+        <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
+    }
+
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private string? _query;
+    private string? _projectIdInput;
+    private string? _selectedProjectId;
+    private string? _currentProjectId;
+    private string? _includedProjectIds;
+    private MemoryQueryMode _queryMode = MemoryQueryMode.CurrentOnly;
+    private bool _useSummaryLayer;
+    private string? _scope;
+    private string? _memoryType;
+    private string? _status;
+    private string? _sourceType;
+    private string? _tag;
+    private PagedResult<MemoryListItemResult>? _page;
+    private MemoryDetailsResult? _selected;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _message;
+    private long _messageSequence;
+    private IReadOnlyList<ProjectSuggestionResult> _projectSuggestions = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        var snapshot = await RuntimeSettingsAccessor.GetCurrentAsync(CancellationToken.None);
+        _currentProjectId = DashboardProjectSelection.ResolveCurrentProjectId(snapshot.Behavior.DefaultProjectId);
+        _queryMode = snapshot.Behavior.DefaultQueryMode;
+        _useSummaryLayer = snapshot.Behavior.DefaultUseSummaryLayer;
+        await LoadProjectSuggestionsAsync(null);
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            _page = await ApiClient.GetMemoriesAsync(
+                new MemoryListRequest(
+                    _query,
+                    Parse<MemoryScope>(_scope),
+                    Parse<MemoryType>(_memoryType),
+                    Parse<MemoryStatus>(_status),
+                    string.IsNullOrWhiteSpace(_sourceType) ? null : _sourceType,
+                    string.IsNullOrWhiteSpace(_tag) ? null : _tag,
+                    ResolveSelectedProjectId(),
+                    ResolveProjectQuery(),
+                    ParseProjectIds(_includedProjectIds),
+                    _queryMode,
+                    _useSummaryLayer,
+                    1,
+                    25),
+                CancellationToken.None);
+
+            if (_selected is not null)
+            {
+                _selected = await ApiClient.GetMemoryDetailsAsync(_selected.Document.Id, CancellationToken.None);
+            }
+
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SelectAsync(Guid id)
+        => _selected = await ApiClient.GetMemoryDetailsAsync(id, CancellationToken.None);
+
+    private async Task LoadSharedSummaryAsync()
+    {
+        _queryMode = MemoryQueryMode.SummaryOnly;
+        _useSummaryLayer = false;
+        _includedProjectIds = null;
+        await LoadAsync();
+    }
+
+    private async Task LoadCurrentProjectAsync()
+    {
+        _selectedProjectId = _currentProjectId;
+        _projectIdInput = _currentProjectId;
+        await LoadProjectSuggestionsAsync(_projectIdInput);
+        _queryMode = MemoryQueryMode.CurrentOnly;
+        _useSummaryLayer = false;
+        await LoadAsync();
+    }
+
+    private async Task RefreshSharedSummaryAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var projectId = ResolveSelectedProjectId();
+            if (projectId is null)
+            {
+                ShowMessage("請先指定 ProjectId，再重建共用綜合層。");
+                return;
+            }
+
+            var result = await ApiClient.EnqueueSummaryRefreshAsync(
+                new EnqueueSummaryRefreshRequest(
+                    projectId,
+                    ParseProjectIds(_includedProjectIds)),
+                CancellationToken.None);
+
+            ShowMessage($"已排入共用綜合層重建工作：{result.JobId}");
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+
+    private void ClearMessage()
+        => _message = null;
+
+    private async Task HandleProjectIdInputAsync()
+    {
+        if (!string.Equals(NormalizeEmpty(_projectIdInput), _selectedProjectId, StringComparison.OrdinalIgnoreCase))
+        {
+            _selectedProjectId = null;
+        }
+
+        await LoadProjectSuggestionsAsync(_projectIdInput);
+    }
+
+    private async Task ShowProjectSuggestionsAsync(FocusEventArgs _)
+        => await LoadProjectSuggestionsAsync(_projectIdInput);
+
+    private async Task SelectProjectSuggestionAsync(string projectId)
+    {
+        _selectedProjectId = projectId;
+        _projectIdInput = projectId;
+        _projectSuggestions = [];
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task LoadProjectSuggestionsAsync(string? query)
+    {
+        _projectSuggestions = await ApiClient.GetMemoryProjectsAsync(query, 8, CancellationToken.None);
+    }
+
+    private static TEnum? Parse<TEnum>(string? value)
+        where TEnum : struct, Enum
+        => Enum.TryParse<TEnum>(value, true, out var parsed) ? parsed : null;
+
+    private string SelectedClass(Guid id)
+        => _selected?.Document.Id == id ? "selected-row" : string.Empty;
+
+    private static string StatusClass(string status)
+        => status.ToLowerInvariant() switch
+        {
+            "active" or "ready" or "running" => "ok",
+            "archived" or "pending" => "warn",
+            _ => "neutral"
+        };
+
+    private static string ChangedByText(string changedBy)
+        => changedBy.ToLowerInvariant() switch
+        {
+            "upsert" => "寫入更新",
+            "update" => "內容更新",
+            "archive" => "封存",
+            "restore" => "還原",
+            _ => changedBy
+        };
+
+    private static string? NormalizeEmpty(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value;
+
+    private string? ResolveSelectedProjectId()
+    {
+        var input = NormalizeEmpty(_projectIdInput);
+        if (input is null)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_selectedProjectId) &&
+            string.Equals(_selectedProjectId, input, StringComparison.OrdinalIgnoreCase))
+        {
+            return _selectedProjectId;
+        }
+
+        var exactMatch = _projectSuggestions.FirstOrDefault(x => string.Equals(x.ProjectId, input, StringComparison.OrdinalIgnoreCase));
+        return exactMatch?.ProjectId;
+    }
+
+    private string? ResolveProjectQuery()
+    {
+        var input = NormalizeEmpty(_projectIdInput);
+        var selected = ResolveSelectedProjectId();
+        return selected is null ? input : null;
+    }
+
+    private static IReadOnlyList<string>? ParseProjectIds(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? null
+            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+}

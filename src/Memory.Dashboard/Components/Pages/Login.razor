@@ -1,0 +1,82 @@
+@page "/login"
+@layout LoginLayout
+@attribute [AllowAnonymous]
+
+<PageTitle>Context Hub | 登入</PageTitle>
+
+<div class="login-scene">
+    <section class="login-brand-panel panel" aria-label="Context Hub 品牌說明">
+        <div class="login-brand-lockup">
+            <img class="login-brand-icon" src="/favicon.svg" alt="" />
+            <div class="login-brand-copy">
+                <div class="login-kicker">ContextHub Dashboard</div>
+                <div class="login-title">Context Hub</div>
+                <p class="login-subtitle">集中管理 memory、runtime logs、jobs 與系統執行參數的內部控制台。</p>
+            </div>
+        </div>
+
+        <div class="login-chip-row" aria-hidden="true">
+            <span class="login-chip">Memory</span>
+            <span class="login-chip">Logs</span>
+            <span class="login-chip">Jobs</span>
+            <span class="login-chip">Runtime</span>
+        </div>
+
+        <div class="login-highlight-grid">
+            <article class="login-highlight">
+                <div class="login-highlight-label">工作流</div>
+                <div class="login-highlight-value">單一 Dashboard</div>
+                <div class="login-highlight-copy">用同一個入口檢視 runtime 狀態、資料探索與背景工作。</div>
+            </article>
+
+            <article class="login-highlight">
+                <div class="login-highlight-label">使用場景</div>
+                <div class="login-highlight-value">本機 / 可信內網</div>
+                <div class="login-highlight-copy">定位為管理介面，不是對外公開的多租戶 portal。</div>
+            </article>
+        </div>
+    </section>
+
+    <section class="login-card" aria-label="登入表單">
+        <div class="login-card-header">
+            <div class="login-card-eyebrow">Secure Console</div>
+            <h1 class="login-card-title">登入 Dashboard</h1>
+            <p class="login-card-copy">輸入管理帳號後進入系統總覽、資料探索與維運頁面。</p>
+        </div>
+
+        @if (string.Equals(Error, "invalid", StringComparison.OrdinalIgnoreCase))
+        {
+            <div class="login-error">帳號或密碼不正確。</div>
+        }
+
+        <form method="post" action="/account/login" class="login-form">
+            <AntiforgeryToken />
+            <input type="hidden" name="ReturnUrl" value="@ReturnUrl" />
+
+            <label class="login-field">
+                <span>帳號</span>
+                <input name="Username" autocomplete="username" placeholder="admin" />
+            </label>
+
+            <label class="login-field">
+                <span>密碼</span>
+                <input name="Password" type="password" autocomplete="current-password" placeholder="輸入管理密碼" />
+            </label>
+
+            <button class="primary-button login-button" type="submit">登入</button>
+        </form>
+
+        <div class="login-footer">
+            <div>Context Hub Dashboard</div>
+            <div class="login-footer-muted">本機 / 內網管理介面</div>
+        </div>
+    </section>
+</div>
+
+@code {
+    [SupplyParameterFromQuery]
+    public string? Error { get; set; }
+
+    [SupplyParameterFromQuery]
+    public string? ReturnUrl { get; set; }
+}

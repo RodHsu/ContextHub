@@ -1,0 +1,51 @@
+@using Memory.Application
+
+<div class="refresh-status-group">
+    @if (!string.IsNullOrWhiteSpace(WarningText))
+    {
+        <div class="inline-error dashboard-snapshot-warning dashboard-snapshot-warning-inline">
+            @WarningText
+        </div>
+    }
+
+    <div class="refresh-status-shell">
+        <div class="refresh-status-primary">
+            <div class="refresh-status-primary-copy">
+                <span class="refresh-status-caption">@Label</span>
+                <div class="refresh-status-time">
+                    @if (LastUpdatedAt.HasValue)
+                    {
+                        <ClientLocalTime Value="LastUpdatedAt.Value" />
+                    }
+                    else
+                    {
+                        <span>尚未同步</span>
+                    }
+                </div>
+            </div>
+
+            <span class="refresh-status-live @(IsRefreshing ? "is-active" : null)"
+                  aria-hidden="@(!IsRefreshing ? "true" : "false")">
+                <span class="refresh-status-live-dot"></span>
+                <span>同步中</span>
+            </span>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public string Label { get; set; } = "最後更新";
+
+    [Parameter]
+    public DateTimeOffset? LastUpdatedAt { get; set; }
+
+    [Parameter]
+    public bool IsRefreshing { get; set; }
+
+    [Parameter]
+    public int PollingIntervalSeconds { get; set; }
+
+    [Parameter]
+    public string? WarningText { get; set; }
+}

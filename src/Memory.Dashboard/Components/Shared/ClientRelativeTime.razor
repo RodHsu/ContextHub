@@ -1,0 +1,8 @@
+@using Memory.Dashboard.Services
+
+<span class="client-relative-time">@DashboardFormatting.Relative(Value)</span>
+
+@code {
+    [Parameter, EditorRequired]
+    public DateTimeOffset Value { get; set; }
+}

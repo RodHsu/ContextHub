@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-Memory.Worker-5a5de23a-32f6-481f-ba95-78f3efef5c13</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Memory.Application\Memory.Application.csproj" />
+    <ProjectReference Include="..\Memory.Infrastructure\Memory.Infrastructure.csproj" />
+    <ProjectReference Include="..\Memory.Domain\Memory.Domain.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,49 @@
+@inject IJSRuntime JsRuntime
+
+<div class="theme-switcher" role="group" aria-label="切換主題">
+    @foreach (var option in ThemeOptions)
+    {
+        <button type="button"
+                class="theme-switcher-option @(string.Equals(_preference, option.Value, StringComparison.OrdinalIgnoreCase) ? "active" : null)"
+                @onclick="() => SetThemeAsync(option.Value)">
+            @option.Label
+        </button>
+    }
+</div>
+
+@code {
+    private static readonly IReadOnlyList<ThemeOption> ThemeOptions =
+    [
+        new("system", "系統"),
+        new("dark", "深色"),
+        new("light", "淺色")
+    ];
+
+    private string _preference = "dark";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        try
+        {
+            _preference = await JsRuntime.InvokeAsync<string>("contextHubTheme.initialize");
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (JSException)
+        {
+            _preference = "dark";
+        }
+    }
+
+    private async Task SetThemeAsync(string preference)
+    {
+        _preference = preference;
+        await JsRuntime.InvokeVoidAsync("contextHubTheme.setPreference", preference);
+    }
+
+    private sealed record ThemeOption(string Value, string Label);
+}

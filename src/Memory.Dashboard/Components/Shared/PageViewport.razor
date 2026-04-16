@@ -1,0 +1,29 @@
+<div class="page-viewport">
+    <PageHeader Title="@Title" Subtitle="@Subtitle" Breadcrumb="@Breadcrumb">
+        <Actions>@Actions</Actions>
+    </PageHeader>
+
+    <div class="@BodyClass">
+        @ChildContent
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public string Breadcrumb { get; set; } = "ContextHub / 主控台";
+
+    [Parameter]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter]
+    public string? Subtitle { get; set; }
+
+    [Parameter]
+    public string BodyClass { get; set; } = "page-viewport-body";
+
+    [Parameter]
+    public RenderFragment? Actions { get; set; }
+
+    [Parameter]
+    public RenderFragment? ChildContent { get; set; }
+}

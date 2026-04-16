@@ -1,0 +1,56 @@
+<script type="module" src="@Assets["Components/Layout/ReconnectModal.razor.js"]"></script>
+
+<dialog id="components-reconnect-modal" data-nosnippet aria-live="assertive">
+    <div class="components-reconnect-shell">
+        <div class="components-reconnect-hero">
+            <div class="components-rejoining-animation" aria-hidden="true">
+                <div></div>
+                <div></div>
+            </div>
+            <div class="components-reconnect-heading-block">
+                <div class="components-reconnect-state-strip">
+                    <span class="components-reconnect-state-badge components-reconnect-first-attempt-visible components-reconnect-repeated-attempt-visible">
+                        重新連線中
+                    </span>
+                    <span class="components-reconnect-state-badge components-reconnect-state-badge-warn components-pause-visible">
+                        Session 已暫停
+                    </span>
+                    <span class="components-reconnect-state-badge components-reconnect-state-badge-bad components-reconnect-failed-visible components-resume-failed-visible">
+                        需要手動介入
+                    </span>
+                </div>
+                <h2 class="components-reconnect-title">Dashboard 連線中斷</h2>
+                <p class="components-reconnect-caption">
+                    正在嘗試恢復與伺服器的即時連線。畫面資料暫時停止更新，但目前內容仍保留在本機畫面上。
+                </p>
+            </div>
+        </div>
+
+        <div class="components-reconnect-body">
+            <p class="components-reconnect-first-attempt-visible">
+                正在重新連線到 dashboard...
+            </p>
+            <p class="components-reconnect-repeated-attempt-visible">
+                連線失敗，將於 <span id="components-seconds-to-next-attempt"></span> 秒後重試。
+            </p>
+            <p class="components-reconnect-failed-visible">
+                無法重新連線。請重試或重新整理頁面。
+            </p>
+            <p class="components-pause-visible">
+                目前 session 已被伺服器暫停。
+            </p>
+            <p class="components-resume-failed-visible">
+                無法恢復 session。請重試或重新整理頁面。
+            </p>
+        </div>
+
+        <div class="components-reconnect-actions">
+            <button id="components-reconnect-button" class="components-reconnect-failed-visible">
+                重試
+            </button>
+            <button id="components-resume-button" class="components-pause-visible components-resume-failed-visible">
+                恢復
+            </button>
+        </div>
+    </div>
+</dialog>

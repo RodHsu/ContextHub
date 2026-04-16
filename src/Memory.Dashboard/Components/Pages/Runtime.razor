@@ -1,0 +1,248 @@
+@page "/runtime"
+@implements IAsyncDisposable
+@inject IContextHubApiClient ApiClient
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+
+<PageTitle>Context Hub | 執行參數</PageTitle>
+
+<PageViewport Title="執行參數"
+              Subtitle="顯示目前 ContextHub 的設定檔 (profile)、模型與受控執行環境 (runtime) 公開參數。"
+              BodyClass="page-viewport-body runtime-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading"
+                       PollingIntervalSeconds="@PollingIntervalSeconds"
+                       WarningText="@SnapshotWarningText()" />
+        <button class="primary-button" @onclick="RefreshAsync" disabled="@_loading">刷新</button>
+    </Actions>
+    <ChildContent>
+
+    @if (!string.IsNullOrWhiteSpace(_loadError))
+    {
+        <div class="inline-error">@_loadError</div>
+    }
+    @if (_runtime is null)
+    {
+        <div class="dashboard-grid page-scroll-host">
+            @for (var i = 0; i < 2; i++)
+            {
+                <section class="panel skeleton-panel">
+                    <div class="skeleton-line skeleton-line-md"></div>
+                    <div class="skeleton-stack">
+                        <div class="skeleton-line skeleton-line-lg"></div>
+                        <div class="skeleton-line skeleton-line-md"></div>
+                        <div class="skeleton-line skeleton-line-sm"></div>
+                        <div class="skeleton-line skeleton-line-xs"></div>
+                    </div>
+                </section>
+            }
+        </div>
+    }
+    else
+    {
+        <div class="runtime-page-stack">
+            <section class="panel runtime-main-panel">
+                <div class="panel-title">向量執行環境 (Embedding Runtime)</div>
+                <dl class="definition-grid">
+                    <div><dt>建置版本 (Build Version)</dt><dd>@_runtime.BuildVersion</dd></div>
+                    <div><dt>建置時間 (Build Time)</dt><dd><ClientLocalTime Value="_runtime.BuildTimestampUtc" /></dd></div>
+                    <div><dt>提供者 (Provider)</dt><dd>@_runtime.EmbeddingProvider</dd></div>
+                    <div><dt>執行提供者 (Execution Provider)</dt><dd>@_runtime.ExecutionProvider</dd></div>
+                    <div><dt>設定檔 (Profile)</dt><dd>@_runtime.EmbeddingProfile</dd></div>
+                    <div><dt>模型鍵值 (Model Key)</dt><dd>@_runtime.ModelKey</dd></div>
+                    <div><dt>維度 (Dimensions)</dt><dd>@_runtime.Dimensions</dd></div>
+                    <div><dt>最大 Token 數 (Max Tokens)</dt><dd>@_runtime.MaxTokens</dd></div>
+                    <div><dt>推論執行緒 (Inference Threads)</dt><dd>@_runtime.InferenceThreads</dd></div>
+                    <div><dt>批次大小 (Batch Size)</dt><dd>@_runtime.BatchSize</dd></div>
+                    <div><dt>啟用批次 (Batching Enabled)</dt><dd>@(_runtime.BatchingEnabled ? "是" : "否")</dd></div>
+                    <div><dt>命名空間 (Namespace)</dt><dd>@_runtime.Namespace</dd></div>
+                </dl>
+            </section>
+
+        <section class="panel runtime-parameters-panel">
+            <div class="panel-title">公開參數 (Public Parameters)</div>
+            <div class="table-scroll-shell">
+                <table class="data-table runtime-parameters-table">
+                    <thead>
+                        <tr>
+                            <th>區段 (Section)</th>
+                            <th>鍵值 (Key)</th>
+                            <th>值 (Value)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var parameter in _runtime.Parameters)
+                        {
+                            <tr>
+                                <td>@TranslateSection(parameter.Section)</td>
+                                <td>@TranslateKey(parameter.Key)</td>
+                                <td class="runtime-parameter-value">@(parameter.IsSecret ? "********" : parameter.Value)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+    }
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private readonly CancellationTokenSource _cts = new();
+    private Task? _pollingTask;
+    private DashboardRuntimeResult? _runtime;
+    private string? _loadError;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.EmbeddingRuntimeSeconds ?? 30;
+    private InstanceSettingsSnapshot? _settingsSnapshot;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settingsSnapshot = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
+        await RefreshAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _pollingTask = PollAsync(PollingIntervalSeconds);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAsync()
+    {
+        _runtime = await ApiClient.GetRuntimeAsync(_cts.Token);
+        _loadError = null;
+    }
+
+    private async Task RefreshAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            await LoadAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("執行參數", ex, _runtime is not null);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private Task PollAsync(int intervalSeconds)
+    {
+        if (intervalSeconds <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(_cts.Token))
+                {
+                    try
+                    {
+                        await RefreshAsync();
+                    }
+                    catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+                    {
+                    }
+                    catch (Exception ex)
+                    {
+                        _loadError = DashboardUiErrorFormatter.BuildLoadError("執行參數", ex, _runtime is not null);
+                    }
+
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
+    }
+
+    private static string TranslateSection(string section)
+        => section switch
+        {
+            "General" => "一般 (General)",
+            "Embeddings" => "向量設定 (Embeddings)",
+            _ => $"{section} ({section})"
+        };
+
+    private static string TranslateKey(string key)
+        => key switch
+        {
+            "Memory Namespace" => "記憶命名空間 (Memory Namespace)",
+            "Provider" => "提供者 (Provider)",
+            "Execution Provider" => "執行提供者 (Execution Provider)",
+            "Profile" => "設定檔 (Profile)",
+            "Model Key" => "模型鍵值 (Model Key)",
+            "Dimensions" => "維度 (Dimensions)",
+            "Max Tokens" => "最大 Token 數 (Max Tokens)",
+            "Inference Threads" => "推論執行緒 (Inference Threads)",
+            "Batch Size" => "批次大小 (Batch Size)",
+            "Batching Enabled" => "啟用批次 (Batching Enabled)",
+            _ => $"{key} ({key})"
+        };
+
+    private DashboardPageSnapshotStatusResult? PageSnapshotStatus()
+        => _runtime?.SnapshotStatus;
+
+    private string? SnapshotWarningText()
+    {
+        var snapshotStatus = PageSnapshotStatus();
+        if (snapshotStatus is null || (!snapshotStatus.IsStale && string.IsNullOrWhiteSpace(snapshotStatus.Warning)))
+        {
+            return null;
+        }
+
+        return string.IsNullOrWhiteSpace(snapshotStatus.Warning)
+            ? "Dashboard snapshot 已過期，畫面顯示的是最後一份可用資料。"
+            : snapshotStatus.Warning;
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        if (_pollingTask is not null)
+        {
+            _ = CompleteDisposeAsync(_pollingTask, _cts);
+            return ValueTask.CompletedTask;
+        }
+
+        _cts.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static async Task CompleteDisposeAsync(Task pollingTask, CancellationTokenSource cts)
+    {
+        try
+        {
+            await pollingTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+
+}

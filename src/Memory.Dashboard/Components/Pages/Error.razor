@@ -1,0 +1,25 @@
+@page "/Error"
+@using System.Diagnostics
+
+<PageTitle>Context Hub | 錯誤</PageTitle>
+
+<div class="empty-state">
+    <div class="empty-title">主控台發生錯誤</div>
+    <div class="empty-copy">這個請求未能完成，請重新整理或檢查 `mcp-server` / Docker stack 狀態。</div>
+
+    @if (ShowRequestId)
+    {
+        <div class="code-block">Request ID: @RequestId</div>
+    }
+</div>
+
+@code{
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private string? RequestId { get; set; }
+    private bool ShowRequestId => !string.IsNullOrEmpty(RequestId);
+
+    protected override void OnInitialized() =>
+        RequestId = Activity.Current?.Id ?? HttpContext?.TraceIdentifier;
+}

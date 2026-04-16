@@ -1,0 +1,249 @@
+@page "/preferences"
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>Context Hub | 使用者偏好</PageTitle>
+
+<PageViewport Title="使用者偏好"
+              Subtitle="顯式維護會跨 session / 跨專案沿用的使用者規則，不做自動偷存。"
+              BodyClass="page-viewport-body split-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                       IsRefreshing="_loading" />
+        <button class="ghost-button" @onclick="StartNewPreference" disabled="@_loading">建立新偏好</button>
+        <button class="primary-button" @onclick="SaveAsync" disabled="@_loading">儲存偏好</button>
+    </Actions>
+    <ChildContent>
+
+    <div class="split-layout">
+    <section class="panel panel-scroll">
+        <div class="panel-title">偏好編輯</div>
+        <div class="panel-scroll-body detail-scroll-shell">
+            <div class="stack-item-meta preference-editor-meta">
+                @if (_selectedPreferenceId.HasValue)
+                {
+                    <span>目前編輯：@_key</span>
+                }
+                else
+                {
+                    <span>建立新的使用者偏好項目。</span>
+                }
+            </div>
+            <div class="form-grid">
+                <label>
+                    <span>鍵值 (Key)</span>
+                    <input @bind="_key" placeholder="preferred-language" />
+                </label>
+                <label>
+                    <span>類別 (Kind)</span>
+                    <select @bind="_kind">
+                        @foreach (var kind in Enum.GetValues<UserPreferenceKind>())
+                        {
+                            <option value="@kind">@DashboardText.Label(kind)</option>
+                        }
+                    </select>
+                </label>
+                <label class="span-2">
+                    <span>標題 (Title)</span>
+                    <input @bind="_title" placeholder="偏好繁體中文" />
+                </label>
+                <label class="span-2">
+                    <span>內容 (Content)</span>
+                    <textarea @bind="_content"></textarea>
+                </label>
+                <label class="span-2">
+                    <span>原因說明 (Rationale)</span>
+                    <textarea @bind="_rationale"></textarea>
+                </label>
+                <label class="span-2">
+                    <span>標籤 (Tags)</span>
+                    <input @bind="_tags" placeholder="language, style" />
+                </label>
+            </div>
+        </div>
+    </section>
+
+    <section class="panel detail-panel preferences-list-panel">
+        <div class="panel-title">已儲存偏好</div>
+        <div class="badge-strip">
+            @foreach (var kind in Enum.GetValues<UserPreferenceKind>())
+            {
+                <button class="ghost-button" @onclick="@(() => FilterAsync(kind))">@DashboardText.Label(kind) (@CountByKind(kind))</button>
+            }
+            <button class="ghost-button" @onclick="@(() => FilterAsync(null))">全部 (@_allPreferences.Count)</button>
+        </div>
+
+        <div class="stack-scroll-shell">
+            <div class="stack-list">
+                @foreach (var item in _preferences)
+                {
+                    var selected = item.Id == _selectedPreferenceId;
+                    <article class="stack-item stack-item-selectable @(selected ? "stack-item-selected" : string.Empty)"
+                             @onclick="@(() => SelectPreference(item))">
+                        <div class="stack-item-split">
+                            <div class="stack-item-content">
+                                <div class="stack-item-title">@DashboardText.Label(item.Kind) / @item.Title</div>
+                                <div class="stack-item-copy">@item.Content</div>
+                                <div class="stack-item-meta">@string.Join(", ", item.Tags.Select(DashboardText.PreferenceTag))</div>
+                            </div>
+                            <div class="stack-item-actions stack-item-actions-inline">
+                                <button class="ghost-button" @onclick="@(() => SelectPreference(item))" @onclick:stopPropagation="true">編輯</button>
+                                <button class="ghost-button" @onclick="@(() => ToggleArchiveAsync(item))" @onclick:stopPropagation="true">
+                                @(item.Status == MemoryStatus.Active ? "封存" : "還原")
+                                </button>
+                            </div>
+                        </div>
+                    </article>
+                }
+            </div>
+        </div>
+    </section>
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(_message))
+    {
+        <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
+    }
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private string _key = string.Empty;
+    private UserPreferenceKind _kind = UserPreferenceKind.CommunicationStyle;
+    private string _title = string.Empty;
+    private string _content = string.Empty;
+    private string _rationale = string.Empty;
+    private string _tags = string.Empty;
+    private string? _message;
+    private long _messageSequence;
+    private UserPreferenceKind? _filterKind;
+    private Guid? _selectedPreferenceId;
+    private IReadOnlyList<UserPreferenceResult> _allPreferences = [];
+    private IReadOnlyList<UserPreferenceResult> _preferences = [];
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+
+    protected override async Task OnInitializedAsync()
+        => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            _allPreferences = await ApiClient.GetPreferencesAsync(null, includeArchived: true, limit: 50, CancellationToken.None);
+            _preferences = _filterKind.HasValue
+                ? _allPreferences.Where(x => x.Kind == _filterKind.Value).ToArray()
+                : _allPreferences;
+            SyncEditorFromStoredPreferences();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        var saved = await ApiClient.UpsertPreferenceAsync(
+            new UserPreferenceUpsertRequest(
+                _key,
+                _kind,
+                _title,
+                _content,
+                _rationale,
+                ParseTags(_tags)),
+            CancellationToken.None);
+
+        _selectedPreferenceId = saved.Id;
+        PopulateEditor(saved);
+        ShowMessage("偏好已儲存。");
+        await LoadAsync();
+    }
+
+    private async Task ToggleArchiveAsync(UserPreferenceResult item)
+    {
+        await ApiClient.ArchivePreferenceAsync(item.Id, item.Status == MemoryStatus.Active, CancellationToken.None);
+        await LoadAsync();
+    }
+
+    private async Task FilterAsync(UserPreferenceKind? kind)
+    {
+        _filterKind = kind;
+        await LoadAsync();
+    }
+
+    private void SelectPreference(UserPreferenceResult item)
+    {
+        PopulateEditor(item);
+        ShowMessage($"已載入偏好：{item.Key}");
+    }
+
+    private void StartNewPreference()
+        => StartNewPreference(setMessage: true);
+
+    private void StartNewPreference(bool setMessage)
+    {
+        _selectedPreferenceId = null;
+        _key = string.Empty;
+        _kind = UserPreferenceKind.CommunicationStyle;
+        _title = string.Empty;
+        _content = string.Empty;
+        _rationale = string.Empty;
+        _tags = string.Empty;
+        if (setMessage)
+        {
+            ShowMessage("已切換為建立新偏好。");
+        }
+        else
+        {
+            _message = null;
+        }
+    }
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+
+    private void ClearMessage()
+        => _message = null;
+
+    private void SyncEditorFromStoredPreferences()
+    {
+        if (_preferences.Count == 0)
+        {
+            StartNewPreference(setMessage: false);
+            return;
+        }
+
+        var selected = _selectedPreferenceId.HasValue
+            ? _preferences.FirstOrDefault(x => x.Id == _selectedPreferenceId.Value)
+            : null;
+
+        selected ??= _preferences.FirstOrDefault(x => string.Equals(x.Key, _key, StringComparison.OrdinalIgnoreCase));
+        selected ??= _preferences.FirstOrDefault(x => x.Status == MemoryStatus.Active);
+        selected ??= _preferences[0];
+
+        PopulateEditor(selected);
+    }
+
+    private void PopulateEditor(UserPreferenceResult item)
+    {
+        _selectedPreferenceId = item.Id;
+        _key = item.Key;
+        _kind = item.Kind;
+        _title = item.Title;
+        _content = item.Content;
+        _rationale = item.Rationale;
+        _tags = string.Join(", ", item.Tags.Where(x => !string.Equals(x, "user-preference", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static IReadOnlyList<string> ParseTags(string value)
+        => value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private int CountByKind(UserPreferenceKind kind)
+        => _allPreferences.Count(x => x.Kind == kind);
+}

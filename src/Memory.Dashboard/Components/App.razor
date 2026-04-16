@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <script>
+        (() => {
+            try {
+                const storageKey = "contextHub.dashboard.theme";
+                const preference = window.localStorage.getItem(storageKey) || "dark";
+                const resolved = preference === "system"
+                    ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+                    : preference;
+                document.documentElement.dataset.themePreference = preference;
+                document.documentElement.dataset.theme = resolved;
+                document.documentElement.style.colorScheme = resolved;
+            }
+            catch {
+                document.documentElement.dataset.themePreference = "dark";
+                document.documentElement.dataset.theme = "dark";
+                document.documentElement.style.colorScheme = "dark";
+            }
+        })();
+    </script>
+    <ResourcePreloader />
+    <link rel="icon" type="image/svg+xml" href="@Assets["favicon.svg"]" />
+    <link rel="stylesheet" href="@Assets["app.css"]" />
+    <link rel="stylesheet" href="@Assets["Memory.Dashboard.styles.css"]" />
+    <ImportMap />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+
+<body>
+    <Routes @rendermode="InteractiveServer" />
+    <ReconnectModal />
+    <script src="@Assets["dashboard-theme.js"]"></script>
+    <script type="module" src="@Assets["dashboard-viewport.js"]"></script>
+    <script src="@Assets["dashboard-time.js"]"></script>
+    <script src="@Assets["dashboard-clipboard.js"]"></script>
+    <script src="@Assets["dashboard-transfer.js"]"></script>
+    <script src="@Assets["_framework/blazor.web.js"]"></script>
+</body>
+
+</html>
