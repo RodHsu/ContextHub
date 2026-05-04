@@ -114,7 +114,8 @@ public sealed record DashboardOverviewResult(
     DashboardPageSnapshotStatusResult? SnapshotStatus = null,
     DashboardDockerHostResult? DockerHost = null,
     DashboardDependencyResourcesResult? DependencyResources = null,
-    IReadOnlyList<DashboardResourceSampleResult>? ResourceSamples = null);
+    IReadOnlyList<DashboardResourceSampleResult>? ResourceSamples = null,
+    DashboardEvaluationSummaryResult? EvaluationSummary = null);
 
 public sealed record DashboardRuntimeParameterResult(
     string Section,
@@ -275,7 +276,72 @@ public sealed record MemoryChunkResult(
 public sealed record MemoryDetailsResult(
     MemoryDocument Document,
     IReadOnlyList<MemoryRevisionResult> Revisions,
-    IReadOnlyList<MemoryChunkResult> Chunks);
+    IReadOnlyList<MemoryChunkResult> Chunks,
+    IReadOnlyList<MemoryLinkResult>? Links = null,
+    IReadOnlyList<MemoryGovernanceFindingSummaryResult>? Findings = null,
+    MemorySourceContextResult? SourceContext = null);
+
+public enum MemoryGraphMode
+{
+    Seeded,
+    ProjectFull
+}
+
+public sealed record MemoryGraphRequest(
+    string? Query = null,
+    string? Tag = null,
+    string? ProjectId = null,
+    string? ProjectQuery = null,
+    IReadOnlyList<string>? IncludedProjectIds = null,
+    MemoryQueryMode QueryMode = MemoryQueryMode.CurrentOnly,
+    bool UseSummaryLayer = false,
+    MemoryGraphMode GraphMode = MemoryGraphMode.Seeded,
+    int MaxNodes = 120,
+    bool IncludeSimilarity = true,
+    MemoryScope? Scope = null,
+    MemoryType? MemoryType = null,
+    MemoryStatus? Status = null,
+    string? SourceType = null);
+
+public sealed record MemoryGraphNodeResult(
+    Guid Id,
+    string Title,
+    string Summary,
+    string ProjectId,
+    MemoryType MemoryType,
+    MemoryScope Scope,
+    MemoryStatus Status,
+    IReadOnlyList<string> Tags,
+    string SourceType,
+    string SourceRef,
+    DateTimeOffset UpdatedAt,
+    decimal Importance,
+    decimal Confidence,
+    bool IsReadOnly,
+    string? ThumbnailUrl,
+    string? FaviconUrl,
+    string SourceLabel,
+    int ExplicitLinkCount,
+    int SimilarityNeighborCount);
+
+public sealed record MemoryGraphEdgeResult(
+    Guid FromId,
+    Guid ToId,
+    string EdgeType,
+    string Label,
+    decimal? Score = null);
+
+public sealed record MemoryGraphStatsResult(
+    int SeedCount,
+    int NodeCount,
+    int EdgeCount,
+    bool Truncated,
+    string? TruncationReason = null);
+
+public sealed record MemoryGraphResult(
+    IReadOnlyList<MemoryGraphNodeResult> Nodes,
+    IReadOnlyList<MemoryGraphEdgeResult> Edges,
+    MemoryGraphStatsResult Stats);
 
 public sealed record MemoryExportRequest(
     string? Query = null,
@@ -375,6 +441,7 @@ public interface IDashboardQueryService
     Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectSuggestionResult>> GetProjectSuggestionsAsync(string? query, int limit, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
+    Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken);
     Task<PagedResult<JobListItemResult>> GetJobsAsync(JobListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken);
     Task<StorageTableRowsResult> GetStorageRowsAsync(StorageRowsRequest request, CancellationToken cancellationToken);

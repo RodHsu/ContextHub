@@ -78,6 +78,44 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     }
 
     [DockerRequiredFact]
+    public async Task Refresh_Summary_Rebuild_All_Should_Complete_Without_Query_Translation_Errors()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var projectA = $"Alpha_{suffix}";
+        var projectB = $"Beta_{suffix}";
+        var now = DateTimeOffset.UtcNow;
+
+        dbContext.MemoryItems.AddRange(
+            CreateMemoryItem(projectA, $"repo:{projectA}:1", "Alpha rebuild fixture", now),
+            CreateMemoryItem(projectB, $"repo:{projectB}:1", "Beta rebuild fixture", now.AddSeconds(-1)),
+            CreateMemoryItem(ProjectContext.SharedProjectId, $"repo:shared:{suffix}", "Shared layer should be skipped", now.AddSeconds(-2)),
+            CreateMemoryItem(ProjectContext.UserProjectId, $"repo:user:{suffix}", "User layer should be skipped", now.AddSeconds(-3)));
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        var enqueue = await memoryService.EnqueueSummaryRefreshAsync(
+            new EnqueueSummaryRefreshRequest(ProjectId: null, IncludedProjectIds: null),
+            CancellationToken.None);
+
+        var processed = await processor.ProcessNextAsync(CancellationToken.None);
+        processed.Should().NotBeNull();
+        processed!.Id.Should().Be(enqueue.JobId);
+        processed.Status.Should().Be(MemoryJobStatus.Completed);
+        processed.Error.Should().BeEmpty();
+
+        var sharedSummaries = await dbContext.MemoryItems
+            .Where(x => x.ProjectId == ProjectContext.SharedProjectId && x.MemoryType == MemoryType.Summary)
+            .ToListAsync(CancellationToken.None);
+
+        sharedSummaries.Should().Contain(x => x.SourceRef == projectA && x.Content.Contains("Alpha rebuild fixture", StringComparison.Ordinal));
+        sharedSummaries.Should().Contain(x => x.SourceRef == projectB && x.Content.Contains("Beta rebuild fixture", StringComparison.Ordinal));
+        sharedSummaries.Should().NotContain(x => x.SourceRef == ProjectContext.SharedProjectId || x.SourceRef == ProjectContext.UserProjectId);
+    }
+
+    [DockerRequiredFact]
     public async Task Error_Logs_Should_Be_Flushed_To_Runtime_Log_Table()
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
@@ -128,6 +166,123 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
 
         context.UserPreferences.Should().ContainSingle(x => x.Id == preference.Id);
         context.Citations.Should().Contain(x => x.MemoryId == preference.Id);
+    }
+
+    [DockerRequiredFact]
+    public async Task Search_Should_Write_Retrieval_Telemetry_Event_And_Hits()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var query = $"retrieval-telemetry-search-{Guid.NewGuid():N}";
+
+        var created = await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: $"repo:telemetry:{Guid.NewGuid():N}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Decision,
+                Title: "Retrieval telemetry fixture",
+                Content: $"This fixture should be found for query {query}.",
+                Summary: "Retrieval telemetry fixture",
+                SourceType: "document",
+                SourceRef: "tests",
+                Tags: ["telemetry", "search"],
+                Importance: 0.8m,
+                Confidence: 0.9m),
+            CancellationToken.None);
+
+        await processor.ProcessNextAsync(CancellationToken.None);
+
+        var hits = await memoryService.SearchAsync(
+            new MemorySearchRequest(
+                query,
+                5,
+                false,
+                ProjectContext.DefaultProjectId,
+                null,
+                MemoryQueryMode.CurrentOnly,
+                false,
+                new RetrievalTelemetryContext("tests.search", "test", "integration telemetry search")),
+            CancellationToken.None);
+
+        hits.Should().Contain(x => x.MemoryId == created.Id);
+
+        var telemetryEvent = await dbContext.RetrievalEvents
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync(x => x.EntryPoint == "tests.search" && x.QueryText == query, CancellationToken.None);
+
+        telemetryEvent.Should().NotBeNull();
+        telemetryEvent!.Channel.Should().Be("test");
+        telemetryEvent.Purpose.Should().Be("integration telemetry search");
+        telemetryEvent.ResultCount.Should().BeGreaterThan(0);
+        telemetryEvent.Success.Should().BeTrue();
+
+        var telemetryHits = await dbContext.RetrievalHits
+            .Where(x => x.RetrievalEventId == telemetryEvent.Id)
+            .OrderBy(x => x.Rank)
+            .ToListAsync(CancellationToken.None);
+
+        telemetryHits.Should().NotBeEmpty();
+        telemetryHits.Should().Contain(x => x.MemoryId == created.Id);
+    }
+
+    [DockerRequiredFact]
+    public async Task Build_Working_Context_Should_Write_Single_Composite_Telemetry_Event()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var query = $"retrieval-telemetry-context-{Guid.NewGuid():N}";
+
+        await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: $"repo:context-telemetry:{Guid.NewGuid():N}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: "Working context telemetry fixture",
+                Content: $"This fixture should appear in working context for query {query}.",
+                Summary: "Working context telemetry fixture",
+                SourceType: "document",
+                SourceRef: "tests",
+                Tags: ["telemetry", "context"],
+                Importance: 0.85m,
+                Confidence: 0.92m),
+            CancellationToken.None);
+
+        await processor.ProcessNextAsync(CancellationToken.None);
+
+        var result = await memoryService.BuildWorkingContextAsync(
+            new WorkingContextRequest(
+                query,
+                3,
+                2,
+                ProjectContext.DefaultProjectId,
+                null,
+                MemoryQueryMode.CurrentOnly,
+                false,
+                new RetrievalTelemetryContext("tests.working-context", "test", "integration working context")),
+            CancellationToken.None);
+
+        result.Facts.Should().NotBeEmpty();
+
+        var events = await dbContext.RetrievalEvents
+            .Where(x => x.QueryText == query)
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(CancellationToken.None);
+
+        events.Should().ContainSingle(x => x.EntryPoint == "tests.working-context");
+        events.Should().NotContain(x => x.EntryPoint == "build_working_context.search");
+
+        var telemetryEvent = events.Single(x => x.EntryPoint == "tests.working-context");
+        telemetryEvent.ResultCount.Should().BeGreaterThan(0);
+
+        var telemetryHits = await dbContext.RetrievalHits
+            .Where(x => x.RetrievalEventId == telemetryEvent.Id)
+            .ToListAsync(CancellationToken.None);
+
+        telemetryHits.Should().NotBeEmpty();
     }
 
     [DockerRequiredFact]
@@ -317,4 +472,26 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             }
         }
     }
+
+    private static MemoryItem CreateMemoryItem(string projectId, string externalKey, string title, DateTimeOffset timestamp)
+        => new()
+        {
+            ProjectId = projectId,
+            ExternalKey = externalKey,
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Fact,
+            Title = title,
+            Content = title,
+            Summary = title,
+            Tags = ["summary-refresh"],
+            SourceType = "document",
+            SourceRef = "tests",
+            Importance = 0.8m,
+            Confidence = 0.9m,
+            Version = 1,
+            Status = MemoryStatus.Active,
+            MetadataJson = "{}",
+            CreatedAt = timestamp,
+            UpdatedAt = timestamp
+        };
 }

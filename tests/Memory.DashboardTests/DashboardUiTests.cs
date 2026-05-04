@@ -41,6 +41,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         html.Should().Contain("Context Hub");
         html.Should().Contain("login-card");
         html.Should().Contain("登入");
+        html.Should().Contain("UI v");
         html.Should().Contain("favicon.svg");
         html.Should().Contain("dashboard-viewport.js");
     }
@@ -108,6 +109,73 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
     }
 
     [Fact]
+    public void Snapshot_Warning_Should_Not_Show_Generic_Stale_Message_When_Page_Is_Not_Stale()
+    {
+        var snapshot = new DashboardPageSnapshotStatusResult(
+            DateTimeOffset.UtcNow.AddSeconds(-45),
+            false,
+            string.Empty,
+            []);
+
+        var warning = DashboardUiErrorFormatter.BuildSnapshotWarning(snapshot, "總覽");
+
+        warning.Should().BeNull();
+    }
+
+    [Fact]
+    public void Snapshot_Warning_Should_Show_Generic_Stale_Message_When_Page_Is_Stale()
+    {
+        var snapshot = new DashboardPageSnapshotStatusResult(
+            DateTimeOffset.UtcNow.AddSeconds(-18),
+            true,
+            string.Empty,
+            []);
+
+        var warning = DashboardUiErrorFormatter.BuildSnapshotWarning(snapshot, "總覽");
+
+        warning.Should().NotBeNull();
+        warning.Should().Contain("資料延遲");
+    }
+
+    [Fact]
+    public async Task ContextHubApiClient_Should_Retry_Transient_Get_Failure()
+    {
+        using var httpClient = new HttpClient(new SequencedHttpMessageHandler(
+            _ => throw new HttpRequestException("Response ended prematurely."),
+            _ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = JsonContent.Create(CreateSystemStatusResult())
+            }))
+        {
+            BaseAddress = new Uri("http://context-hub.test")
+        };
+        var apiClient = new ContextHubApiClient(httpClient);
+
+        var status = await apiClient.GetStatusAsync(CancellationToken.None);
+
+        status.Service.Should().Be("mcp-server");
+    }
+
+    [Fact]
+    public async Task ContextHubApiClient_Should_Retry_Transient_Get_Status_Code()
+    {
+        using var httpClient = new HttpClient(new SequencedHttpMessageHandler(
+            _ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable),
+            _ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = JsonContent.Create(CreateSystemStatusResult())
+            }))
+        {
+            BaseAddress = new Uri("http://context-hub.test")
+        };
+        var apiClient = new ContextHubApiClient(httpClient);
+
+        var status = await apiClient.GetStatusAsync(CancellationToken.None);
+
+        status.Service.Should().Be("mcp-server");
+    }
+
+    [Fact]
     public async Task Successful_Login_Should_Render_Dashboard_Pages_With_Internal_Scroll_Hosts()
     {
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
@@ -125,6 +193,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("全部記憶條目");
         overviewHtml.Should().Contain("預設專案記憶");
         overviewHtml.Should().Contain("Docker 主機");
+        overviewHtml.Should().Contain("評估摘要");
         overviewHtml.Should().Contain("資源狀態圖表");
         overviewHtml.Should().Contain("近期呼叫趨勢");
         overviewHtml.Should().Contain("近期平均");
@@ -133,7 +202,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("呼叫最近 15 筆");
         overviewHtml.Should().Contain("進站 (Inbound)");
         overviewHtml.Should().Contain("傳出 (Outbound)");
-        overviewHtml.Should().Contain("GMT");
+        overviewHtml.Should().Contain("client-local-time");
+        overviewHtml.Should().Contain("data-local-iso");
         overviewHtml.Should().Contain("建置版本");
         overviewHtml.Should().Contain("2026.04.12-test");
         overviewHtml.Should().Contain("複製 JSON");
@@ -146,25 +216,32 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("\"job\":\"reindex-2\"");
         overviewHtml.Should().NotContain("\"job\":\"reindex-1\"");
         overviewHtml.Should().Contain("最後更新");
+        overviewHtml.Should().Contain("資料快照");
         overviewHtml.Should().Contain("refresh-status-group");
         overviewHtml.Should().Contain("refresh-status-primary");
         overviewHtml.Should().Contain("refresh-status-live");
         overviewHtml.Should().NotContain("refresh-status-build");
         overviewHtml.Should().Contain("page-scroll-host");
-        overviewHtml.IndexOf("sidebar-footer", StringComparison.Ordinal).Should().BeGreaterThan(0);
+        overviewHtml.IndexOf("Docker 主機", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("評估摘要", StringComparison.Ordinal));
         overviewHtml.IndexOf("sidebar-build", StringComparison.Ordinal).Should().BeGreaterThan(0);
-        overviewHtml.IndexOf("sidebar-footer", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("sidebar-build", StringComparison.Ordinal));
+        overviewHtml.Should().NotContain("sidebar-footer");
+        overviewHtml.IndexOf("狀態監控", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("執行參數", StringComparison.Ordinal));
+        overviewHtml.IndexOf("記憶圖譜", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
+        overviewHtml.IndexOf("日誌", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
+        overviewHtml.IndexOf("收件匣", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("使用者偏好", StringComparison.Ordinal));
 
         using var runtimeResponse = await client.GetAsync("/runtime");
         runtimeResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var runtimeHtml = WebUtility.HtmlDecode(await runtimeResponse.Content.ReadAsStringAsync());
         runtimeHtml.Should().Contain("執行參數");
         runtimeHtml.Should().Contain("refresh-status-group");
+        runtimeHtml.Should().Contain("資料快照");
         runtimeHtml.Should().Contain("refresh-status-live");
         runtimeHtml.Should().NotContain("refresh-status-build");
         runtimeHtml.Should().Contain("公開參數");
         runtimeHtml.Should().Contain("建置版本");
-        runtimeHtml.Should().Contain("GMT");
+        runtimeHtml.Should().Contain("client-local-time");
+        runtimeHtml.Should().Contain("data-local-iso");
         runtimeHtml.Should().Contain("2026.04.12-test");
         runtimeHtml.Should().Contain("runtime-page-stack");
         runtimeHtml.Should().Contain("向量執行環境");
@@ -179,6 +256,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         var monitoringHtml = WebUtility.HtmlDecode(await monitoringResponse.Content.ReadAsStringAsync());
         monitoringHtml.Should().Contain("狀態監控");
         monitoringHtml.Should().Contain("refresh-status-group");
+        monitoringHtml.Should().Contain("資料快照");
         monitoringHtml.Should().Contain("Redis");
         monitoringHtml.Should().Contain("PostgreSQL");
         monitoringHtml.Should().Contain("資源趨勢");
@@ -186,6 +264,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("Docker 主機");
         monitoringHtml.Should().Contain("Total Commands");
         monitoringHtml.Should().Contain("Connections");
+        monitoringHtml.Should().Contain("顯示 DB Size 說明");
+        monitoringHtml.Should().Contain("目前 ContextHub PostgreSQL database 的實際資料大小");
+        monitoringHtml.Should().Contain("顯示 Temp Files / Bytes 說明");
+        monitoringHtml.Should().Contain("查詢排序、hash join 或中間結果超出記憶體");
         monitoringHtml.Should().Contain("monitoring-page-stack");
         monitoringHtml.Should().Contain("monitoring-telemetry-grid");
         monitoringHtml.Should().NotContain("未配置 Redis 專屬 volume");
@@ -255,6 +337,57 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         memoriesHtml.Should().Contain("共用綜合層");
         memoriesHtml.Should().Contain("table-head-secondary");
 
+        using var graphResponse = await client.GetAsync("/graph");
+        graphResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var graphHtml = WebUtility.HtmlDecode(await graphResponse.Content.ReadAsStringAsync());
+        graphHtml.Should().Contain("記憶圖譜");
+        graphHtml.Should().Contain("Graph Explorer");
+        graphHtml.Should().Contain("展開鄰居");
+        graphHtml.Should().Contain("回到種子");
+        graphHtml.Should().Contain("Node Detail");
+        graphHtml.Should().Contain("專案檢視");
+        graphHtml.Should().Contain("全部專案整合視圖");
+        graphHtml.Should().Contain("全螢幕");
+        graphHtml.Should().Contain("graph-workspace");
+
+        using var sourcesResponse = await client.GetAsync("/sources");
+        sourcesResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var sourcesHtml = WebUtility.HtmlDecode(await sourcesResponse.Content.ReadAsStringAsync());
+        sourcesHtml.Should().Contain("資料來源");
+        sourcesHtml.Should().Contain("來源設定");
+        sourcesHtml.Should().Contain("來源清單");
+        sourcesHtml.Should().Contain("來源細節");
+        sourcesHtml.Should().Contain("SourceConnections");
+        sourcesHtml.Should().Contain("建立來源後請執行一次同步");
+
+        using var governanceResponse = await client.GetAsync("/governance");
+        governanceResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var governanceHtml = WebUtility.HtmlDecode(await governanceResponse.Content.ReadAsStringAsync());
+        governanceHtml.Should().Contain("治理檢查");
+        governanceHtml.Should().Contain("治理清單");
+        governanceHtml.Should().Contain("治理細節");
+        governanceHtml.Should().Contain("執行治理分析");
+        governanceHtml.Should().Contain("不會自動塞示範資料");
+
+        using var evaluationResponse = await client.GetAsync("/evaluation");
+        evaluationResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var evaluationHtml = WebUtility.HtmlDecode(await evaluationResponse.Content.ReadAsStringAsync());
+        evaluationHtml.Should().Contain("評估驗證");
+        evaluationHtml.Should().Contain("建立最小評測集");
+        evaluationHtml.Should().Contain("評測組清單");
+        evaluationHtml.Should().Contain("評測細節");
+        evaluationHtml.Should().Contain("expected external keys");
+        evaluationHtml.Should().Contain("query` 會直接送進檢索");
+
+        using var inboxResponse = await client.GetAsync("/inbox");
+        inboxResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var inboxHtml = WebUtility.HtmlDecode(await inboxResponse.Content.ReadAsStringAsync());
+        inboxHtml.Should().Contain("收件匣");
+        inboxHtml.Should().Contain("待處理建議");
+        inboxHtml.Should().Contain("建議細節");
+        inboxHtml.Should().Contain("治理分析與評測回歸");
+        inboxHtml.Should().Contain("suggested actions");
+
         using var storageResponse = await client.GetAsync("/storage");
         storageResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var storageHtml = WebUtility.HtmlDecode(await storageResponse.Content.ReadAsStringAsync());
@@ -278,6 +411,17 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         preferencesHtml.Should().Contain("溝通風格 (1)");
         preferencesHtml.Should().Contain("stack-scroll-shell");
         preferencesHtml.Should().Contain("stack-item-split");
+    }
+
+    [Fact]
+    public void Empty_State_Ctas_Should_Target_Page_Specific_Fragments()
+    {
+        var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var sourcesPagePath = Path.Combine(repoRoot, "src", "Memory.Dashboard", "Components", "Pages", "Sources.razor");
+        var evaluationPagePath = Path.Combine(repoRoot, "src", "Memory.Dashboard", "Components", "Pages", "Evaluation.razor");
+
+        File.ReadAllText(sourcesPagePath).Should().Contain("href=\"/sources#source-config-panel\"");
+        File.ReadAllText(evaluationPagePath).Should().Contain("href=\"/evaluation#evaluation-suite-form\"");
     }
 
     [Fact]
@@ -322,6 +466,31 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         var apiClient = _factory.Services.GetRequiredService<IContextHubApiClient>().Should().BeOfType<FakeContextHubApiClient>().Subject;
         apiClient.LastMemoryListRequest.Should().NotBeNull();
         apiClient.LastMemoryListRequest!.ProjectId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Graph_Page_Should_Default_To_AllProjects_Integrated_View()
+    {
+        using var isolatedFactory = new DashboardApplicationFactory();
+        using var client = isolatedFactory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        await LoginAsync(client);
+
+        using var response = await client.GetAsync("/graph");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var apiClient = isolatedFactory.Services.GetRequiredService<IContextHubApiClient>().Should().BeOfType<FakeContextHubApiClient>().Subject;
+        apiClient.LastMemoryGraphRequest.Should().NotBeNull();
+        apiClient.LastMemoryGraphRequest!.ProjectId.Should().BeNull();
+        apiClient.LastMemoryGraphRequest.IncludedProjectIds.Should().BeNull();
+        apiClient.LastMemoryGraphRequest.QueryMode.Should().Be(MemoryQueryMode.CurrentOnly);
+        apiClient.LastMemoryGraphRequest.UseSummaryLayer.Should().BeFalse();
+        apiClient.LastMemoryGraphRequest.IncludeSimilarity.Should().BeFalse();
+        apiClient.LastMemoryGraphRequest.GraphMode.Should().Be(MemoryGraphMode.ProjectFull);
     }
 
     [Fact]
@@ -497,6 +666,29 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         return match.Groups[1].Value;
     }
 
+    private static SystemStatusResult CreateSystemStatusResult()
+        => new(
+            "mcp-server",
+            ProjectContext.DefaultProjectId,
+            "test",
+            DateTimeOffset.Parse("2026-04-12T00:30:00+00:00"),
+            "Http",
+            "CPUExecutionProvider",
+            "compact",
+            "intfloat/multilingual-e5-small",
+            384,
+            512,
+            6,
+            8,
+            true,
+            1,
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            30,
+            false,
+            string.Empty,
+            string.Empty);
+
     private static string BuildAntiforgeryCookie(HttpResponseHeaders headers)
     {
         var setCookie = headers.TryGetValues("Set-Cookie", out var values)
@@ -504,6 +696,23 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
             : null;
         setCookie.Should().NotBeNull();
         return setCookie!.Split(';', 2)[0];
+    }
+}
+
+internal sealed class SequencedHttpMessageHandler : HttpMessageHandler
+{
+    private readonly Queue<Func<HttpRequestMessage, HttpResponseMessage>> _responses;
+
+    public SequencedHttpMessageHandler(params Func<HttpRequestMessage, HttpResponseMessage>[] responses)
+    {
+        _responses = new Queue<Func<HttpRequestMessage, HttpResponseMessage>>(responses);
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        _responses.Count.Should().BeGreaterThan(0);
+        var response = _responses.Dequeue().Invoke(request);
+        return Task.FromResult(response);
     }
 }
 
@@ -578,6 +787,7 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
         DateTimeOffset.UtcNow);
 
     public MemoryListRequest? LastMemoryListRequest { get; private set; }
+    public MemoryGraphRequest? LastMemoryGraphRequest { get; private set; }
 
     public Task<SystemStatusResult> GetStatusAsync(CancellationToken cancellationToken)
     {
@@ -847,6 +1057,36 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
         1));
     }
 
+    public Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)
+    {
+        LastMemoryGraphRequest = request;
+        return Task.FromResult(new MemoryGraphResult(
+        [
+            new MemoryGraphNodeResult(
+                _memory.Id,
+                _memory.Title,
+                _memory.Summary,
+                _memory.ProjectId,
+                _memory.MemoryType,
+                _memory.Scope,
+                _memory.Status,
+                _memory.Tags,
+                _memory.SourceType,
+                _memory.SourceRef,
+                _memory.UpdatedAt,
+                _memory.Importance,
+                _memory.Confidence,
+                _memory.IsReadOnly,
+                null,
+                "https://example.com/favicon.ico",
+                _memory.SourceType,
+                1,
+                request.IncludeSimilarity ? 1 : 0)
+        ],
+        [],
+        new MemoryGraphStatsResult(1, 1, 0, false)));
+    }
+
     public Task<IReadOnlyList<ProjectSuggestionResult>> GetMemoryProjectsAsync(string? query, int limit, CancellationToken cancellationToken)
     {
         IReadOnlyList<ProjectSuggestionResult> projects =
@@ -874,7 +1114,20 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
                 new MemoryChunkResult(Guid.NewGuid(), ChunkKind.Document, 0, "這是一個示範 chunk。", "{}", DateTimeOffset.UtcNow.AddHours(-4), [
                     new MemoryVectorResult(Guid.NewGuid(), "intfloat/multilingual-e5-small", 384, "Active", DateTimeOffset.UtcNow.AddHours(-4))
                 ])
-            ]));
+            ],
+            [
+                new MemoryLinkResult(Guid.Parse("b1000000-0000-0000-0000-000000000001"), _memory.Id, _memory.Id, "related", DateTimeOffset.UtcNow.AddHours(-2))
+            ],
+            null,
+            new MemorySourceContextResult(
+                Guid.Parse("a1000000-0000-0000-0000-000000000001"),
+                "Fake Dashboard Source",
+                "cursor",
+                "v1",
+                "https://example.com/docs/context-hub",
+                DateTimeOffset.UtcNow.AddMinutes(-30),
+                DateTimeOffset.UtcNow.AddMinutes(-20),
+                ["dashboard-ui-tests"])));
 
     public Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new MemoryTransferDownloadResult("demo-export.json", "application/json", Convert.ToBase64String("{}"u8.ToArray()), 1, !string.IsNullOrWhiteSpace(request.Passphrase)));
@@ -919,6 +1172,69 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public Task<EnqueueSummaryRefreshResult> EnqueueSummaryRefreshAsync(EnqueueSummaryRefreshRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new EnqueueSummaryRefreshResult(Guid.NewGuid(), MemoryJobStatus.Pending));
+
+    public Task<IReadOnlyList<SourceConnectionResult>> GetSourcesAsync(SourceListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SourceConnectionResult>>(
+        [
+            new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, "Local Repo", SourceKind.LocalRepo, true, """{"rootPath":"W:/Repositories/WJCY/ContextHub"}""", false, string.Empty, DateTimeOffset.UtcNow.AddMinutes(-10), DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow)
+        ]);
+
+    public Task<SourceConnectionResult> CreateSourceAsync(SourceConnectionCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, request.Name, request.SourceKind, request.Enabled, request.ConfigJson, !string.IsNullOrWhiteSpace(request.SecretJson), string.Empty, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+    public Task<SourceConnectionResult> UpdateSourceAsync(SourceConnectionUpdateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new SourceConnectionResult(request.Id, request.ProjectId ?? ProjectContext.DefaultProjectId, request.Name ?? "Updated Source", SourceKind.LocalRepo, request.Enabled ?? true, request.ConfigJson ?? "{}", !string.IsNullOrWhiteSpace(request.SecretJson), string.Empty, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow));
+
+    public Task<EnqueueSourceSyncResult> SyncSourceAsync(Guid id, SourceSyncRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new EnqueueSourceSyncResult(Guid.NewGuid(), MemoryJobStatus.Pending));
+
+    public Task<IReadOnlyList<SourceSyncRunResult>> GetSourceRunsAsync(Guid id, string? projectId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SourceSyncRunResult>>(
+        [
+            new SourceSyncRunResult(Guid.NewGuid(), id, projectId ?? ProjectContext.DefaultProjectId, SourceSyncTrigger.Manual, SourceSyncStatus.Completed, 8, 4, 1, 0, "before", "after", string.Empty, DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddMinutes(-4))
+        ]);
+
+    public Task<IReadOnlyList<GovernanceFindingResult>> GetGovernanceFindingsAsync(GovernanceFindingListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<GovernanceFindingResult>>(
+        [
+            new GovernanceFindingResult(Guid.NewGuid(), request.ProjectId, null, Guid.NewGuid(), null, GovernanceFindingType.ReindexRequired, GovernanceFindingStatus.Open, "需要重新索引：示範記憶", "目前向量資料未對齊。", "{}", "demo", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow)
+        ]);
+
+    public Task<GovernanceAnalyzeResult> AnalyzeGovernanceAsync(GovernanceAnalyzeRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new GovernanceAnalyzeResult(request.ProjectId, 1, 1, DateTimeOffset.UtcNow));
+
+    public Task<GovernanceFindingResult> AcceptGovernanceFindingAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult(new GovernanceFindingResult(id, ProjectContext.DefaultProjectId, null, Guid.NewGuid(), null, GovernanceFindingType.ReindexRequired, GovernanceFindingStatus.Accepted, "接受 finding", "accepted", "{}", "demo", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow));
+
+    public Task<GovernanceFindingResult> DismissGovernanceFindingAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult(new GovernanceFindingResult(id, ProjectContext.DefaultProjectId, null, Guid.NewGuid(), null, GovernanceFindingType.ReindexRequired, GovernanceFindingStatus.Dismissed, "忽略 finding", "dismissed", "{}", "demo", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<EvaluationSuiteResult>> GetEvaluationSuitesAsync(string projectId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<EvaluationSuiteResult>>(
+        [
+            new EvaluationSuiteResult(Guid.NewGuid(), projectId, "Dashboard Test Suite", "Demo suite", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow, [new EvaluationCaseResult(Guid.NewGuid(), Guid.NewGuid(), projectId, "Scenario", "demo query", [], ["demo-memory"], DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow)])
+        ]);
+
+    public Task<EvaluationSuiteResult> CreateEvaluationSuiteAsync(EvaluationSuiteCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new EvaluationSuiteResult(Guid.NewGuid(), request.ProjectId, request.Name, request.Description, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, []));
+
+    public Task<EvaluationRunResult> RunEvaluationAsync(EvaluationRunRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new EvaluationRunResult(Guid.NewGuid(), request.SuiteId, ProjectContext.DefaultProjectId, EvaluationRunStatus.Completed, "compact", request.QueryMode, request.UseSummaryLayer, request.TopK, 1m, 1m, 1m, 10d, string.Empty, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, []));
+
+    public Task<EvaluationRunResult?> GetEvaluationRunAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult<EvaluationRunResult?>(new EvaluationRunResult(id, Guid.NewGuid(), ProjectContext.DefaultProjectId, EvaluationRunStatus.Completed, "compact", MemoryQueryMode.CurrentOnly, false, 5, 1m, 1m, 1m, 10d, string.Empty, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, []));
+
+    public Task<IReadOnlyList<SuggestedActionResult>> GetSuggestedActionsAsync(SuggestedActionListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SuggestedActionResult>>(
+        [
+            new SuggestedActionResult(Guid.NewGuid(), request.ProjectId, SuggestedActionType.ReindexProject, SuggestedActionStatus.Pending, "重新索引專案", "評測品質回退。", "{}", string.Empty, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, null)
+        ]);
+
+    public Task<SuggestedActionMutationResult> AcceptSuggestedActionAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult(new SuggestedActionMutationResult(new SuggestedActionResult(id, ProjectContext.DefaultProjectId, SuggestedActionType.ReindexProject, SuggestedActionStatus.Executed, "重新索引專案", "已執行。", "{}", string.Empty, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, DateTimeOffset.UtcNow), Guid.NewGuid()));
+
+    public Task<SuggestedActionResult> DismissSuggestedActionAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult(new SuggestedActionResult(id, ProjectContext.DefaultProjectId, SuggestedActionType.ReindexProject, SuggestedActionStatus.Dismissed, "重新索引專案", "已忽略。", "{}", string.Empty, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, null));
 
     public Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<StorageTableSummaryResult>>(

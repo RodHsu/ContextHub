@@ -2,6 +2,8 @@
 
 本檔記錄 `ContextHub` repo 的專案專屬規則與操作重點；通用規則、語氣與本機習慣請以 [`.agent/AGENTS.md`](/w:/Repositories/WJCY/ContextHub/.agent/AGENTS.md) 為準。
 
+若任務涉及 UI / UX 基準、browser 驗證、測試資料落點或遠端部署後驗證，應再補讀 [DESIGN.md](/w:/Repositories/WJCY/ContextHub/DESIGN.md)。
+
 ## 專案定位
 
 - 技術棧：

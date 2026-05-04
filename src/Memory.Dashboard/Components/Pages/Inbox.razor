@@ -1,0 +1,277 @@
+@page "/inbox"
+@inject IContextHubApiClient ApiClient
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+
+<PageTitle>Context Hub | 收件匣</PageTitle>
+
+<PageViewport Title="收件匣"
+              Subtitle="集中處理治理分析與評測產生的建議動作。"
+              BodyClass="page-viewport-body">
+    <Actions>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        <div class="inbox-page-stack">
+            @if (!string.IsNullOrWhiteSpace(_loadError))
+            {
+                <div class="inline-error">@_loadError</div>
+            }
+
+            <div class="metric-grid">
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">建議總數：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(_actions.Count)</span>
+                        <span class="metric-meta-inline">actions</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">待處理：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(PendingActions)</span>
+                        <span class="metric-meta-inline">pending</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">重新索引：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(ReindexActions)</span>
+                        <span class="metric-meta-inline">reindex</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">同步來源：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(SyncActions)</span>
+                        <span class="metric-meta-inline">sync</span>
+                    </div>
+                </section>
+            </div>
+
+            <div class="inbox-workspace-section">
+                <div class="split-layout inbox-split-layout">
+                    <section class="panel panel-scroll">
+                        <div class="panel-heading-row">
+                            <div>
+                                <div class="panel-title">待處理建議 (@DashboardFormatting.Integer(_actions.Count))</div>
+                                <div class="panel-heading-meta">此處只顯示真實 suggested actions。資料來自治理分析與評測回歸結果，不會自動建立示範待辦。</div>
+                            </div>
+                        </div>
+                        @if (_actions.Count == 0)
+                        {
+                            <div class="empty-inline">
+                                <div class="empty-inline-title">目前沒有待處理建議</div>
+                                <div class="empty-inline-copy">建議不是手動新增的資料。先執行治理分析或跑 evaluation，當系統判定需要 sync、reindex 或治理處理時，這裡才會出現待辦。</div>
+                                <div class="empty-inline-actions">
+                                    <a class="primary-button" href="/governance">前往治理檢查</a>
+                                    <a class="ghost-button" href="/evaluation">前往評估驗證</a>
+                                </div>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="panel-scroll-body">
+                                <div class="stack-list">
+                                    @foreach (var action in _actions)
+                                    {
+                                        <article class="@ActionItemCss(action.Id)" @onclick="@(() => SelectAction(action.Id))">
+                                            <div class="stack-item-split">
+                                                <div class="stack-item-content">
+                                                    <div class="stack-item-title">@action.Title</div>
+                                                    <div class="stack-item-copy">@DashboardText.Label(action.Type)</div>
+                                                    <div class="stack-item-meta">@action.Summary</div>
+                                                </div>
+                                                <div class="stack-item-actions stack-item-actions-inline stack-item-actions-column">
+                                                    <span class="status-badge @StatusClass(action.Status)">@DashboardText.Label(action.Status)</span>
+                                                </div>
+                                            </div>
+                                        </article>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </section>
+
+                    <section class="panel detail-panel panel-scroll">
+                        <div class="panel-title">建議細節</div>
+                        <div class="panel-scroll-body detail-scroll-shell">
+                            @if (_selectedAction is null)
+                            {
+                                <div class="empty-inline">
+                                    <div class="empty-inline-title">尚未選擇建議</div>
+                                    <div class="empty-inline-copy">點選左側建議後，這裡會顯示 payload、執行狀態與實際可執行動作，方便你決定要接受還是忽略。</div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="badge-strip">
+                                    <span class="status-badge @StatusClass(_selectedAction.Status)">@DashboardText.Label(_selectedAction.Status)</span>
+                                    <span class="status-badge neutral">@DashboardText.Label(_selectedAction.Type)</span>
+                                </div>
+
+                                <dl class="definition-grid">
+                                    <div><dt>專案</dt><dd>@_selectedAction.ProjectId</dd></div>
+                                    <div><dt>建立時間</dt><dd><ClientLocalTime Value="_selectedAction.CreatedAt" /></dd></div>
+                                    <div><dt>最近更新</dt><dd><ClientLocalTime Value="_selectedAction.UpdatedAt" /></dd></div>
+                                    <div>
+                                        <dt>執行時間</dt>
+                                        <dd>
+                                            @if (_selectedAction.ExecutedAt.HasValue)
+                                            {
+                                                <ClientLocalTime Value="_selectedAction.ExecutedAt.Value" />
+                                            }
+                                            else
+                                            {
+                                                <span>尚未執行</span>
+                                            }
+                                        </dd>
+                                    </div>
+                                </dl>
+
+                                <div class="subpanel-title">摘要</div>
+                                <div class="code-block">@_selectedAction.Summary</div>
+
+                                <div class="subpanel-title">Payload JSON</div>
+                                <div class="code-block">@_selectedAction.PayloadJson</div>
+
+                                @if (!string.IsNullOrWhiteSpace(_selectedAction.Error))
+                                {
+                                    <div class="subpanel-title">錯誤訊息</div>
+                                    <div class="code-block">@_selectedAction.Error</div>
+                                }
+
+                                <div class="inline-actions">
+                                    <button class="ghost-button" @onclick="@(() => AcceptAsync(_selectedAction.Id))" disabled="@_loading">接受並執行</button>
+                                    <button class="ghost-button" @onclick="@(() => DismissAsync(_selectedAction.Id))" disabled="@_loading">忽略</button>
+                                </div>
+                            }
+                        </div>
+                    </section>
+                </div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(_message))
+            {
+                <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="@(() => _message = null)" />
+            }
+        </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private IReadOnlyList<SuggestedActionResult> _actions = [];
+    private SuggestedActionResult? _selectedAction;
+    private string _projectId = ProjectContext.DefaultProjectId;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _loadError;
+    private string? _message;
+    private long _messageSequence;
+
+    private int PendingActions => _actions.Count(item => item.Status == SuggestedActionStatus.Pending);
+    private int ReindexActions => _actions.Count(item => item.Type == SuggestedActionType.ReindexProject);
+    private int SyncActions => _actions.Count(item => item.Type == SuggestedActionType.SyncSourceNow);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var snapshot = await RuntimeSettingsAccessor.GetCurrentAsync(CancellationToken.None);
+        _projectId = snapshot.Behavior.DefaultProjectId;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            _actions = await ApiClient.GetSuggestedActionsAsync(
+                new SuggestedActionListRequest(_projectId),
+                CancellationToken.None);
+            _selectedAction = ResolveSelectedAction();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("收件匣", ex, _actions.Count > 0);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void SelectAction(Guid id)
+        => _selectedAction = _actions.FirstOrDefault(item => item.Id == id);
+
+    private async Task AcceptAsync(Guid id)
+    {
+        try
+        {
+            var result = await ApiClient.AcceptSuggestedActionAsync(id, CancellationToken.None);
+            _selectedAction = result.Action;
+            ShowMessage(result.JobId.HasValue
+                ? $"建議已接受，工作 {result.JobId} 已排入執行。"
+                : "建議已接受。");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("執行建議", ex));
+        }
+    }
+
+    private async Task DismissAsync(Guid id)
+    {
+        try
+        {
+            _selectedAction = await ApiClient.DismissSuggestedActionAsync(id, CancellationToken.None);
+            ShowMessage("建議已忽略。");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("忽略建議", ex));
+        }
+    }
+
+    private SuggestedActionResult? ResolveSelectedAction()
+    {
+        if (_selectedAction is not null)
+        {
+            var current = _actions.FirstOrDefault(item => item.Id == _selectedAction.Id);
+            if (current is not null)
+            {
+                return current;
+            }
+        }
+
+        return _actions.FirstOrDefault();
+    }
+
+    private string ActionItemCss(Guid id)
+        => id == _selectedAction?.Id
+            ? "stack-item stack-item-selectable stack-item-selected"
+            : "stack-item stack-item-selectable";
+
+    private static string StatusClass(SuggestedActionStatus status)
+        => status switch
+        {
+            SuggestedActionStatus.Pending => "warn",
+            SuggestedActionStatus.Accepted or SuggestedActionStatus.Executed => "ok",
+            SuggestedActionStatus.Failed => "bad",
+            SuggestedActionStatus.Dismissed => "neutral",
+            _ => "neutral"
+        };
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+}

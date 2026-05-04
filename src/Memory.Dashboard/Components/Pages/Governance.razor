@@ -1,0 +1,280 @@
+@page "/governance"
+@inject IContextHubApiClient ApiClient
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+
+<PageTitle>Context Hub | 治理檢查</PageTitle>
+
+<PageViewport Title="治理檢查"
+              Subtitle="集中處理 duplicate、conflict、stale 與 reindex findings。"
+              BodyClass="page-viewport-body">
+    <Actions>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-secondary">
+            <button class="ghost-button" @onclick="AnalyzeAsync" disabled="@_loading">執行治理分析</button>
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        <div class="governance-page-stack">
+            @if (!string.IsNullOrWhiteSpace(_loadError))
+            {
+                <div class="inline-error">@_loadError</div>
+            }
+
+            <div class="metric-grid">
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">總 findings：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(_findings.Count)</span>
+                        <span class="metric-meta-inline">items</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">待處理：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(OpenFindings)</span>
+                        <span class="metric-meta-inline">open</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">需要重建索引：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(ReindexFindings)</span>
+                        <span class="metric-meta-inline">reindex</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">來源異常：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(SourceFindings)</span>
+                        <span class="metric-meta-inline">source</span>
+                    </div>
+                </section>
+            </div>
+
+            <div class="governance-workspace-section">
+                <div class="split-layout governance-split-layout">
+                    <section class="panel panel-scroll">
+                        <div class="panel-heading-row">
+                            <div>
+                                <div class="panel-title">治理清單 (@DashboardFormatting.Integer(_findings.Count))</div>
+                                <div class="panel-heading-meta">這裡只顯示真實 findings。來源來自治理分析結果，不會自動塞示範資料。</div>
+                            </div>
+                        </div>
+                        @if (_findings.Count == 0)
+                        {
+                            <div class="empty-inline">
+                                <div class="empty-inline-title">尚未產生治理 findings</div>
+                                <div class="empty-inline-copy">請先有來源與記憶資料，再執行治理分析。分析後才會出現 stale source、missing source、duplicate/conflict 與 reindex required 等項目。</div>
+                                <div class="empty-inline-actions">
+                                    <button class="primary-button" @onclick="AnalyzeAsync" disabled="@_loading">執行治理分析</button>
+                                    <a class="ghost-button" href="/sources">前往資料來源</a>
+                                </div>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="panel-scroll-body">
+                                <div class="stack-list">
+                                    @foreach (var finding in _findings)
+                                    {
+                                        <article class="@FindingItemCss(finding.Id)" @onclick="@(() => SelectFinding(finding.Id))">
+                                            <div class="stack-item-split">
+                                                <div class="stack-item-content">
+                                                    <div class="stack-item-title">@finding.Title</div>
+                                                    <div class="stack-item-copy">@DashboardText.Label(finding.Type)</div>
+                                                    <div class="stack-item-meta">@finding.Summary</div>
+                                                </div>
+                                                <div class="stack-item-actions stack-item-actions-inline stack-item-actions-column">
+                                                    <span class="status-badge @StatusClass(finding.Status)">@DashboardText.Label(finding.Status)</span>
+                                                </div>
+                                            </div>
+                                        </article>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </section>
+
+                    <section class="panel detail-panel panel-scroll">
+                        <div class="panel-title">治理細節</div>
+                        <div class="panel-scroll-body detail-scroll-shell">
+                            @if (_selectedFinding is null)
+                            {
+                                <div class="empty-inline">
+                                    <div class="empty-inline-title">尚未選擇治理項目</div>
+                                    <div class="empty-inline-copy">執行治理分析後，點選左側 finding，這裡會顯示關聯記憶、來源連線與可採取的處理動作。</div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="badge-strip">
+                                    <span class="status-badge @StatusClass(_selectedFinding.Status)">@DashboardText.Label(_selectedFinding.Status)</span>
+                                    <span class="status-badge neutral">@DashboardText.Label(_selectedFinding.Type)</span>
+                                </div>
+
+                                <dl class="definition-grid">
+                                    <div><dt>專案</dt><dd>@_selectedFinding.ProjectId</dd></div>
+                                    <div><dt>Dedup Key</dt><dd>@_selectedFinding.DedupKey</dd></div>
+                                    <div><dt>來源連線</dt><dd>@(_selectedFinding.SourceConnectionId?.ToString() ?? "n/a")</dd></div>
+                                    <div><dt>Primary Memory</dt><dd>@(_selectedFinding.PrimaryMemoryId?.ToString() ?? "n/a")</dd></div>
+                                    <div><dt>Secondary Memory</dt><dd>@(_selectedFinding.SecondaryMemoryId?.ToString() ?? "n/a")</dd></div>
+                                    <div><dt>建立時間</dt><dd><ClientLocalTime Value="_selectedFinding.CreatedAt" /></dd></div>
+                                    <div><dt>最近更新</dt><dd><ClientLocalTime Value="_selectedFinding.UpdatedAt" /></dd></div>
+                                </dl>
+
+                                <div class="subpanel-title">摘要</div>
+                                <div class="code-block">@_selectedFinding.Summary</div>
+
+                                <div class="subpanel-title">Details JSON</div>
+                                <div class="code-block">@_selectedFinding.DetailsJson</div>
+
+                                <div class="inline-actions">
+                                    <button class="ghost-button" @onclick="@(() => AcceptAsync(_selectedFinding.Id))" disabled="@_loading">接受</button>
+                                    <button class="ghost-button" @onclick="@(() => DismissAsync(_selectedFinding.Id))" disabled="@_loading">忽略</button>
+                                </div>
+                            }
+                        </div>
+                    </section>
+                </div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(_message))
+            {
+                <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="@(() => _message = null)" />
+            }
+        </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private IReadOnlyList<GovernanceFindingResult> _findings = [];
+    private GovernanceFindingResult? _selectedFinding;
+    private string _projectId = ProjectContext.DefaultProjectId;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _loadError;
+    private string? _message;
+    private long _messageSequence;
+
+    private int OpenFindings => _findings.Count(item => item.Status == GovernanceFindingStatus.Open);
+    private int ReindexFindings => _findings.Count(item => item.Type == GovernanceFindingType.ReindexRequired);
+    private int SourceFindings => _findings.Count(item => item.Type is GovernanceFindingType.StaleSource or GovernanceFindingType.MissingSource);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var snapshot = await RuntimeSettingsAccessor.GetCurrentAsync(CancellationToken.None);
+        _projectId = snapshot.Behavior.DefaultProjectId;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            _findings = await ApiClient.GetGovernanceFindingsAsync(
+                new GovernanceFindingListRequest(_projectId),
+                CancellationToken.None);
+            _selectedFinding = ResolveSelectedFinding();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("治理檢查", ex, _findings.Count > 0);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task AnalyzeAsync()
+    {
+        _loading = true;
+        try
+        {
+            var result = await ApiClient.AnalyzeGovernanceAsync(new GovernanceAnalyzeRequest(_projectId), CancellationToken.None);
+            ShowMessage($"治理分析完成：目前 {DashboardFormatting.Integer(result.OpenFindingCount)} 筆待處理 findings、{DashboardFormatting.Integer(result.PendingActionCount)} 筆待處理建議。");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("執行治理分析", ex));
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void SelectFinding(Guid id)
+        => _selectedFinding = _findings.FirstOrDefault(item => item.Id == id);
+
+    private async Task AcceptAsync(Guid id)
+    {
+        try
+        {
+            _selectedFinding = await ApiClient.AcceptGovernanceFindingAsync(id, CancellationToken.None);
+            ShowMessage("治理項目已接受。");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("接受治理項目", ex));
+        }
+    }
+
+    private async Task DismissAsync(Guid id)
+    {
+        try
+        {
+            _selectedFinding = await ApiClient.DismissGovernanceFindingAsync(id, CancellationToken.None);
+            ShowMessage("治理項目已忽略。");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("忽略治理項目", ex));
+        }
+    }
+
+    private GovernanceFindingResult? ResolveSelectedFinding()
+    {
+        if (_selectedFinding is not null)
+        {
+            var current = _findings.FirstOrDefault(item => item.Id == _selectedFinding.Id);
+            if (current is not null)
+            {
+                return current;
+            }
+        }
+
+        return _findings.FirstOrDefault();
+    }
+
+    private string FindingItemCss(Guid id)
+        => id == _selectedFinding?.Id
+            ? "stack-item stack-item-selectable stack-item-selected"
+            : "stack-item stack-item-selectable";
+
+    private static string StatusClass(GovernanceFindingStatus status)
+        => status switch
+        {
+            GovernanceFindingStatus.Open => "warn",
+            GovernanceFindingStatus.Accepted or GovernanceFindingStatus.Resolved => "ok",
+            GovernanceFindingStatus.Dismissed => "neutral",
+            _ => "neutral"
+        };
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+}

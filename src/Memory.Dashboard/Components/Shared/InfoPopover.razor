@@ -1,0 +1,43 @@
+<div class="info-popover @(IsWarning ? "info-popover-warning" : null)">
+    <button type="button"
+            class="info-popover-trigger"
+            aria-label="@Label">
+        @Icon
+    </button>
+
+    <div class="info-popover-panel" role="tooltip">
+        @if (!string.IsNullOrWhiteSpace(Title))
+        {
+            <div class="info-popover-title">@Title</div>
+        }
+
+        @if (ChildContent is not null)
+        {
+            <div class="info-popover-body">@ChildContent</div>
+        }
+        else if (!string.IsNullOrWhiteSpace(Text))
+        {
+            <div class="info-popover-body">@Text</div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public string Label { get; set; } = "顯示說明";
+
+    [Parameter]
+    public string Icon { get; set; } = "?";
+
+    [Parameter]
+    public string? Title { get; set; }
+
+    [Parameter]
+    public string? Text { get; set; }
+
+    [Parameter]
+    public bool IsWarning { get; set; }
+
+    [Parameter]
+    public RenderFragment? ChildContent { get; set; }
+}

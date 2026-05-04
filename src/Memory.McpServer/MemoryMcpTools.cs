@@ -20,7 +20,17 @@ public sealed class MemoryMcpTools(
         MemoryQueryMode queryMode = MemoryQueryMode.CurrentOnly,
         bool useSummaryLayer = false,
         CancellationToken cancellationToken = default)
-        => memoryService.SearchAsync(new MemorySearchRequest(query, limit, includeArchived, projectId, includedProjectIds, queryMode, useSummaryLayer), cancellationToken);
+        => memoryService.SearchAsync(
+            new MemorySearchRequest(
+                query,
+                limit,
+                includeArchived,
+                projectId,
+                includedProjectIds,
+                queryMode,
+                useSummaryLayer,
+                new RetrievalTelemetryContext("memory_search", "mcp", "ad hoc retrieval")),
+            cancellationToken);
 
     [McpServerTool, Description("Get a single memory item by id.")]
     public Task<MemoryDocument?> memory_get(Guid id, CancellationToken cancellationToken = default)
@@ -36,7 +46,12 @@ public sealed class MemoryMcpTools(
 
     [McpServerTool, Description("Build a structured working context for the current task.")]
     public Task<WorkingContextResult> build_working_context(WorkingContextRequest request, CancellationToken cancellationToken = default)
-        => memoryService.BuildWorkingContextAsync(request, cancellationToken);
+        => memoryService.BuildWorkingContextAsync(
+            request with
+            {
+                Telemetry = new RetrievalTelemetryContext("build_working_context", "mcp", "task context bootstrap")
+            },
+            cancellationToken);
 
     [McpServerTool, Description("Ingest a completed conversation turn or checkpoint into the conversation staging layer for automatic promotion.")]
     public Task<ConversationIngestResult> conversation_ingest(ConversationIngestRequest request, CancellationToken cancellationToken = default)
@@ -54,7 +69,7 @@ public sealed class MemoryMcpTools(
     public Task<EnqueueReindexResult> enqueue_reindex(EnqueueReindexRequest request, CancellationToken cancellationToken = default)
         => memoryService.EnqueueReindexAsync(request, cancellationToken);
 
-    [McpServerTool, Description("Enqueue a background job to rebuild the read-only shared summary layer for a project and its referenced projects.")]
+    [McpServerTool, Description("Enqueue a background job to rebuild the read-only shared summary layer for a project and its referenced projects, or all projects when projectId is omitted.")]
     public Task<EnqueueSummaryRefreshResult> enqueue_summary_refresh(EnqueueSummaryRefreshRequest request, CancellationToken cancellationToken = default)
         => memoryService.EnqueueSummaryRefreshAsync(request, cancellationToken);
 

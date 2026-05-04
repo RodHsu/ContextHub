@@ -1,0 +1,540 @@
+@page "/evaluation"
+@inject IContextHubApiClient ApiClient
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+
+<PageTitle>Context Hub | 評估驗證</PageTitle>
+
+<PageViewport Title="評估驗證"
+              Subtitle="建立評測集並追蹤檢索回歸結果。"
+              BodyClass="page-viewport-body">
+    <Actions>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        <div class="evaluation-page-stack">
+            @if (!string.IsNullOrWhiteSpace(_loadError))
+            {
+                <div class="inline-error">@_loadError</div>
+            }
+
+            <div class="metric-grid">
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">評測組：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(_suites.Count)</span>
+                        <span class="metric-meta-inline">suites</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">案例總數：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(TotalCaseCount)</span>
+                        <span class="metric-meta-inline">cases</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">最近結果：</span>
+                        <span class="metric-value-inline">@LastRunStatusText</span>
+                        <span class="metric-meta-inline">status</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">平均延遲：</span>
+                        <span class="metric-value-inline">@LastRunLatencyText</span>
+                        <span class="metric-meta-inline">ms</span>
+                    </div>
+                </section>
+            </div>
+
+            <section class="panel filter-panel" id="evaluation-suite-form">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">建立最小評測集</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">請輸入真實查詢與 `expected external keys`。UI 會先做前端驗證，避免送出沒有意義的評測案例。</div>
+                    </div>
+                </div>
+
+                @if (_createFieldErrors.Count > 0)
+                {
+                    <div class="inline-error validation-summary" role="alert">
+                        <div class="validation-summary-title">建立前仍需補齊以下欄位</div>
+                        @foreach (var error in _createFieldErrors.Values)
+                        {
+                            <div>@error</div>
+                        }
+                    </div>
+                }
+
+                <div class="evaluation-create-stack">
+                    <div class="filter-grid evaluation-form-grid">
+                        <label class="@FieldBlockCss(nameof(_suiteName))">
+                            <span class="field-label">
+                                <span class="field-label-primary">評測組名稱</span>
+                                <span class="field-label-secondary">Suite Name</span>
+                            </span>
+                            <input @bind="_suiteName" placeholder="例如：Baseline Retrieval / Reindex Regression" />
+                            @if (TryGetFieldError(nameof(_suiteName), out var suiteNameError))
+                            {
+                                <div class="field-validation-message">@suiteNameError</div>
+                            }
+                        </label>
+                        <label>
+                            <span class="field-label">
+                                <span class="field-label-primary">說明</span>
+                                <span class="field-label-secondary">Description</span>
+                            </span>
+                            <input @bind="_suiteDescription" placeholder="說明這組評測要驗證的情境" />
+                        </label>
+                        <label class="@FieldBlockCss(nameof(_projectId))">
+                            <span class="field-label">
+                                <span class="field-label-primary">Project Id</span>
+                                <span class="field-label-secondary">預設沿用目前 dashboard project</span>
+                            </span>
+                            <input @bind="_projectId" placeholder="ContextHub" />
+                            @if (TryGetFieldError(nameof(_projectId), out var projectIdError))
+                            {
+                                <div class="field-validation-message">@projectIdError</div>
+                            }
+                        </label>
+                        <label class="@FieldBlockCss(nameof(_caseScenarioLabel))">
+                            <span class="field-label">
+                                <span class="field-label-primary">案例標籤</span>
+                                <span class="field-label-secondary">Scenario Label</span>
+                            </span>
+                            <input @bind="_caseScenarioLabel" placeholder="例如：Repository Readme / PR Summary" />
+                            @if (TryGetFieldError(nameof(_caseScenarioLabel), out var caseScenarioError))
+                            {
+                                <div class="field-validation-message">@caseScenarioError</div>
+                            }
+                        </label>
+                    </div>
+
+                    <div class="form-grid evaluation-case-grid">
+                        <label class="evaluation-query-field @FieldBlockCss(nameof(_caseQuery))">
+                            <span class="field-label">
+                                <span class="field-label-primary">查詢字串</span>
+                                <span class="field-label-secondary">實際送進 retrieval 的 query</span>
+                            </span>
+                            <textarea @bind="_caseQuery" rows="4" placeholder="請填使用者真的會查的問題"></textarea>
+                            @if (TryGetFieldError(nameof(_caseQuery), out var caseQueryError))
+                            {
+                                <div class="field-validation-message">@caseQueryError</div>
+                            }
+                        </label>
+                        <label class="evaluation-keys-field @FieldBlockCss(nameof(_caseExpectedExternalKeys))">
+                            <span class="field-label">
+                                <span class="field-label-primary">Expected External Keys</span>
+                                <span class="field-label-secondary">支援逗號或換行；每個 key 代表預期命中的記憶</span>
+                            </span>
+                            <textarea @bind="_caseExpectedExternalKeys" rows="4" placeholder="demo-memory&#10;repo:readme:1"></textarea>
+                            <div class="stack-item-meta">目前會解析為 @DashboardFormatting.Integer(ParsedExpectedExternalKeyCount) 個 key。</div>
+                            @if (TryGetFieldError(nameof(_caseExpectedExternalKeys), out var caseExternalKeysError))
+                            {
+                                <div class="field-validation-message">@caseExternalKeysError</div>
+                            }
+                        </label>
+                    </div>
+
+                    <div class="panel-note">`query` 會直接送進檢索；`expected external keys` 會作為命中判斷基準。若留空，這筆案例即使能建立，也無法做有效回歸驗證，因此 UI 會先阻擋。</div>
+                    <div class="inline-actions">
+                        <button class="ghost-button" @onclick="ResetCreateDraftFromUi" disabled="@_loading">清空草稿</button>
+                        <button class="primary-button" @onclick="CreateSuiteAsync" disabled="@_loading">建立評測集</button>
+                    </div>
+                </div>
+            </section>
+
+            <div class="evaluation-workspace-section">
+                <div class="split-layout evaluation-split-layout">
+                    <section class="panel panel-scroll">
+                        <div class="panel-heading-row">
+                            <div>
+                                <div class="panel-title">評測組清單 (@DashboardFormatting.Integer(_suites.Count))</div>
+                                <div class="panel-heading-meta panel-heading-meta-left">評測組與結果都是真實資料；建立評測集前，這裡會維持空白。</div>
+                            </div>
+                        </div>
+                        @if (_suites.Count == 0)
+                        {
+                            <div class="empty-inline">
+                                <div class="empty-inline-title">尚未建立評測集</div>
+                                <div class="empty-inline-copy">先建立至少一筆包含真實 query 與 expected keys 的 evaluation suite，再執行 run，這裡才會有評測組與結果。</div>
+                                <div class="empty-inline-actions">
+                                    <a class="primary-button" href="/evaluation#evaluation-suite-form">建立第一個評測集</a>
+                                </div>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="panel-scroll-body">
+                                <div class="stack-list">
+                                    @foreach (var suite in _suites)
+                                    {
+                                        <article class="@SuiteItemCss(suite.Id)" @onclick="@(() => SelectSuite(suite.Id))">
+                                            <div class="stack-item-split">
+                                                <div class="stack-item-content">
+                                                    <div class="stack-item-title">@suite.Name</div>
+                                                    <div class="stack-item-copy">@suite.Description</div>
+                                                    <div class="stack-item-meta">@DashboardFormatting.Integer(suite.Cases.Count) 個案例 / 更新於 <ClientLocalTime Value="suite.UpdatedAt" /></div>
+                                                </div>
+                                                <div class="stack-item-actions stack-item-actions-inline stack-item-actions-column">
+                                                    <button type="button" class="ghost-button" @onclick="@(() => RunAsync(suite.Id))">執行</button>
+                                                </div>
+                                            </div>
+                                        </article>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </section>
+
+                    <section class="panel detail-panel panel-scroll">
+                        <div class="panel-title">評測細節</div>
+                        <div class="panel-scroll-body detail-scroll-shell">
+                            @if (_selectedSuite is null)
+                            {
+                                <div class="empty-inline">
+                                    <div class="empty-inline-title">尚未選擇評測組</div>
+                                    <div class="empty-inline-copy">建立或點選左側評測組後，這裡會顯示案例內容、執行設定與最近一次 run 的結果。</div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="badge-strip evaluation-suite-strip">
+                                    <span class="status-badge neutral">@_selectedSuite.ProjectId</span>
+                                    <span class="status-badge neutral">@DashboardFormatting.Integer(_selectedSuite.Cases.Count) 個案例</span>
+                                    <span class="status-badge @(_lastRun is null ? "neutral" : RunStatusClass(_lastRun.Status))">@LastRunStatusText</span>
+                                </div>
+
+                                <dl class="definition-grid">
+                                    <div><dt>評測組</dt><dd>@_selectedSuite.Name</dd></div>
+                                    <div><dt>專案</dt><dd>@_selectedSuite.ProjectId</dd></div>
+                                    <div><dt>案例數</dt><dd>@DashboardFormatting.Integer(_selectedSuite.Cases.Count)</dd></div>
+                                    <div><dt>最近更新</dt><dd><ClientLocalTime Value="_selectedSuite.UpdatedAt" /></dd></div>
+                                </dl>
+
+                                <div class="subpanel-title">執行設定</div>
+                                <div class="filter-grid evaluation-run-grid">
+                                    <label>
+                                        <span class="field-label">
+                                            <span class="field-label-primary">Embedding Profile</span>
+                                            <span class="field-label-secondary">可留空，使用目前 active profile</span>
+                                        </span>
+                                        <input @bind="_embeddingProfile" placeholder="compact / dense / custom profile" />
+                                    </label>
+                                    <label>
+                                        <span class="field-label">
+                                            <span class="field-label-primary">查詢模式</span>
+                                            <span class="field-label-secondary">Query Mode</span>
+                                        </span>
+                                        <select @bind="_queryMode">
+                                            <option value="@MemoryQueryMode.CurrentOnly">目前專案</option>
+                                            <option value="@MemoryQueryMode.CurrentPlusReferencedProjects">目前 + 參考專案</option>
+                                            <option value="@MemoryQueryMode.SummaryOnly">共用綜合層</option>
+                                        </select>
+                                    </label>
+                                    <label>
+                                        <span class="field-label">
+                                            <span class="field-label-primary">Top K</span>
+                                            <span class="field-label-secondary">命中數上限</span>
+                                        </span>
+                                        <input type="number" min="1" max="20" @bind="_topK" />
+                                    </label>
+                                    <div class="sources-toggle-shell">
+                                        <span class="field-label">
+                                            <span class="field-label-primary">共用綜合層</span>
+                                            <span class="field-label-secondary">執行 run 時一併讀取 summary layer</span>
+                                        </span>
+                                        <label class="toggle-field">
+                                            <input type="checkbox" @bind="_useSummaryLayer" />
+                                            <span>一併讀取綜合層</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="inline-actions">
+                                    <button class="primary-button" @onclick="@(() => RunAsync(_selectedSuite.Id))" disabled="@_loading">執行目前評測組</button>
+                                </div>
+
+                                <div class="subpanel-title">案例內容</div>
+                                <div class="stack-list">
+                                    @foreach (var evaluationCase in _selectedSuite.Cases)
+                                    {
+                                        <article class="stack-item">
+                                            <div class="stack-item-title">@evaluationCase.ScenarioLabel</div>
+                                            <div class="stack-item-copy">@evaluationCase.Query</div>
+                                            <div class="stack-item-meta">
+                                                Expected keys: @(evaluationCase.ExpectedExternalKeys.Count == 0 ? "n/a" : string.Join(", ", evaluationCase.ExpectedExternalKeys))
+                                            </div>
+                                        </article>
+                                    }
+                                </div>
+
+                                <div class="subpanel-title">最近執行結果</div>
+                                @if (_lastRun is null)
+                                {
+                                    <div class="empty-inline">
+                                        <div class="empty-inline-title">尚未執行這個工作階段的評測</div>
+                                        <div class="empty-inline-copy">按下「執行目前評測組」後，這裡才會出現 Hit@K、Recall@K、MRR 與案例結果。</div>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="badge-strip">
+                                        <span class="status-badge @RunStatusClass(_lastRun.Status)">@_lastRun.Status</span>
+                                        <span class="status-badge neutral">TopK = @DashboardFormatting.Integer(_lastRun.TopK)</span>
+                                        <span class="status-badge neutral">@_lastRun.QueryMode</span>
+                                    </div>
+
+                                    <dl class="definition-grid">
+                                        <div><dt>Hit@K</dt><dd>@_lastRun.HitRate</dd></div>
+                                        <div><dt>Recall@K</dt><dd>@_lastRun.RecallAtK</dd></div>
+                                        <div><dt>MRR</dt><dd>@_lastRun.MeanReciprocalRank</dd></div>
+                                        <div><dt>平均延遲</dt><dd>@DashboardFormatting.Decimal(_lastRun.AverageLatencyMs) ms</dd></div>
+                                    </dl>
+
+                                    @if (!string.IsNullOrWhiteSpace(_lastRun.Error))
+                                    {
+                                        <div class="subpanel-title">錯誤訊息</div>
+                                        <div class="code-block">@_lastRun.Error</div>
+                                    }
+
+                                    @if (_lastRun.Items.Count > 0)
+                                    {
+                                        <div class="subpanel-title">案例結果</div>
+                                        <div class="stack-list">
+                                            @foreach (var item in _lastRun.Items)
+                                            {
+                                                <article class="stack-item">
+                                                    <div class="stack-item-title">@item.ScenarioLabel</div>
+                                                    <div class="stack-item-copy">Hit@K: @(item.HitAtK ? "是" : "否") / Recall@K: @item.RecallAtK / MRR: @item.ReciprocalRank</div>
+                                                    <div class="stack-item-meta">Latency: @DashboardFormatting.Decimal(item.LatencyMs) ms</div>
+                                                </article>
+                                            }
+                                        </div>
+                                    }
+                                }
+                            }
+                        </div>
+                    </section>
+                </div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(_message))
+            {
+                <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="@(() => _message = null)" />
+            }
+        </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private readonly Dictionary<string, string> _createFieldErrors = new(StringComparer.Ordinal);
+    private IReadOnlyList<EvaluationSuiteResult> _suites = [];
+    private EvaluationSuiteResult? _selectedSuite;
+    private EvaluationRunResult? _lastRun;
+    private string _projectId = ProjectContext.DefaultProjectId;
+    private string _suiteName = string.Empty;
+    private string _suiteDescription = string.Empty;
+    private string _caseScenarioLabel = string.Empty;
+    private string _caseQuery = string.Empty;
+    private string _caseExpectedExternalKeys = string.Empty;
+    private string _embeddingProfile = string.Empty;
+    private MemoryQueryMode _queryMode = MemoryQueryMode.CurrentOnly;
+    private bool _useSummaryLayer;
+    private int _topK = 5;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _loadError;
+    private string? _message;
+    private long _messageSequence;
+
+    private int TotalCaseCount => _suites.Sum(item => item.Cases.Count);
+    private int ParsedExpectedExternalKeyCount => ParseExpectedExternalKeys().Count;
+    private string LastRunStatusText => _lastRun?.Status.ToString() ?? "未執行";
+    private string LastRunLatencyText => _lastRun is null ? "n/a" : DashboardFormatting.Decimal(_lastRun.AverageLatencyMs);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var snapshot = await RuntimeSettingsAccessor.GetCurrentAsync(CancellationToken.None);
+        _projectId = snapshot.Behavior.DefaultProjectId;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            _suites = await ApiClient.GetEvaluationSuitesAsync(_projectId, CancellationToken.None);
+            _selectedSuite = ResolveSelectedSuite();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("評估驗證", ex, _suites.Count > 0);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task CreateSuiteAsync()
+    {
+        if (!ValidateCreateDraft())
+        {
+            return;
+        }
+
+        _loading = true;
+        try
+        {
+            _selectedSuite = await ApiClient.CreateEvaluationSuiteAsync(
+                new EvaluationSuiteCreateRequest(
+                    _suiteName.Trim(),
+                    _suiteDescription.Trim(),
+                    [
+                        new EvaluateCaseUpsertRequest(
+                            _caseScenarioLabel.Trim(),
+                            _caseQuery.Trim(),
+                            null,
+                            ParseExpectedExternalKeys())
+                    ],
+                    _projectId.Trim()),
+                CancellationToken.None);
+            _lastRun = null;
+            ShowMessage("評測集已建立。");
+            ResetCreateDraft(clearProjectId: false);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("建立評測集", ex));
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task RunAsync(Guid suiteId)
+    {
+        try
+        {
+            _lastRun = await ApiClient.RunEvaluationAsync(
+                new EvaluationRunRequest(
+                    suiteId,
+                    string.IsNullOrWhiteSpace(_embeddingProfile) ? null : _embeddingProfile.Trim(),
+                    _queryMode,
+                    _useSummaryLayer,
+                    _topK),
+                CancellationToken.None);
+            ShowMessage("評測執行完成。");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("執行評測", ex));
+        }
+    }
+
+    private void SelectSuite(Guid id)
+        => _selectedSuite = _suites.FirstOrDefault(item => item.Id == id);
+
+    private EvaluationSuiteResult? ResolveSelectedSuite()
+    {
+        if (_selectedSuite is not null)
+        {
+            var current = _suites.FirstOrDefault(item => item.Id == _selectedSuite.Id);
+            if (current is not null)
+            {
+                return current;
+            }
+        }
+
+        return _suites.FirstOrDefault();
+    }
+
+    private bool ValidateCreateDraft()
+    {
+        _createFieldErrors.Clear();
+        ValidateRequired(nameof(_suiteName), _suiteName, "請填寫評測組名稱。");
+        ValidateRequired(nameof(_projectId), _projectId, "請填寫 Project Id。");
+        ValidateRequired(nameof(_caseScenarioLabel), _caseScenarioLabel, "請填寫案例標籤。");
+        ValidateRequired(nameof(_caseQuery), _caseQuery, "請填寫查詢字串。");
+
+        if (ParseExpectedExternalKeys().Count == 0)
+        {
+            _createFieldErrors[nameof(_caseExpectedExternalKeys)] = "請至少提供一個 expected external key。";
+        }
+
+        return _createFieldErrors.Count == 0;
+    }
+
+    private void ValidateRequired(string fieldName, string? value, string errorMessage)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            _createFieldErrors[fieldName] = errorMessage;
+        }
+    }
+
+    private string FieldBlockCss(string fieldName)
+        => TryGetFieldError(fieldName, out _)
+            ? "validation-field"
+            : string.Empty;
+
+    private bool TryGetFieldError(string fieldName, out string error)
+        => _createFieldErrors.TryGetValue(fieldName, out error!);
+
+    private IReadOnlyList<string> ParseExpectedExternalKeys()
+        => (_caseExpectedExternalKeys ?? string.Empty)
+            .Split([',', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private void ResetCreateDraft(bool clearProjectId = false)
+    {
+        _suiteName = string.Empty;
+        _suiteDescription = string.Empty;
+        _caseScenarioLabel = string.Empty;
+        _caseQuery = string.Empty;
+        _caseExpectedExternalKeys = string.Empty;
+        _createFieldErrors.Clear();
+
+        if (clearProjectId)
+        {
+            _projectId = ProjectContext.DefaultProjectId;
+        }
+    }
+
+    private void ResetCreateDraftFromUi()
+        => ResetCreateDraft();
+
+    private string SuiteItemCss(Guid id)
+        => id == _selectedSuite?.Id
+            ? "stack-item stack-item-selectable stack-item-selected"
+            : "stack-item stack-item-selectable";
+
+    private static string RunStatusClass(EvaluationRunStatus status)
+        => status switch
+        {
+            EvaluationRunStatus.Completed => "ok",
+            EvaluationRunStatus.Running => "warn",
+            EvaluationRunStatus.Failed => "bad",
+            _ => "neutral"
+        };
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+}

@@ -2,6 +2,7 @@ using Memory.Application;
 using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.McpServer;
+using ModelContextProtocol.Protocol;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Http.Json;
 using Microsoft.AspNetCore.Mvc;
@@ -21,7 +22,13 @@ builder.Services.AddHostedService<DashboardSnapshotCollectorHostedService>();
 builder.Services.AddScoped<MemoryMcpTools>();
 builder.Services.AddMcpServer()
     .WithHttpTransport()
-    .WithTools<MemoryMcpTools>();
+    .WithTools<MemoryMcpTools>()
+    .WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult
+    {
+        Resources = []
+    }))
+    .WithListResourceTemplatesHandler(WorkingContextMcpResources.ListTemplatesAsync)
+    .WithReadResourceHandler(WorkingContextMcpResources.ReadAsync);
 
 var app = builder.Build();
 
@@ -179,6 +186,66 @@ memories.MapGet("/projects", async (
     return Results.Ok(result);
 });
 
+memories.MapGet("/graph", async (
+    string? query,
+    string? tag,
+    string? projectId,
+    string? projectQuery,
+    string? includedProjectIds,
+    string? queryMode,
+    bool? useSummaryLayer,
+    string? graphMode,
+    int? maxNodes,
+    bool? includeSimilarity,
+    string? scope,
+    string? memoryType,
+    string? status,
+    string? sourceType,
+    IDashboardQueryService service,
+    CancellationToken cancellationToken) =>
+{
+    string? queryModeError = null;
+    string? graphModeError = null;
+    string? scopeError = null;
+    string? memoryTypeError = null;
+    string? statusError = null;
+
+    if (!EnumParser.TryParse(queryMode, out MemoryQueryMode? parsedQueryMode, out queryModeError) ||
+        !EnumParser.TryParse(graphMode, out MemoryGraphMode? parsedGraphMode, out graphModeError) ||
+        !EnumParser.TryParse(scope, out MemoryScope? parsedScope, out scopeError) ||
+        !EnumParser.TryParse(memoryType, out MemoryType? parsedMemoryType, out memoryTypeError) ||
+        !EnumParser.TryParse(status, out MemoryStatus? parsedStatus, out statusError))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["queryMode"] = queryModeError is null ? [] : [queryModeError],
+            ["graphMode"] = graphModeError is null ? [] : [graphModeError],
+            ["scope"] = scopeError is null ? [] : [scopeError],
+            ["memoryType"] = memoryTypeError is null ? [] : [memoryTypeError],
+            ["status"] = statusError is null ? [] : [statusError]
+        }.Where(x => x.Value.Length > 0).ToDictionary());
+    }
+
+    var result = await service.GetMemoryGraphAsync(
+        new MemoryGraphRequest(
+            query,
+            tag,
+            string.IsNullOrWhiteSpace(projectId) ? null : projectId.Trim(),
+            string.IsNullOrWhiteSpace(projectQuery) ? null : projectQuery.Trim(),
+            QueryParser.ParseProjectIds(includedProjectIds),
+            parsedQueryMode ?? MemoryQueryMode.CurrentOnly,
+            useSummaryLayer ?? false,
+            parsedGraphMode ?? MemoryGraphMode.Seeded,
+            maxNodes ?? 120,
+            includeSimilarity ?? true,
+            parsedScope,
+            parsedMemoryType,
+            parsedStatus,
+            sourceType),
+        cancellationToken);
+    return Results.Ok(result);
+});
+
 memories.MapGet("/search", async (
     string query,
     int? limit,
@@ -206,7 +273,8 @@ memories.MapGet("/search", async (
             ProjectContext.Normalize(projectId),
             QueryParser.ParseProjectIds(includedProjectIds),
             parsedQueryMode ?? MemoryQueryMode.CurrentOnly,
-            useSummaryLayer ?? false),
+            useSummaryLayer ?? false,
+            new RetrievalTelemetryContext("/api/memories/search", "rest", "dashboard memory search")),
         cancellationToken);
     return Results.Ok(result);
 });
@@ -341,7 +409,273 @@ userPreferences.MapPatch("/{id:guid}", async (Guid id, UserPreferenceArchiveBody
 
 app.MapPost("/api/context/build", async (WorkingContextRequest request, IMemoryService service, CancellationToken cancellationToken) =>
 {
-    var result = await service.BuildWorkingContextAsync(request, cancellationToken);
+    var result = await service.BuildWorkingContextAsync(
+        request with
+        {
+            Telemetry = new RetrievalTelemetryContext("/api/context/build", "rest", "task context bootstrap")
+        },
+        cancellationToken);
+    return Results.Ok(result);
+});
+
+var sources = app.MapGroup("/api/sources");
+sources.MapGet(string.Empty, async (
+    string? projectId,
+    string? enabled,
+    string? sourceKind,
+    ISourceConnectionService service,
+    CancellationToken cancellationToken) =>
+{
+    if (!bool.TryParse(enabled, out var parsedEnabled) && !string.IsNullOrWhiteSpace(enabled))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["enabled"] = ["Enabled must be true or false."]
+        });
+    }
+
+    if (!EnumParser.TryParse(sourceKind, out SourceKind? parsedSourceKind, out var sourceKindError))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["sourceKind"] = [sourceKindError ?? "Unsupported SourceKind value."]
+        });
+    }
+
+    var result = await service.ListAsync(
+        new SourceListRequest(
+            ProjectContext.Normalize(projectId),
+            string.IsNullOrWhiteSpace(enabled) ? null : parsedEnabled,
+            parsedSourceKind),
+        cancellationToken);
+    return Results.Ok(result);
+});
+
+sources.MapPost(string.Empty, async (
+    SourceConnectionCreateRequest request,
+    ISourceConnectionService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.CreateAsync(request, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["source"] = [ex.Message]
+        });
+    }
+});
+
+sources.MapPatch("/{id:guid}", async (
+    Guid id,
+    SourceConnectionPatchBody request,
+    ISourceConnectionService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.UpdateAsync(
+            new SourceConnectionUpdateRequest(
+                id,
+                request.Name,
+                request.ConfigJson,
+                request.SecretJson,
+                request.Enabled,
+                request.ProjectId),
+            cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["source"] = [ex.Message]
+        });
+    }
+});
+
+sources.MapPost("/{id:guid}/sync", async (
+    Guid id,
+    SourceSyncBody request,
+    ISourceConnectionService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.EnqueueSyncAsync(
+        new SourceSyncRequest(
+            id,
+            request.Trigger,
+            request.Force,
+            request.ProjectId),
+        cancellationToken);
+    return Results.Ok(result);
+});
+
+sources.MapGet("/{id:guid}/runs", async (
+    Guid id,
+    string? projectId,
+    ISourceConnectionService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ListRunsAsync(id, projectId, cancellationToken);
+    return Results.Ok(result);
+});
+
+var governance = app.MapGroup("/api/governance");
+governance.MapGet("/findings", async (
+    string? projectId,
+    string? type,
+    string? status,
+    int? limit,
+    IGovernanceService service,
+    CancellationToken cancellationToken) =>
+{
+    string? typeError = null;
+    string? statusError = null;
+    if (!EnumParser.TryParse(type, out GovernanceFindingType? parsedType, out typeError) ||
+        !EnumParser.TryParse(status, out GovernanceFindingStatus? parsedStatus, out statusError))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["type"] = typeError is null ? [] : [typeError],
+            ["status"] = statusError is null ? [] : [statusError]
+        }.Where(x => x.Value.Length > 0).ToDictionary());
+    }
+
+    var result = await service.ListAsync(
+        new GovernanceFindingListRequest(ProjectContext.Normalize(projectId), parsedType, parsedStatus, limit ?? 100),
+        cancellationToken);
+    return Results.Ok(result);
+});
+
+governance.MapPost("/analyze", async (
+    GovernanceAnalyzeRequest request,
+    IGovernanceService governanceService,
+    ISuggestedActionService actionService,
+    CancellationToken cancellationToken) =>
+{
+    var projectId = ProjectContext.Normalize(request.ProjectId);
+    await governanceService.AnalyzeAsync(projectId, cancellationToken);
+
+    var findings = await governanceService.ListAsync(
+        new GovernanceFindingListRequest(projectId, Status: GovernanceFindingStatus.Open),
+        cancellationToken);
+    var actions = await actionService.ListAsync(
+        new SuggestedActionListRequest(projectId),
+        cancellationToken);
+
+    return Results.Ok(new GovernanceAnalyzeResult(
+        projectId,
+        findings.Count,
+        actions.Count,
+        DateTimeOffset.UtcNow));
+});
+
+governance.MapPost("/findings/{id:guid}/accept", async (Guid id, IGovernanceService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.AcceptAsync(id, cancellationToken);
+    return Results.Ok(result);
+});
+
+governance.MapPost("/findings/{id:guid}/dismiss", async (Guid id, IGovernanceService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.DismissAsync(id, cancellationToken);
+    return Results.Ok(result);
+});
+
+var evaluation = app.MapGroup("/api/evaluation");
+evaluation.MapGet("/suites", async (
+    string? projectId,
+    IEvaluationService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ListSuitesAsync(ProjectContext.Normalize(projectId), cancellationToken);
+    return Results.Ok(result);
+});
+
+evaluation.MapPost("/suites", async (
+    EvaluationSuiteCreateRequest request,
+    IEvaluationService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.CreateSuiteAsync(request, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["suite"] = [ex.Message]
+        });
+    }
+});
+
+evaluation.MapPost("/runs", async (
+    EvaluationRunRequest request,
+    IEvaluationService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.RunAsync(request, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["run"] = [ex.Message]
+        });
+    }
+});
+
+evaluation.MapGet("/runs/{id:guid}", async (Guid id, IEvaluationService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.GetRunAsync(id, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+
+var actions = app.MapGroup("/api/actions");
+actions.MapGet(string.Empty, async (
+    string? projectId,
+    string? status,
+    string? type,
+    int? limit,
+    ISuggestedActionService service,
+    CancellationToken cancellationToken) =>
+{
+    string? statusError = null;
+    string? typeError = null;
+    if (!EnumParser.TryParse(status, out SuggestedActionStatus? parsedStatus, out statusError) ||
+        !EnumParser.TryParse(type, out SuggestedActionType? parsedType, out typeError))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["status"] = statusError is null ? [] : [statusError],
+            ["type"] = typeError is null ? [] : [typeError]
+        }.Where(x => x.Value.Length > 0).ToDictionary());
+    }
+
+    var result = await service.ListAsync(
+        new SuggestedActionListRequest(ProjectContext.Normalize(projectId), parsedStatus, parsedType, limit ?? 100),
+        cancellationToken);
+    return Results.Ok(result);
+});
+
+actions.MapPost("/{id:guid}/accept", async (Guid id, ISuggestedActionService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.AcceptAsync(id, cancellationToken);
+    return Results.Ok(result);
+});
+
+actions.MapPost("/{id:guid}/dismiss", async (Guid id, ISuggestedActionService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.DismissAsync(id, cancellationToken);
     return Results.Ok(result);
 });
 
@@ -546,6 +880,16 @@ internal static class ApiValidation
 }
 
 internal sealed record UserPreferenceArchiveBody(bool Archived = true);
+internal sealed record SourceConnectionPatchBody(
+    string? Name = null,
+    string? ConfigJson = null,
+    string? SecretJson = null,
+    bool? Enabled = null,
+    string? ProjectId = null);
+internal sealed record SourceSyncBody(
+    SourceSyncTrigger Trigger = SourceSyncTrigger.Manual,
+    bool Force = false,
+    string? ProjectId = null);
 
 internal static class EnumParser
 {

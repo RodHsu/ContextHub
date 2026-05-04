@@ -154,6 +154,64 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             items.Length));
     }
 
+    public Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)
+    {
+        var candidates = FilterGraphMemories(request, BuildMemories()).ToArray();
+        if (candidates.Length == 0)
+        {
+            return Task.FromResult(new MemoryGraphResult([], [], new MemoryGraphStatsResult(0, 0, 0, false)));
+        }
+
+        var maxNodes = Math.Clamp(request.MaxNodes, 1, 120);
+        var ordered = !string.IsNullOrWhiteSpace(request.Query)
+            ? candidates
+                .OrderByDescending(memory => memory.Title.Contains(request.Query, StringComparison.OrdinalIgnoreCase) ? 3 : 0)
+                .ThenByDescending(memory => memory.Summary.Contains(request.Query, StringComparison.OrdinalIgnoreCase) ? 2 : 0)
+                .ThenByDescending(memory => memory.Importance)
+                .ThenByDescending(memory => memory.UpdatedAt)
+                .ToArray()
+            : candidates
+                .OrderByDescending(memory => memory.Importance)
+                .ThenByDescending(memory => memory.UpdatedAt)
+                .ToArray();
+        var nodes = ordered.Take(maxNodes).ToArray();
+        var seedCount = request.GraphMode == MemoryGraphMode.ProjectFull ? 0 : Math.Min(nodes.Length, Profile == DashboardBrowserTestProfile.Dense ? 2 : 1);
+        var seedIds = nodes.Take(seedCount).Select(node => node.Id).ToArray();
+        var edges = BuildGraphEdges(nodes, seedIds, request.IncludeSimilarity).ToArray();
+        var explicitCounts = BuildEdgeCounts(edges, "explicit");
+        var similarityCounts = BuildEdgeCounts(edges, "similar");
+
+        return Task.FromResult(new MemoryGraphResult(
+            nodes.Select(node => new MemoryGraphNodeResult(
+                    node.Id,
+                    node.Title,
+                    node.Summary,
+                    node.ProjectId,
+                    node.MemoryType,
+                    node.Scope,
+                    node.Status,
+                    node.Tags,
+                    node.SourceType,
+                    node.SourceRef,
+                    node.UpdatedAt,
+                    node.Importance,
+                    node.Confidence,
+                    node.IsReadOnly,
+                    null,
+                    "https://example.com/favicon.ico",
+                    node.SourceType,
+                    explicitCounts.GetValueOrDefault(node.Id),
+                    similarityCounts.GetValueOrDefault(node.Id)))
+                .ToArray(),
+            edges,
+            new MemoryGraphStatsResult(
+                seedCount,
+                nodes.Length,
+                edges.Length,
+                candidates.Length > nodes.Length,
+                candidates.Length > nodes.Length ? $"Graph capped at {maxNodes} nodes. Add filters to reduce the browser-test dataset." : null)));
+    }
+
     public Task<IReadOnlyList<ProjectSuggestionResult>> GetMemoryProjectsAsync(string? query, int limit, CancellationToken cancellationToken)
     {
         var projects = BuildMemories()
@@ -216,7 +274,25 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                             "Active",
                             DateTimeOffset.UtcNow.AddHours(-4))
                     ]))
-                .ToArray()));
+                .ToArray(),
+            [
+                new MemoryLinkResult(
+                    Guid.Parse("b1000000-0000-0000-0000-000000000001"),
+                    document.Id,
+                    BuildMemories().FirstOrDefault(memory => memory.Id != document.Id)?.Id ?? document.Id,
+                    "related",
+                    DateTimeOffset.UtcNow.AddHours(-6))
+            ],
+            null,
+            new MemorySourceContextResult(
+                Guid.Parse("a1000000-0000-0000-0000-000000000001"),
+                "Browser Test Source",
+                "cursor-demo",
+                "v1",
+                "https://example.com/docs/context-hub",
+                DateTimeOffset.UtcNow.AddMinutes(-45),
+                DateTimeOffset.UtcNow.AddMinutes(-30),
+                ["browser-tests", "graph-page"])));
     }
 
     public Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken)
@@ -316,6 +392,84 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     public Task<EnqueueSummaryRefreshResult> EnqueueSummaryRefreshAsync(EnqueueSummaryRefreshRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new EnqueueSummaryRefreshResult(Guid.NewGuid(), MemoryJobStatus.Pending));
+
+    public Task<IReadOnlyList<SourceConnectionResult>> GetSourcesAsync(SourceListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SourceConnectionResult>>(
+            Profile == DashboardBrowserTestProfile.Empty
+                ? []
+                :
+                [
+                    new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, "Local Repo", SourceKind.LocalRepo, true, """{"rootPath":"W:/Repositories/WJCY/ContextHub"}""", false, string.Empty, DateTimeOffset.UtcNow.AddMinutes(-10), DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow)
+                ]);
+
+    public Task<SourceConnectionResult> CreateSourceAsync(SourceConnectionCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, request.Name, request.SourceKind, request.Enabled, request.ConfigJson, !string.IsNullOrWhiteSpace(request.SecretJson), string.Empty, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+    public Task<SourceConnectionResult> UpdateSourceAsync(SourceConnectionUpdateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new SourceConnectionResult(request.Id, request.ProjectId ?? ProjectContext.DefaultProjectId, request.Name ?? "Updated Source", SourceKind.LocalRepo, request.Enabled ?? true, request.ConfigJson ?? "{}", !string.IsNullOrWhiteSpace(request.SecretJson), string.Empty, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow));
+
+    public Task<EnqueueSourceSyncResult> SyncSourceAsync(Guid id, SourceSyncRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new EnqueueSourceSyncResult(Guid.NewGuid(), MemoryJobStatus.Pending));
+
+    public Task<IReadOnlyList<SourceSyncRunResult>> GetSourceRunsAsync(Guid id, string? projectId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SourceSyncRunResult>>(
+        [
+            new SourceSyncRunResult(Guid.NewGuid(), id, projectId ?? ProjectContext.DefaultProjectId, SourceSyncTrigger.Manual, SourceSyncStatus.Completed, 8, 4, 1, 0, "before", "after", string.Empty, DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddMinutes(-4))
+        ]);
+
+    public Task<IReadOnlyList<GovernanceFindingResult>> GetGovernanceFindingsAsync(GovernanceFindingListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<GovernanceFindingResult>>(
+            Profile == DashboardBrowserTestProfile.Empty
+                ? []
+                :
+                [
+                    new GovernanceFindingResult(Guid.NewGuid(), request.ProjectId, null, Guid.NewGuid(), null, GovernanceFindingType.ReindexRequired, GovernanceFindingStatus.Open, "需要重新索引：示範記憶", "目前向量資料未對齊。", "{}", "demo", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow)
+                ]);
+
+    public Task<GovernanceAnalyzeResult> AnalyzeGovernanceAsync(GovernanceAnalyzeRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(
+            Profile == DashboardBrowserTestProfile.Empty
+                ? new GovernanceAnalyzeResult(request.ProjectId, 0, 0, DateTimeOffset.UtcNow)
+                : new GovernanceAnalyzeResult(request.ProjectId, 1, 1, DateTimeOffset.UtcNow));
+
+    public Task<GovernanceFindingResult> AcceptGovernanceFindingAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult(new GovernanceFindingResult(id, ProjectContext.DefaultProjectId, null, Guid.NewGuid(), null, GovernanceFindingType.ReindexRequired, GovernanceFindingStatus.Accepted, "接受 finding", "accepted", "{}", "demo", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow));
+
+    public Task<GovernanceFindingResult> DismissGovernanceFindingAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult(new GovernanceFindingResult(id, ProjectContext.DefaultProjectId, null, Guid.NewGuid(), null, GovernanceFindingType.ReindexRequired, GovernanceFindingStatus.Dismissed, "忽略 finding", "dismissed", "{}", "demo", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<EvaluationSuiteResult>> GetEvaluationSuitesAsync(string projectId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<EvaluationSuiteResult>>(
+            Profile == DashboardBrowserTestProfile.Empty
+                ? []
+                :
+                [
+                    new EvaluationSuiteResult(Guid.NewGuid(), projectId, "Browser Test Suite", "Demo suite", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow, [new EvaluationCaseResult(Guid.NewGuid(), Guid.NewGuid(), projectId, "Scenario", "demo query", [], ["demo-memory"], DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow)])
+                ]);
+
+    public Task<EvaluationSuiteResult> CreateEvaluationSuiteAsync(EvaluationSuiteCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new EvaluationSuiteResult(Guid.NewGuid(), request.ProjectId, request.Name, request.Description, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, []));
+
+    public Task<EvaluationRunResult> RunEvaluationAsync(EvaluationRunRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new EvaluationRunResult(Guid.NewGuid(), request.SuiteId, ProjectContext.DefaultProjectId, EvaluationRunStatus.Completed, "compact", request.QueryMode, request.UseSummaryLayer, request.TopK, 1m, 1m, 1m, 12.5d, string.Empty, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, []));
+
+    public Task<EvaluationRunResult?> GetEvaluationRunAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult<EvaluationRunResult?>(new EvaluationRunResult(id, Guid.NewGuid(), ProjectContext.DefaultProjectId, EvaluationRunStatus.Completed, "compact", MemoryQueryMode.CurrentOnly, false, 5, 1m, 1m, 1m, 10d, string.Empty, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, []));
+
+    public Task<IReadOnlyList<SuggestedActionResult>> GetSuggestedActionsAsync(SuggestedActionListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SuggestedActionResult>>(
+            Profile == DashboardBrowserTestProfile.Empty
+                ? []
+                :
+                [
+                    new SuggestedActionResult(Guid.NewGuid(), request.ProjectId, SuggestedActionType.ReindexProject, SuggestedActionStatus.Pending, "重新索引專案", "評測品質回退。", "{}", string.Empty, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, null)
+                ]);
+
+    public Task<SuggestedActionMutationResult> AcceptSuggestedActionAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult(new SuggestedActionMutationResult(new SuggestedActionResult(id, ProjectContext.DefaultProjectId, SuggestedActionType.ReindexProject, SuggestedActionStatus.Executed, "重新索引專案", "已執行。", "{}", string.Empty, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, DateTimeOffset.UtcNow), Guid.NewGuid()));
+
+    public Task<SuggestedActionResult> DismissSuggestedActionAsync(Guid id, CancellationToken cancellationToken)
+        => Task.FromResult(new SuggestedActionResult(id, ProjectContext.DefaultProjectId, SuggestedActionType.ReindexProject, SuggestedActionStatus.Dismissed, "重新索引專案", "已忽略。", "{}", string.Empty, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, null));
 
     public Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken)
     {
@@ -542,16 +696,17 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     private DashboardPageSnapshotStatusResult BuildPageSnapshotStatus(DateTimeOffset snapshotAtUtc, bool isStale)
     {
+        var effectiveSnapshotAtUtc = isStale ? snapshotAtUtc.AddSeconds(-12) : snapshotAtUtc;
         var warning = isStale ? "Snapshot is stale in browser test profile." : string.Empty;
         return new DashboardPageSnapshotStatusResult(
-            snapshotAtUtc,
+            effectiveSnapshotAtUtc,
             isStale,
             warning,
             [
                 new DashboardSnapshotSectionStatusResult(
                     "statusCore",
                     "核心狀態",
-                    snapshotAtUtc,
+                    effectiveSnapshotAtUtc,
                     Profile == DashboardBrowserTestProfile.Dense ? 1 : 3,
                     isStale,
                     string.Empty,
@@ -559,7 +714,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 new DashboardSnapshotSectionStatusResult(
                     "dependencyResources",
                     "Compose 服務資源",
-                    snapshotAtUtc,
+                    effectiveSnapshotAtUtc,
                     5,
                     isStale,
                     string.Empty,
@@ -686,7 +841,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             : "這是一筆提供給 dashboard browser 測試的示範記憶內容。";
 
         return new MemoryDocument(
-            Guid.NewGuid(),
+            Guid.Parse($"10000000-0000-0000-0000-{index + 1:000000000000}"),
             externalKey,
             MemoryScope.Project,
             index % 3 == 0 ? MemoryType.Decision : index % 2 == 0 ? MemoryType.Fact : MemoryType.Artifact,
@@ -703,9 +858,121 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             "{\"kind\":\"demo\"}",
             DateTimeOffset.UtcNow.AddDays(-1).AddMinutes(-index),
             DateTimeOffset.UtcNow.AddMinutes(-index),
-            readOnly ? "shared" : index % 2 == 0 ? ProjectContext.DefaultProjectId : $"project-{index:00}",
+            readOnly
+                ? "shared"
+                : Profile == DashboardBrowserTestProfile.Dense
+                    ? index % 2 == 0
+                        ? "context-hub-dev-project-with-long-name"
+                        : "ContextHub"
+                    : "ContextHub",
             readOnly);
     }
+
+    private static IReadOnlyList<MemoryDocument> FilterGraphMemories(MemoryGraphRequest request, IReadOnlyList<MemoryDocument> memories)
+    {
+        var query = memories.AsEnumerable();
+
+        if (IsIntegratedAllProjectsGraphRequest(request))
+        {
+            query = query.Where(memory =>
+                !string.Equals(memory.ProjectId, ProjectContext.SharedProjectId, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(memory.ProjectId, ProjectContext.UserProjectId, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.ProjectId))
+        {
+            query = query.Where(memory => string.Equals(memory.ProjectId, request.ProjectId, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.ProjectQuery))
+        {
+            query = query.Where(memory => memory.ProjectId.Contains(request.ProjectQuery, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Query))
+        {
+            query = query.Where(memory =>
+                memory.Title.Contains(request.Query, StringComparison.OrdinalIgnoreCase) ||
+                memory.Summary.Contains(request.Query, StringComparison.OrdinalIgnoreCase) ||
+                memory.SourceRef.Contains(request.Query, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Tag))
+        {
+            query = query.Where(memory => memory.Tags.Contains(request.Tag, StringComparer.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SourceType))
+        {
+            query = query.Where(memory => string.Equals(memory.SourceType, request.SourceType, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (request.Scope.HasValue)
+        {
+            query = query.Where(memory => memory.Scope == request.Scope.Value);
+        }
+
+        if (request.MemoryType.HasValue)
+        {
+            query = query.Where(memory => memory.MemoryType == request.MemoryType.Value);
+        }
+
+        if (request.Status.HasValue)
+        {
+            query = query.Where(memory => memory.Status == request.Status.Value);
+        }
+
+        return query.ToArray();
+    }
+
+    private static bool IsIntegratedAllProjectsGraphRequest(MemoryGraphRequest request)
+        => string.IsNullOrWhiteSpace(request.ProjectId) &&
+           string.IsNullOrWhiteSpace(request.ProjectQuery) &&
+           (request.IncludedProjectIds is null || request.IncludedProjectIds.Count == 0) &&
+           request.QueryMode != MemoryQueryMode.SummaryOnly;
+
+    private IReadOnlyList<MemoryGraphEdgeResult> BuildGraphEdges(IReadOnlyList<MemoryDocument> nodes, IReadOnlyList<Guid> seedIds, bool includeSimilarity)
+    {
+        var edges = new List<MemoryGraphEdgeResult>();
+        if (nodes.Count == 0)
+        {
+            return edges;
+        }
+
+        for (var index = 1; index < Math.Min(nodes.Count, 5); index++)
+        {
+            var fromId = seedIds.Count > 0 ? seedIds[0] : nodes[0].Id;
+            edges.Add(new MemoryGraphEdgeResult(fromId, nodes[index].Id, "explicit", "related"));
+        }
+
+        if (seedIds.Count > 1 && nodes.Count > 3)
+        {
+            edges.Add(new MemoryGraphEdgeResult(seedIds[1], nodes[3].Id, "explicit", "depends-on"));
+        }
+
+        if (includeSimilarity)
+        {
+            foreach (var seedId in seedIds)
+            {
+                foreach (var nodeId in nodes.Where(node => node.Id != seedId).Skip(2).Take(nodes.Count >= 8 ? 3 : 2).Select(node => node.Id))
+                {
+                    edges.Add(new MemoryGraphEdgeResult(seedId, nodeId, "similar", "Similarity", 0.82m));
+                }
+            }
+        }
+
+        return edges
+            .GroupBy(edge => $"{edge.EdgeType}:{edge.FromId}:{edge.ToId}")
+            .Select(group => group.First())
+            .ToArray();
+    }
+
+    private static Dictionary<Guid, int> BuildEdgeCounts(IReadOnlyList<MemoryGraphEdgeResult> edges, string edgeType)
+        => edges
+            .Where(edge => string.Equals(edge.EdgeType, edgeType, StringComparison.OrdinalIgnoreCase))
+            .SelectMany(edge => new[] { (edge.FromId, edge.ToId), (edge.ToId, edge.FromId) })
+            .GroupBy(pair => pair.Item1)
+            .ToDictionary(group => group.Key, group => group.Select(pair => pair.Item2).Distinct().Count());
 
     private IReadOnlyList<UserPreferenceResult> BuildPreferences()
     {

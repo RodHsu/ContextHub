@@ -9,13 +9,17 @@
 <PageTitle>Context Hub | 日誌</PageTitle>
 
 <PageViewport Title="日誌"
-              Subtitle="檢視 DB-first runtime logs，依 service、level、trace 與時間範圍過濾。"
+              Subtitle="依 service、level、trace 與時間範圍查詢 runtime logs。"
               BodyClass="page-viewport-body split-page-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                       IsRefreshing="_loading"
-                       PollingIntervalSeconds="@PollingIntervalSeconds" />
-        <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">查詢</button>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           IsRefreshing="_loading"
+                           PollingIntervalSeconds="@PollingIntervalSeconds" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">查詢</button>
+        </div>
     </Actions>
     <ChildContent>
 
@@ -77,7 +81,7 @@
 
     <div class="split-layout">
         <section class="panel panel-scroll">
-        <div class="panel-title panel-title-nowrap">日誌條目 (@_logs.Count)</div>
+        <div class="panel-title panel-title-nowrap">日誌條目 (@DashboardFormatting.Integer(_logs.Count))</div>
         <div class="table-scroll-shell table-scroll-shell-tall">
             <table class="data-table data-table-clickable logs-table">
                 <thead>

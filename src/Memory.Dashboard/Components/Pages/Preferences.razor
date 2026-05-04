@@ -4,13 +4,19 @@
 <PageTitle>Context Hub | 使用者偏好</PageTitle>
 
 <PageViewport Title="使用者偏好"
-              Subtitle="顯式維護會跨 session / 跨專案沿用的使用者規則，不做自動偷存。"
+              Subtitle="維護會跨 session 與專案沿用的明確偏好。"
               BodyClass="page-viewport-body split-page-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                       IsRefreshing="_loading" />
-        <button class="ghost-button" @onclick="StartNewPreference" disabled="@_loading">建立新偏好</button>
-        <button class="primary-button" @onclick="SaveAsync" disabled="@_loading">儲存偏好</button>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-secondary">
+            <button class="ghost-button" @onclick="StartNewPreference" disabled="@_loading">建立新偏好</button>
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="SaveAsync" disabled="@_loading">儲存偏好</button>
+        </div>
     </Actions>
     <ChildContent>
 
@@ -67,9 +73,9 @@
         <div class="badge-strip">
             @foreach (var kind in Enum.GetValues<UserPreferenceKind>())
             {
-                <button class="ghost-button" @onclick="@(() => FilterAsync(kind))">@DashboardText.Label(kind) (@CountByKind(kind))</button>
+                <button class="ghost-button" @onclick="@(() => FilterAsync(kind))">@DashboardText.Label(kind) (@DashboardFormatting.Integer(CountByKind(kind)))</button>
             }
-            <button class="ghost-button" @onclick="@(() => FilterAsync(null))">全部 (@_allPreferences.Count)</button>
+            <button class="ghost-button" @onclick="@(() => FilterAsync(null))">全部 (@DashboardFormatting.Integer(_allPreferences.Count))</button>
         </div>
 
         <div class="stack-scroll-shell">

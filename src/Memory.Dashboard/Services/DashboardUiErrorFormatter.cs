@@ -1,9 +1,34 @@
 using System.Net;
+using Memory.Application;
 
 namespace Memory.Dashboard.Services;
 
 internal static class DashboardUiErrorFormatter
 {
+    public static string? BuildSnapshotWarning(DashboardPageSnapshotStatusResult? snapshotStatus, string subject)
+    {
+        if (snapshotStatus is null)
+        {
+            return null;
+        }
+
+        if (!snapshotStatus.IsStale)
+        {
+            return string.IsNullOrWhiteSpace(snapshotStatus.Warning)
+                ? null
+                : snapshotStatus.Warning;
+        }
+
+        var age = DateTimeOffset.UtcNow - snapshotStatus.SnapshotAtUtc;
+        if (!string.IsNullOrWhiteSpace(snapshotStatus.Warning))
+        {
+            return snapshotStatus.Warning;
+        }
+
+        var ageSeconds = Math.Max(1, (int)Math.Floor(age.TotalSeconds));
+        return $"{subject}資料延遲 {ageSeconds} 秒，畫面顯示的是最後一份可用資料。";
+    }
+
     public static string BuildLoadError(string subject, Exception exception, bool hasCachedData)
     {
         var prefix = hasCachedData

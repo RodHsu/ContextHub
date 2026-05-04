@@ -1,10 +1,9 @@
 <div class="page-header">
     <div class="page-header-copy">
-        <div class="breadcrumb">@Breadcrumb</div>
         <h1>@Title</h1>
         @if (!string.IsNullOrWhiteSpace(Subtitle))
         {
-            <p class="page-subtitle">@Subtitle</p>
+            <p class="page-subtitle" title="@Subtitle">@Subtitle</p>
         }
     </div>
 

@@ -73,6 +73,8 @@ public static class DependencyInjection
         services.AddScoped<IHybridSearchStore, NpgsqlSearchStore>();
         services.AddScoped<IVectorStore, NpgsqlSearchStore>();
         services.AddScoped<IStorageExplorerStore, NpgsqlStorageExplorerStore>();
+        services.AddScoped<IRetrievalTelemetryService, DatabaseRetrievalTelemetryService>();
+        services.AddSingleton<ISecretProtector, AesSecretProtector>();
 
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnectionString));
         services.AddSingleton<ICacheVersionStore, RedisCacheVersionStore>();

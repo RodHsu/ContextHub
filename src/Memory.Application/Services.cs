@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -16,7 +17,8 @@ public sealed class ChunkingService : IChunkingService
 {
     public IReadOnlyList<ChunkDraft> Chunk(MemoryType memoryType, string sourceType, string content)
     {
-        var kind = ResolveChunkKind(memoryType, sourceType);
+        var normalizedSourceType = sourceType ?? string.Empty;
+        var kind = ResolveChunkKind(memoryType, normalizedSourceType);
         var (targetTokens, overlap) = ResolveChunkWindow(kind);
         var segments = ExpandSegments(kind, content, targetTokens);
 
@@ -381,17 +383,26 @@ public sealed class MemoryService(
     IEmbeddingProvider embeddingProvider,
     ICacheVersionStore cacheStore,
     IClock clock,
-    IInstanceBehaviorSettingsAccessor behaviorSettingsAccessor) : IMemoryService
+    IInstanceBehaviorSettingsAccessor behaviorSettingsAccessor,
+    IRetrievalTelemetryService retrievalTelemetryService) : IMemoryService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<MemoryDocument> UpsertAsync(MemoryUpsertRequest request, CancellationToken cancellationToken)
     {
+        var externalKey = NormalizeRequiredText(request.ExternalKey, nameof(request.ExternalKey));
+        var title = NormalizeRequiredText(request.Title, nameof(request.Title));
+        var content = request.Content ?? string.Empty;
+        var summary = NormalizeSummary(request.Summary, title, content);
+        var sourceType = NormalizeSourceType(request.SourceType);
+        var sourceRef = NormalizeSourceRef(request.SourceRef, externalKey);
+        var tags = NormalizeTags(request.Tags);
+        var metadataJson = NormalizeMetadataJson(request.MetadataJson);
         var projectId = ProjectContext.Normalize(request.ProjectId, ResolveDefaultProjectId(request.Scope, request.MemoryType));
         EnsureWritableProject(projectId, allowSharedLayer: IsSummaryWrite(request));
 
         var entity = await dbContext.MemoryItems
-            .FirstOrDefaultAsync(x => x.ProjectId == projectId && x.ExternalKey == request.ExternalKey, cancellationToken);
+            .FirstOrDefaultAsync(x => x.ProjectId == projectId && x.ExternalKey == externalKey, cancellationToken);
         var previousType = entity?.MemoryType;
 
         if (entity is null)
@@ -399,18 +410,18 @@ public sealed class MemoryService(
             entity = new MemoryItem
             {
                 ProjectId = projectId,
-                ExternalKey = request.ExternalKey,
+                ExternalKey = externalKey,
                 Scope = request.Scope,
                 MemoryType = request.MemoryType,
-                Title = request.Title,
-                Content = request.Content,
-                Summary = request.Summary,
-                SourceType = request.SourceType,
-                SourceRef = request.SourceRef,
-                Tags = request.Tags.ToArray(),
+                Title = title,
+                Content = content,
+                Summary = summary,
+                SourceType = sourceType,
+                SourceRef = sourceRef,
+                Tags = tags,
                 Importance = request.Importance,
                 Confidence = request.Confidence,
-                MetadataJson = request.MetadataJson,
+                MetadataJson = metadataJson,
                 IsReadOnly = projectId == ProjectContext.SharedProjectId,
                 CreatedAt = clock.UtcNow,
                 UpdatedAt = clock.UtcNow
@@ -422,22 +433,22 @@ public sealed class MemoryService(
             EnsureMemoryWritable(entity, allowSharedLayer: IsSummaryWrite(request));
             entity.Scope = request.Scope;
             entity.MemoryType = request.MemoryType;
-            entity.Title = request.Title;
-            entity.Content = request.Content;
-            entity.Summary = request.Summary;
-            entity.SourceType = request.SourceType;
-            entity.SourceRef = request.SourceRef;
-            entity.Tags = request.Tags.ToArray();
+            entity.Title = title;
+            entity.Content = content;
+            entity.Summary = summary;
+            entity.SourceType = sourceType;
+            entity.SourceRef = sourceRef;
+            entity.Tags = tags;
             entity.Importance = request.Importance;
             entity.Confidence = request.Confidence;
-            entity.MetadataJson = request.MetadataJson;
+            entity.MetadataJson = metadataJson;
             entity.IsReadOnly = projectId == ProjectContext.SharedProjectId;
             entity.Version += 1;
             entity.UpdatedAt = clock.UtcNow;
         }
 
         await AddRevisionAsync(entity, "upsert", cancellationToken);
-        await ReplaceChunksAsync(entity, request.Content, cancellationToken);
+        await ReplaceChunksAsync(entity, content, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         await InvalidateCachesAsync(cancellationToken);
 
@@ -501,83 +512,311 @@ public sealed class MemoryService(
 
     public async Task<IReadOnlyList<MemorySearchHit>> SearchAsync(MemorySearchRequest request, CancellationToken cancellationToken)
     {
+        var stopwatch = Stopwatch.StartNew();
         var allowedProjects = ProjectContext.ResolveSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
         var version = await cacheStore.GetVersionAsync(cancellationToken);
         var cacheKey = $"search:{version}:{Sha(request.Query)}:{request.Limit}:{request.IncludeArchived}:{string.Join("|", allowedProjects.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))}";
         var cached = await cacheStore.GetAsync<IReadOnlyList<MemorySearchHit>>(cacheKey, cancellationToken);
+        var cacheHit = cached is not null;
         if (cached is not null)
         {
+            await TryRecordSearchTelemetryAsync(request, cached, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, cancellationToken);
             return cached;
         }
 
-        var keywordHits = await searchStore.SearchKeywordChunksAsync(request.Query, request.Limit * 4, cancellationToken);
-        var queryVector = await embeddingProvider.EmbedAsync(request.Query, EmbeddingPurpose.Query, cancellationToken);
-        var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, request.Limit * 4, cancellationToken);
+        try
+        {
+            var keywordHits = await searchStore.SearchKeywordChunksAsync(request.Query, request.Limit * 4, cancellationToken);
+            var queryVector = await embeddingProvider.EmbedAsync(request.Query, EmbeddingPurpose.Query, cancellationToken);
+            var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, request.Limit * 4, cancellationToken);
 
-        var itemIds = keywordHits.Select(x => x.MemoryId).Concat(semanticHits.Select(x => x.MemoryId)).Distinct().ToArray();
-        var items = await dbContext.MemoryItems
-            .Where(x => itemIds.Contains(x.Id))
-            .Where(x => allowedProjects.Contains(x.ProjectId))
-            .ToDictionaryAsync(x => x.Id, cancellationToken);
-        var merged = HybridSearchComposer.Compose(keywordHits, semanticHits, items, request.Limit, request.IncludeArchived);
+            var itemIds = keywordHits.Select(x => x.MemoryId).Concat(semanticHits.Select(x => x.MemoryId)).Distinct().ToArray();
+            var items = await dbContext.MemoryItems
+                .Where(x => itemIds.Contains(x.Id))
+                .Where(x => allowedProjects.Contains(x.ProjectId))
+                .ToDictionaryAsync(x => x.Id, cancellationToken);
+            var merged = HybridSearchComposer.Compose(keywordHits, semanticHits, items, request.Limit, request.IncludeArchived);
 
-        await cacheStore.SetAsync(cacheKey, merged, TimeSpan.FromMinutes(5), cancellationToken);
-        return merged;
+            await cacheStore.SetAsync(cacheKey, merged, TimeSpan.FromMinutes(5), cancellationToken);
+            await TryRecordSearchTelemetryAsync(request, merged, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, cancellationToken);
+            return merged;
+        }
+        catch (Exception ex)
+        {
+            await TryRecordSearchTelemetryAsync(request, [], cacheHit, stopwatch.Elapsed.TotalMilliseconds, false, ex.Message, cancellationToken);
+            throw;
+        }
     }
 
     public async Task<WorkingContextResult> BuildWorkingContextAsync(WorkingContextRequest request, CancellationToken cancellationToken)
     {
+        var stopwatch = Stopwatch.StartNew();
         var allowedProjects = ProjectContext.ResolveSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
         var version = await cacheStore.GetVersionAsync(cancellationToken);
         var cacheKey = $"context:{version}:{Sha(request.Query)}:{request.Limit}:{request.RecentLogLimit}:{string.Join("|", allowedProjects.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))}";
         var cached = await cacheStore.GetAsync<WorkingContextResult>(cacheKey, cancellationToken);
+        var cacheHit = cached is not null;
         if (cached is not null)
         {
+            await TryRecordWorkingContextTelemetryAsync(request, [], cached, cacheHit, false, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, cancellationToken);
             return cached;
         }
 
-        var hits = await SearchAsync(
-            new MemorySearchRequest(
-                request.Query,
-                request.Limit * 3,
+        IReadOnlyList<MemorySearchHit> hits = [];
+        var usedFallback = false;
+        try
+        {
+            hits = await SearchAsync(
+                new MemorySearchRequest(
+                    request.Query,
+                    request.Limit * 3,
+                    false,
+                    request.ProjectId,
+                    request.IncludedProjectIds,
+                    request.QueryMode,
+                    request.UseSummaryLayer,
+                    new RetrievalTelemetryContext("build_working_context.search", "internal", "working context seed search", false)),
+                cancellationToken);
+            if (hits.Count == 0)
+            {
+                hits = await LoadFallbackWorkingContextHitsAsync(allowedProjects, request.Limit * 3, cancellationToken);
+                usedFallback = hits.Count > 0;
+            }
+
+            var logService = new LogQueryService(dbContext);
+            var recentLogs = await logService.SearchAsync(
+                new LogQueryRequest(Query: request.Query, Limit: request.RecentLogLimit, ProjectId: request.ProjectId),
+                cancellationToken);
+            var userPreferenceSearch = await SearchUserPreferencesAsync(request.Query, 3, cancellationToken);
+
+            var facts = MapContext(hits.Where(x => x.MemoryType == MemoryType.Fact).Take(request.Limit));
+            var decisions = MapContext(hits.Where(x => x.MemoryType == MemoryType.Decision).Take(request.Limit));
+            var episodes = MapContext(hits.Where(x => x.MemoryType == MemoryType.Episode).Take(request.Limit));
+            var artifacts = MapContext(hits.Where(x => x.MemoryType is MemoryType.Artifact or MemoryType.Summary).Take(request.Limit));
+            var suggestedTests = recentLogs.Where(x => x.Level is "Error" or "Warning")
+                .Select(x => $"Verify service '{x.ServiceName}' around trace '{x.TraceId}'.")
+                .Distinct()
+                .Take(request.Limit)
+                .ToArray();
+            var citations = hits.Take(request.Limit * 2)
+                .Select(x => new WorkingContextCitation(x.MemoryId, null, x.SourceRef, x.Excerpt, x.ProjectId))
+                .Concat(userPreferenceSearch.Citations)
+                .ToArray();
+
+            var result = new WorkingContextResult(
+                facts,
+                decisions,
+                episodes,
+                artifacts,
+                recentLogs,
+                userPreferenceSearch.Preferences,
+                suggestedTests,
+                citations);
+            await cacheStore.SetAsync(cacheKey, result, TimeSpan.FromMinutes(5), cancellationToken);
+            await TryRecordWorkingContextTelemetryAsync(request, hits, result, cacheHit, usedFallback, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, cancellationToken);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            await TryRecordWorkingContextTelemetryAsync(
+                request,
+                hits,
+                new WorkingContextResult([], [], [], [], [], [], [], []),
+                cacheHit,
+                usedFallback,
+                stopwatch.Elapsed.TotalMilliseconds,
                 false,
-                request.ProjectId,
-                request.IncludedProjectIds,
-                request.QueryMode,
-                request.UseSummaryLayer),
-            cancellationToken);
-        var logService = new LogQueryService(dbContext);
-        var recentLogs = await logService.SearchAsync(
-            new LogQueryRequest(Query: request.Query, Limit: request.RecentLogLimit, ProjectId: request.ProjectId),
-            cancellationToken);
-        var userPreferenceSearch = await SearchUserPreferencesAsync(request.Query, 3, cancellationToken);
-
-        var facts = MapContext(hits.Where(x => x.MemoryType == MemoryType.Fact).Take(request.Limit));
-        var decisions = MapContext(hits.Where(x => x.MemoryType == MemoryType.Decision).Take(request.Limit));
-        var episodes = MapContext(hits.Where(x => x.MemoryType == MemoryType.Episode).Take(request.Limit));
-        var artifacts = MapContext(hits.Where(x => x.MemoryType is MemoryType.Artifact or MemoryType.Summary).Take(request.Limit));
-        var suggestedTests = recentLogs.Where(x => x.Level is "Error" or "Warning")
-            .Select(x => $"Verify service '{x.ServiceName}' around trace '{x.TraceId}'.")
-            .Distinct()
-            .Take(request.Limit)
-            .ToArray();
-        var citations = hits.Take(request.Limit * 2)
-            .Select(x => new WorkingContextCitation(x.MemoryId, null, x.SourceRef, x.Excerpt, x.ProjectId))
-            .Concat(userPreferenceSearch.Citations)
-            .ToArray();
-
-        var result = new WorkingContextResult(
-            facts,
-            decisions,
-            episodes,
-            artifacts,
-            recentLogs,
-            userPreferenceSearch.Preferences,
-            suggestedTests,
-            citations);
-        await cacheStore.SetAsync(cacheKey, result, TimeSpan.FromMinutes(5), cancellationToken);
-        return result;
+                ex.Message,
+                cancellationToken);
+            throw;
+        }
     }
+
+    private async Task<IReadOnlyList<MemorySearchHit>> LoadFallbackWorkingContextHitsAsync(
+        IReadOnlyList<string> allowedProjects,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        if (allowedProjects.Count == 0 || limit < 1)
+        {
+            return [];
+        }
+
+        var items = await dbContext.MemoryItems
+            .AsNoTracking()
+            .Where(x => allowedProjects.Contains(x.ProjectId))
+            .Where(x => x.Status != MemoryStatus.Archived)
+            .OrderByDescending(x => x.Importance)
+            .ThenByDescending(x => x.UpdatedAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        return items
+            .Select(item => new MemorySearchHit(
+                item.Id,
+                item.Title,
+                item.MemoryType,
+                item.Scope,
+                item.Importance,
+                BuildFallbackExcerpt(item),
+                item.SourceType,
+                item.SourceRef,
+                item.Tags,
+                item.ProjectId))
+            .ToArray();
+    }
+
+    private static string BuildFallbackExcerpt(MemoryItem item)
+    {
+        var excerpt = !string.IsNullOrWhiteSpace(item.Summary)
+            ? item.Summary
+            : item.Content;
+        if (string.IsNullOrWhiteSpace(excerpt))
+        {
+            return item.Title;
+        }
+
+        const int maxLength = 220;
+        excerpt = excerpt.Trim();
+        return excerpt.Length <= maxLength ? excerpt : $"{excerpt[..maxLength]}…";
+    }
+
+    private async Task TryRecordSearchTelemetryAsync(
+        MemorySearchRequest request,
+        IReadOnlyList<MemorySearchHit> hits,
+        bool cacheHit,
+        double durationMs,
+        bool success,
+        string error,
+        CancellationToken cancellationToken)
+    {
+        if (request.Telemetry?.Enabled == false)
+        {
+            return;
+        }
+
+        var context = request.Telemetry ?? new RetrievalTelemetryContext("memory.search", "internal", "memory search");
+        var purpose = string.IsNullOrWhiteSpace(context.Purpose) ? "memory search" : context.Purpose!;
+        var hitSnapshots = hits
+            .Take(Math.Min(request.Limit, 10))
+            .Select((hit, index) => new RetrievalTelemetryHitWriteRequest(
+                index + 1,
+                hit.MemoryId,
+                hit.Title,
+                hit.MemoryType.ToString(),
+                hit.SourceType,
+                hit.SourceRef,
+                hit.Score,
+                hit.Excerpt,
+                hit.ProjectId))
+            .ToArray();
+
+        await TryRecordTelemetryAsync(
+            new RetrievalTelemetryWriteRequest(
+                ProjectContext.Normalize(request.ProjectId),
+                context.Channel,
+                context.EntryPoint,
+                purpose,
+                request.Query,
+                request.QueryMode.ToString(),
+                request.IncludedProjectIds ?? [],
+                request.UseSummaryLayer,
+                request.Limit,
+                cacheHit,
+                hits.Count,
+                durationMs,
+                success,
+                error,
+                "{}",
+                GetTraceId(),
+                GetRequestId(),
+                hitSnapshots),
+            cancellationToken);
+    }
+
+    private async Task TryRecordWorkingContextTelemetryAsync(
+        WorkingContextRequest request,
+        IReadOnlyList<MemorySearchHit> hits,
+        WorkingContextResult result,
+        bool cacheHit,
+        bool usedFallback,
+        double durationMs,
+        bool success,
+        string error,
+        CancellationToken cancellationToken)
+    {
+        if (request.Telemetry?.Enabled == false)
+        {
+            return;
+        }
+
+        var context = request.Telemetry ?? new RetrievalTelemetryContext("build_working_context", "internal", "working context bootstrap");
+        var purpose = string.IsNullOrWhiteSpace(context.Purpose) ? "working context bootstrap" : context.Purpose!;
+        var metadataJson = JsonSerializer.Serialize(new
+        {
+            request.RecentLogLimit,
+            usedFallback,
+            facts = result.Facts.Count,
+            decisions = result.Decisions.Count,
+            episodes = result.Episodes.Count,
+            artifacts = result.Artifacts.Count,
+            recentLogs = result.RecentLogs.Count,
+            userPreferences = result.UserPreferences.Count,
+            suggestedTests = result.SuggestedTests.Count
+        }, JsonOptions);
+        var hitSnapshots = hits
+            .Take(Math.Min(request.Limit * 2, 10))
+            .Select((hit, index) => new RetrievalTelemetryHitWriteRequest(
+                index + 1,
+                hit.MemoryId,
+                hit.Title,
+                hit.MemoryType.ToString(),
+                hit.SourceType,
+                hit.SourceRef,
+                hit.Score,
+                hit.Excerpt,
+                hit.ProjectId))
+            .ToArray();
+
+        await TryRecordTelemetryAsync(
+            new RetrievalTelemetryWriteRequest(
+                ProjectContext.Normalize(request.ProjectId),
+                context.Channel,
+                context.EntryPoint,
+                purpose,
+                request.Query,
+                request.QueryMode.ToString(),
+                request.IncludedProjectIds ?? [],
+                request.UseSummaryLayer,
+                request.Limit,
+                cacheHit,
+                result.Facts.Count + result.Decisions.Count + result.Episodes.Count + result.Artifacts.Count,
+                durationMs,
+                success,
+                error,
+                metadataJson,
+                GetTraceId(),
+                GetRequestId(),
+                hitSnapshots),
+            cancellationToken);
+    }
+
+    private async Task TryRecordTelemetryAsync(RetrievalTelemetryWriteRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await retrievalTelemetryService.RecordAsync(request, cancellationToken);
+        }
+        catch
+        {
+        }
+    }
+
+    private static string GetTraceId()
+        => Activity.Current?.TraceId.ToString() ?? string.Empty;
+
+    private static string GetRequestId()
+        => Activity.Current?.SpanId.ToString() ?? string.Empty;
 
     public async Task<EnqueueReindexResult> EnqueueReindexAsync(EnqueueReindexRequest request, CancellationToken cancellationToken)
     {
@@ -601,8 +840,11 @@ public sealed class MemoryService(
 
     public async Task<EnqueueSummaryRefreshResult> EnqueueSummaryRefreshAsync(EnqueueSummaryRefreshRequest request, CancellationToken cancellationToken)
     {
-        var projectId = ProjectContext.Normalize(request.ProjectId);
-        var referenced = (request.IncludedProjectIds ?? [])
+        var rebuildAll = string.IsNullOrWhiteSpace(request.ProjectId);
+        var projectId = rebuildAll ? null : ProjectContext.Normalize(request.ProjectId);
+        var referenced = rebuildAll
+            ? []
+            : (request.IncludedProjectIds ?? [])
             .Select(x => ProjectContext.Normalize(x))
             .Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -610,10 +852,10 @@ public sealed class MemoryService(
 
         var job = new MemoryJob
         {
-            ProjectId = projectId,
+            ProjectId = rebuildAll ? ProjectContext.SharedProjectId : projectId!,
             JobType = MemoryJobType.RefreshSummary,
             Status = MemoryJobStatus.Pending,
-            PayloadJson = JsonSerializer.Serialize(new SummaryRefreshJobPayload(projectId, referenced), JsonOptions),
+            PayloadJson = JsonSerializer.Serialize(new SummaryRefreshJobPayload(projectId, referenced, rebuildAll), JsonOptions),
             CreatedAt = clock.UtcNow
         };
 
@@ -655,6 +897,60 @@ public sealed class MemoryService(
 
         return IsSharedSummarySourceType(currentType) || (previousType.HasValue && IsSharedSummarySourceType(previousType.Value));
     }
+
+    private static string NormalizeRequiredText(string? value, string fieldName)
+    {
+        var normalized = value?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new InvalidOperationException($"{fieldName} is required.");
+        }
+
+        return normalized;
+    }
+
+    private static string NormalizeSummary(string? summary, string title, string content)
+    {
+        var normalized = summary?.Trim();
+        if (!string.IsNullOrWhiteSpace(normalized))
+        {
+            return normalized;
+        }
+
+        if (!string.IsNullOrWhiteSpace(content))
+        {
+            var collapsed = content.ReplaceLineEndings(" ").Trim();
+            return collapsed.Length <= 280
+                ? collapsed
+                : $"{collapsed[..280].TrimEnd()}…";
+        }
+
+        return title;
+    }
+
+    private static string NormalizeSourceType(string? sourceType)
+        => string.IsNullOrWhiteSpace(sourceType)
+            ? "document"
+            : sourceType.Trim();
+
+    private static string NormalizeSourceRef(string? sourceRef, string externalKey)
+        => string.IsNullOrWhiteSpace(sourceRef)
+            ? externalKey
+            : sourceRef.Trim();
+
+    private static string[] NormalizeTags(IReadOnlyList<string>? tags)
+        => tags is null
+            ? []
+            : tags
+                .Where(tag => !string.IsNullOrWhiteSpace(tag))
+                .Select(tag => tag.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private static string NormalizeMetadataJson(string? metadataJson)
+        => string.IsNullOrWhiteSpace(metadataJson)
+            ? "{}"
+            : metadataJson;
 
     private static bool IsSharedSummarySourceType(MemoryType memoryType)
         => memoryType is MemoryType.Fact or MemoryType.Decision or MemoryType.Artifact;
@@ -957,7 +1253,7 @@ public sealed class MemoryService(
         IReadOnlyList<WorkingContextCitation> Citations);
 
     private sealed record ReindexJobPayload(string ModelKey, Guid? MemoryItemId, string ProjectId);
-    private sealed record SummaryRefreshJobPayload(string ProjectId, IReadOnlyList<string> IncludedProjectIds);
+    private sealed record SummaryRefreshJobPayload(string? ProjectId, IReadOnlyList<string> IncludedProjectIds, bool RebuildAll);
 }
 
 public sealed class LogQueryService(IApplicationDbContext dbContext) : ILogQueryService
@@ -993,12 +1289,14 @@ public sealed class LogQueryService(IApplicationDbContext dbContext) : ILogQuery
 
         if (request.From.HasValue)
         {
-            query = query.Where(x => x.CreatedAt >= request.From.Value);
+            var fromUtc = NormalizeUtc(request.From.Value);
+            query = query.Where(x => x.CreatedAt >= fromUtc);
         }
 
         if (request.To.HasValue)
         {
-            query = query.Where(x => x.CreatedAt <= request.To.Value);
+            var toUtc = NormalizeUtc(request.To.Value);
+            query = query.Where(x => x.CreatedAt <= toUtc);
         }
 
         if (!string.IsNullOrWhiteSpace(request.Query))
@@ -1034,6 +1332,9 @@ public sealed class LogQueryService(IApplicationDbContext dbContext) : ILogQuery
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
 
+    private static DateTimeOffset NormalizeUtc(DateTimeOffset value)
+        => value.Offset == TimeSpan.Zero ? value : value.ToUniversalTime();
+
     public async Task<LogEntryResult?> GetAsync(long id, CancellationToken cancellationToken)
     {
         return await dbContext.RuntimeLogEntries
@@ -1059,7 +1360,11 @@ public sealed class BackgroundJobProcessor(
     IEmbeddingProvider embeddingProvider,
     IVectorStore vectorStore,
     IClock clock,
-    IConversationAutomationService conversationAutomationService) : IBackgroundJobProcessor
+    IConversationAutomationService conversationAutomationService,
+    ISourceSyncService sourceSyncService,
+    IGovernanceService governanceService,
+    IEvaluationService evaluationService,
+    ISuggestedActionService suggestedActionService) : IBackgroundJobProcessor
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -1093,6 +1398,18 @@ public sealed class BackgroundJobProcessor(
                     break;
                 case MemoryJobType.PromoteConversationInsights:
                     await ProcessConversationPromotionAsync(job, cancellationToken);
+                    break;
+                case MemoryJobType.SyncSource:
+                    await ProcessSourceSyncAsync(job, cancellationToken);
+                    break;
+                case MemoryJobType.AnalyzeGovernance:
+                    await ProcessGovernanceAnalysisAsync(job, cancellationToken);
+                    break;
+                case MemoryJobType.RunEvaluation:
+                    await ProcessEvaluationAsync(job, cancellationToken);
+                    break;
+                case MemoryJobType.ExecuteSuggestedAction:
+                    await ProcessSuggestedActionAsync(job, cancellationToken);
                     break;
             }
 
@@ -1153,9 +1470,42 @@ public sealed class BackgroundJobProcessor(
     private async Task ProcessRefreshSummaryAsync(MemoryJob job, CancellationToken cancellationToken)
     {
         var payload = JsonSerializer.Deserialize<SummaryRefreshJobPayload>(job.PayloadJson, JsonOptions)
-            ?? new SummaryRefreshJobPayload(job.ProjectId, []);
-        var projectIds = payload.IncludedProjectIds
-            .Append(ProjectContext.Normalize(payload.ProjectId, job.ProjectId))
+            ?? new SummaryRefreshJobPayload(job.ProjectId, [], false);
+
+        if (payload.RebuildAll || string.IsNullOrWhiteSpace(payload.ProjectId))
+        {
+            var projectIds = (await dbContext.MemoryItems
+                .Select(x => x.ProjectId)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToListAsync(cancellationToken))
+                .Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x))
+                .ToList();
+
+            foreach (var projectId in projectIds)
+            {
+                await RefreshSharedSummaryForProjectAsync(projectId, [], cancellationToken);
+            }
+
+            return;
+        }
+
+        await RefreshSharedSummaryForProjectAsync(
+            ProjectContext.Normalize(payload.ProjectId, job.ProjectId),
+            payload.IncludedProjectIds,
+            cancellationToken);
+    }
+
+    private async Task RefreshSharedSummaryForProjectAsync(
+        string projectId,
+        IReadOnlyList<string>? includedProjectIds,
+        CancellationToken cancellationToken)
+    {
+        var normalizedProjectId = ProjectContext.Normalize(projectId);
+        var projectIds = (includedProjectIds ?? [])
+            .Select(x => ProjectContext.Normalize(x))
+            .Append(normalizedProjectId)
+            .Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -1179,13 +1529,13 @@ public sealed class BackgroundJobProcessor(
             ? "No reusable project knowledge is available yet."
             : string.Join(Environment.NewLine, sourceItems.Select(x => $"- [{x.ProjectId}] {x.Title}: {x.Summary}"));
         var summary = sourceItems.Count == 0
-            ? $"No shared summary is available for project '{payload.ProjectId}'."
-            : $"Shared summary for project '{payload.ProjectId}' and {Math.Max(0, projectIds.Length - 1)} referenced project(s).";
+            ? $"No shared summary is available for project '{normalizedProjectId}'."
+            : $"Shared summary for project '{normalizedProjectId}' and {Math.Max(0, projectIds.Length - 1)} referenced project(s).";
 
         var entity = await dbContext.MemoryItems
             .FirstOrDefaultAsync(
                 x => x.ProjectId == ProjectContext.SharedProjectId &&
-                     x.ExternalKey == BuildSharedSummaryExternalKey(payload.ProjectId),
+                     x.ExternalKey == BuildSharedSummaryExternalKey(normalizedProjectId),
                 cancellationToken);
 
         if (entity is null)
@@ -1193,22 +1543,22 @@ public sealed class BackgroundJobProcessor(
             entity = new MemoryItem
             {
                 ProjectId = ProjectContext.SharedProjectId,
-                ExternalKey = BuildSharedSummaryExternalKey(payload.ProjectId),
+                ExternalKey = BuildSharedSummaryExternalKey(normalizedProjectId),
                 Scope = MemoryScope.Project,
                 MemoryType = MemoryType.Summary,
-                Title = $"Shared summary for {payload.ProjectId}",
+                Title = $"Shared summary for {normalizedProjectId}",
                 SourceType = "summary-layer",
-                SourceRef = payload.ProjectId,
+                SourceRef = normalizedProjectId,
                 IsReadOnly = true,
                 CreatedAt = clock.UtcNow
             };
             await dbContext.MemoryItems.AddAsync(entity, cancellationToken);
         }
 
-        entity.Title = $"Shared summary for {payload.ProjectId}";
+        entity.Title = $"Shared summary for {normalizedProjectId}";
         entity.Content = content;
         entity.Summary = summary;
-        entity.Tags = ["summary-layer", $"project:{payload.ProjectId}"];
+        entity.Tags = ["summary-layer", $"project:{normalizedProjectId}"];
         entity.Importance = 0.85m;
         entity.Confidence = 0.8m;
         entity.Version = entity.Version <= 0 ? 1 : entity.Version + 1;
@@ -1265,6 +1615,30 @@ public sealed class BackgroundJobProcessor(
         await conversationAutomationService.PromotePendingInsightsAsync(payload.ConversationId, payload.ProjectId, cancellationToken);
     }
 
+    private Task ProcessSourceSyncAsync(MemoryJob job, CancellationToken cancellationToken)
+        => sourceSyncService.ProcessSyncJobAsync(job.Id, cancellationToken);
+
+    private async Task ProcessGovernanceAnalysisAsync(MemoryJob job, CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Deserialize<GovernanceAnalysisJobPayload>(job.PayloadJson, JsonOptions)
+            ?? throw new InvalidOperationException("Governance analysis payload is invalid.");
+        await governanceService.AnalyzeAsync(payload.ProjectId, cancellationToken);
+    }
+
+    private async Task ProcessEvaluationAsync(MemoryJob job, CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Deserialize<EvaluationRunRequest>(job.PayloadJson, JsonOptions)
+            ?? throw new InvalidOperationException("Evaluation run payload is invalid.");
+        await evaluationService.RunAsync(payload, cancellationToken);
+    }
+
+    private async Task ProcessSuggestedActionAsync(MemoryJob job, CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Deserialize<ExecuteSuggestedActionPayload>(job.PayloadJson, JsonOptions)
+            ?? throw new InvalidOperationException("Suggested action payload is invalid.");
+        await suggestedActionService.AcceptAsync(payload.ActionId, cancellationToken);
+    }
+
     private static IReadOnlyList<ChunkDraft> ChunkingServiceChunk(string content)
         => new ChunkingService().Chunk(MemoryType.Summary, "summary-layer", content);
 
@@ -1272,9 +1646,11 @@ public sealed class BackgroundJobProcessor(
         => $"shared-summary:{ProjectContext.Normalize(projectId)}";
 
     private sealed record ReindexJobPayload(string? ModelKey, Guid? MemoryItemId, string ProjectId);
-    private sealed record SummaryRefreshJobPayload(string ProjectId, IReadOnlyList<string> IncludedProjectIds);
+    private sealed record SummaryRefreshJobPayload(string? ProjectId, IReadOnlyList<string> IncludedProjectIds, bool RebuildAll);
     private sealed record ConversationCheckpointJobPayload(Guid CheckpointId);
     private sealed record ConversationPromotionJobPayload(string ConversationId, string ProjectId);
+    private sealed record GovernanceAnalysisJobPayload(string ProjectId);
+    private sealed record ExecuteSuggestedActionPayload(Guid ActionId);
     private sealed record SummaryCitation(Guid MemoryId, string ProjectId, string Title, string SourceRef);
     private sealed record SharedSummaryMetadata(IReadOnlyList<string> SourceProjects, IReadOnlyList<SummaryCitation> Citations);
 }
@@ -1292,6 +1668,11 @@ public static class DependencyInjection
         services.AddScoped<IPerformanceProbeService, PerformanceProbeService>();
         services.AddScoped<IInstanceBehaviorSettingsAccessor, InstanceBehaviorSettingsAccessor>();
         services.AddScoped<IConversationAutomationService, ConversationAutomationService>();
+        services.AddScoped<ISourceConnectionService, SourceConnectionService>();
+        services.AddScoped<ISourceSyncService, SourceSyncService>();
+        services.AddScoped<IGovernanceService, GovernanceService>();
+        services.AddScoped<IEvaluationService, EvaluationService>();
+        services.AddScoped<ISuggestedActionService, SuggestedActionService>();
         services.AddScoped<IBackgroundJobProcessor, BackgroundJobProcessor>();
         return services;
     }

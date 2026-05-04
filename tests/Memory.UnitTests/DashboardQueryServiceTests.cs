@@ -63,6 +63,7 @@ public sealed class DashboardQueryServiceTests
             new UnusedApplicationDbContext(),
             new UnusedStorageExplorerStore(),
             snapshotStore,
+            new UnusedMemoryService(),
             new FixedTimeProvider(now));
 
         var monitoring = await service.GetMonitoringAsync(CancellationToken.None);
@@ -168,6 +169,7 @@ public sealed class DashboardQueryServiceTests
             new UnusedApplicationDbContext(),
             new UnusedStorageExplorerStore(),
             snapshotStore,
+            new UnusedMemoryService(),
             new FixedTimeProvider(now));
 
         var overview = await service.GetOverviewAsync(CancellationToken.None);
@@ -216,6 +218,45 @@ public sealed class DashboardQueryServiceTests
             => throw new NotSupportedException();
     }
 
+    private sealed class UnusedMemoryService : IMemoryService
+    {
+        public Task<MemoryDocument> UpsertAsync(MemoryUpsertRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<MemoryDocument> UpdateAsync(MemoryUpdateRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<MemoryDocument?> GetAsync(Guid id, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<MemorySearchHit>> SearchAsync(MemorySearchRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<WorkingContextResult> BuildWorkingContextAsync(WorkingContextRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<EnqueueReindexResult> EnqueueReindexAsync(EnqueueReindexRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<EnqueueSummaryRefreshResult> EnqueueSummaryRefreshAsync(EnqueueSummaryRefreshRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<JobResult?> GetJobAsync(Guid id, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<MemoryDocument> PromoteLogSliceAsync(PromoteLogSliceRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<UserPreferenceResult> UpsertUserPreferenceAsync(UserPreferenceUpsertRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<UserPreferenceResult>> ListUserPreferencesAsync(UserPreferenceListRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<UserPreferenceResult> ArchiveUserPreferenceAsync(UserPreferenceArchiveRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+    }
+
     private sealed class UnusedApplicationDbContext : IApplicationDbContext
     {
         public DbSet<InstanceSetting> InstanceSettings => throw new NotSupportedException();
@@ -227,6 +268,14 @@ public sealed class DashboardQueryServiceTests
         public DbSet<MemoryJob> MemoryJobs => throw new NotSupportedException();
         public DbSet<RuntimeLogEntry> RuntimeLogEntries => throw new NotSupportedException();
         public DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints => throw new NotSupportedException();
+        public DbSet<SourceConnection> SourceConnections => throw new NotSupportedException();
+        public DbSet<SourceSyncRun> SourceSyncRuns => throw new NotSupportedException();
+        public DbSet<GovernanceFinding> GovernanceFindings => throw new NotSupportedException();
+        public DbSet<EvaluationSuite> EvaluationSuites => throw new NotSupportedException();
+        public DbSet<EvaluationCase> EvaluationCases => throw new NotSupportedException();
+        public DbSet<EvaluationRun> EvaluationRuns => throw new NotSupportedException();
+        public DbSet<EvaluationRunItem> EvaluationRunItems => throw new NotSupportedException();
+        public DbSet<SuggestedAction> SuggestedActions => throw new NotSupportedException();
         public DbSet<ConversationSession> ConversationSessions => throw new NotSupportedException();
         public DbSet<ConversationCheckpoint> ConversationCheckpoints => throw new NotSupportedException();
         public DbSet<ConversationInsight> ConversationInsights => throw new NotSupportedException();

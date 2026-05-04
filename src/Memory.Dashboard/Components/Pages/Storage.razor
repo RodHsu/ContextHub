@@ -4,12 +4,16 @@
 <PageTitle>Context Hub | 資料庫檢視</PageTitle>
 
 <PageViewport Title="資料庫檢視"
-              Subtitle="只讀白名單 raw table explorer，可直接查詢目前資料庫已落庫的內容。"
+              Subtitle="只讀查詢白名單資料表內容。"
               BodyClass="page-viewport-body storage-page-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                       IsRefreshing="_loading" />
-        <button class="primary-button" @onclick="ReloadAsync" disabled="@_loading">刷新</button>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="ReloadAsync" disabled="@_loading">刷新</button>
+        </div>
     </Actions>
     <ChildContent>
 
@@ -24,7 +28,7 @@
                     <article class="stack-item storage-table-item @SelectedClass(table.Name)" @onclick="@(() => SelectTableAsync(table.Name))">
                         <div class="stack-item-title">@table.Name</div>
                         <div class="stack-item-copy">@table.Description</div>
-                        <div class="stack-item-meta">@table.RowCount 列 / @string.Join(", ", table.Columns)</div>
+                        <div class="stack-item-meta">@DashboardFormatting.Integer(table.RowCount) 列 / @string.Join(", ", table.Columns)</div>
                     </article>
                 }
             </div>
@@ -54,7 +58,7 @@
                         <select @bind="_pageSize">
                             @foreach (var pageSize in PageSizeOptions)
                             {
-                                <option value="@pageSize">@pageSize 筆 / 頁</option>
+                                <option value="@pageSize">@DashboardFormatting.Integer(pageSize) 筆 / 頁</option>
                             }
                         </select>
                         <div class="storage-filter-actions">
@@ -71,11 +75,11 @@
                     </div>
                     <div class="host-stat">
                         <span>結果數</span>
-                        <strong>@_rows.Rows.TotalCount</strong>
+                        <strong>@DashboardFormatting.Integer(_rows.Rows.TotalCount)</strong>
                     </div>
                     <div class="host-stat">
                         <span>目前頁</span>
-                        <strong>@_rows.Rows.Page / @TotalPages</strong>
+                        <strong>@DashboardFormatting.Integer(_rows.Rows.Page) / @DashboardFormatting.Integer(TotalPages)</strong>
                     </div>
                 </div>
 
@@ -120,7 +124,7 @@
                     </div>
 
                     <div class="storage-pagination">
-                        <div class="table-subtitle">共 @_rows.Rows.TotalCount 筆，這一頁顯示 @_rows.Rows.Items.Count 筆。</div>
+                        <div class="table-subtitle">共 @DashboardFormatting.Integer(_rows.Rows.TotalCount) 筆，這一頁顯示 @DashboardFormatting.Integer(_rows.Rows.Items.Count) 筆。</div>
                         <div class="storage-pagination-actions">
                             <button class="ghost-button" @onclick="PreviousPageAsync" disabled="@(_loading || !CanGoPrevious)">上一頁</button>
                             <button class="ghost-button" @onclick="NextPageAsync" disabled="@(_loading || !CanGoNext)">下一頁</button>

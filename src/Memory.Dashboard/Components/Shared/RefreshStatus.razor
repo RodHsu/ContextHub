@@ -1,13 +1,6 @@
 @using Memory.Application
 
 <div class="refresh-status-group">
-    @if (!string.IsNullOrWhiteSpace(WarningText))
-    {
-        <div class="inline-error dashboard-snapshot-warning dashboard-snapshot-warning-inline">
-            @WarningText
-        </div>
-    }
-
     <div class="refresh-status-shell">
         <div class="refresh-status-primary">
             <div class="refresh-status-primary-copy">
@@ -22,13 +15,30 @@
                         <span>尚未同步</span>
                     }
                 </div>
+                @if (SnapshotAtUtc.HasValue)
+                {
+                    <div class="refresh-status-subline">
+                        資料快照 <ClientLocalTime Value="SnapshotAtUtc.Value" />
+                    </div>
+                }
             </div>
 
-            <span class="refresh-status-live @(IsRefreshing ? "is-active" : null)"
-                  aria-hidden="@(!IsRefreshing ? "true" : "false")">
-                <span class="refresh-status-live-dot"></span>
-                <span>同步中</span>
-            </span>
+            <div class="refresh-status-indicators">
+                @if (!string.IsNullOrWhiteSpace(WarningText))
+                {
+                    <InfoPopover Label="顯示資料延遲說明"
+                                 Title="資料延遲"
+                                 Text="@WarningText"
+                                 Icon="!"
+                                 IsWarning="true" />
+                }
+
+                <span class="refresh-status-live @(IsRefreshing ? "is-active" : null)"
+                      aria-hidden="@(!IsRefreshing ? "true" : "false")">
+                    <span class="refresh-status-live-dot"></span>
+                    <span>同步中</span>
+                </span>
+            </div>
         </div>
     </div>
 </div>
@@ -39,6 +49,9 @@
 
     [Parameter]
     public DateTimeOffset? LastUpdatedAt { get; set; }
+
+    [Parameter]
+    public DateTimeOffset? SnapshotAtUtc { get; set; }
 
     [Parameter]
     public bool IsRefreshing { get; set; }

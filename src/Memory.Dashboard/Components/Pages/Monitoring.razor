@@ -6,14 +6,19 @@
 <PageTitle>Context Hub | 狀態監控</PageTitle>
 
 <PageViewport Title="狀態監控"
-              Subtitle="集中檢視 Redis、PostgreSQL、Compose 服務與整體資源趨勢，快速定位目前 instance 的壓力與健康狀態。"
+              Subtitle="集中檢視服務、資料庫與資源壓力變化。"
               BodyClass="page-viewport-body monitoring-page-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                       IsRefreshing="_loading"
-                       PollingIntervalSeconds="@PollingIntervalSeconds"
-                       WarningText="@SnapshotWarningText()" />
-        <button class="primary-button" @onclick="RefreshAsync" disabled="@_loading">刷新</button>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           SnapshotAtUtc="PageSnapshotAtUtc()"
+                           IsRefreshing="_loading"
+                           PollingIntervalSeconds="@PollingIntervalSeconds"
+                           WarningText="@SnapshotWarningText()" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="RefreshAsync" disabled="@_loading">刷新</button>
+        </div>
     </Actions>
     <ChildContent>
 
@@ -40,7 +45,7 @@
     }
     else
     {
-        <div class="monitoring-page-stack page-scroll-host">
+        <div class="monitoring-page-stack page-scroll-host monitoring-workspace-section">
             <div class="monitoring-top-grid">
                 <section class="panel">
                     <div class="panel-title">核心狀態</div>
@@ -66,7 +71,7 @@
                         </div>
                         <div>
                             <dt>服務數量</dt>
-                            <dd>@_monitoring.Services.Count</dd>
+                            <dd>@DashboardFormatting.Integer(_monitoring.Services.Count)</dd>
                         </div>
                     </dl>
                 </section>
@@ -81,7 +86,7 @@
                         </article>
                         <article class="host-stat runtime-host-card">
                             <span>CPU</span>
-                            <strong>@((_monitoring.DockerHost?.Host.CpuCount ?? 0).ToString()) cores</strong>
+                            <strong>@DashboardFormatting.Integer(_monitoring.DockerHost?.Host.CpuCount ?? 0) cores</strong>
                             <div class="stack-item-meta">@StatusText(_monitoring.DockerHost?.Status ?? "unavailable")</div>
                         </article>
                         <article class="host-stat runtime-host-card">
@@ -91,8 +96,8 @@
                         </article>
                         <article class="host-stat runtime-host-card">
                             <span>Compose Footprint</span>
-                            <strong>@((_monitoring.DockerHost?.Host.ActiveContainerCount ?? 0).ToString()) containers</strong>
-                            <div class="stack-item-meta">@((_monitoring.DockerHost?.Host.VolumeCount ?? 0).ToString()) volumes / @((_monitoring.DockerHost?.Host.ImageCount ?? 0).ToString()) images</div>
+                            <strong>@DashboardFormatting.Integer(_monitoring.DockerHost?.Host.ActiveContainerCount ?? 0) containers</strong>
+                            <div class="stack-item-meta">@DashboardFormatting.Integer(_monitoring.DockerHost?.Host.VolumeCount ?? 0) volumes / @DashboardFormatting.Integer(_monitoring.DockerHost?.Host.ImageCount ?? 0) images</div>
                         </article>
                     </div>
 
@@ -277,7 +282,7 @@
                         </article>
                         <article class="runtime-dependency-kpi">
                             <span>Key Count</span>
-                            <strong>@_monitoring.Redis.KeyCount</strong>
+                            <strong>@DashboardFormatting.Integer(_monitoring.Redis.KeyCount)</strong>
                         </article>
                         <article class="runtime-dependency-kpi">
                             <span>Storage</span>
@@ -287,13 +292,13 @@
 
                     <dl class="definition-grid monitoring-definition-grid">
                         <div><dt>Max Memory</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.MaxMemoryBytes)</dd></div>
-                        <div><dt>Total Commands</dt><dd>@_monitoring.Redis.TotalCommandsProcessed</dd></div>
+                        <div><dt>Total Commands</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.TotalCommandsProcessed)</dd></div>
                         <div><dt>Total Net In</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.TotalNetInputBytes)</dd></div>
                         <div><dt>Total Net Out</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.TotalNetOutputBytes)</dd></div>
-                        <div><dt>Instant In</dt><dd>@($"{_monitoring.Redis.InstantaneousInputKbps:0.##} KB/s")</dd></div>
-                        <div><dt>Instant Out</dt><dd>@($"{_monitoring.Redis.InstantaneousOutputKbps:0.##} KB/s")</dd></div>
-                        <div><dt>Expired Keys</dt><dd>@_monitoring.Redis.ExpiredKeys</dd></div>
-                        <div><dt>Evicted Keys</dt><dd>@_monitoring.Redis.EvictedKeys</dd></div>
+                        <div><dt>Instant In</dt><dd>@($"{DashboardFormatting.Decimal(_monitoring.Redis.InstantaneousInputKbps)} KB/s")</dd></div>
+                        <div><dt>Instant Out</dt><dd>@($"{DashboardFormatting.Decimal(_monitoring.Redis.InstantaneousOutputKbps)} KB/s")</dd></div>
+                        <div><dt>Expired Keys</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.ExpiredKeys)</dd></div>
+                        <div><dt>Evicted Keys</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.EvictedKeys)</dd></div>
                         <div><dt>Container Network</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.NetworkRxBytes) RX / @DashboardFormatting.Bytes(_monitoring.Redis.NetworkTxBytes) TX</dd></div>
                         <div><dt>Container Disk I/O</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.DiskReadBytes) Read / @DashboardFormatting.Bytes(_monitoring.Redis.DiskWriteBytes) Write</dd></div>
                         <div class="monitoring-definition-span"><dt>Storage Target</dt><dd>@_monitoring.Redis.PersistentStorageName</dd></div>
@@ -317,35 +322,35 @@
 
                     <div class="runtime-dependency-kpi-grid">
                         <article class="runtime-dependency-kpi">
-                            <span>DB Size</span>
+                            <span class="metric-label-with-info">DB Size <InfoPopover Label="顯示 DB Size 說明" Icon="i" Title="DB Size" Text="目前 ContextHub PostgreSQL database 的實際資料大小。持續上升通常代表記憶、log、retrieval telemetry 或 job history 正在累積，需搭配資料保留策略與 table size 一起看。" /></span>
                             <strong>@DashboardFormatting.Bytes(_monitoring.Postgres.DatabaseSizeBytes)</strong>
                         </article>
                         <article class="runtime-dependency-kpi">
-                            <span>Connections</span>
-                            <strong>@_monitoring.Postgres.ActiveConnections</strong>
+                            <span class="metric-label-with-info">Connections <InfoPopover Label="顯示 Connections 說明" Icon="i" Title="Connections" Text="目前連到 PostgreSQL 的 active connections 數量。短暫升高通常正常；長時間接近連線上限時，可能是連線池設定、慢查詢或未釋放連線造成。" /></span>
+                            <strong>@DashboardFormatting.Integer(_monitoring.Postgres.ActiveConnections)</strong>
                         </article>
                         <article class="runtime-dependency-kpi">
-                            <span>Storage</span>
+                            <span class="metric-label-with-info">Storage <InfoPopover Label="顯示 Storage 說明" Icon="i" Title="Storage" Text="PostgreSQL Docker volume 的粗略儲存占用。這是容器層級估算，可能與 DB Size 不完全一致；若快速成長，優先檢查資料表大小、索引與 WAL / volume 狀態。" /></span>
                             <strong>@DashboardFormatting.Bytes(_monitoring.Postgres.PersistentStorageBytes)</strong>
                         </article>
                     </div>
 
                     <dl class="definition-grid monitoring-definition-grid">
-                        <div><dt>Committed</dt><dd>@_monitoring.Postgres.TransactionsCommitted</dd></div>
-                        <div><dt>Rolled Back</dt><dd>@_monitoring.Postgres.TransactionsRolledBack</dd></div>
-                        <div><dt>Blocks Read</dt><dd>@_monitoring.Postgres.BlocksRead</dd></div>
-                        <div><dt>Blocks Hit</dt><dd>@_monitoring.Postgres.BlocksHit</dd></div>
-                        <div><dt>Rows Returned</dt><dd>@_monitoring.Postgres.RowsReturned</dd></div>
-                        <div><dt>Rows Fetched</dt><dd>@_monitoring.Postgres.RowsFetched</dd></div>
-                        <div><dt>Rows Inserted</dt><dd>@_monitoring.Postgres.RowsInserted</dd></div>
-                        <div><dt>Rows Updated</dt><dd>@_monitoring.Postgres.RowsUpdated</dd></div>
-                        <div><dt>Rows Deleted</dt><dd>@_monitoring.Postgres.RowsDeleted</dd></div>
-                        <div><dt>Temp Files / Bytes</dt><dd>@_monitoring.Postgres.TempFiles / @DashboardFormatting.Bytes(_monitoring.Postgres.TempBytes)</dd></div>
-                        <div><dt>Deadlocks</dt><dd>@_monitoring.Postgres.Deadlocks</dd></div>
-                        <div><dt>Container Network</dt><dd>@DashboardFormatting.Bytes(_monitoring.Postgres.NetworkRxBytes) RX / @DashboardFormatting.Bytes(_monitoring.Postgres.NetworkTxBytes) TX</dd></div>
-                        <div><dt>Container Disk I/O</dt><dd>@DashboardFormatting.Bytes(_monitoring.Postgres.DiskReadBytes) Read / @DashboardFormatting.Bytes(_monitoring.Postgres.DiskWriteBytes) Write</dd></div>
-                        <div class="monitoring-definition-span"><dt>Storage Target</dt><dd>@_monitoring.Postgres.PersistentStorageName</dd></div>
-                        <div class="monitoring-definition-span"><dt>Container</dt><dd>@ContainerSummary("postgres")</dd></div>
+                        <div><dt class="metric-label-with-info">Committed <InfoPopover Label="顯示 Committed 說明" Icon="i" Title="Committed" Text="已成功 commit 的 transaction 累積數。這是整體寫入與查詢活動量指標；單看數值大小不是問題，重點是與 rolled back、延遲和錯誤率一起判斷。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.TransactionsCommitted)</dd></div>
+                        <div><dt class="metric-label-with-info">Rolled Back <InfoPopover Label="顯示 Rolled Back 說明" Icon="i" Title="Rolled Back" Text="被 rollback 的 transaction 累積數。少量可能來自正常錯誤處理；若比例上升，通常要檢查例外、交易逾時、constraint violation 或應用程式重試策略。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.TransactionsRolledBack)</dd></div>
+                        <div><dt class="metric-label-with-info">Blocks Read <InfoPopover Label="顯示 Blocks Read 說明" Icon="i" Title="Blocks Read" Text="PostgreSQL 從磁碟讀取的資料 block 數。相對 Blocks Hit 偏高時，代表 buffer cache 命中不足或查詢正在掃描大量資料，可能需要檢查索引、查詢條件與 cache / memory 配置。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.BlocksRead)</dd></div>
+                        <div><dt class="metric-label-with-info">Blocks Hit <InfoPopover Label="顯示 Blocks Hit 說明" Icon="i" Title="Blocks Hit" Text="PostgreSQL 從 shared buffer cache 命中的資料 block 數。通常越高越好；和 Blocks Read 搭配可估算 cache hit ratio，命中率下降時要看是否有大查詢或 working set 變大。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.BlocksHit)</dd></div>
+                        <div><dt class="metric-label-with-info">Rows Returned <InfoPopover Label="顯示 Rows Returned 說明" Icon="i" Title="Rows Returned" Text="查詢掃描或返回處理過的 row 累積量，通常反映讀取工作量。若明顯高於實際頁面需求，可能有過寬查詢、缺索引或列表未限制筆數。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.RowsReturned)</dd></div>
+                        <div><dt class="metric-label-with-info">Rows Fetched <InfoPopover Label="顯示 Rows Fetched 說明" Icon="i" Title="Rows Fetched" Text="透過查詢取出的 row 累積量。可用來觀察應用程式實際取資料量；與 Rows Returned 差距過大時，通常要回頭看查詢計畫與資料掃描效率。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.RowsFetched)</dd></div>
+                        <div><dt class="metric-label-with-info">Rows Inserted <InfoPopover Label="顯示 Rows Inserted 說明" Icon="i" Title="Rows Inserted" Text="新增 row 的累積數。上升代表記憶、log、job、source sync 或 telemetry 正在寫入；若速度異常，需檢查背景工作是否重複寫入或資料保留策略是否不足。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.RowsInserted)</dd></div>
+                        <div><dt class="metric-label-with-info">Rows Updated <InfoPopover Label="顯示 Rows Updated 說明" Icon="i" Title="Rows Updated" Text="更新 row 的累積數。高更新量可能來自 job 狀態、summary refresh、偏好設定或同步狀態；若伴隨 table bloat 或慢查詢，需評估 vacuum 與索引更新成本。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.RowsUpdated)</dd></div>
+                        <div><dt class="metric-label-with-info">Rows Deleted <InfoPopover Label="顯示 Rows Deleted 說明" Icon="i" Title="Rows Deleted" Text="刪除 row 的累積數。刪除後空間不一定立刻回到作業系統，仍需 autovacuum / vacuum 回收；若刪除量大，需觀察 table bloat 與 vacuum 是否跟得上。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.RowsDeleted)</dd></div>
+                        <div><dt class="metric-label-with-info">Temp Files / Bytes <InfoPopover Label="顯示 Temp Files / Bytes 說明" Icon="i" Title="Temp Files / Bytes" Text="查詢排序、hash join 或中間結果超出記憶體時建立的暫存檔數與大小。持續增加通常代表查詢太大、work_mem 不足，或缺少能降低排序 / join 成本的索引。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.TempFiles) / @DashboardFormatting.Bytes(_monitoring.Postgres.TempBytes)</dd></div>
+                        <div><dt class="metric-label-with-info">Deadlocks <InfoPopover Label="顯示 Deadlocks 說明" Icon="i" Title="Deadlocks" Text="PostgreSQL 偵測到互相等待鎖而中止其中一個 transaction 的次數。正常情況應接近 0；若出現增加，通常要檢查交易順序、鎖定範圍與長交易。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Postgres.Deadlocks)</dd></div>
+                        <div><dt class="metric-label-with-info">Container Network <InfoPopover Label="顯示 Container Network 說明" Icon="i" Title="Container Network" Text="PostgreSQL container 層級的累積網路 RX / TX。它反映 DB 與其他服務間的傳輸量；突然升高時可對照查詢量、匯入匯出或背景同步。" /></dt><dd>@DashboardFormatting.Bytes(_monitoring.Postgres.NetworkRxBytes) RX / @DashboardFormatting.Bytes(_monitoring.Postgres.NetworkTxBytes) TX</dd></div>
+                        <div><dt class="metric-label-with-info">Container Disk I/O <InfoPopover Label="顯示 Container Disk I/O 說明" Icon="i" Title="Container Disk I/O" Text="PostgreSQL container 層級的累積磁碟讀寫量。高寫入通常與資料寫入、WAL、checkpoint 或 vacuum 有關；高讀取可能表示 cache miss 或大量掃描。" /></dt><dd>@DashboardFormatting.Bytes(_monitoring.Postgres.DiskReadBytes) Read / @DashboardFormatting.Bytes(_monitoring.Postgres.DiskWriteBytes) Write</dd></div>
+                        <div class="monitoring-definition-span"><dt class="metric-label-with-info">Storage Target <InfoPopover Label="顯示 Storage Target 說明" Icon="i" Title="Storage Target" Text="PostgreSQL 使用的 Docker volume 名稱。用來確認資料落在哪個持久化儲存；備份、搬移或清理 volume 前應確認這個名稱。" /></dt><dd>@_monitoring.Postgres.PersistentStorageName</dd></div>
+                        <div class="monitoring-definition-span"><dt class="metric-label-with-info">Container <InfoPopover Label="顯示 Container 說明" Icon="i" Title="Container" Text="目前偵測到的 PostgreSQL compose container、執行狀態、健康狀態與 restart 次數。若 health 非 healthy 或 restart 增加，優先看 container logs。" /></dt><dd>@ContainerSummary("postgres")</dd></div>
                     </dl>
                 </section>
             </div>
@@ -380,7 +385,7 @@
                                     <td class="monitoring-memory-cell">@DashboardFormatting.Bytes(container.MemoryUsageBytes) / @DashboardFormatting.Bytes(container.MemoryLimitBytes)</td>
                                     <td class="monitoring-network-cell">@DashboardFormatting.Bytes(container.NetworkRxBytes) / @DashboardFormatting.Bytes(container.NetworkTxBytes)</td>
                                     <td class="monitoring-disk-cell">@DashboardFormatting.Bytes(container.DiskReadBytes) / @DashboardFormatting.Bytes(container.DiskWriteBytes)</td>
-                                    <td class="monitoring-restart-cell">@container.RestartCount</td>
+                                    <td class="monitoring-restart-cell">@DashboardFormatting.Integer(container.RestartCount)</td>
                                 </tr>
                             }
                         </tbody>
@@ -497,7 +502,7 @@
         => DashboardText.Service(name);
 
     private string ResourceChartPanelNote()
-        => $"每 {PollingIntervalSeconds} 秒刷新 / 最近 {(_monitoring?.ResourceSamples?.Count ?? 0)} 筆樣本";
+        => $"每 {DashboardFormatting.Integer(PollingIntervalSeconds)} 秒刷新 / 最近 {DashboardFormatting.Integer(_monitoring?.ResourceSamples?.Count ?? 0)} 筆樣本";
 
     private double CurrentCpuPercent()
         => _monitoring?.ResourceSamples?.LastOrDefault()?.CpuPercent ?? 0d;
@@ -592,7 +597,7 @@
         var container = _monitoring?.DependencyResources?.Containers.FirstOrDefault(x => string.Equals(x.Service, serviceName, StringComparison.OrdinalIgnoreCase));
         return container is null
             ? "未偵測 compose 容器"
-            : $"{container.Name} / {StatusText(container.State)} / {StatusText(container.Health)} / restart {container.RestartCount}";
+            : $"{container.Name} / {StatusText(container.State)} / {StatusText(container.Health)} / restart {DashboardFormatting.Integer(container.RestartCount)}";
     }
 
     private static IEnumerable<int> ChartGuideLines()
@@ -635,23 +640,16 @@
         => $"{DashboardFormatting.Bytes((long)Math.Round(bytesPerSecond))}/s";
 
     private static string FormatCountRate(int value)
-        => $"{value}/s";
+        => $"{DashboardFormatting.Integer(value)}/s";
 
     private DashboardPageSnapshotStatusResult? PageSnapshotStatus()
         => _monitoring?.SnapshotStatus;
 
-    private string? SnapshotWarningText()
-    {
-        var snapshotStatus = PageSnapshotStatus();
-        if (snapshotStatus is null || (!snapshotStatus.IsStale && string.IsNullOrWhiteSpace(snapshotStatus.Warning)))
-        {
-            return null;
-        }
+    private DateTimeOffset? PageSnapshotAtUtc()
+        => _monitoring?.SnapshotStatus?.SnapshotAtUtc ?? _monitoring?.SnapshotAtUtc;
 
-        return string.IsNullOrWhiteSpace(snapshotStatus.Warning)
-            ? "Dashboard snapshot 已過期，畫面顯示的是最後一份可用資料。"
-            : snapshotStatus.Warning;
-    }
+    private string? SnapshotWarningText()
+        => DashboardUiErrorFormatter.BuildSnapshotWarning(PageSnapshotStatus(), "狀態監控");
 
     public ValueTask DisposeAsync()
     {

@@ -1,6 +1,7 @@
 @page "/login"
 @layout LoginLayout
 @attribute [AllowAnonymous]
+@using Memory.Application
 
 <PageTitle>Context Hub | 登入</PageTitle>
 
@@ -46,7 +47,10 @@
 
         @if (string.Equals(Error, "invalid", StringComparison.OrdinalIgnoreCase))
         {
-            <div class="login-error">帳號或密碼不正確。</div>
+            <DashboardToast Message="帳號或密碼不正確。"
+                            IsError="true"
+                            Sequence="1"
+                            DurationMilliseconds="5000" />
         }
 
         <form method="post" action="/account/login" class="login-form">
@@ -69,6 +73,7 @@
         <div class="login-footer">
             <div>Context Hub Dashboard</div>
             <div class="login-footer-muted">本機 / 內網管理介面</div>
+            <div class="login-footer-version">@($"UI v{BuildMetadata.Current.Version}")</div>
         </div>
     </section>
 </div>

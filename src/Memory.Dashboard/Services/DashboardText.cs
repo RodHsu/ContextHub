@@ -30,6 +30,8 @@ public static class DashboardText
         => value switch
         {
             MemoryStatus.Active => "啟用",
+            MemoryStatus.Stale => "過期",
+            MemoryStatus.Superseded => "已取代",
             MemoryStatus.Archived => "封存",
             _ => value.ToString()
         };
@@ -53,6 +55,10 @@ public static class DashboardText
             MemoryJobType.RefreshSummary => "重建共用綜合層",
             MemoryJobType.IngestConversation => "整理對話 checkpoint",
             MemoryJobType.PromoteConversationInsights => "提升對話 insights",
+            MemoryJobType.SyncSource => "同步來源",
+            MemoryJobType.AnalyzeGovernance => "分析治理檢查",
+            MemoryJobType.RunEvaluation => "執行評測",
+            MemoryJobType.ExecuteSuggestedAction => "執行建議",
             _ => value.ToString()
         };
 
@@ -137,5 +143,69 @@ public static class DashboardText
             nameof(UserPreferenceKind.Constraint) => "限制條件",
             nameof(UserPreferenceKind.AntiPattern) => "反模式",
             _ => tag
+        };
+
+    public static string Label(SourceKind value)
+        => value switch
+        {
+            SourceKind.LocalRepo => "本機 Repo",
+            SourceKind.LocalDocs => "本機文件",
+            SourceKind.RuntimeLogRule => "Runtime Log Rule",
+            SourceKind.GitHubPull => "GitHub Pull",
+            _ => value.ToString()
+        };
+
+    public static string Label(SourceSyncStatus value)
+        => value switch
+        {
+            SourceSyncStatus.Pending => "等待中",
+            SourceSyncStatus.Running => "同步中",
+            SourceSyncStatus.Completed => "已完成",
+            SourceSyncStatus.Failed => "失敗",
+            _ => value.ToString()
+        };
+
+    public static string Label(GovernanceFindingType value)
+        => value switch
+        {
+            GovernanceFindingType.DuplicateCandidate => "重複候選",
+            GovernanceFindingType.ConflictCandidate => "衝突候選",
+            GovernanceFindingType.StaleSource => "來源過期",
+            GovernanceFindingType.MissingSource => "來源遺失",
+            GovernanceFindingType.ReindexRequired => "需要重建索引",
+            _ => value.ToString()
+        };
+
+    public static string Label(GovernanceFindingStatus value)
+        => value switch
+        {
+            GovernanceFindingStatus.Open => "待處理",
+            GovernanceFindingStatus.Accepted => "已接受",
+            GovernanceFindingStatus.Dismissed => "已忽略",
+            GovernanceFindingStatus.Resolved => "已解決",
+            _ => value.ToString()
+        };
+
+    public static string Label(SuggestedActionType value)
+        => value switch
+        {
+            SuggestedActionType.SyncSourceNow => "立即同步來源",
+            SuggestedActionType.ArchiveStaleMemory => "封存過期記憶",
+            SuggestedActionType.MergeDuplicateCandidate => "處理重複候選",
+            SuggestedActionType.ReviewConflictCandidate => "檢閱衝突候選",
+            SuggestedActionType.ReindexProject => "重新索引專案",
+            SuggestedActionType.RefreshSharedSummary => "更新綜合層",
+            _ => value.ToString()
+        };
+
+    public static string Label(SuggestedActionStatus value)
+        => value switch
+        {
+            SuggestedActionStatus.Pending => "待處理",
+            SuggestedActionStatus.Accepted => "已接受",
+            SuggestedActionStatus.Dismissed => "已忽略",
+            SuggestedActionStatus.Executed => "已執行",
+            SuggestedActionStatus.Failed => "失敗",
+            _ => value.ToString()
         };
 }

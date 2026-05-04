@@ -9,6 +9,7 @@ using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
 
 namespace Memory.McpProtocolTests;
 
@@ -187,6 +188,52 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Sdk_Client_Should_List_Working_Context_Template_And_Read_Legacy_Working_Context_Uri()
+    {
+        var projectId = $"Vital_AirMeet_BackEnd_{Guid.NewGuid():N}";
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+
+            await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    ExternalKey: $"repo:mcp:resource:{projectId}",
+                    Scope: MemoryScope.Project,
+                    MemoryType: MemoryType.Fact,
+                    Title: "Legacy working-context resource fixture",
+                    Content: "This fixture validates MCP resources/read compatibility for working-context URIs.",
+                    Summary: "working-context resource compatibility",
+                    SourceType: "document",
+                    SourceRef: "mcp-tests",
+                    Tags: ["mcp", "resource"],
+                    Importance: 0.8m,
+                    Confidence: 0.9m,
+                    ProjectId: projectId),
+                CancellationToken.None);
+        }
+
+        using var httpClient = environment.GetFactory().CreateClient();
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri(httpClient.BaseAddress!, "/mcp"),
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, httpClient);
+
+        await using var client = await McpClient.CreateAsync(transport);
+        var templates = await client.ListResourceTemplatesAsync();
+        var payload = await client.ReadResourceAsync(
+            $"working-context://{projectId}?query={Uri.EscapeDataString("啟動錯誤 duplicate key")}&limit=3&recentLogLimit=2",
+            null,
+            CancellationToken.None);
+
+        templates.Select(x => x.UriTemplate).Should().Contain("working-context://{projectId}{?query,limit,recentLogLimit,queryMode,useSummaryLayer,includedProjectIds}");
+        payload.Contents.Should().ContainSingle(x => x is TextResourceContents);
+        ((TextResourceContents)payload.Contents[0]).Text.Should().Contain(projectId);
+        ((TextResourceContents)payload.Contents[0]).Text.Should().Contain("Legacy working-context resource fixture");
+    }
+
+    [DockerRequiredFact]
     public async Task Raw_Http_Conversation_Ingest_Tool_Should_Create_And_Promote_Insights()
     {
         var conversationId = $"mcp-conversation-{Guid.NewGuid():N}";
@@ -291,6 +338,61 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
 
         insightPayload.Should().Contain("Promoted");
         insightPayload.Should().Contain("PreferenceCandidate");
+    }
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Memory_Upsert_Should_Default_SourceType_When_Omitted()
+    {
+        var externalKey = $"repo:mcp:missing-source-type:{Guid.NewGuid():N}";
+        var captureHandler = new SessionCaptureHandler(environment.GetFactory().Server.CreateHandler());
+        using var client = new HttpClient(captureHandler)
+        {
+            BaseAddress = environment.GetFactory().Server.BaseAddress
+        };
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri(client.BaseAddress!, "/mcp"),
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, client);
+
+        await using var mcpClient = await McpClient.CreateAsync(transport);
+        _ = await mcpClient.ListToolsAsync();
+
+        var sessionId = captureHandler.SessionId;
+        sessionId.Should().NotBeNullOrWhiteSpace();
+
+        var upsertPayload = await SendMcpAsync(client, sessionId!, 2, "tools/call", new
+        {
+            name = "memory_upsert",
+            arguments = new
+            {
+                request = new
+                {
+                    externalKey,
+                    scope = "Project",
+                    memoryType = "Fact",
+                    title = "Missing sourceType fallback",
+                    content = "When sourceType is omitted, memory_upsert should still persist a document memory.",
+                    summary = "Fallback test",
+                    sourceRef = "mcp-tests",
+                    tags = new[] { "mcp", "fallback" },
+                    importance = 0.8m,
+                    confidence = 0.9m,
+                    projectId = ProjectContext.DefaultProjectId
+                }
+            }
+        });
+
+        ExtractToolJsonField(upsertPayload, "sourceType").Should().Be("document");
+
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var document = await dbContext.MemoryItems.SingleAsync(x => x.ExternalKey == externalKey, CancellationToken.None);
+
+        document.SourceType.Should().Be("document");
+        dbContext.RuntimeLogEntries.Should().NotContain(x =>
+            x.Category == "ModelContextProtocol.Server.McpServer" &&
+            x.Message.Contains("\"memory_upsert\"", StringComparison.Ordinal));
     }
 
     private static async Task DrainConversationAutomationAsync(

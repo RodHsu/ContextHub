@@ -7,13 +7,19 @@
 <PageTitle>Context Hub | 系統設定</PageTitle>
 
 <PageViewport Title="系統設定"
-              Subtitle="管理目前 instance 的個人化設定、Dashboard 登入資訊與維運操作。"
+              Subtitle="管理 instance 設定、登入資訊與維運操作。"
               BodyClass="page-viewport-body page-grid-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                       IsRefreshing="_loading" />
-        <button class="ghost-button" @onclick="ReloadAsync" disabled="@_loading">重新讀取</button>
-        <button class="primary-button" @onclick="SaveAsync" disabled="@_loading">儲存設定</button>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-secondary">
+            <button class="ghost-button" @onclick="ReloadAsync" disabled="@_loading">重新讀取</button>
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="SaveAsync" disabled="@_loading">儲存設定</button>
+        </div>
     </Actions>
     <ChildContent>
 
@@ -336,15 +342,15 @@
                                 {
                                     <div class="host-stat">
                                         <span>@(section.Label)</span>
-                                        <strong>@(section.TotalItems)</strong>
-                                        <div class="stack-item-meta">新增 @(section.NewItems) / 覆蓋 @(section.ConflictItems)</div>
+                                        <strong>@DashboardFormatting.Integer(section.TotalItems)</strong>
+                                        <div class="stack-item-meta">新增 @DashboardFormatting.Integer(section.NewItems) / 覆蓋 @DashboardFormatting.Integer(section.ConflictItems)</div>
                                     </div>
                                 }
                             </div>
 
                             @if (_transferPreview.Conflicts.Count > 0)
                             {
-                                <div class="inline-error">匯入後會覆蓋 @_transferPreview.Conflicts.Count 筆既有設定或同識別資料，請先確認下列衝突項目。</div>
+                                <div class="inline-error">匯入後會覆蓋 @DashboardFormatting.Integer(_transferPreview.Conflicts.Count) 筆既有設定或同識別資料，請先確認下列衝突項目。</div>
                                 <div class="stack-scroll-shell">
                                     <div class="stack-list">
                                         @foreach (var conflict in _transferPreview.Conflicts)
@@ -374,15 +380,15 @@
                     <div class="settings-operation-list">
                         <div class="host-stat settings-operation-card">
                             <span>最近 checkpoints</span>
-                            <strong>@_snapshot.AutomationStatus.RecentCheckpoints</strong>
+                            <strong>@DashboardFormatting.Integer(_snapshot.AutomationStatus.RecentCheckpoints)</strong>
                         </div>
                         <div class="host-stat settings-operation-card">
                             <span>待提升 insights</span>
-                            <strong>@_snapshot.AutomationStatus.PendingInsights</strong>
+                            <strong>@DashboardFormatting.Integer(_snapshot.AutomationStatus.PendingInsights)</strong>
                         </div>
                         <div class="host-stat settings-operation-card">
                             <span>待 promotion jobs</span>
-                            <strong>@_snapshot.AutomationStatus.PendingPromotions</strong>
+                            <strong>@DashboardFormatting.Integer(_snapshot.AutomationStatus.PendingPromotions)</strong>
                         </div>
                     </div>
 
@@ -607,7 +613,7 @@
             _snapshot = await InstanceSettingsService.GetSnapshotAsync(CancellationToken.None);
             PopulateForm(_snapshot);
             _transferPreview = null;
-            ShowMessage($"匯入完成：新增或套用 {result.AppliedItems} 筆，覆蓋 {result.OverwrittenItems} 筆。");
+        ShowMessage($"匯入完成：新增或套用 {DashboardFormatting.Integer(result.AppliedItems)} 筆，覆蓋 {DashboardFormatting.Integer(result.OverwrittenItems)} 筆。");
             _lastUpdatedAt = DateTimeOffset.UtcNow;
         });
     }

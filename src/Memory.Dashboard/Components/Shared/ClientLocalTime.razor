@@ -1,6 +1,8 @@
 @using Memory.Dashboard.Services
 
-<time class="client-local-time" datetime="@Value.ToString("O")">@DashboardFormatting.TimestampWithZone(Value)</time>
+<time class="client-local-time"
+      datetime="@Value.ToString("O")"
+      data-local-iso="@Value.ToString("O")">@DashboardFormatting.Timestamp(Value)</time>
 
 @code {
     [Parameter, EditorRequired]

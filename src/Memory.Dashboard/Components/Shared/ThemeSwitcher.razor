@@ -1,13 +1,35 @@
 @inject IJSRuntime JsRuntime
 
-<div class="theme-switcher" role="group" aria-label="切換主題">
-    @foreach (var option in ThemeOptions)
+<div class="theme-switcher" role="group" aria-label="切換主題" @onmouseleave="CloseMenu">
+    <button type="button"
+            class="theme-switcher-toggle"
+            aria-expanded="@_menuOpen"
+            aria-haspopup="menu"
+            @onclick="ToggleMenu">
+        <span class="theme-switcher-toggle-label">主題</span>
+        <span class="theme-switcher-toggle-value">@CurrentThemeLabel()</span>
+        <span class="theme-switcher-toggle-icon" aria-hidden="true">▾</span>
+    </button>
+
+    @if (_menuOpen)
     {
-        <button type="button"
-                class="theme-switcher-option @(string.Equals(_preference, option.Value, StringComparison.OrdinalIgnoreCase) ? "active" : null)"
-                @onclick="() => SetThemeAsync(option.Value)">
-            @option.Label
-        </button>
+        <div class="theme-switcher-menu" role="menu" aria-label="主題選單">
+            @foreach (var option in ThemeOptions)
+            {
+                <button type="button"
+                        role="menuitemradio"
+                        aria-checked="@string.Equals(_preference, option.Value, StringComparison.OrdinalIgnoreCase)"
+                        class="theme-switcher-option @(string.Equals(_preference, option.Value, StringComparison.OrdinalIgnoreCase) ? "active" : null)"
+                        @onmousedown:preventDefault="true"
+                        @onclick="() => SetThemeAsync(option.Value)">
+                    <span>@option.Label</span>
+                    @if (string.Equals(_preference, option.Value, StringComparison.OrdinalIgnoreCase))
+                    {
+                        <span class="theme-switcher-check" aria-hidden="true">✓</span>
+                    }
+                </button>
+            }
+        </div>
     }
 </div>
 
@@ -20,6 +42,7 @@
     ];
 
     private string _preference = "dark";
+    private bool _menuOpen;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -42,8 +65,18 @@
     private async Task SetThemeAsync(string preference)
     {
         _preference = preference;
+        _menuOpen = false;
         await JsRuntime.InvokeVoidAsync("contextHubTheme.setPreference", preference);
     }
+
+    private void ToggleMenu()
+        => _menuOpen = !_menuOpen;
+
+    private void CloseMenu()
+        => _menuOpen = false;
+
+    private string CurrentThemeLabel()
+        => ThemeOptions.FirstOrDefault(option => string.Equals(option.Value, _preference, StringComparison.OrdinalIgnoreCase))?.Label ?? "深色";
 
     private sealed record ThemeOption(string Value, string Label);
 }

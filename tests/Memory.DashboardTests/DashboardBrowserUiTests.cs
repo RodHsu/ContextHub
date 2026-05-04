@@ -29,7 +29,12 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("overview", "/", "總覽", [".metric-grid", ".dashboard-grid", ".resource-chart-grid"], [".page-header", ".metric-grid", ".dashboard-grid"], [".content", ".dashboard-grid.page-scroll-host"]),
         new("runtime", "/runtime", "執行參數", [".runtime-page-stack", ".runtime-main-panel", ".runtime-parameters-panel"], [".page-header", ".runtime-main-panel", ".runtime-parameters-panel"], [".content", ".runtime-page-stack"]),
         new("monitoring", "/monitoring", "狀態監控", [".monitoring-page-stack", ".monitoring-top-grid", ".monitoring-telemetry-grid"], [".page-header", ".monitoring-top-grid", ".monitoring-telemetry-grid"], [".content", ".monitoring-page-stack"]),
-        new("memories", "/memories", "記憶資料", [".memories-scope-hint-panel", ".filter-panel", ".split-layout"], [".memories-scope-hint-panel", ".filter-panel", ".split-layout"], [".content", ".split-layout"]),
+        new("memories", "/memories", "記憶資料", [".page-actions-secondary .info-popover", ".filter-panel", ".split-layout"], [".page-header", ".filter-panel", ".split-layout"], [".content", ".split-layout"]),
+        new("graph", "/graph", "記憶圖譜", [".graph-workspace", ".graph-filter-panel", ".graph-scroll-shell"], [".page-header", ".graph-workspace"], [".content", ".graph-scroll-shell", ".graph-detail-panel"]),
+        new("sources", "/sources", "資料來源", [".sources-page-stack", ".sources-setup-grid", ".sources-workspace-section"], [".page-header", ".sources-setup-grid", ".sources-workspace-section"], [".content", ".sources-page-stack", ".panel-scroll-body"]),
+        new("governance", "/governance", "治理檢查", [".governance-page-stack", ".metric-grid", ".governance-workspace-section"], [".page-header", ".metric-grid", ".governance-workspace-section"], [".content", ".governance-page-stack", ".panel-scroll-body"]),
+        new("evaluation", "/evaluation", "評估驗證", [".evaluation-page-stack", ".filter-panel", ".evaluation-workspace-section"], [".page-header", ".filter-panel", ".evaluation-workspace-section"], [".content", ".evaluation-page-stack", ".panel-scroll-body"]),
+        new("inbox", "/inbox", "收件匣", [".inbox-page-stack", ".metric-grid", ".inbox-workspace-section"], [".page-header", ".metric-grid", ".inbox-workspace-section"], [".content", ".inbox-page-stack", ".panel-scroll-body"]),
         new("preferences", "/preferences", "使用者偏好", [".split-layout", ".preferences-list-panel", ".stack-scroll-shell"], [".page-header", ".split-layout"], [".content", ".stack-scroll-shell"]),
         new("logs", "/logs", "日誌", [".logs-filter-grid", ".split-layout", ".table-scroll-shell"], [".filter-panel", ".split-layout"], [".content", ".table-scroll-shell"]),
         new("jobs", "/jobs", "工作佇列", [".split-layout", ".data-table", ".detail-panel"], [".page-header", ".jobs-page-body > .split-layout:last-of-type"], [".content", ".panel-scroll-body"]),
@@ -44,6 +49,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         Routes.Single(route => route.Name == "runtime"),
         Routes.Single(route => route.Name == "monitoring"),
         Routes.Single(route => route.Name == "memories"),
+        Routes.Single(route => route.Name == "graph"),
         Routes.Single(route => route.Name == "logs"),
         Routes.Single(route => route.Name == "storage"),
         Routes.Single(route => route.Name == "performance")
@@ -51,6 +57,11 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
     private static readonly DashboardRouteSpec[] EmptyRoutes =
     [
+        Routes.Single(route => route.Name == "sources"),
+        Routes.Single(route => route.Name == "governance"),
+        Routes.Single(route => route.Name == "evaluation"),
+        Routes.Single(route => route.Name == "inbox"),
+        Routes.Single(route => route.Name == "graph"),
         Routes.Single(route => route.Name == "memories"),
         Routes.Single(route => route.Name == "preferences"),
         Routes.Single(route => route.Name == "logs"),
@@ -134,6 +145,109 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
+    public async Task Evaluation_Create_Suite_Form_Should_Render_Without_Horizontal_Overflow_On_Desktop()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/evaluation?uiProfile=normal");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                topRowCount: [...new Set(Array.from(document.querySelectorAll('.evaluation-form-grid > label'))
+                    .map(item => Math.round(item.getBoundingClientRect().top)))].length,
+                formScrollWidth: document.querySelector('.evaluation-form-grid')?.scrollWidth ?? 0,
+                formClientWidth: document.querySelector('.evaluation-form-grid')?.clientWidth ?? 0,
+                caseScrollWidth: document.querySelector('.evaluation-case-grid')?.scrollWidth ?? 0,
+                caseClientWidth: document.querySelector('.evaluation-case-grid')?.clientWidth ?? 0,
+                workspaceScrollWidth: document.querySelector('.evaluation-split-layout')?.scrollWidth ?? 0,
+                workspaceClientWidth: document.querySelector('.evaluation-split-layout')?.clientWidth ?? 0
+            })");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        document.RootElement.GetProperty("topRowCount").GetInt32().Should().Be(1);
+        document.RootElement.GetProperty("formScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("formClientWidth").GetInt32() + 1);
+        document.RootElement.GetProperty("caseScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("caseClientWidth").GetInt32() + 1);
+        document.RootElement.GetProperty("workspaceScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("workspaceClientWidth").GetInt32() + 1);
+    }
+
+    [Fact]
+    public async Task Sources_Create_Panel_Should_Finish_Before_Workspace_Section_Starts()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/sources?uiProfile=normal");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                panelBottom: Math.round(document.querySelector('#source-config-panel')?.getBoundingClientRect().bottom ?? 0),
+                actionBottom: Math.round(document.querySelector('#source-config-panel .inline-actions')?.getBoundingClientRect().bottom ?? 0),
+                workspaceTop: Math.round(document.querySelector('.sources-workspace-section')?.getBoundingClientRect().top ?? 0)
+            })");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var panelBottom = document.RootElement.GetProperty("panelBottom").GetInt32();
+        var actionBottom = document.RootElement.GetProperty("actionBottom").GetInt32();
+        var workspaceTop = document.RootElement.GetProperty("workspaceTop").GetInt32();
+
+        panelBottom.Should().BeGreaterThanOrEqualTo(actionBottom - 1);
+        workspaceTop.Should().BeGreaterThanOrEqualTo(panelBottom - 1);
+    }
+
+    [Fact]
+    public async Task Evaluation_Create_Form_Should_Finish_Before_Workspace_Section_Starts()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/evaluation?uiProfile=normal");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                formBottom: Math.round(document.querySelector('#evaluation-suite-form')?.getBoundingClientRect().bottom ?? 0),
+                actionBottom: Math.round(document.querySelector('#evaluation-suite-form .inline-actions')?.getBoundingClientRect().bottom ?? 0),
+                workspaceTop: Math.round(document.querySelector('.evaluation-workspace-section')?.getBoundingClientRect().top ?? 0)
+            })");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var formBottom = document.RootElement.GetProperty("formBottom").GetInt32();
+        var actionBottom = document.RootElement.GetProperty("actionBottom").GetInt32();
+        var workspaceTop = document.RootElement.GetProperty("workspaceTop").GetInt32();
+
+        formBottom.Should().BeGreaterThanOrEqualTo(actionBottom - 1);
+        workspaceTop.Should().BeGreaterThanOrEqualTo(formBottom - 1);
+    }
+
+    [Fact]
+    public async Task Evaluation_Create_Suite_Should_Show_Client_Validation_For_Missing_Required_Fields()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/evaluation?uiProfile=normal");
+
+        await page.GetByRole(AriaRole.Button, new() { Name = "建立評測集" }).ClickAsync();
+
+        var summary = page.Locator(".validation-summary");
+        await summary.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var text = await summary.InnerTextAsync();
+        text.Should().Contain("請填寫評測組名稱");
+        text.Should().Contain("請填寫案例標籤");
+        text.Should().Contain("請填寫查詢字串");
+        text.Should().Contain("請至少提供一個 expected external key");
+    }
+
+    [Fact]
     public async Task Copy_Action_Should_Show_Resolved_Toast_Message()
     {
         await _fixture.EnsureDashboardRunningAsync();
@@ -154,6 +268,35 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var text = await toast.InnerTextAsync();
         text.Should().Contain("已複製日誌 #");
         text.Should().NotContain("_message");
+    }
+
+    [Fact]
+    public async Task Login_Page_Display_Copy_Should_Not_Be_User_Selectable()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await page.GotoAsync(new Uri(_fixture.BaseUri, "/login").ToString());
+        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var stylesJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                title: getComputedStyle(document.querySelector('.login-title') ?? document.body).userSelect,
+                cardTitle: getComputedStyle(document.querySelector('.login-card-title') ?? document.body).userSelect,
+                chip: getComputedStyle(document.querySelector('.login-chip') ?? document.body).userSelect,
+                footer: getComputedStyle(document.querySelector('.login-footer') ?? document.body).userSelect,
+                usernameInput: getComputedStyle(document.querySelector('input[name=""Username""]') ?? document.body).userSelect,
+                error: getComputedStyle(document.querySelector('.toast-error') ?? document.body).userSelect
+            })");
+
+        using var document = JsonDocument.Parse(stylesJson);
+        document.RootElement.GetProperty("title").GetString().Should().Be("none");
+        document.RootElement.GetProperty("cardTitle").GetString().Should().Be("none");
+        document.RootElement.GetProperty("chip").GetString().Should().Be("none");
+        document.RootElement.GetProperty("footer").GetString().Should().Be("none");
+        document.RootElement.GetProperty("usernameInput").GetString().Should().NotBe("none");
+        document.RootElement.GetProperty("error").GetString().Should().NotBe("none");
     }
 
     [Fact]
@@ -182,6 +325,136 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             State = WaitForSelectorState.Hidden,
             Timeout = 15000
         });
+    }
+
+    [Fact]
+    public async Task Memories_Return_To_Current_Project_Should_Not_Backfill_Project_Input_When_No_Explicit_Project_Was_Selected()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/memories?uiProfile=normal");
+
+        var projectInput = page.GetByPlaceholder("目前專案 (Project Id，可模糊搜尋)");
+        projectInput.Should().NotBeNull();
+
+        (await projectInput.InputValueAsync()).Should().BeEmpty();
+
+        await page.GetByRole(AriaRole.Button, new() { Name = "查看共用綜合層" }).ClickAsync();
+        await page.WaitForTimeoutAsync(400);
+
+        await page.GetByRole(AriaRole.Button, new() { Name = "回到目前專案" }).ClickAsync();
+        await page.WaitForTimeoutAsync(400);
+
+        (await projectInput.InputValueAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Memories_Return_To_Current_Project_Should_Restore_Explicit_Project_Filter_When_One_Was_Selected()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/memories?uiProfile=normal");
+
+        var projectInput = page.GetByPlaceholder("目前專案 (Project Id，可模糊搜尋)");
+        await projectInput.ClickAsync();
+        await page.Locator(".project-suggestion-item").First.ClickAsync();
+        await page.WaitForTimeoutAsync(400);
+        var selectedProjectId = await projectInput.InputValueAsync();
+        selectedProjectId.Should().NotBeNullOrWhiteSpace();
+
+        await page.GetByRole(AriaRole.Button, new() { Name = "查看共用綜合層" }).ClickAsync();
+        await page.WaitForTimeoutAsync(400);
+
+        await page.GetByRole(AriaRole.Button, new() { Name = "回到目前專案" }).ClickAsync();
+        await page.WaitForTimeoutAsync(400);
+
+        (await projectInput.InputValueAsync()).Should().Be(selectedProjectId);
+    }
+
+    [Fact]
+    public async Task Memories_Scope_Shortcuts_Should_Be_Mutually_Exclusive()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/memories?uiProfile=normal");
+
+        var viewSharedButton = page.GetByRole(AriaRole.Button, new() { Name = "查看共用綜合層" });
+        var returnButton = page.GetByRole(AriaRole.Button, new() { Name = "回到目前專案" });
+
+        (await viewSharedButton.CountAsync()).Should().Be(1);
+        (await returnButton.CountAsync()).Should().Be(0);
+
+        await viewSharedButton.ClickAsync();
+        await page.WaitForTimeoutAsync(400);
+
+        (await page.GetByRole(AriaRole.Button, new() { Name = "查看共用綜合層" }).CountAsync()).Should().Be(0);
+        (await page.GetByRole(AriaRole.Button, new() { Name = "回到目前專案" }).CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Memories_Project_Suggestion_Field_Should_Not_Overflow_On_Fhd_Viewport()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("fhd-1080p", 1920, 1080);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
+
+        var projectInput = page.GetByPlaceholder("目前專案 (Project Id，可模糊搜尋)");
+        var suggestionList = page.Locator(".project-suggestion-list");
+
+        await projectInput.ClickAsync();
+        await suggestionList.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                fieldWidth: Math.round(document.querySelector('.project-suggestion-field')?.getBoundingClientRect().width ?? 0),
+                listWidth: Math.round(document.querySelector('.project-suggestion-list')?.getBoundingClientRect().width ?? 0),
+                fieldRight: Math.round(document.querySelector('.project-suggestion-field')?.getBoundingClientRect().right ?? 0),
+                listRight: Math.round(document.querySelector('.project-suggestion-list')?.getBoundingClientRect().right ?? 0),
+                gridScrollWidth: document.querySelector('.memories-filter-grid')?.scrollWidth ?? 0,
+                gridClientWidth: document.querySelector('.memories-filter-grid')?.clientWidth ?? 0
+            })");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        document.RootElement.GetProperty("fieldWidth").GetInt32().Should().BeGreaterThan(0);
+        document.RootElement.GetProperty("listWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("fieldWidth").GetInt32() + 1);
+        document.RootElement.GetProperty("listRight").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("fieldRight").GetInt32() + 1);
+        document.RootElement.GetProperty("gridScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("gridClientWidth").GetInt32() + 1);
+    }
+
+    [Fact]
+    public async Task Memories_Filter_Should_Render_In_Two_Rows_On_Fhd_Viewport()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("fhd-1080p", 1920, 1080);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                uniqueRows: [...new Set(Array.from(document.querySelectorAll('.memories-filter-grid > *'))
+                    .map(node => Math.round(node.getBoundingClientRect().top)))].length,
+                gridScrollWidth: document.querySelector('.memories-filter-grid')?.scrollWidth ?? 0,
+                gridClientWidth: document.querySelector('.memories-filter-grid')?.clientWidth ?? 0
+            })");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        document.RootElement.GetProperty("uniqueRows").GetInt32().Should().Be(2);
+        document.RootElement.GetProperty("gridScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("gridClientWidth").GetInt32() + 1);
     }
 
     [Fact]
@@ -216,6 +489,411 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         rowHeights.Should().NotBeEmpty();
         rowHeights.Max().Should().BeLessThan(140d);
+    }
+
+    [Fact]
+    public async Task Graph_Node_Selection_Should_Update_Detail_Panel()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
+
+        var cards = page.Locator(".graph-node-card");
+        await cards.Nth(1).WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var expectedTitle = await cards.Nth(1).Locator(".graph-node-title").InnerTextAsync();
+        await cards.Nth(1).ClickAsync();
+        await page.WaitForFunctionAsync(
+            "(title) => document.querySelector('.graph-detail-panel')?.innerText?.includes(title) === true",
+            expectedTitle);
+
+        var detailPanel = page.Locator(".graph-detail-panel");
+        var detailText = await detailPanel.InnerTextAsync();
+        detailText.Should().Contain(expectedTitle);
+
+        var className = await cards.Nth(1).GetAttributeAsync("class");
+        className.Should().NotBeNull();
+        className.Should().MatchRegex("selected");
+    }
+
+    [Fact]
+    public async Task Graph_Dense_Layout_Should_Avoid_Card_Overlap_On_Desktop()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
+        await page.WaitForFunctionAsync("() => (document.querySelectorAll('.graph-node-card').length ?? 0) >= 4");
+
+        var overlapJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const cards = Array.from(document.querySelectorAll('.graph-node-card')).map(card => {
+                    const rect = card.getBoundingClientRect();
+                    return {
+                        left: rect.left,
+                        top: rect.top,
+                        right: rect.right,
+                        bottom: rect.bottom,
+                        width: rect.width,
+                        height: rect.height
+                    };
+                });
+
+                let maxIntersectionArea = 0;
+                for (let i = 0; i < cards.length; i += 1) {
+                    for (let j = i + 1; j < cards.length; j += 1) {
+                        const left = Math.max(cards[i].left, cards[j].left);
+                        const right = Math.min(cards[i].right, cards[j].right);
+                        const top = Math.max(cards[i].top, cards[j].top);
+                        const bottom = Math.min(cards[i].bottom, cards[j].bottom);
+                        if (right > left && bottom > top) {
+                            maxIntersectionArea = Math.max(maxIntersectionArea, (right - left) * (bottom - top));
+                        }
+                    }
+                }
+
+                return JSON.stringify({
+                    count: cards.length,
+                    maxIntersectionArea
+                });
+            }");
+
+        using var document = JsonDocument.Parse(overlapJson);
+        document.RootElement.GetProperty("count").GetInt32().Should().BeGreaterThanOrEqualTo(4);
+        document.RootElement.GetProperty("maxIntersectionArea").GetDouble().Should().BeLessThan(8);
+    }
+
+    [Fact]
+    public async Task Graph_Project_Dropdown_Should_Support_AllProjects_Integrated_View()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
+
+        var projectSelect = page.Locator("select[aria-label='專案檢視']");
+        await projectSelect.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var optionTexts = await projectSelect.Locator("option").AllInnerTextsAsync();
+        optionTexts.Should().Contain(text => text.Contains("全部專案整合視圖", StringComparison.Ordinal));
+        (await projectSelect.InputValueAsync()).Should().Be("__all__");
+
+        await projectSelect.SelectOptionAsync(AllProjectsSelectionValue());
+        await page.GetByRole(AriaRole.Button, new() { Name = "更新圖譜" }).ClickAsync();
+
+        var statusStrip = page.Locator(".graph-status-strip");
+        await statusStrip.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var statusText = await statusStrip.InnerTextAsync();
+        statusText.Should().Contain("全部專案整合視圖");
+    }
+
+    [Fact]
+    public async Task Graph_Integrated_View_Should_Render_Project_Overview_Without_Initial_Focus_Clipping()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
+        await page.WaitForFunctionAsync("() => (document.querySelectorAll('.graph-node-card').length ?? 0) >= 8");
+        await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0) > 0");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const shell = document.querySelector('.graph-scroll-shell')?.getBoundingClientRect();
+                const cards = Array.from(document.querySelectorAll('.graph-node-card')).map(card => {
+                    const rect = card.getBoundingClientRect();
+                    return {
+                        left: rect.left,
+                        top: rect.top,
+                        right: rect.right,
+                        bottom: rect.bottom
+                    };
+                });
+                const clippedCount = shell
+                    ? cards.filter(card =>
+                        card.left < shell.left - 1 ||
+                        card.top < shell.top - 1 ||
+                        card.right > shell.right + 1 ||
+                        card.bottom > shell.bottom + 1).length
+                    : cards.length;
+
+                return JSON.stringify({
+                    count: cards.length,
+                    clippedCount,
+                    scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
+                    statusText: document.querySelector('.graph-status-strip')?.textContent ?? '',
+                    focusText: document.querySelector('.graph-detail-actions .ghost-button')?.textContent ?? ''
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        document.RootElement.GetProperty("count").GetInt32().Should().BeGreaterThanOrEqualTo(8);
+        document.RootElement.GetProperty("clippedCount").GetInt32().Should().Be(0);
+        document.RootElement.GetProperty("scale").GetDouble().Should().BeGreaterThan(0.48d);
+        document.RootElement.GetProperty("statusText").GetString().Should().Contain("ProjectFull 模式");
+        document.RootElement.GetProperty("focusText").GetString().Should().Contain("聚焦此節點");
+    }
+
+    [Fact]
+    public async Task Graph_Viewport_Should_Support_Wheel_Zoom_And_Drag_Pan()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
+        var shell = page.Locator(".graph-scroll-shell");
+        await shell.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+        await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0) > 0");
+
+        var box = await shell.BoundingBoxAsync();
+        box.Should().NotBeNull();
+
+        var beforeJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
+                panX: Number(document.querySelector('.graph-scroll-shell')?.dataset.panX ?? 0),
+                panY: Number(document.querySelector('.graph-scroll-shell')?.dataset.panY ?? 0)
+            })");
+
+        await page.Mouse.MoveAsync(box!.X + box.Width - 42, box.Y + 42);
+        await page.Mouse.WheelAsync(0, -720);
+        await page.WaitForTimeoutAsync(180);
+
+        var afterZoomJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
+                panX: Number(document.querySelector('.graph-scroll-shell')?.dataset.panX ?? 0),
+                panY: Number(document.querySelector('.graph-scroll-shell')?.dataset.panY ?? 0)
+            })");
+
+        using var beforeDocument = JsonDocument.Parse(beforeJson);
+        using var afterZoomDocument = JsonDocument.Parse(afterZoomJson);
+        var beforeScale = beforeDocument.RootElement.GetProperty("scale").GetDouble();
+        var afterZoomScale = afterZoomDocument.RootElement.GetProperty("scale").GetDouble();
+        afterZoomScale.Should().BeGreaterThan(beforeScale + 0.05d);
+
+        var startX = box.X + 18;
+        var startY = box.Y + 18;
+        await page.Mouse.MoveAsync(startX, startY);
+        await page.Mouse.DownAsync();
+        await page.Mouse.MoveAsync(startX + 132, startY + 96, new MouseMoveOptions
+        {
+            Steps = 8
+        });
+        await page.Mouse.UpAsync();
+        await page.WaitForTimeoutAsync(120);
+
+        var afterPanJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
+                panX: Number(document.querySelector('.graph-scroll-shell')?.dataset.panX ?? 0),
+                panY: Number(document.querySelector('.graph-scroll-shell')?.dataset.panY ?? 0)
+            })");
+
+        using var afterPanDocument = JsonDocument.Parse(afterPanJson);
+        var afterZoomPanX = afterZoomDocument.RootElement.GetProperty("panX").GetDouble();
+        var afterZoomPanY = afterZoomDocument.RootElement.GetProperty("panY").GetDouble();
+        var afterPanPanX = afterPanDocument.RootElement.GetProperty("panX").GetDouble();
+        var afterPanPanY = afterPanDocument.RootElement.GetProperty("panY").GetDouble();
+
+        Math.Abs(afterPanPanX - afterZoomPanX).Should().BeGreaterThan(40);
+        Math.Abs(afterPanPanY - afterZoomPanY).Should().BeGreaterThan(24);
+    }
+
+    [Fact]
+    public async Task Graph_Normal_View_Should_Keep_Small_Graphs_Readable_On_First_Render()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=normal");
+        await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0) > 0");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
+                nodeWidth: Math.round(document.querySelector('.graph-node-card')?.getBoundingClientRect().width ?? 0),
+                nodeHeight: Math.round(document.querySelector('.graph-node-card')?.getBoundingClientRect().height ?? 0),
+                shellWidth: Math.round(document.querySelector('.graph-scroll-shell')?.getBoundingClientRect().width ?? 0)
+            })");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        document.RootElement.GetProperty("scale").GetDouble().Should().BeGreaterThan(0.58d);
+        document.RootElement.GetProperty("nodeWidth").GetInt32().Should().BeGreaterThan(150);
+        document.RootElement.GetProperty("nodeHeight").GetInt32().Should().BeGreaterThan(100);
+        document.RootElement.GetProperty("shellWidth").GetInt32().Should().BeGreaterThan(360);
+    }
+
+    [Fact]
+    public async Task Graph_Should_Support_Fullscreen_Expansion()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
+
+        var panel = page.Locator(".graph-canvas-panel");
+        await panel.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var beforeBox = await panel.BoundingBoxAsync();
+        beforeBox.Should().NotBeNull();
+
+        await page.GetByRole(AriaRole.Button, new() { Name = "全螢幕" }).ClickAsync();
+        await page.WaitForFunctionAsync("() => document.querySelector('.graph-canvas-panel')?.classList.contains('graph-canvas-panel-expanded') === true");
+
+        var expandedBox = await panel.BoundingBoxAsync();
+        expandedBox.Should().NotBeNull();
+        expandedBox!.Width.Should().BeGreaterThan(beforeBox!.Width + 120);
+        expandedBox.Height.Should().BeGreaterThan(beforeBox.Height + 120);
+
+        await page.GetByRole(AriaRole.Button, new() { Name = "收合圖表" }).ClickAsync();
+        await page.WaitForFunctionAsync("() => document.querySelector('.graph-canvas-panel')?.classList.contains('graph-canvas-panel-expanded') === false");
+    }
+
+    private static string[] AllProjectsSelectionValue()
+        => ["__all__"];
+
+    [Fact]
+    public async Task Sources_Page_Should_Not_Overflow_On_Fhd_Viewport()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("fhd-1080p", 1920, 1080);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/sources?uiProfile=dense");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                metricScrollWidth: document.querySelector('.sources-metric-grid')?.scrollWidth ?? 0,
+                metricClientWidth: document.querySelector('.sources-metric-grid')?.clientWidth ?? 0,
+                setupScrollWidth: document.querySelector('.sources-setup-grid')?.scrollWidth ?? 0,
+                setupClientWidth: document.querySelector('.sources-setup-grid')?.clientWidth ?? 0,
+                filterScrollWidth: document.querySelector('.sources-filter-grid')?.scrollWidth ?? 0,
+                filterClientWidth: document.querySelector('.sources-filter-grid')?.clientWidth ?? 0,
+                textareaScrollWidth: document.querySelector('.sources-textarea-grid')?.scrollWidth ?? 0,
+                textareaClientWidth: document.querySelector('.sources-textarea-grid')?.clientWidth ?? 0,
+                splitScrollWidth: document.querySelector('.sources-split-layout')?.scrollWidth ?? 0,
+                splitClientWidth: document.querySelector('.sources-split-layout')?.clientWidth ?? 0,
+                sectionTops: Array.from(document.querySelectorAll('.sources-page-stack > *'))
+                    .map(node => Math.round(node.getBoundingClientRect().top))
+            })");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        document.RootElement.GetProperty("metricScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("metricClientWidth").GetInt32() + 1);
+        document.RootElement.GetProperty("setupScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("setupClientWidth").GetInt32() + 1);
+        document.RootElement.GetProperty("filterScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("filterClientWidth").GetInt32() + 1);
+        document.RootElement.GetProperty("textareaScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("textareaClientWidth").GetInt32() + 1);
+        document.RootElement.GetProperty("splitScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("splitClientWidth").GetInt32() + 1);
+
+        var sectionTops = document.RootElement.GetProperty("sectionTops")
+            .EnumerateArray()
+            .Select(static value => value.GetInt32())
+            .ToArray();
+
+        sectionTops.Should().HaveCountGreaterThanOrEqualTo(3);
+        sectionTops.Should().BeInAscendingOrder();
+    }
+
+    [Theory]
+    [InlineData("/sources?uiProfile=normal", ".sources-page-stack", ".sources-page-stack > .metric-grid", ".sources-page-stack > .sources-setup-grid", ".sources-page-stack > .sources-workspace-section")]
+    [InlineData("/governance?uiProfile=normal", ".governance-page-stack", ".governance-page-stack > .metric-grid", ".governance-page-stack > .governance-workspace-section")]
+    [InlineData("/evaluation?uiProfile=normal", ".evaluation-page-stack", ".evaluation-page-stack > .metric-grid", ".evaluation-page-stack > #evaluation-suite-form", ".evaluation-page-stack > .evaluation-workspace-section")]
+    [InlineData("/inbox?uiProfile=normal", ".inbox-page-stack", ".inbox-page-stack > .metric-grid", ".inbox-page-stack > .inbox-workspace-section")]
+    public async Task Workspace_Pages_Should_Flow_From_Summary_To_Workspace_Without_Section_Overlap(string route, string stackSelector, params string[] sectionSelectors)
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, route);
+
+        await page.Locator(stackSelector).WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"selectors => JSON.stringify(selectors.map(selector => {
+                const element = document.querySelector(selector);
+                if (!element) {
+                    return { selector, exists: false, top: 0, bottom: 0 };
+                }
+
+                const rect = element.getBoundingClientRect();
+                return {
+                    selector,
+                    exists: true,
+                    top: Math.round(rect.top),
+                    bottom: Math.round(rect.bottom)
+                };
+            }))",
+            sectionSelectors);
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var sections = document.RootElement.EnumerateArray().ToArray();
+        sections.Should().NotBeEmpty();
+        sections.All(section => section.GetProperty("exists").GetBoolean()).Should().BeTrue();
+
+        var previousBottom = 0;
+        foreach (var section in sections)
+        {
+            var top = section.GetProperty("top").GetInt32();
+            var bottom = section.GetProperty("bottom").GetInt32();
+            top.Should().BeGreaterThanOrEqualTo(previousBottom - 1, $"{section.GetProperty("selector").GetString()} should not overlap the previous section");
+            bottom.Should().BeGreaterThan(top);
+            previousBottom = bottom;
+        }
+    }
+
+    [Fact]
+    public async Task Monitoring_Workspace_Should_Render_Divider_Between_Summary_And_Scroll_Section()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/monitoring?uiProfile=normal");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                borderTopWidth: getComputedStyle(document.querySelector('.monitoring-workspace-section') ?? document.body).borderTopWidth,
+                paddingTop: getComputedStyle(document.querySelector('.monitoring-workspace-section') ?? document.body).paddingTop
+            })");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        document.RootElement.GetProperty("borderTopWidth").GetString().Should().NotBeNullOrWhiteSpace().And.NotBe("0px");
+        document.RootElement.GetProperty("paddingTop").GetString().Should().NotBeNullOrWhiteSpace().And.NotBe("0px");
     }
 
     [Fact]

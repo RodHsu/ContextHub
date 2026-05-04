@@ -1,0 +1,457 @@
+::deep .graph-page-body {
+    min-height: 0;
+}
+
+.graph-workspace {
+    display: grid;
+    grid-template-columns: minmax(248px, 0.62fr) minmax(0, 2.15fr) minmax(280px, 0.78fr);
+    grid-template-areas: "filter canvas detail";
+    gap: var(--dashboard-grid-gap);
+    min-height: 0;
+    align-items: stretch;
+}
+
+.graph-filter-panel,
+.graph-canvas-panel,
+.graph-detail-panel {
+    min-width: 0;
+    min-height: 0;
+}
+
+.graph-filter-panel {
+    grid-area: filter;
+}
+
+.graph-canvas-panel {
+    grid-area: canvas;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.graph-detail-panel {
+    grid-area: detail;
+}
+
+.graph-filter-stack {
+    display: grid;
+    gap: 0.9rem;
+}
+
+.graph-filter-stack > label {
+    display: grid;
+    gap: 0.38rem;
+    min-width: 0;
+}
+
+.graph-filter-stack > label > span {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+}
+
+.graph-field-note {
+    font-size: 0.76rem;
+    color: var(--text-subtle);
+    line-height: 1.4;
+}
+
+.graph-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.9rem;
+}
+
+.graph-panel-header-copy {
+    display: grid;
+    gap: 0.35rem;
+    min-width: 0;
+}
+
+.graph-status-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+}
+
+.graph-status-chip {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    padding: 0.22rem 0.62rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+    color: var(--text-muted);
+    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+    font-size: 0.76rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.graph-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+}
+
+.graph-toolbar-chip {
+    padding: 0.28rem 0.62rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+    color: color-mix(in srgb, var(--accent) 72%, var(--text) 28%);
+    border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.graph-toolbar-chip-live {
+    min-width: 6.8rem;
+    text-align: center;
+}
+
+.graph-alert {
+    margin-bottom: 0.9rem;
+}
+
+.graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-bottom: 0.9rem;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+}
+
+.graph-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.graph-legend-line {
+    width: 2rem;
+    height: 0;
+    border-top: 2px solid transparent;
+}
+
+.graph-legend-line-explicit {
+    border-top-color: color-mix(in srgb, var(--accent) 74%, #0f172a 26%);
+}
+
+.graph-legend-line-similar {
+    border-top-color: color-mix(in srgb, var(--warn) 62%, transparent);
+    border-top-style: dashed;
+}
+
+.graph-legend-seed {
+    width: 0.82rem;
+    height: 0.82rem;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--accent) 74%, white 26%);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-soft) 78%, transparent);
+}
+
+.graph-legend-hint {
+    padding: 0.18rem 0.5rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+.graph-scroll-shell {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 30rem;
+    height: clamp(30rem, calc(var(--dashboard-viewport-height) - 18.5rem), 48rem);
+    overflow: hidden;
+    border-radius: var(--radius);
+    border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+    background:
+        radial-gradient(circle at 20% 18%, color-mix(in srgb, var(--accent-soft) 22%, transparent) 0, transparent 34%),
+        linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 90%, white 10%), color-mix(in srgb, var(--surface-muted) 94%, transparent));
+    cursor: grab;
+    touch-action: none;
+    isolation: isolate;
+}
+
+.graph-scroll-shell::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(90deg, color-mix(in srgb, var(--border) 48%, transparent) 1px, transparent 1px) 0 0 / 48px 48px,
+        linear-gradient(0deg, color-mix(in srgb, var(--border) 48%, transparent) 1px, transparent 1px) 0 0 / 48px 48px;
+    opacity: 0.08;
+    pointer-events: none;
+}
+
+.graph-scroll-shell[data-is-panning="true"] {
+    cursor: grabbing;
+}
+
+.graph-pan-content {
+    position: relative;
+    min-width: 100%;
+    min-height: 100%;
+    will-change: transform;
+}
+
+.graph-pan-content:has(.graph-empty-state) {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.graph-canvas {
+    position: relative;
+}
+
+.graph-edges-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+}
+
+.graph-edge {
+    stroke-width: 2.2;
+    opacity: 0.62;
+}
+
+.graph-edge-explicit {
+    stroke: color-mix(in srgb, var(--accent) 74%, #0f172a 26%);
+}
+
+.graph-edge-similar {
+    stroke: color-mix(in srgb, var(--warn) 58%, var(--text-muted) 42%);
+    stroke-dasharray: 8 6;
+}
+
+.graph-node-card {
+    position: absolute;
+    display: grid;
+    gap: 0.5rem;
+    align-content: start;
+    padding: 0.92rem 0.96rem;
+    border-radius: 16px;
+    border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+    background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
+    box-shadow:
+        0 10px 28px rgba(0, 77, 109, 0.07),
+        0 2px 8px rgba(0, 0, 0, 0.04);
+    text-align: left;
+    color: inherit;
+    cursor: pointer;
+    text-decoration: none;
+    user-select: none;
+    overflow: hidden;
+    transition: border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.graph-node-card:hover {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--accent) 18%, var(--border) 82%);
+}
+
+.graph-node-card.selected {
+    border-color: color-mix(in srgb, var(--accent) 40%, white 60%);
+    box-shadow:
+        0 14px 34px rgba(0, 77, 109, 0.1),
+        0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.graph-node-seed {
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 18%, white 82%), color-mix(in srgb, var(--bg-elevated) 96%, transparent));
+}
+
+.graph-node-header {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+}
+
+.graph-node-media,
+.graph-node-favicon,
+.graph-node-source-badge {
+    width: 2rem;
+    height: 2rem;
+    flex: 0 0 auto;
+    border-radius: 10px;
+}
+
+.graph-node-media,
+.graph-node-favicon {
+    object-fit: cover;
+    background: color-mix(in srgb, var(--surface-muted) 90%, transparent);
+}
+
+.graph-node-source-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.76rem;
+}
+
+.graph-node-meta {
+    display: grid;
+    gap: 0.1rem;
+    min-width: 0;
+}
+
+.graph-node-type,
+.graph-node-project {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.graph-node-type {
+    font-size: 0.76rem;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.graph-node-project {
+    color: var(--text-subtle);
+    font-size: 0.76rem;
+}
+
+.graph-node-title,
+.graph-node-summary,
+.graph-node-tags {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+
+.graph-node-title {
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    font-weight: 700;
+    line-height: 1.35;
+}
+
+.graph-node-summary {
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    color: var(--text-muted);
+    font-size: 0.83rem;
+    line-height: 1.45;
+}
+
+.graph-node-tags {
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    color: var(--text-subtle);
+    font-size: 0.76rem;
+}
+
+.graph-node-footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.45rem;
+    color: var(--text-subtle);
+    font-size: 0.76rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.graph-empty-state {
+    position: absolute;
+    inset: 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    border: 1px dashed color-mix(in srgb, var(--border) 74%, transparent);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--bg-panel) 78%, transparent);
+}
+
+.graph-canvas-panel-expanded {
+    position: fixed;
+    inset: 1rem;
+    z-index: 90;
+    margin: 0;
+    background: color-mix(in srgb, var(--bg-panel) 96%, white 4%);
+    box-shadow:
+        0 18px 54px rgba(0, 0, 0, 0.24),
+        0 4px 18px rgba(0, 77, 109, 0.08);
+}
+
+.graph-canvas-panel-expanded .graph-scroll-shell {
+    min-height: 0;
+    height: auto;
+}
+
+.graph-detail-scroll {
+    min-height: 0;
+}
+
+.graph-detail-stack {
+    display: grid;
+    gap: 1rem;
+}
+
+.graph-detail-actions {
+    display: flex;
+    gap: 0.65rem;
+    flex-wrap: wrap;
+}
+
+.graph-detail-summary,
+.graph-detail-content {
+    white-space: pre-wrap;
+}
+
+@media (max-width: 1500px) {
+    .graph-workspace {
+        grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+        grid-template-areas:
+            "filter canvas"
+            "detail canvas";
+    }
+
+    .graph-scroll-shell {
+        height: clamp(34rem, calc(var(--dashboard-viewport-height) - 17rem), 48rem);
+    }
+}
+
+@media (max-width: 1100px) {
+    .graph-workspace {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+            "filter"
+            "canvas"
+            "detail";
+    }
+}
+
+@media (max-width: 720px) {
+    .graph-panel-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .graph-toolbar {
+        width: 100%;
+    }
+
+    .graph-scroll-shell {
+        height: 30rem;
+    }
+
+    .graph-canvas-panel-expanded {
+        inset: 0.65rem;
+    }
+}

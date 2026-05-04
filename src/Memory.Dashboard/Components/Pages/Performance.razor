@@ -4,12 +4,16 @@
 <PageTitle>Context Hub | 效能</PageTitle>
 
 <PageViewport Title="效能"
-              Subtitle="用目前 active profile / model / PostgreSQL state 量測 chunking、embedding 與 hybrid search，可選固定次數或固定時長模式。"
+              Subtitle="量測 chunking、embedding 與 hybrid search 表現。"
               BodyClass="page-viewport-body performance-page-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                       IsRefreshing="_loading" />
-        <button class="primary-button" @onclick="MeasureAsync" disabled="@_loading">開始量測</button>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="MeasureAsync" disabled="@_loading">開始量測</button>
+        </div>
     </Actions>
     <ChildContent>
 
@@ -97,17 +101,17 @@
                 <section class="panel performance-results-panel">
                     <div class="panel-title">量測結果總覽</div>
                     <div class="performance-run-meta">
-                        <div class="performance-run-pill">預熱 @_result.WarmupIterations 次</div>
-                        <div class="performance-run-pill">量測 @_result.MeasurementIterations 次</div>
+                        <div class="performance-run-pill">預熱 @DashboardFormatting.Integer(_result.WarmupIterations) 次</div>
+                        <div class="performance-run-pill">量測 @DashboardFormatting.Integer(_result.MeasurementIterations) 次</div>
                         <div class="performance-run-pill">請求時長 @RequestedDurationText(_result)</div>
-                        <div class="performance-run-pill">迭代上限 @_result.MaxMeasurementIterations</div>
+                        <div class="performance-run-pill">迭代上限 @DashboardFormatting.Integer(_result.MaxMeasurementIterations)</div>
                     </div>
 
                     <div class="performance-kpi-grid">
                         <article class="performance-kpi-card">
                             <div class="metric-label">向量設定</div>
                             <div class="performance-kpi-value">@_result.EmbeddingProfile</div>
-                            <div class="performance-kpi-meta">@_result.ModelKey / @_result.Dimensions 維</div>
+                            <div class="performance-kpi-meta">@_result.ModelKey / @DashboardFormatting.Integer(_result.Dimensions) 維</div>
                         </article>
                         <article class="performance-kpi-card">
                             <div class="metric-label">量測模式</div>
@@ -117,17 +121,17 @@
                         <article class="performance-kpi-card">
                             <div class="metric-label">量測總時長</div>
                             <div class="performance-kpi-value">@FormatDuration(_result.TotalMeasurementMilliseconds)</div>
-                            <div class="performance-kpi-meta">原始值 @_result.TotalMeasurementMilliseconds.ToString("0") ms</div>
+                            <div class="performance-kpi-meta">原始值 @DashboardFormatting.Integer((long)Math.Round(_result.TotalMeasurementMilliseconds)) ms</div>
                         </article>
                         <article class="performance-kpi-card">
                             <div class="metric-label">切塊數量</div>
-                            <div class="performance-kpi-value">@_result.ChunkCount</div>
-                            <div class="performance-kpi-meta">Token Estimate @_result.DocumentTokenEstimate</div>
+                            <div class="performance-kpi-value">@DashboardFormatting.Integer(_result.ChunkCount)</div>
+                            <div class="performance-kpi-meta">Token Estimate @DashboardFormatting.Integer(_result.DocumentTokenEstimate)</div>
                         </article>
                         <article class="performance-kpi-card">
                             <div class="metric-label">命中筆數</div>
-                            <div class="performance-kpi-value">@_result.HybridHitCount</div>
-                            <div class="performance-kpi-meta">Keyword @_result.KeywordHitCount / Vector @_result.VectorHitCount</div>
+                            <div class="performance-kpi-value">@DashboardFormatting.Integer(_result.HybridHitCount)</div>
+                            <div class="performance-kpi-meta">Keyword @DashboardFormatting.Integer(_result.KeywordHitCount) / Vector @DashboardFormatting.Integer(_result.VectorHitCount)</div>
                         </article>
                     </div>
 
@@ -149,11 +153,11 @@
                                 {
                                     <tr>
                                         <td>@DashboardText.PerformanceMetric(row.Name)</td>
-                                        <td>@row.Result.AverageMilliseconds.ToString("0.##") ms</td>
-                                        <td>@row.Result.P95Milliseconds.ToString("0.##") ms</td>
-                                        <td>@row.Result.MinMilliseconds.ToString("0.##") ms</td>
-                                        <td>@row.Result.MaxMilliseconds.ToString("0.##") ms</td>
-                                        <td>@row.Result.ThroughputPerSecond.ToString("0.##") /s</td>
+                                        <td>@DashboardFormatting.Decimal(row.Result.AverageMilliseconds) ms</td>
+                                        <td>@DashboardFormatting.Decimal(row.Result.P95Milliseconds) ms</td>
+                                        <td>@DashboardFormatting.Decimal(row.Result.MinMilliseconds) ms</td>
+                                        <td>@DashboardFormatting.Decimal(row.Result.MaxMilliseconds) ms</td>
+                                        <td>@DashboardFormatting.Decimal(row.Result.ThroughputPerSecond) /s</td>
                                     </tr>
                                 }
                             </tbody>

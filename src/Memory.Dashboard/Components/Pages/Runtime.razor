@@ -6,14 +6,19 @@
 <PageTitle>Context Hub | 執行參數</PageTitle>
 
 <PageViewport Title="執行參數"
-              Subtitle="顯示目前 ContextHub 的設定檔 (profile)、模型與受控執行環境 (runtime) 公開參數。"
+              Subtitle="檢視目前 profile、模型與執行環境參數。"
               BodyClass="page-viewport-body runtime-page-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                       IsRefreshing="_loading"
-                       PollingIntervalSeconds="@PollingIntervalSeconds"
-                       WarningText="@SnapshotWarningText()" />
-        <button class="primary-button" @onclick="RefreshAsync" disabled="@_loading">刷新</button>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           SnapshotAtUtc="PageSnapshotAtUtc()"
+                           IsRefreshing="_loading"
+                           PollingIntervalSeconds="@PollingIntervalSeconds"
+                           WarningText="@SnapshotWarningText()" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="RefreshAsync" disabled="@_loading">刷新</button>
+        </div>
     </Actions>
     <ChildContent>
 
@@ -50,10 +55,10 @@
                     <div><dt>執行提供者 (Execution Provider)</dt><dd>@_runtime.ExecutionProvider</dd></div>
                     <div><dt>設定檔 (Profile)</dt><dd>@_runtime.EmbeddingProfile</dd></div>
                     <div><dt>模型鍵值 (Model Key)</dt><dd>@_runtime.ModelKey</dd></div>
-                    <div><dt>維度 (Dimensions)</dt><dd>@_runtime.Dimensions</dd></div>
-                    <div><dt>最大 Token 數 (Max Tokens)</dt><dd>@_runtime.MaxTokens</dd></div>
-                    <div><dt>推論執行緒 (Inference Threads)</dt><dd>@_runtime.InferenceThreads</dd></div>
-                    <div><dt>批次大小 (Batch Size)</dt><dd>@_runtime.BatchSize</dd></div>
+                    <div><dt>維度 (Dimensions)</dt><dd>@DashboardFormatting.Integer(_runtime.Dimensions)</dd></div>
+                    <div><dt>最大 Token 數 (Max Tokens)</dt><dd>@DashboardFormatting.Integer(_runtime.MaxTokens)</dd></div>
+                    <div><dt>推論執行緒 (Inference Threads)</dt><dd>@DashboardFormatting.Integer(_runtime.InferenceThreads)</dd></div>
+                    <div><dt>批次大小 (Batch Size)</dt><dd>@DashboardFormatting.Integer(_runtime.BatchSize)</dd></div>
                     <div><dt>啟用批次 (Batching Enabled)</dt><dd>@(_runtime.BatchingEnabled ? "是" : "否")</dd></div>
                     <div><dt>命名空間 (Namespace)</dt><dd>@_runtime.Namespace</dd></div>
                 </dl>
@@ -204,18 +209,11 @@
     private DashboardPageSnapshotStatusResult? PageSnapshotStatus()
         => _runtime?.SnapshotStatus;
 
-    private string? SnapshotWarningText()
-    {
-        var snapshotStatus = PageSnapshotStatus();
-        if (snapshotStatus is null || (!snapshotStatus.IsStale && string.IsNullOrWhiteSpace(snapshotStatus.Warning)))
-        {
-            return null;
-        }
+    private DateTimeOffset? PageSnapshotAtUtc()
+        => _runtime?.SnapshotStatus?.SnapshotAtUtc ?? _runtime?.SnapshotAtUtc;
 
-        return string.IsNullOrWhiteSpace(snapshotStatus.Warning)
-            ? "Dashboard snapshot 已過期，畫面顯示的是最後一份可用資料。"
-            : snapshotStatus.Warning;
-    }
+    private string? SnapshotWarningText()
+        => DashboardUiErrorFormatter.BuildSnapshotWarning(PageSnapshotStatus(), "執行參數");
 
     public ValueTask DisposeAsync()
     {

@@ -9,28 +9,19 @@ window.contextHubTime = {
             return isoValue;
         }
 
-        const formatter = new Intl.DateTimeFormat(undefined, {
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-            hour12: false,
-            timeZoneName: "short"
-        });
+        const year = value.getFullYear();
+        const month = String(value.getMonth() + 1).padStart(2, "0");
+        const day = String(value.getDate()).padStart(2, "0");
+        const hour = String(value.getHours()).padStart(2, "0");
+        const minute = String(value.getMinutes()).padStart(2, "0");
+        const second = String(value.getSeconds()).padStart(2, "0");
+        const offsetMinutes = -value.getTimezoneOffset();
+        const sign = offsetMinutes >= 0 ? "+" : "-";
+        const absoluteOffsetMinutes = Math.abs(offsetMinutes);
+        const offsetHours = String(Math.floor(absoluteOffsetMinutes / 60)).padStart(2, "0");
+        const offsetRemainderMinutes = String(absoluteOffsetMinutes % 60).padStart(2, "0");
 
-        const parts = formatter.formatToParts(value);
-        const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
-        const year = map.year ?? "";
-        const month = map.month ?? "";
-        const day = map.day ?? "";
-        const hour = map.hour ?? "";
-        const minute = map.minute ?? "";
-        const second = map.second ?? "";
-        const zone = map.timeZoneName ?? "";
-
-        return `${year}-${month}-${day} ${hour}:${minute}:${second} ${zone}`.trim();
+        return `${year}-${month}-${day} ${hour}:${minute}:${second} GMT${sign}${offsetHours}:${offsetRemainderMinutes}`;
     },
 
     formatRelativeTimestamp(isoValue) {
@@ -62,3 +53,67 @@ window.contextHubTime = {
         return `${deltaDays} 天前`;
     }
 };
+
+(() => {
+    const selector = "time.client-local-time[data-local-iso]";
+
+    function applyLocalTimestamp(element) {
+        if (!(element instanceof HTMLElement)) {
+            return;
+        }
+
+        const isoValue = element.dataset.localIso;
+        if (!isoValue) {
+            return;
+        }
+
+        const formatted = window.contextHubTime.formatLocalTimestamp(isoValue);
+        if (formatted) {
+            element.textContent = formatted;
+        }
+    }
+
+    function refreshLocalTimestamps(root) {
+        if (!root) {
+            return;
+        }
+
+        if (root.matches?.(selector)) {
+            applyLocalTimestamp(root);
+        }
+
+        root.querySelectorAll?.(selector).forEach(applyLocalTimestamp);
+    }
+
+    function initialize() {
+        refreshLocalTimestamps(document);
+
+        if (typeof MutationObserver === "undefined") {
+            return;
+        }
+
+        const observer = new MutationObserver(mutations => {
+            mutations.forEach(mutation => {
+                mutation.addedNodes.forEach(node => refreshLocalTimestamps(node));
+
+                if (mutation.type === "attributes" && mutation.target instanceof HTMLElement) {
+                    applyLocalTimestamp(mutation.target);
+                }
+            });
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["data-local-iso"]
+        });
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", initialize, { once: true });
+    }
+    else {
+        initialize();
+    }
+})();

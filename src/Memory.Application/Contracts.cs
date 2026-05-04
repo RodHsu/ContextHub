@@ -36,7 +36,8 @@ public sealed record MemorySearchRequest(
     string ProjectId = ProjectContext.DefaultProjectId,
     IReadOnlyList<string>? IncludedProjectIds = null,
     MemoryQueryMode QueryMode = MemoryQueryMode.CurrentOnly,
-    bool UseSummaryLayer = false);
+    bool UseSummaryLayer = false,
+    RetrievalTelemetryContext? Telemetry = null);
 
 public sealed record MemorySearchHit(
     Guid MemoryId,
@@ -45,6 +46,7 @@ public sealed record MemorySearchHit(
     MemoryScope Scope,
     decimal Score,
     string Excerpt,
+    string SourceType,
     string SourceRef,
     IReadOnlyList<string> Tags,
     string ProjectId = ProjectContext.DefaultProjectId);
@@ -77,7 +79,45 @@ public sealed record WorkingContextRequest(
     string ProjectId = ProjectContext.DefaultProjectId,
     IReadOnlyList<string>? IncludedProjectIds = null,
     MemoryQueryMode QueryMode = MemoryQueryMode.CurrentOnly,
-    bool UseSummaryLayer = false);
+    bool UseSummaryLayer = false,
+    RetrievalTelemetryContext? Telemetry = null);
+
+public sealed record RetrievalTelemetryContext(
+    string EntryPoint,
+    string Channel,
+    string? Purpose = null,
+    bool Enabled = true);
+
+public sealed record RetrievalTelemetryHitWriteRequest(
+    int Rank,
+    Guid? MemoryId,
+    string Title,
+    string MemoryType,
+    string SourceType,
+    string SourceRef,
+    decimal? Score,
+    string Excerpt,
+    string ProjectId = ProjectContext.DefaultProjectId);
+
+public sealed record RetrievalTelemetryWriteRequest(
+    string ProjectId,
+    string Channel,
+    string EntryPoint,
+    string Purpose,
+    string QueryText,
+    string QueryMode,
+    IReadOnlyList<string> IncludedProjectIds,
+    bool UseSummaryLayer,
+    int Limit,
+    bool CacheHit,
+    int ResultCount,
+    double DurationMs,
+    bool Success,
+    string Error,
+    string MetadataJson,
+    string TraceId,
+    string RequestId,
+    IReadOnlyList<RetrievalTelemetryHitWriteRequest> Hits);
 
 public sealed record WorkingContextSection(
     Guid MemoryId,
@@ -109,7 +149,7 @@ public sealed record EnqueueReindexRequest(
     string ProjectId = ProjectContext.DefaultProjectId);
 
 public sealed record EnqueueSummaryRefreshRequest(
-    string ProjectId = ProjectContext.DefaultProjectId,
+    string? ProjectId = null,
     IReadOnlyList<string>? IncludedProjectIds = null);
 
 public sealed record EnqueueReindexResult(Guid JobId, MemoryJobStatus Status);
@@ -480,6 +520,14 @@ public interface IApplicationDbContext
     DbSet<MemoryJob> MemoryJobs { get; }
     DbSet<RuntimeLogEntry> RuntimeLogEntries { get; }
     DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints { get; }
+    DbSet<SourceConnection> SourceConnections { get; }
+    DbSet<SourceSyncRun> SourceSyncRuns { get; }
+    DbSet<GovernanceFinding> GovernanceFindings { get; }
+    DbSet<EvaluationSuite> EvaluationSuites { get; }
+    DbSet<EvaluationCase> EvaluationCases { get; }
+    DbSet<EvaluationRun> EvaluationRuns { get; }
+    DbSet<EvaluationRunItem> EvaluationRunItems { get; }
+    DbSet<SuggestedAction> SuggestedActions { get; }
     DbSet<ConversationSession> ConversationSessions { get; }
     DbSet<ConversationCheckpoint> ConversationCheckpoints { get; }
     DbSet<ConversationInsight> ConversationInsights { get; }
@@ -489,6 +537,11 @@ public interface IApplicationDbContext
 public interface IChunkingService
 {
     IReadOnlyList<ChunkDraft> Chunk(MemoryType memoryType, string sourceType, string content);
+}
+
+public interface IRetrievalTelemetryService
+{
+    Task RecordAsync(RetrievalTelemetryWriteRequest request, CancellationToken cancellationToken);
 }
 
 public interface IHybridSearchStore

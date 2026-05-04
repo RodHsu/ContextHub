@@ -5,27 +5,34 @@
 <PageTitle>Context Hub | 記憶資料</PageTitle>
 
 <PageViewport Title="記憶資料"
-              Subtitle="以 domain view 檢視 memory items，並展開 revisions / chunks / vectors 摘要。"
+              Subtitle="查詢 memory items，展開 revisions、chunks 與 vectors。"
               BodyClass="page-viewport-body memories-page-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                       IsRefreshing="_loading" />
-        <button class="ghost-button" @onclick="RefreshSharedSummaryAsync" disabled="@_loading">重建共用綜合層</button>
-        <button class="ghost-button" @onclick="LoadSharedSummaryAsync" disabled="@_loading">查看共用綜合層</button>
-        <button class="ghost-button" @onclick="LoadCurrentProjectAsync" disabled="@_loading">回到目前專案</button>
-        <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">查詢</button>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-secondary">
+            <InfoPopover Label="顯示查詢模式說明" Title="查詢模式">
+                <p><code>目前專案</code> 只查目前 <code>ProjectId</code>。</p>
+                <p><code>目前 + 參考專案</code> 會一併帶入參考專案清單。</p>
+                <p><code>共用綜合層</code> 直接查詢唯讀的 shared summary layer。</p>
+            </InfoPopover>
+            <button class="ghost-button" @onclick="RefreshSharedSummaryAsync" disabled="@_loading">重建共用綜合層</button>
+            @if (_queryMode == MemoryQueryMode.SummaryOnly)
+            {
+                <button class="ghost-button" @onclick="LoadCurrentProjectAsync" disabled="@_loading">回到目前專案</button>
+            }
+            else
+            {
+                <button class="ghost-button" @onclick="LoadSharedSummaryAsync" disabled="@_loading">查看共用綜合層</button>
+            }
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">查詢</button>
+        </div>
     </Actions>
     <ChildContent>
-
-    <section class="panel memories-scope-hint-panel">
-        <div class="memories-scope-hint-title">查詢範圍</div>
-        <div class="memories-scope-hint-copy">
-            `目前專案` 只查當前 `ProjectId`。`目前 + 參考專案` 會帶入上方參考專案清單。`共用綜合層` 會直接查詢唯讀的 shared summary layer。
-        </div>
-        <div class="memories-scope-hint-meta">
-            共用綜合層的正式資料層名稱是 `shared summary layer`，在畫面上就是上方查詢模式的 `共用綜合層`，也可直接按「查看共用綜合層」切換。
-        </div>
-    </section>
 
     <section class="panel filter-panel">
         <div class="filter-grid memories-filter-grid">
@@ -46,7 +53,7 @@
                                     class="project-suggestion-item"
                                     @onclick="@(() => SelectProjectSuggestionAsync(suggestion.ProjectId))">
                                 <span>@suggestion.ProjectId</span>
-                                <small>@suggestion.ItemCount 筆</small>
+                                <small>@DashboardFormatting.Integer(suggestion.ItemCount) 筆</small>
                             </button>
                         }
                     </div>
@@ -116,7 +123,7 @@
     {
         <div class="split-layout">
         <section class="panel panel-scroll">
-            <div class="panel-title">記憶條目 (@_page.TotalCount)</div>
+            <div class="panel-title">記憶條目 (@DashboardFormatting.Integer(_page.TotalCount))</div>
             <div class="table-scroll-shell table-scroll-shell-tall">
                 <table class="data-table data-table-clickable memories-table">
                     <colgroup>
@@ -195,6 +202,35 @@
                             <div><dt>更新時間 (Updated)</dt><dd><ClientLocalTime Value="_selected.Document.UpdatedAt" /></dd></div>
                         </dl>
 
+                        @if (_selected.SourceContext is not null)
+                        {
+                            <section class="memory-detail-section">
+                                <div class="subpanel-title">Source Context</div>
+                                <dl class="definition-grid">
+                                    <div><dt>Connector</dt><dd>@(_selected.SourceContext.ConnectorName ?? "n/a")</dd></div>
+                                    <div><dt>Connector Id</dt><dd>@(_selected.SourceContext.SourceConnectionId?.ToString() ?? "n/a")</dd></div>
+                                    <div><dt>Source Version</dt><dd>@(_selected.SourceContext.SourceVersion ?? "n/a")</dd></div>
+                                    <div>
+                                        <dt>Last Sync</dt>
+                                        <dd>
+                                            @if (_selected.SourceContext.LastSuccessfulSyncAt.HasValue)
+                                            {
+                                                <ClientLocalTime Value="_selected.SourceContext.LastSuccessfulSyncAt.Value" />
+                                            }
+                                            else
+                                            {
+                                                <span>n/a</span>
+                                            }
+                                        </dd>
+                                    </div>
+                                </dl>
+                                @if (_selected.SourceContext.Lineage.Count > 0)
+                                {
+                                    <div class="stack-item-meta">@string.Join(" -> ", _selected.SourceContext.Lineage)</div>
+                                }
+                            </section>
+                        }
+
                         <div class="code-block memory-detail-content-block">@_selected.Document.Content</div>
 
                         <section class="memory-detail-section">
@@ -222,12 +258,45 @@
                                         <article class="stack-item">
                                             <div class="stack-item-title">@DashboardText.Label(chunk.ChunkKind) / #@chunk.ChunkIndex</div>
                                             <div class="stack-item-copy">@chunk.ChunkText</div>
-                                            <div class="stack-item-meta">@chunk.Vectors.Count 筆向量</div>
+                                            <div class="stack-item-meta">@DashboardFormatting.Integer(chunk.Vectors.Count) 筆向量</div>
                                         </article>
                                     }
                                 </div>
                             </div>
                         </section>
+
+                        @if (_selected.Findings?.Count > 0)
+                        {
+                            <section class="memory-detail-section">
+                                <div class="subpanel-title">Findings</div>
+                                <div class="stack-list">
+                                    @foreach (var finding in _selected.Findings)
+                                    {
+                                        <article class="stack-item">
+                                            <div class="stack-item-title">@DashboardText.Label(finding.Type) / @DashboardText.Label(finding.Status)</div>
+                                            <div class="stack-item-copy">@finding.Title</div>
+                                            <div class="stack-item-meta">@finding.Summary</div>
+                                        </article>
+                                    }
+                                </div>
+                            </section>
+                        }
+
+                        @if (_selected.Links?.Count > 0)
+                        {
+                            <section class="memory-detail-section">
+                                <div class="subpanel-title">Links</div>
+                                <div class="stack-list">
+                                    @foreach (var link in _selected.Links)
+                                    {
+                                        <article class="stack-item">
+                                            <div class="stack-item-title">@link.LinkType</div>
+                                            <div class="stack-item-meta">@link.FromId -> @link.ToId</div>
+                                        </article>
+                                    }
+                                </div>
+                            </section>
+                        }
                     </div>
                 }
             </div>
@@ -263,6 +332,7 @@
     private string? _message;
     private long _messageSequence;
     private IReadOnlyList<ProjectSuggestionResult> _projectSuggestions = [];
+    private ProjectShortcutState? _projectShortcutState;
 
     protected override async Task OnInitializedAsync()
     {
@@ -315,6 +385,10 @@
 
     private async Task LoadSharedSummaryAsync()
     {
+        CaptureProjectShortcutState();
+        _selectedProjectId = null;
+        _projectIdInput = null;
+        _projectSuggestions = [];
         _queryMode = MemoryQueryMode.SummaryOnly;
         _useSummaryLayer = false;
         _includedProjectIds = null;
@@ -323,11 +397,11 @@
 
     private async Task LoadCurrentProjectAsync()
     {
-        _selectedProjectId = _currentProjectId;
-        _projectIdInput = _currentProjectId;
-        await LoadProjectSuggestionsAsync(_projectIdInput);
+        RestoreProjectShortcutState();
+        _projectSuggestions = [];
         _queryMode = MemoryQueryMode.CurrentOnly;
         _useSummaryLayer = false;
+        _includedProjectIds = null;
         await LoadAsync();
     }
 
@@ -338,19 +412,15 @@
         try
         {
             var projectId = ResolveSelectedProjectId();
-            if (projectId is null)
-            {
-                ShowMessage("請先指定 ProjectId，再重建共用綜合層。");
-                return;
-            }
-
             var result = await ApiClient.EnqueueSummaryRefreshAsync(
                 new EnqueueSummaryRefreshRequest(
                     projectId,
-                    ParseProjectIds(_includedProjectIds)),
+                    projectId is null ? null : ParseProjectIds(_includedProjectIds)),
                 CancellationToken.None);
 
-            ShowMessage($"已排入共用綜合層重建工作：{result.JobId}");
+            ShowMessage(projectId is null
+                ? $"已排入全部共用綜合層重建工作：{result.JobId}"
+                : $"已排入共用綜合層重建工作：{result.JobId}");
             _lastUpdatedAt = DateTimeOffset.UtcNow;
         }
         finally
@@ -392,6 +462,22 @@
     private async Task LoadProjectSuggestionsAsync(string? query)
     {
         _projectSuggestions = await ApiClient.GetMemoryProjectsAsync(query, 8, CancellationToken.None);
+    }
+
+    private void CaptureProjectShortcutState()
+    {
+        var input = NormalizeEmpty(_projectIdInput);
+        var selectedProjectId = ResolveSelectedProjectId();
+        _projectShortcutState = input is null && selectedProjectId is null
+            ? null
+            : new ProjectShortcutState(input, selectedProjectId, NormalizeEmpty(_includedProjectIds));
+    }
+
+    private void RestoreProjectShortcutState()
+    {
+        _selectedProjectId = _projectShortcutState?.SelectedProjectId;
+        _projectIdInput = _projectShortcutState?.ProjectIdInput;
+        _includedProjectIds = _projectShortcutState?.IncludedProjectIds;
     }
 
     private static TEnum? Parse<TEnum>(string? value)
@@ -453,4 +539,6 @@
             : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+
+    private sealed record ProjectShortcutState(string? ProjectIdInput, string? SelectedProjectId, string? IncludedProjectIds);
 }

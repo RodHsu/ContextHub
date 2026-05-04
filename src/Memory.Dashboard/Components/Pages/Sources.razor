@@ -1,0 +1,488 @@
+@page "/sources"
+@inject IContextHubApiClient ApiClient
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+
+<PageTitle>Context Hub | 資料來源</PageTitle>
+
+<PageViewport Title="資料來源"
+              Subtitle="管理來源設定並追蹤同步狀態。"
+              BodyClass="page-viewport-body">
+    <Actions>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        <div class="sources-page-stack">
+            @if (!string.IsNullOrWhiteSpace(_loadError))
+            {
+                <div class="inline-error">@_loadError</div>
+            }
+
+            <div class="metric-grid sources-metric-grid">
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">來源總數：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(_sources.Count)</span>
+                        <span class="metric-meta-inline">connections</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">啟用中：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(EnabledSources)</span>
+                        <span class="metric-meta-inline">active</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">24 小時內同步：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(RecentlySyncedSources)</span>
+                        <span class="metric-meta-inline">sources</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">來源種類：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(SourceKindCount)</span>
+                        <span class="metric-meta-inline">types</span>
+                    </div>
+                </section>
+            </div>
+
+            <div class="sources-setup-grid">
+                <section class="panel filter-panel" id="source-config-panel">
+                    <div class="panel-heading-row">
+                        <div>
+                            <div class="panel-title">來源設定</div>
+                            <div class="panel-heading-meta panel-heading-meta-left">此頁資料來自 `SourceConnections`；建立來源後，需手動同步才會累積最近同步紀錄與來源細節。</div>
+                        </div>
+                    </div>
+                    <div class="sources-form-stack">
+                        <div class="filter-grid sources-filter-grid">
+                            <label>
+                                <span class="field-label">
+                                    <span class="field-label-primary">來源名稱</span>
+                                    <span class="field-label-secondary">Display Name</span>
+                                </span>
+                                <input @bind="_formName" placeholder="例如：Local Repo / Runtime Logs / GitHub PR" />
+                            </label>
+                            <label>
+                                <span class="field-label">
+                                    <span class="field-label-primary">來源種類</span>
+                                    <span class="field-label-secondary">Source Kind</span>
+                                </span>
+                                <select @bind="_formKind">
+                                    @foreach (var kind in Enum.GetValues<SourceKind>())
+                                    {
+                                        <option value="@kind">@DashboardText.Label(kind)</option>
+                                    }
+                                </select>
+                            </label>
+                            <label>
+                                <span class="field-label">
+                                    <span class="field-label-primary">Project Id</span>
+                                    <span class="field-label-secondary">資料將歸屬到哪個專案</span>
+                                </span>
+                                <input @bind="_projectId" placeholder="ContextHub" />
+                            </label>
+                            <div class="sources-toggle-shell">
+                                <span class="field-label">
+                                    <span class="field-label-primary">啟用狀態</span>
+                                    <span class="field-label-secondary">建立後是否立即參與同步</span>
+                                </span>
+                                <label class="toggle-field">
+                                    <input type="checkbox" @bind="_formEnabled" />
+                                    <span>啟用此來源</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-grid sources-textarea-grid">
+                            <label class="span-2">
+                                <span class="field-label">
+                                    <span class="field-label-primary">Config JSON</span>
+                                    <span class="field-label-secondary">會直接寫入來源設定，請填有效 JSON</span>
+                                </span>
+                                <textarea @bind="_formConfigJson" rows="6" placeholder="{&quot;rootPath&quot;:&quot;W:/Repositories/WJCY/ContextHub&quot;}"></textarea>
+                            </label>
+                            <label>
+                                <span class="field-label">
+                                    <span class="field-label-primary">Secret JSON</span>
+                                    <span class="field-label-secondary">留空代表不覆蓋既有 secret</span>
+                                </span>
+                                <textarea @bind="_formSecretJson" rows="6" placeholder="{&quot;token&quot;:&quot;***&quot;}"></textarea>
+                            </label>
+                        </div>
+
+                        <div class="panel-note">建立來源後請執行一次同步，才會開始看到 cursor、成功同步時間與來源細節。</div>
+                        <div class="inline-actions">
+                            <button class="ghost-button" @onclick="ResetForm" disabled="@_loading">清空</button>
+                            <button class="primary-button" @onclick="SaveAsync" disabled="@_loading">儲存來源</button>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel sources-guide-panel">
+                    <div class="panel-heading-row">
+                        <div>
+                            <div class="panel-title">同步節奏</div>
+                            <div class="panel-heading-meta panel-heading-meta-left">延用其他頁面的摘要卡節奏，先建來源、再同步、最後檢視 run 與 cursor。</div>
+                        </div>
+                    </div>
+                    <div class="sources-guide-grid">
+                        <article class="host-stat">
+                            <span>1. 建立來源</span>
+                            <strong>填入 Config / Secret</strong>
+                            <div class="stack-item-meta">先確認來源種類與 Project Id，避免資料寫到錯的 scope。</div>
+                        </article>
+                        <article class="host-stat">
+                            <span>2. 立即同步</span>
+                            <strong>啟動第一輪 ingestion</strong>
+                            <div class="stack-item-meta">沒有同步紀錄時，左側清單只會顯示靜態來源設定。</div>
+                        </article>
+                        <article class="host-stat">
+                            <span>3. 檢查細節</span>
+                            <strong>比對 run / cursor / secret</strong>
+                            <div class="stack-item-meta">若同步失敗，優先檢查 Config JSON、Secret JSON 與外部連線。</div>
+                        </article>
+                    </div>
+                    <div class="badge-strip sources-guide-strip">
+                        <span class="status-badge neutral">Default Project: @(_projectId ?? ProjectContext.DefaultProjectId)</span>
+                        <span class="status-badge @(RecentlySyncedSources > 0 ? "ok" : "warn")">24h 內同步 @DashboardFormatting.Integer(RecentlySyncedSources)</span>
+                        <span class="status-badge @(EnabledSources > 0 ? "ok" : "neutral")">啟用中 @DashboardFormatting.Integer(EnabledSources)</span>
+                    </div>
+                </section>
+            </div>
+
+            <div class="sources-workspace-section">
+                <div class="split-layout sources-split-layout">
+                    <section class="panel panel-scroll">
+                        <div class="panel-heading-row">
+                            <div>
+                                <div class="panel-title">來源清單 (@DashboardFormatting.Integer(_sources.Count))</div>
+                                <div class="panel-heading-meta panel-heading-meta-left">來源建立後就會出現在這裡；同步成功後才會逐步填滿 run、cursor 與最近同步時間。</div>
+                            </div>
+                        </div>
+                        @if (_sources.Count == 0)
+                        {
+                            <div class="empty-inline">
+                                <div class="empty-inline-title">尚未建立來源</div>
+                                <div class="empty-inline-copy">這裡只顯示真實的 `SourceConnections`。建立第一個來源後，再手動執行同步，列表與同步紀錄才會出現。</div>
+                                <div class="empty-inline-actions">
+                                    <a class="primary-button" href="/sources#source-config-panel">建立第一個來源</a>
+                                </div>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="panel-scroll-body">
+                                <div class="stack-list">
+                                    @foreach (var item in _sources)
+                                    {
+                                        <article class="@SourceItemCss(item.Id)" @onclick="@(() => SelectSourceAsync(item.Id))">
+                                            <div class="stack-item-split">
+                                                <div class="stack-item-content">
+                                                    <div class="stack-item-title">@item.Name</div>
+                                                    <div class="stack-item-copy">@DashboardText.Label(item.SourceKind) / @item.ProjectId</div>
+                                                    <div class="stack-item-meta">
+                                                        @if (item.LastSuccessfulSyncAt.HasValue)
+                                                        {
+                                                            <ClientLocalTime Value="item.LastSuccessfulSyncAt.Value" />
+                                                        }
+                                                        else
+                                                        {
+                                                            <span>尚未同步</span>
+                                                        }
+                                                    </div>
+                                                </div>
+                                                <div class="stack-item-actions stack-item-actions-inline stack-item-actions-column">
+                                                    <span class="status-badge @(item.Enabled ? "ok" : "neutral")">@(item.Enabled ? "啟用" : "停用")</span>
+                                                    <button type="button" class="ghost-button" @onclick="@(() => EditAsync(item.Id))">編輯</button>
+                                                    <button type="button" class="ghost-button" @onclick="@(() => SyncAsync(item.Id))">立即同步</button>
+                                                </div>
+                                            </div>
+                                        </article>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </section>
+
+                    <section class="panel detail-panel panel-scroll">
+                        <div class="panel-title">來源細節</div>
+                        <div class="panel-scroll-body detail-scroll-shell">
+                            @if (_selectedSource is null)
+                            {
+                                <div class="empty-inline">
+                                    <div class="empty-inline-title">尚未選擇來源</div>
+                                    <div class="empty-inline-copy">建立或點選左側來源後，這裡會顯示設定內容、是否有 secret，以及最近同步紀錄。</div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="badge-strip sources-detail-strip">
+                                    <span class="status-badge @(_selectedSource.Enabled ? "ok" : "neutral")">@(_selectedSource.Enabled ? "啟用" : "停用")</span>
+                                    <span class="status-badge neutral">@DashboardText.Label(_selectedSource.SourceKind)</span>
+                                    <span class="status-badge neutral">@_selectedSource.ProjectId</span>
+                                    <span class="status-badge @(_selectedSource.HasSecret ? "ok" : "neutral")">@(_selectedSource.HasSecret ? "已設定 Secret" : "未設定 Secret")</span>
+                                </div>
+
+                                <dl class="definition-grid">
+                                    <div><dt>名稱</dt><dd>@_selectedSource.Name</dd></div>
+                                    <div><dt>種類</dt><dd>@DashboardText.Label(_selectedSource.SourceKind)</dd></div>
+                                    <div><dt>專案</dt><dd>@_selectedSource.ProjectId</dd></div>
+                                    <div><dt>狀態</dt><dd>@(_selectedSource.Enabled ? "啟用" : "停用")</dd></div>
+                                    <div><dt>建立時間</dt><dd><ClientLocalTime Value="_selectedSource.CreatedAt" /></dd></div>
+                                    <div><dt>最近更新</dt><dd><ClientLocalTime Value="_selectedSource.UpdatedAt" /></dd></div>
+                                    <div>
+                                        <dt>最近同步</dt>
+                                        <dd>
+                                            @if (_selectedSource.LastSuccessfulSyncAt.HasValue)
+                                            {
+                                                <ClientLocalTime Value="_selectedSource.LastSuccessfulSyncAt.Value" />
+                                            }
+                                            else
+                                            {
+                                                <span>尚未同步</span>
+                                            }
+                                        </dd>
+                                    </div>
+                                    <div><dt>Secret</dt><dd>@(_selectedSource.HasSecret ? "已設定" : "未設定")</dd></div>
+                                </dl>
+
+                                <div class="subpanel-title">Config JSON</div>
+                                <div class="code-block">@_selectedSource.ConfigJson</div>
+
+                                <div class="subpanel-title">最近同步紀錄</div>
+                                @if (_runs.Count == 0)
+                                {
+                                    <div class="empty-inline">
+                                        <div class="empty-inline-title">尚未產生同步紀錄</div>
+                                        <div class="empty-inline-copy">此來源已存在，但還沒有成功跑過同步。請從左側清單執行一次「立即同步」。</div>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="stack-list">
+                                        @foreach (var run in _runs)
+                                        {
+                                            <article class="stack-item">
+                                                <div class="stack-item-title">
+                                                    @DashboardText.Label(run.Status) /
+                                                    <ClientLocalTime Value="run.StartedAt" />
+                                                </div>
+                                                <div class="stack-item-copy">
+                                                    掃描 @DashboardFormatting.Integer(run.ScannedCount)、寫入 @DashboardFormatting.Integer(run.UpsertedCount)、封存 @DashboardFormatting.Integer(run.ArchivedCount)、錯誤 @DashboardFormatting.Integer(run.ErrorCount)
+                                                </div>
+                                                <div class="stack-item-meta">
+                                                    Cursor: @run.CursorBefore -> @run.CursorAfter
+                                                </div>
+                                            </article>
+                                        }
+                                    </div>
+                                }
+                            }
+                        </div>
+                    </section>
+                </div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(_message))
+            {
+                <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="@(() => _message = null)" />
+            }
+        </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private IReadOnlyList<SourceConnectionResult> _sources = [];
+    private IReadOnlyList<SourceSyncRunResult> _runs = [];
+    private SourceConnectionResult? _selectedSource;
+    private Guid? _editingId;
+    private string? _projectId;
+    private string _formName = string.Empty;
+    private SourceKind _formKind = SourceKind.LocalRepo;
+    private bool _formEnabled = true;
+    private string _formConfigJson = "{}";
+    private string _formSecretJson = string.Empty;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _loadError;
+    private string? _message;
+    private long _messageSequence;
+
+    private int EnabledSources => _sources.Count(item => item.Enabled);
+    private int RecentlySyncedSources => _sources.Count(item => item.LastSuccessfulSyncAt >= DateTimeOffset.UtcNow.AddHours(-24));
+    private int SourceKindCount => _sources.Select(item => item.SourceKind).Distinct().Count();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var snapshot = await RuntimeSettingsAccessor.GetCurrentAsync(CancellationToken.None);
+        _projectId = snapshot.Behavior.DefaultProjectId;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            _sources = await ApiClient.GetSourcesAsync(
+                new SourceListRequest(_projectId ?? ProjectContext.DefaultProjectId),
+                CancellationToken.None);
+            _selectedSource = ResolveSelectedSource();
+            _runs = _selectedSource is null
+                ? []
+                : await ApiClient.GetSourceRunsAsync(_selectedSource.Id, _selectedSource.ProjectId, CancellationToken.None);
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("資料來源", ex, _sources.Count > 0);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        _loading = true;
+        try
+        {
+            if (_editingId.HasValue)
+            {
+                _selectedSource = await ApiClient.UpdateSourceAsync(
+                    new SourceConnectionUpdateRequest(
+                        _editingId.Value,
+                        _formName,
+                        _formConfigJson,
+                        _formSecretJson,
+                        _formEnabled,
+                        _projectId),
+                    CancellationToken.None);
+            }
+            else
+            {
+                _selectedSource = await ApiClient.CreateSourceAsync(
+                    new SourceConnectionCreateRequest(
+                        _formName,
+                        _formKind,
+                        _formConfigJson,
+                        _formSecretJson,
+                        _formEnabled,
+                        _projectId ?? ProjectContext.DefaultProjectId),
+                    CancellationToken.None);
+            }
+
+            ShowMessage("來源設定已儲存。");
+            ResetForm();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("儲存來源設定", ex));
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SelectSourceAsync(Guid id)
+    {
+        _selectedSource = _sources.FirstOrDefault(item => item.Id == id);
+        if (_selectedSource is null)
+        {
+            _runs = [];
+            return;
+        }
+
+        try
+        {
+            _runs = await ApiClient.GetSourceRunsAsync(id, _selectedSource.ProjectId, CancellationToken.None);
+            _loadError = null;
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("讀取同步紀錄", ex));
+        }
+    }
+
+    private async Task EditAsync(Guid id)
+    {
+        await SelectSourceAsync(id);
+        if (_selectedSource is null)
+        {
+            return;
+        }
+
+        _editingId = _selectedSource.Id;
+        _formName = _selectedSource.Name;
+        _formKind = _selectedSource.SourceKind;
+        _formEnabled = _selectedSource.Enabled;
+        _formConfigJson = _selectedSource.ConfigJson;
+        _formSecretJson = string.Empty;
+        _projectId = _selectedSource.ProjectId;
+    }
+
+    private async Task SyncAsync(Guid id)
+    {
+        try
+        {
+            var selected = _sources.FirstOrDefault(item => item.Id == id);
+            var result = await ApiClient.SyncSourceAsync(
+                id,
+                new SourceSyncRequest(id, SourceSyncTrigger.Manual, true, selected?.ProjectId ?? _projectId),
+                CancellationToken.None);
+            ShowMessage($"已排入同步工作：{result.JobId}");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError("排入來源同步", ex));
+        }
+    }
+
+    private void ResetForm()
+    {
+        _editingId = null;
+        _formName = string.Empty;
+        _formKind = SourceKind.LocalRepo;
+        _formEnabled = true;
+        _formConfigJson = "{}";
+        _formSecretJson = string.Empty;
+    }
+
+    private SourceConnectionResult? ResolveSelectedSource()
+    {
+        if (_selectedSource is not null)
+        {
+            var current = _sources.FirstOrDefault(item => item.Id == _selectedSource.Id);
+            if (current is not null)
+            {
+                return current;
+            }
+        }
+
+        return _sources.FirstOrDefault();
+    }
+
+    private string SourceItemCss(Guid id)
+        => id == _selectedSource?.Id
+            ? "stack-item stack-item-selectable stack-item-selected"
+            : "stack-item stack-item-selectable";
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+}

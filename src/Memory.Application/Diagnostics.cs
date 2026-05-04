@@ -31,7 +31,7 @@ internal static class HybridSearchComposer
                     ((item.Importance + item.Confidence) / 2m) * 0.1m;
 
                 var excerpt = semantic?.Excerpt ?? keyword?.Excerpt ?? item.Summary ?? item.Content[..Math.Min(item.Content.Length, 180)];
-                return new MemorySearchHit(item.Id, item.Title, item.MemoryType, item.Scope, decimal.Round(score, 4), excerpt, item.SourceRef, item.Tags, item.ProjectId);
+                return new MemorySearchHit(item.Id, item.Title, item.MemoryType, item.Scope, decimal.Round(score, 4), excerpt, item.SourceType, item.SourceRef, item.Tags, item.ProjectId);
             })
             .OrderByDescending(x => x.Score)
             .Take(limit)

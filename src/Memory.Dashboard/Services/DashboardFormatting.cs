@@ -1,7 +1,11 @@
+using System.Globalization;
+
 namespace Memory.Dashboard.Services;
 
 public static class DashboardFormatting
 {
+    private static readonly CultureInfo DisplayCulture = CultureInfo.InvariantCulture;
+
     public static string Bytes(long value)
     {
         string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -13,11 +17,23 @@ public static class DashboardFormatting
             unitIndex++;
         }
 
-        return $"{size:0.##} {units[unitIndex]}";
+        return $"{Decimal(size)} {units[unitIndex]}";
     }
 
     public static string Percent(double value)
-        => $"{value:0.##}%";
+        => $"{Decimal(value)}%";
+
+    public static string Integer(int value)
+        => value.ToString("N0", DisplayCulture);
+
+    public static string Integer(long value)
+        => value.ToString("N0", DisplayCulture);
+
+    public static string Decimal(double value)
+        => value.ToString("#,##0.##", DisplayCulture);
+
+    public static string Decimal(decimal value)
+        => value.ToString("#,##0.##", DisplayCulture);
 
     public static string Relative(DateTimeOffset value)
     {

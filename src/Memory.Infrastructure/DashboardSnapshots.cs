@@ -163,7 +163,15 @@ public sealed class DockerRuntimeMetricsService(IOptions<DockerRuntimeOptions> o
     {
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(_snapshotTimeout);
-        return await CollectSnapshotAsync(timeoutCts.Token);
+        try
+        {
+            return await CollectSnapshotAsync(timeoutCts.Token).WaitAsync(_snapshotTimeout, cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            timeoutCts.Cancel();
+            throw new OperationCanceledException(timeoutCts.Token);
+        }
     }
 
     private async Task<DockerRuntimeSnapshot> CollectSnapshotAsync(CancellationToken cancellationToken)
@@ -292,19 +300,34 @@ public sealed class DockerRuntimeMetricsService(IOptions<DockerRuntimeOptions> o
             }
         });
 
+        var statsTask = _client.Value.Containers.GetContainerStatsAsync(
+            containerId,
+            new ContainerStatsParameters { Stream = true },
+            progress,
+            linkedCts.Token);
+
+        _ = statsTask.ContinueWith(
+            task =>
+            {
+                if (task.IsFaulted && task.Exception is not null)
+                {
+                    completion.TrySetException(task.Exception.InnerExceptions);
+                }
+                else if (task.IsCanceled)
+                {
+                    completion.TrySetCanceled(cancellationToken);
+                }
+            },
+            TaskScheduler.Default);
+
         try
         {
-            await _client.Value.Containers.GetContainerStatsAsync(
-                containerId,
-                new ContainerStatsParameters { Stream = true },
-                progress,
-                linkedCts.Token);
+            return await completion.Task.WaitAsync(cancellationToken);
         }
-        catch (OperationCanceledException) when (completion.Task.IsCompleted)
+        finally
         {
+            linkedCts.Cancel();
         }
-
-        return await completion.Task.WaitAsync(cancellationToken);
     }
 
     private static DockerClient CreateDockerClient(string endpoint)
