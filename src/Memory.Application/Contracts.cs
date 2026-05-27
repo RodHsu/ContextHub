@@ -166,6 +166,55 @@ public sealed record JobResult(
     DateTimeOffset? CompletedAt,
     string ProjectId = ProjectContext.DefaultProjectId);
 
+public sealed record MaintenanceRunResult(
+    Guid Id,
+    MaintenanceRunType MaintenanceType,
+    MaintenanceRunStatus Status,
+    DateTimeOffset StartedAt,
+    DateTimeOffset? CompletedAt,
+    string TriggeredBy,
+    string PolicyJson,
+    string ResultJson,
+    string Error);
+
+public sealed record MaintenanceModeStateResult(
+    bool Active,
+    string Reason,
+    string Message,
+    DateTimeOffset? StartedAtUtc,
+    DateTimeOffset? EstimatedEndsAtUtc,
+    Guid? RunId,
+    string TriggeredBy);
+
+public sealed record MaintenanceModeRequest(
+    string? Reason = null,
+    string? Message = null,
+    DateTimeOffset? EstimatedEndsAtUtc = null,
+    int? EstimatedDurationMinutes = null,
+    string? TriggeredBy = null);
+
+public sealed record RetrievalTelemetryRetentionRunRequest(
+    string? TriggeredBy = null);
+
+public sealed record RetrievalTelemetryRetentionRunResult(
+    Guid RunId,
+    DateTimeOffset HitsCutoffUtc,
+    DateTimeOffset EventsCutoffUtc,
+    long DeletedHits,
+    long DeletedEvents,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset CompletedAtUtc,
+    string ResultJson);
+
+public sealed record VacuumFullReclaimRunRequest(
+    string? TriggeredBy = null);
+
+public sealed record VacuumFullReclaimRunResult(
+    Guid RunId,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset CompletedAtUtc,
+    string ResultJson);
+
 public sealed record LogQueryRequest(
     string? Query = null,
     string? ServiceName = null,
@@ -330,7 +379,8 @@ public sealed record DashboardSnapshotPollingSettingsResult(
     int DockerHostSeconds,
     int DependencyResourcesSeconds,
     int RecentOperationsSeconds,
-    int ResourceChartSeconds);
+    int ResourceChartSeconds,
+    int MemoryGraphIndexSeconds = 15);
 
 public sealed record InstanceBehaviorSettingsResult(
     bool ConversationAutomationEnabled,
@@ -353,6 +403,133 @@ public sealed record InstanceBehaviorSettingsResult(
 public sealed record InstanceDashboardAuthSettingsResult(
     string AdminUsername,
     int SessionTimeoutMinutes);
+
+public sealed record TenantCreateRequest(
+    string Slug,
+    string DisplayName);
+
+public sealed record TenantResult(
+    Guid Id,
+    string Slug,
+    string DisplayName,
+    TenantStatus Status,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record TenantUserCreateRequest(
+    Guid TenantId,
+    string Username,
+    string DisplayName,
+    string Email,
+    TenantUserRole Role = TenantUserRole.Member,
+    string PasswordHash = "");
+
+public sealed record TenantUserUpdateRequest(
+    string? DisplayName = null,
+    string? Email = null,
+    TenantUserRole? Role = null,
+    TenantUserStatus? Status = null,
+    string? PasswordHash = null);
+
+public sealed record TenantUserResult(
+    Guid Id,
+    Guid TenantId,
+    string Username,
+    string DisplayName,
+    string Email,
+    TenantUserRole Role,
+    TenantUserStatus Status,
+    DateTimeOffset? LastLoginAt,
+    DateTimeOffset? PasswordUpdatedAt,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record TenantProjectGrantUpsertRequest(
+    Guid TenantId,
+    string ProjectId,
+    bool CanRead = true,
+    bool CanWrite = false,
+    bool CanManageTokens = false);
+
+public sealed record TenantProjectGrantResult(
+    Guid Id,
+    Guid TenantId,
+    string ProjectId,
+    bool CanRead,
+    bool CanWrite,
+    bool CanManageTokens,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record ApiTokenCreateRequest(
+    Guid TenantId,
+    Guid OwnerUserId,
+    string Name,
+    string? Notes = null,
+    IReadOnlyList<string>? Scopes = null,
+    IReadOnlyList<string>? AllowedProjectIds = null,
+    DateTimeOffset? ExpiresAt = null);
+
+public sealed record ApiTokenUpdateRequest(
+    string? Name = null,
+    string? Notes = null,
+    IReadOnlyList<string>? Scopes = null,
+    IReadOnlyList<string>? AllowedProjectIds = null,
+    DateTimeOffset? ExpiresAt = null);
+
+public sealed record ApiTokenResult(
+    Guid Id,
+    Guid TenantId,
+    Guid OwnerUserId,
+    string Name,
+    string Notes,
+    string TokenPrefix,
+    string TokenLastFour,
+    IReadOnlyList<string> Scopes,
+    IReadOnlyList<string> AllowedProjectIds,
+    DateTimeOffset? ExpiresAt,
+    DateTimeOffset? RevokedAt,
+    DateTimeOffset? LastUsedAt,
+    string LastUsedIp,
+    string LastUsedUserAgent,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record ApiTokenCreatedResult(
+    ApiTokenResult Token,
+    string PlainToken);
+
+public sealed record ApiTokenAuthenticationResult(
+    bool Succeeded,
+    string FailureReason,
+    Guid? TenantId = null,
+    Guid? OwnerUserId = null,
+    Guid? ApiTokenId = null,
+    string? TenantSlug = null,
+    string? Username = null,
+    TenantUserRole? Role = null,
+    IReadOnlyList<string>? Scopes = null,
+    IReadOnlyList<string>? AllowedProjectIds = null);
+
+public sealed record CurrentUserResult(
+    Guid TenantId,
+    Guid UserId,
+    string Username,
+    string DisplayName,
+    string Email,
+    TenantUserRole Role);
+
+public sealed record SecurityAuditEventResult(
+    Guid Id,
+    Guid? TenantId,
+    Guid? ActorUserId,
+    Guid? ApiTokenId,
+    SecurityAuditEventType EventType,
+    string Outcome,
+    string IpAddress,
+    string UserAgent,
+    string DetailsJson,
+    DateTimeOffset CreatedAt);
 
 public sealed record ConversationAutomationStatusResult(
     int RecentCheckpoints,
@@ -464,7 +641,8 @@ public sealed record DashboardSnapshotPollingSettingsUpdateRequest(
     int DockerHostSeconds,
     int DependencyResourcesSeconds,
     int RecentOperationsSeconds,
-    int ResourceChartSeconds);
+    int ResourceChartSeconds,
+    int MemoryGraphIndexSeconds = 15);
 
 public sealed record InstanceBehaviorSettingsUpdateRequest(
     bool ConversationAutomationEnabled,
@@ -512,12 +690,18 @@ public sealed record DashboardAuthenticationSettings(
 public interface IApplicationDbContext
 {
     DbSet<InstanceSetting> InstanceSettings { get; }
+    DbSet<Tenant> Tenants { get; }
+    DbSet<TenantUser> TenantUsers { get; }
+    DbSet<TenantProjectGrant> TenantProjectGrants { get; }
+    DbSet<ApiToken> ApiTokens { get; }
+    DbSet<SecurityAuditEvent> SecurityAuditEvents { get; }
     DbSet<MemoryItem> MemoryItems { get; }
     DbSet<MemoryItemRevision> MemoryItemRevisions { get; }
     DbSet<MemoryItemChunk> MemoryItemChunks { get; }
     DbSet<MemoryChunkVector> MemoryChunkVectors { get; }
     DbSet<MemoryLink> MemoryLinks { get; }
     DbSet<MemoryJob> MemoryJobs { get; }
+    DbSet<MaintenanceRun> MaintenanceRuns { get; }
     DbSet<RuntimeLogEntry> RuntimeLogEntries { get; }
     DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints { get; }
     DbSet<SourceConnection> SourceConnections { get; }
@@ -573,11 +757,70 @@ public interface IEmbeddingProvider
 public interface ICacheVersionStore
 {
     Task<long> GetVersionAsync(CancellationToken cancellationToken);
+    Task<CacheVersionStamp> GetVersionStampAsync(
+        IReadOnlyList<string> projectIds,
+        ContextHubRequestActor actor,
+        bool includeShared,
+        CancellationToken cancellationToken);
     Task<long> IncrementAsync(CancellationToken cancellationToken);
+    Task<long> IncrementProjectAsync(string projectId, CancellationToken cancellationToken);
+    Task<long> IncrementUserAsync(ContextHubRequestActor actor, CancellationToken cancellationToken);
+    Task<long> IncrementSharedAsync(CancellationToken cancellationToken);
+    Task<long> IncrementSecurityAsync(CancellationToken cancellationToken);
+    Task<long> GetJobVersionAsync(CancellationToken cancellationToken);
+    Task<long> IncrementJobsAsync(CancellationToken cancellationToken);
     Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken);
     Task SetAsync<T>(string key, T value, TimeSpan ttl, CancellationToken cancellationToken);
     Task PublishJobSignalAsync(Guid jobId, CancellationToken cancellationToken);
     Task<bool> WaitForJobSignalAsync(TimeSpan timeout, CancellationToken cancellationToken);
+}
+
+public sealed record CacheVersionStamp(
+    string Value,
+    long GlobalVersion,
+    long SecurityVersion,
+    long SharedVersion,
+    long UserVersion,
+    IReadOnlyDictionary<string, long> ProjectVersions);
+
+public sealed record RedisCacheLookup<T>(bool Hit, T? Value);
+
+public sealed record RedisCacheKindTelemetry(long Hits, long Misses, long Sets, long Bypasses, long Errors);
+
+public sealed record RedisCacheTelemetrySnapshot(
+    long Hits,
+    long Misses,
+    long Sets,
+    long Bypasses,
+    long Errors,
+    IReadOnlyDictionary<string, RedisCacheKindTelemetry> Kinds);
+
+public interface IRedisObjectCache
+{
+    Task<RedisCacheLookup<T>> GetAsync<T>(string key, string kind, CancellationToken cancellationToken);
+    Task SetAsync<T>(string key, string kind, T value, TimeSpan ttl, CancellationToken cancellationToken);
+}
+
+public interface IRedisCacheTelemetry
+{
+    RedisCacheTelemetrySnapshot GetSnapshot();
+}
+
+public interface IRedisCachePolicy
+{
+    bool Enabled { get; }
+    TimeSpan SearchTtl { get; }
+    TimeSpan WorkingContextTtl { get; }
+    TimeSpan EmbeddingTtl { get; }
+    TimeSpan SemanticHitTtl { get; }
+    TimeSpan MetadataTtl { get; }
+    TimeSpan SecurityTtl { get; }
+}
+
+public interface IBackgroundJobQueue
+{
+    Task<Guid> EnqueueAsync(MemoryJob job, CancellationToken cancellationToken);
+    Task PublishSignalAsync(Guid jobId, CancellationToken cancellationToken);
 }
 
 public interface IClock
@@ -601,6 +844,29 @@ public interface IMemoryService
     Task<UserPreferenceResult> ArchiveUserPreferenceAsync(UserPreferenceArchiveRequest request, CancellationToken cancellationToken);
 }
 
+public interface ITenantSecurityService
+{
+    Task<TenantResult> CreateTenantAsync(TenantCreateRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<TenantResult>> ListTenantsAsync(bool includeArchived, int limit, CancellationToken cancellationToken);
+    Task<TenantUserResult> CreateUserAsync(TenantUserCreateRequest request, CancellationToken cancellationToken);
+    Task<TenantUserResult> UpdateUserAsync(Guid userId, TenantUserUpdateRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<TenantUserResult>> ListUsersAsync(Guid tenantId, bool includeArchived, CancellationToken cancellationToken);
+    Task<TenantProjectGrantResult> UpsertProjectGrantAsync(TenantProjectGrantUpsertRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<TenantProjectGrantResult>> ListProjectGrantsAsync(Guid tenantId, CancellationToken cancellationToken);
+    Task<ApiTokenCreatedResult> CreateTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken);
+    Task<ApiTokenResult> UpdateTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken);
+    Task<ApiTokenCreatedResult> RegenerateTokenAsync(Guid tokenId, CancellationToken cancellationToken);
+    Task<ApiTokenResult> RevokeTokenAsync(Guid tokenId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ApiTokenResult>> ListTokensAsync(Guid tenantId, bool includeRevoked, CancellationToken cancellationToken);
+    Task<ApiTokenCreatedResult> CreateMyTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken);
+    Task<ApiTokenResult> UpdateMyTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken);
+    Task<ApiTokenCreatedResult> RegenerateMyTokenAsync(Guid tokenId, CancellationToken cancellationToken);
+    Task<ApiTokenResult> RevokeMyTokenAsync(Guid tokenId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ApiTokenResult>> ListMyTokensAsync(bool includeRevoked, CancellationToken cancellationToken);
+    Task<ApiTokenAuthenticationResult> AuthenticateTokenAsync(string token, string ipAddress, string userAgent, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SecurityAuditEventResult>> ListAuditEventsAsync(Guid? tenantId, int limit, CancellationToken cancellationToken);
+}
+
 public interface IConversationAutomationService
 {
     Task<ConversationIngestResult> IngestAsync(ConversationIngestRequest request, CancellationToken cancellationToken);
@@ -615,6 +881,28 @@ public interface ILogQueryService
 {
     Task<IReadOnlyList<LogEntryResult>> SearchAsync(LogQueryRequest request, CancellationToken cancellationToken);
     Task<LogEntryResult?> GetAsync(long id, CancellationToken cancellationToken);
+}
+
+public interface IMaintenanceModeStore
+{
+    Task<MaintenanceModeStateResult> GetAsync(CancellationToken cancellationToken);
+    Task<MaintenanceModeStateResult> EnableAsync(MaintenanceModeRequest request, string triggeredBy, CancellationToken cancellationToken);
+    Task<MaintenanceModeStateResult> DisableAsync(string triggeredBy, CancellationToken cancellationToken);
+}
+
+public interface IMaintenanceRunQueryService
+{
+    Task<IReadOnlyList<MaintenanceRunResult>> ListRunsAsync(int limit, CancellationToken cancellationToken);
+}
+
+public interface IRetrievalTelemetryRetentionService
+{
+    Task<RetrievalTelemetryRetentionRunResult> RunAsync(string triggeredBy, CancellationToken cancellationToken);
+}
+
+public interface IVacuumFullReclaimService
+{
+    Task<VacuumFullReclaimRunResult> RunAsync(string triggeredBy, CancellationToken cancellationToken);
 }
 
 public interface IPerformanceProbeService

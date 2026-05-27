@@ -161,7 +161,12 @@ public sealed record DashboardRedisTelemetryResult(
     long DiskReadBytes,
     long DiskWriteBytes,
     long PersistentStorageBytes,
-    string PersistentStorageName);
+    string PersistentStorageName,
+    long CacheHits = 0,
+    long CacheMisses = 0,
+    long CacheSets = 0,
+    long CacheBypasses = 0,
+    long CacheErrors = 0);
 
 public sealed record DashboardPostgresTelemetryResult(
     string Status,
@@ -412,7 +417,8 @@ public sealed record StorageTableSummaryResult(
     string Name,
     string Description,
     int RowCount,
-    IReadOnlyList<string> Columns);
+    IReadOnlyList<string> Columns,
+    bool IsLarge = false);
 
 public sealed record StorageRowsRequest(
     string Table,
@@ -431,7 +437,9 @@ public sealed record StorageTableRowsResult(
     IReadOnlyList<string> SearchableColumns,
     string? AppliedQuery,
     string? AppliedColumn,
-    PagedResult<StorageRowResult> Rows);
+    PagedResult<StorageRowResult> Rows,
+    string Warning = "",
+    string DataSource = "origin");
 
 public interface IDashboardQueryService
 {
@@ -445,6 +453,19 @@ public interface IDashboardQueryService
     Task<PagedResult<JobListItemResult>> GetJobsAsync(JobListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken);
     Task<StorageTableRowsResult> GetStorageRowsAsync(StorageRowsRequest request, CancellationToken cancellationToken);
+}
+
+public interface IDashboardMemoryGraphIndexBuilder
+{
+    Task<DashboardMemoryGraphIndexSnapshotPayload> BuildAsync(CancellationToken cancellationToken);
+}
+
+public interface IDashboardMemoryGraphIndexRefreshService
+{
+    Task<DashboardMemoryGraphIndexRefreshResult> RefreshAsync(
+        string trigger,
+        int? refreshIntervalSeconds,
+        CancellationToken cancellationToken);
 }
 
 public interface IMemoryTransferService

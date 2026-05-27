@@ -107,7 +107,8 @@ public sealed class DashboardInstanceSettingsService(
                 request.Behavior.SnapshotPolling.DockerHostSeconds,
                 request.Behavior.SnapshotPolling.DependencyResourcesSeconds,
                 request.Behavior.SnapshotPolling.RecentOperationsSeconds,
-                request.Behavior.SnapshotPolling.ResourceChartSeconds),
+                request.Behavior.SnapshotPolling.ResourceChartSeconds,
+                request.Behavior.SnapshotPolling.MemoryGraphIndexSeconds),
             request.Behavior.OverviewPollingSeconds,
             request.Behavior.MetricsPollingSeconds,
             request.Behavior.JobsPollingSeconds,
@@ -237,7 +238,8 @@ public sealed class DashboardInstanceSettingsService(
             request.Behavior.SnapshotPolling.DockerHostSeconds,
             request.Behavior.SnapshotPolling.DependencyResourcesSeconds,
             request.Behavior.SnapshotPolling.RecentOperationsSeconds,
-            request.Behavior.SnapshotPolling.ResourceChartSeconds
+            request.Behavior.SnapshotPolling.ResourceChartSeconds,
+            request.Behavior.SnapshotPolling.MemoryGraphIndexSeconds
         };
 
         if (snapshotPollingValues.Any(value => value is < 1 or > 3600))

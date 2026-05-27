@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.AspNetCore.WebUtilities;
 
 namespace Memory.Dashboard.Services.Testing;
@@ -8,19 +9,27 @@ internal enum DashboardBrowserTestProfile
 {
     Normal,
     Empty,
-    Dense
+    Dense,
+    GraphDemo
 }
 
 internal sealed class DashboardBrowserTestProfileAccessor
 {
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly NavigationManager _navigationManager;
+    private readonly DashboardBrowserTestProfile _defaultProfile;
     private DashboardBrowserTestProfile? _cachedExplicitProfile;
 
-    public DashboardBrowserTestProfileAccessor(IHttpContextAccessor httpContextAccessor, NavigationManager navigationManager)
+    public DashboardBrowserTestProfileAccessor(
+        IHttpContextAccessor httpContextAccessor,
+        NavigationManager navigationManager,
+        IConfiguration configuration)
     {
         _httpContextAccessor = httpContextAccessor;
         _navigationManager = navigationManager;
+        _defaultProfile = TryReadExplicitProfile(configuration["Dashboard:BrowserTestDefaultProfile"], out var profile)
+            ? profile
+            : DashboardBrowserTestProfile.Normal;
     }
 
     public DashboardBrowserTestProfile Current => ResolveProfile();
@@ -35,13 +44,19 @@ internal sealed class DashboardBrowserTestProfileAccessor
             return httpProfile;
         }
 
+        if (TryResolveSelectedGraphDemoProfile(_httpContextAccessor.HttpContext?.Request.Query["selected"].ToString(), out var selectedProfile))
+        {
+            _cachedExplicitProfile = selectedProfile;
+            return selectedProfile;
+        }
+
         if (TryResolveNavigationProfile(out var navigationProfile))
         {
             _cachedExplicitProfile = navigationProfile;
             return navigationProfile;
         }
 
-        return _cachedExplicitProfile ?? DashboardBrowserTestProfile.Normal;
+        return _cachedExplicitProfile ?? _defaultProfile;
     }
 
     private bool TryResolveNavigationProfile(out DashboardBrowserTestProfile profile)
@@ -55,9 +70,19 @@ internal sealed class DashboardBrowserTestProfileAccessor
                 return false;
             }
 
-            return TryReadExplicitProfile(
-                QueryHelpers.ParseQuery(uri.Query).TryGetValue("uiProfile", out var profileValues)
+            var query = QueryHelpers.ParseQuery(uri.Query);
+            if (TryReadExplicitProfile(
+                query.TryGetValue("uiProfile", out var profileValues)
                     ? profileValues.ToString()
+                    : null,
+                out profile))
+            {
+                return true;
+            }
+
+            return TryResolveSelectedGraphDemoProfile(
+                query.TryGetValue("selected", out var selectedValues)
+                    ? selectedValues.ToString()
                     : null,
                 out profile);
         }
@@ -65,6 +90,26 @@ internal sealed class DashboardBrowserTestProfileAccessor
         {
             return false;
         }
+    }
+
+    private static bool TryResolveSelectedGraphDemoProfile(string? raw, out DashboardBrowserTestProfile profile)
+    {
+        profile = default;
+        if (!Guid.TryParse(raw, out var selectedId))
+        {
+            return false;
+        }
+
+        for (var index = 1; index <= 12; index++)
+        {
+            if (selectedId == Guid.Parse($"10000000-0000-0000-0000-{index:000000000000}"))
+            {
+                profile = DashboardBrowserTestProfile.GraphDemo;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool TryReadExplicitProfile(string? raw, out DashboardBrowserTestProfile profile)

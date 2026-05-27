@@ -8,6 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddMemoryApplication();
 builder.Services.AddMemoryInfrastructure(builder.Configuration, "worker");
 builder.Services.AddHostedService<JobWorker>();
+builder.Services.AddHostedService<TelemetryRetentionHostedService>();
 
 var app = builder.Build();
 

@@ -38,6 +38,7 @@ public static class DependencyInjection
         services.PostConfigure<EmbeddingOptions>(EmbeddingProfileResolver.ApplyResolvedDefaults);
         services.Configure<DatabaseLoggingOptions>(configuration.GetSection(DatabaseLoggingOptions.SectionName));
         services.PostConfigure<DatabaseLoggingOptions>(options => options.ServiceName = serviceName);
+        services.Configure<TelemetryRetentionOptions>(configuration.GetSection(TelemetryRetentionOptions.SectionName));
         services.AddOptions<DockerRuntimeOptions>()
             .Configure(options =>
             {
@@ -74,10 +75,18 @@ public static class DependencyInjection
         services.AddScoped<IVectorStore, NpgsqlSearchStore>();
         services.AddScoped<IStorageExplorerStore, NpgsqlStorageExplorerStore>();
         services.AddScoped<IRetrievalTelemetryService, DatabaseRetrievalTelemetryService>();
+        services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
+        services.AddScoped<IVacuumFullReclaimService, VacuumFullReclaimService>();
+        services.AddScoped<IMaintenanceRunQueryService, MaintenanceRunQueryService>();
         services.AddSingleton<ISecretProtector, AesSecretProtector>();
 
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnectionString));
+        services.AddSingleton<RedisCacheTelemetry>();
+        services.AddSingleton<IRedisCacheTelemetry>(sp => sp.GetRequiredService<RedisCacheTelemetry>());
+        services.AddSingleton<IRedisCachePolicy, RedisCachePolicy>();
+        services.AddSingleton<IRedisObjectCache, RedisObjectCache>();
         services.AddSingleton<ICacheVersionStore, RedisCacheVersionStore>();
+        services.AddSingleton<IMaintenanceModeStore, RedisMaintenanceModeStore>();
         services.AddSingleton<IDashboardSnapshotStore, RedisDashboardSnapshotStore>();
         services.AddSingleton<DockerRuntimeMetricsService>();
         services.AddSingleton(TimeProvider.System);
@@ -85,6 +94,7 @@ public static class DependencyInjection
         services.AddSingleton<DatabaseLogQueue>();
         services.AddSingleton<ILoggerProvider, DatabaseLoggerProvider>();
         services.AddHostedService<DatabaseMigrationHostedService>();
+        services.AddHostedService<SecurityBootstrapHostedService>();
         services.AddHostedService<DatabaseLogWriterService>();
         services.AddSingleton(sp =>
         {

@@ -20,6 +20,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
     IRequestTrafficSnapshotAccessor requestTrafficSnapshotAccessor,
     IDbContextFactory<MemoryDbContext> dbContextFactory,
     IConnectionMultiplexer redis,
+    IRedisCacheTelemetry redisCacheTelemetry,
     HealthCheckService healthCheckService,
     DockerRuntimeMetricsService dockerMetricsService,
     TimeProvider timeProvider,
@@ -47,7 +48,13 @@ public sealed class DashboardSnapshotCollectorHostedService(
             RunLoopAsync(DashboardSnapshotKeys.DependencyResources, behavior => behavior.DependencyResourcesSeconds, CollectDependencyResourcesAsync, stoppingToken),
             RunLoopAsync(DashboardSnapshotKeys.MonitoringStats, behavior => behavior.DependencyResourcesSeconds, CollectMonitoringStatsAsync, stoppingToken),
             RunLoopAsync(DashboardSnapshotKeys.RecentOperations, behavior => behavior.RecentOperationsSeconds, CollectRecentOperationsAsync, stoppingToken),
-            RunLoopAsync(DashboardSnapshotKeys.ResourceChart, behavior => behavior.ResourceChartSeconds, CollectResourceChartAsync, stoppingToken)
+            RunLoopAsync(DashboardSnapshotKeys.DashboardJobs, behavior => behavior.RecentOperationsSeconds, CollectDashboardJobsAsync, stoppingToken),
+            RunLoopAsync(DashboardSnapshotKeys.DashboardLogs, behavior => behavior.RecentOperationsSeconds, CollectDashboardLogsAsync, stoppingToken),
+            RunLoopAsync(DashboardSnapshotKeys.DashboardProjectSuggestions, behavior => behavior.RecentOperationsSeconds, CollectDashboardProjectSuggestionsAsync, stoppingToken),
+            RunLoopAsync(DashboardSnapshotKeys.StorageTableStats, behavior => behavior.RecentOperationsSeconds, CollectStorageTableStatsAsync, stoppingToken),
+            RunLoopAsync(DashboardSnapshotKeys.StorageLargeTablePreview, behavior => behavior.RecentOperationsSeconds, CollectStorageLargeTablePreviewAsync, stoppingToken),
+            RunLoopAsync(DashboardSnapshotKeys.ResourceChart, behavior => behavior.ResourceChartSeconds, CollectResourceChartAsync, stoppingToken),
+            RunLoopAsync(DashboardSnapshotKeys.MemoryGraphIndex, behavior => behavior.MemoryGraphIndexSeconds, CollectMemoryGraphIndexAsync, stoppingToken)
         };
 
         await Task.WhenAll(tasks);
@@ -63,6 +70,11 @@ public sealed class DashboardSnapshotCollectorHostedService(
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.DependencyResources, settings.DependencyResourcesSeconds, CollectDependencyResourcesAsync, cancellationToken);
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.MonitoringStats, settings.DependencyResourcesSeconds, CollectMonitoringStatsAsync, cancellationToken);
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.RecentOperations, settings.RecentOperationsSeconds, CollectRecentOperationsAsync, cancellationToken);
+        await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.DashboardJobs, settings.RecentOperationsSeconds, CollectDashboardJobsAsync, cancellationToken);
+        await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.DashboardLogs, settings.RecentOperationsSeconds, CollectDashboardLogsAsync, cancellationToken);
+        await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.DashboardProjectSuggestions, settings.RecentOperationsSeconds, CollectDashboardProjectSuggestionsAsync, cancellationToken);
+        await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.StorageTableStats, settings.RecentOperationsSeconds, CollectStorageTableStatsAsync, cancellationToken);
+        await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.StorageLargeTablePreview, settings.RecentOperationsSeconds, CollectStorageLargeTablePreviewAsync, cancellationToken);
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.ResourceChart, settings.ResourceChartSeconds, CollectResourceChartAsync, cancellationToken);
     }
 
@@ -141,7 +153,13 @@ public sealed class DashboardSnapshotCollectorHostedService(
             DashboardSnapshotKeys.DependencyResources => defaults.DependencyResourcesSeconds,
             DashboardSnapshotKeys.MonitoringStats => defaults.DependencyResourcesSeconds,
             DashboardSnapshotKeys.RecentOperations => defaults.RecentOperationsSeconds,
+            DashboardSnapshotKeys.DashboardJobs => defaults.RecentOperationsSeconds,
+            DashboardSnapshotKeys.DashboardLogs => defaults.RecentOperationsSeconds,
+            DashboardSnapshotKeys.DashboardProjectSuggestions => defaults.RecentOperationsSeconds,
+            DashboardSnapshotKeys.StorageTableStats => defaults.RecentOperationsSeconds,
+            DashboardSnapshotKeys.StorageLargeTablePreview => defaults.RecentOperationsSeconds,
             DashboardSnapshotKeys.ResourceChart => defaults.ResourceChartSeconds,
+            DashboardSnapshotKeys.MemoryGraphIndex => defaults.MemoryGraphIndexSeconds,
             _ => defaults.StatusCoreSeconds
         };
     }
@@ -290,7 +308,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
 
         var payload = new DashboardRecentOperationsSnapshotPayload(
             [
-                new DashboardOverviewMetricResult("memoryItems", "全部記憶條目", memoryItemCount, "items"),
+                new DashboardOverviewMetricResult("memoryItems", "記憶條目", memoryItemCount, "items"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", defaultProjectMemoryItemCount, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", preferenceCount, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", activeJobCount, "jobs"),
@@ -300,6 +318,118 @@ public sealed class DashboardSnapshotCollectorHostedService(
             recentErrors);
 
         await WriteSnapshotAsync(DashboardSnapshotKeys.RecentOperations, intervalSeconds, payload, cancellationToken);
+    }
+
+    private async Task CollectDashboardJobsAsync(int intervalSeconds, CancellationToken cancellationToken)
+    {
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var totalCount = await dbContext.MemoryJobs.CountAsync(cancellationToken);
+        var jobs = await dbContext.MemoryJobs
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(100)
+            .Select(x => new JobListItemResult(
+                x.Id,
+                x.JobType,
+                x.Status,
+                x.PayloadJson,
+                x.Error,
+                x.CreatedAt,
+                x.StartedAt,
+                x.CompletedAt,
+                x.ProjectId))
+            .ToListAsync(cancellationToken);
+
+        await WriteSnapshotAsync(
+            DashboardSnapshotKeys.DashboardJobs,
+            intervalSeconds,
+            new DashboardJobsSnapshotPayload(new PagedResult<JobListItemResult>(jobs, 1, jobs.Count, totalCount)),
+            cancellationToken);
+    }
+
+    private async Task CollectDashboardLogsAsync(int intervalSeconds, CancellationToken cancellationToken)
+    {
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var recentErrors = await dbContext.RuntimeLogEntries
+            .Where(x => x.Level == "Error" || x.Level == "Critical")
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(50)
+            .Select(x => new LogEntryResult(
+                x.Id,
+                x.ServiceName,
+                x.Category,
+                x.Level,
+                x.Message,
+                x.Exception,
+                x.TraceId,
+                x.RequestId,
+                x.PayloadJson,
+                x.CreatedAt,
+                x.ProjectId))
+            .ToListAsync(cancellationToken);
+
+        await WriteSnapshotAsync(
+            DashboardSnapshotKeys.DashboardLogs,
+            intervalSeconds,
+            new DashboardLogsSnapshotPayload(recentErrors),
+            cancellationToken);
+    }
+
+    private async Task CollectDashboardProjectSuggestionsAsync(int intervalSeconds, CancellationToken cancellationToken)
+    {
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var projectRows = await dbContext.MemoryItems
+            .AsNoTracking()
+            .Where(x => x.ProjectId != ProjectContext.SharedProjectId && x.ProjectId != ProjectContext.UserProjectId)
+            .GroupBy(x => x.ProjectId)
+            .Select(group => new { ProjectId = group.Key, ItemCount = group.Count() })
+            .OrderByDescending(x => x.ItemCount)
+            .ThenBy(x => x.ProjectId)
+            .Take(100)
+            .ToListAsync(cancellationToken);
+        var projects = projectRows
+            .Select(x => new ProjectSuggestionResult(x.ProjectId, x.ItemCount))
+            .ToList();
+
+        await WriteSnapshotAsync(
+            DashboardSnapshotKeys.DashboardProjectSuggestions,
+            intervalSeconds,
+            new DashboardProjectSuggestionsSnapshotPayload(projects),
+            cancellationToken);
+    }
+
+    private async Task CollectStorageTableStatsAsync(int intervalSeconds, CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var storageExplorerStore = scope.ServiceProvider.GetRequiredService<IStorageExplorerStore>();
+        var tables = await storageExplorerStore.ListTablesAsync(cancellationToken);
+        await WriteSnapshotAsync(
+            DashboardSnapshotKeys.StorageTableStats,
+            intervalSeconds,
+            new DashboardStorageTableStatsSnapshotPayload(tables),
+            cancellationToken);
+    }
+
+    private async Task CollectStorageLargeTablePreviewAsync(int intervalSeconds, CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var storageExplorerStore = scope.ServiceProvider.GetRequiredService<IStorageExplorerStore>();
+        var tables = new List<StorageTableRowsResult>();
+        foreach (var table in DashboardStoragePolicy.LargeTableNames)
+        {
+            var preview = await storageExplorerStore.GetRowsAsync(
+                new StorageRowsRequest(
+                    table,
+                    Page: 1,
+                    PageSize: DashboardStoragePolicy.LargeTablePreviewPageSize),
+                cancellationToken);
+            tables.Add(preview with { DataSource = "redis" });
+        }
+
+        await WriteSnapshotAsync(
+            DashboardSnapshotKeys.StorageLargeTablePreview,
+            intervalSeconds,
+            new DashboardStorageLargeTablePreviewSnapshotPayload(tables),
+            cancellationToken);
     }
 
     private async Task CollectResourceChartAsync(int intervalSeconds, CancellationToken cancellationToken)
@@ -329,6 +459,13 @@ public sealed class DashboardSnapshotCollectorHostedService(
         {
             _resourceLock.Release();
         }
+    }
+
+    private async Task CollectMemoryGraphIndexAsync(int intervalSeconds, CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var refreshService = scope.ServiceProvider.GetRequiredService<IDashboardMemoryGraphIndexRefreshService>();
+        await refreshService.RefreshAsync("scheduled", intervalSeconds, cancellationToken);
     }
 
     private DashboardResourceSampleResult BuildResourceSample(DockerRuntimeSnapshot snapshot, RequestTrafficSampleResult requestSample)
@@ -381,7 +518,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 key,
                 capturedAtUtc,
                 intervalSeconds,
-                capturedAtUtc.AddSeconds(intervalSeconds),
+                DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc),
                 string.Empty,
                 payload),
             cancellationToken);
@@ -398,7 +535,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
         await snapshotStore.SetAsync(existing with
         {
             RefreshIntervalSeconds = intervalSeconds,
-            StaleAfterUtc = existing.CapturedAtUtc.AddSeconds(intervalSeconds),
+            StaleAfterUtc = DashboardSnapshotStalenessPolicy.ComputeStaleAfter(existing.CapturedAtUtc),
             LastError = error
         }, cancellationToken);
     }
@@ -416,6 +553,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
             var database = redis.GetDatabase();
             var info = await server.ExecuteAsync("INFO");
             var infoMap = ParseRedisInfo(info.ToString());
+            var cacheSnapshot = redisCacheTelemetry.GetSnapshot();
             var keyCountResult = await database.ExecuteAsync("DBSIZE");
             var keyCount = long.TryParse(keyCountResult.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedKeyCount)
                 ? parsedKeyCount
@@ -448,7 +586,12 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 container?.Metric.DiskReadBytes ?? 0,
                 container?.Metric.DiskWriteBytes ?? 0,
                 storage?.SizeBytes ?? 0,
-                storage?.DisplayName ?? "未配置");
+                storage?.DisplayName ?? "未配置",
+                cacheSnapshot.Hits,
+                cacheSnapshot.Misses,
+                cacheSnapshot.Sets,
+                cacheSnapshot.Bypasses,
+                cacheSnapshot.Errors);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

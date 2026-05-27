@@ -3,19 +3,45 @@ using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.McpServer;
 using ModelContextProtocol.Protocol;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Http.Json;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
+LocalDotEnvConfiguration.AddFallbacks(
+    builder.Configuration,
+    builder.Environment.ContentRootPath,
+    new Dictionary<string, string>
+    {
+        ["CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN"] = "ContextHub:Security:BootstrapToken",
+        ["CONTEXTHUB_SECURITY_BOOTSTRAP_TENANT_SLUG"] = "ContextHub:Security:BootstrapTenantSlug",
+        ["CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME"] = "ContextHub:Security:BootstrapUsername",
+        ["CONTEXTHUB_SECURITY_BOOTSTRAP_ALLOWED_PROJECT_IDS"] = "ContextHub:Security:BootstrapAllowedProjectIds"
+    });
 
 builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(options =>
 {
     options.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
 });
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
+                               ForwardedHeaders.XForwardedHost |
+                               ForwardedHeaders.XForwardedProto;
+    options.KnownIPNetworks.Clear();
+    options.KnownProxies.Clear();
+});
 
 builder.Services.AddProblemDetails();
+builder.Services.AddAuthentication(ContextHubAuthentication.Scheme)
+    .AddScheme<AuthenticationSchemeOptions, ApiTokenAuthenticationHandler>(ContextHubAuthentication.Scheme, _ => { });
+builder.Services.AddAuthorization();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<IPasswordHasher<object>, PasswordHasher<object>>();
 builder.Services.AddMemoryApplication();
 builder.Services.AddMemoryInfrastructure(builder.Configuration, "mcp-server");
 builder.Services.AddHostedService<DashboardSnapshotCollectorHostedService>();
@@ -31,8 +57,15 @@ builder.Services.AddMcpServer()
     .WithReadResourceHandler(WorkingContextMcpResources.ReadAsync);
 
 var app = builder.Build();
+var requireAuthentication = app.Services.GetRequiredService<IOptions<ContextHubOptions>>().Value.Security.RequireAuthentication;
 
+app.UseForwardedHeaders();
 app.UseExceptionHandler();
+app.Use(CloudflareCacheHeaders.ApplyNoStorePolicyAsync);
+app.UseMiddleware<MaintenanceModeMiddleware>();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseMiddleware<RequestActorMiddleware>();
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path;
@@ -65,7 +98,7 @@ app.MapHealthChecks("/health/live", new HealthCheckOptions
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
     Predicate = registration => registration.Tags.Contains("ready")
-});
+}).RequireAuthIfEnabled(requireAuthentication);
 
 app.MapGet("/api/status", async (
     IDashboardSnapshotStore snapshotStore,
@@ -100,28 +133,35 @@ app.MapGet("/api/status", async (
             : snapshot.StaleAfterUtc < now
                 ? "狀態資料已過期。"
                 : string.Empty));
-});
+}).RequireAuthIfEnabled(requireAuthentication);
 
 var dashboard = app.MapGroup("/api/dashboard");
-dashboard.MapGet("/overview", async (IDashboardQueryService service, CancellationToken cancellationToken) =>
+dashboard.RequireAuthIfEnabled(requireAuthentication);
+dashboard.RequireAdminIfEnabled(requireAuthentication);
+dashboard.MapGet("/overview", async (IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
 {
     var result = await service.GetOverviewAsync(cancellationToken);
+    SetDataSource(httpContext, "redis");
     return Results.Ok(result);
 });
 
-dashboard.MapGet("/runtime", async (IDashboardQueryService service, CancellationToken cancellationToken) =>
+dashboard.MapGet("/runtime", async (IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
 {
     var result = await service.GetRuntimeAsync(cancellationToken);
+    SetDataSource(httpContext, "redis");
     return Results.Ok(result);
 });
 
-dashboard.MapGet("/monitoring", async (IDashboardQueryService service, CancellationToken cancellationToken) =>
+dashboard.MapGet("/monitoring", async (IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
 {
     var result = await service.GetMonitoringAsync(cancellationToken);
+    SetDataSource(httpContext, "redis");
     return Results.Ok(result);
 });
 
 var memories = app.MapGroup("/api/memories");
+memories.RequireAuthIfEnabled(requireAuthentication);
+memories.RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 memories.MapGet(string.Empty, async (
     string? query,
     string? scope,
@@ -137,6 +177,7 @@ memories.MapGet(string.Empty, async (
     int? page,
     int? pageSize,
     IDashboardQueryService service,
+    HttpContext httpContext,
     CancellationToken cancellationToken) =>
 {
     string? scopeError = null;
@@ -173,6 +214,7 @@ memories.MapGet(string.Empty, async (
             page ?? 1,
             pageSize ?? 25),
         cancellationToken);
+    SetDataSource(httpContext, "cache");
     return Results.Ok(result);
 });
 
@@ -180,9 +222,11 @@ memories.MapGet("/projects", async (
     string? query,
     int? limit,
     IDashboardQueryService service,
+    HttpContext httpContext,
     CancellationToken cancellationToken) =>
 {
     var result = await service.GetProjectSuggestionsAsync(query, limit ?? 8, cancellationToken);
+    SetDataSource(httpContext, "redis");
     return Results.Ok(result);
 });
 
@@ -202,6 +246,7 @@ memories.MapGet("/graph", async (
     string? status,
     string? sourceType,
     IDashboardQueryService service,
+    HttpContext httpContext,
     CancellationToken cancellationToken) =>
 {
     string? queryModeError = null;
@@ -243,8 +288,17 @@ memories.MapGet("/graph", async (
             parsedStatus,
             sourceType),
         cancellationToken);
+    SetDataSource(httpContext, "redis");
     return Results.Ok(result);
-});
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+
+memories.MapPost("/graph/index/refresh", async (
+    IDashboardMemoryGraphIndexRefreshService refreshService,
+    CancellationToken cancellationToken) =>
+{
+    var result = await refreshService.RefreshAsync("manual", null, cancellationToken);
+    return Results.Ok(result);
+}).RequireAdminIfEnabled(requireAuthentication);
 
 memories.MapGet("/search", async (
     string query,
@@ -285,9 +339,10 @@ memories.MapGet("/{id:guid}", async (Guid id, IMemoryService service, Cancellati
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
 
-memories.MapGet("/{id:guid}/details", async (Guid id, IDashboardQueryService service, CancellationToken cancellationToken) =>
+memories.MapGet("/{id:guid}/details", async (Guid id, IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
 {
     var result = await service.GetMemoryDetailsAsync(id, cancellationToken);
+    SetDataSource(httpContext, "cache");
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
 
@@ -327,9 +382,11 @@ memories.MapPost("/import/apply", async (MemoryImportRequest request, IMemoryTra
             ["package"] = [ex.Message]
         });
     }
-});
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 
 var logs = app.MapGroup("/api/logs");
+logs.RequireAuthIfEnabled(requireAuthentication);
+logs.RequireAdminIfEnabled(requireAuthentication);
 logs.MapGet("/search", async (
     string? query,
     [FromQuery(Name = "serviceName")] string[]? serviceNames,
@@ -341,20 +398,32 @@ logs.MapGet("/search", async (
     int? limit,
     string? projectId,
     ILogQueryService service,
+    IRedisObjectCache objectCache,
+    IRequestActorAccessor actorAccessor,
+    HttpContext httpContext,
     CancellationToken cancellationToken) =>
 {
-    var result = await service.SearchAsync(
-        new LogQueryRequest(
-            query,
-            JoinQueryFilter(serviceNames),
-            JoinQueryFilter(levels),
-            traceId,
-            requestId,
-            from,
-            to,
-            limit ?? 50,
-            ProjectContext.Normalize(projectId)),
-        cancellationToken);
+    var request = new LogQueryRequest(
+        query,
+        JoinQueryFilter(serviceNames),
+        JoinQueryFilter(levels),
+        traceId,
+        requestId,
+        from,
+        to,
+        limit ?? 50,
+        ProjectContext.Normalize(projectId));
+    var cacheKey = RedisCacheKeyBuilder.DashboardLogs(request, actorAccessor.Current);
+    var cached = await objectCache.GetAsync<IReadOnlyList<LogEntryResult>>(cacheKey, "dashboard-logs-search", cancellationToken);
+    if (cached.Hit && cached.Value is not null)
+    {
+        SetDataSource(httpContext, "cache");
+        return Results.Ok(cached.Value);
+    }
+
+    var result = await service.SearchAsync(request, cancellationToken);
+    await objectCache.SetAsync(cacheKey, "dashboard-logs-search", result, TimeSpan.FromSeconds(15), cancellationToken);
+    SetDataSource(httpContext, "origin");
     return Results.Ok(result);
 });
 
@@ -370,6 +439,7 @@ static string? JoinQueryFilter(string[]? values)
         : string.Join(',', values.Where(value => !string.IsNullOrWhiteSpace(value)));
 
 var userPreferences = app.MapGroup("/api/user/preferences");
+userPreferences.RequireAuthIfEnabled(requireAuthentication);
 userPreferences.MapGet(string.Empty, async (
     string? kind,
     bool? includeArchived,
@@ -393,17 +463,358 @@ userPreferences.MapGet(string.Empty, async (
 
     var result = await service.ListUserPreferencesAsync(new UserPreferenceListRequest(parsedKind, includeArchived ?? false, limit ?? 50), cancellationToken);
     return Results.Ok(result);
-});
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.PreferencesRead);
 
 userPreferences.MapPost(string.Empty, async (UserPreferenceUpsertRequest request, IMemoryService service, CancellationToken cancellationToken) =>
 {
     var result = await service.UpsertUserPreferenceAsync(request, cancellationToken);
     return Results.Ok(result);
-});
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.PreferencesWrite);
 
 userPreferences.MapPatch("/{id:guid}", async (Guid id, UserPreferenceArchiveBody request, IMemoryService service, CancellationToken cancellationToken) =>
 {
     var result = await service.ArchiveUserPreferenceAsync(new UserPreferenceArchiveRequest(id, request.Archived), cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.PreferencesWrite);
+
+var me = app.MapGroup("/api/me");
+me.RequireAuthIfEnabled(requireAuthentication);
+me.MapGet(string.Empty, (IRequestActorAccessor actorAccessor) =>
+{
+    var actor = actorAccessor.Current;
+    return actor.HasUser
+        ? Results.Ok(new CurrentUserResult(
+            actor.TenantId!.Value,
+            actor.UserId!.Value,
+            actor.Username,
+            actor.Username,
+            string.Empty,
+            actor.Role ?? TenantUserRole.Member))
+        : Results.Unauthorized();
+});
+
+me.MapGet("/tokens", async (
+    bool? includeRevoked,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ListMyTokensAsync(includeRevoked ?? false, cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.TokenManage);
+
+me.MapPost("/tokens", async (
+    ApiTokenCreateBody request,
+    ITenantSecurityService service,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var actor = actorAccessor.Current;
+        if (!actor.HasUser)
+        {
+            return Results.Unauthorized();
+        }
+
+        var result = await service.CreateMyTokenAsync(
+            new ApiTokenCreateRequest(
+                actor.TenantId!.Value,
+                actor.UserId!.Value,
+                request.Name,
+                request.Notes,
+                request.Scopes,
+                request.AllowedProjectIds,
+                request.ExpiresAt),
+            cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["token"] = [ex.Message] });
+    }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.TokenManage);
+
+me.MapPatch("/tokens/{tokenId:guid}", async (
+    Guid tokenId,
+    ApiTokenUpdateRequest request,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.UpdateMyTokenAsync(tokenId, request, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["token"] = [ex.Message] });
+    }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.TokenManage);
+
+me.MapPost("/tokens/{tokenId:guid}/revoke", async (
+    Guid tokenId,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.RevokeMyTokenAsync(tokenId, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["token"] = [ex.Message] });
+    }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.TokenManage);
+
+me.MapPost("/tokens/{tokenId:guid}/regenerate", async (
+    Guid tokenId,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.RegenerateMyTokenAsync(tokenId, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["token"] = [ex.Message] });
+    }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.TokenManage);
+
+var security = app.MapGroup("/api/security");
+security.RequireAuthIfEnabled(requireAuthentication);
+if (requireAuthentication)
+{
+    security.AddEndpointFilter(async (context, next) =>
+    {
+        var actor = context.HttpContext.RequestServices.GetRequiredService<IRequestActorAccessor>().Current;
+        return actor.IsAdmin ? await next(context) : Results.Forbid();
+    });
+}
+security.MapGet("/tenants", async (
+    bool? includeArchived,
+    int? limit,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ListTenantsAsync(includeArchived ?? false, limit ?? 100, cancellationToken);
+    return Results.Ok(result);
+});
+
+security.MapPost("/tenants", async (
+    TenantCreateRequest request,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.CreateTenantAsync(request, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["tenant"] = [ex.Message] });
+    }
+});
+
+security.MapGet("/tenants/{tenantId:guid}/users", async (
+    Guid tenantId,
+    bool? includeArchived,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ListUsersAsync(tenantId, includeArchived ?? false, cancellationToken);
+    return Results.Ok(result);
+});
+
+security.MapPost("/tenants/{tenantId:guid}/users", async (
+    Guid tenantId,
+    TenantUserCreateBody request,
+    ITenantSecurityService service,
+    IPasswordHasher<object> passwordHasher,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var passwordHash = string.IsNullOrWhiteSpace(request.Password)
+            ? string.Empty
+            : passwordHasher.HashPassword(new object(), request.Password);
+        var result = await service.CreateUserAsync(
+            new TenantUserCreateRequest(
+                tenantId,
+                request.Username,
+                request.DisplayName,
+                request.Email,
+                request.Role,
+                passwordHash),
+            cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["user"] = [ex.Message] });
+    }
+});
+
+security.MapPatch("/users/{userId:guid}", async (
+    Guid userId,
+    TenantUserUpdateBody request,
+    ITenantSecurityService service,
+    IPasswordHasher<object> passwordHasher,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var passwordHash = request.Password is null
+            ? null
+            : string.IsNullOrWhiteSpace(request.Password)
+                ? string.Empty
+                : passwordHasher.HashPassword(new object(), request.Password);
+        var result = await service.UpdateUserAsync(
+            userId,
+            new TenantUserUpdateRequest(
+                request.DisplayName,
+                request.Email,
+                request.Role,
+                request.Status,
+                passwordHash),
+            cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["user"] = [ex.Message] });
+    }
+});
+
+security.MapGet("/tenants/{tenantId:guid}/project-grants", async (
+    Guid tenantId,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ListProjectGrantsAsync(tenantId, cancellationToken);
+    return Results.Ok(result);
+});
+
+security.MapPut("/tenants/{tenantId:guid}/project-grants/{projectId}", async (
+    Guid tenantId,
+    string projectId,
+    TenantProjectGrantUpsertBody request,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.UpsertProjectGrantAsync(
+            new TenantProjectGrantUpsertRequest(
+                tenantId,
+                projectId,
+                request.CanRead,
+                request.CanWrite,
+                request.CanManageTokens),
+            cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["projectGrant"] = [ex.Message] });
+    }
+});
+
+security.MapGet("/tenants/{tenantId:guid}/tokens", async (
+    Guid tenantId,
+    bool? includeRevoked,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ListTokensAsync(tenantId, includeRevoked ?? false, cancellationToken);
+    return Results.Ok(result);
+});
+
+security.MapPost("/tenants/{tenantId:guid}/tokens", async (
+    Guid tenantId,
+    ApiTokenCreateBody request,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.CreateTokenAsync(
+            new ApiTokenCreateRequest(
+                tenantId,
+                request.OwnerUserId,
+                request.Name,
+                request.Notes,
+                request.Scopes,
+                request.AllowedProjectIds,
+                request.ExpiresAt),
+            cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["token"] = [ex.Message] });
+    }
+});
+
+security.MapPatch("/tokens/{tokenId:guid}", async (
+    Guid tokenId,
+    ApiTokenUpdateRequest request,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.UpdateTokenAsync(tokenId, request, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["token"] = [ex.Message] });
+    }
+});
+
+security.MapPost("/tokens/{tokenId:guid}/revoke", async (
+    Guid tokenId,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.RevokeTokenAsync(tokenId, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["token"] = [ex.Message] });
+    }
+});
+
+security.MapPost("/tokens/{tokenId:guid}/regenerate", async (
+    Guid tokenId,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.RegenerateTokenAsync(tokenId, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["token"] = [ex.Message] });
+    }
+});
+
+security.MapGet("/audit-events", async (
+    Guid? tenantId,
+    int? limit,
+    ITenantSecurityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ListAuditEventsAsync(tenantId, limit ?? 100, cancellationToken);
     return Results.Ok(result);
 });
 
@@ -416,9 +827,11 @@ app.MapPost("/api/context/build", async (WorkingContextRequest request, IMemoryS
         },
         cancellationToken);
     return Results.Ok(result);
-});
+}).RequireAuthIfEnabled(requireAuthentication).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
 var sources = app.MapGroup("/api/sources");
+sources.RequireAuthIfEnabled(requireAuthentication);
+sources.RequireAdminIfEnabled(requireAuthentication);
 sources.MapGet(string.Empty, async (
     string? projectId,
     string? enabled,
@@ -525,6 +938,8 @@ sources.MapGet("/{id:guid}/runs", async (
 });
 
 var governance = app.MapGroup("/api/governance");
+governance.RequireAuthIfEnabled(requireAuthentication);
+governance.RequireAdminIfEnabled(requireAuthentication);
 governance.MapGet("/findings", async (
     string? projectId,
     string? type,
@@ -587,6 +1002,8 @@ governance.MapPost("/findings/{id:guid}/dismiss", async (Guid id, IGovernanceSer
 });
 
 var evaluation = app.MapGroup("/api/evaluation");
+evaluation.RequireAuthIfEnabled(requireAuthentication);
+evaluation.RequireAdminIfEnabled(requireAuthentication);
 evaluation.MapGet("/suites", async (
     string? projectId,
     IEvaluationService service,
@@ -641,6 +1058,8 @@ evaluation.MapGet("/runs/{id:guid}", async (Guid id, IEvaluationService service,
 });
 
 var actions = app.MapGroup("/api/actions");
+actions.RequireAuthIfEnabled(requireAuthentication);
+actions.RequireAdminIfEnabled(requireAuthentication);
 actions.MapGet(string.Empty, async (
     string? projectId,
     string? status,
@@ -680,6 +1099,7 @@ actions.MapPost("/{id:guid}/dismiss", async (Guid id, ISuggestedActionService se
 });
 
 var conversations = app.MapGroup("/api/conversations");
+conversations.RequireAuthIfEnabled(requireAuthentication);
 conversations.MapPost("/ingest", async (
     ConversationIngestRequest request,
     IConversationAutomationService service,
@@ -741,12 +1161,15 @@ conversations.MapGet("/insights", async (
 });
 
 var jobs = app.MapGroup("/api/jobs");
+jobs.RequireAuthIfEnabled(requireAuthentication);
+jobs.RequireAdminIfEnabled(requireAuthentication);
 jobs.MapGet(string.Empty, async (
     string? status,
     string? jobType,
     int? page,
     int? pageSize,
     IDashboardQueryService service,
+    HttpContext httpContext,
     CancellationToken cancellationToken) =>
 {
     string? statusError = null;
@@ -764,6 +1187,7 @@ jobs.MapGet(string.Empty, async (
     var result = await service.GetJobsAsync(
         new JobListRequest(parsedStatus, parsedJobType, page ?? 1, pageSize ?? 25),
         cancellationToken);
+    SetDataSource(httpContext, parsedStatus is null && parsedJobType is null && (page ?? 1) <= 1 ? "redis" : "cache");
     return Results.Ok(result);
 });
 
@@ -785,10 +1209,74 @@ jobs.MapPost("/summary-refresh", async (EnqueueSummaryRefreshRequest request, IM
     return Results.Ok(result);
 });
 
+var maintenance = app.MapGroup("/api/maintenance");
+maintenance.RequireAuthIfEnabled(requireAuthentication);
+maintenance.RequireAdminIfEnabled(requireAuthentication);
+maintenance.MapGet("/status", async (IMaintenanceModeStore store, CancellationToken cancellationToken) =>
+{
+    var result = await store.GetAsync(cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/mode", async (
+    MaintenanceModeRequest request,
+    IMaintenanceModeStore store,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await store.EnableAsync(request, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapDelete("/mode", async (
+    IMaintenanceModeStore store,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await store.DisableAsync(MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/retrieval-telemetry-retention/run", async (
+    RetrievalTelemetryRetentionRunRequest request,
+    IRetrievalTelemetryRetentionService service,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.RunAsync(
+        string.IsNullOrWhiteSpace(request.TriggeredBy) ? MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor) : request.TriggeredBy,
+        cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/vacuum-full-reclaim/run", async (
+    VacuumFullReclaimRunRequest request,
+    IVacuumFullReclaimService service,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.RunAsync(
+        string.IsNullOrWhiteSpace(request.TriggeredBy) ? MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor) : request.TriggeredBy,
+        cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapGet("/runs", async (
+    int? limit,
+    IMaintenanceRunQueryService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ListRunsAsync(limit ?? 100, cancellationToken);
+    return Results.Ok(result);
+});
+
 var storage = app.MapGroup("/api/storage");
-storage.MapGet("/tables", async (IDashboardQueryService service, CancellationToken cancellationToken) =>
+storage.RequireAuthIfEnabled(requireAuthentication);
+storage.RequireAdminIfEnabled(requireAuthentication);
+storage.MapGet("/tables", async (IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
 {
     var result = await service.GetStorageTablesAsync(cancellationToken);
+    SetDataSource(httpContext, "redis");
     return Results.Ok(result);
 });
 
@@ -799,6 +1287,7 @@ storage.MapGet("/{table}", async (
     int? page,
     int? pageSize,
     IDashboardQueryService service,
+    HttpContext httpContext,
     CancellationToken cancellationToken) =>
 {
     try
@@ -811,7 +1300,17 @@ storage.MapGet("/{table}", async (
                 page ?? 1,
                 pageSize ?? 50),
             cancellationToken);
+        SetDataSource(httpContext, result.DataSource);
         return Results.Ok(result);
+    }
+    catch (StorageExplorerQueryRejectedException ex)
+    {
+        return Results.BadRequest(new ProblemDetails
+        {
+            Title = "Storage query rejected.",
+            Detail = ex.Message,
+            Status = StatusCodes.Status400BadRequest
+        });
     }
     catch (ArgumentException ex) when (string.Equals(ex.ParamName, "column", StringComparison.Ordinal))
     {
@@ -831,6 +1330,11 @@ storage.MapGet("/{table}", async (
     }
 });
 
+static void SetDataSource(HttpContext httpContext, string source)
+{
+    httpContext.Response.Headers["X-ContextHub-Data-Source"] = source;
+}
+
 app.MapPost("/api/performance/measure", async (PerformanceMeasureRequest request, IPerformanceProbeService service, CancellationToken cancellationToken) =>
 {
     var errors = ApiValidation.ValidatePerformanceRequest(request);
@@ -841,13 +1345,51 @@ app.MapPost("/api/performance/measure", async (PerformanceMeasureRequest request
 
     var result = await service.MeasureAsync(request, cancellationToken);
     return Results.Ok(result);
-});
+}).RequireAuthIfEnabled(requireAuthentication);
 
-app.MapMcp("/mcp");
+app.MapMcp("/mcp").RequireAuthIfEnabled(requireAuthentication);
 
 app.Run();
 
 public partial class Program;
+
+internal static class CloudflareCacheHeaders
+{
+    public static async Task ApplyNoStorePolicyAsync(HttpContext context, RequestDelegate next)
+    {
+        context.Response.OnStarting(static state =>
+        {
+            var httpContext = (HttpContext)state;
+            httpContext.Response.Headers.CacheControl = "no-store, no-cache, max-age=0, must-revalidate";
+            httpContext.Response.Headers["Cloudflare-CDN-Cache-Control"] = "no-store";
+            httpContext.Response.Headers["CDN-Cache-Control"] = "no-store";
+            httpContext.Response.Headers.Pragma = "no-cache";
+            httpContext.Response.Headers.Expires = "0";
+            return Task.CompletedTask;
+        }, context);
+
+        await next(context);
+    }
+}
+
+internal static class MaintenanceApiHelpers
+{
+    public static string ResolveTriggeredBy(IRequestActorAccessor actorAccessor)
+    {
+        var actor = actorAccessor.Current;
+        if (!string.IsNullOrWhiteSpace(actor.Username))
+        {
+            return actor.Username;
+        }
+
+        if (actor.UserId.HasValue)
+        {
+            return actor.UserId.Value.ToString("D");
+        }
+
+        return actor.IsAuthenticated ? "authenticated-api-token" : "system";
+    }
+}
 
 internal static class ApiValidation
 {
@@ -880,6 +1422,29 @@ internal static class ApiValidation
 }
 
 internal sealed record UserPreferenceArchiveBody(bool Archived = true);
+internal sealed record TenantUserCreateBody(
+    string Username,
+    string DisplayName,
+    string Email = "",
+    TenantUserRole Role = TenantUserRole.Member,
+    string Password = "");
+internal sealed record TenantUserUpdateBody(
+    string? DisplayName = null,
+    string? Email = null,
+    TenantUserRole? Role = null,
+    TenantUserStatus? Status = null,
+    string? Password = null);
+internal sealed record TenantProjectGrantUpsertBody(
+    bool CanRead = true,
+    bool CanWrite = false,
+    bool CanManageTokens = false);
+internal sealed record ApiTokenCreateBody(
+    Guid OwnerUserId,
+    string Name,
+    string? Notes = null,
+    IReadOnlyList<string>? Scopes = null,
+    IReadOnlyList<string>? AllowedProjectIds = null,
+    DateTimeOffset? ExpiresAt = null);
 internal sealed record SourceConnectionPatchBody(
     string? Name = null,
     string? ConfigJson = null,
@@ -925,4 +1490,50 @@ internal static class QueryParser
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+}
+
+internal static class EndpointAuthorizationExtensions
+{
+    public static TBuilder RequireAuthIfEnabled<TBuilder>(this TBuilder builder, bool enabled)
+        where TBuilder : IEndpointConventionBuilder
+    {
+        if (enabled)
+        {
+            builder.RequireAuthorization();
+        }
+
+        return builder;
+    }
+
+    public static TBuilder RequireAdminIfEnabled<TBuilder>(this TBuilder builder, bool enabled)
+        where TBuilder : IEndpointConventionBuilder
+    {
+        if (enabled)
+        {
+            builder.AddEndpointFilter(async (context, next) =>
+            {
+                var actor = context.HttpContext.RequestServices.GetRequiredService<IRequestActorAccessor>().Current;
+                return actor.IsAdmin ? await next(context) : Results.Forbid();
+            });
+        }
+
+        return builder;
+    }
+
+    public static TBuilder RequireScopeIfEnabled<TBuilder>(this TBuilder builder, bool enabled, string scope)
+        where TBuilder : IEndpointConventionBuilder
+    {
+        if (enabled)
+        {
+            builder.AddEndpointFilter(async (context, next) =>
+            {
+                var actor = context.HttpContext.RequestServices.GetRequiredService<IRequestActorAccessor>().Current;
+                return actor.HasUser && actor.HasScope(scope)
+                    ? await next(context)
+                    : Results.Forbid();
+            });
+        }
+
+        return builder;
+    }
 }

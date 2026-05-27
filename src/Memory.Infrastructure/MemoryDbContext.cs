@@ -19,12 +19,18 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
         value => value);
 
     public DbSet<InstanceSetting> InstanceSettings => Set<InstanceSetting>();
+    public DbSet<Tenant> Tenants => Set<Tenant>();
+    public DbSet<TenantUser> TenantUsers => Set<TenantUser>();
+    public DbSet<TenantProjectGrant> TenantProjectGrants => Set<TenantProjectGrant>();
+    public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
+    public DbSet<SecurityAuditEvent> SecurityAuditEvents => Set<SecurityAuditEvent>();
     public DbSet<MemoryItem> MemoryItems => Set<MemoryItem>();
     public DbSet<MemoryItemRevision> MemoryItemRevisions => Set<MemoryItemRevision>();
     public DbSet<MemoryItemChunk> MemoryItemChunks => Set<MemoryItemChunk>();
     public DbSet<MemoryChunkVector> MemoryChunkVectors => Set<MemoryChunkVector>();
     public DbSet<MemoryLink> MemoryLinks => Set<MemoryLink>();
     public DbSet<MemoryJob> MemoryJobs => Set<MemoryJob>();
+    public DbSet<MaintenanceRun> MaintenanceRuns => Set<MaintenanceRun>();
     public DbSet<RuntimeLogEntry> RuntimeLogEntries => Set<RuntimeLogEntry>();
     public DbSet<RetrievalEvent> RetrievalEvents => Set<RetrievalEvent>();
     public DbSet<RetrievalHit> RetrievalHits => Set<RetrievalHit>();
@@ -58,11 +64,111 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.UpdatedBy).HasColumnName("updated_by");
         });
 
+        modelBuilder.Entity<Tenant>(entity =>
+        {
+            entity.ToTable("tenants");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.Slug).HasColumnName("slug");
+            entity.Property(x => x.DisplayName).HasColumnName("display_name");
+            entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => x.Slug).IsUnique();
+            entity.HasMany(x => x.Users).WithOne(x => x.Tenant).HasForeignKey(x => x.TenantId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasMany(x => x.ProjectGrants).WithOne(x => x.Tenant).HasForeignKey(x => x.TenantId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasMany(x => x.ApiTokens).WithOne(x => x.Tenant).HasForeignKey(x => x.TenantId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<TenantUser>(entity =>
+        {
+            entity.ToTable("tenant_users");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.Username).HasColumnName("username");
+            entity.Property(x => x.DisplayName).HasColumnName("display_name");
+            entity.Property(x => x.Email).HasColumnName("email");
+            entity.Property(x => x.PasswordHash).HasColumnName("password_hash");
+            entity.Property(x => x.Role).HasColumnName("role").HasConversion<string>();
+            entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.LastLoginAt).HasColumnName("last_login_at");
+            entity.Property(x => x.PasswordUpdatedAt).HasColumnName("password_updated_at");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.Username }).IsUnique();
+            entity.HasMany(x => x.ApiTokens).WithOne(x => x.OwnerUser).HasForeignKey(x => x.OwnerUserId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<TenantProjectGrant>(entity =>
+        {
+            entity.ToTable("tenant_project_grants");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.CanRead).HasColumnName("can_read");
+            entity.Property(x => x.CanWrite).HasColumnName("can_write");
+            entity.Property(x => x.CanManageTokens).HasColumnName("can_manage_tokens");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.ProjectId }).IsUnique();
+        });
+
+        modelBuilder.Entity<ApiToken>(entity =>
+        {
+            entity.ToTable("api_tokens");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.Name).HasColumnName("name");
+            entity.Property(x => x.Notes).HasColumnName("notes");
+            entity.Property(x => x.TokenPrefix).HasColumnName("token_prefix");
+            entity.Property(x => x.TokenHash).HasColumnName("token_hash");
+            entity.Property(x => x.TokenLastFour).HasColumnName("token_last_four");
+            entity.Property(x => x.Scopes).HasColumnName("scopes").HasColumnType("text[]");
+            entity.Property(x => x.AllowedProjectIds).HasColumnName("allowed_project_ids").HasColumnType("text[]");
+            entity.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(x => x.RevokedAt).HasColumnName("revoked_at");
+            entity.Property(x => x.LastUsedAt).HasColumnName("last_used_at");
+            entity.Property(x => x.LastUsedIp).HasColumnName("last_used_ip");
+            entity.Property(x => x.LastUsedUserAgent).HasColumnName("last_used_user_agent");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => x.TokenHash).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.Name });
+            entity.HasIndex(x => x.LastUsedAt);
+        });
+
+        modelBuilder.Entity<SecurityAuditEvent>(entity =>
+        {
+            entity.ToTable("security_audit_events");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.ApiTokenId).HasColumnName("api_token_id");
+            entity.Property(x => x.EventType).HasColumnName("event_type").HasConversion<string>();
+            entity.Property(x => x.Outcome).HasColumnName("outcome");
+            entity.Property(x => x.IpAddress).HasColumnName("ip_address");
+            entity.Property(x => x.UserAgent).HasColumnName("user_agent");
+            entity.Property(x => x.DetailsJson)
+                .HasColumnName("details_json")
+                .HasColumnType("jsonb")
+                .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.CreatedAt });
+            entity.HasIndex(x => new { x.ApiTokenId, x.CreatedAt });
+        });
+
         modelBuilder.Entity<MemoryItem>(entity =>
         {
             entity.ToTable("memory_items");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.ExternalKey).HasColumnName("external_key");
             entity.Property(x => x.Scope).HasColumnName("scope").HasConversion<string>();
@@ -81,7 +187,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.MetadataJson).HasColumnName("metadata_json");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
-            entity.HasIndex(x => new { x.ProjectId, x.ExternalKey }).IsUnique();
+            entity.HasIndex(x => new { x.ProjectId, x.OwnerUserId, x.ExternalKey }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Status });
             entity.HasMany(x => x.Revisions).WithOne(x => x.MemoryItem).HasForeignKey(x => x.MemoryItemId).OnDelete(DeleteBehavior.Cascade);
             entity.HasMany(x => x.Chunks).WithOne(x => x.MemoryItem).HasForeignKey(x => x.MemoryItemId).OnDelete(DeleteBehavior.Cascade);
         });
@@ -145,6 +252,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.ToTable("memory_jobs");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.JobType).HasColumnName("job_type").HasConversion<string>();
             entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
@@ -153,6 +262,28 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.StartedAt).HasColumnName("started_at");
             entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
+        });
+
+        modelBuilder.Entity<MaintenanceRun>(entity =>
+        {
+            entity.ToTable("maintenance_runs");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.MaintenanceType).HasColumnName("maintenance_type").HasConversion<string>();
+            entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.StartedAt).HasColumnName("started_at");
+            entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
+            entity.Property(x => x.TriggeredBy).HasColumnName("triggered_by");
+            entity.Property(x => x.PolicyJson)
+                .HasColumnName("policy_json")
+                .HasColumnType("jsonb")
+                .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.ResultJson)
+                .HasColumnName("result_json")
+                .HasColumnType("jsonb")
+                .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.Error).HasColumnName("error");
+            entity.HasIndex(x => x.StartedAt);
         });
 
         modelBuilder.Entity<RuntimeLogEntry>(entity =>
@@ -177,6 +308,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.ToTable("retrieval_events");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.Channel).HasColumnName("channel");
             entity.Property(x => x.EntryPoint).HasColumnName("entry_point");
@@ -391,6 +524,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.ToTable("conversation_sessions");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ConversationId).HasColumnName("conversation_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.ProjectName).HasColumnName("project_name");
@@ -412,6 +547,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
             entity.Property(x => x.SessionId).HasColumnName("session_id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ConversationId).HasColumnName("conversation_id");
             entity.Property(x => x.TurnId).HasColumnName("turn_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
@@ -446,6 +583,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Id).HasColumnName("id");
             entity.Property(x => x.SessionId).HasColumnName("session_id");
             entity.Property(x => x.CheckpointId).HasColumnName("checkpoint_id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ConversationId).HasColumnName("conversation_id");
             entity.Property(x => x.TurnId).HasColumnName("turn_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");

@@ -1,0 +1,17 @@
+@page "/forbidden"
+
+<PageTitle>Context Hub | 無權限</PageTitle>
+
+<PageViewport Title="無權限"
+              Subtitle="目前帳號只能存取自己的記憶資料、記憶圖譜、使用者偏好與 Token。">
+    <ChildContent>
+        <section class="panel">
+            <div class="panel-title">無法存取此頁面</div>
+            <div class="empty-inline">請回到個人工作區，或請管理員調整帳號角色。</div>
+            <div class="settings-button-row">
+                <a class="primary-button" href="/memories">前往記憶資料</a>
+                <a class="ghost-button" href="/account/tokens">管理我的 Token</a>
+            </div>
+        </section>
+    </ChildContent>
+</PageViewport>

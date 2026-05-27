@@ -10,10 +10,13 @@ namespace Memory.Infrastructure;
 
 public sealed class DatabaseMigrationHostedService(NpgsqlDataSource dataSource, ILogger<DatabaseMigrationHostedService> logger) : IHostedService
 {
+    private const int MigrationCommandTimeoutSeconds = 300;
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var lockCommand = connection.CreateCommand();
+        lockCommand.CommandTimeout = MigrationCommandTimeoutSeconds;
         lockCommand.CommandText = "SELECT pg_advisory_lock(941221);";
         await lockCommand.ExecuteNonQueryAsync(cancellationToken);
 
@@ -43,6 +46,7 @@ public sealed class DatabaseMigrationHostedService(NpgsqlDataSource dataSource, 
                 await using (var applyCommand = connection.CreateCommand())
                 {
                     applyCommand.Transaction = transaction;
+                    applyCommand.CommandTimeout = MigrationCommandTimeoutSeconds;
                     applyCommand.CommandText = sql;
                     await applyCommand.ExecuteNonQueryAsync(cancellationToken);
                 }
@@ -50,6 +54,7 @@ public sealed class DatabaseMigrationHostedService(NpgsqlDataSource dataSource, 
                 await using (var insertCommand = connection.CreateCommand())
                 {
                     insertCommand.Transaction = transaction;
+                    insertCommand.CommandTimeout = MigrationCommandTimeoutSeconds;
                     insertCommand.CommandText = "INSERT INTO schema_migrations (name) VALUES (@name);";
                     insertCommand.Parameters.Add(new NpgsqlParameter<string>("name", name));
                     await insertCommand.ExecuteNonQueryAsync(cancellationToken);
@@ -64,6 +69,7 @@ public sealed class DatabaseMigrationHostedService(NpgsqlDataSource dataSource, 
         finally
         {
             await using var unlockCommand = connection.CreateCommand();
+            unlockCommand.CommandTimeout = MigrationCommandTimeoutSeconds;
             unlockCommand.CommandText = "SELECT pg_advisory_unlock(941221);";
             await unlockCommand.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -74,6 +80,7 @@ public sealed class DatabaseMigrationHostedService(NpgsqlDataSource dataSource, 
     private static async Task EnsureMigrationTableAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
+        command.CommandTimeout = MigrationCommandTimeoutSeconds;
         command.CommandText = """
             CREATE TABLE IF NOT EXISTS schema_migrations
             (
@@ -88,6 +95,7 @@ public sealed class DatabaseMigrationHostedService(NpgsqlDataSource dataSource, 
     {
         var applied = new HashSet<string>(StringComparer.Ordinal);
         await using var command = connection.CreateCommand();
+        command.CommandTimeout = MigrationCommandTimeoutSeconds;
         command.CommandText = "SELECT name FROM schema_migrations;";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

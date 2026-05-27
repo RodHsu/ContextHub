@@ -245,7 +245,26 @@ public sealed class ChunkingAndEmbeddingTests
 
         public Task<long> GetVersionAsync(CancellationToken cancellationToken) => Task.FromResult(1L);
 
+        public Task<CacheVersionStamp> GetVersionStampAsync(
+            IReadOnlyList<string> projectIds,
+            ContextHubRequestActor actor,
+            bool includeShared,
+            CancellationToken cancellationToken)
+            => Task.FromResult(new CacheVersionStamp("test", 1, 1, includeShared ? 1 : 0, 1, new Dictionary<string, long>()));
+
         public Task<long> IncrementAsync(CancellationToken cancellationToken) => Task.FromResult(2L);
+
+        public Task<long> IncrementProjectAsync(string projectId, CancellationToken cancellationToken) => Task.FromResult(2L);
+
+        public Task<long> IncrementUserAsync(ContextHubRequestActor actor, CancellationToken cancellationToken) => Task.FromResult(2L);
+
+        public Task<long> IncrementSharedAsync(CancellationToken cancellationToken) => Task.FromResult(2L);
+
+        public Task<long> IncrementSecurityAsync(CancellationToken cancellationToken) => Task.FromResult(2L);
+
+        public Task<long> GetJobVersionAsync(CancellationToken cancellationToken) => Task.FromResult(1L);
+
+        public Task<long> IncrementJobsAsync(CancellationToken cancellationToken) => Task.FromResult(2L);
 
         public Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken) => Task.FromResult<T?>(default);
 

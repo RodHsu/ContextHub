@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
+ARG APP_VERSION=1.1.0
+ARG BUILD_TIMESTAMP_UTC
 
 COPY ContextHub.slnx ./
 COPY Directory.Build.props ./
@@ -11,7 +13,7 @@ COPY src/Memory.Dashboard/Memory.Dashboard.csproj src/Memory.Dashboard/
 RUN dotnet restore src/Memory.Dashboard/Memory.Dashboard.csproj
 
 COPY . .
-RUN dotnet publish src/Memory.Dashboard/Memory.Dashboard.csproj -c Release -o /app/publish /p:UseAppHost=false
+RUN dotnet publish src/Memory.Dashboard/Memory.Dashboard.csproj -c Release -o /app/publish /p:UseAppHost=false /p:Version=$APP_VERSION /p:InformationalVersion=$APP_VERSION /p:BuildTimestampUtc=$BUILD_TIMESTAMP_UTC
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 RUN apt-get update \

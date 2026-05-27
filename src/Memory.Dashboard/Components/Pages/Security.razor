@@ -1,0 +1,880 @@
+@page "/security"
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.JSInterop
+@inject IContextHubApiClient ApiClient
+@inject IJSRuntime JsRuntime
+
+<PageTitle>Context Hub | 安全管理</PageTitle>
+
+<PageViewport Title="安全管理"
+              Subtitle="管理租戶、帳戶、Project 授權、API Token 與稽核事件。"
+              BodyClass="page-viewport-body page-grid-body">
+    <Actions>
+        <div class="page-actions-status security-header-actions">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           IsRefreshing="_loading"
+                           WarningText="@_error" />
+            <button type="button" class="ghost-button" @onclick="ReloadAsync" disabled="@_loading">重新讀取</button>
+        </div>
+    </Actions>
+    <ChildContent>
+
+    @if (!string.IsNullOrWhiteSpace(_message))
+    {
+        <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
+    }
+
+    @if (!string.IsNullOrWhiteSpace(_error))
+    {
+        <DashboardToast Message="@_error" IsError="true" Sequence="@_errorSequence" OnDismiss="ClearError" />
+    }
+
+    @if (!string.IsNullOrWhiteSpace(_createdPlainToken))
+    {
+        <section class="panel security-token-secret-panel">
+            <div class="panel-title">完整 Token</div>
+            <div class="table-subtitle">只會顯示這一次；離開後無法取回，只能重新產生。</div>
+            <textarea readonly rows="2">@_createdPlainToken</textarea>
+            <div class="settings-button-row">
+                <button type="button" class="ghost-button" @onclick="CopyCreatedTokenAsync" disabled="@_loading">複製 Token</button>
+            </div>
+        </section>
+    }
+
+    <div class="settings-layout page-scroll-host security-layout">
+        <section class="panel security-my-token-panel">
+            <div class="panel-title">我的 Token</div>
+            @if (_selectedTenant is null)
+            {
+                <div class="empty-inline">先選取租戶後即可管理自己的 Token。</div>
+            }
+            else if (CurrentTenantUser is null)
+            {
+                <div class="empty-inline">目前登入帳號 @_currentUsername 尚未在此租戶建立帳戶。</div>
+                <div class="settings-button-row">
+                    <button type="button" class="primary-button" @onclick="CreateCurrentUserAsync" disabled="@_loading">建立我的帳戶</button>
+                </div>
+            }
+            else
+            {
+                <div class="settings-form-grid settings-query-grid">
+                    <label>
+                        <span>Token 名稱</span>
+                        <input @bind="_myTokenName" placeholder="@($"{_currentUsername} MCP")" />
+                    </label>
+                    <TokenScopeSelect @bind-Value="_myTokenScopes" />
+                    <ProjectIdSelect @bind-Value="_myTokenAllowedProjectIds" Options="_projectOptions" Disabled="_loading" />
+                    <label>
+                        <span>到期時間 (ISO / optional)</span>
+                        <input @bind="_myTokenExpiresAt" placeholder="2026-12-31T23:59:59+08:00" />
+                    </label>
+                    <label class="settings-field-span">
+                        <span>備註</span>
+                        <textarea @bind="_myTokenNotes" rows="3"></textarea>
+                    </label>
+                </div>
+                <div class="settings-button-row">
+                    <button type="button" class="primary-button" @onclick="CreateMyTokenAsync" disabled="@_loading">建立我的 Token</button>
+                </div>
+
+                <div class="table-scroll-shell security-my-token-table-shell">
+                    <table class="data-table security-token-table">
+                        <thead>
+                            <tr>
+                                <th>名稱</th>
+                                <th>Token</th>
+                                <th>Scopes</th>
+                                <th>Projects</th>
+                                <th>最後使用</th>
+                                <th>備註</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var token in MyTokens)
+                            {
+                                <tr>
+                                    <td>@token.Name</td>
+                                    <td>@token.TokenPrefix...@token.TokenLastFour</td>
+                                    <td>@string.Join(", ", token.Scopes)</td>
+                                    <td>@ProjectAccessText(token.AllowedProjectIds)</td>
+                                    <td>@LastUsedText(token)</td>
+                                    <td>@token.Notes</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <section class="panel">
+            <div class="panel-title">租戶</div>
+            <div class="settings-form-grid settings-query-grid">
+                <label>
+                    <span>Slug</span>
+                    <input @bind="_tenantSlug" placeholder="team-a" />
+                </label>
+                <label>
+                    <span>顯示名稱</span>
+                    <input @bind="_tenantDisplayName" placeholder="Team A" />
+                </label>
+                <div class="settings-checkbox-field">
+                    <span>顯示封存</span>
+                    <label class="toggle-field settings-inline-toggle-field">
+                        <input type="checkbox" @bind="_includeArchivedTenants" />
+                        <span>包含封存租戶</span>
+                    </label>
+                </div>
+            </div>
+            <div class="settings-button-row">
+                <button type="button" class="primary-button" @onclick="CreateTenantAsync" disabled="@_loading">新增租戶</button>
+            </div>
+
+            <div class="table-scroll-shell">
+                <table class="data-table data-table-clickable">
+                    <thead>
+                        <tr>
+                            <th>Slug</th>
+                            <th>名稱</th>
+                            <th>狀態</th>
+                            <th>更新時間</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var tenant in _tenants)
+                        {
+                            <tr class="@SelectedTenantClass(tenant)" @onclick="@(() => SelectTenantAsync(tenant.Id))">
+                                <td>@tenant.Slug</td>
+                                <td>@tenant.DisplayName</td>
+                                <td><span class="status-badge @StatusClass(tenant.Status.ToString())">@tenant.Status</span></td>
+                                <td><ClientLocalTime Value="tenant.UpdatedAt" /></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-title">帳戶管理</div>
+            @if (_selectedTenant is null)
+            {
+                <div class="empty-inline">先選取租戶後即可管理帳戶。</div>
+            }
+            else
+            {
+                <div class="settings-form-grid settings-query-grid">
+                    <label>
+                        <span>Username</span>
+                        <input @bind="_userUsername" />
+                    </label>
+                    <label>
+                        <span>顯示名稱</span>
+                        <input @bind="_userDisplayName" />
+                    </label>
+                    <label>
+                        <span>Email</span>
+                        <input @bind="_userEmail" />
+                    </label>
+                    <label>
+                        <span>初始密碼</span>
+                        <input type="password" @bind="_userPassword" />
+                    </label>
+                    <label>
+                        <span>角色</span>
+                        <select @bind="_userRole">
+                            <option value="@TenantUserRole.Owner">Owner</option>
+                            <option value="@TenantUserRole.Admin">Admin</option>
+                            <option value="@TenantUserRole.Member">Member</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="settings-button-row">
+                    <button type="button" class="primary-button" @onclick="CreateUserAsync" disabled="@_loading">新增帳戶</button>
+                </div>
+
+                <div class="table-scroll-shell">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Username</th>
+                                <th>名稱</th>
+                                <th>Email</th>
+                                <th>角色</th>
+                                <th>狀態</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var user in _users)
+                            {
+                                <tr>
+                                    <td>@user.Username</td>
+                                    <td>@user.DisplayName</td>
+                                    <td>@user.Email</td>
+                                    <td>@user.Role</td>
+                                    <td><span class="status-badge @StatusClass(user.Status.ToString())">@user.Status</span></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <section class="panel">
+            <div class="panel-title">Project 授權</div>
+            @if (_selectedTenant is null)
+            {
+                <div class="empty-inline">先選取租戶後即可管理 project grants。</div>
+            }
+            else
+            {
+                <div class="settings-form-grid settings-query-grid">
+                    <label>
+                        <span>ProjectId</span>
+                        <input @bind="_grantProjectId" />
+                    </label>
+                    <label class="toggle-field">
+                        <input type="checkbox" @bind="_grantCanRead" />
+                        <span>Read</span>
+                    </label>
+                    <label class="toggle-field">
+                        <input type="checkbox" @bind="_grantCanWrite" />
+                        <span>Write</span>
+                    </label>
+                    <label class="toggle-field">
+                        <input type="checkbox" @bind="_grantCanManageTokens" />
+                        <span>Manage Tokens</span>
+                    </label>
+                </div>
+                <div class="settings-button-row">
+                    <button type="button" class="primary-button" @onclick="SaveGrantAsync" disabled="@_loading">儲存授權</button>
+                </div>
+
+                <div class="table-scroll-shell">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>ProjectId</th>
+                                <th>Read</th>
+                                <th>Write</th>
+                                <th>Manage Tokens</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var grant in _grants)
+                            {
+                                <tr>
+                                    <td>@grant.ProjectId</td>
+                                    <td>@YesNo(grant.CanRead)</td>
+                                    <td>@YesNo(grant.CanWrite)</td>
+                                    <td>@YesNo(grant.CanManageTokens)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <section class="panel">
+            <div class="panel-title">Token 管理</div>
+            @if (_selectedTenant is null)
+            {
+                <div class="empty-inline">先選取租戶後即可建立與管理 Token。</div>
+            }
+            else
+            {
+                <div class="settings-form-grid settings-query-grid">
+                    <label>
+                        <span>Owner</span>
+                        <select @bind="_tokenOwnerUserId">
+                            <option value="">選擇帳戶</option>
+                            @foreach (var user in _users)
+                            {
+                                <option value="@user.Id">@user.Username (@user.Role)</option>
+                            }
+                        </select>
+                    </label>
+                    <label>
+                        <span>Token 名稱</span>
+                        <input @bind="_tokenName" />
+                    </label>
+                    <TokenScopeSelect @bind-Value="_tokenScopes" />
+                    <ProjectIdSelect @bind-Value="_tokenAllowedProjectIds" Options="_projectOptions" Disabled="_loading" />
+                    <label class="settings-field-span">
+                        <span>備註</span>
+                        <textarea @bind="_tokenNotes" rows="3"></textarea>
+                    </label>
+                    <label>
+                        <span>到期時間 (ISO / optional)</span>
+                        <input @bind="_tokenExpiresAt" placeholder="2026-12-31T23:59:59+08:00" />
+                    </label>
+                </div>
+                <div class="settings-button-row">
+                    <button type="button" class="primary-button" @onclick="CreateTokenAsync" disabled="@_loading">建立 Token</button>
+                    <label class="toggle-field settings-inline-toggle-field">
+                        <input type="checkbox" @bind="_includeRevokedTokens" />
+                        <span>顯示已撤銷</span>
+                    </label>
+                </div>
+
+                <div class="table-scroll-shell">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>名稱</th>
+                                <th>Token</th>
+                                <th>Scopes</th>
+                                <th>Projects</th>
+                                <th>最後使用</th>
+                                <th>備註</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var token in _tokens)
+                            {
+                                <tr>
+                                    <td>@token.Name</td>
+                                    <td>@token.TokenPrefix...@token.TokenLastFour</td>
+                                    <td>@string.Join(", ", token.Scopes)</td>
+                                    <td>@ProjectAccessText(token.AllowedProjectIds)</td>
+                                    <td>@LastUsedText(token)</td>
+                                    <td>@token.Notes</td>
+                                    <td class="security-token-actions-cell">
+                                        <button type="button" class="ghost-button" @onclick="@(() => EditToken(token))" @onclick:stopPropagation="true" disabled="@(_loading || token.RevokedAt.HasValue)">編輯</button>
+                                        <button type="button"
+                                                class="ghost-button security-token-more-button"
+                                                aria-expanded="@(_openTokenActionsId == token.Id)"
+                                                aria-label="@($"更多 Token 操作，包含重新產生 Token：{token.Name}")"
+                                                title="更多 Token 操作"
+                                                @onclick="@(() => ToggleTokenActions(token.Id))"
+                                                @onclick:stopPropagation="true"
+                                                disabled="@_loading">...</button>
+                                    </td>
+                                </tr>
+                                @if (_openTokenActionsId == token.Id)
+                                {
+                                    <tr class="security-token-action-row">
+                                        <td colspan="7">
+                                            <div class="security-token-action-menu">
+                                                @if (token.RevokedAt.HasValue)
+                                                {
+                                                    <span class="table-subtitle">這個 Token 已撤銷，沒有可用操作。</span>
+                                                }
+                                                else
+                                                {
+                                                    <button type="button" class="ghost-button" @onclick="@(() => RegenerateTokenAsync(token.Id))" disabled="@_loading">重新產生 Token</button>
+                                                    <button type="button" class="ghost-button danger-button" @onclick="@(() => RevokeTokenAsync(token.Id))" disabled="@_loading">撤銷 Token</button>
+                                                    <span class="table-subtitle">完整 token 只會在重新產生後顯示一次。</span>
+                                                }
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+
+                @if (_editTokenId.HasValue)
+                {
+                    <section class="storage-info-panel">
+                        <div class="storage-info-title">編輯 Token metadata</div>
+                        <div class="settings-form-grid settings-query-grid">
+                            <label>
+                                <span>名稱</span>
+                                <input @bind="_editTokenName" />
+                            </label>
+                            <TokenScopeSelect @bind-Value="_editTokenScopes" />
+                            <ProjectIdSelect @bind-Value="_editTokenAllowedProjectIds" Options="_projectOptions" Disabled="_loading" />
+                            <label class="settings-field-span">
+                                <span>備註</span>
+                                <textarea @bind="_editTokenNotes" rows="3"></textarea>
+                            </label>
+                            <label>
+                                <span>到期時間 (ISO / optional)</span>
+                                <input @bind="_editTokenExpiresAt" />
+                            </label>
+                        </div>
+                        <div class="settings-button-row">
+                            <button type="button" class="primary-button" @onclick="SaveTokenAsync" disabled="@_loading">儲存 Token</button>
+                            <button type="button" class="ghost-button" @onclick="CancelTokenEdit" disabled="@_loading">取消</button>
+                        </div>
+                    </section>
+                }
+            }
+        </section>
+
+        <section class="panel">
+            <div class="panel-title">安全稽核</div>
+            <div class="table-scroll-shell">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>時間</th>
+                            <th>事件</th>
+                            <th>結果</th>
+                            <th>IP</th>
+                            <th>User Agent</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in _auditEvents)
+                        {
+                            <tr>
+                                <td><ClientLocalTime Value="item.CreatedAt" /></td>
+                                <td>@item.EventType</td>
+                                <td>@item.Outcome</td>
+                                <td>@item.IpAddress</td>
+                                <td class="truncate-cell">@item.UserAgent</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private IReadOnlyList<TenantResult> _tenants = [];
+    private IReadOnlyList<TenantUserResult> _users = [];
+    private IReadOnlyList<TenantProjectGrantResult> _grants = [];
+    private IReadOnlyList<ApiTokenResult> _tokens = [];
+    private IReadOnlyList<SecurityAuditEventResult> _auditEvents = [];
+    private IReadOnlyList<string> _projectOptions = [ProjectContext.DefaultProjectId];
+    private Guid? _selectedTenantId;
+    private bool _loading;
+    private bool _includeArchivedTenants;
+    private bool _includeRevokedTokens;
+    private DateTimeOffset? _lastUpdatedAt;
+    private string? _message;
+    private string? _error;
+    private string? _createdPlainToken;
+    private int _messageSequence;
+    private int _errorSequence;
+
+    private string _currentUsername = DashboardOptions.DefaultAdminUsername;
+    private string _tenantSlug = string.Empty;
+    private string _tenantDisplayName = string.Empty;
+    private string _userUsername = string.Empty;
+    private string _userDisplayName = string.Empty;
+    private string _userEmail = string.Empty;
+    private string _userPassword = string.Empty;
+    private TenantUserRole _userRole = TenantUserRole.Member;
+    private string _grantProjectId = "ContextHub";
+    private bool _grantCanRead = true;
+    private bool _grantCanWrite;
+    private bool _grantCanManageTokens;
+    private string _myTokenName = string.Empty;
+    private string _myTokenNotes = string.Empty;
+    private string _myTokenScopes = "memory:read";
+    private string _myTokenAllowedProjectIds = "ContextHub";
+    private string _myTokenExpiresAt = string.Empty;
+    private string? _tokenOwnerUserId;
+    private string _tokenName = string.Empty;
+    private string _tokenNotes = string.Empty;
+    private string _tokenScopes = "memory:read";
+    private string _tokenAllowedProjectIds = "ContextHub";
+    private string _tokenExpiresAt = string.Empty;
+    private Guid? _editTokenId;
+    private string _editTokenName = string.Empty;
+    private string _editTokenNotes = string.Empty;
+    private string _editTokenScopes = string.Empty;
+    private string _editTokenAllowedProjectIds = string.Empty;
+    private string _editTokenExpiresAt = string.Empty;
+    private Guid? _openTokenActionsId;
+
+    private TenantResult? _selectedTenant
+        => _selectedTenantId.HasValue
+            ? _tenants.FirstOrDefault(x => x.Id == _selectedTenantId.Value)
+            : null;
+
+    private TenantUserResult? CurrentTenantUser
+        => _users.FirstOrDefault(x => string.Equals(x.Username, _currentUsername, StringComparison.OrdinalIgnoreCase));
+
+    private IReadOnlyList<ApiTokenResult> MyTokens
+        => CurrentTenantUser is not { } user
+            ? []
+            : _tokens.Where(x => x.OwnerUserId == user.Id).ToArray();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _currentUsername = await ResolveCurrentUsernameAsync();
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+        => await RunLoadingAsync(async () =>
+        {
+            _tenants = await ApiClient.GetTenantsAsync(_includeArchivedTenants, 100, CancellationToken.None);
+            if (_selectedTenantId is null || !_tenants.Any(x => x.Id == _selectedTenantId.Value))
+            {
+                _selectedTenantId = _tenants.FirstOrDefault()?.Id;
+            }
+
+            await LoadSelectedTenantAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+
+    private async Task SelectTenantAsync(Guid tenantId)
+        => await RunLoadingAsync(async () =>
+        {
+            _selectedTenantId = tenantId;
+            await LoadSelectedTenantAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+
+    private async Task LoadSelectedTenantAsync()
+    {
+        if (_selectedTenantId is not Guid tenantId)
+        {
+            _users = [];
+            _grants = [];
+            _tokens = [];
+            _auditEvents = await ApiClient.GetSecurityAuditEventsAsync(null, 100, CancellationToken.None);
+            return;
+        }
+
+        _users = await ApiClient.GetTenantUsersAsync(tenantId, includeArchived: false, CancellationToken.None);
+        _grants = await ApiClient.GetTenantProjectGrantsAsync(tenantId, CancellationToken.None);
+        _tokens = await ApiClient.GetApiTokensAsync(tenantId, _includeRevokedTokens, CancellationToken.None);
+        _auditEvents = await ApiClient.GetSecurityAuditEventsAsync(tenantId, 100, CancellationToken.None);
+        _projectOptions = await LoadProjectOptionsAsync();
+        var currentUser = CurrentTenantUser;
+        if (currentUser is not null &&
+            (string.IsNullOrWhiteSpace(_tokenOwnerUserId) || !_users.Any(x => x.Id.ToString() == _tokenOwnerUserId)))
+        {
+            _tokenOwnerUserId = currentUser.Id.ToString();
+        }
+        else
+        {
+            _tokenOwnerUserId ??= _users.FirstOrDefault()?.Id.ToString();
+        }
+    }
+
+    private async Task CreateTenantAsync()
+    {
+        await RunCommandAsync(async () =>
+        {
+            var tenant = await ApiClient.CreateTenantAsync(new TenantCreateRequest(_tenantSlug, _tenantDisplayName), CancellationToken.None);
+            _tenantSlug = string.Empty;
+            _tenantDisplayName = string.Empty;
+            _selectedTenantId = tenant.Id;
+            SetMessage($"已新增租戶 {tenant.Slug}。");
+            await ReloadAsync();
+        });
+    }
+
+    private async Task CreateUserAsync()
+    {
+        if (_selectedTenantId is not Guid tenantId)
+        {
+            return;
+        }
+
+        await RunCommandAsync(async () =>
+        {
+            var user = await ApiClient.CreateTenantUserAsync(new TenantUserCreateRequest(tenantId, _userUsername, _userDisplayName, _userEmail, _userRole, _userPassword), CancellationToken.None);
+            _userUsername = string.Empty;
+            _userDisplayName = string.Empty;
+            _userEmail = string.Empty;
+            _userPassword = string.Empty;
+            _tokenOwnerUserId = user.Id.ToString();
+            SetMessage($"已新增帳戶 {user.Username}。");
+            await LoadSelectedTenantAsync();
+        });
+    }
+
+    private async Task CreateCurrentUserAsync()
+    {
+        if (_selectedTenantId is not Guid tenantId)
+        {
+            return;
+        }
+
+        await RunCommandAsync(async () =>
+        {
+            var user = await ApiClient.CreateTenantUserAsync(
+                new TenantUserCreateRequest(
+                    tenantId,
+                    _currentUsername,
+                    _currentUsername,
+                    string.Empty,
+                    TenantUserRole.Owner,
+                    string.Empty),
+                CancellationToken.None);
+            _tokenOwnerUserId = user.Id.ToString();
+            SetMessage($"已建立目前登入帳號 {user.Username}。");
+            await LoadSelectedTenantAsync();
+        });
+    }
+
+    private async Task CreateMyTokenAsync()
+    {
+        if (_selectedTenantId is not Guid tenantId || CurrentTenantUser is not { } user)
+        {
+            SetError("請先建立目前登入帳號的租戶帳戶。");
+            return;
+        }
+
+        await RunCommandAsync(async () =>
+        {
+            var result = await ApiClient.CreateApiTokenAsync(
+                new ApiTokenCreateRequest(
+                    tenantId,
+                    user.Id,
+                    string.IsNullOrWhiteSpace(_myTokenName) ? $"{_currentUsername} MCP" : _myTokenName,
+                    _myTokenNotes,
+                    SplitCsv(_myTokenScopes),
+                    SplitCsv(_myTokenAllowedProjectIds),
+                    ParseExpiresAt(_myTokenExpiresAt)),
+                CancellationToken.None);
+            _createdPlainToken = result.PlainToken;
+            _myTokenName = string.Empty;
+            _myTokenNotes = string.Empty;
+            SetMessage($"已建立我的 Token {result.Token.Name}。");
+            await LoadSelectedTenantAsync();
+        });
+    }
+
+    private async Task SaveGrantAsync()
+    {
+        if (_selectedTenantId is not Guid tenantId)
+        {
+            return;
+        }
+
+        await RunCommandAsync(async () =>
+        {
+            var grant = await ApiClient.UpsertTenantProjectGrantAsync(new TenantProjectGrantUpsertRequest(tenantId, _grantProjectId, _grantCanRead, _grantCanWrite, _grantCanManageTokens), CancellationToken.None);
+            SetMessage($"已儲存 {grant.ProjectId} 授權。");
+            await LoadSelectedTenantAsync();
+        });
+    }
+
+    private async Task CreateTokenAsync()
+    {
+        if (_selectedTenantId is not Guid tenantId || !Guid.TryParse(_tokenOwnerUserId, out var ownerUserId))
+        {
+            SetError("請先選擇有效的 Token owner。");
+            return;
+        }
+
+        await RunCommandAsync(async () =>
+        {
+            var result = await ApiClient.CreateApiTokenAsync(
+                new ApiTokenCreateRequest(
+                    tenantId,
+                    ownerUserId,
+                    _tokenName,
+                    _tokenNotes,
+                    SplitCsv(_tokenScopes),
+                    SplitCsv(_tokenAllowedProjectIds),
+                    ParseExpiresAt(_tokenExpiresAt)),
+                CancellationToken.None);
+            _createdPlainToken = result.PlainToken;
+            _tokenName = string.Empty;
+            _tokenNotes = string.Empty;
+            SetMessage($"已建立 Token {result.Token.Name}。");
+            await LoadSelectedTenantAsync();
+        });
+    }
+
+    private async Task RevokeTokenAsync(Guid tokenId)
+        => await RunCommandAsync(async () =>
+        {
+            var token = await ApiClient.RevokeApiTokenAsync(tokenId, CancellationToken.None);
+            _openTokenActionsId = null;
+            if (_editTokenId == tokenId)
+            {
+                CancelTokenEdit();
+            }
+
+            SetMessage($"已撤銷 Token {token.Name}。");
+            await LoadSelectedTenantAsync();
+        });
+
+    private async Task RegenerateTokenAsync(Guid tokenId)
+        => await RunCommandAsync(async () =>
+        {
+            var result = await ApiClient.RegenerateApiTokenAsync(tokenId, CancellationToken.None);
+            _openTokenActionsId = null;
+            if (_editTokenId == tokenId)
+            {
+                CancelTokenEdit();
+            }
+
+            _createdPlainToken = result.PlainToken;
+            SetMessage($"已重新產生 Token {result.Token.Name}，完整 token 只會顯示這一次。");
+            await LoadSelectedTenantAsync();
+        });
+
+    private async Task CopyCreatedTokenAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_createdPlainToken))
+        {
+            return;
+        }
+
+        await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", _createdPlainToken);
+        SetMessage("已複製完整 Token。");
+    }
+
+    private void EditToken(ApiTokenResult token)
+    {
+        _openTokenActionsId = null;
+        _editTokenId = token.Id;
+        _editTokenName = token.Name;
+        _editTokenNotes = token.Notes;
+        _editTokenScopes = string.Join(", ", token.Scopes);
+        _editTokenAllowedProjectIds = ProjectAccessValue(token.AllowedProjectIds);
+        _editTokenExpiresAt = token.ExpiresAt?.ToString("O") ?? string.Empty;
+    }
+
+    private async Task SaveTokenAsync()
+    {
+        if (_editTokenId is not Guid tokenId)
+        {
+            return;
+        }
+
+        await RunCommandAsync(async () =>
+        {
+            var token = await ApiClient.UpdateApiTokenAsync(
+                tokenId,
+                new ApiTokenUpdateRequest(
+                    _editTokenName,
+                    _editTokenNotes,
+                    SplitCsv(_editTokenScopes),
+                    SplitCsv(_editTokenAllowedProjectIds),
+                    ParseExpiresAt(_editTokenExpiresAt)),
+                CancellationToken.None);
+            SetMessage($"已更新 Token {token.Name}。");
+            CancelTokenEdit();
+            await LoadSelectedTenantAsync();
+        });
+    }
+
+    private void CancelTokenEdit()
+    {
+        _editTokenId = null;
+        _editTokenName = string.Empty;
+        _editTokenNotes = string.Empty;
+        _editTokenScopes = string.Empty;
+        _editTokenAllowedProjectIds = string.Empty;
+        _editTokenExpiresAt = string.Empty;
+    }
+
+    private void ToggleTokenActions(Guid tokenId)
+        => _openTokenActionsId = _openTokenActionsId == tokenId ? null : tokenId;
+
+    private async Task RunCommandAsync(Func<Task> action)
+    {
+        _createdPlainToken = null;
+        await RunLoadingAsync(action);
+    }
+
+    private async Task RunLoadingAsync(Func<Task> action)
+    {
+        _loading = true;
+        ClearError();
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            await action();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            SetError(ex.Message);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void SetMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+
+    private void SetError(string message)
+    {
+        _error = message;
+        _errorSequence++;
+    }
+
+    private void ClearMessage()
+        => _message = null;
+
+    private void ClearError()
+        => _error = null;
+
+    private string SelectedTenantClass(TenantResult tenant)
+        => _selectedTenantId == tenant.Id ? "selected-row" : string.Empty;
+
+    private static string StatusClass(string status)
+        => status.Equals("Active", StringComparison.OrdinalIgnoreCase)
+            ? "ok"
+            : status.Equals("Suspended", StringComparison.OrdinalIgnoreCase) || status.Equals("Disabled", StringComparison.OrdinalIgnoreCase)
+            ? "warn"
+            : "neutral";
+
+    private static string YesNo(bool value)
+        => value ? "Yes" : "No";
+
+    private static string LastUsedText(ApiTokenResult token)
+        => token.LastUsedAt.HasValue
+            ? $"{token.LastUsedAt.Value.ToLocalTime():yyyy-MM-dd HH:mm} / {token.LastUsedIp}"
+            : "尚未使用";
+
+    private static IReadOnlyList<string> SplitCsv(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? []
+            : value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+    private static string ProjectAccessText(IReadOnlyList<string> projectIds)
+        => projectIds.Count == 0 ? "全部" : string.Join(", ", projectIds);
+
+    private static string ProjectAccessValue(IReadOnlyList<string> projectIds)
+        => projectIds.Count == 0 ? ProjectContext.AllProjectIdsSentinel : string.Join(", ", projectIds);
+
+    private static DateTimeOffset? ParseExpiresAt(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? null
+            : DateTimeOffset.TryParse(value, out var parsed)
+            ? parsed
+            : throw new InvalidOperationException("到期時間格式無法解析，請使用 ISO 8601。");
+
+    private async Task<IReadOnlyList<string>> LoadProjectOptionsAsync()
+    {
+        var suggestions = await ApiClient.GetMemoryProjectsAsync(null, 100, CancellationToken.None);
+        return suggestions
+            .Select(project => project.ProjectId)
+            .Concat(_grants.Select(grant => grant.ProjectId))
+            .Append(ProjectContext.DefaultProjectId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(projectId => projectId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private async Task<string> ResolveCurrentUsernameAsync()
+    {
+        var username = AuthenticationStateTask is null
+            ? null
+            : (await AuthenticationStateTask).User.Identity?.Name;
+
+        return string.IsNullOrWhiteSpace(username)
+            ? DashboardOptions.DefaultAdminUsername
+            : username.Trim();
+    }
+}

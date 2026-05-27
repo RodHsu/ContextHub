@@ -1,0 +1,358 @@
+@page "/account/tokens"
+@using Memory.Application
+@using Microsoft.JSInterop
+@inject IContextHubApiClient ApiClient
+@inject IJSRuntime JsRuntime
+
+<PageTitle>Context Hub | 我的 Token</PageTitle>
+
+<PageViewport Title="我的 Token"
+              Subtitle="建立與管理自己用於 MCP / API 連線的 Token。"
+              BodyClass="page-viewport-body page-grid-body">
+    <Actions>
+        <div class="page-actions-status security-header-actions">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" WarningText="@_error" />
+            <button type="button" class="ghost-button" @onclick="ReloadAsync" disabled="@_loading">重新讀取</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        @if (!string.IsNullOrWhiteSpace(_message))
+        {
+            <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="@(() => _message = null)" />
+        }
+        @if (!string.IsNullOrWhiteSpace(_error))
+        {
+            <DashboardToast Message="@_error" IsError="true" Sequence="@_errorSequence" OnDismiss="@(() => _error = null)" />
+        }
+        @if (!string.IsNullOrWhiteSpace(_createdPlainToken))
+        {
+            <section class="panel security-token-secret-panel">
+                <div class="panel-title">完整 Token</div>
+                <div class="table-subtitle">只會顯示這一次；離開後無法取回，只能重新產生。</div>
+                <textarea readonly rows="2">@_createdPlainToken</textarea>
+                <div class="settings-button-row">
+                    <button type="button" class="ghost-button" @onclick="CopyCreatedTokenAsync" disabled="@_loading">複製 Token</button>
+                </div>
+            </section>
+        }
+
+        <section class="panel">
+            <div class="panel-title">建立 Token</div>
+            <div class="settings-form-grid settings-query-grid">
+                <label>
+                    <span>Token 名稱</span>
+                    <input @bind="_name" placeholder="MCP Client" />
+                </label>
+                <TokenScopeSelect @bind-Value="_scopes" />
+                <ProjectIdSelect @bind-Value="_projectIds" Options="_projectOptions" Disabled="_loading" />
+                <label>
+                    <span>到期時間 (ISO / optional)</span>
+                    <input @bind="_expiresAt" placeholder="2026-12-31T23:59:59+08:00" />
+                </label>
+                <label class="settings-field-span">
+                    <span>備註</span>
+                    <textarea @bind="_notes" rows="3"></textarea>
+                </label>
+            </div>
+            <div class="settings-button-row">
+                <button type="button" class="primary-button" @onclick="CreateAsync" disabled="@_loading">建立 Token</button>
+                <label class="toggle-field settings-inline-toggle-field">
+                    <input type="checkbox" @bind="_includeRevoked" />
+                    <span>顯示已撤銷</span>
+                </label>
+            </div>
+
+            <div class="table-scroll-shell">
+                <table class="data-table security-token-table">
+                    <thead>
+                        <tr>
+                            <th>名稱</th>
+                            <th>Token</th>
+                            <th>Scopes</th>
+                            <th>Projects</th>
+                            <th>最後使用</th>
+                            <th>備註</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var token in _tokens)
+                        {
+                            <tr>
+                                <td>@token.Name</td>
+                                <td>@token.TokenPrefix...@token.TokenLastFour</td>
+                                <td>@string.Join(", ", token.Scopes)</td>
+                                <td>@ProjectAccessText(token.AllowedProjectIds)</td>
+                                <td>@LastUsedText(token)</td>
+                                <td>@token.Notes</td>
+                                <td class="security-token-actions-cell">
+                                    <button type="button" class="ghost-button" @onclick="@(() => EditToken(token))" @onclick:stopPropagation="true" disabled="@(_loading || token.RevokedAt.HasValue)">編輯</button>
+                                    <button type="button"
+                                            class="ghost-button security-token-more-button"
+                                            aria-expanded="@(_openTokenActionsId == token.Id)"
+                                            aria-label="@($"更多 Token 操作，包含重新產生 Token：{token.Name}")"
+                                            title="更多 Token 操作"
+                                            @onclick="@(() => ToggleTokenActions(token.Id))"
+                                            @onclick:stopPropagation="true"
+                                            disabled="@_loading">...</button>
+                                </td>
+                            </tr>
+                            @if (_openTokenActionsId == token.Id)
+                            {
+                                <tr class="security-token-action-row">
+                                    <td colspan="7">
+                                        <div class="security-token-action-menu">
+                                            @if (token.RevokedAt.HasValue)
+                                            {
+                                                <span class="table-subtitle">這個 Token 已撤銷，沒有可用操作。</span>
+                                            }
+                                            else
+                                            {
+                                                <button type="button" class="ghost-button" @onclick="@(() => RegenerateAsync(token.Id))" disabled="@_loading">重新產生 Token</button>
+                                                <button type="button" class="ghost-button danger-button" @onclick="@(() => RevokeAsync(token.Id))" disabled="@_loading">撤銷 Token</button>
+                                                <span class="table-subtitle">完整 token 只會在重新產生後顯示一次。</span>
+                                            }
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            @if (_editTokenId.HasValue)
+            {
+                <section class="storage-info-panel">
+                    <div class="storage-info-title">編輯 Token 權限</div>
+                    <div class="settings-form-grid settings-query-grid">
+                        <label>
+                            <span>名稱</span>
+                            <input @bind="_editName" />
+                        </label>
+                        <TokenScopeSelect @bind-Value="_editScopes" />
+                        <ProjectIdSelect @bind-Value="_editProjectIds" Options="_projectOptions" Disabled="_loading" />
+                        <label>
+                            <span>到期時間 (ISO / optional)</span>
+                            <input @bind="_editExpiresAt" />
+                        </label>
+                        <label class="settings-field-span">
+                            <span>備註</span>
+                            <textarea @bind="_editNotes" rows="3"></textarea>
+                        </label>
+                    </div>
+                    <div class="settings-button-row">
+                        <button type="button" class="primary-button" @onclick="SaveEditAsync" disabled="@_loading">儲存 Token</button>
+                        <button type="button" class="ghost-button" @onclick="CancelEdit" disabled="@_loading">取消</button>
+                    </div>
+                </section>
+            }
+        </section>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private IReadOnlyList<ApiTokenResult> _tokens = [];
+    private IReadOnlyList<string> _projectOptions = [ProjectContext.DefaultProjectId];
+    private bool _includeRevoked;
+    private bool _loading;
+    private string _name = string.Empty;
+    private string _notes = string.Empty;
+    private string _scopes = CodexScopes;
+    private string _projectIds = "ContextHub";
+    private string _expiresAt = string.Empty;
+    private Guid? _editTokenId;
+    private string _editName = string.Empty;
+    private string _editNotes = string.Empty;
+    private string _editScopes = string.Empty;
+    private string _editProjectIds = string.Empty;
+    private string _editExpiresAt = string.Empty;
+    private Guid? _openTokenActionsId;
+    private string? _createdPlainToken;
+    private string? _message;
+    private string? _error;
+    private int _messageSequence;
+    private int _errorSequence;
+    private DateTimeOffset? _lastUpdatedAt;
+    private const string CodexScopes = $"{SecurityScopes.MemoryRead}, {SecurityScopes.MemoryWrite}, {SecurityScopes.PreferencesRead}, {SecurityScopes.PreferencesWrite}";
+
+    protected override async Task OnInitializedAsync()
+        => await ReloadAsync();
+
+    private async Task ReloadAsync()
+        => await RunAsync(async () =>
+        {
+            _projectOptions = await LoadProjectOptionsAsync();
+            _tokens = await ApiClient.GetMyApiTokensAsync(_includeRevoked, CancellationToken.None);
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        });
+
+    private async Task CreateAsync()
+        => await RunAsync(async () =>
+        {
+            var result = await ApiClient.CreateMyApiTokenAsync(
+                new ApiTokenCreateRequest(
+                    Guid.Empty,
+                    Guid.Empty,
+                    _name,
+                    _notes,
+                    SplitCsv(_scopes),
+                    SplitCsv(_projectIds),
+                    ParseExpiresAt(_expiresAt)),
+                CancellationToken.None);
+            _createdPlainToken = result.PlainToken;
+            _name = string.Empty;
+            _notes = string.Empty;
+            _message = $"已建立 Token {result.Token.Name}。";
+            _messageSequence++;
+            _tokens = await ApiClient.GetMyApiTokensAsync(_includeRevoked, CancellationToken.None);
+        }, clearToken: true);
+
+    private async Task SaveEditAsync()
+    {
+        if (_editTokenId is not Guid tokenId)
+        {
+            return;
+        }
+
+        await RunAsync(async () =>
+        {
+            var token = await ApiClient.UpdateMyApiTokenAsync(
+                tokenId,
+                new ApiTokenUpdateRequest(
+                    _editName,
+                    _editNotes,
+                    SplitCsv(_editScopes),
+                    SplitCsv(_editProjectIds),
+                    ParseExpiresAt(_editExpiresAt)),
+                CancellationToken.None);
+            _message = $"已更新 Token {token.Name}。";
+            _messageSequence++;
+            CancelEdit();
+            _tokens = await ApiClient.GetMyApiTokensAsync(_includeRevoked, CancellationToken.None);
+        }, clearToken: true);
+    }
+
+    private async Task RevokeAsync(Guid tokenId)
+        => await RunAsync(async () =>
+        {
+            var token = await ApiClient.RevokeMyApiTokenAsync(tokenId, CancellationToken.None);
+            _openTokenActionsId = null;
+            if (_editTokenId == tokenId)
+            {
+                CancelEdit();
+            }
+
+            _message = $"已撤銷 Token {token.Name}。";
+            _messageSequence++;
+            _tokens = await ApiClient.GetMyApiTokensAsync(_includeRevoked, CancellationToken.None);
+        }, clearToken: true);
+
+    private async Task RegenerateAsync(Guid tokenId)
+        => await RunAsync(async () =>
+        {
+            var result = await ApiClient.RegenerateMyApiTokenAsync(tokenId, CancellationToken.None);
+            _openTokenActionsId = null;
+            if (_editTokenId == tokenId)
+            {
+                CancelEdit();
+            }
+
+            _createdPlainToken = result.PlainToken;
+            _message = $"已重新產生 Token {result.Token.Name}，完整 token 只會顯示這一次。";
+            _messageSequence++;
+            _tokens = await ApiClient.GetMyApiTokensAsync(_includeRevoked, CancellationToken.None);
+        }, clearToken: true);
+
+    private async Task CopyCreatedTokenAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_createdPlainToken))
+        {
+            return;
+        }
+
+        await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", _createdPlainToken);
+        _message = "已複製完整 Token。";
+        _messageSequence++;
+    }
+
+    private void EditToken(ApiTokenResult token)
+    {
+        _openTokenActionsId = null;
+        _editTokenId = token.Id;
+        _editName = token.Name;
+        _editNotes = token.Notes;
+        _editScopes = string.Join(", ", token.Scopes);
+        _editProjectIds = ProjectAccessValue(token.AllowedProjectIds);
+        _editExpiresAt = token.ExpiresAt?.ToString("O") ?? string.Empty;
+    }
+
+    private void CancelEdit()
+    {
+        _editTokenId = null;
+        _editName = string.Empty;
+        _editNotes = string.Empty;
+        _editScopes = string.Empty;
+        _editProjectIds = string.Empty;
+        _editExpiresAt = string.Empty;
+    }
+
+    private void ToggleTokenActions(Guid tokenId)
+        => _openTokenActionsId = _openTokenActionsId == tokenId ? null : tokenId;
+
+    private async Task RunAsync(Func<Task> action, bool clearToken = false)
+    {
+        _loading = true;
+        _error = null;
+        if (clearToken)
+        {
+            _createdPlainToken = null;
+        }
+
+        try
+        {
+            await action();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            _errorSequence++;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private static IReadOnlyList<string> SplitCsv(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? []
+            : value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+    private static string ProjectAccessText(IReadOnlyList<string> projectIds)
+        => projectIds.Count == 0 ? "全部" : string.Join(", ", projectIds);
+
+    private static string ProjectAccessValue(IReadOnlyList<string> projectIds)
+        => projectIds.Count == 0 ? ProjectContext.AllProjectIdsSentinel : string.Join(", ", projectIds);
+
+    private static DateTimeOffset? ParseExpiresAt(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? null
+            : DateTimeOffset.TryParse(value, out var parsed)
+            ? parsed
+            : throw new InvalidOperationException("到期時間格式無法解析，請使用 ISO 8601。");
+
+    private async Task<IReadOnlyList<string>> LoadProjectOptionsAsync()
+        => (await ApiClient.GetMemoryProjectsAsync(null, 100, CancellationToken.None))
+            .Select(project => project.ProjectId)
+            .Append(ProjectContext.DefaultProjectId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(projectId => projectId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private static string LastUsedText(ApiTokenResult token)
+        => token.LastUsedAt.HasValue
+            ? $"{token.LastUsedAt.Value.ToLocalTime():yyyy-MM-dd HH:mm} / {token.LastUsedIp}"
+            : "尚未使用";
+}

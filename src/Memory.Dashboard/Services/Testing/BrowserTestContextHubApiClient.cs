@@ -16,6 +16,8 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     private static DateTimeOffset BuildTimestampUtc => DateTimeOffset.Parse("2026-04-12T00:30:00+00:00");
 
+    private static IReadOnlyList<MemoryGraphEdgeResult> GraphDemoPrecomputedEdges { get; } = BuildGraphDemoPrecomputedEdges();
+
     public Task<SystemStatusResult> GetStatusAsync(CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
@@ -471,6 +473,80 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<SuggestedActionResult> DismissSuggestedActionAsync(Guid id, CancellationToken cancellationToken)
         => Task.FromResult(new SuggestedActionResult(id, ProjectContext.DefaultProjectId, SuggestedActionType.ReindexProject, SuggestedActionStatus.Dismissed, "重新索引專案", "已忽略。", "{}", string.Empty, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, null));
 
+    public Task<IReadOnlyList<TenantResult>> GetTenantsAsync(bool includeArchived, int limit, CancellationToken cancellationToken)
+    {
+        TenantResult[] tenants = Profile == DashboardBrowserTestProfile.Empty
+            ? []
+            : [DemoTenant()];
+
+        return Task.FromResult<IReadOnlyList<TenantResult>>(tenants.Take(limit).ToArray());
+    }
+
+    public Task<TenantResult> CreateTenantAsync(TenantCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new TenantResult(Guid.NewGuid(), request.Slug, request.DisplayName, TenantStatus.Active, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<TenantUserResult>> GetTenantUsersAsync(Guid tenantId, bool includeArchived, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<TenantUserResult>>(
+            Profile == DashboardBrowserTestProfile.Empty
+                ? []
+                :
+                [
+                    DemoUser(tenantId),
+                    new TenantUserResult(Guid.Parse("73000000-0000-0000-0000-000000000002"), tenantId, "automation", "Automation Runner", "automation@example.com", TenantUserRole.Member, TenantUserStatus.Active, DateTimeOffset.UtcNow.AddHours(-6), DateTimeOffset.UtcNow.AddDays(-8), DateTimeOffset.UtcNow.AddDays(-8), DateTimeOffset.UtcNow.AddHours(-6))
+                ]);
+
+    public Task<TenantUserResult> CreateTenantUserAsync(TenantUserCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new TenantUserResult(Guid.NewGuid(), request.TenantId, request.Username, request.DisplayName, request.Email, request.Role, TenantUserStatus.Active, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<TenantProjectGrantResult>> GetTenantProjectGrantsAsync(Guid tenantId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<TenantProjectGrantResult>>(
+        [
+            new TenantProjectGrantResult(Guid.Parse("74000000-0000-0000-0000-000000000001"), tenantId, "ContextHub", true, true, true, DateTimeOffset.UtcNow.AddDays(-8), DateTimeOffset.UtcNow.AddHours(-1))
+        ]);
+
+    public Task<TenantProjectGrantResult> UpsertTenantProjectGrantAsync(TenantProjectGrantUpsertRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new TenantProjectGrantResult(Guid.NewGuid(), request.TenantId, request.ProjectId, request.CanRead, request.CanWrite, request.CanManageTokens, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<ApiTokenResult>> GetApiTokensAsync(Guid tenantId, bool includeRevoked, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<ApiTokenResult>>(
+            Profile == DashboardBrowserTestProfile.Empty
+                ? []
+                :
+                [
+                    new ApiTokenResult(Guid.Parse("75000000-0000-0000-0000-000000000001"), tenantId, DemoUser(tenantId).Id, "Codex MCP", "外部 Codex 連線使用", "ctxh_9f7a1c", "4A2F", ["memory:read", "memory:write"], ["ContextHub"], null, null, DateTimeOffset.UtcNow.AddMinutes(-12), "203.0.113.42", "codex-mcp-client/1.0", DateTimeOffset.UtcNow.AddDays(-7), DateTimeOffset.UtcNow.AddMinutes(-12))
+                ]);
+
+    public Task<ApiTokenCreatedResult> CreateApiTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken)
+    {
+        var token = new ApiTokenResult(Guid.NewGuid(), request.TenantId, request.OwnerUserId, request.Name, request.Notes ?? string.Empty, "ctxh_demo", "9F0A", request.Scopes ?? ["memory:read"], request.AllowedProjectIds ?? [], request.ExpiresAt, null, null, string.Empty, string.Empty, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        return Task.FromResult(new ApiTokenCreatedResult(token, "ctxh_demo_plain_token_9F0A"));
+    }
+
+    public Task<ApiTokenResult> UpdateApiTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new ApiTokenResult(tokenId, DemoTenant().Id, DemoUser(DemoTenant().Id).Id, request.Name ?? "Updated Token", request.Notes ?? string.Empty, "ctxh_demo", "9F0A", request.Scopes ?? ["memory:read"], request.AllowedProjectIds ?? [], request.ExpiresAt, null, null, string.Empty, string.Empty, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow));
+
+    public Task<ApiTokenResult> RevokeApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+        => Task.FromResult(new ApiTokenResult(tokenId, DemoTenant().Id, DemoUser(DemoTenant().Id).Id, "Revoked Token", "已撤銷", "ctxh_demo", "9F0A", ["memory:read"], ["ContextHub"], null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(-12), "203.0.113.42", "codex-mcp-client/1.0", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow));
+
+    public Task<ApiTokenCreatedResult> RegenerateApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+    {
+        var token = new ApiTokenResult(tokenId, DemoTenant().Id, DemoUser(DemoTenant().Id).Id, "Regenerated Token", string.Empty, "ctxh_new", "1A2B", ["memory:read"], ["ContextHub"], null, null, null, string.Empty, string.Empty, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow);
+        return Task.FromResult(new ApiTokenCreatedResult(token, "ctxh_new_plain_token_1A2B"));
+    }
+
+    public Task<IReadOnlyList<SecurityAuditEventResult>> GetSecurityAuditEventsAsync(Guid? tenantId, int limit, CancellationToken cancellationToken)
+    {
+        SecurityAuditEventResult[] events = Profile == DashboardBrowserTestProfile.Empty
+            ? []
+            :
+            [
+                new SecurityAuditEventResult(Guid.NewGuid(), tenantId ?? DemoTenant().Id, DemoUser(tenantId ?? DemoTenant().Id).Id, Guid.Parse("75000000-0000-0000-0000-000000000001"), SecurityAuditEventType.ApiTokenAuthenticated, "Succeeded", "203.0.113.42", "codex-mcp-client/1.0", """{"name":"Codex MCP"}""", DateTimeOffset.UtcNow.AddMinutes(-12)),
+                new SecurityAuditEventResult(Guid.NewGuid(), tenantId ?? DemoTenant().Id, DemoUser(tenantId ?? DemoTenant().Id).Id, null, SecurityAuditEventType.ProjectGrantUpserted, "Succeeded", string.Empty, string.Empty, """{"projectId":"ContextHub"}""", DateTimeOffset.UtcNow.AddHours(-2))
+            ];
+
+        return Task.FromResult<IReadOnlyList<SecurityAuditEventResult>>(events.Take(limit).ToArray());
+    }
+
     public Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken)
     {
         IReadOnlyList<StorageTableSummaryResult> tables = Profile switch
@@ -567,6 +643,12 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             DateTimeOffset.UtcNow));
     }
 
+    private static TenantResult DemoTenant()
+        => new(Guid.Parse("72000000-0000-0000-0000-000000000001"), "context-team", "Context Team", TenantStatus.Active, DateTimeOffset.UtcNow.AddDays(-8), DateTimeOffset.UtcNow.AddHours(-1));
+
+    private static TenantUserResult DemoUser(Guid tenantId)
+        => new(Guid.Parse("73000000-0000-0000-0000-000000000001"), tenantId, "admin", "Admin User", "admin@example.com", TenantUserRole.Owner, TenantUserStatus.Active, DateTimeOffset.UtcNow.AddMinutes(-12), DateTimeOffset.UtcNow.AddDays(-8), DateTimeOffset.UtcNow.AddDays(-8), DateTimeOffset.UtcNow.AddHours(-1));
+
     private IReadOnlyList<DashboardServiceHealthResult> BuildServices()
         => Profile switch
         {
@@ -590,7 +672,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         {
             DashboardBrowserTestProfile.Empty =>
             [
-                new DashboardOverviewMetricResult("memoryItems", "全部記憶條目", 0, "items"),
+                new DashboardOverviewMetricResult("memoryItems", "記憶條目", 0, "items"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", 0, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", 0, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", 0, "jobs"),
@@ -598,7 +680,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             ],
             DashboardBrowserTestProfile.Dense =>
             [
-                new DashboardOverviewMetricResult("memoryItems", "全部記憶條目", 1248, "items"),
+                new DashboardOverviewMetricResult("memoryItems", "記憶條目", 1248, "items"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", 314, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", 18, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", 7, "jobs"),
@@ -606,7 +688,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             ],
             _ =>
             [
-                new DashboardOverviewMetricResult("memoryItems", "全部記憶條目", 24, "items"),
+                new DashboardOverviewMetricResult("memoryItems", "記憶條目", 24, "items"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", 4, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", 3, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", 1, "jobs"),
@@ -823,6 +905,11 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             return [];
         }
 
+        if (Profile == DashboardBrowserTestProfile.GraphDemo)
+        {
+            return BuildGraphDemoMemories();
+        }
+
         var count = Profile == DashboardBrowserTestProfile.Dense ? 12 : 1;
         return Enumerable.Range(0, count)
             .Select(index => CreateMemory(
@@ -832,6 +919,164 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 index == 0 ? "示範記憶摘要" : $"Dense summary {index:00} validating project isolation, cross-project reads, shared summary layer, and long metadata wrapping.",
                 Profile == DashboardBrowserTestProfile.Dense && index % 4 == 0))
             .ToArray();
+    }
+
+    private static IReadOnlyList<MemoryDocument> BuildGraphDemoMemories()
+        => [
+            CreateGraphDemoMemory(
+                0,
+                "demo-memory",
+                MemoryType.Fact,
+                "示範記憶",
+                "Graph seed：ContextHub Dashboard 的入口節點，用來展示 hub、bridge、explicit 與 similarity 關聯。",
+                "demo://graph/seed",
+                "ContextHub",
+                ["demo", "dashboard", "graph", "hub"],
+                0.98m),
+            CreateGraphDemoMemory(
+                1,
+                "graph-design-decision",
+                MemoryType.Decision,
+                "Graph Explorer 採用 JS viewport 互動",
+                "決策節點：圖譜縮放與拖曳平移交由前端 JS 管理，避免 Blazor round trip 造成互動延遲。",
+                "decision://graph/js-viewport",
+                "ContextHub",
+                ["graph", "viewport", "interaction"],
+                0.94m),
+            CreateGraphDemoMemory(
+                2,
+                "graph-api-contract",
+                MemoryType.Artifact,
+                "Memory Graph API contract v1",
+                "Artifact 節點：/api/memories/graph 回傳 nodes、edges 與 stats，Dashboard 只負責視覺化。",
+                "artifact://api/memory-graph-v1",
+                "ContextHub.Dashboard",
+                ["graph", "api", "contract"],
+                0.91m),
+            CreateGraphDemoMemory(
+                3,
+                "graph-layout-validation",
+                MemoryType.Fact,
+                "Graph layout validation passed",
+                "Fact 節點：桌面、平板與手機 viewport 已驗證節點卡片不重疊，canvas 可以 fit、zoom、pan。",
+                "test://dashboard/graph-layout",
+                "ContextHub.Dashboard",
+                ["graph", "browser-test", "layout"],
+                0.89m),
+            CreateGraphDemoMemory(
+                4,
+                "graph-stitch-baseline",
+                MemoryType.Artifact,
+                "Stitch Memory Graph baseline",
+                "Artifact 節點：Stitch baseline 定義 graph explorer 的管理介面密度、legend 與 node detail 層級。",
+                "stitch://projects/6837023420245161450",
+                "ContextHub.Design",
+                ["graph", "stitch", "ux"],
+                0.86m),
+            CreateGraphDemoMemory(
+                5,
+                "graph-selection-behavior",
+                MemoryType.Decision,
+                "選取節點不等於初始聚焦",
+                "二階節點：全專案整合視圖不自動 focus，避免初始畫面被單一節點裁切。",
+                "decision://graph/selection-focus",
+                "ContextHub",
+                ["graph", "focus", "selection"],
+                0.82m),
+            CreateGraphDemoMemory(
+                6,
+                "graph-similarity-fallback",
+                MemoryType.Decision,
+                "Similarity fallback 避免空關聯",
+                "二階節點：搜尋結果不足時以 lexical fallback 補足 similarity 邊，讓探索圖不會只有孤立節點。",
+                "decision://graph/similarity-fallback",
+                "ContextHub.Application",
+                ["graph", "similarity", "retrieval"],
+                0.8m),
+            CreateGraphDemoMemory(
+                7,
+                "graph-css-isolation",
+                MemoryType.Decision,
+                "Graph CSS isolation",
+                "Bridge 節點：graph 專屬樣式放在 CSS isolation，降低全域 dashboard CSS 互相污染的風險。",
+                "decision://graph/css-isolation",
+                "ContextHub.Dashboard",
+                ["graph", "css", "maintainability"],
+                0.78m)
+            ,
+            CreateGraphDemoMemory(
+                8,
+                "graph-index-snapshot",
+                MemoryType.Artifact,
+                "MemoryGraphIndex 背景快照",
+                "Artifact 節點：關聯索引由背景 collector 預先建立，Dashboard 只讀取已完成的 snapshot。",
+                "snapshot://dashboard/memory-graph-index",
+                "ContextHub.Application",
+                ["graph", "snapshot", "background"],
+                0.88m),
+            CreateGraphDemoMemory(
+                9,
+                "graph-scheduled-refresh",
+                MemoryType.Decision,
+                "排程刷新關聯索引",
+                "Decision 節點：memoryGraphIndex 依 Dashboard polling cadence 排程更新，避免互動查詢時重新計算全圖。",
+                "schedule://dashboard/memory-graph-index",
+                "ContextHub.Worker",
+                ["graph", "schedule", "snapshot"],
+                0.84m),
+            CreateGraphDemoMemory(
+                10,
+                "graph-event-refresh-entry",
+                MemoryType.Fact,
+                "事件驅動刷新入口",
+                "Fact 節點：memory upsert、source sync 與 reindex 完成後可導向同一個 graph index refresh flow。",
+                "event://memory/graph-index-refresh",
+                "ContextHub.Runtime",
+                ["graph", "event", "refresh"],
+                0.8m),
+            CreateGraphDemoMemory(
+                11,
+                "graph-manual-refresh",
+                MemoryType.Artifact,
+                "手動觸發關聯重建",
+                "Artifact 節點：管理者可以手動觸發背景索引重建，再由圖譜頁重新讀取最新 snapshot。",
+                "manual://dashboard/memory-graph-index",
+                "ContextHub.Dashboard",
+                ["graph", "manual", "snapshot"],
+                0.79m)
+        ];
+
+    private static MemoryDocument CreateGraphDemoMemory(
+        int index,
+        string externalKey,
+        MemoryType memoryType,
+        string title,
+        string summary,
+        string sourceRef,
+        string projectId,
+        IReadOnlyList<string> tags,
+        decimal importance)
+    {
+        return new MemoryDocument(
+            CreateGraphDemoId(index),
+            externalKey,
+            MemoryScope.Project,
+            memoryType,
+            title,
+            $"這是一筆 graph preview 測試資料。{summary}",
+            summary,
+            "document",
+            sourceRef,
+            tags,
+            importance,
+            0.92m,
+            3,
+            MemoryStatus.Active,
+            "{\"kind\":\"graph-preview\"}",
+            DateTimeOffset.UtcNow.AddDays(-1).AddMinutes(-index),
+            DateTimeOffset.UtcNow.AddMinutes(-index),
+            projectId,
+            false);
     }
 
     private MemoryDocument CreateMemory(int index, string externalKey, string title, string summary, bool readOnly)
@@ -933,6 +1178,11 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     private IReadOnlyList<MemoryGraphEdgeResult> BuildGraphEdges(IReadOnlyList<MemoryDocument> nodes, IReadOnlyList<Guid> seedIds, bool includeSimilarity)
     {
+        if (Profile == DashboardBrowserTestProfile.GraphDemo)
+        {
+            return SelectPrecomputedGraphDemoEdges(nodes, includeSimilarity);
+        }
+
         var edges = new List<MemoryGraphEdgeResult>();
         if (nodes.Count == 0)
         {
@@ -942,7 +1192,15 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         for (var index = 1; index < Math.Min(nodes.Count, 5); index++)
         {
             var fromId = seedIds.Count > 0 ? seedIds[0] : nodes[0].Id;
-            edges.Add(new MemoryGraphEdgeResult(fromId, nodes[index].Id, "explicit", "related"));
+            var relation = index switch
+            {
+                1 => "decides",
+                2 => "implements",
+                3 => "validates",
+                4 => "references",
+                _ => "related"
+            };
+            edges.Add(new MemoryGraphEdgeResult(fromId, nodes[index].Id, "explicit", relation));
         }
 
         if (seedIds.Count > 1 && nodes.Count > 3)
@@ -950,9 +1208,28 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             edges.Add(new MemoryGraphEdgeResult(seedIds[1], nodes[3].Id, "explicit", "depends-on"));
         }
 
+        if (nodes.Count > 5)
+        {
+            edges.Add(new MemoryGraphEdgeResult(nodes[1].Id, nodes[5].Id, "explicit", "refines"));
+        }
+
+        if (nodes.Count > 6)
+        {
+            edges.Add(new MemoryGraphEdgeResult(nodes[2].Id, nodes[6].Id, "explicit", "backs"));
+        }
+
+        if (nodes.Count > 7)
+        {
+            edges.Add(new MemoryGraphEdgeResult(nodes[3].Id, nodes[7].Id, "explicit", "isolates-style"));
+        }
+
         if (includeSimilarity)
         {
-            foreach (var seedId in seedIds)
+            var similarityRoots = seedIds.Count > 0
+                ? seedIds
+                : nodes.Take(Math.Min(nodes.Count, 2)).Select(node => node.Id).ToArray();
+
+            foreach (var seedId in similarityRoots)
             {
                 foreach (var nodeId in nodes.Where(node => node.Id != seedId).Skip(2).Take(nodes.Count >= 8 ? 3 : 2).Select(node => node.Id))
                 {
@@ -965,6 +1242,62 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             .GroupBy(edge => $"{edge.EdgeType}:{edge.FromId}:{edge.ToId}")
             .Select(group => group.First())
             .ToArray();
+    }
+
+    private static Guid CreateGraphDemoId(int index)
+        => Guid.Parse($"10000000-0000-0000-0000-{index + 1:000000000000}");
+
+    private static IReadOnlyList<MemoryGraphEdgeResult> SelectPrecomputedGraphDemoEdges(
+        IReadOnlyList<MemoryDocument> nodes,
+        bool includeSimilarity)
+    {
+        var nodeIds = nodes.Select(node => node.Id).ToHashSet();
+        return GraphDemoPrecomputedEdges
+            .Where(edge => nodeIds.Contains(edge.FromId) && nodeIds.Contains(edge.ToId))
+            .Where(edge => includeSimilarity || !string.Equals(edge.EdgeType, "similar", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<MemoryGraphEdgeResult> BuildGraphDemoPrecomputedEdges()
+    {
+        static Guid Node(int index) => CreateGraphDemoId(index);
+        static MemoryGraphEdgeResult Explicit(int from, int to, string relation)
+            => new(Node(from), Node(to), "explicit", relation);
+        static MemoryGraphEdgeResult Similar(int from, int to, decimal score)
+            => new(Node(from), Node(to), "similar", "Similarity", score);
+
+        return
+        [
+            Explicit(0, 1, "decides"),
+            Explicit(0, 2, "documents"),
+            Explicit(0, 3, "validates"),
+            Explicit(0, 4, "references"),
+            Explicit(0, 8, "indexes"),
+            Explicit(1, 5, "refines"),
+            Explicit(1, 7, "implements"),
+            Explicit(1, 3, "verifies"),
+            Explicit(2, 6, "backs"),
+            Explicit(2, 8, "served-by"),
+            Explicit(2, 10, "accepts-event"),
+            Explicit(3, 7, "guards"),
+            Explicit(3, 11, "tests-manual"),
+            Explicit(4, 7, "styles"),
+            Explicit(4, 5, "baseline-for"),
+            Explicit(5, 3, "validates"),
+            Explicit(6, 2, "derives"),
+            Explicit(6, 8, "precomputes"),
+            Explicit(8, 9, "scheduled-by"),
+            Explicit(8, 10, "refreshed-by"),
+            Explicit(8, 11, "rebuilt-by"),
+            Explicit(9, 3, "observed-by"),
+            Explicit(9, 10, "coordinates"),
+            Explicit(10, 11, "shares-flow"),
+            Explicit(11, 2, "publishes"),
+            Similar(0, 8, 0.92m),
+            Similar(4, 7, 0.88m),
+            Similar(6, 10, 0.84m),
+            Similar(9, 11, 0.82m)
+        ];
     }
 
     private static Dictionary<Guid, int> BuildEdgeCounts(IReadOnlyList<MemoryGraphEdgeResult> edges, string edgeType)
@@ -1017,4 +1350,28 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 DateTimeOffset.UtcNow.AddHours(-5))
         ];
     }
+
+    public Task<CurrentUserResult> GetCurrentUserAsync(CancellationToken cancellationToken)
+        => Task.FromResult(new CurrentUserResult(
+            Guid.Parse("72000000-0000-0000-0000-000000000001"),
+            Guid.Parse("73000000-0000-0000-0000-000000000001"),
+            "admin",
+            "Admin User",
+            "admin@example.com",
+            TenantUserRole.Owner));
+
+    public Task<IReadOnlyList<ApiTokenResult>> GetMyApiTokensAsync(bool includeRevoked, CancellationToken cancellationToken)
+        => GetApiTokensAsync(Guid.Parse("72000000-0000-0000-0000-000000000001"), includeRevoked, cancellationToken);
+
+    public Task<ApiTokenCreatedResult> CreateMyApiTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken)
+        => CreateApiTokenAsync(request, cancellationToken);
+
+    public Task<ApiTokenResult> UpdateMyApiTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken)
+        => UpdateApiTokenAsync(tokenId, request, cancellationToken);
+
+    public Task<ApiTokenCreatedResult> RegenerateMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+        => RegenerateApiTokenAsync(tokenId, cancellationToken);
+
+    public Task<ApiTokenResult> RevokeMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+        => RevokeApiTokenAsync(tokenId, cancellationToken);
 }

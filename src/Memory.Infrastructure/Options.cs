@@ -6,6 +6,25 @@ public sealed class MemoryOptions
 {
     public const string SectionName = "Memory";
     public string Namespace { get; set; } = "context-hub";
+    public RedisCacheOptions RedisCache { get; set; } = new();
+}
+
+public sealed class RedisCacheOptions
+{
+    public bool Enabled { get; set; } = true;
+    public int SearchTtlMinutes { get; set; } = 15;
+    public int WorkingContextTtlMinutes { get; set; } = 15;
+    public int EmbeddingTtlHours { get; set; } = 24;
+    public int SemanticHitTtlMinutes { get; set; } = 10;
+    public int MetadataTtlSeconds { get; set; } = 60;
+    public int SecurityTtlSeconds { get; set; } = 30;
+
+    public TimeSpan SearchTtl => TimeSpan.FromMinutes(Math.Max(1, SearchTtlMinutes));
+    public TimeSpan WorkingContextTtl => TimeSpan.FromMinutes(Math.Max(1, WorkingContextTtlMinutes));
+    public TimeSpan EmbeddingTtl => TimeSpan.FromHours(Math.Max(1, EmbeddingTtlHours));
+    public TimeSpan SemanticHitTtl => TimeSpan.FromMinutes(Math.Max(1, SemanticHitTtlMinutes));
+    public TimeSpan MetadataTtl => TimeSpan.FromSeconds(Math.Max(1, MetadataTtlSeconds));
+    public TimeSpan SecurityTtl => TimeSpan.FromSeconds(Math.Max(1, SecurityTtlSeconds));
 }
 
 public sealed class EmbeddingOptions
@@ -37,4 +56,18 @@ public sealed class DatabaseLoggingOptions
     public LogLevel MinimumLevel { get; set; } = LogLevel.Warning;
     public int BatchSize { get; set; } = 50;
     public int FlushIntervalSeconds { get; set; } = 2;
+}
+
+public sealed class TelemetryRetentionOptions
+{
+    public const string SectionName = "TelemetryRetention";
+    public bool Enabled { get; set; } = true;
+    public int HitsRetentionDays { get; set; } = 15;
+    public int EventsRetentionDays { get; set; } = 30;
+    public string RunAtLocalTime { get; set; } = "03:30";
+    public string TimeZone { get; set; } = "Asia/Taipei";
+    public int BatchSize { get; set; } = 10_000;
+    public int DelayBetweenBatchesMs { get; set; } = 200;
+    public int CommandTimeoutSeconds { get; set; } = 120;
+    public bool RunVacuumFullAutomatically { get; set; }
 }

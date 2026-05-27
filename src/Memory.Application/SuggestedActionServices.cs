@@ -8,6 +8,7 @@ public sealed class SuggestedActionService(
     IApplicationDbContext dbContext,
     IMemoryService memoryService,
     IGovernanceService governanceService,
+    IBackgroundJobQueue jobQueue,
     IClock clock) : ISuggestedActionService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -128,9 +129,7 @@ public sealed class SuggestedActionService(
             CreatedAt = clock.UtcNow
         };
 
-        await dbContext.MemoryJobs.AddAsync(job, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return job.Id;
+        return await jobQueue.EnqueueAsync(job, cancellationToken);
     }
 
     private async Task ArchiveMemoryAsync(Guid id, CancellationToken cancellationToken)

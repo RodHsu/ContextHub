@@ -1,0 +1,44 @@
+@using Memory.Application
+
+<label>
+    <span>@Label</span>
+    <select value="@Value" @onchange="OnChanged">
+        @if (!IsKnownValue)
+        {
+            <option value="@Value">自訂：@Value</option>
+        }
+        @foreach (var option in ScopeOptions)
+        {
+            <option value="@option.Value">@option.Label</option>
+        }
+    </select>
+</label>
+
+@code {
+    private static readonly TokenScopeOption[] ScopeOptions =
+    [
+        new("只讀記憶", SecurityScopes.MemoryRead),
+        new("讀寫記憶", $"{SecurityScopes.MemoryRead}, {SecurityScopes.MemoryWrite}"),
+        new("MCP Client（記憶與偏好讀寫）", $"{SecurityScopes.MemoryRead}, {SecurityScopes.MemoryWrite}, {SecurityScopes.PreferencesRead}, {SecurityScopes.PreferencesWrite}"),
+        new("個人完整權限", $"{SecurityScopes.MemoryRead}, {SecurityScopes.MemoryWrite}, {SecurityScopes.PreferencesRead}, {SecurityScopes.PreferencesWrite}, {SecurityScopes.TokenManage}"),
+        new("安全管理", $"{SecurityScopes.MemoryRead}, {SecurityScopes.MemoryWrite}, {SecurityScopes.PreferencesRead}, {SecurityScopes.PreferencesWrite}, {SecurityScopes.TokenManage}, {SecurityScopes.SecurityManage}"),
+        new("Dashboard Service", $"{SecurityScopes.MemoryRead}, {SecurityScopes.MemoryWrite}, {SecurityScopes.PreferencesRead}, {SecurityScopes.PreferencesWrite}, {SecurityScopes.TokenManage}, {SecurityScopes.SecurityManage}, {SecurityScopes.DashboardActAs}")
+    ];
+
+    [Parameter]
+    public string Label { get; set; } = "Scopes";
+
+    [Parameter]
+    public string Value { get; set; } = SecurityScopes.MemoryRead;
+
+    [Parameter]
+    public EventCallback<string> ValueChanged { get; set; }
+
+    private bool IsKnownValue
+        => ScopeOptions.Any(option => string.Equals(option.Value, Value, StringComparison.OrdinalIgnoreCase));
+
+    private async Task OnChanged(ChangeEventArgs args)
+        => await ValueChanged.InvokeAsync(args.Value?.ToString() ?? string.Empty);
+
+    private sealed record TokenScopeOption(string Label, string Value);
+}

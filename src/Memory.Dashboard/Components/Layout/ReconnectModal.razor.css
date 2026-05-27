@@ -141,11 +141,13 @@
 
 .components-reconnect-body {
     display: grid;
+    justify-items: center;
     gap: 0.7rem;
     padding: 0.95rem 1rem;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: color-mix(in srgb, var(--bg-panel) 82%, var(--bg-elevated) 18%);
+    text-align: center;
 }
 
 .components-reconnect-body p {

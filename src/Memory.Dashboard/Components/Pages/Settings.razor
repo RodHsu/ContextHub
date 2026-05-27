@@ -211,14 +211,18 @@
 
                     <section class="settings-cadence-card">
                         <div class="settings-cadence-header">
-                            <div class="subpanel-title">近期維運摘要</div>
-                            <span class="status-badge warn">errors / jobs</span>
+                            <div class="subpanel-title">近期維運摘要 / 圖譜</div>
+                            <span class="status-badge warn">errors / jobs / graph</span>
                         </div>
-                        <div class="settings-cadence-copy">最近錯誤日誌、進行中工作與 overview metric cards。</div>
+                        <div class="settings-cadence-copy">最近錯誤日誌、進行中工作、overview metric cards 與記憶圖譜預先計算索引。</div>
                         <div class="settings-form-grid">
                             <label>
                                 <span>Recent Operations</span>
                                 <input type="number" min="1" max="3600" @bind="_recentOperationsPollingSeconds" />
+                            </label>
+                            <label>
+                                <span>Memory Graph Index</span>
+                                <input type="number" min="1" max="3600" @bind="_memoryGraphIndexPollingSeconds" />
                             </label>
                         </div>
                     </section>
@@ -441,6 +445,7 @@
     private int _dependencyResourcesPollingSeconds;
     private int _recentOperationsPollingSeconds;
     private int _resourceChartPollingSeconds;
+    private int _memoryGraphIndexPollingSeconds;
     private int _overviewPollingSeconds;
     private int _metricsPollingSeconds;
     private int _jobsPollingSeconds;
@@ -498,7 +503,8 @@
                             _dockerHostPollingSeconds,
                             _dependencyResourcesPollingSeconds,
                             _recentOperationsPollingSeconds,
-                            _resourceChartPollingSeconds),
+                            _resourceChartPollingSeconds,
+                            _memoryGraphIndexPollingSeconds),
                         _overviewPollingSeconds,
                         _metricsPollingSeconds,
                         _jobsPollingSeconds,
@@ -674,6 +680,7 @@
         _dependencyResourcesPollingSeconds = snapshot.Behavior.SnapshotPolling.DependencyResourcesSeconds;
         _recentOperationsPollingSeconds = snapshot.Behavior.SnapshotPolling.RecentOperationsSeconds;
         _resourceChartPollingSeconds = snapshot.Behavior.SnapshotPolling.ResourceChartSeconds;
+        _memoryGraphIndexPollingSeconds = snapshot.Behavior.SnapshotPolling.MemoryGraphIndexSeconds;
         _overviewPollingSeconds = snapshot.Behavior.OverviewPollingSeconds;
         _metricsPollingSeconds = snapshot.Behavior.MetricsPollingSeconds;
         _jobsPollingSeconds = snapshot.Behavior.JobsPollingSeconds;

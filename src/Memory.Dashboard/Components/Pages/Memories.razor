@@ -34,8 +34,14 @@
     </Actions>
     <ChildContent>
 
-    <section class="panel filter-panel">
-        <div class="filter-grid memories-filter-grid">
+    <section class="panel filter-panel filter-panel-stacked memories-filter-panel">
+        <div class="filter-panel-heading">
+            <div>
+                <div class="panel-title">查詢條件</div>
+                <div class="panel-heading-meta panel-heading-meta-left">先用關鍵字與專案縮小清單，再展開進階條件處理來源、狀態與 shared summary layer。</div>
+            </div>
+        </div>
+        <div class="filter-grid filter-quick-grid memories-filter-grid">
             <input @bind="_query" placeholder="搜尋標題 / 摘要 / 來源參照" />
             <div class="project-suggestion-field">
                 <input @bind="_projectIdInput"
@@ -59,7 +65,6 @@
                     </div>
                 }
             </div>
-            <input @bind="_includedProjectIds" placeholder="參考專案，以逗號分隔" />
             <select @bind="_queryMode">
                 <option value="@MemoryQueryMode.CurrentOnly">目前專案</option>
                 <option value="@MemoryQueryMode.CurrentPlusReferencedProjects">目前 + 參考專案</option>
@@ -79,20 +84,29 @@
                     <option value="@type">@DashboardText.Label(type)</option>
                 }
             </select>
-            <select @bind="_status">
-                <option value="">全部狀態</option>
-                @foreach (var status in Enum.GetValues<MemoryStatus>())
-                {
-                    <option value="@status">@DashboardText.Label(status)</option>
-                }
-            </select>
-            <input @bind="_sourceType" placeholder="來源類型 (Source Type)" />
-            <input @bind="_tag" placeholder="標籤 (Tag)" />
-            <label class="toggle-field">
-                <input type="checkbox" @bind="_useSummaryLayer" />
-                <span>一併讀取綜合層</span>
-            </label>
         </div>
+        <details class="filter-advanced" open>
+            <summary>
+                <span>進階篩選</span>
+                <small>參考專案、狀態、來源與標籤</small>
+            </summary>
+            <div class="filter-grid advanced-filter-grid memories-advanced-filter-grid">
+                <input @bind="_includedProjectIds" placeholder="參考專案，以逗號分隔" />
+                <select @bind="_status">
+                    <option value="">全部狀態</option>
+                    @foreach (var status in Enum.GetValues<MemoryStatus>())
+                    {
+                        <option value="@status">@DashboardText.Label(status)</option>
+                    }
+                </select>
+                <input @bind="_sourceType" placeholder="來源類型 (Source Type)" />
+                <input @bind="_tag" placeholder="標籤 (Tag)" />
+                <label class="toggle-field">
+                    <input type="checkbox" @bind="_useSummaryLayer" />
+                    <span>一併讀取綜合層</span>
+                </label>
+            </div>
+        </details>
     </section>
 
     @if (_page is null)

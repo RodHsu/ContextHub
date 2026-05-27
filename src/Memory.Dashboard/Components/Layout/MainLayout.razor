@@ -3,6 +3,9 @@
 
 <AuthorizeView>
     <Authorized Context="auth">
+        @{
+            var isAdmin = IsDashboardAdmin(auth.User);
+        }
         <div class="dashboard-shell">
             <aside class="sidebar">
                 <div class="sidebar-inner">
@@ -14,6 +17,8 @@
                         </div>
                     </div>
 
+                    @if (isAdmin)
+                    {
                     <div class="sidebar-section-label">維運監控</div>
                     <nav class="sidebar-nav">
                         <NavLink class="nav-item" href="/" Match="NavLinkMatch.All">
@@ -86,6 +91,7 @@
                             <span class="nav-label">效能</span>
                         </NavLink>
                     </nav>
+                    }
 
                     <div class="sidebar-section-label">知識工作</div>
                     <nav class="sidebar-nav">
@@ -110,6 +116,8 @@
                             </span>
                             <span class="nav-label">記憶資料</span>
                         </NavLink>
+                        @if (isAdmin)
+                        {
                         <NavLink class="nav-item" href="/sources">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -152,6 +160,7 @@
                             </span>
                             <span class="nav-label">收件匣</span>
                         </NavLink>
+                        }
                     </nav>
 
                     <div class="sidebar-section-label">管理設定</div>
@@ -165,6 +174,17 @@
                             </span>
                             <span class="nav-label">使用者偏好</span>
                         </NavLink>
+                        <NavLink class="nav-item" href="/account/tokens">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M15 7a4 4 0 1 1-2.8 6.8L7 19H4v-3l5.2-5.2A4 4 0 0 1 15 7Z" />
+                                    <path d="m14 10 2 2" />
+                                </svg>
+                            </span>
+                            <span class="nav-label">我的 Token</span>
+                        </NavLink>
+                        @if (isAdmin)
+                        {
                         <NavLink class="nav-item" href="/storage">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -175,6 +195,16 @@
                             </span>
                             <span class="nav-label">資料庫檢視</span>
                         </NavLink>
+                        <NavLink class="nav-item" href="/security">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M12 3 5 6v5c0 4.2 2.8 8 7 10 4.2-2 7-5.8 7-10V6l-7-3Z" />
+                                    <path d="M9 12h6" />
+                                    <path d="M12 9v6" />
+                                </svg>
+                            </span>
+                            <span class="nav-label">安全管理</span>
+                        </NavLink>
                         <NavLink class="nav-item" href="/settings">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -184,6 +214,7 @@
                             </span>
                             <span class="nav-label">系統設定</span>
                         </NavLink>
+                        }
                     </nav>
 
                     <div class="sidebar-bottom">
@@ -223,3 +254,10 @@
         </div>
     </Authorized>
 </AuthorizeView>
+
+@code {
+    private static bool IsDashboardAdmin(System.Security.Claims.ClaimsPrincipal user)
+        => user.IsInRole(TenantUserRole.Owner.ToString()) ||
+           user.IsInRole(TenantUserRole.Admin.ToString()) ||
+           user.IsInRole("DashboardAdmin");
+}

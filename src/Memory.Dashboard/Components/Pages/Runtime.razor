@@ -100,7 +100,7 @@
     private string? _loadError;
     private bool _loading;
     private DateTimeOffset? _lastUpdatedAt;
-    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.EmbeddingRuntimeSeconds ?? 30;
+    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.EmbeddingRuntimeSeconds ?? 5;
     private InstanceSettingsSnapshot? _settingsSnapshot;
 
     protected override async Task OnInitializedAsync()

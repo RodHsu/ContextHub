@@ -36,6 +36,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
 
         using var response = await client.GetAsync("/login");
         response.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertNoStoreHeaders(response);
 
         var html = await response.Content.ReadAsStringAsync();
         html.Should().Contain("Context Hub");
@@ -65,18 +66,40 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
 
         using var cssResponse = await client.GetAsync(cssPath);
         cssResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertStaticAssetCacheHeaders(cssResponse);
         cssResponse.Content.Headers.ContentType?.MediaType.Should().Be("text/css");
         (await cssResponse.Content.ReadAsStringAsync()).Should().NotBeNullOrWhiteSpace();
 
         using var blazorScriptResponse = await client.GetAsync(blazorScriptPath);
         blazorScriptResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertStaticAssetCacheHeaders(blazorScriptResponse);
         blazorScriptResponse.Content.Headers.ContentType?.MediaType.Should().Contain("javascript");
         (await blazorScriptResponse.Content.ReadAsStringAsync()).Should().NotStartWith("<!DOCTYPE html>", "framework script should not fall back to an HTML error page");
 
         using var viewportScriptResponse = await client.GetAsync(viewportScriptPath);
         viewportScriptResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertStaticAssetCacheHeaders(viewportScriptResponse);
         viewportScriptResponse.Content.Headers.ContentType?.MediaType.Should().Contain("javascript");
         (await viewportScriptResponse.Content.ReadAsStringAsync()).Should().NotStartWith("<!DOCTYPE html>", "dashboard module script should not fall back to an HTML error page");
+    }
+
+    [Fact]
+    public void Dashboard_Api_Client_Should_Send_Service_Token_When_Configured()
+    {
+        using var client = new HttpClient();
+        DashboardApiClientHttpClient.Configure(client, new DashboardOptions
+        {
+            BaseUrl = "http://fake-context-hub",
+            ApiToken = " service-token "
+        });
+
+        client.BaseAddress.Should().Be(new Uri("http://fake-context-hub"));
+        client.DefaultRequestHeaders.Authorization.Should().NotBeNull();
+        client.DefaultRequestHeaders.Authorization!.Scheme.Should().Be("Bearer");
+        client.DefaultRequestHeaders.Authorization.Parameter.Should().Be("service-token");
+        client.DefaultRequestHeaders.GetValues(RequestTrafficConstants.DashboardRequestHeader)
+            .Should()
+            .ContainSingle(RequestTrafficConstants.DashboardRequestHeaderValue);
     }
 
     [Fact]
@@ -105,7 +128,23 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
 
         using var response = await client.PostAsync("/_blazor/negotiate?negotiateVersion=1", content: null);
         response.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertNoStoreHeaders(response);
         response.Content.Headers.ContentType?.MediaType.Should().Be("application/json");
+    }
+
+    [Fact]
+    public async Task Dashboard_Health_Should_Not_Be_Cached_By_Cloudflare()
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        using var response = await client.GetAsync("/health/live");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertNoStoreHeaders(response);
     }
 
     [Fact]
@@ -190,14 +229,18 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var overviewHtml = WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync());
         overviewHtml.Should().Contain("ContextHub 管理主控台");
-        overviewHtml.Should().Contain("全部記憶條目");
+        overviewHtml.Should().Contain("記憶條目");
         overviewHtml.Should().Contain("預設專案記憶");
         overviewHtml.Should().Contain("Docker 主機");
         overviewHtml.Should().Contain("評估摘要");
         overviewHtml.Should().Contain("資源狀態圖表");
         overviewHtml.Should().Contain("近期呼叫趨勢");
+        overviewHtml.Should().Contain("Redis 狀態監控");
+        overviewHtml.Should().Contain("resource-redis-chart");
+        overviewHtml.Should().Contain("Redis resource status chart");
+        overviewHtml.Should().Contain("contexthub-redis-1");
         overviewHtml.Should().Contain("近期平均");
-        overviewHtml.Should().Contain("每 3 秒刷新");
+        overviewHtml.Should().Contain("每 5 秒刷新");
         overviewHtml.Should().Contain("資源最近");
         overviewHtml.Should().Contain("呼叫最近 15 筆");
         overviewHtml.Should().Contain("進站 (Inbound)");
@@ -229,6 +272,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.IndexOf("記憶圖譜", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
         overviewHtml.IndexOf("日誌", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
         overviewHtml.IndexOf("收件匣", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("使用者偏好", StringComparison.Ordinal));
+        overviewHtml.IndexOf("資料庫檢視", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("安全管理", StringComparison.Ordinal));
 
         using var runtimeResponse = await client.GetAsync("/runtime");
         runtimeResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -341,10 +385,11 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         graphResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var graphHtml = WebUtility.HtmlDecode(await graphResponse.Content.ReadAsStringAsync());
         graphHtml.Should().Contain("記憶圖譜");
-        graphHtml.Should().Contain("Graph Explorer");
+        graphHtml.Should().Contain("記憶關聯");
         graphHtml.Should().Contain("展開鄰居");
         graphHtml.Should().Contain("回到種子");
-        graphHtml.Should().Contain("Node Detail");
+        graphHtml.Should().Contain("關聯探索");
+        graphHtml.Should().Contain("相鄰探索");
         graphHtml.Should().Contain("專案檢視");
         graphHtml.Should().Contain("全部專案整合視圖");
         graphHtml.Should().Contain("全螢幕");
@@ -396,11 +441,55 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         storageHtml.Should().Contain("關鍵字查詢");
         storageHtml.Should().Contain("所有可搜尋欄位");
         storageHtml.Should().Contain("可搜尋欄位");
+        storageHtml.Should().Contain("頁碼跳轉");
+        storageHtml.Should().Contain("第一頁");
+        storageHtml.Should().Contain("最後頁");
         storageHtml.Should().Contain("storage-table-list");
         storageHtml.Should().Contain("storage-query-panel");
         storageHtml.Should().Contain("storage-info-panel");
         storageHtml.Should().Contain("storage-inspector-panel");
         storageHtml.Should().Contain("table-scroll-shell");
+        storageHtml.Should().NotContain("尚未同步");
+        storageHtml.Should().NotContain("同步失敗");
+
+        using var securityResponse = await client.GetAsync("/security");
+        securityResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var securityHtml = WebUtility.HtmlDecode(await securityResponse.Content.ReadAsStringAsync());
+        securityHtml.Should().Contain("安全管理");
+        securityHtml.Should().Contain("我的 Token");
+        securityHtml.Should().Contain("租戶");
+        securityHtml.Should().Contain("帳戶管理");
+        securityHtml.Should().Contain("Project 授權");
+        securityHtml.Should().Contain("Token 管理");
+        securityHtml.Should().Contain("安全稽核");
+        securityHtml.Should().Contain("Context Team");
+        securityHtml.Should().Contain("MCP Client（記憶與偏好讀寫）");
+        securityHtml.Should().Contain("全部");
+        securityHtml.Should().Contain("最後使用");
+        securityHtml.Should().Contain("更多 Token 操作");
+        securityHtml.Should().Contain("重新產生");
+        securityHtml.Should().Contain("ApiTokenAuthenticated");
+        securityHtml.Should().Contain("<select");
+        securityHtml.Should().Contain("只讀記憶");
+        securityHtml.Should().Contain("Dashboard Service");
+        securityHtml.Should().NotContain("尚未同步");
+        securityHtml.Should().NotContain("同步失敗");
+
+        using var accountTokensResponse = await client.GetAsync("/account/tokens");
+        accountTokensResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var accountTokensHtml = WebUtility.HtmlDecode(await accountTokensResponse.Content.ReadAsStringAsync());
+        accountTokensHtml.Should().Contain("我的 Token");
+        accountTokensHtml.Should().Contain("<select");
+        accountTokensHtml.Should().Contain("ContextHub");
+        accountTokensHtml.Should().Contain("MCP Client（記憶與偏好讀寫）");
+        accountTokensHtml.Should().Contain("全部");
+        accountTokensHtml.Should().Contain("個人完整權限");
+        accountTokensHtml.Should().Contain("編輯");
+        accountTokensHtml.Should().Contain("更多 Token 操作");
+        accountTokensHtml.Should().Contain("重新產生");
+        accountTokensHtml.Should().Contain("撤銷");
+        accountTokensHtml.Should().NotContain("尚未同步");
+        accountTokensHtml.Should().NotContain("同步失敗");
 
         using var preferencesResponse = await client.GetAsync("/preferences");
         preferencesResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -666,6 +755,27 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         return match.Groups[1].Value;
     }
 
+    private static void AssertNoStoreHeaders(HttpResponseMessage response)
+    {
+        response.Headers.CacheControl?.NoStore.Should().BeTrue();
+        response.Headers.CacheControl?.NoCache.Should().BeTrue();
+        response.Headers.TryGetValues("Cloudflare-CDN-Cache-Control", out var cloudflareValues).Should().BeTrue();
+        cloudflareValues.Should().ContainSingle("no-store");
+        response.Headers.TryGetValues("CDN-Cache-Control", out var cdnValues).Should().BeTrue();
+        cdnValues.Should().ContainSingle("no-store");
+    }
+
+    private static void AssertStaticAssetCacheHeaders(HttpResponseMessage response)
+    {
+        response.Headers.CacheControl?.Public.Should().BeTrue();
+        response.Headers.CacheControl?.MaxAge.Should().Be(TimeSpan.FromDays(365));
+        response.Headers.CacheControl?.Extensions.Should().Contain(x => string.Equals(x.Name, "immutable", StringComparison.OrdinalIgnoreCase));
+        response.Headers.TryGetValues("Cloudflare-CDN-Cache-Control", out var cloudflareValues).Should().BeTrue();
+        cloudflareValues.Should().ContainSingle("public, max-age=31536000");
+        response.Headers.TryGetValues("CDN-Cache-Control", out var cdnValues).Should().BeTrue();
+        cdnValues.Should().ContainSingle("public, max-age=31536000");
+    }
+
     private static SystemStatusResult CreateSystemStatusResult()
         => new(
             "mcp-server",
@@ -834,7 +944,7 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
                 new DashboardServiceHealthResult("embeddings", "Healthy", "")
             ],
             [
-                new DashboardOverviewMetricResult("memoryItems", "全部記憶條目", 24, "items"),
+                new DashboardOverviewMetricResult("memoryItems", "記憶條目", 24, "items"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", 4, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", 3, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", 4, "jobs"),
@@ -1236,6 +1346,91 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
     public Task<SuggestedActionResult> DismissSuggestedActionAsync(Guid id, CancellationToken cancellationToken)
         => Task.FromResult(new SuggestedActionResult(id, ProjectContext.DefaultProjectId, SuggestedActionType.ReindexProject, SuggestedActionStatus.Dismissed, "重新索引專案", "已忽略。", "{}", string.Empty, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, null));
 
+    public Task<IReadOnlyList<TenantResult>> GetTenantsAsync(bool includeArchived, int limit, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<TenantResult>>(
+        [
+            DemoTenant()
+        ]);
+
+    public Task<TenantResult> CreateTenantAsync(TenantCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new TenantResult(Guid.NewGuid(), request.Slug, request.DisplayName, TenantStatus.Active, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<TenantUserResult>> GetTenantUsersAsync(Guid tenantId, bool includeArchived, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<TenantUserResult>>(
+        [
+            DemoUser(tenantId)
+        ]);
+
+    public Task<TenantUserResult> CreateTenantUserAsync(TenantUserCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new TenantUserResult(Guid.NewGuid(), request.TenantId, request.Username, request.DisplayName, request.Email, request.Role, TenantUserStatus.Active, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<TenantProjectGrantResult>> GetTenantProjectGrantsAsync(Guid tenantId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<TenantProjectGrantResult>>(
+        [
+            new TenantProjectGrantResult(Guid.Parse("74000000-0000-0000-0000-000000000001"), tenantId, "ContextHub", true, true, true, DateTimeOffset.UtcNow.AddDays(-3), DateTimeOffset.UtcNow)
+        ]);
+
+    public Task<TenantProjectGrantResult> UpsertTenantProjectGrantAsync(TenantProjectGrantUpsertRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new TenantProjectGrantResult(Guid.NewGuid(), request.TenantId, request.ProjectId, request.CanRead, request.CanWrite, request.CanManageTokens, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<ApiTokenResult>> GetApiTokensAsync(Guid tenantId, bool includeRevoked, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<ApiTokenResult>>(
+        [
+            new ApiTokenResult(Guid.Parse("75000000-0000-0000-0000-000000000001"), tenantId, DemoUser(tenantId).Id, "Codex MCP", "外部連線", "ctxh_demo", "9F0A", ["memory:read"], ["ContextHub"], null, null, DateTimeOffset.UtcNow.AddMinutes(-10), "203.0.113.42", "codex-mcp-client/1.0", DateTimeOffset.UtcNow.AddDays(-3), DateTimeOffset.UtcNow)
+        ]);
+
+    public Task<ApiTokenCreatedResult> CreateApiTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken)
+    {
+        var token = new ApiTokenResult(Guid.NewGuid(), request.TenantId, request.OwnerUserId, request.Name, request.Notes ?? string.Empty, "ctxh_demo", "9F0A", request.Scopes ?? ["memory:read"], request.AllowedProjectIds ?? [], request.ExpiresAt, null, null, string.Empty, string.Empty, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        return Task.FromResult(new ApiTokenCreatedResult(token, "ctxh_demo_plain_token_9F0A"));
+    }
+
+    public Task<ApiTokenResult> UpdateApiTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new ApiTokenResult(tokenId, DemoTenant().Id, DemoUser(DemoTenant().Id).Id, request.Name ?? "Updated Token", request.Notes ?? string.Empty, "ctxh_demo", "9F0A", request.Scopes ?? ["memory:read"], request.AllowedProjectIds ?? [], request.ExpiresAt, null, null, string.Empty, string.Empty, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow));
+
+    public Task<ApiTokenResult> RevokeApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+        => Task.FromResult(new ApiTokenResult(tokenId, DemoTenant().Id, DemoUser(DemoTenant().Id).Id, "Revoked Token", "已撤銷", "ctxh_demo", "9F0A", ["memory:read"], ["ContextHub"], null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(-10), "203.0.113.42", "codex-mcp-client/1.0", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow));
+
+    public Task<ApiTokenCreatedResult> RegenerateApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+    {
+        var token = new ApiTokenResult(tokenId, DemoTenant().Id, DemoUser(DemoTenant().Id).Id, "Regenerated Token", string.Empty, "ctxh_new", "1A2B", ["memory:read"], ["ContextHub"], null, null, null, string.Empty, string.Empty, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow);
+        return Task.FromResult(new ApiTokenCreatedResult(token, "ctxh_new_plain_token_1A2B"));
+    }
+
+    public Task<CurrentUserResult> GetCurrentUserAsync(CancellationToken cancellationToken)
+    {
+        var tenant = DemoTenant();
+        var user = DemoUser(tenant.Id);
+        return Task.FromResult(new CurrentUserResult(tenant.Id, user.Id, user.Username, user.DisplayName, user.Email, user.Role));
+    }
+
+    public Task<IReadOnlyList<ApiTokenResult>> GetMyApiTokensAsync(bool includeRevoked, CancellationToken cancellationToken)
+        => GetApiTokensAsync(DemoTenant().Id, includeRevoked, cancellationToken);
+
+    public Task<ApiTokenCreatedResult> CreateMyApiTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken)
+        => CreateApiTokenAsync(request, cancellationToken);
+
+    public Task<ApiTokenResult> UpdateMyApiTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken)
+        => UpdateApiTokenAsync(tokenId, request, cancellationToken);
+
+    public Task<ApiTokenCreatedResult> RegenerateMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+        => RegenerateApiTokenAsync(tokenId, cancellationToken);
+
+    public Task<ApiTokenResult> RevokeMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+        => RevokeApiTokenAsync(tokenId, cancellationToken);
+
+    public Task<IReadOnlyList<SecurityAuditEventResult>> GetSecurityAuditEventsAsync(Guid? tenantId, int limit, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SecurityAuditEventResult>>(
+        [
+            new SecurityAuditEventResult(Guid.NewGuid(), tenantId ?? DemoTenant().Id, DemoUser(tenantId ?? DemoTenant().Id).Id, Guid.Parse("75000000-0000-0000-0000-000000000001"), SecurityAuditEventType.ApiTokenAuthenticated, "Succeeded", "203.0.113.42", "codex-mcp-client/1.0", """{"name":"Codex MCP"}""", DateTimeOffset.UtcNow.AddMinutes(-10))
+        ]);
+
+    private static TenantResult DemoTenant()
+        => new(Guid.Parse("72000000-0000-0000-0000-000000000001"), "context-team", "Context Team", TenantStatus.Active, DateTimeOffset.UtcNow.AddDays(-3), DateTimeOffset.UtcNow);
+
+    private static TenantUserResult DemoUser(Guid tenantId)
+        => new(Guid.Parse("73000000-0000-0000-0000-000000000001"), tenantId, "admin", "Admin User", "admin@example.com", TenantUserRole.Owner, TenantUserStatus.Active, DateTimeOffset.UtcNow.AddMinutes(-10), DateTimeOffset.UtcNow.AddDays(-3), DateTimeOffset.UtcNow.AddDays(-3), DateTimeOffset.UtcNow);
+
     public Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<StorageTableSummaryResult>>(
         [
@@ -1411,13 +1606,13 @@ internal sealed class FakeInstanceSettingsService(IOptions<DashboardOptions> das
                 false,
                 true,
                 new DashboardSnapshotPollingSettingsResult(
-                    30,
-                    30,
-                    10,
-                    30,
                     5,
                     5,
-                    3),
+                    5,
+                    5,
+                    5,
+                    5,
+                    5),
                 options.Polling.OverviewSeconds,
                 options.Polling.MetricsSeconds,
                 options.Polling.JobsSeconds,

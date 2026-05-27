@@ -1,21 +1,24 @@
 @page "/graph"
+@using System.Globalization
 @using Memory.Application
 @using Microsoft.JSInterop
 @inject IContextHubApiClient ApiClient
 @inject IJSRuntime JSRuntime
 @inject NavigationManager NavigationManager
 @inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+@inject IOptions<DashboardOptions> DashboardOptionsAccessor
 @implements IAsyncDisposable
 
 <PageTitle>Context Hub | 記憶圖譜</PageTitle>
 
 <PageViewport Title="記憶圖譜"
-              Subtitle="依 ProjectId、Tag、Query 檢閱 explicit links 與 similarity 鄰居。"
+              Subtitle="以關聯鄰域、hub 節點與 similarity layer 檢閱記憶之間真正可追溯的脈絡。"
               BodyClass="page-viewport-body graph-page-body">
     <Actions>
         <div class="page-actions-status">
             <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                           IsRefreshing="_loading" />
+                           IsRefreshing="_loading"
+                           PollingIntervalSeconds="GraphPollingIntervalSeconds" />
         </div>
         <div class="page-actions-secondary">
             <InfoPopover Label="顯示圖譜模式說明" Title="圖譜模式">
@@ -33,12 +36,13 @@
     <ChildContent>
         <div class="graph-workspace">
             <section class="panel graph-filter-panel">
-                <div class="panel-title">篩選與模式</div>
-                <div class="graph-filter-stack">
-                    <label>
-                        <span>關鍵字查詢</span>
-                        <input @bind="_query" placeholder="搜尋標題 / 摘要 / 來源參照" />
-                    </label>
+                <div class="filter-panel-heading">
+                    <div>
+                        <div class="panel-title">圖譜範圍</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">保留最常用的 project、模式與節點上限，次要條件收進進階篩選。</div>
+                    </div>
+                </div>
+                <div class="graph-filter-stack graph-filter-quick-stack">
                     <label>
                         <span>專案檢視</span>
                         <select aria-label="專案檢視"
@@ -53,61 +57,10 @@
                         <small class="graph-field-note">可直接切到全部專案整合狀態，或只看單一 project 的圖譜。</small>
                     </label>
                     <label>
-                        <span>參考專案</span>
-                        <input @bind="_includedProjectIds" placeholder="以逗號分隔" />
-                        <small class="graph-field-note">僅在單一專案模式下，用來擴充跨專案鄰居。</small>
-                    </label>
-                    <label>
-                        <span>標籤 (Tag)</span>
-                        <input @bind="_tag" placeholder="例如 graph, api" />
-                    </label>
-                    <label>
-                        <span>來源類型</span>
-                        <input @bind="_sourceType" placeholder="例如 codex, document" />
-                    </label>
-                    <label>
-                        <span>查詢模式</span>
-                        <select @bind="_queryMode">
-                            <option value="@MemoryQueryMode.CurrentOnly">目前專案</option>
-                            <option value="@MemoryQueryMode.CurrentPlusReferencedProjects">目前 + 參考專案</option>
-                            <option value="@MemoryQueryMode.SummaryOnly">共用綜合層</option>
-                        </select>
-                    </label>
-                    <label>
                         <span>圖譜模式</span>
                         <select @bind="_graphMode">
                             <option value="@MemoryGraphMode.Seeded">Seeded</option>
                             <option value="@MemoryGraphMode.ProjectFull">ProjectFull</option>
-                        </select>
-                    </label>
-                    <label>
-                        <span>範圍</span>
-                        <select @bind="_scope">
-                            <option value="">全部範圍</option>
-                            @foreach (var scope in Enum.GetValues<MemoryScope>())
-                            {
-                                <option value="@scope">@DashboardText.Label(scope)</option>
-                            }
-                        </select>
-                    </label>
-                    <label>
-                        <span>類型</span>
-                        <select @bind="_memoryType">
-                            <option value="">全部類型</option>
-                            @foreach (var type in Enum.GetValues<MemoryType>())
-                            {
-                                <option value="@type">@DashboardText.Label(type)</option>
-                            }
-                        </select>
-                    </label>
-                    <label>
-                        <span>狀態</span>
-                        <select @bind="_status">
-                            <option value="">全部狀態</option>
-                            @foreach (var status in Enum.GetValues<MemoryStatus>())
-                            {
-                                <option value="@status">@DashboardText.Label(status)</option>
-                            }
                         </select>
                     </label>
                     <label>
@@ -116,28 +69,90 @@
                     </label>
                     <label class="toggle-field">
                         <input type="checkbox" @bind="_includeSimilarity" />
-                        <span>計算 similarity neighbors</span>
+                        <span>顯示 similarity 邊</span>
                     </label>
                     <label class="toggle-field">
                         <input type="checkbox" @bind="_useSummaryLayer" />
                         <span>一併讀取綜合層</span>
                     </label>
                 </div>
+                <details class="filter-advanced graph-advanced-filter">
+                    <summary>
+                        <span>進階資料條件</span>
+                        <small>參考專案、Tag、來源、Scope、Type、Status</small>
+                    </summary>
+                    <div class="graph-filter-stack graph-filter-advanced-stack">
+                        <label>
+                            <span>參考專案</span>
+                            <input @bind="_includedProjectIds" placeholder="以逗號分隔" />
+                            <small class="graph-field-note">僅在單一專案模式下，用來擴充跨專案鄰居。</small>
+                        </label>
+                        <label>
+                            <span>標籤 (Tag)</span>
+                            <input @bind="_tag" placeholder="例如 graph, api" />
+                        </label>
+                        <label>
+                            <span>來源類型</span>
+                            <input @bind="_sourceType" placeholder="例如 codex, document" />
+                        </label>
+                        <label>
+                            <span>查詢模式</span>
+                            <select @bind="_queryMode">
+                                <option value="@MemoryQueryMode.CurrentOnly">目前專案</option>
+                                <option value="@MemoryQueryMode.CurrentPlusReferencedProjects">目前 + 參考專案</option>
+                                <option value="@MemoryQueryMode.SummaryOnly">共用綜合層</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>範圍</span>
+                            <select @bind="_scope">
+                                <option value="">全部範圍</option>
+                                @foreach (var scope in Enum.GetValues<MemoryScope>())
+                                {
+                                    <option value="@scope">@DashboardText.Label(scope)</option>
+                                }
+                            </select>
+                        </label>
+                        <label>
+                            <span>類型</span>
+                            <select @bind="_memoryType">
+                                <option value="">全部類型</option>
+                                @foreach (var type in Enum.GetValues<MemoryType>())
+                                {
+                                    <option value="@type">@DashboardText.Label(type)</option>
+                                }
+                            </select>
+                        </label>
+                        <label>
+                            <span>狀態</span>
+                            <select @bind="_status">
+                                <option value="">全部狀態</option>
+                                @foreach (var status in Enum.GetValues<MemoryStatus>())
+                                {
+                                    <option value="@status">@DashboardText.Label(status)</option>
+                                }
+                            </select>
+                        </label>
+                    </div>
+                </details>
             </section>
 
             <section class="panel graph-canvas-panel @ExpandedCanvasCss">
                 <div class="graph-panel-header">
                     <div class="graph-panel-header-copy">
-                        <div class="panel-title">Graph Explorer</div>
-                        <div class="table-subtitle">卡片節點、顯式 links 與 similarity 圖層。</div>
+                        <div class="panel-title">記憶關聯</div>
+                        <div class="table-subtitle">以文件關聯圖的方式檢視分類、主要關聯與相鄰記憶。</div>
                         <div class="graph-status-strip">
                             <span class="graph-status-chip">@CurrentProjectScopeLabel</span>
                             <span class="graph-status-chip">@GraphModeLabel</span>
+                            <span class="graph-status-chip">@GraphInsights.ComponentLabel</span>
+                            <span class="graph-status-chip">@AutoRefreshLabel</span>
                         </div>
                     </div>
                     <div class="graph-toolbar">
                         <span class="graph-toolbar-chip">@DashboardFormatting.Integer(VisibleNodes.Count) 節點</span>
                         <span class="graph-toolbar-chip">@DashboardFormatting.Integer(VisibleEdges.Count) 邊</span>
+                        <span class="graph-toolbar-chip">@DashboardFormatting.Integer(SelectedNeighborRelations.Count) 相鄰</span>
                         <span class="graph-toolbar-chip graph-toolbar-chip-live" data-graph-zoom-chip>Zoom 1.00x</span>
                         <button type="button" class="ghost-button" @onclick="ZoomOutAsync" disabled="@(_loading || _graph?.Nodes.Count == 0)">-</button>
                         <button type="button" class="ghost-button" @onclick="ZoomInAsync" disabled="@(_loading || _graph?.Nodes.Count == 0)">+</button>
@@ -156,13 +171,72 @@
                     </div>
                 }
 
+                <div class="graph-view-toolbar" aria-label="圖譜顯示控制">
+                    <label class="graph-view-field graph-view-search-field">
+                        <span>搜尋</span>
+                        <input @bind="_viewQuery"
+                               @bind:event="oninput"
+                               type="search"
+                               autocomplete="off"
+                               placeholder="標題、摘要、專案、標籤、來源" />
+                    </label>
+                    <label class="graph-view-field">
+                        <span>分類</span>
+                        <select @bind="_viewCategory">
+                            <option value="@AllGraphCategoryValue">全部</option>
+                            @foreach (var option in GraphCategoryOptions)
+                            {
+                                <option value="@option.Value">@option.Label</option>
+                            }
+                        </select>
+                    </label>
+                    <label class="graph-view-field graph-view-mode-field">
+                        <span>顯示</span>
+                        <select @bind="_viewDisplayMode">
+                            <option value="@GraphDisplayConnected">關聯節點</option>
+                            <option value="@GraphDisplayAll">全部節點</option>
+                            <option value="@GraphDisplayNeighborhood">相鄰探索</option>
+                        </select>
+                    </label>
+                    <label class="graph-view-toggle">
+                        <input type="checkbox" @bind="_viewShowSimilarityEdges" />
+                        <span>相似關聯</span>
+                    </label>
+                    <label class="graph-view-toggle">
+                        <input type="checkbox" @bind="_viewShowIsolatedNodes" />
+                        <span>孤立節點</span>
+                    </label>
+                    <label class="graph-view-toggle">
+                        <input type="checkbox" @bind="_viewShowLabels" />
+                        <span>節點標籤</span>
+                    </label>
+                    <div class="graph-view-toolbar-metrics" aria-live="polite" aria-label="目前圖面統計">
+                        <span class="graph-view-stat-chip"><span>節點</span><strong>@DashboardFormatting.Integer(VisibleNodes.Count)</strong></span>
+                        <span class="graph-view-stat-chip"><span>關聯</span><strong>@DashboardFormatting.Integer(VisibleEdges.Count)</strong></span>
+                        <span class="graph-view-stat-chip"><span>分類</span><strong>@DashboardFormatting.Integer(VisibleCategoryCount)</strong></span>
+                    </div>
+                </div>
+
                 <div class="graph-legend">
-                    <span class="graph-legend-item"><span class="graph-legend-line graph-legend-line-explicit"></span>Explicit</span>
-                    <span class="graph-legend-item"><span class="graph-legend-line graph-legend-line-similar"></span>Similarity</span>
+                    <span class="graph-legend-item"><span class="graph-legend-line graph-legend-line-explicit"></span>主要關聯</span>
+                    <span class="graph-legend-item"><span class="graph-legend-line graph-legend-line-similar"></span>相似關聯</span>
                     <span class="graph-legend-item"><span class="graph-legend-seed"></span>Seed</span>
+                    <span class="graph-legend-item"><span class="graph-legend-node graph-legend-node-hub"></span>Hub</span>
+                    <span class="graph-legend-item"><span class="graph-legend-node graph-legend-node-bridge"></span>Bridge</span>
                     <span class="graph-legend-item graph-legend-hint">滾輪縮放</span>
-                    <span class="graph-legend-item graph-legend-hint">拖曳空白處平移</span>
+                    <span class="graph-legend-item graph-legend-hint">拖曳圖面平移</span>
                     <span class="graph-legend-item graph-legend-hint">雙擊重整視角</span>
+                </div>
+
+                <div class="graph-insight-strip" aria-label="關聯洞察">
+                    <span><strong>@DashboardFormatting.Integer(GraphInsights.HubCount)</strong> hub nodes</span>
+                    <span><strong>@DashboardFormatting.Integer(GraphInsights.IsolatedCount)</strong> isolated</span>
+                    <span><strong>@DashboardFormatting.Integer(GraphInsights.ExplicitEdgeCount)</strong> explicit</span>
+                    <span><strong>@DashboardFormatting.Integer(GraphInsights.SimilarityEdgeCount)</strong> similar</span>
+                    @if (!string.IsNullOrWhiteSpace(GraphInsights.TopHubTitle))
+                    {
+                        <span class="graph-insight-primary">Top hub · @GraphInsights.TopHubTitle</span>
+                    }
                 </div>
 
                 <div class="graph-scroll-shell" @ref="_viewportRef">
@@ -178,60 +252,102 @@
                         else
                         {
                             <div class="graph-canvas" style="@($"width:{Canvas.Width}px;height:{Canvas.Height}px;")">
-                                <svg class="graph-edges-layer" viewBox="@Canvas.ViewBox" aria-hidden="true">
+                                <svg class="graph-view-svg" viewBox="@Canvas.ViewBox" role="img" aria-label="記憶關聯圖">
                                     @foreach (var edge in Canvas.Edges)
                                     {
-                                        <line class="graph-edge @EdgeClass(edge.Edge.EdgeType)"
+                                        <line class="graph-edge @EdgeVisualClass(edge)"
+                                              style="@BuildEdgeStyle(edge)"
                                               x1="@edge.FromCenterX"
                                               y1="@edge.FromCenterY"
                                               x2="@edge.ToCenterX"
                                               y2="@edge.ToCenterY" />
                                     }
+                                    @foreach (var node in Canvas.Nodes)
+                                    {
+                                        var nodeId = node.Node.Id;
+                                        <a @key="nodeId"
+                                           href="@BuildNodeSelectionHref(nodeId)"
+                                           class="@BuildNodeVisualClass(node)"
+                                           style="@BuildNodeStyle(node)"
+                                           transform="@BuildNodeTransform(node)"
+                                           @onclick="() => SelectNodeAsync(nodeId)"
+                                           role="button"
+                                           aria-label="@BuildNodeAccessibleLabel(node.Node)"
+                                           data-graph-node-id="@nodeId"
+                                           data-graph-node-weight="@FormatInvariant(NodeWeight(node.Node))">
+                                            <title>@BuildNodeAccessibleLabel(node.Node)</title>
+                                            <rect class="graph-view-node-hit"
+                                                  x="@FormatInvariant(BuildNodeHitX(node.Node))"
+                                                  y="@FormatInvariant(BuildNodeHitY(node.Node))"
+                                                  width="@FormatInvariant(BuildNodeHitWidth(node.Node))"
+                                                  height="@FormatInvariant(BuildNodeHitHeight(node.Node))"
+                                                  rx="6" />
+                                            <circle r="@FormatInvariant(BuildNodeRadius(node.Node))" />
+                                            <svg:text class="graph-view-node-initial"
+                                                      x="0"
+                                                      y="0"
+                                                      aria-hidden="true">
+                                                @AbbreviateSource(node.Node.SourceLabel)
+                                            </svg:text>
+                                            <svg:text class="@BuildNodeTitleClass()"
+                                                      x="@FormatInvariant(BuildNodeRadius(node.Node) + 5d)"
+                                                      y="4">
+                                                @node.Node.Title
+                                            </svg:text>
+                                        </a>
+                                    }
                                 </svg>
-
-                                @foreach (var node in Canvas.Nodes)
-                                {
-                                    var nodeId = node.Node.Id;
-                                    <a @key="nodeId"
-                                       href="@BuildNodeSelectionHref(nodeId)"
-                                       class="graph-node-card @(node.IsSelected ? "selected" : string.Empty) @(node.IsSeed ? "graph-node-seed" : string.Empty)"
-                                       style="@($"left:{node.X}px;top:{node.Y}px;width:{node.Width}px;height:{node.Height}px;")">
-                                        <span class="graph-node-header">
-                                            @if (!string.IsNullOrWhiteSpace(node.Node.ThumbnailUrl))
-                                            {
-                                                <img class="graph-node-media" src="@node.Node.ThumbnailUrl" alt="" />
-                                            }
-                                            else if (!string.IsNullOrWhiteSpace(node.Node.FaviconUrl))
-                                            {
-                                                <img class="graph-node-favicon" src="@node.Node.FaviconUrl" alt="" />
-                                            }
-                                            else
-                                            {
-                                                <span class="graph-node-source-badge">@AbbreviateSource(node.Node.SourceLabel)</span>
-                                            }
-                                            <span class="graph-node-meta">
-                                                <span class="graph-node-type">@DashboardText.Label(node.Node.MemoryType)</span>
-                                                <span class="graph-node-project" title="@node.Node.ProjectId">@node.Node.ProjectId</span>
-                                            </span>
-                                        </span>
-                                        <span class="graph-node-title" title="@node.Node.Title">@node.Node.Title</span>
-                                        <span class="graph-node-summary" title="@node.Node.Summary">@node.Node.Summary</span>
-                                        <span class="graph-node-tags" title="@string.Join(", ", node.Node.Tags)">@BuildTagText(node.Node.Tags)</span>
-                                        <span class="graph-node-footer">
-                                            <span>@DashboardFormatting.Integer(node.Node.ExplicitLinkCount) explicit</span>
-                                            <span>@DashboardFormatting.Integer(node.Node.SimilarityNeighborCount) similar</span>
-                                        </span>
-                                    </a>
-                                }
                             </div>
                         }
+                    </div>
+                    <div class="graph-viewport-controls" role="toolbar" aria-label="圖面視角操作">
+                        <div class="graph-pan-pad">
+                            <button type="button" class="graph-viewport-button graph-pan-up" title="向上移動" aria-label="向上移動" @onclick="PanUpAsync">↑</button>
+                            <button type="button" class="graph-viewport-button graph-pan-left" title="向左移動" aria-label="向左移動" @onclick="PanLeftAsync">←</button>
+                            <button type="button" class="graph-viewport-button graph-pan-right" title="向右移動" aria-label="向右移動" @onclick="PanRightAsync">→</button>
+                            <button type="button" class="graph-viewport-button graph-pan-down" title="向下移動" aria-label="向下移動" @onclick="PanDownAsync">↓</button>
+                        </div>
+                        <div class="graph-zoom-pad">
+                            <button type="button" class="graph-viewport-button" title="放大" aria-label="放大" @onclick="ZoomInAsync">+</button>
+                            <button type="button" class="graph-viewport-button" title="縮小" aria-label="縮小" @onclick="ZoomOutAsync">−</button>
+                            <button type="button" class="graph-viewport-button" title="適應視圖" aria-label="適應視圖" @onclick="FitGraphAsync">⌂</button>
+                            <button type="button" class="graph-viewport-button" title="全螢幕顯示" aria-label="全螢幕顯示" @onclick="ToggleCanvasExpandedAsync">⛶</button>
+                        </div>
                     </div>
                 </div>
             </section>
 
             <section class="panel graph-detail-panel">
-                <div class="panel-title">Node Detail</div>
+                <div class="panel-title">關聯探索</div>
                 <div class="panel-scroll-body detail-scroll-shell graph-detail-scroll">
+                    <section class="memory-detail-section graph-overview-section">
+                        <div class="graph-view-kicker">目前視圖</div>
+                        <div class="graph-view-details-title">@GraphOverviewTitle</div>
+                        <div class="graph-view-details-copy">單擊節點查看內容與相鄰記憶；使用搜尋、分類與顯示模式縮小圖面。</div>
+                        <div class="graph-view-metrics">
+                            <div class="graph-view-metric"><span>節點</span><strong>@DashboardFormatting.Integer(VisibleNodes.Count)</strong></div>
+                            <div class="graph-view-metric"><span>關聯</span><strong>@DashboardFormatting.Integer(VisibleEdges.Count)</strong></div>
+                            <div class="graph-view-metric"><span>分類</span><strong>@DashboardFormatting.Integer(VisibleCategoryCount)</strong></div>
+                        </div>
+                        <div class="graph-view-section graph-view-legend-section">
+                            <div class="graph-view-section-title">線條圖例</div>
+                            <div class="graph-view-legend-row"><span class="graph-view-legend-line is-explicit"></span><span>主要關聯</span></div>
+                            <div class="graph-view-legend-row"><span class="graph-view-legend-line is-similar"></span><span>相似關聯</span></div>
+                            <div class="graph-view-legend-row"><span class="graph-view-legend-line is-selected"></span><span>目前節點鄰域</span></div>
+                        </div>
+                        <div class="graph-view-section graph-view-category-section">
+                            <div class="graph-view-section-title">主要分類</div>
+                            @foreach (var category in VisibleCategorySummaries)
+                            {
+                                <button type="button"
+                                        class="graph-view-category-row"
+                                        @onclick="() => SelectViewCategory(category.Value)">
+                                    <span>@category.Label</span>
+                                    <strong>@DashboardFormatting.Integer(category.Count)</strong>
+                                </button>
+                            }
+                        </div>
+                    </section>
                     @if (SelectedGraphNode is null)
                     {
                         <div class="empty-inline">點選節點後顯示內容、revisions、links 與來源上下文。</div>
@@ -259,6 +375,33 @@
                             </dl>
 
                             <div class="code-block graph-detail-summary">@SelectedGraphNode.Summary</div>
+
+                            <section class="memory-detail-section graph-neighbor-section">
+                                <div class="subpanel-title">Relationship Neighborhood</div>
+                                @if (SelectedNeighborRelations.Count == 0)
+                                {
+                                    <div class="empty-inline">這個節點在目前篩選圖內沒有直接鄰居。</div>
+                                }
+                                else
+                                {
+                                    <div class="graph-neighbor-list">
+                                        @foreach (var relation in SelectedNeighborRelations.Take(10))
+                                        {
+                                            <a class="graph-neighbor-item @RelationClass(relation)"
+                                               href="@BuildNodeSelectionHref(relation.Node.Id)">
+                                                <span class="graph-neighbor-kicker">
+                                                    <span>@relation.DirectionLabel</span>
+                                                    <span>@relation.Edge.Label</span>
+                                                </span>
+                                                <span class="graph-neighbor-title">@relation.Node.Title</span>
+                                                <span class="graph-neighbor-meta">
+                                                    @relation.Node.ProjectId · @DashboardText.Label(relation.Node.MemoryType) · @relation.StrengthLabel
+                                                </span>
+                                            </a>
+                                        }
+                                    </div>
+                                }
+                            </section>
 
                             @if (_selectedDetails?.SourceContext is not null)
                             {
@@ -329,7 +472,16 @@
     public Guid? SelectedNodeQueryId { get; set; }
 
     private const string AllProjectsSelectionValue = "__all__";
-    private string? _query;
+    private const string AllGraphCategoryValue = "__all__";
+    private const string GraphDisplayConnected = "connected";
+    private const string GraphDisplayAll = "all";
+    private const string GraphDisplayNeighborhood = "neighborhood";
+    private string? _viewQuery;
+    private string _viewCategory = AllGraphCategoryValue;
+    private string _viewDisplayMode = GraphDisplayConnected;
+    private bool _viewShowSimilarityEdges = true;
+    private bool _viewShowIsolatedNodes;
+    private bool _viewShowLabels = true;
     private string? _projectIdInput;
     private string? _projectQuery;
     private string? _includedProjectIds;
@@ -341,6 +493,9 @@
     private string? _status;
     private string? _currentProjectId;
     private IReadOnlyList<ProjectSuggestionResult> _projectOptions = [];
+    private readonly CancellationTokenSource _cts = new();
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    private Task? _pollingTask;
     private MemoryQueryMode _queryMode = MemoryQueryMode.CurrentOnly;
     private MemoryGraphMode _graphMode = MemoryGraphMode.Seeded;
     private bool _useSummaryLayer;
@@ -378,27 +533,46 @@
     private IReadOnlyList<MemoryGraphEdgeResult> VisibleEdges
         => _graph is null
             ? []
-            : _graph.Edges
-                .Where(edge => ResolveVisibleNodeIds().Contains(edge.FromId) && ResolveVisibleNodeIds().Contains(edge.ToId))
-                .ToArray();
+            : BuildVisibleEdges(ResolveVisibleNodeIds()).ToArray();
 
     private GraphCanvasLayout Canvas => BuildCanvasLayout(VisibleNodes, VisibleEdges);
+    private GraphInsightSummary GraphInsights => BuildGraphInsights(VisibleNodes, VisibleEdges);
+    private IReadOnlyList<GraphNeighborRelation> SelectedNeighborRelations => BuildSelectedNeighborRelations();
     private string PanContentDimensionsStyle => $"width:{Canvas.Width}px;height:{Canvas.Height}px;";
+    private IReadOnlyList<GraphCategoryOption> GraphCategoryOptions => BuildGraphCategoryOptions();
+    private IReadOnlyList<GraphCategorySummary> VisibleCategorySummaries => BuildVisibleCategorySummaries();
+    private int VisibleCategoryCount => VisibleNodes.Select(BuildCategoryKey).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+    private string GraphOverviewTitle
+        => string.IsNullOrWhiteSpace(_viewQuery) && string.Equals(_viewCategory, AllGraphCategoryValue, StringComparison.Ordinal)
+            ? "關聯探索"
+            : "篩選後視圖";
     private bool IsAllProjectsSelected => string.Equals(_selectedProjectFilter, AllProjectsSelectionValue, StringComparison.Ordinal);
     private string CurrentProjectScopeLabel => _selectedProjectFilter == AllProjectsSelectionValue ? "全部專案整合視圖" : $"Project · {_selectedProjectFilter}";
     private string GraphModeLabel => _graphMode == MemoryGraphMode.ProjectFull ? "ProjectFull 模式" : "Seeded 模式";
+    private int GraphPollingIntervalSeconds => DashboardOptionsAccessor.Value.Polling.GraphSeconds;
+    private string AutoRefreshLabel => GraphPollingIntervalSeconds <= 0 ? "背景刷新關閉" : $"背景每 {GraphPollingIntervalSeconds} 秒刷新";
     private string ExpandedCanvasCss => _isCanvasExpanded ? "graph-canvas-panel-expanded" : string.Empty;
 
     protected override async Task OnInitializedAsync()
     {
-        var snapshot = await RuntimeSettingsAccessor.GetCurrentAsync(CancellationToken.None);
-        _currentProjectId = DashboardProjectSelection.ResolveCurrentProjectId(snapshot.Behavior.DefaultProjectId);
-        _queryMode = snapshot.Behavior.DefaultQueryMode;
-        _useSummaryLayer = snapshot.Behavior.DefaultUseSummaryLayer;
-        await LoadProjectOptionsAsync();
-        _selectedProjectFilter = AllProjectsSelectionValue;
-        ApplyProjectSelection(enforceIntegratedViewDefaults: true);
-        await LoadAsync();
+        try
+        {
+            var snapshot = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
+            _currentProjectId = DashboardProjectSelection.ResolveCurrentProjectId(snapshot.Behavior.DefaultProjectId);
+            _queryMode = snapshot.Behavior.DefaultQueryMode;
+            _useSummaryLayer = snapshot.Behavior.DefaultUseSummaryLayer;
+            await LoadProjectOptionsAsync(_cts.Token);
+            _selectedProjectFilter = AllProjectsSelectionValue;
+            ApplyProjectSelection(enforceIntegratedViewDefaults: true);
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            ShowMessage($"無法載入記憶圖譜：{ex.Message}");
+        }
     }
 
     protected override async Task OnParametersSetAsync()
@@ -416,6 +590,11 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (firstRender)
+        {
+            StartPollingLoop();
+        }
+
         try
         {
             await JSRuntime.InvokeVoidAsync("contextHubGraph.register", _viewportRef, _panContentRef);
@@ -444,15 +623,31 @@
     }
 
     private async Task LoadAsync()
+        => await LoadGraphAsync(preserveInteraction: false, waitForLock: true);
+
+    private async Task LoadGraphAsync(bool preserveInteraction, bool waitForLock)
     {
-        _loading = true;
-        await InvokeAsync(StateHasChanged);
+        if (waitForLock)
+        {
+            await _refreshGate.WaitAsync(_cts.Token);
+        }
+        else if (!await _refreshGate.WaitAsync(0, _cts.Token))
+        {
+            return;
+        }
 
         try
         {
+            var previousSelectedId = _selectedNodeId;
+            var previousFocusNodeId = _focusNodeId;
+            var previousExpandedNodeIds = _expandedNodeIds.ToArray();
+
+            _loading = true;
+            await InvokeAsync(StateHasChanged);
+
             _graph = await ApiClient.GetMemoryGraphAsync(
                 new MemoryGraphRequest(
-                    _query,
+                    null,
                     NormalizeEmpty(_tag),
                     NormalizeEmpty(_projectIdInput),
                     NormalizeEmpty(_projectQuery),
@@ -466,28 +661,56 @@
                     Parse<MemoryType>(_memoryType),
                     Parse<MemoryStatus>(_status),
                     NormalizeEmpty(_sourceType)),
-                CancellationToken.None);
+                _cts.Token);
 
-            _expandedNodeIds.Clear();
-            var nextId = ResolveInitialSelectionId();
+            var graphNodeIds = _graph.Nodes.Select(node => node.Id).ToHashSet();
+            Guid? nextId;
+            if (preserveInteraction)
+            {
+                nextId = previousSelectedId.HasValue && graphNodeIds.Contains(previousSelectedId.Value)
+                    ? previousSelectedId
+                    : ResolveInitialSelectionId();
+                _focusNodeId = previousFocusNodeId.HasValue && graphNodeIds.Contains(previousFocusNodeId.Value)
+                    ? previousFocusNodeId
+                    : null;
+                _expandedNodeIds.Clear();
+                foreach (var nodeId in previousExpandedNodeIds.Where(graphNodeIds.Contains))
+                {
+                    _expandedNodeIds.Add(nodeId);
+                }
+            }
+            else
+            {
+                _expandedNodeIds.Clear();
+                nextId = ResolveInitialSelectionId();
+                _focusNodeId = null;
+                _fitGraphPending = true;
+            }
+
             _selectedNodeId = nextId;
-            _focusNodeId = null;
             _selectedDetails = nextId is Guid selectedId && selectedId != Guid.Empty
-                ? await ApiClient.GetMemoryDetailsAsync(selectedId, CancellationToken.None)
+                ? await ApiClient.GetMemoryDetailsAsync(selectedId, _cts.Token)
                 : null;
             _lastUpdatedAt = DateTimeOffset.UtcNow;
-            _fitGraphPending = true;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            ShowMessage($"無法更新記憶圖譜：{ex.Message}");
         }
         finally
         {
             _loading = false;
+            _refreshGate.Release();
         }
     }
 
     private async Task SelectNodeAsync(Guid id)
     {
         _selectedNodeId = id;
-        _selectedDetails = await ApiClient.GetMemoryDetailsAsync(id, CancellationToken.None);
+        _selectedDetails = await ApiClient.GetMemoryDetailsAsync(id, _cts.Token);
     }
 
     private Task ToggleFocusNodeAsync()
@@ -551,6 +774,25 @@
     private async Task ResetGraphAsync()
         => await InvokeViewportCommandAsync("reset");
 
+    private async Task PanUpAsync()
+        => await InvokeViewportCommandAsync("panUp");
+
+    private async Task PanDownAsync()
+        => await InvokeViewportCommandAsync("panDown");
+
+    private async Task PanLeftAsync()
+        => await InvokeViewportCommandAsync("panLeft");
+
+    private async Task PanRightAsync()
+        => await InvokeViewportCommandAsync("panRight");
+
+    private Task SelectViewCategory(string value)
+    {
+        _viewCategory = value;
+        _fitGraphPending = true;
+        return Task.CompletedTask;
+    }
+
     private async Task ToggleCanvasExpandedAsync()
     {
         _isCanvasExpanded = !_isCanvasExpanded;
@@ -576,47 +818,211 @@
 
     private HashSet<Guid> ResolveVisibleNodeIds()
     {
-        var nodes = _graph?.Nodes ?? [];
-        var visible = nodes.Select(node => node.Id).ToHashSet();
-        if (_focusNodeId is null)
-        {
-            return visible;
-        }
+        var baseIds = BuildViewFilteredNodeIds();
+        var visibleEdges = BuildVisibleEdges(baseIds).ToArray();
 
-        visible.Clear();
-        foreach (var seedId in SeedNodeIds)
+        if (string.Equals(_viewDisplayMode, GraphDisplayConnected, StringComparison.Ordinal) ||
+            (!_viewShowIsolatedNodes && !HasActiveViewSearch))
         {
-            visible.Add(seedId);
-        }
-
-        visible.Add(_focusNodeId.Value);
-        AddNeighborIds(_focusNodeId.Value, visible);
-
-        foreach (var expandedRoot in _expandedNodeIds)
-        {
-            var firstRing = GetNeighborIds(expandedRoot).ToArray();
-            foreach (var neighborId in firstRing)
+            var connectedIds = visibleEdges
+                .SelectMany(edge => new[] { edge.FromId, edge.ToId })
+                .ToHashSet();
+            if (connectedIds.Count > 0)
             {
-                visible.Add(neighborId);
-                AddNeighborIds(neighborId, visible);
+                baseIds.IntersectWith(connectedIds);
             }
         }
 
-        return visible;
+        if (string.Equals(_viewDisplayMode, GraphDisplayNeighborhood, StringComparison.Ordinal) &&
+            SelectedGraphNode is { } selected &&
+            baseIds.Contains(selected.Id))
+        {
+            var neighborhood = new HashSet<Guid> { selected.Id };
+            AddNeighborIds(selected.Id, neighborhood, visibleEdges);
+            baseIds.IntersectWith(neighborhood);
+        }
+
+        if (_focusNodeId is null)
+        {
+            return baseIds;
+        }
+
+        var focusedVisible = new HashSet<Guid>();
+        foreach (var seedId in SeedNodeIds.Where(baseIds.Contains))
+        {
+            focusedVisible.Add(seedId);
+        }
+
+        if (baseIds.Contains(_focusNodeId.Value))
+        {
+            focusedVisible.Add(_focusNodeId.Value);
+            AddNeighborIds(_focusNodeId.Value, focusedVisible, visibleEdges);
+        }
+
+        foreach (var expandedRoot in _expandedNodeIds.Where(baseIds.Contains))
+        {
+            var firstRing = GetNeighborIds(expandedRoot, visibleEdges).Where(baseIds.Contains).ToArray();
+            foreach (var neighborId in firstRing)
+            {
+                focusedVisible.Add(neighborId);
+                AddNeighborIds(neighborId, focusedVisible, visibleEdges);
+            }
+        }
+
+        focusedVisible.IntersectWith(baseIds);
+        return focusedVisible;
     }
 
-    private IEnumerable<Guid> GetNeighborIds(Guid nodeId)
+    private bool HasActiveViewSearch => !string.IsNullOrWhiteSpace(_viewQuery);
+
+    private HashSet<Guid> BuildViewFilteredNodeIds()
+        => (_graph?.Nodes ?? [])
+            .Where(MatchesViewQuery)
+            .Where(MatchesViewCategory)
+            .Select(node => node.Id)
+            .ToHashSet();
+
+    private IEnumerable<MemoryGraphEdgeResult> BuildVisibleEdges(IReadOnlySet<Guid> visibleNodeIds)
         => (_graph?.Edges ?? [])
+            .Where(edge => visibleNodeIds.Contains(edge.FromId) && visibleNodeIds.Contains(edge.ToId))
+            .Where(IsViewEdgeVisible);
+
+    private IEnumerable<Guid> GetNeighborIds(Guid nodeId, IEnumerable<MemoryGraphEdgeResult>? edges = null)
+        => (edges ?? _graph?.Edges ?? [])
             .Where(edge => edge.FromId == nodeId || edge.ToId == nodeId)
             .Select(edge => edge.FromId == nodeId ? edge.ToId : edge.FromId)
             .Distinct();
 
-    private void AddNeighborIds(Guid nodeId, HashSet<Guid> visible)
+    private void AddNeighborIds(Guid nodeId, HashSet<Guid> visible, IEnumerable<MemoryGraphEdgeResult>? edges = null)
     {
-        foreach (var neighborId in GetNeighborIds(nodeId))
+        foreach (var neighborId in GetNeighborIds(nodeId, edges))
         {
             visible.Add(neighborId);
         }
+    }
+
+    private bool IsViewEdgeVisible(MemoryGraphEdgeResult edge)
+        => _viewShowSimilarityEdges ||
+           !string.Equals(edge.EdgeType, "similar", StringComparison.OrdinalIgnoreCase);
+
+    private bool MatchesViewQuery(MemoryGraphNodeResult node)
+    {
+        var query = NormalizeEmpty(_viewQuery);
+        if (query is null)
+        {
+            return true;
+        }
+
+        return ContainsInvariant(node.Title, query) ||
+               ContainsInvariant(node.Summary, query) ||
+               ContainsInvariant(node.ProjectId, query) ||
+               ContainsInvariant(node.SourceType, query) ||
+               ContainsInvariant(node.SourceRef, query) ||
+               node.Tags.Any(tag => ContainsInvariant(tag, query));
+    }
+
+    private bool MatchesViewCategory(MemoryGraphNodeResult node)
+    {
+        if (string.Equals(_viewCategory, AllGraphCategoryValue, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return string.Equals(_viewCategory, BuildCategoryValue(node), StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(_viewCategory, BuildTypeCategoryValue(node.MemoryType), StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(_viewCategory, BuildScopeCategoryValue(node.Scope), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ContainsInvariant(string? value, string query)
+        => value?.Contains(query, StringComparison.OrdinalIgnoreCase) == true;
+
+    private GraphInsightSummary BuildGraphInsights(
+        IReadOnlyList<MemoryGraphNodeResult> nodes,
+        IReadOnlyList<MemoryGraphEdgeResult> edges)
+    {
+        if (nodes.Count == 0)
+        {
+            return new GraphInsightSummary(0, 0, 0, null, 0, 0);
+        }
+
+        var nodeIds = nodes.Select(node => node.Id).ToHashSet();
+        var adjacency = nodeIds.ToDictionary(id => id, _ => new HashSet<Guid>());
+        foreach (var edge in edges)
+        {
+            if (!adjacency.ContainsKey(edge.FromId) || !adjacency.ContainsKey(edge.ToId))
+            {
+                continue;
+            }
+
+            adjacency[edge.FromId].Add(edge.ToId);
+            adjacency[edge.ToId].Add(edge.FromId);
+        }
+
+        var visited = new HashSet<Guid>();
+        var componentCount = 0;
+        foreach (var nodeId in nodeIds)
+        {
+            if (!visited.Add(nodeId))
+            {
+                continue;
+            }
+
+            componentCount++;
+            var queue = new Queue<Guid>();
+            queue.Enqueue(nodeId);
+            while (queue.TryDequeue(out var current))
+            {
+                foreach (var neighborId in adjacency[current])
+                {
+                    if (visited.Add(neighborId))
+                    {
+                        queue.Enqueue(neighborId);
+                    }
+                }
+            }
+        }
+
+        var topHub = nodes
+            .OrderByDescending(node => adjacency[node.Id].Count)
+            .ThenByDescending(node => node.Importance)
+            .FirstOrDefault();
+        var hubCount = nodes.Count(node => adjacency[node.Id].Count >= 3);
+
+        return new GraphInsightSummary(
+            componentCount,
+            nodes.Count(node => adjacency[node.Id].Count == 0),
+            hubCount,
+            topHub is not null && adjacency[topHub.Id].Count > 0 ? topHub.Title : null,
+            edges.Count(edge => string.Equals(edge.EdgeType, "explicit", StringComparison.OrdinalIgnoreCase)),
+            edges.Count(edge => string.Equals(edge.EdgeType, "similar", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private IReadOnlyList<GraphNeighborRelation> BuildSelectedNeighborRelations()
+    {
+        if (SelectedGraphNode is null || _graph is null)
+        {
+            return [];
+        }
+
+        var selectedId = SelectedGraphNode.Id;
+        var nodeLookup = _graph.Nodes.ToDictionary(node => node.Id);
+
+        return VisibleEdges
+            .Where(edge => edge.FromId == selectedId || edge.ToId == selectedId)
+            .Select(edge =>
+            {
+                var neighborId = edge.FromId == selectedId ? edge.ToId : edge.FromId;
+                return nodeLookup.TryGetValue(neighborId, out var node)
+                    ? new GraphNeighborRelation(node, edge, BuildRelationDirectionLabel(edge, selectedId), BuildRelationStrengthLabel(edge))
+                    : null;
+            })
+            .Where(relation => relation is not null)
+            .Select(relation => relation!)
+            .OrderByDescending(relation => string.Equals(relation.Edge.EdgeType, "explicit", StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(relation => relation.Edge.Score ?? 0)
+            .ThenByDescending(relation => NodeDegree(relation.Node))
+            .ThenBy(relation => relation.Node.Title, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private GraphCanvasLayout BuildCanvasLayout(IReadOnlyList<MemoryGraphNodeResult> nodes, IReadOnlyList<MemoryGraphEdgeResult> edges)
@@ -633,8 +1039,8 @@
 
     private GraphCanvasLayout BuildSeededLayout(IReadOnlyList<MemoryGraphNodeResult> nodes, IReadOnlyList<MemoryGraphEdgeResult> edges)
     {
-        const double nodeWidth = 272;
-        const double nodeHeight = 188;
+        const double nodeWidth = 34;
+        const double nodeHeight = 34;
         const double centerX = 0;
         const double centerY = 0;
         var seedIds = SeedNodeIds.ToHashSet();
@@ -672,8 +1078,8 @@
                 centerY,
                 nodeWidth,
                 nodeHeight,
-                212,
-                246,
+                132,
+                136,
                 -Math.PI / 2,
                 null,
                 false);
@@ -687,8 +1093,8 @@
             centerY,
             nodeWidth,
             nodeHeight,
-            Math.Max(seedOuterRadius + 268, 392),
-            248,
+            Math.Max(seedOuterRadius + 170, 218),
+            152,
             -Math.PI / 2,
             BuildPreferredAngles(explicitNodes, edges, positions, centerX, centerY),
             false);
@@ -701,8 +1107,8 @@
             centerY,
             nodeWidth,
             nodeHeight,
-            Math.Max(explicitPlacement.OuterRadius + 268, seedOuterRadius + 548),
-            256,
+            Math.Max(explicitPlacement.OuterRadius + 176, seedOuterRadius + 362),
+            158,
             -Math.PI / 2,
             BuildPreferredAngles(similarNodes, edges, anchorPositions, centerX, centerY),
             false);
@@ -713,13 +1119,8 @@
 
     private GraphCanvasLayout BuildProjectFullLayout(IReadOnlyList<MemoryGraphNodeResult> nodes, IReadOnlyList<MemoryGraphEdgeResult> edges)
     {
-        const double nodeWidth = 252;
-        const double nodeHeight = 180;
-        const double clusterGapX = 132;
-        const double clusterGapY = 136;
-        const double clusterPaddingTop = 36;
-        const double columnGap = 34;
-        const double rowGap = 30;
+        const double nodeWidth = 34;
+        const double nodeHeight = 34;
 
         var groups = nodes
             .GroupBy(node => IsAllProjectsSelected ? node.ProjectId : node.Tags.FirstOrDefault() ?? node.ProjectId)
@@ -727,49 +1128,44 @@
             .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var positions = new Dictionary<Guid, RenderedGraphNode>();
-        var cursorX = 0d;
-        var cursorY = 0d;
-        var currentRowHeight = 0d;
-        var dashboardColumns = Math.Clamp((int)Math.Ceiling(Math.Sqrt(groups.Length)), 1, 3);
-        var rowItemCount = 0;
-        var rowMaxWidth = 0d;
+        var clusterCount = Math.Max(groups.Length, 1);
+        var radiusX = Math.Max(210d, 92d * Math.Sqrt(nodes.Count) + (clusterCount * 18d));
+        var radiusY = Math.Max(170d, 74d * Math.Sqrt(nodes.Count) + (clusterCount * 14d));
 
-        foreach (var group in groups)
+        for (var groupIndex = 0; groupIndex < groups.Length; groupIndex++)
         {
+            var group = groups[groupIndex];
             var ordered = group
                 .OrderByDescending(node => node.ExplicitLinkCount + node.SimilarityNeighborCount)
                 .ThenByDescending(node => node.Importance)
                 .ThenBy(node => node.Title, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            var localColumns = ordered.Length >= 7 ? 3 : ordered.Length >= 3 ? 2 : 1;
-            var localRows = (int)Math.Ceiling(ordered.Length / (double)localColumns);
-            var clusterWidth = (localColumns * nodeWidth) + ((localColumns - 1) * columnGap);
-            var clusterHeight = clusterPaddingTop + (localRows * nodeHeight) + ((localRows - 1) * rowGap);
-
-            if (rowItemCount >= dashboardColumns)
+            var angle = clusterCount == 1
+                ? -Math.PI / 2
+                : ((Math.PI * 2 * groupIndex) / clusterCount) - (Math.PI / 2);
+            var clusterCenterX = Math.Cos(angle) * radiusX;
+            var clusterCenterY = Math.Sin(angle) * radiusY;
+            var localStartAngle = angle + Math.PI;
+            var localRadius = ordered.Length switch
             {
-                cursorX = 0;
-                cursorY += currentRowHeight + clusterGapY;
-                currentRowHeight = 0;
-                rowItemCount = 0;
-                rowMaxWidth = 0;
-            }
+                <= 1 => 0d,
+                <= 4 => 64d,
+                <= 8 => 86d,
+                _ => 108d
+            };
 
-            var clusterX = cursorX;
-            var clusterY = cursorY;
-            for (var index = 0; index < ordered.Length; index++)
-            {
-                var localColumn = index % localColumns;
-                var localRow = index / localColumns;
-                var x = clusterX + (localColumn * (nodeWidth + columnGap)) + (nodeWidth / 2);
-                var y = clusterY + clusterPaddingTop + (localRow * (nodeHeight + rowGap)) + (nodeHeight / 2);
-                positions[ordered[index].Id] = CreateRenderedNode(ordered[index], x, y, nodeWidth, nodeHeight);
-            }
-
-            cursorX += clusterWidth + clusterGapX;
-            currentRowHeight = Math.Max(currentRowHeight, clusterHeight);
-            rowItemCount++;
-            rowMaxWidth = Math.Max(rowMaxWidth, cursorX);
+            var placement = PlaceNodesOnShells(
+                ordered,
+                clusterCenterX,
+                clusterCenterY,
+                nodeWidth,
+                nodeHeight,
+                localRadius,
+                64,
+                localStartAngle,
+                BuildPreferredAngles(ordered, edges, positions, clusterCenterX, clusterCenterY),
+                true);
+            MergePositions(positions, placement.Positions);
         }
 
         return BuildCanvasFromPositions(positions, edges);
@@ -800,12 +1196,16 @@
         var nodeLookup = nodes.ToDictionary(node => node.Node.Id, node => node);
         var (minCanvasWidth, minCanvasHeight) = rawNodes.Length switch
         {
-            <= 1 => (720d, 520d),
-            <= 3 => (980d, 640d),
-            _ => (1180d, 760d)
+            <= 1 => (560d, 420d),
+            <= 3 => (760d, 520d),
+            _ => (880d, 600d)
         };
-        var maxX = Math.Max(minCanvasWidth, nodes.Max(node => node.X + node.Width) + padding);
-        var maxY = Math.Max(minCanvasHeight, nodes.Max(node => node.Y + node.Height) + padding);
+        var maxX = Math.Max(
+            minCanvasWidth,
+            nodes.Max(node => node.CenterX + BuildNodeRadius(node.Node) + EstimateNodeLabelWidth(node.Node)) + padding);
+        var maxY = Math.Max(
+            minCanvasHeight,
+            nodes.Max(node => node.CenterY + BuildNodeRadius(node.Node)) + padding);
         var renderedEdges = edges
             .Where(edge => nodeLookup.ContainsKey(edge.FromId) && nodeLookup.ContainsKey(edge.ToId))
             .Select(edge => new RenderedGraphEdge(
@@ -828,6 +1228,155 @@
             height,
             SeedNodeIds.Contains(node.Id),
             SelectedGraphNode?.Id == node.Id);
+
+    private string BuildNodeVisualClass(RenderedGraphNode node)
+    {
+        var classes = new List<string> { "graph-view-node" };
+        if (node.IsSelected)
+        {
+            classes.Add("selected");
+        }
+
+        if (node.IsSeed)
+        {
+            classes.Add("graph-node-seed");
+        }
+
+        if (IsHubNode(node.Node))
+        {
+            classes.Add("graph-node-hub");
+        }
+        else if (IsBridgeNode(node.Node))
+        {
+            classes.Add("graph-node-bridge");
+        }
+
+        if (SelectedGraphNode is { } selected && node.Node.Id != selected.Id)
+        {
+            if (IsDirectNeighbor(selected.Id, node.Node.Id))
+            {
+                classes.Add("graph-node-related");
+            }
+            else
+            {
+                classes.Add("graph-node-muted");
+            }
+        }
+
+        return string.Join(" ", classes);
+    }
+
+    private string BuildNodeStyle(RenderedGraphNode node)
+        => string.Create(
+            CultureInfo.InvariantCulture,
+            $"--node-weight:{NodeWeight(node.Node):0.###};--node-radius:{BuildNodeRadius(node.Node):0.#}px;--node-color:{BuildNodeColor(node.Node)};");
+
+    private static string BuildNodeTransform(RenderedGraphNode node)
+        => string.Create(CultureInfo.InvariantCulture, $"translate({node.CenterX:0.###} {node.CenterY:0.###})");
+
+    private string BuildNodeTitleClass()
+        => _viewShowLabels ? "graph-node-title" : "graph-node-title graph-node-title-hidden";
+
+    private static string BuildNodeAccessibleLabel(MemoryGraphNodeResult node)
+        => string.Create(
+            CultureInfo.InvariantCulture,
+            $"{node.Title}，{BuildNodeCategoryLabel(node)}，主要關聯 {node.ExplicitLinkCount}，相似關聯 {node.SimilarityNeighborCount}");
+
+    private static double BuildNodeHitX(MemoryGraphNodeResult node)
+        => -(BuildNodeRadius(node) + 5d);
+
+    private static double BuildNodeHitY(MemoryGraphNodeResult node)
+        => -(BuildNodeHitHeight(node) / 2d);
+
+    private static double BuildNodeHitWidth(MemoryGraphNodeResult node)
+        => (BuildNodeRadius(node) * 2d) + 10d;
+
+    private static double BuildNodeHitHeight(MemoryGraphNodeResult node)
+        => Math.Max((BuildNodeRadius(node) * 2d) + 12d, 30d);
+
+    private static double EstimateNodeLabelWidth(MemoryGraphNodeResult node)
+        => Math.Clamp(StringInfo.ParseCombiningCharacters(node.Title).Length * 6.2d, 52d, 230d);
+
+    private static double BuildNodeRadius(MemoryGraphNodeResult node)
+        => Math.Clamp(8.5 + (NodeDegree(node) * 0.45) + ((double)node.Importance * 1.2), 9, 13.5);
+
+    private static string BuildNodeColor(MemoryGraphNodeResult node)
+    {
+        string[] palette =
+        [
+            "#2da44e",
+            "#2563eb",
+            "#7c3aed",
+            "#db2777",
+            "#0891b2",
+            "#ca8a04",
+            "#dc2626",
+            "#475569"
+        ];
+        var key = string.IsNullOrWhiteSpace(node.ProjectId) ? node.MemoryType.ToString() : node.ProjectId;
+        var hash = 0;
+        foreach (var ch in key)
+        {
+            hash = unchecked((hash * 31) + ch);
+        }
+
+        return palette[(hash & int.MaxValue) % palette.Length];
+    }
+
+    private static string BuildNodeMeterStyle(int count, int total)
+        => string.Create(CultureInfo.InvariantCulture, $"flex:{Math.Max(count, 0)} 0 {Math.Clamp(total == 0 ? 0 : count * 100d / total, 0, 100):0.##}%;");
+
+    private static int NodeDegree(MemoryGraphNodeResult node)
+        => node.ExplicitLinkCount + node.SimilarityNeighborCount;
+
+    private static double NodeWeight(MemoryGraphNodeResult node)
+        => Math.Clamp((double)node.Importance + (NodeDegree(node) * 0.16), 0.4, 1.8);
+
+    private static bool IsHubNode(MemoryGraphNodeResult node)
+        => NodeDegree(node) >= 4;
+
+    private static bool IsBridgeNode(MemoryGraphNodeResult node)
+        => node.ExplicitLinkCount > 0 && node.SimilarityNeighborCount > 0;
+
+    private bool IsDirectNeighbor(Guid sourceId, Guid targetId)
+        => (_graph?.Edges ?? []).Any(edge =>
+            (edge.FromId == sourceId && edge.ToId == targetId) ||
+            (edge.FromId == targetId && edge.ToId == sourceId));
+
+    private string EdgeVisualClass(RenderedGraphEdge edge)
+    {
+        var classes = new List<string>
+        {
+            EdgeClass(edge.Edge.EdgeType)
+        };
+
+        if (SelectedGraphNode is { } selected)
+        {
+            if (edge.Edge.FromId == selected.Id || edge.Edge.ToId == selected.Id)
+            {
+                classes.Add("graph-edge-selected");
+            }
+            else
+            {
+                classes.Add("graph-edge-muted");
+            }
+        }
+
+        return string.Join(" ", classes);
+    }
+
+    private static string BuildEdgeStyle(RenderedGraphEdge edge)
+    {
+        var baseWidth = string.Equals(edge.Edge.EdgeType, "explicit", StringComparison.OrdinalIgnoreCase)
+            ? 1.25d
+            : 1d;
+        var scoreBoost = edge.Edge.Score.HasValue
+            ? Math.Clamp((double)edge.Edge.Score.Value, 0, 1) * 0.85
+            : 0;
+        var width = Math.Clamp(baseWidth + scoreBoost, 1, 2.8);
+
+        return string.Create(CultureInfo.InvariantCulture, $"--edge-width:{width:0.##};");
+    }
 
     private static (double X, double Y) ResolveEllipsePoint(int index, int total, double centerX, double centerY, double radiusX, double radiusY)
     {
@@ -952,12 +1501,127 @@
     private void ClearMessage()
         => _message = null;
 
+    private static string BuildRelationDirectionLabel(MemoryGraphEdgeResult edge, Guid selectedId)
+    {
+        if (string.Equals(edge.EdgeType, "similar", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Similarity";
+        }
+
+        return edge.FromId == selectedId ? "Outgoing" : "Incoming";
+    }
+
+    private static string BuildRelationStrengthLabel(MemoryGraphEdgeResult edge)
+    {
+        if (!string.Equals(edge.EdgeType, "similar", StringComparison.OrdinalIgnoreCase))
+        {
+            return "explicit link";
+        }
+
+        return edge.Score is decimal score
+            ? $"score {score.ToString("0.###", CultureInfo.InvariantCulture)}"
+            : "semantic neighbor";
+    }
+
+    private static string RelationClass(GraphNeighborRelation relation)
+        => string.Equals(relation.Edge.EdgeType, "similar", StringComparison.OrdinalIgnoreCase)
+            ? "graph-neighbor-similar"
+            : "graph-neighbor-explicit";
+
+    private static string FormatInvariant(double value)
+        => value.ToString("0.###", CultureInfo.InvariantCulture);
+
     private static string BuildTagText(IReadOnlyList<string> tags)
         => tags.Count == 0 ? "無標籤" : string.Join(" / ", tags.Take(3));
 
-    private async Task LoadProjectOptionsAsync()
+    private static string BuildNodeCategoryLabel(MemoryGraphNodeResult node)
+        => $"{node.ProjectId} · {DashboardText.Label(node.MemoryType)}";
+
+    private IReadOnlyList<GraphCategoryOption> BuildGraphCategoryOptions()
     {
-        var options = await ApiClient.GetMemoryProjectsAsync(null, 20, CancellationToken.None);
+        if (_graph is null)
+        {
+            return [];
+        }
+
+        var projectOptions = _graph.Nodes
+            .GroupBy(node => node.ProjectId, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new GraphCategoryOption(BuildProjectCategoryValue(group.Key), $"Project · {group.Key}", group.Count()));
+
+        var typeOptions = _graph.Nodes
+            .GroupBy(node => node.MemoryType)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => DashboardText.Label(group.Key), StringComparer.OrdinalIgnoreCase)
+            .Select(group => new GraphCategoryOption(BuildTypeCategoryValue(group.Key), $"Type · {DashboardText.Label(group.Key)}", group.Count()));
+
+        var scopeOptions = _graph.Nodes
+            .GroupBy(node => node.Scope)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => DashboardText.Label(group.Key), StringComparer.OrdinalIgnoreCase)
+            .Select(group => new GraphCategoryOption(BuildScopeCategoryValue(group.Key), $"Scope · {DashboardText.Label(group.Key)}", group.Count()));
+
+        return projectOptions
+            .Concat(typeOptions)
+            .Concat(scopeOptions)
+            .ToArray();
+    }
+
+    private IReadOnlyList<GraphCategorySummary> BuildVisibleCategorySummaries()
+        => VisibleNodes
+            .GroupBy(BuildCategoryKey, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new GraphCategorySummary(
+                group.Key,
+                group.First().ProjectId,
+                BuildProjectCategoryValue(group.First().ProjectId),
+                group.Count()))
+            .OrderByDescending(summary => summary.Count)
+            .ThenBy(summary => summary.Label, StringComparer.OrdinalIgnoreCase)
+            .Take(6)
+            .ToArray();
+
+    private static string BuildCategoryKey(MemoryGraphNodeResult node)
+        => node.ProjectId;
+
+    private static string BuildCategoryValue(MemoryGraphNodeResult node)
+        => BuildProjectCategoryValue(node.ProjectId);
+
+    private static string BuildProjectCategoryValue(string projectId)
+        => $"project:{projectId}";
+
+    private static string BuildTypeCategoryValue(MemoryType memoryType)
+        => $"type:{memoryType}";
+
+    private static string BuildScopeCategoryValue(MemoryScope scope)
+        => $"scope:{scope}";
+
+    private void StartPollingLoop()
+    {
+        if (_pollingTask is not null || GraphPollingIntervalSeconds <= 0)
+        {
+            return;
+        }
+
+        _pollingTask = Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(GraphPollingIntervalSeconds));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(_cts.Token))
+                {
+                    await InvokeAsync(() => LoadGraphAsync(preserveInteraction: true, waitForLock: false));
+                }
+            }
+            catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+            {
+            }
+        });
+    }
+
+    private async Task LoadProjectOptionsAsync(CancellationToken cancellationToken)
+    {
+        var options = await ApiClient.GetMemoryProjectsAsync(null, 20, cancellationToken);
         if (!string.IsNullOrWhiteSpace(_currentProjectId) &&
             options.All(option => !string.Equals(option.ProjectId, _currentProjectId, StringComparison.OrdinalIgnoreCase)))
         {
@@ -981,10 +1645,7 @@
                 _useSummaryLayer = false;
                 _graphMode = MemoryGraphMode.ProjectFull;
 
-                if (string.IsNullOrWhiteSpace(_query))
-                {
-                    _includeSimilarity = false;
-                }
+                _includeSimilarity = false;
             }
 
             return;
@@ -1051,18 +1712,32 @@
 
     public async ValueTask DisposeAsync()
     {
-        if (!_viewportRegistered)
+        _cts.Cancel();
+
+        if (_viewportRegistered)
         {
-            return;
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("contextHubGraph.unregister", _viewportRef);
+            }
+            catch (JSDisconnectedException)
+            {
+            }
         }
 
-        try
+        if (_pollingTask is not null)
         {
-            await JSRuntime.InvokeVoidAsync("contextHubGraph.unregister", _viewportRef);
+            try
+            {
+                await _pollingTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
         }
-        catch (JSDisconnectedException)
-        {
-        }
+
+        _cts.Dispose();
+        _refreshGate.Dispose();
     }
 
     private sealed record GraphCanvasLayout(
@@ -1071,6 +1746,36 @@
         double Width,
         double Height,
         string ViewBox);
+
+    private sealed record GraphInsightSummary(
+        int ComponentCount,
+        int IsolatedCount,
+        int HubCount,
+        string? TopHubTitle,
+        int ExplicitEdgeCount,
+        int SimilarityEdgeCount)
+    {
+        public string ComponentLabel => ComponentCount <= 1
+            ? "1 component"
+            : $"{ComponentCount} components";
+    }
+
+    private sealed record GraphNeighborRelation(
+        MemoryGraphNodeResult Node,
+        MemoryGraphEdgeResult Edge,
+        string DirectionLabel,
+        string StrengthLabel);
+
+    private sealed record GraphCategoryOption(
+        string Value,
+        string Label,
+        int Count);
+
+    private sealed record GraphCategorySummary(
+        string Key,
+        string Label,
+        string Value,
+        int Count);
 
     private sealed record RenderedGraphNode(
         MemoryGraphNodeResult Node,
@@ -1090,7 +1795,11 @@
         double FromCenterX,
         double FromCenterY,
         double ToCenterX,
-        double ToCenterY);
+        double ToCenterY)
+    {
+        public double MidX => (FromCenterX + ToCenterX) / 2;
+        public double MidY => (FromCenterY + ToCenterY) / 2;
+    }
 
     private sealed record ShellPlacementResult(
         IReadOnlyDictionary<Guid, RenderedGraphNode> Positions,

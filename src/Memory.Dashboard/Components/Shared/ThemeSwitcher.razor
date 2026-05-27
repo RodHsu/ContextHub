@@ -1,6 +1,6 @@
 @inject IJSRuntime JsRuntime
 
-<div class="theme-switcher" role="group" aria-label="切換主題" @onmouseleave="CloseMenu">
+<div class="theme-switcher" role="group" aria-label="切換主題">
     <button type="button"
             class="theme-switcher-toggle"
             aria-expanded="@_menuOpen"
@@ -71,9 +71,6 @@
 
     private void ToggleMenu()
         => _menuOpen = !_menuOpen;
-
-    private void CloseMenu()
-        => _menuOpen = false;
 
     private string CurrentThemeLabel()
         => ThemeOptions.FirstOrDefault(option => string.Equals(option.Value, _preference, StringComparison.OrdinalIgnoreCase))?.Label ?? "深色";

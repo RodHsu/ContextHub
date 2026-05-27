@@ -10,6 +10,20 @@ public static class DashboardSnapshotKeys
     public const string RecentOperations = "recentOperations";
     public const string ResourceChart = "resourceChart";
     public const string MonitoringStats = "monitoringStats";
+    public const string MemoryGraphIndex = "memoryGraphIndex";
+    public const string StorageTableStats = "storageTableStats";
+    public const string StorageLargeTablePreview = "storageLargeTablePreview";
+    public const string DashboardJobs = "dashboardJobs";
+    public const string DashboardLogs = "dashboardLogs";
+    public const string DashboardProjectSuggestions = "dashboardProjectSuggestions";
+}
+
+public static class DashboardSnapshotStalenessPolicy
+{
+    public const int WarningThresholdSeconds = 15;
+
+    public static DateTimeOffset ComputeStaleAfter(DateTimeOffset capturedAtUtc)
+        => capturedAtUtc.AddSeconds(WarningThresholdSeconds);
 }
 
 public sealed record DashboardSnapshotEnvelope<TPayload>(
@@ -64,6 +78,32 @@ public sealed record DashboardResourceChartSnapshotPayload(
 public sealed record DashboardMonitoringSnapshotPayload(
     DashboardRedisTelemetryResult Redis,
     DashboardPostgresTelemetryResult Postgres);
+
+public sealed record DashboardMemoryGraphIndexSnapshotPayload(
+    MemoryGraphResult Graph);
+
+public sealed record DashboardStorageTableStatsSnapshotPayload(
+    IReadOnlyList<StorageTableSummaryResult> Tables);
+
+public sealed record DashboardStorageLargeTablePreviewSnapshotPayload(
+    IReadOnlyList<StorageTableRowsResult> Tables);
+
+public sealed record DashboardJobsSnapshotPayload(
+    PagedResult<JobListItemResult> RecentJobs);
+
+public sealed record DashboardLogsSnapshotPayload(
+    IReadOnlyList<LogEntryResult> RecentErrors);
+
+public sealed record DashboardProjectSuggestionsSnapshotPayload(
+    IReadOnlyList<ProjectSuggestionResult> Projects);
+
+public sealed record DashboardMemoryGraphIndexRefreshResult(
+    DateTimeOffset CapturedAtUtc,
+    int RefreshIntervalSeconds,
+    string Trigger,
+    int NodeCount,
+    int EdgeCount,
+    bool Truncated);
 
 public interface IDashboardSnapshotStore
 {

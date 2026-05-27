@@ -141,6 +141,7 @@ public sealed class MemoryApplicationFactory(string postgresConnectionString, st
         builder.UseSetting("Embeddings:MaxTokens", "512");
         builder.UseSetting("Memory:Namespace", "test");
         builder.UseSetting("DatabaseLogging:MinimumLevel", "Error");
+        builder.UseSetting("ContextHub:Security:RequireAuthentication", "false");
         builder.ConfigureAppConfiguration((_, config) =>
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
@@ -153,7 +154,8 @@ public sealed class MemoryApplicationFactory(string postgresConnectionString, st
                 ["Embeddings:Dimensions"] = "384",
                 ["Embeddings:MaxTokens"] = "512",
                 ["Memory:Namespace"] = "test",
-                ["DatabaseLogging:MinimumLevel"] = "Error"
+                ["DatabaseLogging:MinimumLevel"] = "Error",
+                ["ContextHub:Security:RequireAuthentication"] = "false"
             });
         });
     }

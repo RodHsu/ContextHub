@@ -39,6 +39,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("logs", "/logs", "日誌", [".logs-filter-grid", ".split-layout", ".table-scroll-shell"], [".filter-panel", ".split-layout"], [".content", ".table-scroll-shell"]),
         new("jobs", "/jobs", "工作佇列", [".split-layout", ".data-table", ".detail-panel"], [".page-header", ".jobs-page-body > .split-layout:last-of-type"], [".content", ".panel-scroll-body"]),
         new("storage", "/storage", "資料庫檢視", [".storage-layout", ".storage-table-panel", ".storage-detail-panel"], [".storage-table-panel", ".storage-detail-panel"], [".content", ".storage-table-list", ".table-scroll-shell"]),
+        new("security", "/security", "安全管理", [".security-layout", ".settings-form-grid", ".table-scroll-shell"], [".page-header", ".security-layout"], [".content", ".security-layout"]),
         new("performance", "/performance", "效能", [".performance-form-grid", ".performance-config-footer", ".empty-inline"], [".page-header", ".performance-page-body"], [".content", ".performance-results-shell"]),
         new("settings", "/settings", "系統設定", [".settings-layout", ".settings-form-grid", ".settings-transfer-panel"], [".settings-info-panel", ".settings-auth-panel"], [".content", ".settings-layout"])
     ];
@@ -142,6 +143,118 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }
 
         failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task Theme_Switcher_Menu_Should_Be_Clickable_At_App_Browser_Size()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("app-browser-1031", 1031, 1270);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        await context.AddInitScriptAsync(
+            @"(() => {
+                localStorage.setItem('contextHub.dashboard.theme', 'dark');
+                document.documentElement.dataset.themePreference = 'dark';
+                document.documentElement.dataset.theme = 'dark';
+                document.documentElement.style.colorScheme = 'dark';
+            })();");
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/preferences");
+        var themeToggle = page.Locator(".theme-switcher-toggle");
+        (await themeToggle.EvaluateAsync<string>("element => getComputedStyle(element).cursor"))
+            .Should()
+            .Be("pointer");
+
+        await themeToggle.ClickAsync();
+        var lightOption = page.GetByRole(AriaRole.Menuitemradio, new() { Name = "淺色" });
+        await lightOption.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 5000
+        });
+
+        var hitTestJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const option = Array.from(document.querySelectorAll('.theme-switcher-option'))
+                    .find(item => item.textContent?.includes('淺色'));
+                const menu = document.querySelector('.theme-switcher-menu');
+                const topbar = document.querySelector('.topbar');
+                const pageHeader = document.querySelector('.page-header');
+                const rect = option?.getBoundingClientRect();
+                const x = rect ? rect.left + (rect.width / 2) : 0;
+                const y = rect ? rect.top + (rect.height / 2) : 0;
+                const hit = rect ? document.elementFromPoint(x, y) : null;
+                return JSON.stringify({
+                    optionVisible: !!option,
+                    hitThemeOption: !!hit?.closest('.theme-switcher-option'),
+                    hitClass: hit?.className?.toString() ?? '',
+                    menuZ: Number(getComputedStyle(menu).zIndex || 0),
+                    topbarZ: Number(getComputedStyle(topbar).zIndex || 0),
+                    pageHeaderZ: Number(getComputedStyle(pageHeader).zIndex || 0)
+                });
+            }");
+
+        using var hitTestDocument = JsonDocument.Parse(hitTestJson);
+        var hitTest = hitTestDocument.RootElement;
+        hitTest.GetProperty("optionVisible").GetBoolean().Should().BeTrue();
+        hitTest.GetProperty("hitThemeOption").GetBoolean().Should().BeTrue($"theme menu must not be covered at 1031x1270, hit test was {hitTestJson}");
+        hitTest.GetProperty("topbarZ").GetInt32().Should().BeGreaterThan(hitTest.GetProperty("pageHeaderZ").GetInt32());
+        hitTest.GetProperty("menuZ").GetInt32().Should().BeGreaterThan(100);
+
+        await lightOption.ClickAsync();
+        await page.WaitForFunctionAsync("() => document.documentElement.dataset.theme === 'light'");
+        var toggleText = await themeToggle.InnerTextAsync();
+        toggleText.Should().Contain("淺色");
+    }
+
+    [Fact]
+    public async Task Reconnect_Modal_Status_Text_Should_Be_Centered()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("app-browser-1196", 1196, 1270);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/security?uiProfile=normal");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const modal = document.querySelector('#components-reconnect-modal');
+                modal.className = 'components-reconnect-retrying';
+                if (!modal.open) {
+                    modal.showModal();
+                }
+
+                const body = modal.querySelector('.components-reconnect-body');
+                const visibleParagraphs = Array.from(body.querySelectorAll('p'))
+                    .filter(item => getComputedStyle(item).display !== 'none')
+                    .map(item => {
+                        const rect = item.getBoundingClientRect();
+                        const bodyRect = body.getBoundingClientRect();
+                        return {
+                            text: item.textContent?.trim() ?? '',
+                            textAlign: getComputedStyle(item).textAlign,
+                            leftOffset: Math.round(rect.left - bodyRect.left),
+                            rightOffset: Math.round(bodyRect.right - rect.right)
+                        };
+                    });
+
+                return JSON.stringify({
+                    bodyTextAlign: getComputedStyle(body).textAlign,
+                    bodyJustifyItems: getComputedStyle(body).justifyItems,
+                    visibleParagraphs
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var root = document.RootElement;
+        root.GetProperty("bodyTextAlign").GetString().Should().Be("center", $"reconnect modal body should center status copy: {layoutJson}");
+        root.GetProperty("bodyJustifyItems").GetString().Should().Be("center", $"reconnect modal body should center paragraph blocks: {layoutJson}");
+
+        var paragraphs = root.GetProperty("visibleParagraphs").EnumerateArray().ToArray();
+        paragraphs.Should().NotBeEmpty();
+        paragraphs.Select(item => item.GetProperty("textAlign").GetString()).Should().OnlyContain(value => value == "center");
     }
 
     [Fact]
@@ -297,6 +410,93 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         document.RootElement.GetProperty("footer").GetString().Should().Be("none");
         document.RootElement.GetProperty("usernameInput").GetString().Should().NotBe("none");
         document.RootElement.GetProperty("error").GetString().Should().NotBe("none");
+
+        var footerVersion = await page.Locator(".login-footer-version").InnerTextAsync();
+        footerVersion.Should().StartWith("UI v");
+        footerVersion.Should().NotContain("vv");
+    }
+
+    [Fact]
+    public async Task Login_Page_Highlights_Should_Stack_And_Center_In_Narrow_Desktop()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("login-narrow-desktop", 1031, 1270);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await page.GotoAsync(new Uri(_fixture.BaseUri, "/login").ToString());
+        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const viewportWidth = window.innerWidth;
+                const scene = document.querySelector('.login-scene')?.getBoundingClientRect();
+                const brand = document.querySelector('.login-brand-panel')?.getBoundingClientRect();
+                const card = document.querySelector('.login-card')?.getBoundingClientRect();
+                const chipRow = document.querySelector('.login-chip-row')?.getBoundingClientRect();
+                const title = document.querySelector('.login-title');
+                const highlights = Array.from(document.querySelectorAll('.login-highlight')).map(item => {
+                    const rect = item.getBoundingClientRect();
+                    return {
+                        left: Math.round(rect.left),
+                        top: Math.round(rect.top),
+                        bottom: Math.round(rect.bottom),
+                        width: Math.round(rect.width)
+                    };
+                });
+
+                return JSON.stringify({
+                    viewportWidth,
+                    scene: scene ? {
+                        left: Math.round(scene.left),
+                        right: Math.round(scene.right),
+                        width: Math.round(scene.width)
+                    } : null,
+                    brand: brand ? {
+                        left: Math.round(brand.left),
+                        right: Math.round(brand.right),
+                        width: Math.round(brand.width)
+                    } : null,
+                    card: card ? {
+                        left: Math.round(card.left),
+                        right: Math.round(card.right),
+                        width: Math.round(card.width)
+                    } : null,
+                    chipRow: chipRow ? {
+                        left: Math.round(chipRow.left),
+                        right: Math.round(chipRow.right),
+                        width: Math.round(chipRow.width)
+                    } : null,
+                    titleTextAlign: title ? getComputedStyle(title).textAlign : '',
+                    highlights
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var root = document.RootElement;
+        var scene = root.GetProperty("scene");
+        var brand = root.GetProperty("brand");
+        var card = root.GetProperty("card");
+        var chipRow = root.GetProperty("chipRow");
+        var highlights = root.GetProperty("highlights").EnumerateArray().ToArray();
+
+        highlights.Should().HaveCount(2);
+        highlights[1].GetProperty("top").GetInt32().Should().BeGreaterThan(highlights[0].GetProperty("bottom").GetInt32());
+        Math.Abs(highlights[1].GetProperty("left").GetInt32() - highlights[0].GetProperty("left").GetInt32()).Should().BeLessThanOrEqualTo(2);
+        Math.Abs(highlights[1].GetProperty("width").GetInt32() - highlights[0].GetProperty("width").GetInt32()).Should().BeLessThanOrEqualTo(2);
+
+        var viewportCenter = root.GetProperty("viewportWidth").GetInt32() / 2d;
+        var sceneCenter = (scene.GetProperty("left").GetInt32() + scene.GetProperty("right").GetInt32()) / 2d;
+        var brandCenter = (brand.GetProperty("left").GetInt32() + brand.GetProperty("right").GetInt32()) / 2d;
+        var cardCenter = (card.GetProperty("left").GetInt32() + card.GetProperty("right").GetInt32()) / 2d;
+        var chipRowCenter = (chipRow.GetProperty("left").GetInt32() + chipRow.GetProperty("right").GetInt32()) / 2d;
+        Math.Abs(sceneCenter - viewportCenter).Should().BeLessThanOrEqualTo(2d);
+        Math.Abs(brandCenter - sceneCenter).Should().BeLessThanOrEqualTo(2d);
+        Math.Abs(cardCenter - sceneCenter).Should().BeLessThanOrEqualTo(2d);
+        Math.Abs(chipRowCenter - brandCenter).Should().BeLessThanOrEqualTo(2d);
+        scene.GetProperty("width").GetInt32().Should().BeLessThan(root.GetProperty("viewportWidth").GetInt32());
+        card.GetProperty("width").GetInt32().Should().BeLessThan(scene.GetProperty("width").GetInt32());
+        root.GetProperty("titleTextAlign").GetString().Should().Be("left");
     }
 
     [Fact]
@@ -435,7 +635,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
-    public async Task Memories_Filter_Should_Render_In_Two_Rows_On_Fhd_Viewport()
+    public async Task Memories_Filter_Should_Keep_Quick_And_Advanced_Rows_Inside_Fhd_Viewport()
     {
         await _fixture.EnsureDashboardRunningAsync();
         var viewport = new DashboardViewport("fhd-1080p", 1920, 1080);
@@ -446,15 +646,20 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         var layoutJson = await page.EvaluateAsync<string>(
             @"() => JSON.stringify({
-                uniqueRows: [...new Set(Array.from(document.querySelectorAll('.memories-filter-grid > *'))
+                quickRows: [...new Set(Array.from(document.querySelectorAll('.memories-filter-grid > *'))
                     .map(node => Math.round(node.getBoundingClientRect().top)))].length,
                 gridScrollWidth: document.querySelector('.memories-filter-grid')?.scrollWidth ?? 0,
-                gridClientWidth: document.querySelector('.memories-filter-grid')?.clientWidth ?? 0
+                gridClientWidth: document.querySelector('.memories-filter-grid')?.clientWidth ?? 0,
+                advancedOpen: document.querySelector('.memories-filter-panel .filter-advanced')?.open ?? false,
+                advancedScrollWidth: document.querySelector('.memories-advanced-filter-grid')?.scrollWidth ?? 0,
+                advancedClientWidth: document.querySelector('.memories-advanced-filter-grid')?.clientWidth ?? 0
             })");
 
         using var document = JsonDocument.Parse(layoutJson);
-        document.RootElement.GetProperty("uniqueRows").GetInt32().Should().Be(2);
+        document.RootElement.GetProperty("quickRows").GetInt32().Should().BeLessThanOrEqualTo(2);
+        document.RootElement.GetProperty("advancedOpen").GetBoolean().Should().BeTrue();
         document.RootElement.GetProperty("gridScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("gridClientWidth").GetInt32() + 1);
+        document.RootElement.GetProperty("advancedScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("advancedClientWidth").GetInt32() + 1);
     }
 
     [Fact]
@@ -500,15 +705,16 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
 
-        var cards = page.Locator(".graph-node-card");
-        await cards.Nth(1).WaitForAsync(new LocatorWaitForOptions
+        var nodes = page.Locator(".graph-view-node");
+        await nodes.Nth(1).WaitForAsync(new LocatorWaitForOptions
         {
             State = WaitForSelectorState.Visible,
             Timeout = 15000
         });
 
-        var expectedTitle = await cards.Nth(1).Locator(".graph-node-title").InnerTextAsync();
-        await cards.Nth(1).ClickAsync();
+        var expectedTitle = await nodes.Nth(1).Locator(".graph-node-title").TextContentAsync();
+        expectedTitle.Should().NotBeNullOrWhiteSpace();
+        await nodes.Nth(1).Locator("circle").ClickAsync();
         await page.WaitForFunctionAsync(
             "(title) => document.querySelector('.graph-detail-panel')?.innerText?.includes(title) === true",
             expectedTitle);
@@ -517,25 +723,25 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var detailText = await detailPanel.InnerTextAsync();
         detailText.Should().Contain(expectedTitle);
 
-        var className = await cards.Nth(1).GetAttributeAsync("class");
+        var className = await nodes.Nth(1).GetAttributeAsync("class");
         className.Should().NotBeNull();
         className.Should().MatchRegex("selected");
     }
 
     [Fact]
-    public async Task Graph_Dense_Layout_Should_Avoid_Card_Overlap_On_Desktop()
+    public async Task Graph_Dense_Layout_Should_Avoid_Node_Overlap_On_Desktop()
     {
         await _fixture.EnsureDashboardRunningAsync();
         await using var context = await _fixture.CreateContextAsync(Viewports[0]);
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
-        await page.WaitForFunctionAsync("() => (document.querySelectorAll('.graph-node-card').length ?? 0) >= 4");
+        await page.WaitForFunctionAsync("() => (document.querySelectorAll('.graph-view-node').length ?? 0) >= 4");
 
         var overlapJson = await page.EvaluateAsync<string>(
             @"() => {
-                const cards = Array.from(document.querySelectorAll('.graph-node-card')).map(card => {
-                    const rect = card.getBoundingClientRect();
+                const nodes = Array.from(document.querySelectorAll('.graph-view-node circle')).map(node => {
+                    const rect = node.getBoundingClientRect();
                     return {
                         left: rect.left,
                         top: rect.top,
@@ -547,12 +753,12 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 });
 
                 let maxIntersectionArea = 0;
-                for (let i = 0; i < cards.length; i += 1) {
-                    for (let j = i + 1; j < cards.length; j += 1) {
-                        const left = Math.max(cards[i].left, cards[j].left);
-                        const right = Math.min(cards[i].right, cards[j].right);
-                        const top = Math.max(cards[i].top, cards[j].top);
-                        const bottom = Math.min(cards[i].bottom, cards[j].bottom);
+                for (let i = 0; i < nodes.length; i += 1) {
+                    for (let j = i + 1; j < nodes.length; j += 1) {
+                        const left = Math.max(nodes[i].left, nodes[j].left);
+                        const right = Math.min(nodes[i].right, nodes[j].right);
+                        const top = Math.max(nodes[i].top, nodes[j].top);
+                        const bottom = Math.min(nodes[i].bottom, nodes[j].bottom);
                         if (right > left && bottom > top) {
                             maxIntersectionArea = Math.max(maxIntersectionArea, (right - left) * (bottom - top));
                         }
@@ -560,7 +766,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 }
 
                 return JSON.stringify({
-                    count: cards.length,
+                    count: nodes.length,
                     maxIntersectionArea
                 });
             }");
@@ -568,6 +774,50 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         using var document = JsonDocument.Parse(overlapJson);
         document.RootElement.GetProperty("count").GetInt32().Should().BeGreaterThanOrEqualTo(4);
         document.RootElement.GetProperty("maxIntersectionArea").GetDouble().Should().BeLessThan(8);
+    }
+
+    [Fact]
+    public async Task Graph_Filter_Toggles_Should_Keep_Checkbox_And_Text_On_One_Line()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=graphdemo");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const labels = ['顯示 similarity 邊', '一併讀取綜合層'].map(text => {
+                    const label = Array.from(document.querySelectorAll('.graph-filter-stack > .toggle-field'))
+                        .find(item => item.textContent?.includes(text));
+                    const input = label?.querySelector('input[type=""checkbox""]')?.getBoundingClientRect();
+                    const caption = label?.querySelector('span')?.getBoundingClientRect();
+                    return {
+                        text,
+                        display: label ? getComputedStyle(label).display : '',
+                        inputCenterY: input ? input.top + (input.height / 2) : 0,
+                        captionCenterY: caption ? caption.top + (caption.height / 2) : 0,
+                        inputRight: input?.right ?? 0,
+                        captionLeft: caption?.left ?? 0,
+                        captionWidth: caption?.width ?? 0
+                    };
+                });
+
+                return JSON.stringify(labels);
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var labels = document.RootElement.EnumerateArray().ToArray();
+        labels.Should().HaveCount(2);
+
+        foreach (var label in labels)
+        {
+            label.GetProperty("display").GetString().Should().Be("flex", $"toggle layout was {layoutJson}");
+            Math.Abs(label.GetProperty("inputCenterY").GetDouble() - label.GetProperty("captionCenterY").GetDouble())
+                .Should().BeLessThanOrEqualTo(3d, $"toggle layout was {layoutJson}");
+            label.GetProperty("captionLeft").GetDouble().Should().BeGreaterThan(label.GetProperty("inputRight").GetDouble());
+            label.GetProperty("captionWidth").GetDouble().Should().BeGreaterThan(60d);
+        }
     }
 
     [Fact]
@@ -605,6 +855,61 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
+    public async Task Graph_Mode_Info_Popover_Should_Render_Above_Graph_Panels()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=graphdemo&selected=10000000-0000-0000-0000-000000000003");
+
+        var trigger = page.GetByRole(AriaRole.Button, new() { Name = "顯示圖譜模式說明" });
+        await trigger.FocusAsync();
+        await page.WaitForFunctionAsync(
+            "() => getComputedStyle(document.querySelector('.page-actions .info-popover-panel')).visibility === 'visible'");
+        await page.WaitForFunctionAsync(
+            "() => Number(getComputedStyle(document.querySelector('.page-actions .info-popover-panel')).opacity) > 0.95");
+
+        var overlayJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const panel = document.querySelector('.page-actions .info-popover-panel');
+                const rect = panel?.getBoundingClientRect();
+                const x = Math.round((rect?.left ?? 0) + ((rect?.width ?? 0) / 2));
+                const y = Math.round((rect?.top ?? 0) + ((rect?.height ?? 0) / 2));
+                const topElement = document.elementFromPoint(x, y);
+                const header = document.querySelector('.page-header');
+                const actions = document.querySelector('.page-actions');
+                const popover = document.querySelector('.page-actions .info-popover');
+
+                return JSON.stringify({
+                    visible: panel ? getComputedStyle(panel).visibility : '',
+                    opacity: panel ? Number(getComputedStyle(panel).opacity) : 0,
+                    panelTop: Math.round(rect?.top ?? 0),
+                    panelBottom: Math.round(rect?.bottom ?? 0),
+                    panelHeight: Math.round(rect?.height ?? 0),
+                    topElementClass: topElement?.className?.toString() ?? '',
+                    topElementTag: topElement?.tagName ?? '',
+                    isPanelOnTop: !!topElement?.closest?.('.info-popover-panel'),
+                    headerZIndex: header ? getComputedStyle(header).zIndex : '',
+                    actionsZIndex: actions ? getComputedStyle(actions).zIndex : '',
+                    popoverZIndex: popover ? getComputedStyle(popover).zIndex : '',
+                    graphWorkspaceTop: Math.round(document.querySelector('.graph-workspace')?.getBoundingClientRect().top ?? 0)
+                });
+            }");
+
+        using var document = JsonDocument.Parse(overlayJson);
+        var root = document.RootElement;
+        root.GetProperty("visible").GetString().Should().Be("visible", $"popover layout was {overlayJson}");
+        root.GetProperty("opacity").GetDouble().Should().BeGreaterThan(0.95d, $"popover layout was {overlayJson}");
+        root.GetProperty("panelHeight").GetInt32().Should().BeGreaterThan(80, $"popover layout was {overlayJson}");
+        root.GetProperty("panelBottom").GetInt32().Should().BeGreaterThan(root.GetProperty("graphWorkspaceTop").GetInt32());
+        root.GetProperty("isPanelOnTop").GetBoolean().Should().BeTrue($"popover should not be covered by graph panels: {overlayJson}");
+        root.GetProperty("headerZIndex").GetString().Should().Be("70");
+        root.GetProperty("actionsZIndex").GetString().Should().Be("72");
+        root.GetProperty("popoverZIndex").GetString().Should().Be("100");
+    }
+
+    [Fact]
     public async Task Graph_Integrated_View_Should_Render_Project_Overview_Without_Initial_Focus_Clipping()
     {
         await _fixture.EnsureDashboardRunningAsync();
@@ -612,14 +917,14 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
-        await page.WaitForFunctionAsync("() => (document.querySelectorAll('.graph-node-card').length ?? 0) >= 8");
+        await page.WaitForFunctionAsync("() => (document.querySelectorAll('.graph-view-node').length ?? 0) >= 8");
         await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0) > 0");
 
         var layoutJson = await page.EvaluateAsync<string>(
             @"() => {
                 const shell = document.querySelector('.graph-scroll-shell')?.getBoundingClientRect();
-                const cards = Array.from(document.querySelectorAll('.graph-node-card')).map(card => {
-                    const rect = card.getBoundingClientRect();
+                const nodes = Array.from(document.querySelectorAll('.graph-view-node circle')).map(node => {
+                    const rect = node.getBoundingClientRect();
                     return {
                         left: rect.left,
                         top: rect.top,
@@ -628,15 +933,15 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     };
                 });
                 const clippedCount = shell
-                    ? cards.filter(card =>
-                        card.left < shell.left - 1 ||
-                        card.top < shell.top - 1 ||
-                        card.right > shell.right + 1 ||
-                        card.bottom > shell.bottom + 1).length
-                    : cards.length;
+                    ? nodes.filter(node =>
+                        node.left < shell.left - 1 ||
+                        node.top < shell.top - 1 ||
+                        node.right > shell.right + 1 ||
+                        node.bottom > shell.bottom + 1).length
+                    : nodes.length;
 
                 return JSON.stringify({
-                    count: cards.length,
+                    count: nodes.length,
                     clippedCount,
                     scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
                     statusText: document.querySelector('.graph-status-strip')?.textContent ?? '',
@@ -721,6 +1026,31 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         Math.Abs(afterPanPanX - afterZoomPanX).Should().BeGreaterThan(40);
         Math.Abs(afterPanPanY - afterZoomPanY).Should().BeGreaterThan(24);
+
+        var nodeBox = await page.Locator(".graph-view-node circle").First.BoundingBoxAsync();
+        nodeBox.Should().NotBeNull();
+
+        await page.Mouse.MoveAsync(nodeBox!.X + (nodeBox.Width / 2), nodeBox.Y + (nodeBox.Height / 2));
+        await page.Mouse.DownAsync();
+        await page.Mouse.MoveAsync(nodeBox.X + (nodeBox.Width / 2) - 112, nodeBox.Y + (nodeBox.Height / 2) + 72, new MouseMoveOptions
+        {
+            Steps = 8
+        });
+        await page.Mouse.UpAsync();
+        await page.WaitForTimeoutAsync(120);
+
+        var afterNodePanJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                panX: Number(document.querySelector('.graph-scroll-shell')?.dataset.panX ?? 0),
+                panY: Number(document.querySelector('.graph-scroll-shell')?.dataset.panY ?? 0)
+            })");
+
+        using var afterNodePanDocument = JsonDocument.Parse(afterNodePanJson);
+        var afterNodePanX = afterNodePanDocument.RootElement.GetProperty("panX").GetDouble();
+        var afterNodePanY = afterNodePanDocument.RootElement.GetProperty("panY").GetDouble();
+
+        Math.Abs(afterNodePanX - afterPanPanX).Should().BeGreaterThan(32);
+        Math.Abs(afterNodePanY - afterPanPanY).Should().BeGreaterThan(20);
     }
 
     [Fact]
@@ -731,21 +1061,182 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/graph?uiProfile=normal");
+        await page.Locator(".graph-view-node").First.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
         await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0) > 0");
 
         var layoutJson = await page.EvaluateAsync<string>(
             @"() => JSON.stringify({
                 scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
-                nodeWidth: Math.round(document.querySelector('.graph-node-card')?.getBoundingClientRect().width ?? 0),
-                nodeHeight: Math.round(document.querySelector('.graph-node-card')?.getBoundingClientRect().height ?? 0),
-                shellWidth: Math.round(document.querySelector('.graph-scroll-shell')?.getBoundingClientRect().width ?? 0)
+                nodeWidth: Math.round(document.querySelector('.graph-view-node')?.getBoundingClientRect().width ?? 0),
+                nodeHeight: Math.round(document.querySelector('.graph-view-node')?.getBoundingClientRect().height ?? 0),
+                circleRadius: Number(document.querySelector('.graph-view-node circle')?.getAttribute('r') ?? 0),
+                titleWidth: Math.round(document.querySelector('.graph-view-node .graph-node-title')?.getBoundingClientRect().width ?? 0),
+                legacyLabelCount: document.querySelectorAll('.graph-view-node-label').length,
+                nodeTagName: document.querySelector('.graph-view-node')?.tagName ?? '',
+                shellWidth: Math.round(document.querySelector('.graph-scroll-shell')?.getBoundingClientRect().width ?? 0),
+                shellHeight: Math.round(document.querySelector('.graph-scroll-shell')?.getBoundingClientRect().height ?? 0),
+                contentWidth: Math.round(document.querySelector('.graph-pan-content')?.offsetWidth ?? 0),
+                contentHeight: Math.round(document.querySelector('.graph-pan-content')?.offsetHeight ?? 0)
             })");
 
         using var document = JsonDocument.Parse(layoutJson);
-        document.RootElement.GetProperty("scale").GetDouble().Should().BeGreaterThan(0.58d);
-        document.RootElement.GetProperty("nodeWidth").GetInt32().Should().BeGreaterThan(150);
-        document.RootElement.GetProperty("nodeHeight").GetInt32().Should().BeGreaterThan(100);
+        document.RootElement.GetProperty("scale").GetDouble().Should().BeGreaterThan(0.58d, $"layout was {layoutJson}");
+        document.RootElement.GetProperty("nodeWidth").GetInt32().Should().BeGreaterThanOrEqualTo(28);
+        document.RootElement.GetProperty("nodeHeight").GetInt32().Should().BeGreaterThanOrEqualTo(18);
+        document.RootElement.GetProperty("nodeHeight").GetInt32().Should().BeLessThan(46);
+        document.RootElement.GetProperty("circleRadius").GetDouble().Should().BeGreaterThanOrEqualTo(9d);
+        document.RootElement.GetProperty("titleWidth").GetInt32().Should().BeGreaterThan(40);
+        document.RootElement.GetProperty("legacyLabelCount").GetInt32().Should().Be(0);
+        document.RootElement.GetProperty("nodeTagName").GetString().Should().Be("a");
         document.RootElement.GetProperty("shellWidth").GetInt32().Should().BeGreaterThan(360);
+    }
+
+    [Fact]
+    public async Task Graph_Canvas_Should_Follow_Vital_Document_Relation_Presentation()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=graphdemo&selected=10000000-0000-0000-0000-000000000001");
+        await page.WaitForFunctionAsync("() => document.querySelectorAll('.graph-view-node').length >= 8");
+        await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0) > 0");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const shell = document.querySelector('.graph-scroll-shell')?.getBoundingClientRect();
+                const circles = Array.from(document.querySelectorAll('.graph-view-node circle')).map(node => {
+                    const rect = node.getBoundingClientRect();
+                    return {
+                        left: rect.left,
+                        top: rect.top,
+                        right: rect.right,
+                        bottom: rect.bottom
+                    };
+                });
+                const clippedCircleCount = shell
+                    ? circles.filter(node =>
+                        node.left < shell.left - 1 ||
+                        node.top < shell.top - 1 ||
+                        node.right > shell.right + 1 ||
+                        node.bottom > shell.bottom + 1).length
+                    : circles.length;
+                const firstLine = document.querySelector('.graph-edge');
+
+                return JSON.stringify({
+                    nodeCount: document.querySelectorAll('.graph-view-node').length,
+                    circleCount: document.querySelectorAll('.graph-view-node circle').length,
+                    nodeTextCount: document.querySelectorAll('.graph-view-node .graph-node-title').length,
+                    edgeCount: document.querySelectorAll('.graph-edge').length,
+                    edgeLabelCount: document.querySelectorAll('.graph-edge-label').length,
+                    markerCount: document.querySelectorAll('marker').length,
+                    markerEnd: firstLine ? getComputedStyle(firstLine).markerEnd : '',
+                    clippedCircleCount,
+                    scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0)
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var root = document.RootElement;
+        root.GetProperty("nodeCount").GetInt32().Should().BeGreaterThanOrEqualTo(8);
+        root.GetProperty("circleCount").GetInt32().Should().Be(root.GetProperty("nodeCount").GetInt32());
+        root.GetProperty("nodeTextCount").GetInt32().Should().Be(root.GetProperty("nodeCount").GetInt32());
+        root.GetProperty("edgeCount").GetInt32().Should().BeGreaterThan(0);
+        root.GetProperty("edgeLabelCount").GetInt32().Should().Be(0, $"Vital-style graph keeps relation labels in the details panel, layout was {layoutJson}");
+        root.GetProperty("markerCount").GetInt32().Should().Be(0, $"Vital-style graph uses plain relationship lines, layout was {layoutJson}");
+        root.GetProperty("markerEnd").GetString().Should().Be("none");
+        root.GetProperty("clippedCircleCount").GetInt32().Should().Be(0, $"layout was {layoutJson}");
+        root.GetProperty("scale").GetDouble().Should().BeGreaterThan(0.24d);
+    }
+
+    [Fact]
+    public async Task Graph_Demo_Should_Render_Precomputed_Relationship_Examples()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=graphdemo");
+        await page.WaitForFunctionAsync(
+            "() => document.querySelectorAll('.graph-view-node').length >= 12 && document.querySelectorAll('.graph-edge-explicit').length >= 25");
+
+        var graphJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                nodeCount: document.querySelectorAll('.graph-view-node').length,
+                edgeCount: document.querySelectorAll('.graph-edge').length,
+                explicitEdgeCount: document.querySelectorAll('.graph-edge-explicit').length,
+                similarEdgeCount: document.querySelectorAll('.graph-edge-similar').length,
+                edgeLabelCount: document.querySelectorAll('.graph-edge-label').length,
+                toolbarText: document.querySelector('.graph-toolbar')?.innerText ?? ''
+            })");
+
+        using var document = JsonDocument.Parse(graphJson);
+        var root = document.RootElement;
+        root.GetProperty("nodeCount").GetInt32().Should().BeGreaterThanOrEqualTo(12);
+        root.GetProperty("edgeCount").GetInt32().Should().Be(25, $"demo graph should read the precomputed browser-test graph index, layout was {graphJson}");
+        root.GetProperty("explicitEdgeCount").GetInt32().Should().Be(25);
+        root.GetProperty("similarEdgeCount").GetInt32().Should().Be(0);
+        root.GetProperty("edgeLabelCount").GetInt32().Should().Be(0);
+        root.GetProperty("toolbarText").GetString().Should().Contain("25 邊");
+    }
+
+    [Fact]
+    public async Task Graph_Demo_Selected_Node_Url_Should_Load_Demo_Profile_Without_Profile_Query()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?selected=10000000-0000-0000-0000-000000000003");
+        await page.WaitForFunctionAsync(
+            "() => document.querySelectorAll('.graph-view-node').length >= 12 && document.querySelectorAll('.graph-edge-explicit').length >= 25");
+
+        var graphJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                nodeCount: document.querySelectorAll('.graph-view-node').length,
+                edgeCount: document.querySelectorAll('.graph-edge').length,
+                selectedCount: document.querySelectorAll('.graph-view-node.selected').length,
+                selectedLabel: document.querySelector('.graph-view-node.selected')?.getAttribute('aria-label') ?? ''
+            })");
+
+        using var document = JsonDocument.Parse(graphJson);
+        var root = document.RootElement;
+        root.GetProperty("nodeCount").GetInt32().Should().BeGreaterThanOrEqualTo(12);
+        root.GetProperty("edgeCount").GetInt32().Should().Be(25, $"selected demo URL should not fall back to the one-node normal profile, layout was {graphJson}");
+        root.GetProperty("selectedCount").GetInt32().Should().Be(1);
+        root.GetProperty("selectedLabel").GetString().Should().Contain("Memory Graph API contract");
+    }
+
+    [Fact]
+    public async Task Graph_View_Toolbar_Should_Filter_And_Switch_Display_Mode()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
+        await page.WaitForFunctionAsync("() => document.querySelectorAll('.graph-view-node').length >= 4");
+
+        var initialNodeCount = await page.Locator(".graph-view-node").CountAsync();
+        initialNodeCount.Should().BeGreaterThan(3);
+
+        await page.Locator(".graph-view-search-field input").FillAsync("Dense Memory Item 05");
+        await page.WaitForFunctionAsync("() => document.querySelectorAll('.graph-view-node').length === 1");
+
+        var toolbarText = await page.Locator(".graph-view-toolbar").InnerTextAsync();
+        toolbarText.Should().Contain("搜尋");
+        toolbarText.Should().Contain("顯示");
+        toolbarText.Should().Contain("關聯節點");
+
+        await page.Locator(".graph-view-mode-field select").SelectOptionAsync("all");
+        await page.Locator(".graph-view-search-field input").FillAsync(string.Empty);
+        await page.WaitForFunctionAsync(
+            "(count) => document.querySelectorAll('.graph-view-node').length >= count",
+            initialNodeCount);
     }
 
     [Fact]
@@ -767,16 +1258,211 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var beforeBox = await panel.BoundingBoxAsync();
         beforeBox.Should().NotBeNull();
 
-        await page.GetByRole(AriaRole.Button, new() { Name = "全螢幕" }).ClickAsync();
+        await page.GetByRole(AriaRole.Button, new() { Name = "全螢幕", Exact = true }).ClickAsync();
         await page.WaitForFunctionAsync("() => document.querySelector('.graph-canvas-panel')?.classList.contains('graph-canvas-panel-expanded') === true");
 
         var expandedBox = await panel.BoundingBoxAsync();
         expandedBox.Should().NotBeNull();
+        var viewportJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                width: window.innerWidth,
+                height: window.innerHeight
+            })");
+        using var viewportDocument = JsonDocument.Parse(viewportJson);
+        var viewportWidth = viewportDocument.RootElement.GetProperty("width").GetDouble();
+        var viewportHeight = viewportDocument.RootElement.GetProperty("height").GetDouble();
+
+        expandedBox!.X.Should().BeLessThan(24);
+        expandedBox.Y.Should().BeLessThan(24);
         expandedBox!.Width.Should().BeGreaterThan(beforeBox!.Width + 120);
-        expandedBox.Height.Should().BeGreaterThan(beforeBox.Height + 120);
+        expandedBox.Width.Should().BeGreaterThan((float)(viewportWidth * 0.95d));
+        expandedBox.Height.Should().BeGreaterThan((float)(viewportHeight * 0.92d));
 
         await page.GetByRole(AriaRole.Button, new() { Name = "收合圖表" }).ClickAsync();
         await page.WaitForFunctionAsync("() => document.querySelector('.graph-canvas-panel')?.classList.contains('graph-canvas-panel-expanded') === false");
+    }
+
+    [Fact]
+    public async Task Graph_Should_Background_Refresh_Without_Resetting_Selected_Node()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=graphdemo");
+        await page.WaitForFunctionAsync("() => document.querySelectorAll('.graph-view-node').length >= 8");
+
+        var secondNode = page.Locator(".graph-view-node").Nth(1);
+        await secondNode.Locator("circle").ClickAsync();
+        var selectedNodeId = await secondNode.GetAttributeAsync("data-graph-node-id");
+        selectedNodeId.Should().NotBeNullOrWhiteSpace();
+        var firstRefreshTimestamp = await page.Locator(".refresh-status-time .client-local-time").GetAttributeAsync("data-local-iso");
+        firstRefreshTimestamp.Should().NotBeNullOrWhiteSpace();
+
+        await page.WaitForFunctionAsync(
+            @"({ selectedNodeId, firstRefreshTimestamp }) => {
+                const selected = document.querySelector('.graph-view-node.selected');
+                const refreshedAt = document.querySelector('.refresh-status-time .client-local-time')?.getAttribute('data-local-iso');
+                return selected?.getAttribute('data-graph-node-id') === selectedNodeId &&
+                    refreshedAt &&
+                    refreshedAt !== firstRefreshTimestamp;
+            }",
+            new { selectedNodeId, firstRefreshTimestamp },
+            new PageWaitForFunctionOptions { Timeout = 5000 });
+    }
+
+    [Theory]
+    [InlineData("app-browser-1092", 1092, 1270, true)]
+    [InlineData("comment-retina-2182", 2182, 2538, false)]
+    public async Task Graph_Responsive_Layout_Should_Not_Overlap_When_Focused_And_Expanded_At_App_Browser_Sizes(
+        string viewportName,
+        int width,
+        int height,
+        bool expectSingleColumn)
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport(viewportName, width, height);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/graph?uiProfile=graphdemo");
+        await page.WaitForFunctionAsync("() => document.querySelectorAll('.graph-view-node').length >= 8");
+
+        await page.Locator(".graph-view-node").First.Locator("circle").ClickAsync();
+        var focusButton = page.GetByRole(AriaRole.Button, new() { Name = "聚焦此節點" });
+        try
+        {
+            await focusButton.ClickAsync(new LocatorClickOptions { Timeout = 3000 });
+        }
+        catch (TimeoutException ex)
+        {
+            var diagnosticJson = await page.EvaluateAsync<string>(
+                @"() => {
+                    const rectOf = selector => {
+                        const element = document.querySelector(selector);
+                        if (!element) {
+                            return null;
+                        }
+
+                        const rect = element.getBoundingClientRect();
+                        return {
+                            left: Math.round(rect.left),
+                            top: Math.round(rect.top),
+                            right: Math.round(rect.right),
+                            bottom: Math.round(rect.bottom),
+                            width: Math.round(rect.width),
+                            height: Math.round(rect.height)
+                        };
+                    };
+                    const workspace = document.querySelector('.graph-workspace');
+                    const style = workspace ? getComputedStyle(workspace) : null;
+                    const button = Array.from(document.querySelectorAll('button')).find(item => item.textContent?.trim() === '聚焦此節點');
+                    const buttonRect = button?.getBoundingClientRect();
+                    const centerX = buttonRect ? Math.round(buttonRect.left + (buttonRect.width / 2)) : 0;
+                    const centerY = buttonRect ? Math.round(buttonRect.top + (buttonRect.height / 2)) : 0;
+                    const blocker = document.elementFromPoint(centerX, centerY);
+
+                    return JSON.stringify({
+                        viewportWidth: window.innerWidth,
+                        areas: style?.gridTemplateAreas ?? '',
+                        columns: style?.gridTemplateColumns ?? '',
+                        rows: style?.gridTemplateRows ?? '',
+                        alignContent: style?.alignContent ?? '',
+                        workspace: rectOf('.graph-workspace'),
+                        filter: rectOf('.graph-filter-panel'),
+                        canvas: rectOf('.graph-canvas-panel'),
+                        detail: rectOf('.graph-detail-panel'),
+                        shell: rectOf('.graph-scroll-shell'),
+                        button: button ? rectOf('button.ghost-button') : null,
+                        centerX,
+                        centerY,
+                        blockerTag: blocker?.tagName ?? '',
+                        blockerClass: blocker?.className?.toString() ?? '',
+                        blockerPanelClass: blocker?.closest('section')?.className?.toString() ?? ''
+                    });
+                }");
+            throw new InvalidOperationException($"Graph focus action is visually blocked at {viewportName}: {diagnosticJson}", ex);
+        }
+        await page.GetByRole(AriaRole.Button, new() { Name = "展開二階鄰居" }).ClickAsync();
+        await page.WaitForTimeoutAsync(350);
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const rectOf = selector => {
+                    const element = document.querySelector(selector);
+                    if (!element) {
+                        return null;
+                    }
+
+                    const rect = element.getBoundingClientRect();
+                    return {
+                        left: Math.round(rect.left),
+                        top: Math.round(rect.top),
+                        right: Math.round(rect.right),
+                        bottom: Math.round(rect.bottom),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
+                    };
+                };
+                const overlapArea = (a, b) => {
+                    if (!a || !b) {
+                        return 0;
+                    }
+
+                    const width = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+                    const height = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+                    return Math.round(width * height);
+                };
+
+                const workspace = document.querySelector('.graph-workspace');
+                const root = document.documentElement;
+                const body = document.body;
+                const filter = rectOf('.graph-filter-panel');
+                const canvas = rectOf('.graph-canvas-panel');
+                const detail = rectOf('.graph-detail-panel');
+                const shell = rectOf('.graph-scroll-shell');
+                const style = workspace ? getComputedStyle(workspace) : null;
+
+                return JSON.stringify({
+                    viewportWidth: window.innerWidth,
+                    documentScrollWidth: root.scrollWidth,
+                    bodyScrollWidth: body.scrollWidth,
+                    contentScrollWidth: document.querySelector('.content')?.scrollWidth ?? 0,
+                    contentClientWidth: document.querySelector('.content')?.clientWidth ?? 0,
+                    areas: style?.gridTemplateAreas ?? '',
+                    columns: style?.gridTemplateColumns ?? '',
+                    filter,
+                    canvas,
+                    detail,
+                    shell,
+                    filterCanvasOverlap: overlapArea(filter, canvas),
+                    canvasDetailOverlap: overlapArea(canvas, detail),
+                    filterDetailOverlap: overlapArea(filter, detail),
+                    visibleNodeCount: document.querySelectorAll('.graph-view-node').length
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var root = document.RootElement;
+        root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
+        root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
+        root.GetProperty("contentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("contentClientWidth").GetInt32() + 1);
+        root.GetProperty("visibleNodeCount").GetInt32().Should().BeGreaterThanOrEqualTo(5);
+        root.GetProperty("filterCanvasOverlap").GetInt32().Should().Be(0);
+        root.GetProperty("canvasDetailOverlap").GetInt32().Should().Be(0);
+        root.GetProperty("filterDetailOverlap").GetInt32().Should().Be(0);
+        root.GetProperty("shell").GetProperty("width").GetInt32().Should().BeGreaterThan(420);
+        root.GetProperty("shell").GetProperty("right").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
+
+        if (expectSingleColumn)
+        {
+            root.GetProperty("areas").GetString().Should().Contain("\"filter\"");
+            root.GetProperty("areas").GetString().Should().Contain("\"canvas\"");
+            root.GetProperty("areas").GetString().Should().Contain("\"detail\"");
+            root.GetProperty("columns").GetString()!.Split(' ', StringSplitOptions.RemoveEmptyEntries).Should().HaveCount(1);
+            root.GetProperty("canvas").GetProperty("top").GetInt32().Should().BeGreaterThan(root.GetProperty("filter").GetProperty("bottom").GetInt32());
+            root.GetProperty("detail").GetProperty("top").GetInt32().Should().BeGreaterThan(root.GetProperty("canvas").GetProperty("top").GetInt32());
+        }
     }
 
     private static string[] AllProjectsSelectionValue()
@@ -1186,6 +1872,112 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
+    public async Task Security_Form_Controls_Should_Use_Consistent_Field_Heights_On_App_Browser_Viewport()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("app-browser-1196", 1196, 1270);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/security?uiProfile=normal");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify(Array.from(document.querySelectorAll('.security-layout .settings-form-grid')).map((grid, gridIndex) => {
+                const controls = Array.from(grid.children).map((field, fieldIndex) => {
+                    const control = field.matches('.toggle-field')
+                        ? field
+                        : field.querySelector(':scope > input, :scope > select, :scope > .toggle-field');
+                    if (!control || field.matches('.settings-field-span')) {
+                        return null;
+                    }
+
+                    const rect = control.getBoundingClientRect();
+                    const fieldRect = field.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0 || fieldRect.width <= 0 || fieldRect.height <= 0) {
+                        return null;
+                    }
+
+                    return {
+                        gridIndex,
+                        fieldIndex,
+                        tag: control.tagName.toLowerCase(),
+                        className: control.className,
+                        height: Math.round(rect.height),
+                        top: Math.round(rect.top),
+                        fieldTop: Math.round(fieldRect.top)
+                    };
+                }).filter(Boolean);
+
+                return { gridIndex, controls };
+            }).filter(group => group.controls.length > 1))");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var groups = document.RootElement.EnumerateArray().ToArray();
+        groups.Should().NotBeEmpty();
+
+        foreach (var group in groups)
+        {
+            var controls = group.GetProperty("controls").EnumerateArray().ToArray();
+            var heights = controls.Select(control => control.GetProperty("height").GetInt32()).ToArray();
+
+            heights.Should().OnlyContain(height => height >= 46 && height <= 50, $"security controls should stay near the 48px field baseline: {layoutJson}");
+            (heights.Max() - heights.Min()).Should().BeLessThanOrEqualTo(1, $"security controls in the same form row should have matching heights: {layoutJson}");
+        }
+    }
+
+    [Fact]
+    public async Task Security_My_Token_Panel_Should_Not_Overlap_Next_Panel_And_Reload_Should_Sit_Next_To_Status()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("app-browser-1196", 1196, 1270);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/security?uiProfile=normal");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const rectOf = selector => {
+                    const element = document.querySelector(selector);
+                    if (!element) {
+                        return null;
+                    }
+
+                    const rect = element.getBoundingClientRect();
+                    return {
+                        left: Math.round(rect.left),
+                        top: Math.round(rect.top),
+                        right: Math.round(rect.right),
+                        bottom: Math.round(rect.bottom),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
+                    };
+                };
+
+                return JSON.stringify({
+                    myTokenPanel: rectOf('.security-layout > .security-my-token-panel'),
+                    myTokenTable: rectOf('.security-my-token-table-shell'),
+                    tenantPanel: rectOf('.security-layout > .panel:nth-of-type(2)'),
+                    refreshStatus: rectOf('.security-header-actions .refresh-status-shell'),
+                    reloadButton: rectOf('.security-header-actions .ghost-button')
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var root = document.RootElement;
+        var myTokenPanel = root.GetProperty("myTokenPanel");
+        var myTokenTable = root.GetProperty("myTokenTable");
+        var tenantPanel = root.GetProperty("tenantPanel");
+        var refreshStatus = root.GetProperty("refreshStatus");
+        var reloadButton = root.GetProperty("reloadButton");
+
+        myTokenPanel.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(tenantPanel.GetProperty("top").GetInt32(), $"my token panel must not overlap the tenant panel: {layoutJson}");
+        myTokenTable.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(myTokenPanel.GetProperty("bottom").GetInt32(), $"my token table must stay inside its panel: {layoutJson}");
+        reloadButton.GetProperty("left").GetInt32().Should().BeGreaterThan(refreshStatus.GetProperty("right").GetInt32() - 1, $"reload button should sit to the right of refresh status: {layoutJson}");
+        Math.Abs(reloadButton.GetProperty("top").GetInt32() - refreshStatus.GetProperty("top").GetInt32()).Should().BeLessThanOrEqualTo(2, $"reload button should align with refresh status: {layoutJson}");
+    }
+
+    [Fact]
     public async Task Settings_Transfer_Scope_Chips_Should_Stay_Three_Columns_And_Not_Collapse_At_1080_Width()
     {
         await _fixture.EnsureDashboardRunningAsync();
@@ -1448,7 +2240,8 @@ internal enum DashboardUiProfile
 {
     Normal,
     Empty,
-    Dense
+    Dense,
+    GraphDemo
 }
 
 internal sealed record DashboardRouteSpec(
@@ -1597,6 +2390,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         startInfo.Environment["Dashboard__SessionTimeoutMinutes"] = "480";
         startInfo.Environment["Dashboard__ComposeProject"] = "contexthub";
         startInfo.Environment["Dashboard__DataProtectionPath"] = dataProtectionPath;
+        startInfo.Environment["Dashboard__Polling__GraphSeconds"] = "1";
         startInfo.Environment["Memory__Namespace"] = "context-hub-browser";
 
         _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start dashboard process for browser tests.");

@@ -211,7 +211,7 @@ public sealed class GovernanceService(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
-        await cacheStore.IncrementAsync(cancellationToken);
+        await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
     }
 
     private async Task EnsureLinkAsync(GovernanceDraft draft, CancellationToken cancellationToken)

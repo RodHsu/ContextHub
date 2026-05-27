@@ -59,8 +59,25 @@ public static class InstanceBehaviorSettingsSerializer
     public static InstanceBehaviorSettingsResult Normalize(InstanceBehaviorSettingsResult settings)
         => settings with
         {
-            SnapshotPolling = settings.SnapshotPolling ?? DashboardSnapshotPollingDefaults.Create()
+            SnapshotPolling = NormalizeSnapshotPolling(settings.SnapshotPolling)
         };
+
+    private static DashboardSnapshotPollingSettingsResult NormalizeSnapshotPolling(
+        DashboardSnapshotPollingSettingsResult? settings)
+    {
+        var defaults = DashboardSnapshotPollingDefaults.Create();
+        if (settings is null)
+        {
+            return defaults;
+        }
+
+        return settings with
+        {
+            MemoryGraphIndexSeconds = settings.MemoryGraphIndexSeconds < 1
+                ? defaults.MemoryGraphIndexSeconds
+                : settings.MemoryGraphIndexSeconds
+        };
+    }
 
     private sealed record LegacyInstanceBehaviorSettings(
         bool ConversationAutomationEnabled,

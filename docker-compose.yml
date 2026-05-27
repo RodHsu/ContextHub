@@ -17,6 +17,18 @@ x-dashboard-config: &dashboard-config
   Dashboard__Polling__JobsSeconds: ${DASHBOARD_POLLING_JOBS_SECONDS:-8}
   Dashboard__Polling__LogsSeconds: ${DASHBOARD_POLLING_LOGS_SECONDS:-10}
   Dashboard__Polling__PerformanceSeconds: ${DASHBOARD_POLLING_PERFORMANCE_SECONDS:-30}
+  Dashboard__ApiToken: ${DASHBOARD_API_TOKEN}
+
+x-telemetry-retention-config: &telemetry-retention-config
+  TelemetryRetention__Enabled: ${TELEMETRY_RETENTION_ENABLED:-true}
+  TelemetryRetention__HitsRetentionDays: ${TELEMETRY_RETENTION_HITS_DAYS:-15}
+  TelemetryRetention__EventsRetentionDays: ${TELEMETRY_RETENTION_EVENTS_DAYS:-30}
+  TelemetryRetention__RunAtLocalTime: ${TELEMETRY_RETENTION_RUN_AT_LOCAL_TIME:-03:30}
+  TelemetryRetention__TimeZone: ${TELEMETRY_RETENTION_TIME_ZONE:-Asia/Taipei}
+  TelemetryRetention__BatchSize: ${TELEMETRY_RETENTION_BATCH_SIZE:-10000}
+  TelemetryRetention__DelayBetweenBatchesMs: ${TELEMETRY_RETENTION_DELAY_BETWEEN_BATCHES_MS:-200}
+  TelemetryRetention__CommandTimeoutSeconds: ${TELEMETRY_RETENTION_COMMAND_TIMEOUT_SECONDS:-120}
+  TelemetryRetention__RunVacuumFullAutomatically: ${TELEMETRY_RETENTION_RUN_VACUUM_FULL_AUTOMATICALLY:-false}
 
 services:
   embedding-service:
@@ -24,6 +36,9 @@ services:
     build:
       context: .
       dockerfile: src/Memory.EmbeddingServer/Dockerfile
+      args:
+        APP_VERSION: ${CONTEXTHUB_BUILD_VERSION:-1.1.0}
+        BUILD_TIMESTAMP_UTC: ${CONTEXTHUB_BUILD_TIMESTAMP_UTC:-}
     restart: always
     environment:
       <<: *embedding-config
@@ -50,7 +65,7 @@ services:
       POSTGRES_USER: contexthub
       POSTGRES_PASSWORD: contexthub
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -68,7 +83,7 @@ services:
     image: redis:7.4-alpine
     restart: always
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_BIND:-127.0.0.1}:${REDIS_HOST_PORT:-6379}:6379"
     command: ["redis-server", "--appendonly", "no", "--save", "3600", "1", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
       - redis-data:/data
@@ -88,10 +103,19 @@ services:
     build:
       context: .
       dockerfile: src/Memory.McpServer/Dockerfile
+      args:
+        APP_VERSION: ${CONTEXTHUB_BUILD_VERSION:-1.1.0}
+        BUILD_TIMESTAMP_UTC: ${CONTEXTHUB_BUILD_TIMESTAMP_UTC:-}
     restart: always
     environment:
       ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
-      <<: *embedding-config
+      ContextHub__Security__RequireAuthentication: ${CONTEXTHUB_SECURITY_REQUIREAUTHENTICATION:-true}
+      CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN}
+      ContextHub__Security__BootstrapToken: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN}
+      ContextHub__Security__BootstrapTenantSlug: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TENANT_SLUG:-context-team}
+      ContextHub__Security__BootstrapUsername: ${CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME:-dashboard-service}
+      ContextHub__Security__BootstrapAllowedProjectIds: ${CONTEXTHUB_SECURITY_BOOTSTRAP_ALLOWED_PROJECT_IDS:-ContextHub}
+      <<: [*embedding-config, *telemetry-retention-config]
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
       Dashboard__ComposeProject: ${DASHBOARD_COMPOSE_PROJECT:-contexthub}
@@ -109,15 +133,15 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "${MCP_SERVER_HOST_PORT:-8092}:8080"
+      - "${MCP_SERVER_HOST_BIND:-127.0.0.1}:${MCP_SERVER_HOST_PORT:-8092}:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/ready"]
+      test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $$CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN\" http://localhost:8080/health/ready"]
       interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
+      timeout: 10s
+      retries: 60
+      start_period: 90s
     logging:
       driver: "json-file"
       options:
@@ -129,10 +153,13 @@ services:
     build:
       context: .
       dockerfile: src/Memory.Worker/Dockerfile
+      args:
+        APP_VERSION: ${CONTEXTHUB_BUILD_VERSION:-1.1.0}
+        BUILD_TIMESTAMP_UTC: ${CONTEXTHUB_BUILD_TIMESTAMP_UTC:-}
     restart: always
     environment:
       ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
-      <<: *embedding-config
+      <<: [*embedding-config, *telemetry-retention-config]
       ASPNETCORE_URLS: http://0.0.0.0:8082
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
@@ -164,6 +191,9 @@ services:
     build:
       context: .
       dockerfile: src/Memory.Dashboard/Dockerfile
+      args:
+        APP_VERSION: ${CONTEXTHUB_BUILD_VERSION:-1.1.0}
+        BUILD_TIMESTAMP_UTC: ${CONTEXTHUB_BUILD_TIMESTAMP_UTC:-}
     restart: always
     environment:
       ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
@@ -178,7 +208,7 @@ services:
       mcp-server:
         condition: service_healthy
     ports:
-      - "${DASHBOARD_HOST_PORT:-8091}:8088"
+      - "${DASHBOARD_HOST_BIND:-127.0.0.1}:${DASHBOARD_HOST_PORT:-8091}:8088"
     volumes:
       - dashboard-data-protection:/var/lib/contexthub-dashboard/keys
       - /var/run/docker.sock:/var/run/docker.sock:ro

@@ -8,6 +8,103 @@ namespace Memory.UnitTests;
 public sealed class DashboardQueryServiceTests
 {
     [Fact]
+    public async Task MemoryGraph_Should_Read_Precomputed_Snapshot()
+    {
+        var now = new DateTimeOffset(2026, 4, 15, 8, 0, 0, TimeSpan.Zero);
+        var nodeA = CreateGraphNode(1, "ContextHub", "Graph seed", ["graph", "dashboard"], 0.95m);
+        var nodeB = CreateGraphNode(2, "ContextHub", "Graph neighbor", ["graph"], 0.85m);
+        var nodeC = CreateGraphNode(3, "OtherProject", "Other memory", ["other"], 0.75m);
+        var snapshotStore = new FakeDashboardSnapshotStore();
+        snapshotStore.Add(new DashboardSnapshotEnvelope<DashboardMemoryGraphIndexSnapshotPayload>(
+            DashboardSnapshotKeys.MemoryGraphIndex,
+            now.AddSeconds(-2),
+            15,
+            now.AddSeconds(13),
+            string.Empty,
+            new DashboardMemoryGraphIndexSnapshotPayload(
+                new MemoryGraphResult(
+                    [nodeA, nodeB, nodeC],
+                    [
+                        new MemoryGraphEdgeResult(nodeA.Id, nodeB.Id, "explicit", "references"),
+                        new MemoryGraphEdgeResult(nodeA.Id, nodeC.Id, "explicit", "cross-project")
+                    ],
+                    new MemoryGraphStatsResult(0, 3, 2, false)))));
+
+        var service = new DashboardQueryService(
+            new UnusedApplicationDbContext(),
+            new UnusedStorageExplorerStore(),
+            snapshotStore,
+            new UnusedMemoryService(),
+            new FakeCacheVersionStore(),
+            new FakeRedisObjectCache(),
+            new FixedTimeProvider(now),
+            new RequestActorAccessor());
+
+        var graph = await service.GetMemoryGraphAsync(
+            new MemoryGraphRequest(ProjectId: "ContextHub", GraphMode: MemoryGraphMode.ProjectFull),
+            CancellationToken.None);
+
+        graph.Nodes.Should().HaveCount(2);
+        graph.Edges.Should().ContainSingle();
+        graph.Nodes.Single(node => node.Id == nodeA.Id).ExplicitLinkCount.Should().Be(1);
+        graph.Stats.Truncated.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task MemoryGraph_Should_Return_Unavailable_When_Snapshot_Is_Missing()
+    {
+        var now = new DateTimeOffset(2026, 4, 15, 8, 0, 0, TimeSpan.Zero);
+        var service = new DashboardQueryService(
+            new UnusedApplicationDbContext(),
+            new UnusedStorageExplorerStore(),
+            new FakeDashboardSnapshotStore(),
+            new UnusedMemoryService(),
+            new FakeCacheVersionStore(),
+            new FakeRedisObjectCache(),
+            new FixedTimeProvider(now),
+            new RequestActorAccessor());
+
+        var graph = await service.GetMemoryGraphAsync(new MemoryGraphRequest(ProjectId: "ContextHub"), CancellationToken.None);
+
+        graph.Nodes.Should().BeEmpty();
+        graph.Edges.Should().BeEmpty();
+        graph.Stats.Truncated.Should().BeTrue();
+        graph.Stats.TruncationReason.Should().Contain("Graph index snapshot unavailable");
+    }
+
+    [Fact]
+    public async Task MemoryGraphIndexRefresh_Should_Write_Background_Snapshot()
+    {
+        var now = new DateTimeOffset(2026, 4, 15, 8, 10, 0, TimeSpan.Zero);
+        var nodeA = CreateGraphNode(1, "ContextHub", "Graph seed", ["graph"], 0.95m);
+        var nodeB = CreateGraphNode(2, "ContextHub", "Graph neighbor", ["graph"], 0.85m);
+        var expectedGraph = new MemoryGraphResult(
+            [nodeA, nodeB],
+            [new MemoryGraphEdgeResult(nodeA.Id, nodeB.Id, "explicit", "references")],
+            new MemoryGraphStatsResult(0, 2, 1, false));
+        var snapshotStore = new FakeDashboardSnapshotStore();
+        var service = new DashboardMemoryGraphIndexRefreshService(
+            new FakeDashboardMemoryGraphIndexBuilder(expectedGraph),
+            snapshotStore,
+            new FixedBehaviorSettingsAccessor(23),
+            new FixedTimeProvider(now));
+
+        var result = await service.RefreshAsync("manual", null, CancellationToken.None);
+        var snapshot = await snapshotStore.GetAsync<DashboardMemoryGraphIndexSnapshotPayload>(
+            DashboardSnapshotKeys.MemoryGraphIndex,
+            CancellationToken.None);
+
+        result.Trigger.Should().Be("manual");
+        result.RefreshIntervalSeconds.Should().Be(23);
+        result.NodeCount.Should().Be(2);
+        result.EdgeCount.Should().Be(1);
+        snapshot.Should().NotBeNull();
+        snapshot!.CapturedAtUtc.Should().Be(now);
+        snapshot.RefreshIntervalSeconds.Should().Be(23);
+        snapshot.Payload.Graph.Edges.Should().ContainSingle();
+    }
+
+    [Fact]
     public async Task Monitoring_Should_Return_Unavailable_Telemetry_When_Snapshot_Is_Missing()
     {
         var now = new DateTimeOffset(2026, 4, 15, 8, 0, 0, TimeSpan.Zero);
@@ -64,7 +161,10 @@ public sealed class DashboardQueryServiceTests
             new UnusedStorageExplorerStore(),
             snapshotStore,
             new UnusedMemoryService(),
-            new FixedTimeProvider(now));
+            new FakeCacheVersionStore(),
+            new FakeRedisObjectCache(),
+            new FixedTimeProvider(now),
+            new RequestActorAccessor());
 
         var monitoring = await service.GetMonitoringAsync(CancellationToken.None);
 
@@ -170,7 +270,10 @@ public sealed class DashboardQueryServiceTests
             new UnusedStorageExplorerStore(),
             snapshotStore,
             new UnusedMemoryService(),
-            new FixedTimeProvider(now));
+            new FakeCacheVersionStore(),
+            new FakeRedisObjectCache(),
+            new FixedTimeProvider(now),
+            new RequestActorAccessor());
 
         var overview = await service.GetOverviewAsync(CancellationToken.None);
 
@@ -180,10 +283,119 @@ public sealed class DashboardQueryServiceTests
         overview.SnapshotStatus.Sections.Single(x => x.Key == DashboardSnapshotKeys.ResourceChart).IsStale.Should().BeTrue();
     }
 
+    [Fact]
+    public async Task StorageTables_Should_Read_Redis_Snapshot()
+    {
+        var now = new DateTimeOffset(2026, 4, 15, 8, 0, 0, TimeSpan.Zero);
+        var snapshotStore = new FakeDashboardSnapshotStore();
+        snapshotStore.Add(new DashboardSnapshotEnvelope<DashboardStorageTableStatsSnapshotPayload>(
+            DashboardSnapshotKeys.StorageTableStats,
+            now,
+            5,
+            now.AddSeconds(15),
+            string.Empty,
+            new DashboardStorageTableStatsSnapshotPayload(
+                [new StorageTableSummaryResult("retrieval_events", "Telemetry", 123, ["id"], true)])));
+        var service = new DashboardQueryService(
+            new UnusedApplicationDbContext(),
+            new UnusedStorageExplorerStore(),
+            snapshotStore,
+            new UnusedMemoryService(),
+            new FakeCacheVersionStore(),
+            new FakeRedisObjectCache(),
+            new FixedTimeProvider(now),
+            new RequestActorAccessor());
+
+        var tables = await service.GetStorageTablesAsync(CancellationToken.None);
+
+        tables.Should().ContainSingle(x => x.Name == "retrieval_events" && x.IsLarge);
+    }
+
+    [Fact]
+    public async Task LargeTablePreview_Should_Read_Redis_Snapshot()
+    {
+        var now = new DateTimeOffset(2026, 4, 15, 8, 0, 0, TimeSpan.Zero);
+        var snapshotStore = new FakeDashboardSnapshotStore();
+        var preview = new StorageTableRowsResult(
+            "retrieval_events",
+            "Telemetry",
+            ["id", "query_text"],
+            ["id"],
+            null,
+            null,
+            new PagedResult<StorageRowResult>(
+                [new StorageRowResult(new Dictionary<string, string?> { ["id"] = "row-1", ["query_text"] = "[omitted]" })],
+                1,
+                25,
+                123),
+            DashboardStoragePolicy.LargeTablePreviewWarning,
+            "redis");
+        snapshotStore.Add(new DashboardSnapshotEnvelope<DashboardStorageLargeTablePreviewSnapshotPayload>(
+            DashboardSnapshotKeys.StorageLargeTablePreview,
+            now,
+            5,
+            now.AddSeconds(15),
+            string.Empty,
+            new DashboardStorageLargeTablePreviewSnapshotPayload([preview])));
+        var service = new DashboardQueryService(
+            new UnusedApplicationDbContext(),
+            new UnusedStorageExplorerStore(),
+            snapshotStore,
+            new UnusedMemoryService(),
+            new FakeCacheVersionStore(),
+            new FakeRedisObjectCache(),
+            new FixedTimeProvider(now),
+            new RequestActorAccessor());
+
+        var rows = await service.GetStorageRowsAsync(
+            new StorageRowsRequest("retrieval_events", Page: 1, PageSize: 25),
+            CancellationToken.None);
+
+        rows.DataSource.Should().Be("redis");
+        rows.Warning.Should().Contain("Large table preview");
+        rows.Rows.Items.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void LargeTablePolicy_Should_Block_Unfiltered_Deep_Paging()
+    {
+        var request = new StorageRowsRequest("retrieval_hits", Page: 2, PageSize: 25);
+
+        DashboardStoragePolicy.IsBlockedUnfilteredLargeTablePage(request).Should().BeTrue();
+        DashboardStoragePolicy.IsLargeTablePreviewRequest(request).Should().BeFalse();
+    }
+
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
     }
+
+    private static MemoryGraphNodeResult CreateGraphNode(
+        int index,
+        string projectId,
+        string title,
+        IReadOnlyList<string> tags,
+        decimal importance)
+        => new(
+            Guid.Parse($"20000000-0000-0000-0000-{index:000000000000}"),
+            title,
+            $"{title} summary",
+            projectId,
+            MemoryType.Artifact,
+            MemoryScope.Project,
+            MemoryStatus.Active,
+            tags,
+            "document",
+            $"test://graph/{index}",
+            new DateTimeOffset(2026, 4, 15, 7, index, 0, TimeSpan.Zero),
+            importance,
+            0.9m,
+            false,
+            null,
+            null,
+            "document",
+            0,
+            0);
 
     private sealed class FakeDashboardSnapshotStore : IDashboardSnapshotStore
     {
@@ -207,6 +419,67 @@ public sealed class DashboardQueryServiceTests
             envelopes[envelope.Key] = envelope;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class FakeDashboardMemoryGraphIndexBuilder(MemoryGraphResult graph) : IDashboardMemoryGraphIndexBuilder
+    {
+        public Task<DashboardMemoryGraphIndexSnapshotPayload> BuildAsync(CancellationToken cancellationToken)
+            => Task.FromResult(new DashboardMemoryGraphIndexSnapshotPayload(graph));
+    }
+
+    private sealed class FakeCacheVersionStore : ICacheVersionStore
+    {
+        public Task<long> GetVersionAsync(CancellationToken cancellationToken) => Task.FromResult(1L);
+
+        public Task<CacheVersionStamp> GetVersionStampAsync(
+            IReadOnlyList<string> projectIds,
+            ContextHubRequestActor actor,
+            bool includeShared,
+            CancellationToken cancellationToken)
+            => Task.FromResult(new CacheVersionStamp("test", 1, 1, includeShared ? 1 : 0, 1, new Dictionary<string, long>()));
+
+        public Task<long> IncrementAsync(CancellationToken cancellationToken) => Task.FromResult(2L);
+        public Task<long> IncrementProjectAsync(string projectId, CancellationToken cancellationToken) => Task.FromResult(2L);
+        public Task<long> IncrementUserAsync(ContextHubRequestActor actor, CancellationToken cancellationToken) => Task.FromResult(2L);
+        public Task<long> IncrementSharedAsync(CancellationToken cancellationToken) => Task.FromResult(2L);
+        public Task<long> IncrementSecurityAsync(CancellationToken cancellationToken) => Task.FromResult(2L);
+        public Task<long> GetJobVersionAsync(CancellationToken cancellationToken) => Task.FromResult(1L);
+        public Task<long> IncrementJobsAsync(CancellationToken cancellationToken) => Task.FromResult(2L);
+        public Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken) => Task.FromResult<T?>(default);
+        public Task SetAsync<T>(string key, T value, TimeSpan ttl, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task PublishJobSignalAsync(Guid jobId, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<bool> WaitForJobSignalAsync(TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(false);
+    }
+
+    private sealed class FakeRedisObjectCache : IRedisObjectCache
+    {
+        public Task<RedisCacheLookup<T>> GetAsync<T>(string key, string kind, CancellationToken cancellationToken)
+            => Task.FromResult(new RedisCacheLookup<T>(false, default));
+
+        public Task SetAsync<T>(string key, string kind, T value, TimeSpan ttl, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+    }
+
+    private sealed class FixedBehaviorSettingsAccessor(int memoryGraphIndexSeconds) : IInstanceBehaviorSettingsAccessor
+    {
+        public Task<InstanceBehaviorSettingsResult> GetCurrentAsync(CancellationToken cancellationToken)
+            => Task.FromResult(new InstanceBehaviorSettingsResult(
+                true,
+                true,
+                true,
+                30,
+                "auto",
+                1200,
+                "ContextHub",
+                MemoryQueryMode.CurrentOnly,
+                false,
+                true,
+                DashboardSnapshotPollingDefaults.Create() with { MemoryGraphIndexSeconds = memoryGraphIndexSeconds },
+                5,
+                5,
+                5,
+                5,
+                5));
     }
 
     private sealed class UnusedStorageExplorerStore : IStorageExplorerStore
@@ -260,12 +533,18 @@ public sealed class DashboardQueryServiceTests
     private sealed class UnusedApplicationDbContext : IApplicationDbContext
     {
         public DbSet<InstanceSetting> InstanceSettings => throw new NotSupportedException();
+        public DbSet<Tenant> Tenants => throw new NotSupportedException();
+        public DbSet<TenantUser> TenantUsers => throw new NotSupportedException();
+        public DbSet<TenantProjectGrant> TenantProjectGrants => throw new NotSupportedException();
+        public DbSet<ApiToken> ApiTokens => throw new NotSupportedException();
+        public DbSet<SecurityAuditEvent> SecurityAuditEvents => throw new NotSupportedException();
         public DbSet<MemoryItem> MemoryItems => throw new NotSupportedException();
         public DbSet<MemoryItemRevision> MemoryItemRevisions => throw new NotSupportedException();
         public DbSet<MemoryItemChunk> MemoryItemChunks => throw new NotSupportedException();
         public DbSet<MemoryChunkVector> MemoryChunkVectors => throw new NotSupportedException();
         public DbSet<MemoryLink> MemoryLinks => throw new NotSupportedException();
         public DbSet<MemoryJob> MemoryJobs => throw new NotSupportedException();
+        public DbSet<MaintenanceRun> MaintenanceRuns => throw new NotSupportedException();
         public DbSet<RuntimeLogEntry> RuntimeLogEntries => throw new NotSupportedException();
         public DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints => throw new NotSupportedException();
         public DbSet<SourceConnection> SourceConnections => throw new NotSupportedException();

@@ -1,8 +1,9 @@
 (() => {
     const instances = new WeakMap();
     const padding = 28;
-    const minScale = 0.45;
+    const minScale = 0.25;
     const maxScale = 2.4;
+    const dragThreshold = 4;
 
     function clamp(value, min, max) {
         return Math.max(min, Math.min(value, max));
@@ -141,7 +142,10 @@
                 startClientX: 0,
                 startClientY: 0,
                 startPanX: 0,
-                startPanY: 0
+                startPanY: 0,
+                startedOnNode: false,
+                hasMoved: false,
+                suppressNextClick: false
             },
             cleanup: []
         };
@@ -157,29 +161,44 @@
                 return;
             }
 
-            const interactiveTarget = event.target instanceof Element
-                ? event.target.closest(".graph-node-card, button, input, select, textarea, a[href]")
+            const controlTarget = event.target instanceof Element
+                ? event.target.closest("button, input, select, textarea")
                 : null;
-            if (interactiveTarget) {
+            if (controlTarget) {
                 return;
             }
 
+            const nodeTarget = event.target instanceof Element
+                ? event.target.closest(".graph-view-node")
+                : null;
             instance.state.pointerId = event.pointerId;
             instance.state.startClientX = event.clientX;
             instance.state.startClientY = event.clientY;
             instance.state.startPanX = instance.state.panX;
             instance.state.startPanY = instance.state.panY;
-            updatePanningState(instance, true);
-            viewport.setPointerCapture?.(event.pointerId);
+            instance.state.startedOnNode = Boolean(nodeTarget);
+            instance.state.hasMoved = false;
         };
 
         const handlePointerMove = (event) => {
-            if (!instance.state.isPanning || instance.state.pointerId !== event.pointerId) {
+            if (instance.state.pointerId !== event.pointerId) {
                 return;
             }
 
-            instance.state.panX = instance.state.startPanX + (event.clientX - instance.state.startClientX);
-            instance.state.panY = instance.state.startPanY + (event.clientY - instance.state.startClientY);
+            const deltaX = event.clientX - instance.state.startClientX;
+            const deltaY = event.clientY - instance.state.startClientY;
+            if (!instance.state.hasMoved && Math.hypot(deltaX, deltaY) >= dragThreshold) {
+                instance.state.hasMoved = true;
+                updatePanningState(instance, true);
+                viewport.setPointerCapture?.(event.pointerId);
+            }
+
+            if (!instance.state.hasMoved) {
+                return;
+            }
+
+            instance.state.panX = instance.state.startPanX + deltaX;
+            instance.state.panY = instance.state.startPanY + deltaY;
             instance.state.hasInteracted = true;
             applyTransform(instance);
         };
@@ -189,14 +208,33 @@
                 return;
             }
 
-            viewport.releasePointerCapture?.(event.pointerId);
+            if (instance.state.isPanning) {
+                viewport.releasePointerCapture?.(event.pointerId);
+            }
+
+            if (instance.state.startedOnNode && instance.state.hasMoved) {
+                instance.state.suppressNextClick = true;
+            }
+
             instance.state.pointerId = null;
+            instance.state.startedOnNode = false;
+            instance.state.hasMoved = false;
             updatePanningState(instance, false);
+        };
+
+        const handleClick = (event) => {
+            if (!instance.state.suppressNextClick) {
+                return;
+            }
+
+            instance.state.suppressNextClick = false;
+            event.preventDefault();
+            event.stopPropagation();
         };
 
         const handleDoubleClick = (event) => {
             const interactiveTarget = event.target instanceof Element
-                ? event.target.closest(".graph-node-card")
+                ? event.target.closest(".graph-view-node")
                 : null;
             if (interactiveTarget) {
                 return;
@@ -216,17 +254,19 @@
 
         viewport.addEventListener("wheel", handleWheel, { passive: false });
         viewport.addEventListener("pointerdown", handlePointerDown);
-        viewport.addEventListener("pointermove", handlePointerMove);
-        viewport.addEventListener("pointerup", handlePointerUp);
-        viewport.addEventListener("pointercancel", handlePointerUp);
+        window.addEventListener("pointermove", handlePointerMove, true);
+        window.addEventListener("pointerup", handlePointerUp, true);
+        window.addEventListener("pointercancel", handlePointerUp, true);
+        viewport.addEventListener("click", handleClick, true);
         viewport.addEventListener("dblclick", handleDoubleClick);
         resizeObserver.observe(viewport);
 
         instance.cleanup.push(() => viewport.removeEventListener("wheel", handleWheel));
         instance.cleanup.push(() => viewport.removeEventListener("pointerdown", handlePointerDown));
-        instance.cleanup.push(() => viewport.removeEventListener("pointermove", handlePointerMove));
-        instance.cleanup.push(() => viewport.removeEventListener("pointerup", handlePointerUp));
-        instance.cleanup.push(() => viewport.removeEventListener("pointercancel", handlePointerUp));
+        instance.cleanup.push(() => window.removeEventListener("pointermove", handlePointerMove, true));
+        instance.cleanup.push(() => window.removeEventListener("pointerup", handlePointerUp, true));
+        instance.cleanup.push(() => window.removeEventListener("pointercancel", handlePointerUp, true));
+        instance.cleanup.push(() => viewport.removeEventListener("click", handleClick, true));
         instance.cleanup.push(() => viewport.removeEventListener("dblclick", handleDoubleClick));
         instance.cleanup.push(() => resizeObserver.disconnect());
 
@@ -281,6 +321,34 @@
         zoomAt(viewport, rect.left + (rect.width / 2), rect.top + (rect.height / 2), 0.86);
     }
 
+    function panBy(viewport, dx, dy) {
+        const instance = getInstance(viewport);
+        if (!instance) {
+            return;
+        }
+
+        instance.state.panX += dx;
+        instance.state.panY += dy;
+        instance.state.hasInteracted = true;
+        applyTransform(instance);
+    }
+
+    function panUp(viewport) {
+        panBy(viewport, 0, 80);
+    }
+
+    function panDown(viewport) {
+        panBy(viewport, 0, -80);
+    }
+
+    function panLeft(viewport) {
+        panBy(viewport, 80, 0);
+    }
+
+    function panRight(viewport) {
+        panBy(viewport, -80, 0);
+    }
+
     window.contextHubGraph = {
         register,
         unregister,
@@ -288,6 +356,10 @@
         fit: fitContent,
         reset: resetContent,
         zoomIn,
-        zoomOut
+        zoomOut,
+        panUp,
+        panDown,
+        panLeft,
+        panRight
     };
 })();

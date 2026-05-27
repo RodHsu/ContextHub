@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Memory.Domain;
 
 namespace Memory.Application;
@@ -382,9 +383,13 @@ public sealed class MemoryService(
     IHybridSearchStore searchStore,
     IEmbeddingProvider embeddingProvider,
     ICacheVersionStore cacheStore,
+    IRedisObjectCache objectCache,
+    IRedisCachePolicy cachePolicy,
+    IBackgroundJobQueue jobQueue,
     IClock clock,
     IInstanceBehaviorSettingsAccessor behaviorSettingsAccessor,
-    IRetrievalTelemetryService retrievalTelemetryService) : IMemoryService
+    IRetrievalTelemetryService retrievalTelemetryService,
+    IRequestActorAccessor actorAccessor) : IMemoryService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -400,9 +405,14 @@ public sealed class MemoryService(
         var metadataJson = NormalizeMetadataJson(request.MetadataJson);
         var projectId = ProjectContext.Normalize(request.ProjectId, ResolveDefaultProjectId(request.Scope, request.MemoryType));
         EnsureWritableProject(projectId, allowSharedLayer: IsSummaryWrite(request));
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, IsUserPreference(request.Scope, request.MemoryType) ? SecurityScopes.PreferencesWrite : SecurityScopes.MemoryWrite);
+        EnsureProjectAllowed(actor, projectId, write: true);
 
         var entity = await dbContext.MemoryItems
-            .FirstOrDefaultAsync(x => x.ProjectId == projectId && x.ExternalKey == externalKey, cancellationToken);
+            .Where(x => x.ProjectId == projectId && x.ExternalKey == externalKey)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+            .FirstOrDefaultAsync(cancellationToken);
         var previousType = entity?.MemoryType;
 
         if (entity is null)
@@ -410,6 +420,8 @@ public sealed class MemoryService(
             entity = new MemoryItem
             {
                 ProjectId = projectId,
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
                 ExternalKey = externalKey,
                 Scope = request.Scope,
                 MemoryType = request.MemoryType,
@@ -450,7 +462,7 @@ public sealed class MemoryService(
         await AddRevisionAsync(entity, "upsert", cancellationToken);
         await ReplaceChunksAsync(entity, content, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
-        await InvalidateCachesAsync(cancellationToken);
+        await InvalidateMemoryCachesAsync(entity.ProjectId, actor, cancellationToken);
 
         if (!entity.IsReadOnly)
         {
@@ -470,8 +482,12 @@ public sealed class MemoryService(
     public async Task<MemoryDocument> UpdateAsync(MemoryUpdateRequest request, CancellationToken cancellationToken)
     {
         var projectId = request.ProjectId == null ? null : ProjectContext.Normalize(request.ProjectId);
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var entity = await dbContext.MemoryItems
-            .FirstOrDefaultAsync(x => x.Id == request.Id && (projectId == null || x.ProjectId == projectId), cancellationToken)
+            .Where(x => x.Id == request.Id && (projectId == null || x.ProjectId == projectId))
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+            .FirstOrDefaultAsync(cancellationToken)
             ?? throw new InvalidOperationException($"Memory item '{request.Id}' was not found.");
         var previousType = entity.MemoryType;
 
@@ -491,7 +507,7 @@ public sealed class MemoryService(
         await ReplaceChunksAsync(entity, entity.Content, cancellationToken);
 
         await dbContext.SaveChangesAsync(cancellationToken);
-        await InvalidateCachesAsync(cancellationToken);
+        await InvalidateMemoryCachesAsync(entity.ProjectId, actor, cancellationToken);
         await EnqueueReindexAsync(new EnqueueReindexRequest(MemoryItemId: entity.Id, ProjectId: entity.ProjectId), cancellationToken);
 
         var behavior = await behaviorSettingsAccessor.GetCurrentAsync(cancellationToken);
@@ -506,44 +522,52 @@ public sealed class MemoryService(
 
     public async Task<MemoryDocument?> GetAsync(Guid id, CancellationToken cancellationToken)
     {
-        var entity = await dbContext.MemoryItems.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        var entity = await dbContext.MemoryItems
+            .Where(x => x.Id == id)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+            .FirstOrDefaultAsync(cancellationToken);
         return entity is null ? null : Map(entity);
     }
 
     public async Task<IReadOnlyList<MemorySearchHit>> SearchAsync(MemorySearchRequest request, CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var allowedProjects = ProjectContext.ResolveSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
-        var version = await cacheStore.GetVersionAsync(cancellationToken);
-        var cacheKey = $"search:{version}:{Sha(request.Query)}:{request.Limit}:{request.IncludeArchived}:{string.Join("|", allowedProjects.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))}";
-        var cached = await cacheStore.GetAsync<IReadOnlyList<MemorySearchHit>>(cacheKey, cancellationToken);
-        var cacheHit = cached is not null;
-        if (cached is not null)
+        EnsureProjectsAllowed(actor, allowedProjects, write: false);
+        var version = await cacheStore.GetVersionStampAsync(allowedProjects, actor, request.UseSummaryLayer, cancellationToken);
+        var cacheKey = RedisCacheKeyBuilder.Search(version, request, actor, allowedProjects, embeddingProvider.ModelKey);
+        var cached = await objectCache.GetAsync<IReadOnlyList<MemorySearchHit>>(cacheKey, "search-final", cancellationToken);
+        var cacheHit = cached.Hit;
+        if (cached.Hit && cached.Value is not null)
         {
-            await TryRecordSearchTelemetryAsync(request, cached, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, cancellationToken);
-            return cached;
+            await TryRecordSearchTelemetryAsync(request, cached.Value, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "final", "search", version.Value, cancellationToken);
+            return cached.Value;
         }
 
         try
         {
             var keywordHits = await searchStore.SearchKeywordChunksAsync(request.Query, request.Limit * 4, cancellationToken);
-            var queryVector = await embeddingProvider.EmbedAsync(request.Query, EmbeddingPurpose.Query, cancellationToken);
-            var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, request.Limit * 4, cancellationToken);
+            var semanticHits = await SearchSemanticHitsAsync(request.Query, request.Limit * 4, version, actor, allowedProjects, cancellationToken);
 
             var itemIds = keywordHits.Select(x => x.MemoryId).Concat(semanticHits.Select(x => x.MemoryId)).Distinct().ToArray();
             var items = await dbContext.MemoryItems
                 .Where(x => itemIds.Contains(x.Id))
                 .Where(x => allowedProjects.Contains(x.ProjectId))
+                .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
                 .ToDictionaryAsync(x => x.Id, cancellationToken);
             var merged = HybridSearchComposer.Compose(keywordHits, semanticHits, items, request.Limit, request.IncludeArchived);
 
-            await cacheStore.SetAsync(cacheKey, merged, TimeSpan.FromMinutes(5), cancellationToken);
-            await TryRecordSearchTelemetryAsync(request, merged, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, cancellationToken);
+            await objectCache.SetAsync(cacheKey, "search-final", merged, cachePolicy.SearchTtl, cancellationToken);
+            await TryRecordSearchTelemetryAsync(request, merged, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "origin", "search", version.Value, cancellationToken);
             return merged;
         }
         catch (Exception ex)
         {
-            await TryRecordSearchTelemetryAsync(request, [], cacheHit, stopwatch.Elapsed.TotalMilliseconds, false, ex.Message, cancellationToken);
+            await TryRecordSearchTelemetryAsync(request, [], cacheHit, stopwatch.Elapsed.TotalMilliseconds, false, ex.Message, "origin", "search", version.Value, cancellationToken);
             throw;
         }
     }
@@ -551,15 +575,18 @@ public sealed class MemoryService(
     public async Task<WorkingContextResult> BuildWorkingContextAsync(WorkingContextRequest request, CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var allowedProjects = ProjectContext.ResolveSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
-        var version = await cacheStore.GetVersionAsync(cancellationToken);
-        var cacheKey = $"context:{version}:{Sha(request.Query)}:{request.Limit}:{request.RecentLogLimit}:{string.Join("|", allowedProjects.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))}";
-        var cached = await cacheStore.GetAsync<WorkingContextResult>(cacheKey, cancellationToken);
-        var cacheHit = cached is not null;
-        if (cached is not null)
+        EnsureProjectsAllowed(actor, allowedProjects, write: false);
+        var version = await cacheStore.GetVersionStampAsync(allowedProjects, actor, request.UseSummaryLayer, cancellationToken);
+        var cacheKey = RedisCacheKeyBuilder.WorkingContext(version, request, actor, allowedProjects, embeddingProvider.ModelKey);
+        var cached = await objectCache.GetAsync<WorkingContextResult>(cacheKey, "working-context-final", cancellationToken);
+        var cacheHit = cached.Hit;
+        if (cached.Hit && cached.Value is not null)
         {
-            await TryRecordWorkingContextTelemetryAsync(request, [], cached, cacheHit, false, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, cancellationToken);
-            return cached;
+            await TryRecordWorkingContextTelemetryAsync(request, [], cached.Value, cacheHit, false, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "final", "working-context", version.Value, cancellationToken);
+            return cached.Value;
         }
 
         IReadOnlyList<MemorySearchHit> hits = [];
@@ -579,7 +606,7 @@ public sealed class MemoryService(
                 cancellationToken);
             if (hits.Count == 0)
             {
-                hits = await LoadFallbackWorkingContextHitsAsync(allowedProjects, request.Limit * 3, cancellationToken);
+                hits = await LoadFallbackWorkingContextHitsAsync(actor, allowedProjects, request.Limit * 3, cancellationToken);
                 usedFallback = hits.Count > 0;
             }
 
@@ -612,8 +639,8 @@ public sealed class MemoryService(
                 userPreferenceSearch.Preferences,
                 suggestedTests,
                 citations);
-            await cacheStore.SetAsync(cacheKey, result, TimeSpan.FromMinutes(5), cancellationToken);
-            await TryRecordWorkingContextTelemetryAsync(request, hits, result, cacheHit, usedFallback, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, cancellationToken);
+            await objectCache.SetAsync(cacheKey, "working-context-final", result, cachePolicy.WorkingContextTtl, cancellationToken);
+            await TryRecordWorkingContextTelemetryAsync(request, hits, result, cacheHit, usedFallback, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "origin", "working-context", version.Value, cancellationToken);
             return result;
         }
         catch (Exception ex)
@@ -627,12 +654,16 @@ public sealed class MemoryService(
                 stopwatch.Elapsed.TotalMilliseconds,
                 false,
                 ex.Message,
+                "origin",
+                "working-context",
+                version.Value,
                 cancellationToken);
             throw;
         }
     }
 
     private async Task<IReadOnlyList<MemorySearchHit>> LoadFallbackWorkingContextHitsAsync(
+        ContextHubRequestActor actor,
         IReadOnlyList<string> allowedProjects,
         int limit,
         CancellationToken cancellationToken)
@@ -645,6 +676,7 @@ public sealed class MemoryService(
         var items = await dbContext.MemoryItems
             .AsNoTracking()
             .Where(x => allowedProjects.Contains(x.ProjectId))
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .Where(x => x.Status != MemoryStatus.Archived)
             .OrderByDescending(x => x.Importance)
             .ThenByDescending(x => x.UpdatedAt)
@@ -681,6 +713,41 @@ public sealed class MemoryService(
         return excerpt.Length <= maxLength ? excerpt : $"{excerpt[..maxLength]}…";
     }
 
+    private async Task<IReadOnlyList<ChunkSearchHit>> SearchSemanticHitsAsync(
+        string query,
+        int limit,
+        CacheVersionStamp version,
+        ContextHubRequestActor actor,
+        IReadOnlyList<string> allowedProjects,
+        CancellationToken cancellationToken)
+    {
+        var cacheKey = RedisCacheKeyBuilder.SemanticHits(version, embeddingProvider.ModelKey, query, limit, actor, allowedProjects);
+        var cached = await objectCache.GetAsync<IReadOnlyList<CachedChunkSearchHit>>(cacheKey, "semantic-hits", cancellationToken);
+        if (cached.Hit && cached.Value is not null)
+        {
+            return cached.Value.Select(x => x.ToSearchHit()).ToArray();
+        }
+
+        var queryVector = await EmbedQueryAsync(query, cancellationToken);
+        var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, limit, cancellationToken);
+        await objectCache.SetAsync(cacheKey, "semantic-hits", semanticHits.Select(x => x.ToCached()).ToArray(), cachePolicy.SemanticHitTtl, cancellationToken);
+        return semanticHits;
+    }
+
+    private async Task<EmbeddingVector> EmbedQueryAsync(string query, CancellationToken cancellationToken)
+    {
+        var cacheKey = RedisCacheKeyBuilder.Embedding(embeddingProvider.ModelKey, EmbeddingPurpose.Query, query);
+        var cached = await objectCache.GetAsync<EmbeddingVector>(cacheKey, "embedding-query", cancellationToken);
+        if (cached.Hit && cached.Value is not null)
+        {
+            return cached.Value;
+        }
+
+        var vector = await embeddingProvider.EmbedAsync(query, EmbeddingPurpose.Query, cancellationToken);
+        await objectCache.SetAsync(cacheKey, "embedding-query", vector, cachePolicy.EmbeddingTtl, cancellationToken);
+        return vector;
+    }
+
     private async Task TryRecordSearchTelemetryAsync(
         MemorySearchRequest request,
         IReadOnlyList<MemorySearchHit> hits,
@@ -688,6 +755,9 @@ public sealed class MemoryService(
         double durationMs,
         bool success,
         string error,
+        string cacheLayer,
+        string cacheKeyKind,
+        string versionStamp,
         CancellationToken cancellationToken)
     {
         if (request.Telemetry?.Enabled == false)
@@ -727,7 +797,7 @@ public sealed class MemoryService(
                 durationMs,
                 success,
                 error,
-                "{}",
+                BuildCacheTelemetryMetadata(cacheLayer, cacheKeyKind, versionStamp),
                 GetTraceId(),
                 GetRequestId(),
                 hitSnapshots),
@@ -743,6 +813,9 @@ public sealed class MemoryService(
         double durationMs,
         bool success,
         string error,
+        string cacheLayer,
+        string cacheKeyKind,
+        string versionStamp,
         CancellationToken cancellationToken)
     {
         if (request.Telemetry?.Enabled == false)
@@ -762,7 +835,10 @@ public sealed class MemoryService(
             artifacts = result.Artifacts.Count,
             recentLogs = result.RecentLogs.Count,
             userPreferences = result.UserPreferences.Count,
-            suggestedTests = result.SuggestedTests.Count
+            suggestedTests = result.SuggestedTests.Count,
+            cacheLayer,
+            cacheKeyKind,
+            versionStamp
         }, JsonOptions);
         var hitSnapshots = hits
             .Take(Math.Min(request.Limit * 2, 10))
@@ -820,8 +896,12 @@ public sealed class MemoryService(
 
     public async Task<EnqueueReindexResult> EnqueueReindexAsync(EnqueueReindexRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var job = new MemoryJob
         {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
             ProjectId = ProjectContext.Normalize(request.ProjectId),
             JobType = MemoryJobType.Reindex,
             Status = MemoryJobStatus.Pending,
@@ -831,15 +911,15 @@ public sealed class MemoryService(
             CreatedAt = clock.UtcNow
         };
 
-        await dbContext.MemoryJobs.AddAsync(job, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await cacheStore.PublishJobSignalAsync(job.Id, cancellationToken);
+        await jobQueue.EnqueueAsync(job, cancellationToken);
 
         return new EnqueueReindexResult(job.Id, job.Status);
     }
 
     public async Task<EnqueueSummaryRefreshResult> EnqueueSummaryRefreshAsync(EnqueueSummaryRefreshRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var rebuildAll = string.IsNullOrWhiteSpace(request.ProjectId);
         var projectId = rebuildAll ? null : ProjectContext.Normalize(request.ProjectId);
         var referenced = rebuildAll
@@ -852,6 +932,8 @@ public sealed class MemoryService(
 
         var job = new MemoryJob
         {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
             ProjectId = rebuildAll ? ProjectContext.SharedProjectId : projectId!,
             JobType = MemoryJobType.RefreshSummary,
             Status = MemoryJobStatus.Pending,
@@ -859,9 +941,7 @@ public sealed class MemoryService(
             CreatedAt = clock.UtcNow
         };
 
-        await dbContext.MemoryJobs.AddAsync(job, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await cacheStore.PublishJobSignalAsync(job.Id, cancellationToken);
+        await jobQueue.EnqueueAsync(job, cancellationToken);
 
         return new EnqueueSummaryRefreshResult(job.Id, job.Status);
     }
@@ -955,6 +1035,64 @@ public sealed class MemoryService(
     private static bool IsSharedSummarySourceType(MemoryType memoryType)
         => memoryType is MemoryType.Fact or MemoryType.Decision or MemoryType.Artifact;
 
+    private static bool IsUserPreference(MemoryScope scope, MemoryType memoryType)
+        => scope == MemoryScope.User && memoryType == MemoryType.Preference;
+
+    private static void EnsureProjectsAllowed(ContextHubRequestActor actor, IReadOnlyList<string> projectIds, bool write)
+    {
+        foreach (var projectId in projectIds)
+        {
+            EnsureProjectAllowed(actor, projectId, write);
+        }
+    }
+
+    private static string BuildCacheTelemetryMetadata(string cacheLayer, string cacheKeyKind, string versionStamp)
+        => JsonSerializer.Serialize(new
+        {
+            cacheLayer,
+            cacheKeyKind,
+            versionStamp
+        }, JsonOptions);
+
+    private static void EnsureProjectAllowed(ContextHubRequestActor actor, string projectId, bool write)
+    {
+        if (!actor.HasUser)
+        {
+            return;
+        }
+
+        if (ProjectContext.IsShared(projectId) || ProjectContext.IsUser(projectId))
+        {
+            return;
+        }
+
+        if (actor.AllowedProjectIds.Count == 0 ||
+            actor.AllowedProjectIds.Any(x => string.Equals(x, projectId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        throw new UnauthorizedAccessException(write
+            ? $"Project '{projectId}' is not writable for the current token."
+            : $"Project '{projectId}' is not readable for the current token.");
+    }
+
+    private static void EnsureScopeAllowed(ContextHubRequestActor actor, string scope)
+    {
+        if (!actor.IsAuthenticated)
+        {
+            return;
+        }
+
+        if (!actor.HasUser || !actor.HasScope(scope))
+        {
+            throw new UnauthorizedAccessException($"Scope '{scope}' is required.");
+        }
+    }
+
+    private static string ActorCacheKey(ContextHubRequestActor actor)
+        => actor.HasUser ? $"{actor.TenantId}:{actor.UserId}" : "unrestricted";
+
     public async Task<JobResult?> GetJobAsync(Guid id, CancellationToken cancellationToken)
     {
         var job = await dbContext.MemoryJobs.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -1017,8 +1155,11 @@ public sealed class MemoryService(
 
     public async Task<IReadOnlyList<UserPreferenceResult>> ListUserPreferencesAsync(UserPreferenceListRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.PreferencesRead);
         var items = await dbContext.MemoryItems
             .Where(x => x.ProjectId == ProjectContext.UserProjectId)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .Where(x => x.Scope == MemoryScope.User && x.MemoryType == MemoryType.Preference)
             .Where(x => request.IncludeArchived || x.Status == MemoryStatus.Active)
             .OrderByDescending(x => x.Importance)
@@ -1036,10 +1177,13 @@ public sealed class MemoryService(
 
     public async Task<UserPreferenceResult> ArchiveUserPreferenceAsync(UserPreferenceArchiveRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.PreferencesWrite);
         var entity = await dbContext.MemoryItems
             .FirstOrDefaultAsync(
                 x => x.Id == request.Id &&
                      x.ProjectId == ProjectContext.UserProjectId &&
+                     (!actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)) &&
                      x.Scope == MemoryScope.User &&
                      x.MemoryType == MemoryType.Preference,
                 cancellationToken)
@@ -1061,23 +1205,41 @@ public sealed class MemoryService(
         }, cancellationToken);
 
         await dbContext.SaveChangesAsync(cancellationToken);
-        await InvalidateCachesAsync(cancellationToken);
+        await InvalidateMemoryCachesAsync(ProjectContext.UserProjectId, actor, cancellationToken);
         return MapUserPreference(entity);
     }
 
-    private async Task InvalidateCachesAsync(CancellationToken cancellationToken)
-        => await cacheStore.IncrementAsync(cancellationToken);
+    private async Task InvalidateMemoryCachesAsync(string projectId, ContextHubRequestActor actor, CancellationToken cancellationToken)
+    {
+        var normalizedProjectId = ProjectContext.Normalize(projectId);
+        if (ProjectContext.IsShared(normalizedProjectId))
+        {
+            await cacheStore.IncrementSharedAsync(cancellationToken);
+            return;
+        }
+
+        if (ProjectContext.IsUser(normalizedProjectId))
+        {
+            await cacheStore.IncrementUserAsync(actor, cancellationToken);
+            return;
+        }
+
+        await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
+    }
 
     private async Task<UserPreferenceSearchResult> SearchUserPreferencesAsync(string query, int limit, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.PreferencesRead);
         var keywordHits = await searchStore.SearchKeywordChunksAsync(query, limit * 4, cancellationToken);
-        var queryVector = await embeddingProvider.EmbedAsync(query, EmbeddingPurpose.Query, cancellationToken);
+        var queryVector = await EmbedQueryAsync(query, cancellationToken);
         var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, limit * 4, cancellationToken);
 
         var itemIds = keywordHits.Select(x => x.MemoryId).Concat(semanticHits.Select(x => x.MemoryId)).Distinct().ToArray();
         var items = await dbContext.MemoryItems
             .Where(x => itemIds.Contains(x.Id))
             .Where(x => x.ProjectId == ProjectContext.UserProjectId)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .Where(x => x.Scope == MemoryScope.User && x.MemoryType == MemoryType.Preference && x.Status == MemoryStatus.Active)
             .ToDictionaryAsync(x => x.Id, cancellationToken);
 
@@ -1091,6 +1253,7 @@ public sealed class MemoryService(
 
         var fallback = await dbContext.MemoryItems
             .Where(x => x.ProjectId == ProjectContext.UserProjectId)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .Where(x => x.Scope == MemoryScope.User && x.MemoryType == MemoryType.Preference && x.Status == MemoryStatus.Active)
             .OrderByDescending(x => x.Importance)
             .ThenByDescending(x => x.Confidence)
@@ -1166,10 +1329,12 @@ public sealed class MemoryService(
 
     private async Task<UserPreferenceResult> GetUserPreferenceRequiredAsync(Guid id, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         var entity = await dbContext.MemoryItems
             .FirstOrDefaultAsync(
                 x => x.Id == id &&
                      x.ProjectId == ProjectContext.UserProjectId &&
+                     (!actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)) &&
                      x.Scope == MemoryScope.User &&
                      x.MemoryType == MemoryType.Preference,
                 cancellationToken)
@@ -1364,7 +1529,11 @@ public sealed class BackgroundJobProcessor(
     ISourceSyncService sourceSyncService,
     IGovernanceService governanceService,
     IEvaluationService evaluationService,
-    ISuggestedActionService suggestedActionService) : IBackgroundJobProcessor
+    ISuggestedActionService suggestedActionService,
+    IDashboardMemoryGraphIndexRefreshService memoryGraphIndexRefreshService,
+    ICacheVersionStore cacheStore,
+    IRequestActorAccessor actorAccessor,
+    ILogger<BackgroundJobProcessor> logger) : IBackgroundJobProcessor
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -1382,6 +1551,20 @@ public sealed class BackgroundJobProcessor(
         job.Status = MemoryJobStatus.Running;
         job.StartedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await cacheStore.IncrementJobsAsync(cancellationToken);
+
+        var previousActor = actorAccessor.Current;
+        if (job.TenantId.HasValue && job.OwnerUserId.HasValue)
+        {
+            actorAccessor.Current = new ContextHubRequestActor(
+                job.TenantId,
+                job.OwnerUserId,
+                "job-owner",
+                TenantUserRole.Member,
+                [],
+                [],
+                true);
+        }
 
         try
         {
@@ -1413,9 +1596,13 @@ public sealed class BackgroundJobProcessor(
                     break;
             }
 
+            await InvalidateCachesAfterCompletedJobAsync(job, cancellationToken);
+            await RefreshMemoryGraphIndexAfterMutationAsync(job.JobType, cancellationToken);
+
             job.Status = MemoryJobStatus.Completed;
             job.CompletedAt = clock.UtcNow;
             await dbContext.SaveChangesAsync(cancellationToken);
+            await cacheStore.IncrementJobsAsync(cancellationToken);
         }
         catch (Exception ex)
         {
@@ -1423,9 +1610,35 @@ public sealed class BackgroundJobProcessor(
             job.Error = ex.ToString();
             job.CompletedAt = clock.UtcNow;
             await dbContext.SaveChangesAsync(cancellationToken);
+            await cacheStore.IncrementJobsAsync(cancellationToken);
+        }
+        finally
+        {
+            actorAccessor.Current = previousActor;
         }
 
         return new JobResult(job.Id, job.JobType, job.Status, job.PayloadJson, job.Error, job.CreatedAt, job.StartedAt, job.CompletedAt, job.ProjectId);
+    }
+
+    private async Task InvalidateCachesAfterCompletedJobAsync(MemoryJob job, CancellationToken cancellationToken)
+    {
+        switch (job.JobType)
+        {
+            case MemoryJobType.Reindex:
+                await cacheStore.IncrementProjectAsync(job.ProjectId, cancellationToken);
+                await cacheStore.IncrementAsync(cancellationToken);
+                break;
+            case MemoryJobType.RefreshSummary:
+                await cacheStore.IncrementSharedAsync(cancellationToken);
+                break;
+            case MemoryJobType.SyncSource:
+            case MemoryJobType.AnalyzeGovernance:
+            case MemoryJobType.PromoteConversationInsights:
+            case MemoryJobType.IngestConversation:
+            case MemoryJobType.ExecuteSuggestedAction:
+                await cacheStore.IncrementProjectAsync(job.ProjectId, cancellationToken);
+                break;
+        }
     }
 
     private async Task ProcessReindexAsync(MemoryJob job, CancellationToken cancellationToken)
@@ -1618,6 +1831,25 @@ public sealed class BackgroundJobProcessor(
     private Task ProcessSourceSyncAsync(MemoryJob job, CancellationToken cancellationToken)
         => sourceSyncService.ProcessSyncJobAsync(job.Id, cancellationToken);
 
+    private async Task RefreshMemoryGraphIndexAfterMutationAsync(
+        MemoryJobType jobType,
+        CancellationToken cancellationToken)
+    {
+        if (jobType is not (MemoryJobType.Reindex or MemoryJobType.RefreshSummary or MemoryJobType.SyncSource))
+        {
+            return;
+        }
+
+        try
+        {
+            await memoryGraphIndexRefreshService.RefreshAsync("event", null, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Memory graph index event refresh failed after {JobType}.", jobType);
+        }
+    }
+
     private async Task ProcessGovernanceAnalysisAsync(MemoryJob job, CancellationToken cancellationToken)
     {
         var payload = JsonSerializer.Deserialize<GovernanceAnalysisJobPayload>(job.PayloadJson, JsonOptions)
@@ -1660,19 +1892,24 @@ public static class DependencyInjection
     public static IServiceCollection AddMemoryApplication(this IServiceCollection services)
     {
         services.AddSingleton<IClock, SystemClock>();
+        services.AddScoped<IRequestActorAccessor, RequestActorAccessor>();
         services.AddScoped<IChunkingService, ChunkingService>();
         services.AddScoped<IMemoryService, MemoryService>();
         services.AddScoped<IDashboardQueryService, DashboardQueryService>();
+        services.AddScoped<IDashboardMemoryGraphIndexBuilder, DashboardMemoryGraphIndexBuilder>();
+        services.AddScoped<IDashboardMemoryGraphIndexRefreshService, DashboardMemoryGraphIndexRefreshService>();
         services.AddScoped<IMemoryTransferService, MemoryTransferService>();
         services.AddScoped<ILogQueryService, LogQueryService>();
         services.AddScoped<IPerformanceProbeService, PerformanceProbeService>();
         services.AddScoped<IInstanceBehaviorSettingsAccessor, InstanceBehaviorSettingsAccessor>();
         services.AddScoped<IConversationAutomationService, ConversationAutomationService>();
+        services.AddScoped<ITenantSecurityService, TenantSecurityService>();
         services.AddScoped<ISourceConnectionService, SourceConnectionService>();
         services.AddScoped<ISourceSyncService, SourceSyncService>();
         services.AddScoped<IGovernanceService, GovernanceService>();
         services.AddScoped<IEvaluationService, EvaluationService>();
         services.AddScoped<ISuggestedActionService, SuggestedActionService>();
+        services.AddScoped<IBackgroundJobQueue, BackgroundJobQueue>();
         services.AddScoped<IBackgroundJobProcessor, BackgroundJobProcessor>();
         return services;
     }

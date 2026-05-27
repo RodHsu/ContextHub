@@ -6,13 +6,17 @@ namespace Memory.Infrastructure;
 
 public sealed class DatabaseRetrievalTelemetryService(
     IDbContextFactory<MemoryDbContext> dbContextFactory,
-    TimeProvider timeProvider) : IRetrievalTelemetryService
+    TimeProvider timeProvider,
+    IRequestActorAccessor actorAccessor) : IRetrievalTelemetryService
 {
     public async Task RecordAsync(RetrievalTelemetryWriteRequest request, CancellationToken cancellationToken)
     {
         await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var actor = actorAccessor.Current;
         var entity = new RetrievalEvent
         {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
             ProjectId = ProjectContext.Normalize(request.ProjectId),
             Channel = request.Channel?.Trim() ?? string.Empty,
             EntryPoint = request.EntryPoint?.Trim() ?? string.Empty,

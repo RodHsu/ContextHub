@@ -9,7 +9,10 @@ public sealed class DashboardQueryService(
     IStorageExplorerStore storageExplorerStore,
     IDashboardSnapshotStore snapshotStore,
     IMemoryService memoryService,
-    TimeProvider timeProvider) : IDashboardQueryService
+    ICacheVersionStore cacheStore,
+    IRedisObjectCache objectCache,
+    TimeProvider timeProvider,
+    IRequestActorAccessor actorAccessor) : IDashboardQueryService
 {
     public async Task<DashboardOverviewResult> GetOverviewAsync(CancellationToken cancellationToken)
     {
@@ -20,12 +23,22 @@ public sealed class DashboardQueryService(
         var resourceChart = await snapshotStore.GetAsync<DashboardResourceChartSnapshotPayload>(DashboardSnapshotKeys.ResourceChart, cancellationToken);
         var dependencyResources = await snapshotStore.GetAsync<DashboardDependencyResourcesResult>(DashboardSnapshotKeys.DependencyResources, cancellationToken);
         var dockerHost = await snapshotStore.GetAsync<DashboardDockerHostResult>(DashboardSnapshotKeys.DockerHost, cancellationToken);
+        var dashboardJobs = await snapshotStore.GetAsync<DashboardJobsSnapshotPayload>(DashboardSnapshotKeys.DashboardJobs, cancellationToken);
+        var dashboardLogs = await snapshotStore.GetAsync<DashboardLogsSnapshotPayload>(DashboardSnapshotKeys.DashboardLogs, cancellationToken);
+        var projectSuggestions = await snapshotStore.GetAsync<DashboardProjectSuggestionsSnapshotPayload>(DashboardSnapshotKeys.DashboardProjectSuggestions, cancellationToken);
+        var storageTableStats = await snapshotStore.GetAsync<DashboardStorageTableStatsSnapshotPayload>(DashboardSnapshotKeys.StorageTableStats, cancellationToken);
+        var storageLargeTablePreview = await snapshotStore.GetAsync<DashboardStorageLargeTablePreviewSnapshotPayload>(DashboardSnapshotKeys.StorageLargeTablePreview, cancellationToken);
 
         var sectionStatuses = new[]
         {
             BuildSectionStatus(DashboardSnapshotKeys.StatusCore, "核心狀態", statusCore, now),
             BuildSectionStatus(DashboardSnapshotKeys.DependenciesHealth, "依賴健康", dependencies, now),
             BuildSectionStatus(DashboardSnapshotKeys.RecentOperations, "近期維運摘要", recentOperations, now),
+            BuildSectionStatus(DashboardSnapshotKeys.DashboardJobs, "背景工作快照", dashboardJobs, now),
+            BuildSectionStatus(DashboardSnapshotKeys.DashboardLogs, "近期日誌快照", dashboardLogs, now),
+            BuildSectionStatus(DashboardSnapshotKeys.DashboardProjectSuggestions, "Project 建議快照", projectSuggestions, now),
+            BuildSectionStatus(DashboardSnapshotKeys.StorageTableStats, "Storage 表統計", storageTableStats, now),
+            BuildSectionStatus(DashboardSnapshotKeys.StorageLargeTablePreview, "Storage 大表預覽", storageLargeTablePreview, now),
             BuildSectionStatus(DashboardSnapshotKeys.ResourceChart, "圖表與即時資料", resourceChart, now),
             BuildSectionStatus(DashboardSnapshotKeys.DependencyResources, "Compose 服務資源", dependencyResources, now),
             BuildSectionStatus(DashboardSnapshotKeys.DockerHost, "Docker 主機", dockerHost, now)
@@ -119,6 +132,8 @@ public sealed class DashboardQueryService(
         var dependencyResources = await snapshotStore.GetAsync<DashboardDependencyResourcesResult>(DashboardSnapshotKeys.DependencyResources, cancellationToken);
         var resourceChart = await snapshotStore.GetAsync<DashboardResourceChartSnapshotPayload>(DashboardSnapshotKeys.ResourceChart, cancellationToken);
         var monitoring = await snapshotStore.GetAsync<DashboardMonitoringSnapshotPayload>(DashboardSnapshotKeys.MonitoringStats, cancellationToken);
+        var storageTableStats = await snapshotStore.GetAsync<DashboardStorageTableStatsSnapshotPayload>(DashboardSnapshotKeys.StorageTableStats, cancellationToken);
+        var storageLargeTablePreview = await snapshotStore.GetAsync<DashboardStorageLargeTablePreviewSnapshotPayload>(DashboardSnapshotKeys.StorageLargeTablePreview, cancellationToken);
 
         var sectionStatuses = new[]
         {
@@ -127,7 +142,9 @@ public sealed class DashboardQueryService(
             BuildSectionStatus(DashboardSnapshotKeys.DockerHost, "Docker 主機", dockerHost, now),
             BuildSectionStatus(DashboardSnapshotKeys.DependencyResources, "Compose 服務資源", dependencyResources, now),
             BuildSectionStatus(DashboardSnapshotKeys.ResourceChart, "資源趨勢", resourceChart, now),
-            BuildSectionStatus(DashboardSnapshotKeys.MonitoringStats, "Redis / PostgreSQL 統計", monitoring, now)
+            BuildSectionStatus(DashboardSnapshotKeys.MonitoringStats, "Redis / PostgreSQL 統計", monitoring, now),
+            BuildSectionStatus(DashboardSnapshotKeys.StorageTableStats, "Storage 表統計", storageTableStats, now),
+            BuildSectionStatus(DashboardSnapshotKeys.StorageLargeTablePreview, "Storage 大表預覽", storageLargeTablePreview, now)
         };
         var snapshotStatus = BuildPageSnapshotStatus(sectionStatuses, now);
         var core = statusCore?.Payload;
@@ -197,7 +214,12 @@ public sealed class DashboardQueryService(
     }
 
     private static bool IsPageCriticalSection(DashboardSnapshotSectionStatusResult section)
-        => !string.Equals(section.Key, DashboardSnapshotKeys.ResourceChart, StringComparison.Ordinal);
+        => section.Key is not DashboardSnapshotKeys.ResourceChart and
+            not DashboardSnapshotKeys.DashboardJobs and
+            not DashboardSnapshotKeys.DashboardLogs and
+            not DashboardSnapshotKeys.DashboardProjectSuggestions and
+            not DashboardSnapshotKeys.StorageTableStats and
+            not DashboardSnapshotKeys.StorageLargeTablePreview;
 
     private static DashboardDockerHostResult CreateUnavailableDockerHost(DateTimeOffset capturedAtUtc)
         => new(
@@ -268,6 +290,23 @@ public sealed class DashboardQueryService(
     public async Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken)
     {
         var normalized = Normalize(request.Page, request.PageSize, 100);
+        var normalizedRequest = request with { Page = normalized.Page, PageSize = normalized.PageSize };
+        var actor = actorAccessor.Current;
+        var version = await cacheStore.GetVersionStampAsync(
+            ResolveDashboardSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer) ?? [],
+            actor,
+            request.UseSummaryLayer,
+            cancellationToken);
+        var cacheKey = RedisCacheKeyBuilder.DashboardMemories(version, normalizedRequest, actor);
+        var cached = await objectCache.GetAsync<PagedResult<MemoryListItemResult>>(
+            cacheKey,
+            "dashboard-memories",
+            cancellationToken);
+        if (cached.Hit && cached.Value is not null)
+        {
+            return cached.Value;
+        }
+
         var query = BuildMemoryScopeQuery(
             request.ProjectId,
             request.IncludedProjectIds,
@@ -305,76 +344,75 @@ public sealed class DashboardQueryService(
                 x.IsReadOnly))
             .ToListAsync(cancellationToken);
 
-        return new PagedResult<MemoryListItemResult>(items, normalized.Page, normalized.PageSize, totalCount);
+        var result = new PagedResult<MemoryListItemResult>(items, normalized.Page, normalized.PageSize, totalCount);
+        await objectCache.SetAsync(cacheKey, "dashboard-memories", result, TimeSpan.FromSeconds(60), cancellationToken);
+        return result;
     }
 
     public async Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)
     {
         var normalizedMaxNodes = NormalizeGraphMaxNodes(request.MaxNodes);
-        var scopedItems = await BuildMemoryScopeQuery(
-                request.ProjectId,
-                request.IncludedProjectIds,
-                request.QueryMode,
-                request.UseSummaryLayer,
-                request.ProjectQuery,
-                null,
-                request.Scope,
-                request.MemoryType,
-                request.Status,
-                request.SourceType,
-                request.Tag)
-            .ToListAsync(cancellationToken);
+        var snapshot = await snapshotStore.GetAsync<DashboardMemoryGraphIndexSnapshotPayload>(
+            DashboardSnapshotKeys.MemoryGraphIndex,
+            cancellationToken);
 
-        if (IsIntegratedAllProjectsGraphRequest(request))
+        if (snapshot is null)
         {
-            scopedItems = scopedItems
-                .Where(item => !ProjectContext.IsShared(item.ProjectId) && !ProjectContext.IsUser(item.ProjectId))
-                .ToList();
+            return new MemoryGraphResult(
+                [],
+                [],
+                new MemoryGraphStatsResult(
+                    0,
+                    0,
+                    0,
+                    true,
+                    "Graph index snapshot unavailable. Wait for the background collector to finish the first refresh."));
         }
 
-        if (scopedItems.Count == 0)
-        {
-            return new MemoryGraphResult([], [], new MemoryGraphStatsResult(0, 0, 0, false));
-        }
-
-        var scopedById = scopedItems.ToDictionary(item => item.Id);
-        var scopedIds = scopedById.Keys.ToHashSet();
-        var scopedLinks = await dbContext.MemoryLinks
-            .AsNoTracking()
-            .Where(x => scopedIds.Contains(x.FromId) || scopedIds.Contains(x.ToId))
-            .ToListAsync(cancellationToken);
-
-        return request.GraphMode == MemoryGraphMode.ProjectFull
-            ? await BuildProjectFullGraphAsync(request, normalizedMaxNodes, scopedItems, scopedById, scopedLinks, cancellationToken)
-            : await BuildSeededGraphAsync(request, normalizedMaxNodes, scopedItems, scopedById, scopedLinks, cancellationToken);
+        var graph = BuildGraphFromSnapshot(request, normalizedMaxNodes, snapshot.Payload.Graph);
+        return await ApplyActorGraphFilterAsync(graph, cancellationToken);
     }
 
     public async Task<IReadOnlyList<ProjectSuggestionResult>> GetProjectSuggestionsAsync(string? query, int limit, CancellationToken cancellationToken)
     {
         var normalizedLimit = limit < 1 ? 8 : Math.Min(limit, 20);
+        var snapshot = await snapshotStore.GetAsync<DashboardProjectSuggestionsSnapshotPayload>(
+            DashboardSnapshotKeys.DashboardProjectSuggestions,
+            cancellationToken);
+        if (snapshot is not null)
+        {
+            var snapshotProjects = FilterProjectSuggestions(snapshot.Payload.Projects, query, normalizedLimit);
+            if (snapshotProjects.Count >= normalizedLimit || string.IsNullOrWhiteSpace(query))
+            {
+                return snapshotProjects;
+            }
+        }
+
         var projects = await dbContext.MemoryItems
             .AsNoTracking()
+            .Where(x => !actorAccessor.Current.HasUser || (x.TenantId == actorAccessor.Current.TenantId && x.OwnerUserId == actorAccessor.Current.UserId))
             .Where(x => x.ProjectId != ProjectContext.SharedProjectId && x.ProjectId != ProjectContext.UserProjectId)
             .GroupBy(x => x.ProjectId)
             .Select(group => new ProjectSuggestionResult(group.Key, group.Count()))
             .ToListAsync(cancellationToken);
 
-        if (!string.IsNullOrWhiteSpace(query))
-        {
-            projects = projects
-                .Where(project => project.ProjectId.Contains(query, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-        }
-
-        return projects
-            .OrderByDescending(project => project.ItemCount)
-            .ThenBy(project => project.ProjectId, StringComparer.OrdinalIgnoreCase)
-            .Take(normalizedLimit)
-            .ToArray();
+        return FilterProjectSuggestions(projects, query, normalizedLimit);
     }
 
     public async Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        var version = await cacheStore.GetVersionStampAsync([], actor, includeShared: false, cancellationToken);
+        var cacheKey = RedisCacheKeyBuilder.DashboardMemoryDetails(version, id, actor);
+        var cached = await objectCache.GetAsync<MemoryDetailsResult>(
+            cacheKey,
+            "dashboard-memory-details",
+            cancellationToken);
+        if (cached.Hit)
+        {
+            return cached.Value;
+        }
+
         var entity = await dbContext.MemoryItems
             .AsNoTracking()
             .Include(x => x.Revisions)
@@ -464,12 +502,41 @@ public sealed class DashboardQueryService(
             .ToListAsync(cancellationToken);
         var sourceContext = BuildSourceContext(entity);
 
-        return new MemoryDetailsResult(document, revisions, chunks, links, findings, sourceContext);
+        var result = new MemoryDetailsResult(document, revisions, chunks, links, findings, sourceContext);
+        await objectCache.SetAsync(cacheKey, "dashboard-memory-details", result, TimeSpan.FromSeconds(60), cancellationToken);
+        return result;
     }
 
     public async Task<PagedResult<JobListItemResult>> GetJobsAsync(JobListRequest request, CancellationToken cancellationToken)
     {
         var normalized = Normalize(request.Page, request.PageSize, 100);
+        var normalizedRequest = request with { Page = normalized.Page, PageSize = normalized.PageSize };
+        if (!request.Status.HasValue && !request.JobType.HasValue && normalized.Page == 1)
+        {
+            var snapshot = await snapshotStore.GetAsync<DashboardJobsSnapshotPayload>(
+                DashboardSnapshotKeys.DashboardJobs,
+                cancellationToken);
+            if (snapshot is not null && snapshot.Payload.RecentJobs.TotalCount > 0)
+            {
+                return new PagedResult<JobListItemResult>(
+                    snapshot.Payload.RecentJobs.Items.Take(normalized.PageSize).ToArray(),
+                    normalized.Page,
+                    normalized.PageSize,
+                    snapshot.Payload.RecentJobs.TotalCount);
+            }
+        }
+
+        var jobVersion = await cacheStore.GetJobVersionAsync(cancellationToken);
+        var cacheKey = RedisCacheKeyBuilder.DashboardJobs(jobVersion, normalizedRequest);
+        var cached = await objectCache.GetAsync<PagedResult<JobListItemResult>>(
+            cacheKey,
+            "dashboard-jobs",
+            cancellationToken);
+        if (cached.Hit && cached.Value is not null)
+        {
+            return cached.Value;
+        }
+
         var query = dbContext.MemoryJobs.AsNoTracking().AsQueryable();
 
         if (request.Status.HasValue)
@@ -499,22 +566,86 @@ public sealed class DashboardQueryService(
                 x.ProjectId))
             .ToListAsync(cancellationToken);
 
-        return new PagedResult<JobListItemResult>(items, normalized.Page, normalized.PageSize, totalCount);
+        var result = new PagedResult<JobListItemResult>(items, normalized.Page, normalized.PageSize, totalCount);
+        await objectCache.SetAsync(cacheKey, "dashboard-jobs", result, TimeSpan.FromSeconds(15), cancellationToken);
+        return result;
     }
 
-    public Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken)
-        => storageExplorerStore.ListTablesAsync(cancellationToken);
-
-    public Task<StorageTableRowsResult> GetStorageRowsAsync(StorageRowsRequest request, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken)
     {
-        var normalized = Normalize(request.Page, request.PageSize, 200);
-        return storageExplorerStore.GetRowsAsync(
-            request with
-            {
-                Page = normalized.Page,
-                PageSize = normalized.PageSize
-            },
+        var snapshot = await snapshotStore.GetAsync<DashboardStorageTableStatsSnapshotPayload>(
+            DashboardSnapshotKeys.StorageTableStats,
             cancellationToken);
+        return snapshot?.Payload.Tables ?? [];
+    }
+
+    public async Task<StorageTableRowsResult> GetStorageRowsAsync(StorageRowsRequest request, CancellationToken cancellationToken)
+    {
+        var maxPageSize = DashboardStoragePolicy.IsLargeTable(request.Table)
+            ? DashboardStoragePolicy.LargeTableMaxPageSize
+            : 200;
+        var normalized = Normalize(request.Page, request.PageSize, maxPageSize);
+        var normalizedRequest = request with
+        {
+            Page = normalized.Page,
+            PageSize = normalized.PageSize
+        };
+
+        if (DashboardStoragePolicy.IsLargeTablePreviewRequest(normalizedRequest))
+        {
+            var snapshot = await snapshotStore.GetAsync<DashboardStorageLargeTablePreviewSnapshotPayload>(
+                DashboardSnapshotKeys.StorageLargeTablePreview,
+                cancellationToken);
+            var preview = snapshot?.Payload.Tables.FirstOrDefault(x => string.Equals(x.Table, normalizedRequest.Table, StringComparison.OrdinalIgnoreCase));
+            if (preview is not null)
+            {
+                return preview with
+                {
+                    Rows = preview.Rows with
+                    {
+                        Items = preview.Rows.Items.Take(normalized.PageSize).ToArray(),
+                        Page = normalized.Page,
+                        PageSize = normalized.PageSize
+                    },
+                    DataSource = "redis"
+                };
+            }
+
+            var tables = await GetStorageTablesAsync(cancellationToken);
+            var table = tables.FirstOrDefault(x => string.Equals(x.Name, normalizedRequest.Table, StringComparison.OrdinalIgnoreCase));
+            return new StorageTableRowsResult(
+                normalizedRequest.Table,
+                table?.Description ?? "Large table preview",
+                table?.Columns ?? [],
+                [],
+                null,
+                null,
+                new PagedResult<StorageRowResult>([], normalized.Page, normalized.PageSize, table?.RowCount ?? 0),
+                "Large table preview snapshot unavailable. Wait for the background collector to finish the first refresh.",
+                "fallback");
+        }
+
+        return await storageExplorerStore.GetRowsAsync(normalizedRequest, cancellationToken);
+    }
+
+    private static IReadOnlyList<ProjectSuggestionResult> FilterProjectSuggestions(
+        IReadOnlyList<ProjectSuggestionResult> projects,
+        string? query,
+        int limit)
+    {
+        var filtered = projects;
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            filtered = filtered
+                .Where(project => project.ProjectId.Contains(query, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+
+        return filtered
+            .OrderByDescending(project => project.ItemCount)
+            .ThenBy(project => project.ProjectId, StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToArray();
     }
 
     private static (int Page, int PageSize) Normalize(int page, int pageSize, int maxPageSize)
@@ -538,6 +669,11 @@ public sealed class DashboardQueryService(
         string? tag)
     {
         var items = dbContext.MemoryItems.AsNoTracking().AsQueryable();
+        var actor = actorAccessor.Current;
+        if (actor.HasUser)
+        {
+            items = items.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        }
         var allowedProjects = ResolveDashboardSearchProjects(currentProjectId, includedProjectIds, queryMode, useSummaryLayer);
 
         if (allowedProjects is not null)
@@ -589,6 +725,31 @@ public sealed class DashboardQueryService(
         }
 
         return items;
+    }
+
+    private async Task<MemoryGraphResult> ApplyActorGraphFilterAsync(MemoryGraphResult graph, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        if (!actor.HasUser || graph.Nodes.Count == 0)
+        {
+            return graph;
+        }
+
+        var nodeIds = graph.Nodes.Select(x => x.Id).ToArray();
+        var allowedIds = await dbContext.MemoryItems
+            .AsNoTracking()
+            .Where(x => nodeIds.Contains(x.Id))
+            .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            .Select(x => x.Id)
+            .ToListAsync(cancellationToken);
+        var allowed = allowedIds.ToHashSet();
+        var nodes = graph.Nodes.Where(x => allowed.Contains(x.Id)).ToArray();
+        var edges = graph.Edges.Where(x => allowed.Contains(x.FromId) && allowed.Contains(x.ToId)).ToArray();
+
+        return new MemoryGraphResult(
+            nodes,
+            edges,
+            new MemoryGraphStatsResult(nodes.Length, nodes.Length, edges.Length, graph.Stats.Truncated, graph.Stats.TruncationReason));
     }
 
     private static IReadOnlyList<string>? ResolveDashboardSearchProjects(
@@ -815,6 +976,402 @@ public sealed class DashboardQueryService(
             truncated ? $"Graph capped at {maxNodes} nodes. Refine filters to inspect more context." : null);
 
         return graph;
+    }
+
+    private MemoryGraphResult BuildGraphFromSnapshot(
+        MemoryGraphRequest request,
+        int maxNodes,
+        MemoryGraphResult index)
+    {
+        var scopedNodes = FilterSnapshotNodes(request, index.Nodes).ToArray();
+        if (scopedNodes.Length == 0)
+        {
+            return new MemoryGraphResult([], [], new MemoryGraphStatsResult(0, 0, 0, false));
+        }
+
+        var scopedById = scopedNodes.ToDictionary(node => node.Id);
+        var scopedIds = scopedById.Keys.ToHashSet();
+        var scopedEdges = index.Edges
+            .Where(edge => scopedIds.Contains(edge.FromId) && scopedIds.Contains(edge.ToId))
+            .Where(edge => request.IncludeSimilarity || !string.Equals(edge.EdgeType, "similar", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        return request.GraphMode == MemoryGraphMode.ProjectFull
+            ? BuildProjectFullGraphFromSnapshot(request, maxNodes, scopedNodes, scopedById, scopedIds, scopedEdges)
+            : BuildSeededGraphFromSnapshot(request, maxNodes, scopedNodes, scopedById, scopedIds, scopedEdges);
+    }
+
+    private static IEnumerable<MemoryGraphNodeResult> FilterSnapshotNodes(
+        MemoryGraphRequest request,
+        IReadOnlyList<MemoryGraphNodeResult> nodes)
+    {
+        var filtered = nodes.AsEnumerable();
+        var allowedProjects = ResolveDashboardSearchProjects(
+            request.ProjectId,
+            request.IncludedProjectIds,
+            request.QueryMode,
+            request.UseSummaryLayer);
+
+        if (allowedProjects is not null)
+        {
+            filtered = filtered.Where(node => allowedProjects.Contains(node.ProjectId, StringComparer.OrdinalIgnoreCase));
+        }
+
+        if (IsIntegratedAllProjectsGraphRequest(request))
+        {
+            filtered = filtered.Where(node => !ProjectContext.IsShared(node.ProjectId) && !ProjectContext.IsUser(node.ProjectId));
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.ProjectQuery))
+        {
+            var projectTerm = request.ProjectQuery.Trim();
+            filtered = filtered.Where(node => node.ProjectId.Contains(projectTerm, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (request.Scope.HasValue)
+        {
+            filtered = filtered.Where(node => node.Scope == request.Scope.Value);
+        }
+
+        if (request.MemoryType.HasValue)
+        {
+            filtered = filtered.Where(node => node.MemoryType == request.MemoryType.Value);
+        }
+
+        if (request.Status.HasValue)
+        {
+            filtered = filtered.Where(node => node.Status == request.Status.Value);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SourceType))
+        {
+            filtered = filtered.Where(node => string.Equals(node.SourceType, request.SourceType, StringComparison.Ordinal));
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Tag))
+        {
+            filtered = filtered.Where(node => node.Tags.Contains(request.Tag, StringComparer.OrdinalIgnoreCase));
+        }
+
+        return filtered;
+    }
+
+    private MemoryGraphResult BuildSeededGraphFromSnapshot(
+        MemoryGraphRequest request,
+        int maxNodes,
+        IReadOnlyList<MemoryGraphNodeResult> scopedNodes,
+        IReadOnlyDictionary<Guid, MemoryGraphNodeResult> scopedById,
+        IReadOnlySet<Guid> scopedIds,
+        IReadOnlyList<MemoryGraphEdgeResult> scopedEdges)
+    {
+        var degreeMap = BuildSnapshotDegreeMap(scopedEdges, scopedIds);
+        var isIntegratedAllProjects = IsIntegratedAllProjectsGraphRequest(request);
+        var seedNodes = !string.IsNullOrWhiteSpace(request.Query)
+            ? RankSnapshotNodesByLexicalSimilarity(request.Query, scopedNodes, Math.Min(maxNodes, isIntegratedAllProjects ? 8 : 6))
+            : isIntegratedAllProjects
+                ? BuildIntegratedSeedCandidatesFromSnapshot(scopedNodes, degreeMap, maxNodes)
+                : scopedNodes
+                    .OrderByDescending(node => degreeMap.GetValueOrDefault(node.Id))
+                    .ThenByDescending(node => node.Importance)
+                    .ThenByDescending(node => node.UpdatedAt)
+                    .Take(Math.Min(maxNodes, 6))
+                    .ToArray();
+
+        if (seedNodes.Count == 0)
+        {
+            return new MemoryGraphResult([], [], new MemoryGraphStatsResult(0, 0, 0, false));
+        }
+
+        var selectedIds = seedNodes.Select(node => node.Id).ToHashSet();
+        foreach (var seed in seedNodes)
+        {
+            AddSnapshotNeighbors(seed.Id, "explicit", scopedEdges, selectedIds, maxNodes);
+        }
+
+        if (request.IncludeSimilarity)
+        {
+            foreach (var seed in seedNodes)
+            {
+                AddSnapshotNeighbors(seed.Id, "similar", scopedEdges, selectedIds, maxNodes);
+            }
+        }
+
+        var orderedIds = selectedIds
+            .Select(id => scopedById[id])
+            .OrderByDescending(node => seedNodes.Any(seed => seed.Id == node.Id))
+            .ThenByDescending(node => degreeMap.GetValueOrDefault(node.Id))
+            .ThenByDescending(node => node.Importance)
+            .ThenByDescending(node => node.UpdatedAt)
+            .Select(node => node.Id)
+            .Take(maxNodes)
+            .ToArray();
+        var orderedSet = orderedIds.ToHashSet();
+        var edges = scopedEdges
+            .Where(edge => orderedSet.Contains(edge.FromId) && orderedSet.Contains(edge.ToId))
+            .ToArray();
+        var truncated = selectedIds.Count > orderedIds.Length;
+
+        return BuildGraphResultFromSnapshot(
+            orderedIds,
+            edges,
+            scopedById,
+            seedNodes.Count,
+            truncated,
+            truncated ? $"Graph capped at {maxNodes} nodes. Refine filters to inspect more context." : null);
+    }
+
+    private MemoryGraphResult BuildProjectFullGraphFromSnapshot(
+        MemoryGraphRequest request,
+        int maxNodes,
+        IReadOnlyList<MemoryGraphNodeResult> scopedNodes,
+        IReadOnlyDictionary<Guid, MemoryGraphNodeResult> scopedById,
+        IReadOnlySet<Guid> scopedIds,
+        IReadOnlyList<MemoryGraphEdgeResult> scopedEdges)
+    {
+        var degreeMap = BuildSnapshotDegreeMap(scopedEdges, scopedIds);
+        var candidates = string.IsNullOrWhiteSpace(request.Query)
+            ? scopedNodes
+            : RankSnapshotNodesByLexicalSimilarity(request.Query, scopedNodes, scopedNodes.Count);
+        var orderedIds = candidates
+            .OrderByDescending(node => degreeMap.GetValueOrDefault(node.Id))
+            .ThenByDescending(node => node.Importance)
+            .ThenByDescending(node => node.UpdatedAt)
+            .Select(node => node.Id)
+            .Take(maxNodes)
+            .ToArray();
+        var selectedIds = orderedIds.ToHashSet();
+        var edges = scopedEdges
+            .Where(edge => selectedIds.Contains(edge.FromId) && selectedIds.Contains(edge.ToId))
+            .ToArray();
+        var truncated = scopedNodes.Count > orderedIds.Length;
+
+        return BuildGraphResultFromSnapshot(
+            orderedIds,
+            edges,
+            scopedById,
+            0,
+            truncated,
+            truncated ? $"Graph capped at {maxNodes} nodes. Add filters to narrow the project graph." : null);
+    }
+
+    private static void AddSnapshotNeighbors(
+        Guid sourceId,
+        string edgeType,
+        IReadOnlyList<MemoryGraphEdgeResult> edges,
+        ISet<Guid> selectedIds,
+        int maxNodes)
+    {
+        foreach (var edge in edges
+                     .Where(edge => string.Equals(edge.EdgeType, edgeType, StringComparison.OrdinalIgnoreCase))
+                     .Where(edge => edge.FromId == sourceId || edge.ToId == sourceId)
+                     .OrderByDescending(edge => edge.Score ?? 1m))
+        {
+            if (selectedIds.Count >= maxNodes)
+            {
+                return;
+            }
+
+            selectedIds.Add(edge.FromId == sourceId ? edge.ToId : edge.FromId);
+        }
+    }
+
+    private MemoryGraphResult BuildGraphResultFromSnapshot(
+        IReadOnlyList<Guid> orderedIds,
+        IReadOnlyList<MemoryGraphEdgeResult> edges,
+        IReadOnlyDictionary<Guid, MemoryGraphNodeResult> scopedById,
+        int seedCount,
+        bool truncated,
+        string? truncationReason)
+    {
+        var explicitCounts = BuildNeighborCountLookup(edges, "explicit");
+        var similarityCounts = BuildNeighborCountLookup(edges, "similar");
+        var nodes = orderedIds
+            .Select(id =>
+            {
+                var node = scopedById[id];
+                return node with
+                {
+                    ExplicitLinkCount = explicitCounts.GetValueOrDefault(id),
+                    SimilarityNeighborCount = similarityCounts.GetValueOrDefault(id)
+                };
+            })
+            .ToArray();
+
+        return new MemoryGraphResult(
+            nodes,
+            edges,
+            new MemoryGraphStatsResult(seedCount, nodes.Length, edges.Count, truncated, truncationReason));
+    }
+
+    private static Dictionary<Guid, int> BuildSnapshotDegreeMap(
+        IReadOnlyList<MemoryGraphEdgeResult> edges,
+        IReadOnlySet<Guid> scopedIds)
+    {
+        var degreeMap = scopedIds.ToDictionary(id => id, _ => 0);
+        foreach (var edge in edges)
+        {
+            if (degreeMap.ContainsKey(edge.FromId))
+            {
+                degreeMap[edge.FromId]++;
+            }
+
+            if (degreeMap.ContainsKey(edge.ToId))
+            {
+                degreeMap[edge.ToId]++;
+            }
+        }
+
+        return degreeMap;
+    }
+
+    private static IReadOnlyList<MemoryGraphNodeResult> BuildIntegratedSeedCandidatesFromSnapshot(
+        IReadOnlyList<MemoryGraphNodeResult> scopedNodes,
+        IReadOnlyDictionary<Guid, int> degreeMap,
+        int maxNodes)
+    {
+        var targetSeedCount = Math.Min(8, maxNodes);
+        var orderedItems = scopedNodes
+            .OrderByDescending(node => degreeMap.GetValueOrDefault(node.Id))
+            .ThenByDescending(node => node.Importance)
+            .ThenByDescending(node => node.UpdatedAt)
+            .ToArray();
+        var selected = new List<MemoryGraphNodeResult>(targetSeedCount);
+        var perProjectCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in orderedItems)
+        {
+            if (perProjectCounts.ContainsKey(item.ProjectId))
+            {
+                continue;
+            }
+
+            selected.Add(item);
+            perProjectCounts[item.ProjectId] = 1;
+
+            if (selected.Count >= targetSeedCount)
+            {
+                return selected;
+            }
+        }
+
+        foreach (var item in orderedItems)
+        {
+            if (selected.Any(entry => entry.Id == item.Id))
+            {
+                continue;
+            }
+
+            var currentCount = perProjectCounts.GetValueOrDefault(item.ProjectId);
+            if (currentCount >= 2)
+            {
+                continue;
+            }
+
+            selected.Add(item);
+            perProjectCounts[item.ProjectId] = currentCount + 1;
+
+            if (selected.Count >= targetSeedCount)
+            {
+                return selected;
+            }
+        }
+
+        foreach (var item in orderedItems)
+        {
+            if (selected.Any(entry => entry.Id == item.Id))
+            {
+                continue;
+            }
+
+            selected.Add(item);
+            if (selected.Count >= targetSeedCount)
+            {
+                break;
+            }
+        }
+
+        return selected;
+    }
+
+    private static IReadOnlyList<MemoryGraphNodeResult> RankSnapshotNodesByLexicalSimilarity(
+        string? query,
+        IEnumerable<MemoryGraphNodeResult> nodes,
+        int limit)
+    {
+        if (string.IsNullOrWhiteSpace(query) || limit < 1)
+        {
+            return [];
+        }
+
+        var normalizedQuery = query.Trim();
+        var tokens = Tokenize(normalizedQuery);
+        return nodes
+            .Select(node => (Node: node, Score: ScoreSnapshotLexicalSimilarity(node, normalizedQuery, tokens)))
+            .Where(entry => entry.Score > 0m)
+            .OrderByDescending(entry => entry.Score)
+            .ThenByDescending(entry => entry.Node.Importance)
+            .ThenByDescending(entry => entry.Node.UpdatedAt)
+            .Take(limit)
+            .Select(entry => entry.Node)
+            .ToArray();
+    }
+
+    private static decimal ScoreSnapshotLexicalSimilarity(
+        MemoryGraphNodeResult node,
+        string rawQuery,
+        IReadOnlySet<string> queryTokens)
+    {
+        var normalizedQuery = rawQuery.Trim();
+        var haystack = string.Join(
+            ' ',
+            [
+                node.ProjectId,
+                node.Title,
+                node.Summary,
+                node.SourceRef,
+                node.SourceLabel,
+                string.Join(' ', node.Tags)
+            ]).Trim();
+
+        if (string.IsNullOrWhiteSpace(haystack))
+        {
+            return decimal.Zero;
+        }
+
+        var score = decimal.Zero;
+        if (node.Title.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 0.7m;
+        }
+
+        if (node.Summary.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 0.35m;
+        }
+
+        if (node.SourceRef.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 0.15m;
+        }
+
+        if (node.ProjectId.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 0.2m;
+        }
+
+        if (queryTokens.Count == 0)
+        {
+            return score;
+        }
+
+        var candidateTokens = Tokenize(haystack);
+        if (candidateTokens.Count == 0)
+        {
+            return score;
+        }
+
+        var overlap = queryTokens.Count(candidateTokens.Contains);
+        return overlap == 0 ? score : score + decimal.Divide(overlap, queryTokens.Count);
     }
 
     private async Task<MemoryGraphResult> BuildProjectFullGraphAsync(

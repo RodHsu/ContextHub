@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -6,6 +7,7 @@ using Memory.Application;
 using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
 
@@ -20,6 +22,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         {
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
             var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
 
             await memoryService.UpsertAsync(
                 new MemoryUpsertRequest(
@@ -56,6 +59,20 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         hits.Should().NotBeNull();
         hits!.Should().Contain(x => x.Title == "API health contract");
         context.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+    }
+
+    [DockerRequiredFact]
+    public async Task Api_And_Health_Responses_Should_Not_Be_Cached_By_Cloudflare()
+    {
+        using var client = environment.GetFactory().CreateClient();
+
+        using var liveResponse = await client.GetAsync("/health/live");
+        using var statusResponse = await client.GetAsync("/api/status");
+
+        liveResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        statusResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        AssertNoStoreHeaders(liveResponse);
+        AssertNoStoreHeaders(statusResponse);
     }
 
     [DockerRequiredFact]
@@ -403,6 +420,189 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Security_Endpoints_Should_Create_Tenant_User_Project_Grant_And_Token_Usage_Metadata()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        var slug = $"tenant-{Guid.NewGuid():N}"[..20];
+
+        using var tenantResponse = await client.PostAsJsonAsync("/api/security/tenants", new TenantCreateRequest(slug, "External user tenant"));
+        tenantResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var tenant = await tenantResponse.Content.ReadFromJsonAsync<TenantResult>();
+        tenant.Should().NotBeNull();
+        tenant!.Slug.Should().Be(slug);
+
+        using var userResponse = await client.PostAsJsonAsync(
+            $"/api/security/tenants/{tenant.Id}/users",
+            new
+            {
+                username = "alice",
+                displayName = "Alice",
+                email = "alice@example.test",
+                role = TenantUserRole.Owner
+            });
+        userResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var user = await userResponse.Content.ReadFromJsonAsync<TenantUserResult>();
+        user.Should().NotBeNull();
+        user!.TenantId.Should().Be(tenant.Id);
+
+        using var grantResponse = await client.PutAsJsonAsync(
+            $"/api/security/tenants/{tenant.Id}/project-grants/ContextHub",
+            new
+            {
+                canRead = true,
+                canWrite = true,
+                canManageTokens = true
+            });
+        grantResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var grant = await grantResponse.Content.ReadFromJsonAsync<TenantProjectGrantResult>();
+        grant.Should().NotBeNull();
+        grant!.ProjectId.Should().Be("ContextHub");
+        grant.CanManageTokens.Should().BeTrue();
+
+        using var tokenResponse = await client.PostAsJsonAsync(
+            $"/api/security/tenants/{tenant.Id}/tokens",
+            new
+            {
+                ownerUserId = user.Id,
+                name = "travel laptop",
+                notes = "Used outside the intranet.",
+                scopes = new[] { "memory:read", "memory:write", "token:manage" },
+                allowedProjectIds = new[] { "ContextHub" }
+            });
+        tokenResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var createdToken = await tokenResponse.Content.ReadFromJsonAsync<ApiTokenCreatedResult>();
+        createdToken.Should().NotBeNull();
+        createdToken!.PlainToken.Should().StartWith("chub_");
+        createdToken.Token.Notes.Should().Be("Used outside the intranet.");
+        createdToken.Token.LastUsedAt.Should().BeNull();
+
+        using var allProjectsTokenResponse = await client.PostAsJsonAsync(
+            $"/api/security/tenants/{tenant.Id}/tokens",
+            new
+            {
+                ownerUserId = user.Id,
+                name = "all projects client",
+                scopes = new[] { "memory:read" },
+                allowedProjectIds = new[] { ProjectContext.AllProjectIdsSentinel }
+            });
+        allProjectsTokenResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var allProjectsToken = await allProjectsTokenResponse.Content.ReadFromJsonAsync<ApiTokenCreatedResult>();
+        allProjectsToken.Should().NotBeNull();
+        allProjectsToken!.Token.AllowedProjectIds.Should().BeEmpty();
+
+        using var regeneratedTokenResponse = await client.PostAsync($"/api/security/tokens/{allProjectsToken.Token.Id}/regenerate", null);
+        regeneratedTokenResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var regeneratedToken = await regeneratedTokenResponse.Content.ReadFromJsonAsync<ApiTokenCreatedResult>();
+        regeneratedToken.Should().NotBeNull();
+        regeneratedToken!.PlainToken.Should().StartWith("chub_");
+        regeneratedToken.PlainToken.Should().NotBe(allProjectsToken.PlainToken);
+        regeneratedToken.Token.TokenPrefix.Should().Be(regeneratedToken.PlainToken[..Math.Min(12, regeneratedToken.PlainToken.Length)]);
+        regeneratedToken.Token.TokenLastFour.Should().Be(regeneratedToken.PlainToken[^4..]);
+        regeneratedToken.Token.LastUsedAt.Should().BeNull();
+
+        using var allProjectsUpdateResponse = await client.PatchAsJsonAsync(
+            $"/api/security/tokens/{createdToken.Token.Id}",
+            new
+            {
+                allowedProjectIds = new[] { ProjectContext.AllProjectIdsSentinel }
+            });
+        allProjectsUpdateResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var updatedAllProjectsToken = await allProjectsUpdateResponse.Content.ReadFromJsonAsync<ApiTokenResult>();
+        updatedAllProjectsToken.Should().NotBeNull();
+        updatedAllProjectsToken!.AllowedProjectIds.Should().BeEmpty();
+
+        using var revokedTokenResponse = await client.PostAsJsonAsync(
+            $"/api/security/tenants/{tenant.Id}/tokens",
+            new
+            {
+                ownerUserId = user.Id,
+                name = "revoked laptop",
+                scopes = new[] { "memory:read" },
+                allowedProjectIds = new[] { "ContextHub" }
+            });
+        revokedTokenResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var revokedToken = await revokedTokenResponse.Content.ReadFromJsonAsync<ApiTokenCreatedResult>();
+        revokedToken.Should().NotBeNull();
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            var securityService = scope.ServiceProvider.GetRequiredService<ITenantSecurityService>();
+            var authResult = await securityService.AuthenticateTokenAsync(
+                createdToken.PlainToken,
+                "203.0.113.10",
+                "api-contract-test",
+                CancellationToken.None);
+            authResult.Succeeded.Should().BeTrue();
+            authResult.TenantId.Should().Be(tenant.Id);
+
+            await securityService.RevokeTokenAsync(revokedToken!.Token.Id, CancellationToken.None);
+        }
+
+        var tokens = await client.GetFromJsonAsync<List<ApiTokenResult>>($"/api/security/tenants/{tenant.Id}/tokens");
+        tokens.Should().NotBeNull();
+        var tokenMetadata = tokens!.Single(x => x.Id == createdToken.Token.Id);
+        tokenMetadata.LastUsedAt.Should().NotBeNull();
+        tokenMetadata.LastUsedIp.Should().Be("203.0.113.10");
+        tokenMetadata.LastUsedUserAgent.Should().Be("api-contract-test");
+
+        var auditEvents = await client.GetFromJsonAsync<List<SecurityAuditEventResult>>($"/api/security/audit-events?tenantId={tenant.Id}");
+        auditEvents.Should().NotBeNull();
+        auditEvents!.Select(x => x.EventType).Should().Contain(SecurityAuditEventType.ApiTokenAuthenticated);
+
+        const string bootstrapToken = "test-bootstrap-token-1234567890";
+        await using var secureFactory = environment.GetFactory().WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureAppConfiguration((_, config) =>
+            {
+                config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["ContextHub:Security:RequireAuthentication"] = "true",
+                    ["ContextHub:Security:BootstrapToken"] = bootstrapToken,
+                    ["ContextHub:Security:BootstrapTenantSlug"] = "bootstrap-team",
+                    ["ContextHub:Security:BootstrapUsername"] = "dashboard-service",
+                    ["ContextHub:Security:BootstrapAllowedProjectIds"] = "ContextHub"
+                });
+            });
+        });
+        using var anonymousClient = secureFactory.CreateClient();
+        using var deniedResponse = await anonymousClient.GetAsync("/api/status");
+        deniedResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+
+        using var invalidClient = secureFactory.CreateClient();
+        invalidClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "not-a-valid-token");
+        using var invalidResponse = await invalidClient.GetAsync("/api/status");
+        invalidResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+
+        using var bootstrapClient = secureFactory.CreateClient();
+        bootstrapClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bootstrapToken);
+        using var bootstrapResponse = await bootstrapClient.GetAsync("/api/status");
+        bootstrapResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+
+        using var authenticatedClient = secureFactory.CreateClient();
+        authenticatedClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", createdToken.PlainToken);
+        using var authorizedResponse = await authenticatedClient.GetAsync("/api/status");
+        authorizedResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+
+        using var revokedClient = secureFactory.CreateClient();
+        revokedClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", revokedToken!.PlainToken);
+        using var revokedResponse = await revokedClient.GetAsync("/api/status");
+        revokedResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var token = await dbContext.ApiTokens.SingleAsync(x => x.Id == createdToken.Token.Id);
+            token.ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+        }
+
+        using var expiredClient = secureFactory.CreateClient();
+        expiredClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", createdToken.PlainToken);
+        using var expiredResponse = await expiredClient.GetAsync("/api/status");
+        expiredResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+    }
+
+    [DockerRequiredFact]
     public async Task Dashboard_Endpoints_Should_Return_Overview_Runtime_And_Storage_Payloads()
     {
         Guid memoryId;
@@ -410,6 +610,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         {
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
             var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
 
             var created = await memoryService.UpsertAsync(
                 new MemoryUpsertRequest(
@@ -429,6 +630,42 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             memoryId = created.Id;
             await processor.ProcessNextAsync(CancellationToken.None);
             await memoryService.EnqueueReindexAsync(new EnqueueReindexRequest(), CancellationToken.None);
+
+            var retrievalEvent = new RetrievalEvent
+            {
+                Id = Guid.Parse("92000000-0000-0000-0000-000000000001"),
+                ProjectId = ProjectContext.DefaultProjectId,
+                Channel = "dashboard",
+                EntryPoint = "storage-test",
+                Purpose = "storage explorer",
+                QueryText = new string('q', 5000),
+                QueryHash = "storage-test-query",
+                QueryMode = MemoryQueryMode.CurrentOnly.ToString(),
+                IncludedProjectIds = [ProjectContext.DefaultProjectId],
+                Limit = 5,
+                ResultCount = 1,
+                DurationMs = 12,
+                Success = true,
+                TraceId = "trace-storage-retrieval",
+                RequestId = "request-storage-retrieval",
+                MetadataJson = """{"payload":"storage explorer should truncate large telemetry cells"}""",
+                CreatedAt = DateTimeOffset.UtcNow
+            };
+            dbContext.RetrievalEvents.Add(retrievalEvent);
+            dbContext.RetrievalHits.Add(new RetrievalHit
+            {
+                RetrievalEventId = retrievalEvent.Id,
+                Rank = 1,
+                MemoryId = memoryId,
+                Title = "Dashboard API fixture",
+                MemoryType = MemoryType.Artifact.ToString(),
+                SourceType = "document",
+                SourceRef = "tests",
+                Score = 0.95m,
+                Excerpt = new string('h', 5000),
+                ProjectId = ProjectContext.DefaultProjectId
+            });
+            await dbContext.SaveChangesAsync(CancellationToken.None);
         }
 
         using var client = environment.GetFactory().CreateClient();
@@ -440,6 +677,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var jobs = await client.GetFromJsonAsync<PagedResult<JobListItemResult>>("/api/jobs?page=1&pageSize=10");
         var tables = await client.GetFromJsonAsync<List<StorageTableSummaryResult>>("/api/storage/tables");
         var rows = await client.GetFromJsonAsync<StorageTableRowsResult>("/api/storage/memory_items?query=Dashboard&page=1&pageSize=5");
+        var retrievalRows = await client.GetFromJsonAsync<StorageTableRowsResult>("/api/storage/retrieval_events?query=trace-storage-retrieval&column=trace_id&page=1&pageSize=5");
+        var retrievalHitRows = await client.GetFromJsonAsync<StorageTableRowsResult>("/api/storage/retrieval_hits?query=Dashboard%20API%20fixture&column=title&page=1&pageSize=5");
 
         overview.Should().NotBeNull();
         overview!.BuildVersion.Should().NotBeNullOrWhiteSpace();
@@ -462,6 +701,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         jobs!.Items.Should().NotBeEmpty();
         tables.Should().NotBeNull();
         tables!.Should().Contain(x => x.Name == "memory_items");
+        tables.Should().Contain(x => x.Name == "maintenance_runs");
         rows.Should().NotBeNull();
         rows!.Table.Should().Be("memory_items");
         rows.Description.Should().NotBeNullOrWhiteSpace();
@@ -469,6 +709,141 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         rows.AppliedQuery.Should().Be("Dashboard");
         rows.Rows.Items.Should().NotBeEmpty();
         rows.Rows.Items.Should().Contain(x => x.Values["title"] == "Dashboard API fixture");
+        retrievalRows.Should().NotBeNull();
+        retrievalRows!.Columns.Should().Contain("tenant_id");
+        retrievalRows.Columns.Should().Contain("owner_user_id");
+        retrievalRows.Columns.Should().Contain("query_text");
+        retrievalRows.Rows.Items.Should().Contain(x =>
+            x.Values["trace_id"] == "trace-storage-retrieval" &&
+            x.Values["query_text"]!.Length <= 4099 &&
+            x.Values["query_text"]!.EndsWith("...", StringComparison.Ordinal));
+        retrievalHitRows.Should().NotBeNull();
+        retrievalHitRows!.Rows.Items.Should().Contain(x =>
+            x.Values["title"] == "Dashboard API fixture" &&
+            x.Values["excerpt"]!.Length <= 4099 &&
+            x.Values["excerpt"]!.EndsWith("...", StringComparison.Ordinal));
+    }
+
+    [DockerRequiredFact]
+    public async Task Maintenance_Endpoints_Should_Expose_Mode_And_Block_Mcp_When_Active()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        await client.DeleteAsync("/api/maintenance/mode");
+
+        try
+        {
+            var inactive = await client.GetFromJsonAsync<MaintenanceModeStateResult>("/api/maintenance/status");
+            inactive.Should().NotBeNull();
+            inactive!.Active.Should().BeFalse();
+
+            var enabledResponse = await client.PostAsJsonAsync(
+                "/api/maintenance/mode",
+                new MaintenanceModeRequest(
+                    Reason: "VacuumFullReclaim",
+                    Message: "Telemetry storage maintenance is running.",
+                    EstimatedDurationMinutes: 90,
+                    TriggeredBy: "api-contract-test"));
+            enabledResponse.EnsureSuccessStatusCode();
+            var enabled = await enabledResponse.Content.ReadFromJsonAsync<MaintenanceModeStateResult>();
+            enabled.Should().NotBeNull();
+            enabled!.Active.Should().BeTrue();
+            enabled.RunId.Should().NotBeNull();
+
+            using var statusResponse = await client.GetAsync("/api/status");
+            statusResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+
+            using var mcpResponse = await client.PostAsync(
+                "/mcp",
+                new StringContent("""{"jsonrpc":"2.0","id":"blocked","method":"tools/list"}""", Encoding.UTF8, "application/json"));
+            mcpResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.ServiceUnavailable);
+            mcpResponse.Headers.TryGetValues("X-ContextHub-Maintenance", out var maintenanceHeaders).Should().BeTrue();
+            maintenanceHeaders.Should().Contain("true");
+            mcpResponse.Headers.RetryAfter.Should().NotBeNull();
+
+            var vacuumResponse = await client.PostAsJsonAsync(
+                "/api/maintenance/vacuum-full-reclaim/run",
+                new VacuumFullReclaimRunRequest("api-contract-test"));
+            vacuumResponse.EnsureSuccessStatusCode();
+            var vacuum = await vacuumResponse.Content.ReadFromJsonAsync<VacuumFullReclaimRunResult>();
+            vacuum.Should().NotBeNull();
+            vacuum!.ResultJson.Should().Contain("vacuumFullCompleted");
+
+            var disabledResponse = await client.DeleteAsync("/api/maintenance/mode");
+            disabledResponse.EnsureSuccessStatusCode();
+            var disabled = await disabledResponse.Content.ReadFromJsonAsync<MaintenanceModeStateResult>();
+            disabled.Should().NotBeNull();
+            disabled!.Active.Should().BeFalse();
+
+            using var restoredMcpResponse = await client.PostAsync(
+                "/mcp",
+                new StringContent("""{"jsonrpc":"2.0","id":"after","method":"tools/list"}""", Encoding.UTF8, "application/json"));
+            restoredMcpResponse.StatusCode.Should().NotBe(System.Net.HttpStatusCode.ServiceUnavailable);
+
+            var runs = await client.GetFromJsonAsync<List<MaintenanceRunResult>>("/api/maintenance/runs?limit=10");
+            runs.Should().NotBeNull();
+            runs!.Should().Contain(x =>
+                x.Id == enabled.RunId &&
+                x.MaintenanceType == MaintenanceRunType.MaintenanceMode &&
+                x.Status == MaintenanceRunStatus.Completed);
+            runs.Should().Contain(x =>
+                x.Id == vacuum.RunId &&
+                x.MaintenanceType == MaintenanceRunType.VacuumFullReclaim &&
+                x.Status == MaintenanceRunStatus.Completed);
+        }
+        finally
+        {
+            await client.DeleteAsync("/api/maintenance/mode");
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Retrieval_Telemetry_Retention_Should_Delete_Hits_At_15_Days_And_Events_At_30_Days()
+    {
+        var oldEventId = Guid.Parse("93000000-0000-0000-0000-000000000001");
+        var middleEventId = Guid.Parse("93000000-0000-0000-0000-000000000002");
+        var recentEventId = Guid.Parse("93000000-0000-0000-0000-000000000003");
+        var now = DateTimeOffset.UtcNow;
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            dbContext.RetrievalEvents.AddRange(
+                CreateRetentionEvent(oldEventId, now.AddDays(-40), "retention-old"),
+                CreateRetentionEvent(middleEventId, now.AddDays(-20), "retention-middle"),
+                CreateRetentionEvent(recentEventId, now.AddDays(-10), "retention-recent"));
+            dbContext.RetrievalHits.AddRange(
+                CreateRetentionHit(oldEventId, "old hit"),
+                CreateRetentionHit(middleEventId, "middle hit"),
+                CreateRetentionHit(recentEventId, "recent hit"));
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+
+            var service = scope.ServiceProvider.GetRequiredService<IRetrievalTelemetryRetentionService>();
+            var result = await service.RunAsync("api-contract-test", CancellationToken.None);
+
+            result.DeletedHits.Should().BeGreaterThanOrEqualTo(2);
+            result.DeletedEvents.Should().BeGreaterThanOrEqualTo(1);
+        }
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            (await dbContext.RetrievalEvents.AnyAsync(x => x.Id == oldEventId)).Should().BeFalse();
+            (await dbContext.RetrievalHits.AnyAsync(x => x.RetrievalEventId == oldEventId)).Should().BeFalse();
+
+            (await dbContext.RetrievalEvents.AnyAsync(x => x.Id == middleEventId)).Should().BeTrue();
+            (await dbContext.RetrievalHits.AnyAsync(x => x.RetrievalEventId == middleEventId)).Should().BeFalse();
+
+            (await dbContext.RetrievalEvents.AnyAsync(x => x.Id == recentEventId)).Should().BeTrue();
+            (await dbContext.RetrievalHits.AnyAsync(x => x.RetrievalEventId == recentEventId)).Should().BeTrue();
+
+            var run = await dbContext.MaintenanceRuns
+                .OrderByDescending(x => x.StartedAt)
+                .FirstAsync(x => x.MaintenanceType == MaintenanceRunType.RetrievalTelemetryRetention);
+            run.Status.Should().Be(MaintenanceRunStatus.Completed);
+            run.PolicyJson.Should().Contain("hitsRetentionDays");
+            run.PolicyJson.Should().Contain("15");
+            run.ResultJson.Should().Contain("deletedHits");
+        }
     }
 
     [DockerRequiredFact]
@@ -634,6 +1009,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             await dbContext.SaveChangesAsync(CancellationToken.None);
         }
 
+        await RefreshMemoryGraphIndexAsync();
+
         using var client = environment.GetFactory().CreateClient();
         var result = await client.GetFromJsonAsync<MemoryGraphResult>($"/api/memories/graph?query=Graph%20API&projectId={projectId}&graphMode=Seeded&includeSimilarity=true");
 
@@ -673,6 +1050,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                     CancellationToken.None);
             }
         }
+
+        await RefreshMemoryGraphIndexAsync();
 
         using var client = environment.GetFactory().CreateClient();
         var result = await client.GetFromJsonAsync<MemoryGraphResult>($"/api/memories/graph?projectId={projectId}&graphMode=ProjectFull&maxNodes=2");
@@ -758,6 +1137,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                     ProjectId: ProjectContext.SharedProjectId),
                 CancellationToken.None);
         }
+
+        await RefreshMemoryGraphIndexAsync();
 
         using var client = environment.GetFactory().CreateClient();
         var result = await client.GetFromJsonAsync<MemoryGraphResult>($"/api/memories/graph?tag={tag}&graphMode=Seeded&includeSimilarity=false&maxNodes=4");
@@ -881,6 +1262,25 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         }
     }
 
+    private async Task RefreshMemoryGraphIndexAsync()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var builder = scope.ServiceProvider.GetRequiredService<IDashboardMemoryGraphIndexBuilder>();
+        var snapshotStore = scope.ServiceProvider.GetRequiredService<IDashboardSnapshotStore>();
+        var capturedAtUtc = DateTimeOffset.UtcNow;
+        var payload = await builder.BuildAsync(CancellationToken.None);
+
+        await snapshotStore.SetAsync(
+            new DashboardSnapshotEnvelope<DashboardMemoryGraphIndexSnapshotPayload>(
+                DashboardSnapshotKeys.MemoryGraphIndex,
+                capturedAtUtc,
+                15,
+                DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc),
+                string.Empty,
+                payload),
+            CancellationToken.None);
+    }
+
     [DockerRequiredFact]
     public async Task Memory_Transfer_Endpoints_Should_Support_Encrypted_Export_Preview_And_Overwrite_Apply()
     {
@@ -956,4 +1356,51 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         verifyMemories.Should().NotBeNull();
         verifyMemories!.Items.Should().HaveCount(2);
     }
+
+    private static RetrievalEvent CreateRetentionEvent(Guid id, DateTimeOffset createdAt, string traceId)
+        => new()
+        {
+            Id = id,
+            ProjectId = ProjectContext.DefaultProjectId,
+            Channel = "api-contract",
+            EntryPoint = "retention-test",
+            Purpose = "retention validation",
+            QueryText = traceId,
+            QueryHash = traceId,
+            QueryMode = MemoryQueryMode.CurrentOnly.ToString(),
+            IncludedProjectIds = [ProjectContext.DefaultProjectId],
+            Limit = 5,
+            ResultCount = 1,
+            DurationMs = 1,
+            Success = true,
+            TraceId = traceId,
+            RequestId = $"{traceId}-request",
+            MetadataJson = "{}",
+            CreatedAt = createdAt
+        };
+
+    private static void AssertNoStoreHeaders(HttpResponseMessage response)
+    {
+        response.Headers.CacheControl?.NoStore.Should().BeTrue();
+        response.Headers.CacheControl?.NoCache.Should().BeTrue();
+        response.Headers.TryGetValues("Cloudflare-CDN-Cache-Control", out var cloudflareValues).Should().BeTrue();
+        cloudflareValues.Should().ContainSingle("no-store");
+        response.Headers.TryGetValues("CDN-Cache-Control", out var cdnValues).Should().BeTrue();
+        cdnValues.Should().ContainSingle("no-store");
+    }
+
+    private static RetrievalHit CreateRetentionHit(Guid retrievalEventId, string title)
+        => new()
+        {
+            RetrievalEventId = retrievalEventId,
+            Rank = 1,
+            MemoryId = null,
+            Title = title,
+            MemoryType = MemoryType.Fact.ToString(),
+            SourceType = "test",
+            SourceRef = "api-contract",
+            Score = 0.5m,
+            Excerpt = title,
+            ProjectId = ProjectContext.DefaultProjectId
+        };
 }

@@ -157,7 +157,7 @@
                 }
             </section>
 
-            <section class="panel">
+            <section class="panel home-evaluation-panel">
                 <div class="panel-title">評估摘要</div>
                 @if (_overview.EvaluationSummary is null)
                 {
@@ -325,6 +325,34 @@
                         <span class="resource-legend-item"><i class="legend-swatch write"></i>寫入 (Write)</span>
                     </div>
                 </article>
+
+                @{
+                    var redisContainer = RedisContainer();
+                }
+                <article class="resource-chart-card resource-chart-card-redis">
+                    <div class="resource-chart-header">
+                        <div>
+                            <div class="resource-chart-title">Redis 狀態監控 (Redis Status)</div>
+                            <div class="resource-chart-value resource-chart-value-status">
+                                <span class="status-badge @RedisStatusClass(redisContainer)">@RedisStatusText(redisContainer)</span>
+                            </div>
+                            <div class="resource-chart-summary" title="@RedisContainerName(redisContainer)">@RedisContainerName(redisContainer)</div>
+                        </div>
+                    </div>
+                    <div class="resource-redis-chart" role="img" aria-label="Redis resource status chart">
+                        @foreach (var bar in RedisChartBars(redisContainer))
+                        {
+                            <div class="resource-redis-chart-row">
+                                <span class="resource-redis-chart-label">@bar.Label</span>
+                                <span class="resource-redis-bar-bg">
+                                    <span class="resource-redis-bar @bar.CssClass" style="--redis-bar-width: @RedisBarWidth(bar.Percent);"></span>
+                                </span>
+                                <span class="resource-redis-chart-value">@bar.Value</span>
+                            </div>
+                        }
+                    </div>
+                    <div class="resource-chart-meta">@RedisStatusMeta(redisContainer)</div>
+                </article>
                 </div>
             </section>
 
@@ -440,7 +468,7 @@
     private long _messageSequence;
     private string? _loadError;
     private InstanceSettingsSnapshot? _settingsSnapshot;
-    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.ResourceChartSeconds ?? 1;
+    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.ResourceChartSeconds ?? 5;
 
     protected override async Task OnInitializedAsync()
     {
@@ -649,6 +677,89 @@
         => _overview?.RequestTraffic.Count > 0
             ? (int)Math.Round(_overview.RequestTraffic.Average(x => x.OutboundRequests))
             : 0;
+
+    private Memory.Dashboard.Services.DockerContainerMetricResult? RedisContainer()
+        => _docker?.Containers.FirstOrDefault(container =>
+            string.Equals(container.Service, "redis", StringComparison.OrdinalIgnoreCase)
+            || container.Name.Contains("redis", StringComparison.OrdinalIgnoreCase)
+            || container.Image.Contains("redis", StringComparison.OrdinalIgnoreCase));
+
+    private static string RedisStatusClass(Memory.Dashboard.Services.DockerContainerMetricResult? container)
+        => container is null
+            ? "neutral"
+            : StatusClass(string.IsNullOrWhiteSpace(container.Health) ? container.State : container.Health);
+
+    private static string RedisStatusText(Memory.Dashboard.Services.DockerContainerMetricResult? container)
+        => container is null
+            ? "未偵測"
+            : StatusText(string.IsNullOrWhiteSpace(container.Health) ? container.State : container.Health);
+
+    private static string RedisHealthText(Memory.Dashboard.Services.DockerContainerMetricResult? container)
+        => container is null || string.IsNullOrWhiteSpace(container.Health)
+            ? "n/a"
+            : StatusText(container.Health);
+
+    private static string RedisStateText(Memory.Dashboard.Services.DockerContainerMetricResult? container)
+        => container is null || string.IsNullOrWhiteSpace(container.State)
+            ? "n/a"
+            : StatusText(container.State);
+
+    private static string RedisContainerName(Memory.Dashboard.Services.DockerContainerMetricResult? container)
+        => container?.Name ?? "未偵測 Redis container";
+
+    private static string RedisMemoryLimitText(Memory.Dashboard.Services.DockerContainerMetricResult? container)
+        => container is null || container.MemoryLimitBytes <= 0
+            ? "Limit n/a"
+            : $"Limit {DashboardFormatting.Bytes(container.MemoryLimitBytes)}";
+
+    private static string RedisStatusMeta(Memory.Dashboard.Services.DockerContainerMetricResult? container)
+        => container is null
+            ? "Compose snapshot 未回報 Redis container，請檢查 dependency resources snapshot。"
+            : $"Health {RedisHealthText(container)} / State {RedisStateText(container)} / Restart {DashboardFormatting.Integer(container.RestartCount)} / Image {container.Image}";
+
+    private IReadOnlyList<RedisChartBar> RedisChartBars(Memory.Dashboard.Services.DockerContainerMetricResult? container)
+    {
+        if (container is null)
+        {
+            return
+            [
+                new("CPU", "n/a", "cpu", 0d),
+                new("Mem", "n/a", "memory", 0d),
+                new("Net", "n/a", "rx", 0d),
+                new("Disk", "n/a", "read", 0d)
+            ];
+        }
+
+        var memoryPercent = container.MemoryLimitBytes <= 0
+            ? 0d
+            : ((double)container.MemoryUsageBytes / container.MemoryLimitBytes) * 100d;
+        var redisNetworkBytes = container.NetworkRxBytes + container.NetworkTxBytes;
+        var redisDiskBytes = container.DiskReadBytes + container.DiskWriteBytes;
+
+        return
+        [
+            new("CPU", DashboardFormatting.Percent(container.CpuPercent), "cpu", container.CpuPercent),
+            new("Mem", DashboardFormatting.Percent(memoryPercent), "memory", memoryPercent),
+            new("Net", $"{DashboardFormatting.Bytes(redisNetworkBytes)}", "rx", RedisRelativePercent(redisNetworkBytes, MaxContainerNetworkBytes())),
+            new("Disk", $"{DashboardFormatting.Bytes(redisDiskBytes)}", "read", RedisRelativePercent(redisDiskBytes, MaxContainerDiskBytes()))
+        ];
+    }
+
+    private double MaxContainerNetworkBytes()
+        => Math.Max(
+            _docker?.Containers.Select(container => (double)(container.NetworkRxBytes + container.NetworkTxBytes)).DefaultIfEmpty(0d).Max() ?? 0d,
+            1d);
+
+    private double MaxContainerDiskBytes()
+        => Math.Max(
+            _docker?.Containers.Select(container => (double)(container.DiskReadBytes + container.DiskWriteBytes)).DefaultIfEmpty(0d).Max() ?? 0d,
+            1d);
+
+    private static double RedisRelativePercent(double value, double max)
+        => max <= 0d ? 0d : (value / max) * 100d;
+
+    private static string RedisBarWidth(double percent)
+        => $"{Math.Clamp(percent, 0d, 100d):0.##}%";
 
     private int ResourceSampleCount
         => _resourceSamples.Count;
@@ -881,4 +992,6 @@
         double NetworkTxBytesPerSecond,
         double DiskReadBytesPerSecond,
         double DiskWriteBytesPerSecond);
+
+    private sealed record RedisChartBar(string Label, string Value, string CssClass, double Percent);
 }

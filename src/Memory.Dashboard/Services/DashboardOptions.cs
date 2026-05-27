@@ -16,16 +16,18 @@ public sealed class DashboardOptions
     public int DockerSnapshotCacheSeconds { get; set; } = 3;
     public int DockerSnapshotTimeoutSeconds { get; set; } = 4;
     public string DataProtectionPath { get; set; } = "/var/lib/contexthub-dashboard/keys";
+    public string ApiToken { get; set; } = string.Empty;
     public DashboardPollingOptions Polling { get; set; } = new();
 }
 
 public sealed class DashboardPollingOptions
 {
-    public int OverviewSeconds { get; set; } = 10;
-    public int MetricsSeconds { get; set; } = 3;
-    public int JobsSeconds { get; set; } = 8;
-    public int LogsSeconds { get; set; } = 10;
-    public int PerformanceSeconds { get; set; } = 30;
+    public int OverviewSeconds { get; set; } = 5;
+    public int MetricsSeconds { get; set; } = 5;
+    public int JobsSeconds { get; set; } = 5;
+    public int LogsSeconds { get; set; } = 5;
+    public int PerformanceSeconds { get; set; } = 5;
+    public int GraphSeconds { get; set; } = 30;
 }
 
 public sealed record DashboardLoginForm(

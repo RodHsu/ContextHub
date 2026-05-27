@@ -46,19 +46,20 @@ public sealed class InstanceBehaviorSettingsAccessor(
             DefaultUseSummaryLayer: false,
             SharedSummaryAutoRefreshEnabled: true,
             SnapshotPolling: DashboardSnapshotPollingDefaults.Create(),
-            OverviewPollingSeconds: 10,
+            OverviewPollingSeconds: 5,
             MetricsPollingSeconds: 5,
-            JobsPollingSeconds: 8,
-            LogsPollingSeconds: 10,
-            PerformancePollingSeconds: 30);
+            JobsPollingSeconds: 5,
+            LogsPollingSeconds: 5,
+            PerformancePollingSeconds: 5);
 }
 
 public sealed class ConversationAutomationService(
     IApplicationDbContext dbContext,
     IMemoryService memoryService,
-    ICacheVersionStore cacheStore,
+    IBackgroundJobQueue jobQueue,
     IClock clock,
-    IInstanceBehaviorSettingsAccessor behaviorSettingsAccessor) : IConversationAutomationService
+    IInstanceBehaviorSettingsAccessor behaviorSettingsAccessor,
+    IRequestActorAccessor actorAccessor) : IConversationAutomationService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -67,6 +68,7 @@ public sealed class ConversationAutomationService(
         Validate(request);
 
         var behavior = await behaviorSettingsAccessor.GetCurrentAsync(cancellationToken);
+        var actor = actorAccessor.Current;
         var effectiveProjectId = ProjectContext.Normalize(request.ProjectId, behavior.DefaultProjectId);
         var projectName = request.ProjectName?.Trim() ?? string.Empty;
         var session = await dbContext.ConversationSessions
@@ -79,6 +81,8 @@ public sealed class ConversationAutomationService(
         {
             session = new ConversationSession
             {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
                 ConversationId = request.ConversationId.Trim(),
                 ProjectId = effectiveProjectId,
                 ProjectName = projectName,
@@ -95,6 +99,8 @@ public sealed class ConversationAutomationService(
         else
         {
             session.ProjectId = effectiveProjectId;
+            session.TenantId ??= actor.TenantId;
+            session.OwnerUserId ??= actor.UserId;
             session.ProjectName = projectName;
             session.TaskId = request.TaskId?.Trim() ?? session.TaskId;
             session.LastTurnId = request.TurnId.Trim();
@@ -133,6 +139,8 @@ public sealed class ConversationAutomationService(
         var checkpoint = new ConversationCheckpoint
         {
             SessionId = session.Id,
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
             ConversationId = session.ConversationId,
             TurnId = request.TurnId.Trim(),
             ProjectId = effectiveProjectId,
@@ -159,6 +167,8 @@ public sealed class ConversationAutomationService(
         {
             var job = new MemoryJob
             {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
                 ProjectId = effectiveProjectId,
                 JobType = MemoryJobType.IngestConversation,
                 Status = MemoryJobStatus.Pending,
@@ -174,7 +184,7 @@ public sealed class ConversationAutomationService(
 
         if (jobId.HasValue)
         {
-            await cacheStore.PublishJobSignalAsync(jobId.Value, cancellationToken);
+            await jobQueue.PublishSignalAsync(jobId.Value, cancellationToken);
         }
 
         return new ConversationIngestResult(
@@ -189,6 +199,11 @@ public sealed class ConversationAutomationService(
     public async Task<IReadOnlyList<ConversationSessionResult>> ListSessionsAsync(ConversationSessionListRequest request, CancellationToken cancellationToken)
     {
         var query = dbContext.ConversationSessions.AsNoTracking().AsQueryable();
+        var actor = actorAccessor.Current;
+        if (actor.HasUser)
+        {
+            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
@@ -227,6 +242,11 @@ public sealed class ConversationAutomationService(
     public async Task<IReadOnlyList<ConversationInsightResult>> ListInsightsAsync(ConversationInsightListRequest request, CancellationToken cancellationToken)
     {
         var query = dbContext.ConversationInsights.AsNoTracking().AsQueryable();
+        var actor = actorAccessor.Current;
+        if (actor.HasUser)
+        {
+            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
@@ -329,6 +349,8 @@ public sealed class ConversationAutomationService(
             {
                 SessionId = checkpoint.SessionId,
                 CheckpointId = checkpoint.Id,
+                TenantId = checkpoint.TenantId,
+                OwnerUserId = checkpoint.OwnerUserId,
                 ConversationId = checkpoint.ConversationId,
                 TurnId = checkpoint.TurnId,
                 ProjectId = candidate.ProjectId,
@@ -451,6 +473,8 @@ public sealed class ConversationAutomationService(
 
         var job = new MemoryJob
         {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
             ProjectId = ProjectContext.Normalize(projectId),
             JobType = MemoryJobType.PromoteConversationInsights,
             Status = MemoryJobStatus.Pending,
@@ -458,9 +482,7 @@ public sealed class ConversationAutomationService(
             CreatedAt = clock.UtcNow
         };
 
-        await dbContext.MemoryJobs.AddAsync(job, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await cacheStore.PublishJobSignalAsync(job.Id, cancellationToken);
+        await jobQueue.EnqueueAsync(job, cancellationToken);
     }
 
     private static bool ShouldScheduleAutomation(ConversationSourceKind sourceKind, InstanceBehaviorSettingsResult behavior)

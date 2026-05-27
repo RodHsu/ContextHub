@@ -27,7 +27,23 @@ public static class BuildMetadata
     {
         var normalized = version.Trim();
         var metadataIndex = normalized.IndexOf('+', StringComparison.Ordinal);
-        return metadataIndex > 0 ? normalized[..metadataIndex] : normalized;
+        normalized = metadataIndex > 0 ? normalized[..metadataIndex] : normalized;
+        if (string.IsNullOrWhiteSpace(normalized) ||
+            string.Equals(normalized, "unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            return "unknown";
+        }
+
+        normalized = normalized.StartsWith('v')
+            ? normalized[1..]
+            : normalized;
+        var parts = normalized.Split('.');
+        if (parts.All(part => part.Length > 0 && part.All(char.IsDigit)))
+        {
+            normalized = string.Join(".", parts.Concat(["0", "0"]).Take(3));
+        }
+
+        return $"v{normalized}";
     }
 
     private static DateTimeOffset ResolveBuildTimestampUtc(Assembly assembly)

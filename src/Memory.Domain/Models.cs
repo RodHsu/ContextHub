@@ -138,6 +138,20 @@ public enum MemoryJobStatus
     Failed
 }
 
+public enum MaintenanceRunType
+{
+    RetrievalTelemetryRetention,
+    MaintenanceMode,
+    VacuumFullReclaim
+}
+
+public enum MaintenanceRunStatus
+{
+    Running,
+    Completed,
+    Failed
+}
+
 public enum ConversationEventType
 {
     TurnCompleted,
@@ -170,6 +184,40 @@ public enum ConversationPromotionStatus
     Failed
 }
 
+public enum TenantStatus
+{
+    Active,
+    Suspended,
+    Archived
+}
+
+public enum TenantUserRole
+{
+    Owner,
+    Admin,
+    Member
+}
+
+public enum TenantUserStatus
+{
+    Active,
+    Disabled,
+    Archived
+}
+
+public enum SecurityAuditEventType
+{
+    TenantCreated,
+    TenantUserCreated,
+    ProjectGrantUpserted,
+    ApiTokenCreated,
+    ApiTokenUpdated,
+    ApiTokenRevoked,
+    ApiTokenAuthenticated,
+    ApiTokenAuthenticationFailed,
+    ApiTokenProjectDenied
+}
+
 public sealed class InstanceSetting
 {
     public string InstanceId { get; set; } = string.Empty;
@@ -180,9 +228,92 @@ public sealed class InstanceSetting
     public string UpdatedBy { get; set; } = "system";
 }
 
+public sealed class Tenant
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Slug { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public TenantStatus Status { get; set; } = TenantStatus.Active;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public List<TenantUser> Users { get; set; } = [];
+    public List<TenantProjectGrant> ProjectGrants { get; set; } = [];
+    public List<ApiToken> ApiTokens { get; set; } = [];
+}
+
+public sealed class TenantUser
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public string Username { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public string PasswordHash { get; set; } = string.Empty;
+    public TenantUserRole Role { get; set; } = TenantUserRole.Member;
+    public TenantUserStatus Status { get; set; } = TenantUserStatus.Active;
+    public DateTimeOffset? LastLoginAt { get; set; }
+    public DateTimeOffset? PasswordUpdatedAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public Tenant? Tenant { get; set; }
+    public List<ApiToken> ApiTokens { get; set; } = [];
+}
+
+public sealed class TenantProjectGrant
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public string ProjectId { get; set; } = "default";
+    public bool CanRead { get; set; } = true;
+    public bool CanWrite { get; set; }
+    public bool CanManageTokens { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public Tenant? Tenant { get; set; }
+}
+
+public sealed class ApiToken
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Notes { get; set; } = string.Empty;
+    public string TokenPrefix { get; set; } = string.Empty;
+    public string TokenHash { get; set; } = string.Empty;
+    public string TokenLastFour { get; set; } = string.Empty;
+    public string[] Scopes { get; set; } = [];
+    public string[] AllowedProjectIds { get; set; } = [];
+    public DateTimeOffset? ExpiresAt { get; set; }
+    public DateTimeOffset? RevokedAt { get; set; }
+    public DateTimeOffset? LastUsedAt { get; set; }
+    public string LastUsedIp { get; set; } = string.Empty;
+    public string LastUsedUserAgent { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public Tenant? Tenant { get; set; }
+    public TenantUser? OwnerUser { get; set; }
+}
+
+public sealed class SecurityAuditEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? ActorUserId { get; set; }
+    public Guid? ApiTokenId { get; set; }
+    public SecurityAuditEventType EventType { get; set; }
+    public string Outcome { get; set; } = string.Empty;
+    public string IpAddress { get; set; } = string.Empty;
+    public string UserAgent { get; set; } = string.Empty;
+    public string DetailsJson { get; set; } = "{}";
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
 public sealed class MemoryItem
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ProjectId { get; set; } = "default";
     public string ExternalKey { get; set; } = string.Empty;
     public MemoryScope Scope { get; set; }
@@ -259,6 +390,8 @@ public sealed class MemoryLink
 public sealed class MemoryJob
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ProjectId { get; set; } = "default";
     public MemoryJobType JobType { get; set; }
     public MemoryJobStatus Status { get; set; } = MemoryJobStatus.Pending;
@@ -267,6 +400,19 @@ public sealed class MemoryJob
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
+}
+
+public sealed class MaintenanceRun
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public MaintenanceRunType MaintenanceType { get; set; }
+    public MaintenanceRunStatus Status { get; set; } = MaintenanceRunStatus.Running;
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public string TriggeredBy { get; set; } = "system";
+    public string PolicyJson { get; set; } = "{}";
+    public string ResultJson { get; set; } = "{}";
+    public string Error { get; set; } = string.Empty;
 }
 
 public sealed class RuntimeLogEntry
@@ -287,6 +433,8 @@ public sealed class RuntimeLogEntry
 public sealed class RetrievalEvent
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ProjectId { get; set; } = "default";
     public string Channel { get; set; } = string.Empty;
     public string EntryPoint { get; set; } = string.Empty;
@@ -471,6 +619,8 @@ public sealed class SuggestedAction
 public sealed class ConversationSession
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ConversationId { get; set; } = string.Empty;
     public string ProjectId { get; set; } = "default";
     public string ProjectName { get; set; } = string.Empty;
@@ -489,6 +639,8 @@ public sealed class ConversationCheckpoint
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid SessionId { get; set; }
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ConversationId { get; set; } = string.Empty;
     public string TurnId { get; set; } = string.Empty;
     public string ProjectId { get; set; } = "default";
@@ -515,6 +667,8 @@ public sealed class ConversationInsight
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid SessionId { get; set; }
     public Guid CheckpointId { get; set; }
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ConversationId { get; set; } = string.Empty;
     public string TurnId { get; set; } = string.Empty;
     public string ProjectId { get; set; } = "default";

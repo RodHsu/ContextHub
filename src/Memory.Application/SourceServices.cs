@@ -10,6 +10,7 @@ namespace Memory.Application;
 public sealed class SourceConnectionService(
     IApplicationDbContext dbContext,
     IClock clock,
+    IBackgroundJobQueue jobQueue,
     ISecretProtector secretProtector) : ISourceConnectionService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -120,8 +121,7 @@ public sealed class SourceConnectionService(
             CreatedAt = clock.UtcNow
         };
 
-        await dbContext.MemoryJobs.AddAsync(job, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await jobQueue.EnqueueAsync(job, cancellationToken);
         return new EnqueueSourceSyncResult(job.Id, job.Status);
     }
 
@@ -235,6 +235,7 @@ public sealed class SourceSyncService(
     IApplicationDbContext dbContext,
     IChunkingService chunkingService,
     ICacheVersionStore cacheStore,
+    IBackgroundJobQueue jobQueue,
     IClock clock,
     ISecretProtector secretProtector) : ISourceSyncService
 {
@@ -293,7 +294,7 @@ public sealed class SourceSyncService(
             {
                 await EnqueueProjectJobAsync(source.ProjectId, MemoryJobType.Reindex, new ReindexJobPayload(null, null, source.ProjectId), cancellationToken);
                 await EnqueueProjectJobAsync(source.ProjectId, MemoryJobType.AnalyzeGovernance, new GovernanceAnalysisJobPayload(source.ProjectId), cancellationToken);
-                await cacheStore.IncrementAsync(cancellationToken);
+                await cacheStore.IncrementProjectAsync(source.ProjectId, cancellationToken);
             }
 
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -704,7 +705,7 @@ public sealed class SourceSyncService(
 
     private async Task EnqueueProjectJobAsync<TPayload>(string projectId, MemoryJobType jobType, TPayload payload, CancellationToken cancellationToken)
     {
-        await dbContext.MemoryJobs.AddAsync(new MemoryJob
+        await jobQueue.EnqueueAsync(new MemoryJob
         {
             ProjectId = projectId,
             JobType = jobType,

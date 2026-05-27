@@ -3,11 +3,13 @@ using Memory.Application;
 using Memory.Dashboard.Components;
 using Memory.Dashboard.Services;
 using Memory.Dashboard.Services.Testing;
+using Memory.Domain;
 using Memory.Infrastructure;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http.Json;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -16,6 +18,13 @@ using Npgsql;
 using Pgvector.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
+LocalDotEnvConfiguration.AddFallbacks(
+    builder.Configuration,
+    builder.Environment.ContentRootPath,
+    new Dictionary<string, string>
+    {
+        ["DASHBOARD_API_TOKEN"] = $"{DashboardOptions.SectionName}:ApiToken"
+    });
 var useBrowserTestDoubles = builder.Configuration.GetValue<bool>($"{DashboardOptions.SectionName}:UseBrowserTestDoubles");
 
 if (useBrowserTestDoubles || builder.Environment.IsEnvironment("Testing"))
@@ -26,6 +35,14 @@ if (useBrowserTestDoubles || builder.Environment.IsEnvironment("Testing"))
 builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(options =>
 {
     options.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+});
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
+                               ForwardedHeaders.XForwardedHost |
+                               ForwardedHeaders.XForwardedProto;
+    options.KnownIPNetworks.Clear();
+    options.KnownProxies.Clear();
 });
 
 builder.Services.AddProblemDetails();
@@ -116,10 +133,10 @@ else
     builder.Services.AddHttpClient<IContextHubApiClient, ContextHubApiClient>((sp, client) =>
     {
         var options = sp.GetRequiredService<IOptions<DashboardOptions>>().Value;
-        client.BaseAddress = new Uri(options.BaseUrl, UriKind.Absolute);
-        client.Timeout = TimeSpan.FromSeconds(15);
-        client.DefaultRequestHeaders.Add(RequestTrafficConstants.DashboardRequestHeader, RequestTrafficConstants.DashboardRequestHeaderValue);
-    });
+        DashboardApiClientHttpClient.Configure(client, options);
+    })
+    .AddHttpMessageHandler<DashboardActAsDelegatingHandler>();
+    builder.Services.AddTransient<DashboardActAsDelegatingHandler>();
     builder.Services.AddSingleton<IDockerMetricsService, DockerMetricsService>();
 }
 builder.Services.AddScoped<IDashboardRuntimeSettingsAccessor, DashboardRuntimeSettingsAccessor>();
@@ -127,45 +144,15 @@ builder.Services.AddScoped<IInstanceTransferService, InstanceTransferService>();
 
 var app = builder.Build();
 
+app.UseForwardedHeaders();
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
 }
 
 app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
+app.Use(CloudflareCacheHeaders.ApplyDashboardPolicyAsync);
 app.UseAuthentication();
-app.Use(async (context, next) =>
-{
-    if (!HttpMethods.IsGet(context.Request.Method))
-    {
-        await next();
-        return;
-    }
-
-    if (AnonymousPaths.IsInfrastructureRequest(context.Request.Path) ||
-        context.Request.Path.StartsWithSegments("/api") ||
-        context.Request.Path.StartsWithSegments("/health"))
-    {
-        await next();
-        return;
-    }
-
-    context.Response.OnStarting(static state =>
-    {
-        var httpContext = (HttpContext)state;
-        if (!string.Equals(httpContext.Response.ContentType?.Split(';', 2)[0], "text/html", StringComparison.OrdinalIgnoreCase))
-        {
-            return Task.CompletedTask;
-        }
-
-        httpContext.Response.Headers.CacheControl = "no-store, no-cache, max-age=0, must-revalidate";
-        httpContext.Response.Headers.Pragma = "no-cache";
-        httpContext.Response.Headers.Expires = "0";
-        return Task.CompletedTask;
-    }, context);
-
-    await next();
-});
 app.Use(async (context, next) =>
 {
     if (AnonymousPaths.IsAllowed(context.Request.Path))
@@ -178,6 +165,18 @@ app.Use(async (context, next) =>
     {
         var returnUrl = Uri.EscapeDataString($"{context.Request.PathBase}{context.Request.Path}{context.Request.QueryString}");
         context.Response.Redirect($"/login?returnUrl={returnUrl}");
+        return;
+    }
+
+    if (!DashboardRouteAuthorization.CanAccess(context.User, context.Request.Path))
+    {
+        if (context.Request.Path == "/")
+        {
+            context.Response.Redirect("/memories");
+            return;
+        }
+
+        context.Response.Redirect("/forbidden");
         return;
     }
 
@@ -211,6 +210,31 @@ app.MapPost("/account/login", async (
     IInstanceSettingsService instanceSettingsService,
     IPasswordHasher<object> passwordHasher) =>
 {
+    var dbContext = context.RequestServices.GetService<MemoryDbContext>();
+    if (dbContext is not null)
+    {
+        var username = (form.Username ?? string.Empty).Trim();
+        var user = await dbContext.TenantUsers
+            .Include(x => x.Tenant)
+            .FirstOrDefaultAsync(
+                x => x.Username == username &&
+                     x.Status == TenantUserStatus.Active &&
+                     x.Tenant!.Status == TenantStatus.Active,
+                context.RequestAborted);
+
+        if (user is not null && !string.IsNullOrWhiteSpace(user.PasswordHash))
+        {
+            var userVerification = passwordHasher.VerifyHashedPassword(new object(), user.PasswordHash, form.Password ?? string.Empty);
+            if (userVerification != PasswordVerificationResult.Failed)
+            {
+                user.LastLoginAt = DateTimeOffset.UtcNow;
+                user.UpdatedAt = DateTimeOffset.UtcNow;
+                await dbContext.SaveChangesAsync(context.RequestAborted);
+                return await SignInDashboardUserAsync(context, user, form.ReturnUrl);
+            }
+        }
+    }
+
     var settings = await instanceSettingsService.GetDashboardAuthenticationSettingsAsync(context.RequestAborted);
     var verification = passwordHasher.VerifyHashedPassword(new object(), settings.AdminPasswordHash, form.Password ?? string.Empty);
     if (!string.Equals(form.Username, settings.AdminUsername, StringComparison.Ordinal) ||
@@ -219,21 +243,13 @@ app.MapPost("/account/login", async (
         return Results.Redirect($"/login?error=invalid&returnUrl={Uri.EscapeDataString(DashboardRouting.NormalizeReturnUrl(form.ReturnUrl))}");
     }
 
-    var claims = new[]
+    if (dbContext is not null)
     {
-        new Claim(ClaimTypes.Name, settings.AdminUsername),
-        new Claim(ClaimTypes.Role, "DashboardAdmin")
-    };
-    var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
-    var principal = new ClaimsPrincipal(identity);
-    await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, principal, new AuthenticationProperties
-    {
-        IsPersistent = true,
-        AllowRefresh = true,
-        ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(settings.SessionTimeoutMinutes)
-    });
+        var admin = await EnsureDashboardAdminUserAsync(dbContext, settings, context.RequestAborted);
+        return await SignInDashboardUserAsync(context, admin, form.ReturnUrl, settings.SessionTimeoutMinutes);
+    }
 
-    return Results.Redirect(DashboardRouting.NormalizeReturnUrl(form.ReturnUrl));
+    return await SignInLegacyAdminAsync(context, settings, form.ReturnUrl);
 });
 
 app.MapPost("/account/logout", async (HttpContext context) =>
@@ -242,13 +258,25 @@ app.MapPost("/account/logout", async (HttpContext context) =>
     return Results.Redirect("/login");
 });
 
-app.MapGet("/api/settings/instance", async (IInstanceSettingsService service, CancellationToken cancellationToken) =>
+var settingsApi = app.MapGroup("/api/settings");
+settingsApi.AddEndpointFilter(async (context, next) =>
+{
+    var user = context.HttpContext.User;
+    if (user.Identity?.IsAuthenticated == true && DashboardRouteAuthorization.IsAdmin(user))
+    {
+        return await next(context);
+    }
+
+    return Results.Forbid();
+});
+
+settingsApi.MapGet("/instance", async (IInstanceSettingsService service, CancellationToken cancellationToken) =>
 {
     var result = await service.GetSnapshotAsync(cancellationToken);
     return Results.Ok(result);
 });
 
-app.MapPut("/api/settings/instance", async (
+settingsApi.MapPut("/instance", async (
     InstanceSettingsUpdateRequest request,
     HttpContext context,
     IInstanceSettingsService service,
@@ -268,7 +296,7 @@ app.MapPut("/api/settings/instance", async (
     }
 });
 
-app.MapDelete("/api/settings/instance", async (
+settingsApi.MapDelete("/instance", async (
     HttpContext context,
     IInstanceSettingsService service,
     CancellationToken cancellationToken) =>
@@ -277,7 +305,7 @@ app.MapDelete("/api/settings/instance", async (
     return Results.Ok(result);
 });
 
-app.MapPost("/api/settings/restart-app", async (
+settingsApi.MapPost("/restart-app", async (
     RestartAppContainersRequest request,
     IDockerMetricsService dockerMetricsService,
     CancellationToken cancellationToken) =>
@@ -291,7 +319,198 @@ app.MapRazorComponents<App>()
 
 app.Run();
 
+async Task<IResult> SignInDashboardUserAsync(
+    HttpContext context,
+    TenantUser user,
+    string? returnUrl,
+    int sessionTimeoutMinutes = 60)
+{
+    var claims = new[]
+    {
+        new Claim(ClaimTypes.Name, user.Username),
+        new Claim(ClaimTypes.Role, user.Role.ToString()),
+        new Claim("contexthub:tenant_id", user.TenantId.ToString()),
+        new Claim("contexthub:user_id", user.Id.ToString())
+    };
+    var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+    var principal = new ClaimsPrincipal(identity);
+    await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, principal, new AuthenticationProperties
+    {
+        IsPersistent = true,
+        AllowRefresh = true,
+        ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(sessionTimeoutMinutes)
+    });
+
+    var normalizedReturnUrl = DashboardRouting.NormalizeReturnUrl(returnUrl);
+    return Results.Redirect(IsDashboardAdmin(user.Role) ? normalizedReturnUrl : NormalizeUserReturnUrl(normalizedReturnUrl));
+}
+
+async Task<IResult> SignInLegacyAdminAsync(HttpContext context, DashboardAuthenticationSettings settings, string? returnUrl)
+{
+    var claims = new[]
+    {
+        new Claim(ClaimTypes.Name, settings.AdminUsername),
+        new Claim(ClaimTypes.Role, TenantUserRole.Owner.ToString())
+    };
+    var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+    var principal = new ClaimsPrincipal(identity);
+    await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, principal, new AuthenticationProperties
+    {
+        IsPersistent = true,
+        AllowRefresh = true,
+        ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(settings.SessionTimeoutMinutes)
+    });
+
+    return Results.Redirect(DashboardRouting.NormalizeReturnUrl(returnUrl));
+}
+
+async Task<TenantUser> EnsureDashboardAdminUserAsync(
+    MemoryDbContext dbContext,
+    DashboardAuthenticationSettings settings,
+    CancellationToken cancellationToken)
+{
+    var tenant = await dbContext.Tenants.FirstOrDefaultAsync(x => x.Slug == "context-team", cancellationToken);
+    if (tenant is null)
+    {
+        tenant = new Tenant
+        {
+            Slug = "context-team",
+            DisplayName = "Context Team",
+            Status = TenantStatus.Active,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        await dbContext.Tenants.AddAsync(tenant, cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    var username = settings.AdminUsername.Trim();
+    var admin = await dbContext.TenantUsers.FirstOrDefaultAsync(
+        x => x.TenantId == tenant.Id && x.Username == username,
+        cancellationToken);
+    if (admin is null)
+    {
+        admin = new TenantUser
+        {
+            TenantId = tenant.Id,
+            Username = username,
+            DisplayName = username,
+            Email = string.Empty,
+            PasswordHash = settings.AdminPasswordHash,
+            Role = TenantUserRole.Owner,
+            Status = TenantUserStatus.Active,
+            LastLoginAt = DateTimeOffset.UtcNow,
+            PasswordUpdatedAt = DateTimeOffset.UtcNow,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        await dbContext.TenantUsers.AddAsync(admin, cancellationToken);
+    }
+    else
+    {
+        admin.PasswordHash = string.IsNullOrWhiteSpace(admin.PasswordHash) ? settings.AdminPasswordHash : admin.PasswordHash;
+        admin.Role = admin.Role == TenantUserRole.Member ? TenantUserRole.Owner : admin.Role;
+        admin.Status = TenantUserStatus.Active;
+        admin.LastLoginAt = DateTimeOffset.UtcNow;
+        admin.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    await dbContext.SaveChangesAsync(cancellationToken);
+    return admin;
+}
+
+bool IsDashboardAdmin(TenantUserRole role)
+    => role is TenantUserRole.Owner or TenantUserRole.Admin;
+
+string NormalizeUserReturnUrl(string returnUrl)
+    => returnUrl is "/memories" or "/graph" or "/preferences" or "/account/tokens"
+        ? returnUrl
+        : "/memories";
+
 public partial class Program;
+
+internal static class CloudflareCacheHeaders
+{
+    private const string BrowserAndSharedNoStore = "no-store, no-cache, max-age=0, must-revalidate";
+    private const string SharedNoStore = "no-store";
+    private const string StaticAssetBrowserCache = "public, max-age=31536000, immutable";
+    private const string StaticAssetSharedCache = "public, max-age=31536000";
+
+    public static async Task ApplyDashboardPolicyAsync(HttpContext context, RequestDelegate next)
+    {
+        context.Response.OnStarting(static state =>
+        {
+            var httpContext = (HttpContext)state;
+            ApplyDashboardPolicy(httpContext);
+            return Task.CompletedTask;
+        }, context);
+
+        await next(context);
+    }
+
+    private static void ApplyDashboardPolicy(HttpContext context)
+    {
+        if (IsCacheableStaticAsset(context))
+        {
+            SetPublicStaticAssetHeaders(context);
+            return;
+        }
+
+        SetNoStoreHeaders(context);
+    }
+
+    private static bool IsCacheableStaticAsset(HttpContext context)
+    {
+        if (!HttpMethods.IsGet(context.Request.Method) &&
+            !HttpMethods.IsHead(context.Request.Method))
+        {
+            return false;
+        }
+
+        if (context.Response.StatusCode is not StatusCodes.Status200OK and not StatusCodes.Status304NotModified)
+        {
+            return false;
+        }
+
+        if (context.Request.Headers.ContainsKey("Authorization") ||
+            context.Response.Headers.ContainsKey("Set-Cookie"))
+        {
+            return false;
+        }
+
+        return IsStaticAssetPath(context.Request.Path) ||
+               IsStaticAssetContentType(context.Response.ContentType);
+    }
+
+    private static bool IsStaticAssetPath(PathString path)
+        => path.StartsWithSegments("/_framework", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/_content", StringComparison.OrdinalIgnoreCase) ||
+           (path.HasValue && Path.HasExtension(path.Value));
+
+    private static bool IsStaticAssetContentType(string? contentType)
+    {
+        var mediaType = contentType?.Split(';', 2)[0].Trim();
+        return mediaType is "text/css" or "application/javascript" or "text/javascript" or "image/svg+xml" or "image/png" or "image/x-icon" or "font/woff2";
+    }
+
+    private static void SetPublicStaticAssetHeaders(HttpContext context)
+    {
+        context.Response.Headers.CacheControl = StaticAssetBrowserCache;
+        context.Response.Headers["Cloudflare-CDN-Cache-Control"] = StaticAssetSharedCache;
+        context.Response.Headers["CDN-Cache-Control"] = StaticAssetSharedCache;
+        context.Response.Headers.Remove("Pragma");
+        context.Response.Headers.Remove("Expires");
+    }
+
+    private static void SetNoStoreHeaders(HttpContext context)
+    {
+        context.Response.Headers.CacheControl = BrowserAndSharedNoStore;
+        context.Response.Headers["Cloudflare-CDN-Cache-Control"] = SharedNoStore;
+        context.Response.Headers["CDN-Cache-Control"] = SharedNoStore;
+        context.Response.Headers.Pragma = "no-cache";
+        context.Response.Headers.Expires = "0";
+    }
+}
 
 internal static class AnonymousPaths
 {
@@ -319,6 +538,39 @@ internal static class AnonymousPaths
         => path.StartsWithSegments("/_blazor") ||
            path.StartsWithSegments("/_framework") ||
            path.StartsWithSegments("/_content");
+}
+
+internal static class DashboardRouteAuthorization
+{
+    private static readonly string[] MemberAllowedPrefixes =
+    [
+        "/memories",
+        "/graph",
+        "/preferences",
+        "/account/tokens",
+        "/forbidden",
+        "/account/logout"
+    ];
+
+    public static bool CanAccess(ClaimsPrincipal user, PathString path)
+    {
+        if (IsAdmin(user))
+        {
+            return true;
+        }
+
+        if (!path.HasValue || path == "/")
+        {
+            return false;
+        }
+
+        return MemberAllowedPrefixes.Any(prefix => path.StartsWithSegments(prefix));
+    }
+
+    public static bool IsAdmin(ClaimsPrincipal user)
+        => user.IsInRole(TenantUserRole.Owner.ToString()) ||
+           user.IsInRole(TenantUserRole.Admin.ToString()) ||
+           user.IsInRole("DashboardAdmin");
 }
 
 internal static class DashboardRouting

@@ -12,7 +12,7 @@
                     }
                     else
                     {
-                        <span>尚未同步</span>
+                        <span>@StatusText</span>
                     }
                 </div>
                 @if (SnapshotAtUtc.HasValue)
@@ -61,4 +61,11 @@
 
     [Parameter]
     public string? WarningText { get; set; }
+
+    private string StatusText
+        => !string.IsNullOrWhiteSpace(WarningText)
+            ? "同步失敗"
+            : IsRefreshing
+            ? "同步中"
+            : "等待資料";
 }

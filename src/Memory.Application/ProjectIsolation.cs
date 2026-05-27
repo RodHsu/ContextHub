@@ -14,6 +14,7 @@ public static class ProjectContext
     public const string DefaultProjectId = "default";
     public const string SharedProjectId = "shared";
     public const string UserProjectId = "user";
+    public const string AllProjectIdsSentinel = "*";
 
     public static string Normalize(string? projectId, string fallback = DefaultProjectId)
         => string.IsNullOrWhiteSpace(projectId) ? fallback : projectId.Trim();

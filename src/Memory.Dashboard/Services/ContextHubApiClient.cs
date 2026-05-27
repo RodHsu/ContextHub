@@ -44,6 +44,24 @@ public interface IContextHubApiClient
     Task<IReadOnlyList<SuggestedActionResult>> GetSuggestedActionsAsync(SuggestedActionListRequest request, CancellationToken cancellationToken);
     Task<SuggestedActionMutationResult> AcceptSuggestedActionAsync(Guid id, CancellationToken cancellationToken);
     Task<SuggestedActionResult> DismissSuggestedActionAsync(Guid id, CancellationToken cancellationToken);
+    Task<IReadOnlyList<TenantResult>> GetTenantsAsync(bool includeArchived, int limit, CancellationToken cancellationToken);
+    Task<TenantResult> CreateTenantAsync(TenantCreateRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<TenantUserResult>> GetTenantUsersAsync(Guid tenantId, bool includeArchived, CancellationToken cancellationToken);
+    Task<TenantUserResult> CreateTenantUserAsync(TenantUserCreateRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<TenantProjectGrantResult>> GetTenantProjectGrantsAsync(Guid tenantId, CancellationToken cancellationToken);
+    Task<TenantProjectGrantResult> UpsertTenantProjectGrantAsync(TenantProjectGrantUpsertRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ApiTokenResult>> GetApiTokensAsync(Guid tenantId, bool includeRevoked, CancellationToken cancellationToken);
+    Task<ApiTokenCreatedResult> CreateApiTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken);
+    Task<ApiTokenResult> UpdateApiTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken);
+    Task<ApiTokenCreatedResult> RegenerateApiTokenAsync(Guid tokenId, CancellationToken cancellationToken);
+    Task<ApiTokenResult> RevokeApiTokenAsync(Guid tokenId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SecurityAuditEventResult>> GetSecurityAuditEventsAsync(Guid? tenantId, int limit, CancellationToken cancellationToken);
+    Task<CurrentUserResult> GetCurrentUserAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<ApiTokenResult>> GetMyApiTokensAsync(bool includeRevoked, CancellationToken cancellationToken);
+    Task<ApiTokenCreatedResult> CreateMyApiTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken);
+    Task<ApiTokenResult> UpdateMyApiTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken);
+    Task<ApiTokenCreatedResult> RegenerateMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken);
+    Task<ApiTokenResult> RevokeMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken);
     Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken);
     Task<StorageTableRowsResult> GetStorageRowsAsync(StorageRowsRequest request, CancellationToken cancellationToken);
     Task<PerformanceMeasureResult> MeasurePerformanceAsync(PerformanceMeasureRequest request, CancellationToken cancellationToken);
@@ -271,6 +289,145 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     {
         using var response = await httpClient.PostAsync($"/api/actions/{id}/dismiss", null, cancellationToken);
         return await ReadRequiredAsync<SuggestedActionResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<TenantResult>> GetTenantsAsync(bool includeArchived, int limit, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<TenantResult>>(QueryHelpers.AddQueryString("/api/security/tenants", new Dictionary<string, string?>
+        {
+            ["includeArchived"] = includeArchived.ToString(),
+            ["limit"] = limit.ToString()
+        }), cancellationToken);
+
+    public async Task<TenantResult> CreateTenantAsync(TenantCreateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/security/tenants", request, cancellationToken);
+        return await ReadRequiredAsync<TenantResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<TenantUserResult>> GetTenantUsersAsync(Guid tenantId, bool includeArchived, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<TenantUserResult>>(QueryHelpers.AddQueryString($"/api/security/tenants/{tenantId}/users", new Dictionary<string, string?>
+        {
+            ["includeArchived"] = includeArchived.ToString()
+        }), cancellationToken);
+
+    public async Task<TenantUserResult> CreateTenantUserAsync(TenantUserCreateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/security/tenants/{request.TenantId}/users", new
+        {
+            request.Username,
+            request.DisplayName,
+            request.Email,
+            request.Role,
+            Password = request.PasswordHash
+        }, cancellationToken);
+        return await ReadRequiredAsync<TenantUserResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<TenantProjectGrantResult>> GetTenantProjectGrantsAsync(Guid tenantId, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<TenantProjectGrantResult>>($"/api/security/tenants/{tenantId}/project-grants", cancellationToken);
+
+    public async Task<TenantProjectGrantResult> UpsertTenantProjectGrantAsync(TenantProjectGrantUpsertRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PutAsJsonAsync($"/api/security/tenants/{request.TenantId}/project-grants/{Uri.EscapeDataString(request.ProjectId)}", new
+        {
+            request.CanRead,
+            request.CanWrite,
+            request.CanManageTokens
+        }, cancellationToken);
+        return await ReadRequiredAsync<TenantProjectGrantResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<ApiTokenResult>> GetApiTokensAsync(Guid tenantId, bool includeRevoked, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<ApiTokenResult>>(QueryHelpers.AddQueryString($"/api/security/tenants/{tenantId}/tokens", new Dictionary<string, string?>
+        {
+            ["includeRevoked"] = includeRevoked.ToString()
+        }), cancellationToken);
+
+    public async Task<ApiTokenCreatedResult> CreateApiTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/security/tenants/{request.TenantId}/tokens", new
+        {
+            request.OwnerUserId,
+            request.Name,
+            request.Notes,
+            request.Scopes,
+            request.AllowedProjectIds,
+            request.ExpiresAt
+        }, cancellationToken);
+        return await ReadRequiredAsync<ApiTokenCreatedResult>(response, cancellationToken);
+    }
+
+    public async Task<ApiTokenResult> UpdateApiTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PatchAsJsonAsync($"/api/security/tokens/{tokenId}", request, cancellationToken);
+        return await ReadRequiredAsync<ApiTokenResult>(response, cancellationToken);
+    }
+
+    public async Task<ApiTokenResult> RevokeApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync($"/api/security/tokens/{tokenId}/revoke", null, cancellationToken);
+        return await ReadRequiredAsync<ApiTokenResult>(response, cancellationToken);
+    }
+
+    public async Task<ApiTokenCreatedResult> RegenerateApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync($"/api/security/tokens/{tokenId}/regenerate", null, cancellationToken);
+        return await ReadRequiredAsync<ApiTokenCreatedResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<SecurityAuditEventResult>> GetSecurityAuditEventsAsync(Guid? tenantId, int limit, CancellationToken cancellationToken)
+    {
+        var query = new Dictionary<string, string?>
+        {
+            ["limit"] = limit.ToString()
+        };
+
+        if (tenantId.HasValue)
+        {
+            query["tenantId"] = tenantId.Value.ToString();
+        }
+
+        return GetRequiredAsync<IReadOnlyList<SecurityAuditEventResult>>(QueryHelpers.AddQueryString("/api/security/audit-events", query), cancellationToken);
+    }
+
+    public Task<CurrentUserResult> GetCurrentUserAsync(CancellationToken cancellationToken)
+        => GetRequiredAsync<CurrentUserResult>("/api/me", cancellationToken);
+
+    public Task<IReadOnlyList<ApiTokenResult>> GetMyApiTokensAsync(bool includeRevoked, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<ApiTokenResult>>(QueryHelpers.AddQueryString("/api/me/tokens", new Dictionary<string, string?>
+        {
+            ["includeRevoked"] = includeRevoked.ToString()
+        }), cancellationToken);
+
+    public async Task<ApiTokenCreatedResult> CreateMyApiTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/me/tokens", new
+        {
+            request.Name,
+            request.Notes,
+            request.Scopes,
+            request.AllowedProjectIds,
+            request.ExpiresAt
+        }, cancellationToken);
+        return await ReadRequiredAsync<ApiTokenCreatedResult>(response, cancellationToken);
+    }
+
+    public async Task<ApiTokenResult> UpdateMyApiTokenAsync(Guid tokenId, ApiTokenUpdateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PatchAsJsonAsync($"/api/me/tokens/{tokenId}", request, cancellationToken);
+        return await ReadRequiredAsync<ApiTokenResult>(response, cancellationToken);
+    }
+
+    public async Task<ApiTokenResult> RevokeMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync($"/api/me/tokens/{tokenId}/revoke", null, cancellationToken);
+        return await ReadRequiredAsync<ApiTokenResult>(response, cancellationToken);
+    }
+
+    public async Task<ApiTokenCreatedResult> RegenerateMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync($"/api/me/tokens/{tokenId}/regenerate", null, cancellationToken);
+        return await ReadRequiredAsync<ApiTokenCreatedResult>(response, cancellationToken);
     }
 
     public Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken)
