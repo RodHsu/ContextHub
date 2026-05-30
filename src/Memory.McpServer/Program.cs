@@ -1244,7 +1244,8 @@ maintenance.MapPost("/retrieval-telemetry-retention/run", async (
     CancellationToken cancellationToken) =>
 {
     var result = await service.RunAsync(
-        string.IsNullOrWhiteSpace(request.TriggeredBy) ? MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor) : request.TriggeredBy,
+        request,
+        MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor),
         cancellationToken);
     return Results.Ok(result);
 });
@@ -1259,6 +1260,34 @@ maintenance.MapPost("/vacuum-full-reclaim/run", async (
         string.IsNullOrWhiteSpace(request.TriggeredBy) ? MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor) : request.TriggeredBy,
         cancellationToken);
     return Results.Ok(result);
+});
+
+maintenance.MapPost("/domain-owner-repair/preview", async (
+    DomainOwnerRepairRequest request,
+    IDomainOwnerRepairService service,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.RunAsync(
+        request with { Apply = false },
+        MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor),
+        cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/domain-owner-repair/run", async (
+    DomainOwnerRepairRequest request,
+    IDomainOwnerRepairService service,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.RunAsync(
+        request with { Apply = true },
+        MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor),
+        cancellationToken);
+    return result.Conflicts.Count > 0
+        ? Results.Conflict(result)
+        : Results.Ok(result);
 });
 
 maintenance.MapGet("/runs", async (
@@ -1360,9 +1389,10 @@ internal static class CloudflareCacheHeaders
         context.Response.OnStarting(static state =>
         {
             var httpContext = (HttpContext)state;
-            httpContext.Response.Headers.CacheControl = "no-store, no-cache, max-age=0, must-revalidate";
+            httpContext.Response.Headers.CacheControl = "no-store, no-cache, max-age=0, must-revalidate, no-transform";
             httpContext.Response.Headers["Cloudflare-CDN-Cache-Control"] = "no-store";
             httpContext.Response.Headers["CDN-Cache-Control"] = "no-store";
+            httpContext.Response.Headers["X-Accel-Buffering"] = "no";
             httpContext.Response.Headers.Pragma = "no-cache";
             httpContext.Response.Headers.Expires = "0";
             return Task.CompletedTask;

@@ -49,7 +49,8 @@ public sealed record MemorySearchHit(
     string SourceType,
     string SourceRef,
     IReadOnlyList<string> Tags,
-    string ProjectId = ProjectContext.DefaultProjectId);
+    string ProjectId = ProjectContext.DefaultProjectId,
+    int SourceTokenEstimate = 0);
 
 public sealed record MemoryDocument(
     Guid Id,
@@ -141,7 +142,16 @@ public sealed record WorkingContextResult(
     IReadOnlyList<LogEntryResult> RecentLogs,
     IReadOnlyList<UserPreferenceResult> UserPreferences,
     IReadOnlyList<string> SuggestedTests,
-    IReadOnlyList<WorkingContextCitation> Citations);
+    IReadOnlyList<WorkingContextCitation> Citations,
+    ContextSavingsEstimateResult? SavingsEstimate = null);
+
+public sealed record ContextSavingsEstimateResult(
+    int BaselineTokenEstimate,
+    int ReturnedTokenEstimate,
+    int EstimatedSavedTokens,
+    double EstimatedSavingPercent,
+    string Confidence,
+    double SourceCoveragePercent);
 
 public sealed record EnqueueReindexRequest(
     string? ModelKey = null,
@@ -194,7 +204,14 @@ public sealed record MaintenanceModeRequest(
     string? TriggeredBy = null);
 
 public sealed record RetrievalTelemetryRetentionRunRequest(
-    string? TriggeredBy = null);
+    string? TriggeredBy = null,
+    int? BatchSize = null,
+    int? EventBatchSize = null,
+    int? TimeWindowDays = null,
+    int? DelayBetweenBatchesMs = null,
+    int? CommandTimeoutSeconds = null,
+    int? MaxDurationMinutes = null,
+    bool? RunVacuumAnalyzeAfterRetention = null);
 
 public sealed record RetrievalTelemetryRetentionRunResult(
     Guid RunId,
@@ -213,6 +230,45 @@ public sealed record VacuumFullReclaimRunResult(
     Guid RunId,
     DateTimeOffset StartedAtUtc,
     DateTimeOffset CompletedAtUtc,
+    string ResultJson);
+
+public sealed record DomainOwnerRepairRequest(
+    bool Apply = false,
+    Guid? AdminTenantId = null,
+    Guid? AdminUserId = null,
+    bool IncludeSmallTables = true,
+    bool IncludeRetrievalEvents = false,
+    int? RetrievalEventBatchSize = null,
+    int? MaxRetrievalEventBatches = null,
+    int? CommandTimeoutSeconds = null,
+    string? TriggeredBy = null);
+
+public sealed record DomainOwnerDistributionResult(
+    string TableName,
+    Guid? TenantId,
+    Guid? OwnerUserId,
+    long RowCount);
+
+public sealed record DomainOwnerConflictResult(
+    string ProjectId,
+    string ExternalKey,
+    long RowCount,
+    IReadOnlyList<Guid> MemoryIds);
+
+public sealed record DomainOwnerRepairTableResult(
+    string TableName,
+    long UpdatedRows);
+
+public sealed record DomainOwnerRepairResult(
+    Guid? RunId,
+    bool Applied,
+    Guid AdminTenantId,
+    Guid AdminUserId,
+    IReadOnlyList<DomainOwnerDistributionResult> DistributionBefore,
+    IReadOnlyList<DomainOwnerDistributionResult> DistributionAfter,
+    IReadOnlyList<DomainOwnerConflictResult> Conflicts,
+    IReadOnlyList<DomainOwnerRepairTableResult> TableResults,
+    IReadOnlyList<string> AffectedProjectIds,
     string ResultJson);
 
 public sealed record LogQueryRequest(
@@ -702,6 +758,8 @@ public interface IApplicationDbContext
     DbSet<MemoryLink> MemoryLinks { get; }
     DbSet<MemoryJob> MemoryJobs { get; }
     DbSet<MaintenanceRun> MaintenanceRuns { get; }
+    DbSet<RetrievalEvent> RetrievalEvents { get; }
+    DbSet<RetrievalHit> RetrievalHits { get; }
     DbSet<RuntimeLogEntry> RuntimeLogEntries { get; }
     DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints { get; }
     DbSet<SourceConnection> SourceConnections { get; }
@@ -898,11 +956,17 @@ public interface IMaintenanceRunQueryService
 public interface IRetrievalTelemetryRetentionService
 {
     Task<RetrievalTelemetryRetentionRunResult> RunAsync(string triggeredBy, CancellationToken cancellationToken);
+    Task<RetrievalTelemetryRetentionRunResult> RunAsync(RetrievalTelemetryRetentionRunRequest request, string fallbackTriggeredBy, CancellationToken cancellationToken);
 }
 
 public interface IVacuumFullReclaimService
 {
     Task<VacuumFullReclaimRunResult> RunAsync(string triggeredBy, CancellationToken cancellationToken);
+}
+
+public interface IDomainOwnerRepairService
+{
+    Task<DomainOwnerRepairResult> RunAsync(DomainOwnerRepairRequest request, string fallbackTriggeredBy, CancellationToken cancellationToken);
 }
 
 public interface IPerformanceProbeService

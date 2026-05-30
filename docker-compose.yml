@@ -25,10 +25,14 @@ x-telemetry-retention-config: &telemetry-retention-config
   TelemetryRetention__EventsRetentionDays: ${TELEMETRY_RETENTION_EVENTS_DAYS:-30}
   TelemetryRetention__RunAtLocalTime: ${TELEMETRY_RETENTION_RUN_AT_LOCAL_TIME:-03:30}
   TelemetryRetention__TimeZone: ${TELEMETRY_RETENTION_TIME_ZONE:-Asia/Taipei}
-  TelemetryRetention__BatchSize: ${TELEMETRY_RETENTION_BATCH_SIZE:-10000}
-  TelemetryRetention__DelayBetweenBatchesMs: ${TELEMETRY_RETENTION_DELAY_BETWEEN_BATCHES_MS:-200}
-  TelemetryRetention__CommandTimeoutSeconds: ${TELEMETRY_RETENTION_COMMAND_TIMEOUT_SECONDS:-120}
-  TelemetryRetention__RunVacuumFullAutomatically: ${TELEMETRY_RETENTION_RUN_VACUUM_FULL_AUTOMATICALLY:-false}
+  TelemetryRetention__BatchSize: ${TELEMETRY_RETENTION_BATCH_SIZE:-5000}
+  TelemetryRetention__EventBatchSize: ${TELEMETRY_RETENTION_EVENT_BATCH_SIZE:-1000}
+  TelemetryRetention__TimeWindowDays: ${TELEMETRY_RETENTION_TIME_WINDOW_DAYS:-3}
+  TelemetryRetention__DelayBetweenBatchesMs: ${TELEMETRY_RETENTION_DELAY_BETWEEN_BATCHES_MS:-250}
+  TelemetryRetention__CommandTimeoutSeconds: ${TELEMETRY_RETENTION_COMMAND_TIMEOUT_SECONDS:-300}
+  TelemetryRetention__MaxDurationMinutes: ${TELEMETRY_RETENTION_MAX_DURATION_MINUTES:-15}
+  TelemetryRetention__RunVacuumAnalyzeAfterRetention: ${TELEMETRY_RETENTION_RUN_VACUUM_ANALYZE_AFTER_RETENTION:-true}
+  TelemetryRetention__RunVacuumFullAutomatically: ${TELEMETRY_RETENTION_RUN_VACUUM_FULL_AUTOMATICALLY:-true}
 
 services:
   embedding-service:

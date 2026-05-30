@@ -46,6 +46,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var status = await client.GetFromJsonAsync<SystemStatusResult>("/api/status");
         var hits = await client.GetFromJsonAsync<List<MemorySearchHit>>("/api/memories/search?query=status%20endpoint");
         var context = await client.PostAsJsonAsync("/api/context/build", new WorkingContextRequest("status endpoint", 3, 3));
+        var contextPayload = await context.Content.ReadFromJsonAsync<WorkingContextResult>();
+        var overview = await client.GetFromJsonAsync<DashboardOverviewResult>("/api/dashboard/overview");
 
         status.Should().NotBeNull();
         status!.Service.Should().Be("mcp-server");
@@ -58,7 +60,12 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         status.BatchingEnabled.Should().BeTrue();
         hits.Should().NotBeNull();
         hits!.Should().Contain(x => x.Title == "API health contract");
+        hits!.Single(x => x.Title == "API health contract").SourceTokenEstimate.Should().BeGreaterThan(0);
         context.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        contextPayload.Should().NotBeNull();
+        contextPayload!.SavingsEstimate.Should().NotBeNull();
+        overview.Should().NotBeNull();
+        overview!.ContextSavings.Should().NotBeNull();
     }
 
     [DockerRequiredFact]
@@ -603,6 +610,377 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Security_Invalid_Bearer_Token_Should_Return_Unauthorized()
+    {
+        const string bootstrapToken = "test-bootstrap-token-invalid-regression";
+        await using var secureFactory = environment.GetFactory().WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureAppConfiguration((_, config) =>
+            {
+                config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["ContextHub:Security:RequireAuthentication"] = "true",
+                    ["ContextHub:Security:BootstrapToken"] = bootstrapToken,
+                    ["ContextHub:Security:BootstrapTenantSlug"] = "bootstrap-team",
+                    ["ContextHub:Security:BootstrapUsername"] = "dashboard-service",
+                    ["ContextHub:Security:BootstrapAllowedProjectIds"] = "ContextHub"
+                });
+            });
+        });
+
+        using var invalidClient = secureFactory.CreateClient();
+        invalidClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "not-a-valid-token");
+        using var response = await invalidClient.GetAsync("/api/status");
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+    }
+
+    [DockerRequiredFact]
+    public async Task Dashboard_Memory_Details_Should_Respect_Actor_Owner_Filter()
+    {
+        var tenantId = Guid.Parse("91000000-0000-0000-0000-000000000001");
+        var ownerUserId = Guid.Parse("91000000-0000-0000-0000-000000000002");
+        var otherUserId = Guid.Parse("91000000-0000-0000-0000-000000000003");
+        var projectId = $"OwnerFilter_{Guid.NewGuid():N}";
+        var ownedMemoryId = Guid.NewGuid();
+        var otherMemoryId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var dashboardService = scope.ServiceProvider.GetRequiredService<IDashboardQueryService>();
+
+        dbContext.Tenants.Add(new Tenant
+        {
+            Id = tenantId,
+            Slug = $"owner-filter-{Guid.NewGuid():N}"[..24],
+            DisplayName = "Owner Filter Tenant",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        dbContext.TenantUsers.AddRange(
+            new TenantUser
+            {
+                Id = ownerUserId,
+                TenantId = tenantId,
+                Username = "owner-filter-owner",
+                DisplayName = "Owner Filter Owner",
+                Role = TenantUserRole.Owner,
+                CreatedAt = now,
+                UpdatedAt = now
+            },
+            new TenantUser
+            {
+                Id = otherUserId,
+                TenantId = tenantId,
+                Username = "owner-filter-other",
+                DisplayName = "Owner Filter Other",
+                Role = TenantUserRole.Member,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        dbContext.MemoryItems.AddRange(
+            new MemoryItem
+            {
+                Id = ownedMemoryId,
+                TenantId = tenantId,
+                OwnerUserId = ownerUserId,
+                ProjectId = projectId,
+                ExternalKey = $"owner-filter:owned:{ownedMemoryId:N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Fact,
+                Title = "Owner visible dashboard memory",
+                Content = "This memory belongs to the current actor.",
+                Summary = "Owner visible memory",
+                SourceType = "test",
+                SourceRef = "api-contract",
+                Importance = 0.7m,
+                Confidence = 0.9m,
+                CreatedAt = now,
+                UpdatedAt = now
+            },
+            new MemoryItem
+            {
+                Id = otherMemoryId,
+                TenantId = tenantId,
+                OwnerUserId = otherUserId,
+                ProjectId = projectId,
+                ExternalKey = $"owner-filter:other:{otherMemoryId:N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Fact,
+                Title = "Other owner dashboard memory",
+                Content = "This memory must not be visible to the current actor.",
+                Summary = "Other owner memory",
+                SourceType = "test",
+                SourceRef = "api-contract",
+                Importance = 0.7m,
+                Confidence = 0.9m,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        actorAccessor.Current = new ContextHubRequestActor(
+            tenantId,
+            ownerUserId,
+            "owner",
+            TenantUserRole.Owner,
+            [SecurityScopes.MemoryRead],
+            [],
+            true);
+
+        var list = await dashboardService.GetMemoriesAsync(
+            new MemoryListRequest(ProjectId: projectId, PageSize: 10),
+            CancellationToken.None);
+        var ownedDetails = await dashboardService.GetMemoryDetailsAsync(ownedMemoryId, CancellationToken.None);
+        var otherDetails = await dashboardService.GetMemoryDetailsAsync(otherMemoryId, CancellationToken.None);
+
+        list.Items.Should().ContainSingle(x => x.Id == ownedMemoryId);
+        list.Items.Should().NotContain(x => x.Id == otherMemoryId);
+        ownedDetails.Should().NotBeNull();
+        ownedDetails!.Document.Id.Should().Be(ownedMemoryId);
+        otherDetails.Should().BeNull();
+    }
+
+    [DockerRequiredFact]
+    public async Task Domain_Owner_Repair_Should_Preview_And_Apply_Admin_Owner_Migration()
+    {
+        var adminTenantId = Guid.Parse("72000000-0000-0000-0000-000000000001");
+        var adminUserId = Guid.Parse("73000000-0000-0000-0000-000000000001");
+        var dashboardServiceUserId = Guid.Parse("209b1f29-a13c-494d-abec-723609e45a64");
+        var legacyUserId = Guid.NewGuid();
+        var projectId = $"OwnerRepair_{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var memoryId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var serviceSessionId = Guid.NewGuid();
+        var checkpointId = Guid.NewGuid();
+        var insightId = Guid.NewGuid();
+        var retrievalEventId = Guid.NewGuid();
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            await EnsureAdminOwnerAsync(dbContext, adminTenantId, adminUserId, now);
+            if (!await dbContext.TenantUsers.AnyAsync(x => x.Id == dashboardServiceUserId))
+            {
+                dbContext.TenantUsers.Add(new TenantUser
+                {
+                    Id = dashboardServiceUserId,
+                    TenantId = adminTenantId,
+                    Username = $"dashboard-service-{Guid.NewGuid():N}"[..32],
+                    DisplayName = "Dashboard Service",
+                    Role = TenantUserRole.Member,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                });
+            }
+
+            dbContext.TenantUsers.Add(new TenantUser
+            {
+                Id = legacyUserId,
+                TenantId = adminTenantId,
+                Username = $"owner-repair-legacy-{Guid.NewGuid():N}"[..32],
+                DisplayName = "Owner Repair Legacy",
+                Role = TenantUserRole.Member,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+
+            dbContext.MemoryItems.Add(new MemoryItem
+            {
+                Id = memoryId,
+                TenantId = null,
+                OwnerUserId = legacyUserId,
+                ProjectId = projectId,
+                ExternalKey = $"owner-repair:{memoryId:N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Fact,
+                Title = "Legacy owner memory",
+                Content = "This legacy row should be moved back to admin.",
+                Summary = "Legacy owner memory",
+                SourceType = "test",
+                SourceRef = "api-contract",
+                Importance = 0.7m,
+                Confidence = 0.9m,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            dbContext.MemoryJobs.Add(new MemoryJob
+            {
+                Id = jobId,
+                TenantId = null,
+                OwnerUserId = legacyUserId,
+                ProjectId = projectId,
+                JobType = MemoryJobType.Reindex,
+                Status = MemoryJobStatus.Pending,
+                CreatedAt = now
+            });
+            dbContext.ConversationSessions.Add(new ConversationSession
+            {
+                Id = sessionId,
+                TenantId = null,
+                OwnerUserId = legacyUserId,
+                ConversationId = $"owner-repair-{Guid.NewGuid():N}",
+                ProjectId = projectId,
+                SourceSystem = "api-contract",
+                StartedAt = now,
+                LastCheckpointAt = now,
+                UpdatedAt = now
+            });
+            dbContext.ConversationSessions.Add(new ConversationSession
+            {
+                Id = serviceSessionId,
+                TenantId = adminTenantId,
+                OwnerUserId = dashboardServiceUserId,
+                ConversationId = $"owner-repair-service-{Guid.NewGuid():N}",
+                ProjectId = projectId,
+                SourceSystem = "api-contract",
+                StartedAt = now,
+                LastCheckpointAt = now,
+                UpdatedAt = now
+            });
+            dbContext.ConversationCheckpoints.Add(new ConversationCheckpoint
+            {
+                Id = checkpointId,
+                SessionId = sessionId,
+                TenantId = null,
+                OwnerUserId = legacyUserId,
+                ConversationId = $"owner-repair-{Guid.NewGuid():N}",
+                TurnId = "turn-1",
+                ProjectId = projectId,
+                SourceSystem = "api-contract",
+                EventType = ConversationEventType.TurnCompleted,
+                SourceKind = ConversationSourceKind.AgentSupplemental,
+                DedupKey = $"owner-repair-checkpoint-{checkpointId:N}",
+                CreatedAt = now
+            });
+            dbContext.ConversationInsights.Add(new ConversationInsight
+            {
+                Id = insightId,
+                SessionId = sessionId,
+                CheckpointId = checkpointId,
+                TenantId = null,
+                OwnerUserId = legacyUserId,
+                ConversationId = $"owner-repair-{Guid.NewGuid():N}",
+                TurnId = "turn-1",
+                ProjectId = projectId,
+                SourceSystem = "api-contract",
+                SourceKind = ConversationSourceKind.AgentSupplemental,
+                InsightType = ConversationInsightType.Fact,
+                Title = "Legacy owner insight",
+                Content = "This legacy insight should be moved back to admin.",
+                Summary = "Legacy owner insight",
+                DedupKey = $"owner-repair-insight-{insightId:N}",
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            var retrievalEvent = CreateRetentionEvent(retrievalEventId, now, $"owner-repair-{Guid.NewGuid():N}");
+            retrievalEvent.TenantId = null;
+            retrievalEvent.OwnerUserId = legacyUserId;
+            retrievalEvent.ProjectId = projectId;
+            dbContext.RetrievalEvents.Add(retrievalEvent);
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+        }
+
+        using var client = environment.GetFactory().CreateClient();
+        using var previewResponse = await client.PostAsJsonAsync(
+            "/api/maintenance/domain-owner-repair/preview",
+            new DomainOwnerRepairRequest());
+        previewResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var preview = await previewResponse.Content.ReadFromJsonAsync<DomainOwnerRepairResult>();
+        preview.Should().NotBeNull();
+        preview!.Applied.Should().BeFalse();
+        preview.AffectedProjectIds.Should().Contain(projectId);
+        preview.Conflicts.Should().BeEmpty();
+
+        using var runResponse = await client.PostAsJsonAsync(
+            "/api/maintenance/domain-owner-repair/run",
+            new DomainOwnerRepairRequest(
+                IncludeRetrievalEvents: true,
+                RetrievalEventBatchSize: 1,
+                MaxRetrievalEventBatches: 10,
+                TriggeredBy: "api-contract-test"));
+        runResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var result = await runResponse.Content.ReadFromJsonAsync<DomainOwnerRepairResult>();
+        result.Should().NotBeNull();
+        result!.Applied.Should().BeTrue();
+        result.RunId.Should().NotBeNull();
+        result.TableResults.Should().Contain(x => x.TableName == "memory_items" && x.UpdatedRows >= 1);
+        result.TableResults.Should().Contain(x => x.TableName == "retrieval_events" && x.UpdatedRows >= 1);
+
+        using var verifyScope = environment.GetFactory().Services.CreateScope();
+        var verifyDbContext = verifyScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        (await verifyDbContext.MemoryItems.SingleAsync(x => x.Id == memoryId)).Should().Match<MemoryItem>(x => x.TenantId == adminTenantId && x.OwnerUserId == adminUserId);
+        (await verifyDbContext.MemoryJobs.SingleAsync(x => x.Id == jobId)).Should().Match<MemoryJob>(x => x.TenantId == adminTenantId && x.OwnerUserId == adminUserId);
+        (await verifyDbContext.ConversationSessions.SingleAsync(x => x.Id == sessionId)).Should().Match<ConversationSession>(x => x.TenantId == adminTenantId && x.OwnerUserId == adminUserId);
+        (await verifyDbContext.ConversationSessions.SingleAsync(x => x.Id == serviceSessionId)).Should().Match<ConversationSession>(x => x.TenantId == adminTenantId && x.OwnerUserId == dashboardServiceUserId);
+        (await verifyDbContext.ConversationCheckpoints.SingleAsync(x => x.Id == checkpointId)).Should().Match<ConversationCheckpoint>(x => x.TenantId == adminTenantId && x.OwnerUserId == adminUserId);
+        (await verifyDbContext.ConversationInsights.SingleAsync(x => x.Id == insightId)).Should().Match<ConversationInsight>(x => x.TenantId == adminTenantId && x.OwnerUserId == adminUserId);
+        (await verifyDbContext.RetrievalEvents.SingleAsync(x => x.Id == retrievalEventId)).Should().Match<RetrievalEvent>(x => x.TenantId == adminTenantId && x.OwnerUserId == adminUserId);
+
+        var run = await verifyDbContext.MaintenanceRuns.SingleAsync(x => x.Id == result.RunId);
+        run.MaintenanceType.Should().Be(MaintenanceRunType.DomainOwnerRepair);
+        run.Status.Should().Be(MaintenanceRunStatus.Completed);
+    }
+
+    [DockerRequiredFact]
+    public async Task Domain_Owner_Repair_Run_Should_Stop_When_Memory_External_Key_Would_Conflict()
+    {
+        var adminTenantId = Guid.Parse("72000000-0000-0000-0000-000000000001");
+        var adminUserId = Guid.Parse("73000000-0000-0000-0000-000000000001");
+        var legacyUserId = Guid.NewGuid();
+        var projectId = $"OwnerRepairConflict_{Guid.NewGuid():N}";
+        var externalKey = $"owner-repair-conflict:{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var adminMemoryId = Guid.NewGuid();
+        var legacyMemoryId = Guid.NewGuid();
+
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await EnsureAdminOwnerAsync(dbContext, adminTenantId, adminUserId, now);
+        dbContext.TenantUsers.Add(new TenantUser
+        {
+            Id = legacyUserId,
+            TenantId = adminTenantId,
+            Username = $"owner-repair-conflict-{Guid.NewGuid():N}"[..32],
+            DisplayName = "Owner Repair Conflict",
+            Role = TenantUserRole.Member,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        dbContext.MemoryItems.AddRange(
+            CreateOwnerRepairMemory(adminMemoryId, adminTenantId, adminUserId, projectId, externalKey, "Admin conflict memory", now),
+            CreateOwnerRepairMemory(legacyMemoryId, adminTenantId, legacyUserId, projectId, externalKey, "Legacy conflict memory", now));
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        try
+        {
+            using var client = environment.GetFactory().CreateClient();
+            using var response = await client.PostAsJsonAsync(
+                "/api/maintenance/domain-owner-repair/run",
+                new DomainOwnerRepairRequest(TriggeredBy: "api-contract-test"));
+            response.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
+            var result = await response.Content.ReadFromJsonAsync<DomainOwnerRepairResult>();
+            result.Should().NotBeNull();
+            result!.Applied.Should().BeFalse();
+            result.Conflicts.Should().Contain(x => x.ProjectId == projectId && x.ExternalKey == externalKey);
+        }
+        finally
+        {
+            dbContext.MemoryItems.RemoveRange(dbContext.MemoryItems.Where(x => x.Id == adminMemoryId || x.Id == legacyMemoryId));
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Dashboard_Endpoints_Should_Return_Overview_Runtime_And_Storage_Payloads()
     {
         Guid memoryId;
@@ -811,16 +1189,24 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 CreateRetentionEvent(oldEventId, now.AddDays(-40), "retention-old"),
                 CreateRetentionEvent(middleEventId, now.AddDays(-20), "retention-middle"),
                 CreateRetentionEvent(recentEventId, now.AddDays(-10), "retention-recent"));
-            dbContext.RetrievalHits.AddRange(
-                CreateRetentionHit(oldEventId, "old hit"),
-                CreateRetentionHit(middleEventId, "middle hit"),
-                CreateRetentionHit(recentEventId, "recent hit"));
+            dbContext.RetrievalHits.AddRange(Enumerable.Range(1, 3).Select(index => CreateRetentionHit(oldEventId, $"old hit {index}")));
+            dbContext.RetrievalHits.AddRange(Enumerable.Range(1, 4).Select(index => CreateRetentionHit(middleEventId, $"middle hit {index}")));
+            dbContext.RetrievalHits.Add(CreateRetentionHit(recentEventId, "recent hit"));
             await dbContext.SaveChangesAsync(CancellationToken.None);
 
             var service = scope.ServiceProvider.GetRequiredService<IRetrievalTelemetryRetentionService>();
-            var result = await service.RunAsync("api-contract-test", CancellationToken.None);
+            var result = await service.RunAsync(
+                new RetrievalTelemetryRetentionRunRequest(
+                    TriggeredBy: "api-contract-test",
+                    BatchSize: 2,
+                    EventBatchSize: 1,
+                    TimeWindowDays: 3,
+                    DelayBetweenBatchesMs: 0,
+                    RunVacuumAnalyzeAfterRetention: false),
+                "api-contract-test",
+                CancellationToken.None);
 
-            result.DeletedHits.Should().BeGreaterThanOrEqualTo(2);
+            result.DeletedHits.Should().BeGreaterThanOrEqualTo(7);
             result.DeletedEvents.Should().BeGreaterThanOrEqualTo(1);
         }
 
@@ -842,8 +1228,53 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             run.Status.Should().Be(MaintenanceRunStatus.Completed);
             run.PolicyJson.Should().Contain("hitsRetentionDays");
             run.PolicyJson.Should().Contain("15");
+            run.PolicyJson.Should().Contain("eventBatchSize");
+            run.PolicyJson.Should().Contain("timeWindowDays");
+            run.PolicyJson.Should().Contain("runVacuumAnalyzeAfterRetention");
             run.ResultJson.Should().Contain("deletedHits");
+            run.ResultJson.Should().Contain("hitsWindowStartUtc");
+            run.ResultJson.Should().Contain("eventsWindowStartUtc");
+            run.ResultJson.Should().Contain("processedHitsWindows");
+            run.ResultJson.Should().Contain("processedEventsWindows");
+            run.ResultJson.Should().Contain("vacuumAnalyzeRequested");
         }
+    }
+
+    [DockerRequiredFact]
+    public async Task Retrieval_Telemetry_Retention_Run_Request_Should_Apply_Manual_Overrides()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        using var response = await client.PostAsJsonAsync(
+            "/api/maintenance/retrieval-telemetry-retention/run",
+            new RetrievalTelemetryRetentionRunRequest(
+                TriggeredBy: "manual-override-test",
+                BatchSize: 2,
+                EventBatchSize: 1,
+                TimeWindowDays: 1,
+                DelayBetweenBatchesMs: 0,
+                CommandTimeoutSeconds: 30,
+                MaxDurationMinutes: 30,
+                RunVacuumAnalyzeAfterRetention: false));
+
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<RetrievalTelemetryRetentionRunResult>();
+        result.Should().NotBeNull();
+
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var run = await dbContext.MaintenanceRuns.SingleAsync(x => x.Id == result!.RunId);
+        using var policyDocument = JsonDocument.Parse(run.PolicyJson);
+        var policy = policyDocument.RootElement;
+        policy.GetProperty("batchSize").GetInt32().Should().Be(2);
+        policy.GetProperty("eventBatchSize").GetInt32().Should().Be(1);
+        policy.GetProperty("timeWindowDays").GetInt32().Should().Be(1);
+        policy.GetProperty("delayBetweenBatchesMs").GetInt32().Should().Be(0);
+        policy.GetProperty("commandTimeoutSeconds").GetInt32().Should().Be(30);
+        policy.GetProperty("maxDurationMinutes").GetInt32().Should().Be(30);
+        policy.GetProperty("runVacuumAnalyzeAfterRetention").GetBoolean().Should().BeFalse();
+
+        using var resultDocument = JsonDocument.Parse(run.ResultJson);
+        resultDocument.RootElement.GetProperty("vacuumAnalyzeRequested").GetBoolean().Should().BeFalse();
     }
 
     [DockerRequiredFact]
@@ -1356,6 +1787,67 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         verifyMemories.Should().NotBeNull();
         verifyMemories!.Items.Should().HaveCount(2);
     }
+
+    private static async Task EnsureAdminOwnerAsync(MemoryDbContext dbContext, Guid adminTenantId, Guid adminUserId, DateTimeOffset now)
+    {
+        if (!await dbContext.Tenants.AnyAsync(x => x.Id == adminTenantId))
+        {
+            dbContext.Tenants.Add(new Tenant
+            {
+                Id = adminTenantId,
+                Slug = "admin",
+                DisplayName = "Admin",
+                Status = TenantStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+        }
+
+        if (!await dbContext.TenantUsers.AnyAsync(x => x.Id == adminUserId))
+        {
+            dbContext.TenantUsers.Add(new TenantUser
+            {
+                Id = adminUserId,
+                TenantId = adminTenantId,
+                Username = "admin",
+                DisplayName = "Admin",
+                Role = TenantUserRole.Owner,
+                Status = TenantUserStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+        }
+
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+    }
+
+    private static MemoryItem CreateOwnerRepairMemory(
+        Guid id,
+        Guid tenantId,
+        Guid ownerUserId,
+        string projectId,
+        string externalKey,
+        string title,
+        DateTimeOffset now)
+        => new()
+        {
+            Id = id,
+            TenantId = tenantId,
+            OwnerUserId = ownerUserId,
+            ProjectId = projectId,
+            ExternalKey = externalKey,
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Fact,
+            Title = title,
+            Content = title,
+            Summary = title,
+            SourceType = "test",
+            SourceRef = "api-contract",
+            Importance = 0.7m,
+            Confidence = 0.9m,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
 
     private static RetrievalEvent CreateRetentionEvent(Guid id, DateTimeOffset createdAt, string traceId)
         => new()

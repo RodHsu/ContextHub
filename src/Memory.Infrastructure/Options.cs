@@ -66,8 +66,12 @@ public sealed class TelemetryRetentionOptions
     public int EventsRetentionDays { get; set; } = 30;
     public string RunAtLocalTime { get; set; } = "03:30";
     public string TimeZone { get; set; } = "Asia/Taipei";
-    public int BatchSize { get; set; } = 10_000;
-    public int DelayBetweenBatchesMs { get; set; } = 200;
-    public int CommandTimeoutSeconds { get; set; } = 120;
+    public int BatchSize { get; set; } = 5_000;
+    public int EventBatchSize { get; set; } = 1_000;
+    public int TimeWindowDays { get; set; } = 3;
+    public int DelayBetweenBatchesMs { get; set; } = 250;
+    public int CommandTimeoutSeconds { get; set; } = 300;
+    public int MaxDurationMinutes { get; set; } = 15;
+    public bool RunVacuumAnalyzeAfterRetention { get; set; } = true;
     public bool RunVacuumFullAutomatically { get; set; }
 }

@@ -77,6 +77,7 @@ public static class DependencyInjection
         services.AddScoped<IRetrievalTelemetryService, DatabaseRetrievalTelemetryService>();
         services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
         services.AddScoped<IVacuumFullReclaimService, VacuumFullReclaimService>();
+        services.AddScoped<IDomainOwnerRepairService, DomainOwnerRepairService>();
         services.AddScoped<IMaintenanceRunQueryService, MaintenanceRunQueryService>();
         services.AddSingleton<ISecretProtector, AesSecretProtector>();
 
