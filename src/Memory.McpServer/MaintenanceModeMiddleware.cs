@@ -76,7 +76,8 @@ internal sealed class MaintenanceModeMiddleware(
         }
 
         return HttpMethods.IsPost(request.Method) &&
-               path.StartsWithSegments("/api/maintenance/vacuum-full-reclaim/run", StringComparison.OrdinalIgnoreCase);
+               (path.StartsWithSegments("/api/maintenance/vacuum-full-reclaim/run", StringComparison.OrdinalIgnoreCase) ||
+                path.StartsWithSegments("/api/maintenance/domain-owner-repair", StringComparison.OrdinalIgnoreCase));
     }
 
     private static int ComputeRetryAfterSeconds(DateTimeOffset? estimatedEndsAtUtc)

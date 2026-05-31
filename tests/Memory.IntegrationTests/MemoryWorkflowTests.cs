@@ -176,6 +176,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
         var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var query = $"retrieval-telemetry-search-{Guid.NewGuid():N}";
+        var content = $"This fixture should be found for query {query}.";
 
         var created = await memoryService.UpsertAsync(
             new MemoryUpsertRequest(
@@ -183,7 +184,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
                 Scope: MemoryScope.Project,
                 MemoryType: MemoryType.Decision,
                 Title: "Retrieval telemetry fixture",
-                Content: $"This fixture should be found for query {query}.",
+                Content: content,
                 Summary: "Retrieval telemetry fixture",
                 SourceType: "document",
                 SourceRef: "tests",
@@ -207,6 +208,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             CancellationToken.None);
 
         hits.Should().Contain(x => x.MemoryId == created.Id);
+        hits.Single(x => x.MemoryId == created.Id).SourceTokenEstimate.Should().Be(ChunkingService.ApproximateTokenCount(content));
 
         var telemetryEvent = await dbContext.RetrievalEvents
             .OrderByDescending(x => x.CreatedAt)
@@ -266,6 +268,9 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             CancellationToken.None);
 
         result.Facts.Should().NotBeEmpty();
+        result.SavingsEstimate.Should().NotBeNull();
+        result.SavingsEstimate!.BaselineTokenEstimate.Should().BeGreaterThan(0);
+        result.SavingsEstimate.ReturnedTokenEstimate.Should().BeGreaterThan(0);
 
         var events = await dbContext.RetrievalEvents
             .Where(x => x.QueryText == query)
@@ -277,6 +282,10 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
 
         var telemetryEvent = events.Single(x => x.EntryPoint == "tests.working-context");
         telemetryEvent.ResultCount.Should().BeGreaterThan(0);
+        using var metadata = JsonDocument.Parse(telemetryEvent.MetadataJson);
+        metadata.RootElement.TryGetProperty("savings", out var savings).Should().BeTrue();
+        savings.GetProperty("baselineTokenEstimate").GetInt32().Should().BeGreaterThan(0);
+        savings.GetProperty("returnedTokenEstimate").GetInt32().Should().BeGreaterThan(0);
 
         var telemetryHits = await dbContext.RetrievalHits
             .Where(x => x.RetrievalEventId == telemetryEvent.Id)

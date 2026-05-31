@@ -115,7 +115,29 @@ public sealed record DashboardOverviewResult(
     DashboardDockerHostResult? DockerHost = null,
     DashboardDependencyResourcesResult? DependencyResources = null,
     IReadOnlyList<DashboardResourceSampleResult>? ResourceSamples = null,
-    DashboardEvaluationSummaryResult? EvaluationSummary = null);
+    DashboardEvaluationSummaryResult? EvaluationSummary = null,
+    DashboardContextSavingsResult? ContextSavings = null);
+
+public sealed record DashboardContextSavingsResult(
+    bool HasData,
+    int SampleCount,
+    int BaselineTokenEstimate,
+    int ReturnedTokenEstimate,
+    int EstimatedSavedTokens,
+    double AverageSavingPercent,
+    string Confidence,
+    double SourceCoveragePercent,
+    double CacheHitPercent,
+    DateTimeOffset WindowStartedAtUtc,
+    DateTimeOffset WindowEndedAtUtc,
+    IReadOnlyList<DashboardContextSavingsTrendPointResult> Trend);
+
+public sealed record DashboardContextSavingsTrendPointResult(
+    DateTimeOffset TimestampUtc,
+    int BaselineTokenEstimate,
+    int ReturnedTokenEstimate,
+    int EstimatedSavedTokens,
+    double SavingPercent);
 
 public sealed record DashboardRuntimeParameterResult(
     string Section,

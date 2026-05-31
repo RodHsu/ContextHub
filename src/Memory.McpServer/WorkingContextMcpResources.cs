@@ -12,6 +12,7 @@ namespace Memory.McpServer;
 internal static class WorkingContextMcpResources
 {
     private const string WorkingContextScheme = "working-context";
+    private const string WorkingContextPrefix = WorkingContextScheme + "://";
     private const string JsonMimeType = "application/json";
     private const string WorkingContextTemplate = "working-context://{projectId}{?query,limit,recentLogLimit,queryMode,useSummaryLayer,includedProjectIds}";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -43,7 +44,7 @@ internal static class WorkingContextMcpResources
         CancellationToken cancellationToken)
     {
         var resourceUri = request.Params?.Uri
-            ?? throw new McpProtocolException("Resource URI is required.");
+            ?? throw InvalidParams("Resource URI is required.");
         var services = request.Services
             ?? throw new McpProtocolException("Request services are unavailable.");
         var workingContextRequest = ParseRequest(resourceUri);
@@ -66,19 +67,25 @@ internal static class WorkingContextMcpResources
 
     private static WorkingContextRequest ParseRequest(string resourceUri)
     {
-        if (!Uri.TryCreate(resourceUri, UriKind.Absolute, out var uri) ||
-            !string.Equals(uri.Scheme, WorkingContextScheme, StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(resourceUri) ||
+            !resourceUri.StartsWith(WorkingContextPrefix, StringComparison.OrdinalIgnoreCase))
         {
-            throw new McpProtocolException($"Unknown resource URI: '{resourceUri}'");
+            throw InvalidParams($"Unknown resource URI: '{resourceUri}'");
         }
 
-        var query = QueryHelpers.ParseQuery(uri.Query);
-        var projectId = ExtractProjectId(resourceUri, uri);
+        var uriRemainder = resourceUri[WorkingContextPrefix.Length..];
+        var queryDelimiterIndex = uriRemainder.IndexOf('?', StringComparison.Ordinal);
+        var projectId = ExtractProjectId(
+            queryDelimiterIndex >= 0 ? uriRemainder[..queryDelimiterIndex] : uriRemainder,
+            resourceUri);
+        var queryString = queryDelimiterIndex >= 0 ? uriRemainder[(queryDelimiterIndex + 1)..] : string.Empty;
+        var query = QueryHelpers.ParseQuery(queryString.Length > 0 ? "?" + queryString : string.Empty);
+        var contextQuery = GetRequiredString(query, "query", "working-context resource requires query.");
 
         return new WorkingContextRequest(
-            Query: GetSingleValue(query, "query") ?? string.Empty,
-            Limit: ParseInt(query, "limit", 5),
-            RecentLogLimit: ParseInt(query, "recentLogLimit", 5),
+            Query: contextQuery,
+            Limit: ParsePositiveInt(query, "limit", 5),
+            RecentLogLimit: ParsePositiveInt(query, "recentLogLimit", 5),
             ProjectId: ProjectContext.Normalize(projectId),
             IncludedProjectIds: ParseIncludedProjectIds(query),
             QueryMode: ParseQueryMode(query),
@@ -86,24 +93,30 @@ internal static class WorkingContextMcpResources
             Telemetry: new RetrievalTelemetryContext("working_context_resource", "mcp-resource", "resource bootstrap"));
     }
 
-    private static string ExtractProjectId(string resourceUri, Uri uri)
+    private static string ExtractProjectId(string projectPart, string resourceUri)
     {
-        var schemeSeparator = resourceUri.IndexOf("://", StringComparison.Ordinal);
-        if (schemeSeparator >= 0)
+        var trimmedProjectPart = projectPart.TrimStart('/');
+        if (string.IsNullOrWhiteSpace(trimmedProjectPart))
         {
-            var remainder = resourceUri[(schemeSeparator + 3)..];
-            var delimiterIndex = remainder.IndexOfAny(['?', '/']);
-            var authority = delimiterIndex >= 0 ? remainder[..delimiterIndex] : remainder;
-            if (!string.IsNullOrWhiteSpace(authority))
-            {
-                return Uri.UnescapeDataString(authority);
-            }
+            throw InvalidParams("working-context resource requires projectId.");
         }
 
-        var path = uri.AbsolutePath.Trim('/');
-        return string.IsNullOrWhiteSpace(path)
-            ? ProjectContext.DefaultProjectId
-            : Uri.UnescapeDataString(path);
+        if (trimmedProjectPart.Contains('/', StringComparison.Ordinal))
+        {
+            throw InvalidParams($"Unsupported working-context resource URI: '{resourceUri}'");
+        }
+
+        try
+        {
+            var projectId = Uri.UnescapeDataString(trimmedProjectPart);
+            return string.IsNullOrWhiteSpace(projectId)
+                ? throw InvalidParams("working-context resource requires projectId.")
+                : projectId;
+        }
+        catch (UriFormatException ex)
+        {
+            throw InvalidParams($"Invalid working-context projectId in resource URI: '{resourceUri}'", ex);
+        }
     }
 
     private static IReadOnlyList<string>? ParseIncludedProjectIds(Dictionary<string, StringValues> query)
@@ -123,26 +136,66 @@ internal static class WorkingContextMcpResources
 
     private static MemoryQueryMode ParseQueryMode(Dictionary<string, StringValues> query)
     {
-        var raw = GetSingleValue(query, "queryMode");
-        return Enum.TryParse<MemoryQueryMode>(raw, ignoreCase: true, out var parsed)
-            ? parsed
-            : MemoryQueryMode.CurrentOnly;
+        if (!query.TryGetValue("queryMode", out var values))
+        {
+            return MemoryQueryMode.CurrentOnly;
+        }
+
+        var raw = GetSingleValue(values);
+        if (Enum.TryParse<MemoryQueryMode>(raw, ignoreCase: true, out var parsed))
+        {
+            return parsed;
+        }
+
+        throw InvalidParams("working-context resource queryMode must be a valid MemoryQueryMode value.");
     }
 
-    private static int ParseInt(Dictionary<string, StringValues> query, string key, int fallback)
+    private static int ParsePositiveInt(Dictionary<string, StringValues> query, string key, int fallback)
     {
-        var raw = GetSingleValue(query, key);
-        return int.TryParse(raw, out var value) && value > 0 ? value : fallback;
+        if (!query.TryGetValue(key, out var values))
+        {
+            return fallback;
+        }
+
+        var raw = GetSingleValue(values);
+        return int.TryParse(raw, out var value) && value > 0
+            ? value
+            : throw InvalidParams($"working-context resource {key} must be a positive integer.");
     }
 
     private static bool ParseBool(Dictionary<string, StringValues> query, string key)
     {
+        if (!query.TryGetValue(key, out var values))
+        {
+            return false;
+        }
+
+        var raw = GetSingleValue(values);
+        return bool.TryParse(raw, out var parsed)
+            ? parsed
+            : throw InvalidParams($"working-context resource {key} must be a boolean value.");
+    }
+
+    private static string GetRequiredString(
+        Dictionary<string, StringValues> query,
+        string key,
+        string errorMessage)
+    {
         var raw = GetSingleValue(query, key);
-        return bool.TryParse(raw, out var parsed) && parsed;
+        return string.IsNullOrWhiteSpace(raw) ? throw InvalidParams(errorMessage) : raw.Trim();
     }
 
     private static string? GetSingleValue(Dictionary<string, StringValues> query, string key)
         => query.TryGetValue(key, out var value)
-            ? value.Count > 0 ? value[0] : null
+            ? GetSingleValue(value)
             : null;
+
+    private static string? GetSingleValue(StringValues value)
+        => value.Count > 0 ? value[0] : null;
+
+    private static McpProtocolException InvalidParams(string message)
+        => new(message, McpErrorCode.InvalidParams);
+
+    private static McpProtocolException InvalidParams(string message, Exception innerException)
+        => new(message, innerException, McpErrorCode.InvalidParams);
 }

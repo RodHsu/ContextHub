@@ -16,4 +16,7 @@
     <Project Path="tests/Memory.McpProtocolTests/Memory.McpProtocolTests.csproj" />
     <Project Path="tests/Memory.UnitTests/Memory.UnitTests.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/ContextHub.McpStdioBridge/ContextHub.McpStdioBridge.csproj" />
+  </Folder>
 </Solution>

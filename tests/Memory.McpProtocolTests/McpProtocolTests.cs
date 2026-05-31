@@ -188,6 +188,47 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Raw_Http_Mcp_Response_Should_Disable_Cache_Transform_And_Buffering()
+    {
+        using var httpClient = environment.GetFactory().CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = JsonContent.Create(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2025-06-18",
+                    capabilities = new { },
+                    clientInfo = new
+                    {
+                        name = "mcp-header-test",
+                        version = "1.0"
+                    }
+                }
+            })
+        };
+        request.Headers.Add("MCP-Protocol-Version", "2025-06-18");
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+
+        using var response = await httpClient.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        response.Headers.CacheControl.Should().NotBeNull();
+        response.Headers.CacheControl!.NoStore.Should().BeTrue();
+        response.Headers.CacheControl.NoTransform.Should().BeTrue();
+        response.Headers.TryGetValues("Cloudflare-CDN-Cache-Control", out var cloudflareCacheControl).Should().BeTrue();
+        cloudflareCacheControl.Should().ContainSingle("no-store");
+        response.Headers.TryGetValues("CDN-Cache-Control", out var cdnCacheControl).Should().BeTrue();
+        cdnCacheControl.Should().ContainSingle("no-store");
+        response.Headers.TryGetValues("X-Accel-Buffering", out var buffering).Should().BeTrue();
+        buffering.Should().ContainSingle("no");
+    }
+
+    [DockerRequiredFact]
     public async Task Sdk_Client_Should_List_Working_Context_Template_And_Read_Legacy_Working_Context_Uri()
     {
         var projectId = $"Vital_AirMeet_BackEnd_{Guid.NewGuid():N}";
@@ -231,6 +272,87 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         payload.Contents.Should().ContainSingle(x => x is TextResourceContents);
         ((TextResourceContents)payload.Contents[0]).Text.Should().Contain(projectId);
         ((TextResourceContents)payload.Contents[0]).Text.Should().Contain("Legacy working-context resource fixture");
+    }
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Working_Context_Resource_Should_Read_Supported_Uri_Forms_And_Return_Client_Errors()
+    {
+        var projectId = $"Vital_AirMeet_Document_{Guid.NewGuid():N}";
+        var query = "working-context resource compatibility";
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+
+            await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    ExternalKey: $"repo:mcp:resource-raw:{projectId}",
+                    Scope: MemoryScope.Project,
+                    MemoryType: MemoryType.Fact,
+                    Title: "Raw working-context resource fixture",
+                    Content: "This fixture validates raw MCP resources/read behavior for both working-context URI forms.",
+                    Summary: "working-context resource compatibility",
+                    SourceType: "document",
+                    SourceRef: "mcp-tests",
+                    Tags: ["mcp", "resource"],
+                    Importance: 0.8m,
+                    Confidence: 0.9m,
+                    ProjectId: projectId),
+                CancellationToken.None);
+        }
+
+        var captureHandler = new SessionCaptureHandler(environment.GetFactory().Server.CreateHandler());
+        using var client = new HttpClient(captureHandler)
+        {
+            BaseAddress = environment.GetFactory().Server.BaseAddress
+        };
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri(client.BaseAddress!, "/mcp"),
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, client);
+
+        await using var mcpClient = await McpClient.CreateAsync(transport);
+        _ = await mcpClient.ListResourceTemplatesAsync();
+
+        var sessionId = captureHandler.SessionId;
+        sessionId.Should().NotBeNullOrWhiteSpace();
+
+        var escapedProjectId = Uri.EscapeDataString(projectId);
+        var escapedQuery = Uri.EscapeDataString(query);
+        var templatesPayload = await SendMcpAsync(client, sessionId!, 2, "resources/templates/list", new { });
+        var authorityPayload = await SendMcpAsync(client, sessionId!, 3, "resources/read", new
+        {
+            uri = $"working-context://{escapedProjectId}?query={escapedQuery}&limit=3&recentLogLimit=2"
+        });
+        var pathPayload = await SendMcpAsync(client, sessionId!, 4, "resources/read", new
+        {
+            uri = $"working-context:///{escapedProjectId}?query={escapedQuery}&limit=3&recentLogLimit=2"
+        });
+        var missingQueryPayload = await SendMcpAsync(client, sessionId!, 5, "resources/read", new
+        {
+            uri = $"working-context://{escapedProjectId}?limit=1"
+        });
+        var missingProjectPayload = await SendMcpAsync(client, sessionId!, 6, "resources/read", new
+        {
+            uri = "working-context://?query=mcp"
+        });
+
+        templatesPayload.Should().Contain("working-context://{projectId}{?query,limit,recentLogLimit,queryMode,useSummaryLayer,includedProjectIds}");
+        ExtractResourceText(authorityPayload).Should().Contain(projectId);
+        ExtractResourceText(authorityPayload).Should().Contain("Raw working-context resource fixture");
+        ExtractResourceText(pathPayload).Should().Contain(projectId);
+        ExtractResourceText(pathPayload).Should().Contain("Raw working-context resource fixture");
+
+        var missingQueryError = ExtractError(missingQueryPayload);
+        missingQueryError.GetProperty("code").GetInt32().Should().Be(-32602);
+        missingQueryError.GetProperty("message").GetString().Should().Contain("requires query");
+        missingQueryError.GetProperty("message").GetString().Should().NotBe("An error occurred.");
+
+        var missingProjectError = ExtractError(missingProjectPayload);
+        missingProjectError.GetProperty("code").GetInt32().Should().Be(-32602);
+        missingProjectError.GetProperty("message").GetString().Should().Contain("requires projectId");
+        missingProjectError.GetProperty("message").GetString().Should().NotBe("An error occurred.");
     }
 
     [DockerRequiredFact]
@@ -441,13 +563,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
 
     private static string ExtractToolText(string payload)
     {
-        var dataLine = payload
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-            .FirstOrDefault(line => line.StartsWith("data: ", StringComparison.Ordinal))
-            ?? throw new InvalidOperationException("Expected SSE data line.");
-
-        using var document = JsonDocument.Parse(dataLine["data: ".Length..]);
-        return document.RootElement
+        return ExtractSseJson(payload)
             .GetProperty("result")
             .GetProperty("content")[0]
             .GetProperty("text")
@@ -461,6 +577,30 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         return document.RootElement.TryGetProperty(fieldName, out var value)
             ? value.GetString() ?? string.Empty
             : string.Empty;
+    }
+
+    private static string ExtractResourceText(string payload)
+    {
+        return ExtractSseJson(payload)
+            .GetProperty("result")
+            .GetProperty("contents")[0]
+            .GetProperty("text")
+            .GetString()
+            ?? string.Empty;
+    }
+
+    private static JsonElement ExtractError(string payload)
+        => ExtractSseJson(payload).GetProperty("error");
+
+    private static JsonElement ExtractSseJson(string payload)
+    {
+        var dataLine = payload
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault(line => line.StartsWith("data: ", StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("Expected SSE data line.");
+
+        using var document = JsonDocument.Parse(dataLine["data: ".Length..]);
+        return document.RootElement.Clone();
     }
 
     private sealed class SessionCaptureHandler(HttpMessageHandler innerHandler) : DelegatingHandler(innerHandler)

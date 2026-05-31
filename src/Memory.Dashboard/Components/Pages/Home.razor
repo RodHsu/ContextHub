@@ -76,6 +76,69 @@
             }
         </div>
 
+        <section class="panel context-savings-panel">
+            <div class="panel-heading-row context-savings-heading">
+                <div>
+                    <div class="panel-title">Estimated Context Savings</div>
+                    <div class="context-savings-note">估算值，非 LLM provider billing usage；以最近 24 小時 successful working-context telemetry 聚合。</div>
+                </div>
+                @if (_overview.ContextSavings is { HasData: true } contextSavingsBadge)
+                {
+                    <span class="status-badge @ContextSavingsConfidenceClass(contextSavingsBadge.Confidence)">Confidence @contextSavingsBadge.Confidence</span>
+                }
+            </div>
+
+            @if (_overview.ContextSavings is not { HasData: true } contextSavings)
+            {
+                <div class="empty-inline">尚無 working context telemetry。</div>
+            }
+            else
+            {
+                <div class="context-savings-content">
+                    <div class="context-savings-primary">
+                        <span>Saving</span>
+                        <strong>@DashboardFormatting.Percent(contextSavings.AverageSavingPercent)</strong>
+                        <small>@FormatTokenCount(contextSavings.EstimatedSavedTokens) saved</small>
+                    </div>
+                    <div class="context-savings-kpis" aria-label="Estimated context savings details">
+                        <div>
+                            <span>Baseline tokens</span>
+                            <strong>@DashboardFormatting.Integer(contextSavings.BaselineTokenEstimate)</strong>
+                        </div>
+                        <div>
+                            <span>Returned tokens</span>
+                            <strong>@DashboardFormatting.Integer(contextSavings.ReturnedTokenEstimate)</strong>
+                        </div>
+                        <div>
+                            <span>Samples</span>
+                            <strong>@DashboardFormatting.Integer(contextSavings.SampleCount)</strong>
+                        </div>
+                        <div>
+                            <span>Cache hit rate</span>
+                            <strong>@DashboardFormatting.Percent(contextSavings.CacheHitPercent)</strong>
+                        </div>
+                        <div>
+                            <span>Source coverage</span>
+                            <strong>@DashboardFormatting.Percent(contextSavings.SourceCoveragePercent)</strong>
+                        </div>
+                    </div>
+                    <div class="context-savings-trend">
+                        <div class="context-savings-trend-head">
+                            <span>24h mini trend</span>
+                            <strong>@DashboardFormatting.Integer(contextSavings.Trend.Count) pts</strong>
+                        </div>
+                        <svg class="resource-line-chart context-savings-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Estimated context saving percent trend">
+                            @foreach (var guide in ChartGuideLines())
+                            {
+                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                            }
+                            <polyline class="resource-line savings" points="@BuildLinePoints(contextSavings.Trend.Select(x => x.SavingPercent), 100d)"></polyline>
+                        </svg>
+                    </div>
+                </div>
+            }
+        </section>
+
         <div class="dashboard-grid page-scroll-host">
             <section class="panel">
                 <div class="panel-title">服務健康</div>
@@ -617,6 +680,18 @@
             "logs" => "筆",
             _ => unit
         };
+
+    private static string ContextSavingsConfidenceClass(string confidence)
+        => confidence switch
+        {
+            ContextSavingsEstimator.HighConfidence => "ok",
+            ContextSavingsEstimator.MediumConfidence => "warn",
+            ContextSavingsEstimator.LowConfidence => "neutral",
+            _ => "neutral"
+        };
+
+    private static string FormatTokenCount(int value)
+        => $"{DashboardFormatting.Integer(value)} tokens";
 
     private double CurrentCpuPercent()
         => _resourceSamples.LastOrDefault()?.CpuPercent ?? 0d;

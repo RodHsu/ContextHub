@@ -1,7 +1,8 @@
 # ContextHub Public Nginx Proxy
 
-`context-hub.wjcy.org` should route through Nginx on the shared Docker network
-instead of exposing ContextHub service ports publicly.
+`context-hub.wjcy.org` should stay behind Cloudflare Proxied DNS and route
+through Nginx on the shared Docker network instead of exposing ContextHub
+service ports publicly.
 
 Expected Docker network:
 
@@ -34,6 +35,29 @@ Cloudflare Cache Rules should not override the origin `no-store` policy for
 `/api/*`, `/mcp*`, `/_blazor*`, `/health*`, `/login*`, or `/account*`.
 Only static asset file extensions should be eligible for edge cache.
 
+Apply the Cloudflare edge rules in
+[`context-hub-cloudflare-rules.md`](context-hub-cloudflare-rules.md) before
+treating MCP failures as origin or application failures.
+
+Cloudflare rules for `/mcp*`:
+
+```text
+DNS:
+  Keep the record Proxied (orange-cloud). Do not switch to DNS-only just to fix MCP.
+
+Cache:
+  Bypass cache for /mcp*
+  Do not override origin Cache-Control / CDN-Cache-Control no-store
+
+Transform / challenges:
+  Do not apply response transformation, Rocket Loader, JS challenge, or managed challenge
+  to /mcp*. MCP clients are non-browser clients and expect raw Streamable HTTP/SSE.
+
+Security:
+  Enforce access with bearer tokens, WAF allow/block rules, and rate limits.
+  If origin hiding needs to be stronger later, prefer Cloudflare Tunnel over DNS-only.
+```
+
 Example Nginx server:
 
 ```nginx
@@ -60,7 +84,14 @@ server {
     proxy_set_header X-Forwarded-Port $server_port;
 
     location = /mcp {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
+        add_header Cloudflare-CDN-Cache-Control "no-store" always;
+        add_header CDN-Cache-Control "no-store" always;
+        add_header X-Accel-Buffering "no" always;
+        gzip off;
+        proxy_cache off;
         proxy_buffering off;
+        proxy_request_buffering off;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_pass http://context-hub-mcp-server:8080;

@@ -260,20 +260,78 @@ query 用「<本次任務描述>」，
 - `/api/status` 能回傳目前 embedding provider、profile、model、dimensions
 - MCP client 可以 `tools/list`、`tools/call`
 
-### 7.2 查詢可用
+### 7.2 Codex MCP 設定可用
+
+ContextHub 的 canonical MCP entrypoint 是公開遠端 Streamable HTTP endpoint。
+Codex 與其他支援 remote MCP 的 agent 應固定指向：
+
+```toml
+[mcp_servers.contexthub]
+enabled = true
+url = "https://context-hub.wjcy.org/mcp"
+bearer_token_env_var = "CONTEXTHUB_MCP_TOKEN"
+```
+
+不要把 repo 啟動流程回退到 `default` ProjectId、本機 `127.0.0.1`，
+或 stdio bridge 當成預設主入口。
+本 repo 的 canonical `ProjectId` 是 `ContextHub`。
+
+Token 應放在環境變數，不要寫進 `config.toml`：
+
+```powershell
+[Environment]::SetEnvironmentVariable("CONTEXTHUB_MCP_TOKEN", "<token>", "User")
+```
+
+### 7.3 固定診斷流程
+
+每次懷疑 Codex 沒有載入 ContextHub MCP 時，先跑：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1
+```
+
+這支腳本會驗證：
+
+- `codex mcp get contexthub`
+- 未帶 token 的 `/mcp` 回 `401`
+- raw MCP `initialize`
+- raw MCP `tools/list`
+- `build_working_context(projectId = ContextHub)`
+
+若 raw MCP 成功但 `-RunCodexExec` 或新 Codex Desktop thread 仍看不到 tools，
+問題在 Codex client / Desktop tool injection 層，而不是 ContextHub server
+本身。此時仍應優先檢查 Cloudflare `/mcp*` rules 與 Codex HTTP MCP worker
+相容性。
+
+只有在特定 client 不支援 remote Streamable HTTP，或短期遭遇 client HTTP
+transport bug 時，才使用 stdio bridge fallback：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1
+```
+
+stdio bridge 讓 client 以本機 child process 連線，再由 bridge 呼叫遠端
+`https://context-hub.wjcy.org/mcp`。它只是 compatibility fallback，不取代
+公開 remote MCP endpoint，也不是「任何 agent 只設定 URL + token」的主方案。
+
+Cloudflare edge 行為的固定規則與驗證方式請見
+[`context-hub-cloudflare-rules.md`](context-hub-cloudflare-rules.md)。MCP
+應維持 Cloudflare Proxied，不應為了除錯切成 DNS-only。
+
+### 7.4 查詢可用
 
 - `build_working_context` 能回傳結構化結果，不是空殼
 - `memory_search` 能命中已知 repo facts / decisions
 - `user_preference_list` 能看到已寫入的偏好
 - `log_search` 能查到近期 runtime facts
 
-### 7.3 背景流程可用
+### 7.5 背景流程可用
 
 - 寫入 memory 後，對應 job 能完成
 - 切換模型後，`enqueue_reindex` 建立的 job 能完成
 - `/api/jobs` 沒有長時間卡住的 pending / failed
 
-### 7.4 效能可接受
+### 7.6 效能可接受
 
 - `/api/performance/measure` 在同機環境下表現穩定
 - `queryEmbedding`、`hybridSearch` 沒有明顯異常抖動

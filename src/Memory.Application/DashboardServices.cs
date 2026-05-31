@@ -14,6 +14,8 @@ public sealed class DashboardQueryService(
     TimeProvider timeProvider,
     IRequestActorAccessor actorAccessor) : IDashboardQueryService
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     public async Task<DashboardOverviewResult> GetOverviewAsync(CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow();
@@ -67,7 +69,8 @@ public sealed class DashboardQueryService(
             dockerHost?.Payload ?? CreateUnavailableDockerHost(now),
             dependencyResources?.Payload ?? CreateUnavailableDependencyResources(),
             resourceChart?.Payload.Samples ?? [],
-            await BuildEvaluationSummaryAsync(cancellationToken));
+            await BuildEvaluationSummaryAsync(cancellationToken),
+            await BuildContextSavingsAsync(now, cancellationToken));
     }
 
     public async Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken)
@@ -418,6 +421,7 @@ public sealed class DashboardQueryService(
             .Include(x => x.Revisions)
             .Include(x => x.Chunks)
                 .ThenInclude(x => x.Vectors)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
 
         if (entity is null)
@@ -798,6 +802,121 @@ public sealed class DashboardQueryService(
 
         return values.Count == 0 ? null : values.ToArray();
     }
+
+    private async Task<DashboardContextSavingsResult> BuildContextSavingsAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var windowStartedAt = now.AddHours(-24);
+        List<ContextSavingsTelemetryEvent> events;
+        try
+        {
+            var actor = actorAccessor.Current;
+            var query = dbContext.RetrievalEvents
+                .AsNoTracking()
+                .Where(x => x.Success)
+                .Where(x => x.CreatedAt >= windowStartedAt && x.CreatedAt <= now);
+
+            if (actor.HasUser)
+            {
+                query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+            }
+
+            events = await query
+                .OrderByDescending(x => x.CreatedAt)
+                .Take(250)
+                .Select(x => new ContextSavingsTelemetryEvent(
+                    x.CreatedAt,
+                    x.CacheHit,
+                    x.MetadataJson))
+                .ToListAsync(cancellationToken);
+        }
+        catch (NotSupportedException)
+        {
+            events = [];
+        }
+
+        var samples = events
+            .Select(x => new ContextSavingsTelemetrySample(
+                x.CreatedAt,
+                x.CacheHit,
+                TryReadSavingsEstimate(x.MetadataJson)))
+            .Where(x => x.Savings is not null)
+            .OrderBy(x => x.CreatedAt)
+            .ToArray();
+
+        if (samples.Length == 0)
+        {
+            return new DashboardContextSavingsResult(
+                false,
+                0,
+                0,
+                0,
+                0,
+                0d,
+                ContextSavingsEstimator.LowConfidence,
+                0d,
+                0d,
+                windowStartedAt,
+                now,
+                []);
+        }
+
+        var baseline = samples.Sum(x => x.Savings!.BaselineTokenEstimate);
+        var returned = samples.Sum(x => x.Savings!.ReturnedTokenEstimate);
+        var saved = samples.Sum(x => x.Savings!.EstimatedSavedTokens);
+        var averageSavingPercent = samples.Average(x => x.Savings!.EstimatedSavingPercent);
+        var averageCoverage = samples.Average(x => x.Savings!.SourceCoveragePercent);
+        var cacheHitPercent = samples.Count(x => x.CacheHit) / (double)samples.Length * 100d;
+        var trend = samples
+            .TakeLast(24)
+            .Select(x => new DashboardContextSavingsTrendPointResult(
+                x.CreatedAt,
+                x.Savings!.BaselineTokenEstimate,
+                x.Savings.ReturnedTokenEstimate,
+                x.Savings.EstimatedSavedTokens,
+                x.Savings.EstimatedSavingPercent))
+            .ToArray();
+
+        return new DashboardContextSavingsResult(
+            true,
+            samples.Length,
+            baseline,
+            returned,
+            saved,
+            Math.Round(averageSavingPercent, 2),
+            ResolveSavingsConfidence(averageCoverage),
+            Math.Round(averageCoverage, 2),
+            Math.Round(cacheHitPercent, 2),
+            windowStartedAt,
+            now,
+            trend);
+    }
+
+    private static ContextSavingsEstimateResult? TryReadSavingsEstimate(string metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<ContextSavingsTelemetryMetadata>(metadataJson, JsonOptions)?.Savings;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string ResolveSavingsConfidence(double sourceCoveragePercent)
+        => sourceCoveragePercent switch
+        {
+            >= 80d => ContextSavingsEstimator.HighConfidence,
+            >= 50d => ContextSavingsEstimator.MediumConfidence,
+            _ => ContextSavingsEstimator.LowConfidence
+        };
 
     private async Task<DashboardEvaluationSummaryResult?> BuildEvaluationSummaryAsync(CancellationToken cancellationToken)
     {
@@ -1872,6 +1991,19 @@ public sealed class DashboardQueryService(
             return null;
         }
     }
+
+    private sealed record ContextSavingsTelemetryMetadata(
+        ContextSavingsEstimateResult? Savings);
+
+    private sealed record ContextSavingsTelemetryEvent(
+        DateTimeOffset CreatedAt,
+        bool CacheHit,
+        string MetadataJson);
+
+    private sealed record ContextSavingsTelemetrySample(
+        DateTimeOffset CreatedAt,
+        bool CacheHit,
+        ContextSavingsEstimateResult? Savings);
 
     private sealed record ScoredGraphNode(MemoryItem Item, decimal? Score);
 }

@@ -545,6 +545,8 @@ public sealed class DashboardQueryServiceTests
         public DbSet<MemoryLink> MemoryLinks => throw new NotSupportedException();
         public DbSet<MemoryJob> MemoryJobs => throw new NotSupportedException();
         public DbSet<MaintenanceRun> MaintenanceRuns => throw new NotSupportedException();
+        public DbSet<RetrievalEvent> RetrievalEvents => throw new NotSupportedException();
+        public DbSet<RetrievalHit> RetrievalHits => throw new NotSupportedException();
         public DbSet<RuntimeLogEntry> RuntimeLogEntries => throw new NotSupportedException();
         public DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints => throw new NotSupportedException();
         public DbSet<SourceConnection> SourceConnections => throw new NotSupportedException();

@@ -18,6 +18,73 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     private static IReadOnlyList<MemoryGraphEdgeResult> GraphDemoPrecomputedEdges { get; } = BuildGraphDemoPrecomputedEdges();
 
+    private DashboardContextSavingsResult BuildContextSavings(DateTimeOffset now)
+    {
+        if (Profile == DashboardBrowserTestProfile.Empty)
+        {
+            return new DashboardContextSavingsResult(
+                false,
+                0,
+                0,
+                0,
+                0,
+                0d,
+                ContextSavingsEstimator.LowConfidence,
+                0d,
+                0d,
+                now.AddHours(-24),
+                now,
+                []);
+        }
+
+        var baseline = Profile == DashboardBrowserTestProfile.Dense ? 186_420 : 48_250;
+        var returned = Profile == DashboardBrowserTestProfile.Dense ? 34_780 : 9_640;
+        var saved = baseline - returned;
+        var sampleCount = Profile == DashboardBrowserTestProfile.Dense ? 42 : 16;
+        var trend = Enumerable.Range(0, 18)
+            .Select(index =>
+            {
+                var pointBaseline = (baseline / 18) + (index * 64);
+                var pointReturned = Math.Max(900, (returned / 18) - (index * 8));
+                var pointSaved = Math.Max(0, pointBaseline - pointReturned);
+                var savingPercent = pointBaseline > 0 ? pointSaved / (double)pointBaseline * 100d : 0d;
+                return new DashboardContextSavingsTrendPointResult(
+                    now.AddMinutes(-85 + (index * 5)),
+                    pointBaseline,
+                    pointReturned,
+                    pointSaved,
+                    Math.Round(savingPercent, 2));
+            })
+            .ToArray();
+
+        return new DashboardContextSavingsResult(
+            true,
+            sampleCount,
+            baseline,
+            returned,
+            saved,
+            Math.Round(saved / (double)baseline * 100d, 2),
+            ContextSavingsEstimator.HighConfidence,
+            Profile == DashboardBrowserTestProfile.Dense ? 92.3d : 86.8d,
+            Profile == DashboardBrowserTestProfile.Dense ? 61.9d : 43.8d,
+            now.AddHours(-24),
+            now,
+            trend);
+    }
+
+    private static DashboardEvaluationSummaryResult BuildEvaluationSummary()
+        => new(
+            Guid.Parse("aaaaaaaa-0000-0000-0000-000000000001"),
+            Guid.Parse("bbbbbbbb-0000-0000-0000-000000000001"),
+            "browser-test-context",
+            EvaluationRunStatus.Completed,
+            0.833m,
+            0.786m,
+            0.72m,
+            41.8d,
+            DateTimeOffset.UtcNow.AddMinutes(-20),
+            DateTimeOffset.UtcNow.AddMinutes(-18));
+
     public Task<SystemStatusResult> GetStatusAsync(CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
@@ -70,7 +137,9 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             BuildPageSnapshotStatus(now, Profile == DashboardBrowserTestProfile.Empty),
             BuildDockerHost(now),
             BuildDependencyResources(),
-            BuildResourceSamples(trafficSamples)));
+            BuildResourceSamples(trafficSamples),
+            BuildEvaluationSummary(),
+            BuildContextSavings(now)));
     }
 
     public Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken)

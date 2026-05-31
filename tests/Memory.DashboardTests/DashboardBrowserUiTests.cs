@@ -26,7 +26,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
     private static readonly DashboardRouteSpec[] Routes =
     [
-        new("overview", "/", "總覽", [".metric-grid", ".dashboard-grid", ".resource-chart-grid"], [".page-header", ".metric-grid", ".dashboard-grid"], [".content", ".dashboard-grid.page-scroll-host"]),
+        new("overview", "/", "總覽", [".metric-grid", ".context-savings-panel", ".dashboard-grid", ".resource-chart-grid"], [".page-header", ".metric-grid", ".context-savings-panel", ".dashboard-grid"], [".content", ".dashboard-grid.page-scroll-host"]),
         new("runtime", "/runtime", "執行參數", [".runtime-page-stack", ".runtime-main-panel", ".runtime-parameters-panel"], [".page-header", ".runtime-main-panel", ".runtime-parameters-panel"], [".content", ".runtime-page-stack"]),
         new("monitoring", "/monitoring", "狀態監控", [".monitoring-page-stack", ".monitoring-top-grid", ".monitoring-telemetry-grid"], [".page-header", ".monitoring-top-grid", ".monitoring-telemetry-grid"], [".content", ".monitoring-page-stack"]),
         new("memories", "/memories", "記憶資料", [".page-actions-secondary .info-popover", ".filter-panel", ".split-layout"], [".page-header", ".filter-panel", ".split-layout"], [".content", ".split-layout"]),
@@ -206,6 +206,65 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         await page.WaitForFunctionAsync("() => document.documentElement.dataset.theme === 'light'");
         var toggleText = await themeToggle.InnerTextAsync();
         toggleText.Should().Contain("淺色");
+    }
+
+    [Fact]
+    public async Task Overview_Context_Savings_Should_Not_Overlap_At_App_Browser_Size()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("app-browser-999", 999, 1270);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/?uiProfile=dense");
+        await page.Locator(".context-savings-panel").WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const rectOf = selector => {
+                    const element = document.querySelector(selector);
+                    const rect = element?.getBoundingClientRect();
+                    return {
+                        top: Math.round(rect?.top ?? 0),
+                        bottom: Math.round(rect?.bottom ?? 0),
+                        height: Math.round(rect?.height ?? 0)
+                    };
+                };
+
+                return JSON.stringify({
+                    viewportWidth: window.innerWidth,
+                    documentScrollWidth: document.documentElement.scrollWidth,
+                    bodyScrollWidth: document.body.scrollWidth,
+                    contentScrollWidth: document.querySelector('.content')?.scrollWidth ?? 0,
+                    contentClientWidth: document.querySelector('.content')?.clientWidth ?? 0,
+                    metricScrollWidth: document.querySelector('.home-page-body > .metric-grid')?.scrollWidth ?? 0,
+                    metricClientWidth: document.querySelector('.home-page-body > .metric-grid')?.clientWidth ?? 0,
+                    savingsScrollWidth: document.querySelector('.context-savings-content')?.scrollWidth ?? 0,
+                    savingsClientWidth: document.querySelector('.context-savings-content')?.clientWidth ?? 0,
+                    metrics: rectOf('.home-page-body > .metric-grid'),
+                    savings: rectOf('.context-savings-panel'),
+                    dashboard: rectOf('.home-page-body > .dashboard-grid')
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var root = document.RootElement;
+        var metrics = root.GetProperty("metrics");
+        var savings = root.GetProperty("savings");
+        var dashboard = root.GetProperty("dashboard");
+
+        metrics.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(savings.GetProperty("top").GetInt32(), $"metric cards must finish before context savings starts: {layoutJson}");
+        savings.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(dashboard.GetProperty("top").GetInt32(), $"context savings must finish before dashboard grid starts: {layoutJson}");
+        savings.GetProperty("height").GetInt32().Should().BeGreaterThan(160, $"context savings panel should not collapse: {layoutJson}");
+        root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
+        root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
+        root.GetProperty("contentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("contentClientWidth").GetInt32() + 1);
+        root.GetProperty("metricScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("metricClientWidth").GetInt32() + 1);
+        root.GetProperty("savingsScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("savingsClientWidth").GetInt32() + 1);
     }
 
     [Fact]

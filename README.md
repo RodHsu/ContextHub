@@ -10,12 +10,18 @@ ContextHub 是一套本機部署、純 Docker Compose 的 MCP knowledge system�
 - `PostgreSQL + pgvector + Redis`
 - 自建 `ONNX embedding-service`
 - `NginxUI` 風格 dark dashboard
+- Dashboard 提供記憶、圖譜、來源、治理、評估、Inbox、安全管理、storage explorer 與 runtime monitoring
 - 顯式 `user preference` 記憶
+- `working-context` telemetry 會估算 prompt context savings，Dashboard 首頁顯示最近 24 小時趨勢
+- Retrieval telemetry retention 與 maintenance API 支援低影響清理、`VACUUM (ANALYZE)` 與可控的 `VACUUM FULL`
+- 公開部署預設走 Cloudflare Proxied + Nginx reverse proxy，不直接暴露 compose service ports
 - `EMBEDDING_PROFILE` 單一主參數
 
 延伸文件：
 
 - `docs/architecture.md`
+- `docs/context-hub-cloudflare-rules.md`
+- `docs/context-hub-public-nginx.md`
 - `docs/mcp-usage-guide.md`
 - `docs/repo-onboarding.md`
 
@@ -25,10 +31,10 @@ ContextHub 是一套本機部署、純 Docker Compose 的 MCP knowledge system�
 |---|---|---|---|
 | `embedding-service` | 第一次啟動下載 ONNX 模型、tokenization、ONNX inference、`query:/passage:` prefix、向量正規化 | 內網 `GET /health/*`、`GET /info`、`POST /embed` | `embedding-model-cache` volume |
 | `mcp-server` | `POST/GET /mcp`、REST 查詢 API、health、performance probe、user preference API | `8080` | 無，狀態進 DB/Redis |
-| `dashboard` | NginxUI 風格管理主控台、登入、runtime 參數、Docker metrics、memory/log/job/storage explorer | `8088` | `dashboard-data-protection` volume |
+| `dashboard` | NginxUI 風格管理主控台、登入、runtime 參數、Docker metrics、memory/log/job/storage/security explorer、context savings overview | `8088` | `dashboard-data-protection` volume |
 | `worker` | reindex、chunk vectors、background jobs、log promotion 後續處理 | 無對外 port | 無，狀態進 DB/Redis |
-| `postgres` | durable memory、revisions、chunks、vectors、jobs、runtime logs | `5432` | `postgres-data` volume |
-| `redis` | cache version、search/context cache、job signal | `6379` | 無持久化 |
+| `postgres` | durable memory、revisions、chunks、vectors、jobs、runtime logs、retrieval telemetry、security records | `5432` | `postgres-data` volume |
+| `redis` | cache version、search/context cache、dashboard snapshots、job signal | `6379` | cache / snapshot data |
 
 ## 專案結構
 
@@ -45,6 +51,9 @@ ContextHub 是一套本機部署、純 Docker Compose 的 MCP knowledge system�
 - `tests/Memory.McpProtocolTests`
 - `tests/Memory.ComposeSmokeTests`
 - `tests/Memory.DashboardTests`
+- `tools/ContextHub.McpStdioBridge`
+- `tools/test-contexthub-mcp.ps1`
+- `tools/test-contexthub-stdio-bridge.ps1`
 
 ## 對外介面
 
@@ -71,16 +80,32 @@ MCP tools：
 
 ContextHub 目前對外提供的是 `HTTP /mcp` 端點，部署與日常使用請優先採用 **Streamable HTTP** 連線。
 
-不建議把 ContextHub 當成 `stdio` server 來設定，原因是：
+本 repo 的 canonical 遠端 MCP entrypoint：
 
-- `stdio` 適合由 VS Code 直接啟動本機 subprocess
-- ContextHub 目前標準部署方式是 Docker Compose / 遠端服務
-- repo 內沒有提供專用的 `stdio` 啟動包裝腳本或 `command` 設定範本
+```text
+https://context-hub.wjcy.org/mcp
+```
+
+對 Codex / agent client，token 應放在環境變數，不要寫入設定檔：
+
+```powershell
+[Environment]::SetEnvironmentVariable("CONTEXTHUB_MCP_TOKEN", "<token>", "User")
+```
+
+Codex 設定概念：
+
+```toml
+[mcp_servers.contexthub]
+enabled = true
+url = "https://context-hub.wjcy.org/mcp"
+bearer_token_env_var = "CONTEXTHUB_MCP_TOKEN"
+```
 
 實務上：
 
 - **本機 Docker Compose**：用 `http://localhost:8080/mcp`
-- **遠端主機**：用 `http://<your-host>:8092/mcp`
+- **遠端公開入口**：用 `https://context-hub.wjcy.org/mcp` 或自己的 Proxied HTTPS hostname
+- **Codex fallback**：只有當 client 的 remote Streamable HTTP transport 有相容性問題時，才使用 `tools/ContextHub.McpStdioBridge`
 
 #### VS Code 設定檔位置
 
@@ -105,7 +130,7 @@ ContextHub 目前對外提供的是 `HTTP /mcp` 端點，部署與日常使用�
 }
 ```
 
-#### 如果未來 MCP 端點需要驗證
+#### 遠端 MCP 端點需要驗證時
 
 可在同一份 `mcp.json` 內加 `headers`：
 
@@ -122,7 +147,7 @@ ContextHub 目前對外提供的是 `HTTP /mcp` 端點，部署與日常使用�
   "servers": {
     "contextHub": {
       "type": "http",
-      "url": "http://<your-host>:8092/mcp",
+      "url": "https://context-hub.wjcy.org/mcp",
       "headers": {
         "Authorization": "Bearer ${input:contextHubToken}"
       }
@@ -140,7 +165,37 @@ ContextHub 目前對外提供的是 `HTTP /mcp` 端點，部署與日常使用�
 - 設定請使用 `type: "http"`
 - `url` 直接指向 `/mcp`
 - 不需要寫 `command` / `args`
-- 不需要用 `stdio`
+- 不需要用 `stdio`，除非是在診斷已確認 remote transport 相容性問題後短期 fallback
+
+#### Codex 診斷腳本
+
+固定先測 raw MCP 與 Cloudflare edge 行為：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1
+```
+
+需要一併驗證 Codex tool injection 時：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1 -RunCodexExec
+```
+
+只有 remote Streamable HTTP client 不穩時，再測 stdio bridge fallback：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1
+```
+
+stdio bridge 由本機 child process 接收 stdio MCP，再轉送到遠端 `https://context-hub.wjcy.org/mcp`。它是 compatibility fallback，不是主要部署入口。
+
+Cloudflare Proxied hostname 的 MCP path 需套用 `docs/context-hub-cloudflare-rules.md`：
+
+- `/mcp*` bypass cache
+- 不覆寫 origin `no-store`
+- 關閉 Rocket Loader、HTML/JS transform、browser challenge
+- 不在 MCP hostname 啟用 mTLS client certificate requirement
+- 不為了除錯切成 DNS-only
 
 #### 設定完成後怎麼驗證
 
@@ -157,6 +212,7 @@ ContextHub 目前對外提供的是 `HTTP /mcp` 端點，部署與日常使用�
 - `http://<your-host>:8092/health/live`
 - `http://<your-host>:8092/health/ready`
 - `http://<your-host>:8092/mcp`
+- `https://context-hub.wjcy.org/mcp`
 
 若 `/health/live` 與 `/health/ready` 正常，通常再回 VS Code 重新載入 MCP server 即可。
 
@@ -261,6 +317,33 @@ ContextHub 目前對外提供的是 `HTTP /mcp` 端點，部署與日常使用�
 - `GET /api/user/preferences`
 - `POST /api/user/preferences`
 - `PATCH /api/user/preferences/{id}`
+- `GET /api/security/*`
+- `POST /api/security/*`
+- `GET /api/maintenance/runs`
+- `POST /api/maintenance/retention/run`
+- `POST /api/maintenance/vacuum-full-reclaim/run`
+- `POST /api/maintenance/domain-owner-repair`
+
+## Working Context Telemetry 與 Context Savings
+
+`build_working_context` 會在 successful retrieval telemetry 寫入估算資訊，用於量化 ContextHub 幫 agent 節省多少 prompt context。
+
+估算欄位包含：
+
+- baseline token estimate
+- returned token estimate
+- estimated saved tokens
+- saving percent
+- source coverage
+- confidence
+
+Dashboard 首頁的 `Estimated Context Savings` panel 會聚合最近 24 小時 successful working-context telemetry，顯示 saving、baseline / returned tokens、samples、cache hit rate、source coverage 與 mini trend。
+
+注意：
+
+- 這是產品內部估算值，不是 LLM provider billing usage
+- 本機 `dotnet test` 使用 deterministic test data，不依賴外部模型下載
+- 沒有 working-context telemetry 時，首頁會顯示 empty state
 
 ## Dashboard
 
@@ -272,11 +355,18 @@ Dashboard 是獨立的 `Blazor Web App` 容器，不直接碰 PostgreSQL；業�
 - `/`
 - `/runtime`
 - `/memories`
+- `/graph`
+- `/sources`
+- `/governance`
+- `/evaluation`
+- `/inbox`
 - `/preferences`
 - `/logs`
 - `/jobs`
 - `/storage`
+- `/security`
 - `/performance`
+- `/settings`
 
 登入方式：
 
@@ -301,7 +391,9 @@ Polling 參數：
 
 安全邊界：
 
-- Dashboard 只做單一 admin cookie auth，不是完整 RBAC
+- Dashboard 使用 cookie auth，admin/member 可見頁面不同
+- Member view 預設只保留「記憶資料、記憶圖譜、使用者偏好、我的 Token」
+- API token、tenant、user、project grant 與 security audit event 由 `mcp-server` 持久化管理
 - Docker socket 以唯讀方式掛載，這是高權限能力，應只在本機 / 內網可信環境使用
 - Data Protection keys 持久化在 `dashboard-data-protection` volume，避免 container 重啟後 session 全失效
 
@@ -439,6 +531,54 @@ docker compose down -v
 - `embedding-service` 不對外暴露公網用途，`mcp-server` 與 `worker` 透過 compose 內網呼叫它
 - `dashboard` 會從 `http://mcp-server:8080` 讀取業務資料，並透過唯讀 Docker socket 顯示 compose stack 狀態
 
+## 公開部署
+
+公開部署建議路徑：
+
+```text
+Cloudflare Proxied DNS
+  -> Nginx reverse proxy on shared Docker network
+  -> context-hub-dashboard:8088
+  -> context-hub-mcp-server:8080
+```
+
+規則：
+
+- 不直接對外暴露 compose service ports
+- Dashboard 與 MCP server 必須保留 origin `no-store` dynamic responses
+- `/mcp*` 必須關閉 buffering、cache transform 與 browser challenge
+- Cloudflare DNS 維持 Proxied，不為了除錯改成 DNS-only
+- 若 MCP hostname 需要更乾淨的 edge policy，建立仍為 Proxied 的 `mcp.context-hub.wjcy.org` 類型專用 hostname
+
+相關文件：
+
+- `docs/context-hub-public-nginx.md`
+- `docs/context-hub-cloudflare-rules.md`
+- `docs/mcp-usage-guide.md`
+
+## Maintenance 與 Retention
+
+Retrieval telemetry 會寫入：
+
+- `retrieval_events`
+- `retrieval_hits`
+
+清理策略以低影響 retention 為優先：
+
+- 分批刪除 hits / events
+- 可設定 batch size、event batch size、delay、command timeout、max duration
+- 預設可在 retention 後執行 `VACUUM (ANALYZE)`
+- `VACUUM FULL` 需要明確啟用或手動呼叫，避免尖峰時段長時間鎖表
+
+常用端點：
+
+- `GET /api/maintenance/runs`
+- `POST /api/maintenance/retention/run`
+- `POST /api/maintenance/vacuum-full-reclaim/run`
+- `POST /api/maintenance/domain-owner-repair`
+
+若經 Cloudflare 呼叫長時間 maintenance API 發生 gateway timeout，優先改從 Docker internal network 呼叫 `http://mcp-server:8080`，避免外部 request timeout 取消正在執行的清理工作。
+
 ## 如何切換模型 / 維度
 
 最常見做法是改 `.env`：
@@ -524,9 +664,10 @@ EMBEDDING_BATCH_SIZE=4
 ## 測試
 
 ```powershell
-dotnet test ContextHub.slnx -m:1
+dotnet test ContextHub.slnx
 dotnet format ContextHub.slnx --verify-no-changes
-docker compose config
+docker compose config --quiet
+docker compose -f docker-compose.release.yml config --quiet
 ```
 
 說明：
@@ -537,6 +678,7 @@ docker compose config
 - `ComposeSmokeTests` 需設 `RUN_COMPOSE_SMOKE_TESTS=1`
 - smoke test 會驗證 `/health/ready`、`/api/status` 與 `/api/performance/measure`
 - smoke test 也會驗證 `dashboard` 的 `/health/ready`、登入頁與 overview shell
+- `DashboardBrowserUiTests` 會用 Playwright 驗證 desktop、tablet、mobile 與 app browser 尺寸，包含首頁 context savings panel 不可與後續 section 重疊
 
 ## 目前 Compose 主要參數
 

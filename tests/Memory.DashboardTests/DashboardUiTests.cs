@@ -957,7 +957,34 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             BuildPageSnapshotStatus(now),
             BuildDockerHost(now),
             BuildDependencyResources(),
-            BuildResourceSamples(traffic)));
+            BuildResourceSamples(traffic),
+            ContextSavings: BuildContextSavings(now)));
+    }
+
+    private static DashboardContextSavingsResult BuildContextSavings(DateTimeOffset now)
+    {
+        var trend = Enumerable.Range(0, 12)
+            .Select(index => new DashboardContextSavingsTrendPointResult(
+                now.AddMinutes(-55 + (index * 5)),
+                2_800 + (index * 40),
+                620 + (index * 8),
+                2_180 + (index * 32),
+                77.86d + (index * 0.18d)))
+            .ToArray();
+
+        return new DashboardContextSavingsResult(
+            true,
+            18,
+            52_400,
+            11_680,
+            40_720,
+            77.71d,
+            ContextSavingsEstimator.HighConfidence,
+            88.9d,
+            55.6d,
+            now.AddHours(-24),
+            now,
+            trend);
     }
 
     private static IReadOnlyList<RequestTrafficSampleResult> BuildTrafficSamples()

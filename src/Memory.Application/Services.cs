@@ -639,6 +639,7 @@ public sealed class MemoryService(
                 userPreferenceSearch.Preferences,
                 suggestedTests,
                 citations);
+            result = result with { SavingsEstimate = ContextSavingsEstimator.Estimate(hits, result) };
             await objectCache.SetAsync(cacheKey, "working-context-final", result, cachePolicy.WorkingContextTtl, cancellationToken);
             await TryRecordWorkingContextTelemetryAsync(request, hits, result, cacheHit, usedFallback, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "origin", "working-context", version.Value, cancellationToken);
             return result;
@@ -694,7 +695,8 @@ public sealed class MemoryService(
                 item.SourceType,
                 item.SourceRef,
                 item.Tags,
-                item.ProjectId))
+                item.ProjectId,
+                ContextSavingsEstimator.EstimateTextTokens(item.Content)))
             .ToArray();
     }
 
@@ -836,6 +838,7 @@ public sealed class MemoryService(
             recentLogs = result.RecentLogs.Count,
             userPreferences = result.UserPreferences.Count,
             suggestedTests = result.SuggestedTests.Count,
+            savings = result.SavingsEstimate,
             cacheLayer,
             cacheKeyKind,
             versionStamp
