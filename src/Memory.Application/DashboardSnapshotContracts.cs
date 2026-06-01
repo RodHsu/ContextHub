@@ -86,7 +86,8 @@ public sealed record DashboardStorageTableStatsSnapshotPayload(
     IReadOnlyList<StorageTableSummaryResult> Tables);
 
 public sealed record DashboardStorageLargeTablePreviewSnapshotPayload(
-    IReadOnlyList<StorageTableRowsResult> Tables);
+    IReadOnlyList<StorageTableRowsResult> Tables,
+    string Warning = "");
 
 public sealed record DashboardJobsSnapshotPayload(
     PagedResult<JobListItemResult> RecentJobs);

@@ -474,6 +474,51 @@ public sealed class RetrievalHit
     public RetrievalEvent? RetrievalEvent { get; set; }
 }
 
+public sealed class RetrievalTelemetryDailySummary
+{
+    public DateOnly SummaryDate { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = "default";
+    public string Channel { get; set; } = string.Empty;
+    public string EntryPoint { get; set; } = string.Empty;
+    public string Purpose { get; set; } = string.Empty;
+    public string QueryMode { get; set; } = string.Empty;
+    public long RequestCount { get; set; }
+    public long SuccessCount { get; set; }
+    public long ErrorCount { get; set; }
+    public long ZeroResultCount { get; set; }
+    public long CacheHitCount { get; set; }
+    public long ResultCountSum { get; set; }
+    public double DurationMsSum { get; set; }
+    public double DurationMsMax { get; set; }
+    public double DurationMsP95 { get; set; }
+    public DateTimeOffset FirstSeenAt { get; set; }
+    public DateTimeOffset LastSeenAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class RetrievalTelemetryDailyHitSummary
+{
+    public DateOnly SummaryDate { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = "default";
+    public string EntryPoint { get; set; } = string.Empty;
+    public Guid MemoryId { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string MemoryType { get; set; } = string.Empty;
+    public string SourceType { get; set; } = string.Empty;
+    public string SourceRef { get; set; } = string.Empty;
+    public long HitCount { get; set; }
+    public int BestRank { get; set; }
+    public decimal? BestScore { get; set; }
+    public decimal? AverageScore { get; set; }
+    public DateTimeOffset FirstSeenAt { get; set; }
+    public DateTimeOffset LastSeenAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
 public sealed class LogIngestionCheckpoint
 {
     public Guid Id { get; set; } = Guid.NewGuid();

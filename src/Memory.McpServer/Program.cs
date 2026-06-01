@@ -44,6 +44,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<IPasswordHasher<object>, PasswordHasher<object>>();
 builder.Services.AddMemoryApplication();
 builder.Services.AddMemoryInfrastructure(builder.Configuration, "mcp-server");
+builder.Services.AddHostedService<InProcessMaintenanceRunRecoveryHostedService>();
 builder.Services.AddHostedService<DashboardSnapshotCollectorHostedService>();
 builder.Services.AddScoped<MemoryMcpTools>();
 builder.Services.AddMcpServer()
@@ -1241,12 +1242,12 @@ maintenance.MapPost("/retrieval-telemetry-retention/run", async (
     RetrievalTelemetryRetentionRunRequest request,
     IRetrievalTelemetryRetentionService service,
     IRequestActorAccessor actorAccessor,
-    CancellationToken cancellationToken) =>
+    IHostApplicationLifetime applicationLifetime) =>
 {
     var result = await service.RunAsync(
         request,
         MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor),
-        cancellationToken);
+        applicationLifetime.ApplicationStopping);
     return Results.Ok(result);
 });
 
@@ -1254,11 +1255,11 @@ maintenance.MapPost("/vacuum-full-reclaim/run", async (
     VacuumFullReclaimRunRequest request,
     IVacuumFullReclaimService service,
     IRequestActorAccessor actorAccessor,
-    CancellationToken cancellationToken) =>
+    IHostApplicationLifetime applicationLifetime) =>
 {
     var result = await service.RunAsync(
         string.IsNullOrWhiteSpace(request.TriggeredBy) ? MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor) : request.TriggeredBy,
-        cancellationToken);
+        applicationLifetime.ApplicationStopping);
     return Results.Ok(result);
 });
 

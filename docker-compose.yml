@@ -21,8 +21,13 @@ x-dashboard-config: &dashboard-config
 
 x-telemetry-retention-config: &telemetry-retention-config
   TelemetryRetention__Enabled: ${TELEMETRY_RETENTION_ENABLED:-true}
-  TelemetryRetention__HitsRetentionDays: ${TELEMETRY_RETENTION_HITS_DAYS:-15}
-  TelemetryRetention__EventsRetentionDays: ${TELEMETRY_RETENTION_EVENTS_DAYS:-30}
+  TelemetryRetention__HitsRetentionDays: ${TELEMETRY_RETENTION_HITS_DAYS:-3}
+  TelemetryRetention__EventsRetentionDays: ${TELEMETRY_RETENTION_EVENTS_DAYS:-7}
+  TelemetryRetention__SummaryRetentionDays: ${TELEMETRY_RETENTION_SUMMARY_DAYS:-30}
+  TelemetryRetention__SecurityAuditRetentionDays: ${TELEMETRY_RETENTION_SECURITY_AUDIT_DAYS:-180}
+  TelemetryRetention__RuntimeLogRetentionDays: ${TELEMETRY_RETENTION_RUNTIME_LOG_DAYS:-30}
+  TelemetryRetention__MaintenanceRunRetentionDays: ${TELEMETRY_RETENTION_MAINTENANCE_RUN_DAYS:-180}
+  TelemetryRetention__HitSummaryTopPerBucket: ${TELEMETRY_RETENTION_HIT_SUMMARY_TOP_PER_BUCKET:-100}
   TelemetryRetention__RunAtLocalTime: ${TELEMETRY_RETENTION_RUN_AT_LOCAL_TIME:-03:30}
   TelemetryRetention__TimeZone: ${TELEMETRY_RETENTION_TIME_ZONE:-Asia/Taipei}
   TelemetryRetention__BatchSize: ${TELEMETRY_RETENTION_BATCH_SIZE:-5000}

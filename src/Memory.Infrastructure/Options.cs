@@ -62,8 +62,13 @@ public sealed class TelemetryRetentionOptions
 {
     public const string SectionName = "TelemetryRetention";
     public bool Enabled { get; set; } = true;
-    public int HitsRetentionDays { get; set; } = 15;
-    public int EventsRetentionDays { get; set; } = 30;
+    public int HitsRetentionDays { get; set; } = 3;
+    public int EventsRetentionDays { get; set; } = 7;
+    public int SummaryRetentionDays { get; set; } = 30;
+    public int SecurityAuditRetentionDays { get; set; } = 180;
+    public int RuntimeLogRetentionDays { get; set; } = 30;
+    public int MaintenanceRunRetentionDays { get; set; } = 180;
+    public int HitSummaryTopPerBucket { get; set; } = 100;
     public string RunAtLocalTime { get; set; } = "03:30";
     public string TimeZone { get; set; } = "Asia/Taipei";
     public int BatchSize { get; set; } = 5_000;

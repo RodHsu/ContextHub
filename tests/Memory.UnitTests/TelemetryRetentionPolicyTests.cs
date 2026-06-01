@@ -11,8 +11,13 @@ public sealed class TelemetryRetentionPolicyTests
     {
         var policy = RetrievalTelemetryRetentionPolicy.Create(new TelemetryRetentionOptions(), new RetrievalTelemetryRetentionRunRequest());
 
-        policy.HitsRetentionDays.Should().Be(15);
-        policy.EventsRetentionDays.Should().Be(30);
+        policy.HitsRetentionDays.Should().Be(3);
+        policy.EventsRetentionDays.Should().Be(7);
+        policy.SummaryRetentionDays.Should().Be(30);
+        policy.SecurityAuditRetentionDays.Should().Be(180);
+        policy.RuntimeLogRetentionDays.Should().Be(30);
+        policy.MaintenanceRunRetentionDays.Should().Be(180);
+        policy.HitSummaryTopPerBucket.Should().Be(100);
         policy.BatchSize.Should().Be(5_000);
         policy.EventBatchSize.Should().Be(1_000);
         policy.TimeWindowDays.Should().Be(3);
@@ -34,7 +39,8 @@ public sealed class TelemetryRetentionPolicyTests
             DelayBetweenBatchesMs: 0,
             CommandTimeoutSeconds: 45,
             MaxDurationMinutes: 30,
-            RunVacuumAnalyzeAfterRetention: false);
+            RunVacuumAnalyzeAfterRetention: false,
+            RunVacuumFullAutomatically: true);
 
         var policy = RetrievalTelemetryRetentionPolicy.Create(new TelemetryRetentionOptions(), request);
 
@@ -45,6 +51,7 @@ public sealed class TelemetryRetentionPolicyTests
         policy.CommandTimeoutSeconds.Should().Be(45);
         policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(30));
         policy.RunVacuumAnalyzeAfterRetention.Should().BeFalse();
+        policy.RunVacuumFullAutomatically.Should().BeTrue();
     }
 
     [Fact]
@@ -67,6 +74,11 @@ public sealed class TelemetryRetentionPolicyTests
         {
             HitsRetentionDays = 0,
             EventsRetentionDays = -10,
+            SummaryRetentionDays = 0,
+            SecurityAuditRetentionDays = 0,
+            RuntimeLogRetentionDays = 0,
+            MaintenanceRunRetentionDays = 0,
+            HitSummaryTopPerBucket = 5_000,
             BatchSize = 0,
             EventBatchSize = 250_000,
             TimeWindowDays = 0,
@@ -86,6 +98,11 @@ public sealed class TelemetryRetentionPolicyTests
 
         policy.HitsRetentionDays.Should().Be(1);
         policy.EventsRetentionDays.Should().Be(1);
+        policy.SummaryRetentionDays.Should().Be(1);
+        policy.SecurityAuditRetentionDays.Should().Be(1);
+        policy.RuntimeLogRetentionDays.Should().Be(1);
+        policy.MaintenanceRunRetentionDays.Should().Be(1);
+        policy.HitSummaryTopPerBucket.Should().Be(1_000);
         policy.BatchSize.Should().Be(100_000);
         policy.EventBatchSize.Should().Be(1);
         policy.TimeWindowDays.Should().Be(3);

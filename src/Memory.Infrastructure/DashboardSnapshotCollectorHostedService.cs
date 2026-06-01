@@ -412,6 +412,17 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private async Task CollectStorageLargeTablePreviewAsync(int intervalSeconds, CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
+        var dbContextFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<MemoryDbContext>>();
+        if (await IsTelemetryMaintenanceRunningAsync(dbContextFactory, cancellationToken))
+        {
+            await WriteSnapshotAsync(
+                DashboardSnapshotKeys.StorageLargeTablePreview,
+                intervalSeconds,
+                new DashboardStorageLargeTablePreviewSnapshotPayload([], "Skipped during telemetry maintenance"),
+                cancellationToken);
+            return;
+        }
+
         var storageExplorerStore = scope.ServiceProvider.GetRequiredService<IStorageExplorerStore>();
         var tables = new List<StorageTableRowsResult>();
         foreach (var table in DashboardStoragePolicy.LargeTableNames)
@@ -430,6 +441,20 @@ public sealed class DashboardSnapshotCollectorHostedService(
             intervalSeconds,
             new DashboardStorageLargeTablePreviewSnapshotPayload(tables),
             cancellationToken);
+    }
+
+    private static async Task<bool> IsTelemetryMaintenanceRunningAsync(
+        IDbContextFactory<MemoryDbContext> dbContextFactory,
+        CancellationToken cancellationToken)
+    {
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        return await dbContext.MaintenanceRuns
+            .AsNoTracking()
+            .AnyAsync(
+                x => x.Status == MaintenanceRunStatus.Running &&
+                     (x.MaintenanceType == MaintenanceRunType.RetrievalTelemetryRetention ||
+                      x.MaintenanceType == MaintenanceRunType.VacuumFullReclaim),
+                cancellationToken);
     }
 
     private async Task CollectResourceChartAsync(int intervalSeconds, CancellationToken cancellationToken)

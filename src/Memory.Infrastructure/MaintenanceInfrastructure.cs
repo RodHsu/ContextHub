@@ -137,9 +137,60 @@ public sealed class MaintenanceRunQueryService(IDbContextFactory<MemoryDbContext
             run.Error);
 }
 
+public sealed class InProcessMaintenanceRunRecoveryHostedService(
+    IDbContextFactory<MemoryDbContext> dbContextFactory,
+    TimeProvider timeProvider,
+    ILogger<InProcessMaintenanceRunRecoveryHostedService> logger) : IHostedService
+{
+    private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow();
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var staleRuns = await dbContext.MaintenanceRuns
+            .Where(x =>
+                x.Status == MaintenanceRunStatus.Running &&
+                x.TriggeredBy != "scheduled" &&
+                (x.MaintenanceType == MaintenanceRunType.RetrievalTelemetryRetention ||
+                 x.MaintenanceType == MaintenanceRunType.VacuumFullReclaim) &&
+                x.StartedAt < now)
+            .ToListAsync(cancellationToken);
+
+        foreach (var run in staleRuns)
+        {
+            run.Status = MaintenanceRunStatus.Failed;
+            run.CompletedAt = now;
+            run.Error = "Maintenance run was interrupted by service restart.";
+            run.ResultJson = JsonSerializer.Serialize(new
+            {
+                error = run.Error,
+                interruptedByServiceRestart = true,
+                startedAtUtc = run.StartedAt,
+                completedAtUtc = now,
+                durationMs = (now - run.StartedAt).TotalMilliseconds
+            }, SerializerOptions);
+        }
+
+        if (staleRuns.Count > 0)
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            logger.LogWarning("Marked {Count} in-process maintenance runs as failed after service restart.", staleRuns.Count);
+        }
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken)
+        => Task.CompletedTask;
+}
+
 public sealed record RetrievalTelemetryRetentionPolicy(
     int HitsRetentionDays,
     int EventsRetentionDays,
+    int SummaryRetentionDays,
+    int SecurityAuditRetentionDays,
+    int RuntimeLogRetentionDays,
+    int MaintenanceRunRetentionDays,
+    int HitSummaryTopPerBucket,
     int BatchSize,
     int EventBatchSize,
     int TimeWindowDays,
@@ -155,6 +206,11 @@ public sealed record RetrievalTelemetryRetentionPolicy(
         => new(
             Math.Max(1, options.HitsRetentionDays),
             Math.Max(1, options.EventsRetentionDays),
+            Math.Max(1, options.SummaryRetentionDays),
+            Math.Max(1, options.SecurityAuditRetentionDays),
+            Math.Max(1, options.RuntimeLogRetentionDays),
+            Math.Max(1, options.MaintenanceRunRetentionDays),
+            Math.Clamp(options.HitSummaryTopPerBucket, 1, 1_000),
             Math.Clamp(request.BatchSize ?? options.BatchSize, 1, 100_000),
             Math.Clamp(request.EventBatchSize ?? options.EventBatchSize, 1, 100_000),
             Math.Clamp(request.TimeWindowDays ?? options.TimeWindowDays, 1, 3),
@@ -162,7 +218,7 @@ public sealed record RetrievalTelemetryRetentionPolicy(
             Math.Clamp(request.CommandTimeoutSeconds ?? options.CommandTimeoutSeconds, 1, 3600),
             TimeSpan.FromMinutes(Math.Clamp(request.MaxDurationMinutes ?? options.MaxDurationMinutes, 1, 30)),
             request.RunVacuumAnalyzeAfterRetention ?? options.RunVacuumAnalyzeAfterRetention,
-            options.RunVacuumFullAutomatically);
+            request.RunVacuumFullAutomatically ?? options.RunVacuumFullAutomatically);
 }
 
 public sealed class RetrievalTelemetryRetentionService(
@@ -174,6 +230,16 @@ public sealed class RetrievalTelemetryRetentionService(
 {
     private const long AdvisoryLockKey = 941222;
     private const int VacuumFullCommandTimeoutSeconds = 7200;
+    private static readonly string[] RetentionVacuumTables =
+    [
+        "retrieval_hits",
+        "retrieval_events",
+        "retrieval_telemetry_daily_summaries",
+        "retrieval_telemetry_daily_hit_summaries",
+        "security_audit_events",
+        "runtime_log_entries",
+        "maintenance_runs"
+    ];
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
     private readonly TelemetryRetentionOptions _options = options.Value;
 
@@ -197,6 +263,11 @@ public sealed class RetrievalTelemetryRetentionService(
             {
                 hitsRetentionDays = policy.HitsRetentionDays,
                 eventsRetentionDays = policy.EventsRetentionDays,
+                summaryRetentionDays = policy.SummaryRetentionDays,
+                securityAuditRetentionDays = policy.SecurityAuditRetentionDays,
+                runtimeLogRetentionDays = policy.RuntimeLogRetentionDays,
+                maintenanceRunRetentionDays = policy.MaintenanceRunRetentionDays,
+                hitSummaryTopPerBucket = policy.HitSummaryTopPerBucket,
                 hitsCutoffUtc = hitsCutoff,
                 eventsCutoffUtc = eventsCutoff,
                 batchSize = policy.BatchSize,
@@ -257,6 +328,8 @@ public sealed class RetrievalTelemetryRetentionService(
             sizeBefore = await ReadTableSizesAsync(connection, policy, cancellationToken);
             progress = new RetentionProgress(run.Id, startedAt, policy, sizeBefore);
 
+            await UpsertDailySummariesAsync(connection, progress, cancellationToken);
+
             while (!ShouldStopForMaxDuration(startedAt, policy, out _))
             {
                 hitsWindow = await ResolveRetentionWindowAsync(connection, hitsCutoff, policy, requiresHits: true, cancellationToken);
@@ -286,6 +359,13 @@ public sealed class RetrievalTelemetryRetentionService(
             }
 
             deletedEvents = progress.DeletedEvents;
+
+            if (!ShouldStopForMaxDuration(startedAt, policy, out _))
+            {
+                await DeleteOtherRetentionTablesAsync(connection, progress, run.Id, cancellationToken);
+                await DeleteExpiredSummariesAsync(connection, progress, cancellationToken);
+            }
+
             if (ShouldStopForMaxDuration(startedAt, policy, out var stoppedReason))
             {
                 var stoppedAt = timeProvider.GetUtcNow();
@@ -307,7 +387,15 @@ public sealed class RetrievalTelemetryRetentionService(
                     vacuumFullCompleted: vacuumFullCompleted,
                     vacuumFullError: vacuumFullError,
                     completed: true,
-                    stoppedReason: stoppedReason);
+                    stoppedReason: stoppedReason,
+                    upsertedEventSummaryRows: progress.UpsertedEventSummaryRows,
+                    upsertedHitSummaryRows: progress.UpsertedHitSummaryRows,
+                    processedSummaryDays: progress.ProcessedSummaryDays,
+                    deletedEventSummaryRows: progress.DeletedEventSummaryRows,
+                    deletedHitSummaryRows: progress.DeletedHitSummaryRows,
+                    deletedSecurityAuditEvents: progress.DeletedSecurityAuditEvents,
+                    deletedRuntimeLogEntries: progress.DeletedRuntimeLogEntries,
+                    deletedMaintenanceRuns: progress.DeletedMaintenanceRuns);
                 await UpdateRunAsync(run.Id, MaintenanceRunStatus.Completed, stoppedAt, stoppedJson, string.Empty, cancellationToken);
                 return new RetrievalTelemetryRetentionRunResult(run.Id, hitsCutoff, eventsCutoff, deletedHits, deletedEvents, startedAt, stoppedAt, stoppedJson);
             }
@@ -359,7 +447,15 @@ public sealed class RetrievalTelemetryRetentionService(
                 vacuumAnalyzeError: vacuumAnalyzeError,
                 vacuumFullCompleted: vacuumFullCompleted,
                 vacuumFullError: vacuumFullError,
-                completed: true);
+                completed: true,
+                upsertedEventSummaryRows: progress.UpsertedEventSummaryRows,
+                upsertedHitSummaryRows: progress.UpsertedHitSummaryRows,
+                processedSummaryDays: progress.ProcessedSummaryDays,
+                deletedEventSummaryRows: progress.DeletedEventSummaryRows,
+                deletedHitSummaryRows: progress.DeletedHitSummaryRows,
+                deletedSecurityAuditEvents: progress.DeletedSecurityAuditEvents,
+                deletedRuntimeLogEntries: progress.DeletedRuntimeLogEntries,
+                deletedMaintenanceRuns: progress.DeletedMaintenanceRuns);
             await UpdateRunAsync(run.Id, MaintenanceRunStatus.Completed, completedAt, resultJson, string.Empty, cancellationToken);
             return new RetrievalTelemetryRetentionRunResult(run.Id, hitsCutoff, eventsCutoff, deletedHits, deletedEvents, startedAt, completedAt, resultJson);
         }
@@ -384,7 +480,15 @@ public sealed class RetrievalTelemetryRetentionService(
                 vacuumFullCompleted: vacuumFullCompleted,
                 vacuumFullError: vacuumFullError,
                 completed: true,
-                error: ex.Message);
+                error: ex.Message,
+                upsertedEventSummaryRows: progress?.UpsertedEventSummaryRows ?? 0,
+                upsertedHitSummaryRows: progress?.UpsertedHitSummaryRows ?? 0,
+                processedSummaryDays: progress?.ProcessedSummaryDays ?? 0,
+                deletedEventSummaryRows: progress?.DeletedEventSummaryRows ?? 0,
+                deletedHitSummaryRows: progress?.DeletedHitSummaryRows ?? 0,
+                deletedSecurityAuditEvents: progress?.DeletedSecurityAuditEvents ?? 0,
+                deletedRuntimeLogEntries: progress?.DeletedRuntimeLogEntries ?? 0,
+                deletedMaintenanceRuns: progress?.DeletedMaintenanceRuns ?? 0);
             await UpdateRunAsync(run.Id, MaintenanceRunStatus.Failed, completedAt, failedJson, ex.Message, CancellationToken.None);
             throw;
         }
@@ -502,6 +606,509 @@ public sealed class RetrievalTelemetryRetentionService(
 
             await DelayBetweenBatchesAsync(progress.Policy, cancellationToken);
         }
+    }
+
+    private async Task UpsertDailySummariesAsync(
+        NpgsqlConnection connection,
+        RetentionProgress progress,
+        CancellationToken cancellationToken)
+    {
+        var summaryCutoffDate = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime.Date);
+        var earliestBackfillDate = summaryCutoffDate.AddDays(-progress.Policy.EventsRetentionDays);
+        var currentDate = await ResolveNextUnsummarizedDateAsync(
+            connection,
+            earliestBackfillDate,
+            summaryCutoffDate,
+            progress.Policy,
+            cancellationToken);
+
+        while (currentDate.HasValue && currentDate.Value < summaryCutoffDate)
+        {
+            if (ShouldStopForMaxDuration(progress.StartedAt, progress.Policy, out _))
+            {
+                return;
+            }
+
+            var day = currentDate.Value;
+            progress.UpsertedEventSummaryRows += await UpsertDailyEventSummaryAsync(connection, day, progress.Policy, cancellationToken);
+            progress.UpsertedHitSummaryRows += await UpsertDailyHitSummaryAsync(connection, day, progress.Policy, cancellationToken);
+            progress.ProcessedSummaryDays++;
+            await UpdateProgressAsync(progress, cancellationToken);
+            currentDate = await ResolveNextUnsummarizedDateAsync(
+                connection,
+                day.AddDays(1),
+                summaryCutoffDate,
+                progress.Policy,
+                cancellationToken);
+        }
+    }
+
+    private static async Task<DateOnly?> ResolveNextUnsummarizedDateAsync(
+        NpgsqlConnection connection,
+        DateOnly fromDate,
+        DateOnly summaryCutoffDate,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            WITH candidate_days AS (
+                SELECT DISTINCT (created_at AT TIME ZONE 'UTC')::date AS summary_date
+                FROM retrieval_events
+                WHERE created_at >= @from_date
+                  AND created_at < @summary_cutoff
+            )
+            SELECT candidate_days.summary_date
+            FROM candidate_days
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM retrieval_telemetry_daily_summaries existing
+                WHERE existing.summary_date = candidate_days.summary_date
+            )
+            ORDER BY candidate_days.summary_date ASC
+            LIMIT 1;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>(
+            "from_date",
+            new DateTimeOffset(fromDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>(
+            "summary_cutoff",
+            new DateTimeOffset(summaryCutoffDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)));
+
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        if (value is null || value is DBNull)
+        {
+            return null;
+        }
+
+        return value switch
+        {
+            DateOnly dateOnly => dateOnly,
+            DateTime dateTime => DateOnly.FromDateTime(dateTime),
+            _ => throw new InvalidOperationException($"Unexpected summary date type '{value.GetType()}'.")
+        };
+    }
+
+    private static async Task<long> UpsertDailyEventSummaryAsync(
+        NpgsqlConnection connection,
+        DateOnly summaryDate,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            INSERT INTO retrieval_telemetry_daily_summaries (
+                summary_date,
+                tenant_id,
+                owner_user_id,
+                project_id,
+                channel,
+                entry_point,
+                purpose,
+                query_mode,
+                request_count,
+                success_count,
+                error_count,
+                zero_result_count,
+                cache_hit_count,
+                result_count_sum,
+                duration_ms_sum,
+                duration_ms_max,
+                duration_ms_p95,
+                first_seen_at,
+                last_seen_at,
+                updated_at)
+            SELECT
+                @summary_date,
+                COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                COALESCE(owner_user_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                COALESCE(project_id, ''),
+                COALESCE(channel, ''),
+                COALESCE(entry_point, ''),
+                COALESCE(purpose, ''),
+                COALESCE(query_mode, ''),
+                COUNT(*)::bigint,
+                COUNT(*) FILTER (WHERE success)::bigint,
+                COUNT(*) FILTER (WHERE NOT success)::bigint,
+                COUNT(*) FILTER (WHERE result_count = 0)::bigint,
+                COUNT(*) FILTER (WHERE cache_hit)::bigint,
+                COALESCE(SUM(result_count), 0)::bigint,
+                COALESCE(SUM(duration_ms), 0)::double precision,
+                COALESCE(MAX(duration_ms), 0)::double precision,
+                COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms), 0)::double precision,
+                MIN(created_at),
+                MAX(created_at),
+                NOW()
+            FROM retrieval_events
+            WHERE created_at >= @day_start
+              AND created_at < @day_end
+            GROUP BY tenant_id, owner_user_id, project_id, channel, entry_point, purpose, query_mode
+            ON CONFLICT (summary_date, tenant_id, owner_user_id, project_id, channel, entry_point, purpose, query_mode)
+            DO UPDATE SET
+                request_count = EXCLUDED.request_count,
+                success_count = EXCLUDED.success_count,
+                error_count = EXCLUDED.error_count,
+                zero_result_count = EXCLUDED.zero_result_count,
+                cache_hit_count = EXCLUDED.cache_hit_count,
+                result_count_sum = EXCLUDED.result_count_sum,
+                duration_ms_sum = EXCLUDED.duration_ms_sum,
+                duration_ms_max = EXCLUDED.duration_ms_max,
+                duration_ms_p95 = EXCLUDED.duration_ms_p95,
+                first_seen_at = EXCLUDED.first_seen_at,
+                last_seen_at = EXCLUDED.last_seen_at,
+                updated_at = EXCLUDED.updated_at;
+            """;
+        AddSummaryDayParameters(command, summaryDate);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<long> UpsertDailyHitSummaryAsync(
+        NpgsqlConnection connection,
+        DateOnly summaryDate,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await DeleteSummaryRowsForDayAsync(
+            connection,
+            "retrieval_telemetry_daily_hit_summaries",
+            summaryDate,
+            policy,
+            cancellationToken);
+
+        long total = 0;
+        DateTimeOffset? afterCreatedAt = null;
+        Guid? afterId = null;
+        while (true)
+        {
+            var eventWindow = await ReadSummaryEventWindowAsync(
+                connection,
+                summaryDate,
+                afterCreatedAt,
+                afterId,
+                policy,
+                cancellationToken);
+            if (eventWindow.EventIds.Count == 0)
+            {
+                break;
+            }
+
+            total += await UpsertDailyHitSummaryBatchAsync(connection, summaryDate, eventWindow.EventIds, policy, cancellationToken);
+            afterCreatedAt = eventWindow.LastCreatedAt;
+            afterId = eventWindow.LastId;
+        }
+
+        await PruneDailyHitSummaryAsync(connection, summaryDate, policy, cancellationToken);
+        return total;
+    }
+
+    private static async Task<EventWindow> ReadSummaryEventWindowAsync(
+        NpgsqlConnection connection,
+        DateOnly summaryDate,
+        DateTimeOffset? afterCreatedAt,
+        Guid? afterId,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        var dayStart = new DateTimeOffset(summaryDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = afterCreatedAt.HasValue && afterId.HasValue
+            ? """
+                SELECT id, created_at
+                FROM retrieval_events
+                WHERE created_at >= @day_start
+                  AND created_at < @day_end
+                  AND (
+                      created_at > @after_created_at
+                      OR (created_at = @after_created_at AND id > @after_id)
+                  )
+                ORDER BY created_at ASC, id ASC
+                LIMIT @event_batch_size;
+                """
+            : """
+                SELECT id, created_at
+                FROM retrieval_events
+                WHERE created_at >= @day_start
+                  AND created_at < @day_end
+                ORDER BY created_at ASC, id ASC
+                LIMIT @event_batch_size;
+                """;
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("day_start", dayStart));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("day_end", dayStart.AddDays(1)));
+        command.Parameters.Add(new NpgsqlParameter<int>("event_batch_size", policy.EventBatchSize));
+        if (afterCreatedAt.HasValue && afterId.HasValue)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("after_created_at", afterCreatedAt.Value));
+            command.Parameters.Add(new NpgsqlParameter<Guid>("after_id", afterId.Value));
+        }
+
+        var eventIds = new List<Guid>(policy.EventBatchSize);
+        DateTimeOffset? lastCreatedAt = null;
+        Guid? lastId = null;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            lastId = reader.GetGuid(0);
+            lastCreatedAt = reader.GetFieldValue<DateTimeOffset>(1);
+            eventIds.Add(lastId.Value);
+        }
+
+        return new EventWindow(eventIds, lastCreatedAt, lastId);
+    }
+
+    private static async Task<long> UpsertDailyHitSummaryBatchAsync(
+        NpgsqlConnection connection,
+        DateOnly summaryDate,
+        IReadOnlyList<Guid> eventIds,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            WITH ranked AS (
+                SELECT
+                    @summary_date::date AS summary_date,
+                    COALESCE(e.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid) AS tenant_id,
+                    COALESCE(e.owner_user_id, '00000000-0000-0000-0000-000000000000'::uuid) AS owner_user_id,
+                    COALESCE(e.project_id, '') AS project_id,
+                    COALESCE(e.entry_point, '') AS entry_point,
+                    COALESCE(h.memory_id, '00000000-0000-0000-0000-000000000000'::uuid) AS memory_id,
+                    COALESCE(MIN(NULLIF(h.title, '')), '(untitled)') AS title,
+                    COALESCE(MIN(NULLIF(h.memory_type, '')), '') AS memory_type,
+                    COALESCE(MIN(NULLIF(h.source_type, '')), '') AS source_type,
+                    COALESCE(h.source_ref, '') AS source_ref,
+                    COUNT(*)::bigint AS hit_count,
+                    MIN(h.rank) AS best_rank,
+                    MAX(h.score) AS best_score,
+                    AVG(h.score) AS average_score,
+                    MIN(e.created_at) AS first_seen_at,
+                    MAX(e.created_at) AS last_seen_at
+                FROM retrieval_events e
+                INNER JOIN retrieval_hits h ON h.retrieval_event_id = e.id
+                WHERE e.id = ANY(@event_ids)
+                GROUP BY e.tenant_id, e.owner_user_id, e.project_id, e.entry_point,
+                         h.memory_id, h.source_ref
+            )
+            INSERT INTO retrieval_telemetry_daily_hit_summaries (
+                summary_date,
+                tenant_id,
+                owner_user_id,
+                project_id,
+                entry_point,
+                memory_id,
+                title,
+                memory_type,
+                source_type,
+                source_ref,
+                hit_count,
+                best_rank,
+                best_score,
+                average_score,
+                first_seen_at,
+                last_seen_at,
+                updated_at)
+            SELECT
+                summary_date,
+                tenant_id,
+                owner_user_id,
+                project_id,
+                entry_point,
+                memory_id,
+                title,
+                memory_type,
+                source_type,
+                source_ref,
+                hit_count,
+                best_rank,
+                best_score,
+                average_score,
+                first_seen_at,
+                last_seen_at,
+                NOW()
+            FROM ranked
+            ON CONFLICT (summary_date, tenant_id, owner_user_id, project_id, entry_point, memory_id, source_ref)
+            DO UPDATE SET
+                title = EXCLUDED.title,
+                memory_type = EXCLUDED.memory_type,
+                source_type = EXCLUDED.source_type,
+                hit_count = retrieval_telemetry_daily_hit_summaries.hit_count + EXCLUDED.hit_count,
+                best_rank = LEAST(retrieval_telemetry_daily_hit_summaries.best_rank, EXCLUDED.best_rank),
+                best_score = GREATEST(retrieval_telemetry_daily_hit_summaries.best_score, EXCLUDED.best_score),
+                average_score =
+                    ((COALESCE(retrieval_telemetry_daily_hit_summaries.average_score, 0) * retrieval_telemetry_daily_hit_summaries.hit_count)
+                     + (COALESCE(EXCLUDED.average_score, 0) * EXCLUDED.hit_count))
+                    / NULLIF(retrieval_telemetry_daily_hit_summaries.hit_count + EXCLUDED.hit_count, 0),
+                first_seen_at = LEAST(retrieval_telemetry_daily_hit_summaries.first_seen_at, EXCLUDED.first_seen_at),
+                last_seen_at = GREATEST(retrieval_telemetry_daily_hit_summaries.last_seen_at, EXCLUDED.last_seen_at),
+                updated_at = EXCLUDED.updated_at;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<DateOnly>("summary_date", summaryDate));
+        command.Parameters.Add(new NpgsqlParameter<Guid[]>("event_ids", eventIds.ToArray()));
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task PruneDailyHitSummaryAsync(
+        NpgsqlConnection connection,
+        DateOnly summaryDate,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            WITH ranked AS (
+                SELECT summary_date,
+                       tenant_id,
+                       owner_user_id,
+                       project_id,
+                       entry_point,
+                       memory_id,
+                       source_ref,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY summary_date, tenant_id, owner_user_id, project_id, entry_point
+                           ORDER BY hit_count DESC, best_rank ASC, title ASC
+                       ) AS row_number
+                FROM retrieval_telemetry_daily_hit_summaries
+                WHERE summary_date = @summary_date
+            )
+            DELETE FROM retrieval_telemetry_daily_hit_summaries target
+            USING ranked
+            WHERE target.summary_date = ranked.summary_date
+              AND target.tenant_id = ranked.tenant_id
+              AND target.owner_user_id = ranked.owner_user_id
+              AND target.project_id = ranked.project_id
+              AND target.entry_point = ranked.entry_point
+              AND target.memory_id = ranked.memory_id
+              AND target.source_ref = ranked.source_ref
+              AND ranked.row_number > @top_per_bucket;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<DateOnly>("summary_date", summaryDate));
+        command.Parameters.Add(new NpgsqlParameter<int>("top_per_bucket", policy.HitSummaryTopPerBucket));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task DeleteSummaryRowsForDayAsync(
+        NpgsqlConnection connection,
+        string table,
+        DateOnly summaryDate,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = $"DELETE FROM {table} WHERE summary_date = @summary_date;";
+        command.Parameters.Add(new NpgsqlParameter<DateOnly>("summary_date", summaryDate));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static void AddSummaryDayParameters(NpgsqlCommand command, DateOnly summaryDate)
+    {
+        var dayStart = new DateTimeOffset(summaryDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        command.Parameters.Add(new NpgsqlParameter<DateOnly>("summary_date", summaryDate));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("day_start", dayStart));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("day_end", dayStart.AddDays(1)));
+    }
+
+    private async Task DeleteOtherRetentionTablesAsync(
+        NpgsqlConnection connection,
+        RetentionProgress progress,
+        Guid currentRunId,
+        CancellationToken cancellationToken)
+    {
+        progress.DeletedSecurityAuditEvents += await DeleteOlderThanAsync(
+            connection,
+            "security_audit_events",
+            "created_at",
+            timeProvider.GetUtcNow().AddDays(-progress.Policy.SecurityAuditRetentionDays),
+            progress.Policy,
+            cancellationToken);
+        progress.DeletedRuntimeLogEntries += await DeleteOlderThanAsync(
+            connection,
+            "runtime_log_entries",
+            "created_at",
+            timeProvider.GetUtcNow().AddDays(-progress.Policy.RuntimeLogRetentionDays),
+            progress.Policy,
+            cancellationToken);
+        progress.DeletedMaintenanceRuns += await DeleteOldMaintenanceRunsAsync(
+            connection,
+            currentRunId,
+            timeProvider.GetUtcNow().AddDays(-progress.Policy.MaintenanceRunRetentionDays),
+            progress.Policy,
+            cancellationToken);
+        await UpdateProgressAsync(progress, cancellationToken);
+    }
+
+    private static async Task<long> DeleteOlderThanAsync(
+        NpgsqlConnection connection,
+        string table,
+        string column,
+        DateTimeOffset cutoff,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = $"DELETE FROM {table} WHERE {column} < @cutoff;";
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoff));
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<long> DeleteOldMaintenanceRunsAsync(
+        NpgsqlConnection connection,
+        Guid currentRunId,
+        DateTimeOffset cutoff,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            DELETE FROM maintenance_runs
+            WHERE id <> @current_run_id
+              AND status <> 'Running'
+              AND started_at < @cutoff;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<Guid>("current_run_id", currentRunId));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoff));
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private async Task DeleteExpiredSummariesAsync(
+        NpgsqlConnection connection,
+        RetentionProgress progress,
+        CancellationToken cancellationToken)
+    {
+        var cutoff = DateOnly.FromDateTime(timeProvider.GetUtcNow().AddDays(-progress.Policy.SummaryRetentionDays).UtcDateTime.Date);
+        progress.DeletedEventSummaryRows += await DeleteSummaryRowsAsync(
+            connection,
+            "retrieval_telemetry_daily_summaries",
+            cutoff,
+            progress.Policy,
+            cancellationToken);
+        progress.DeletedHitSummaryRows += await DeleteSummaryRowsAsync(
+            connection,
+            "retrieval_telemetry_daily_hit_summaries",
+            cutoff,
+            progress.Policy,
+            cancellationToken);
+        await UpdateProgressAsync(progress, cancellationToken);
+    }
+
+    private static async Task<long> DeleteSummaryRowsAsync(
+        NpgsqlConnection connection,
+        string table,
+        DateOnly cutoff,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = $"DELETE FROM {table} WHERE summary_date < @cutoff;";
+        command.Parameters.Add(new NpgsqlParameter<DateOnly>("cutoff", cutoff));
+        return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task<RetentionWindow?> ResolveRetentionWindowAsync(
@@ -642,7 +1249,7 @@ public sealed class RetrievalTelemetryRetentionService(
 
     private static async Task VacuumAnalyzeAsync(NpgsqlConnection connection, RetrievalTelemetryRetentionPolicy policy, CancellationToken cancellationToken)
     {
-        foreach (var table in new[] { "retrieval_hits", "retrieval_events" })
+        foreach (var table in RetentionVacuumTables)
         {
             await using var command = connection.CreateCommand();
             command.CommandTimeout = policy.CommandTimeoutSeconds;
@@ -669,7 +1276,14 @@ public sealed class RetrievalTelemetryRetentionService(
         command.CommandText = """
             SELECT relname, pg_total_relation_size(relid)::bigint
             FROM pg_catalog.pg_statio_user_tables
-            WHERE relname IN ('retrieval_events', 'retrieval_hits')
+            WHERE relname IN (
+                'retrieval_events',
+                'retrieval_hits',
+                'retrieval_telemetry_daily_summaries',
+                'retrieval_telemetry_daily_hit_summaries',
+                'security_audit_events',
+                'runtime_log_entries',
+                'maintenance_runs')
             ORDER BY relname;
             """;
         var sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
@@ -696,7 +1310,15 @@ public sealed class RetrievalTelemetryRetentionService(
             progress.CurrentHitsWindow,
             progress.CurrentEventsWindow,
             progress.ProcessedHitsWindows,
-            progress.ProcessedEventsWindows);
+            progress.ProcessedEventsWindows,
+            upsertedEventSummaryRows: progress.UpsertedEventSummaryRows,
+            upsertedHitSummaryRows: progress.UpsertedHitSummaryRows,
+            processedSummaryDays: progress.ProcessedSummaryDays,
+            deletedEventSummaryRows: progress.DeletedEventSummaryRows,
+            deletedHitSummaryRows: progress.DeletedHitSummaryRows,
+            deletedSecurityAuditEvents: progress.DeletedSecurityAuditEvents,
+            deletedRuntimeLogEntries: progress.DeletedRuntimeLogEntries,
+            deletedMaintenanceRuns: progress.DeletedMaintenanceRuns);
         await UpdateRunAsync(progress.RunId, MaintenanceRunStatus.Running, null, resultJson, string.Empty, cancellationToken);
     }
 
@@ -742,17 +1364,46 @@ public sealed class RetrievalTelemetryRetentionService(
         string? vacuumFullError = null,
         bool completed = false,
         string? stoppedReason = null,
-        string? error = null)
+        string? error = null,
+        long upsertedEventSummaryRows = 0,
+        long upsertedHitSummaryRows = 0,
+        int processedSummaryDays = 0,
+        long deletedEventSummaryRows = 0,
+        long deletedHitSummaryRows = 0,
+        long deletedSecurityAuditEvents = 0,
+        long deletedRuntimeLogEntries = 0,
+        long deletedMaintenanceRuns = 0)
         => JsonSerializer.Serialize(new
         {
             deletedHits,
             deletedEvents,
+            upsertedEventSummaryRows,
+            upsertedHitSummaryRows,
+            processedSummaryDays,
+            deletedEventSummaryRows,
+            deletedHitSummaryRows,
+            otherTableRetention = new
+            {
+                deletedSecurityAuditEvents,
+                deletedRuntimeLogEntries,
+                deletedMaintenanceRuns
+            },
             startedAtUtc = startedAt,
             observedAtUtc = observedAt,
             completedAtUtc = completed ? observedAt : (DateTimeOffset?)null,
             durationMs = (observedAt - startedAt).TotalMilliseconds,
             tableSizeBeforeBytes = sizeBefore,
             tableSizeAfterBytes = sizeAfter,
+            policy = new
+            {
+                hitsRetentionDays = policy.HitsRetentionDays,
+                eventsRetentionDays = policy.EventsRetentionDays,
+                summaryRetentionDays = policy.SummaryRetentionDays,
+                securityAuditRetentionDays = policy.SecurityAuditRetentionDays,
+                runtimeLogRetentionDays = policy.RuntimeLogRetentionDays,
+                maintenanceRunRetentionDays = policy.MaintenanceRunRetentionDays,
+                hitSummaryTopPerBucket = policy.HitSummaryTopPerBucket
+            },
             timeWindowDays = policy.TimeWindowDays,
             hitsWindowStartUtc = hitsWindow?.Start,
             hitsWindowEndUtc = hitsWindow?.End,
@@ -791,6 +1442,14 @@ public sealed class RetrievalTelemetryRetentionService(
     {
         public long DeletedHits { get; set; }
         public long DeletedEvents { get; set; }
+        public long UpsertedEventSummaryRows { get; set; }
+        public long UpsertedHitSummaryRows { get; set; }
+        public int ProcessedSummaryDays { get; set; }
+        public long DeletedEventSummaryRows { get; set; }
+        public long DeletedHitSummaryRows { get; set; }
+        public long DeletedSecurityAuditEvents { get; set; }
+        public long DeletedRuntimeLogEntries { get; set; }
+        public long DeletedMaintenanceRuns { get; set; }
         public int ProcessedHitsWindows { get; set; }
         public int ProcessedEventsWindows { get; set; }
         public RetentionWindow? CurrentHitsWindow { get; set; }

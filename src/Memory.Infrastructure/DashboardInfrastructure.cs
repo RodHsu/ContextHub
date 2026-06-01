@@ -109,6 +109,18 @@ public sealed class NpgsqlStorageExplorerStore(NpgsqlDataSource dataSource) : IS
                 "retrieval_event_id DESC, rank ASC",
                 ["id", "retrieval_event_id", "rank", "memory_id", "title", "memory_type", "source_type", "source_ref", "score", "excerpt", "project_id"],
                 ["retrieval_event_id", "memory_id", "title", "memory_type", "source_type", "source_ref", "excerpt", "project_id"]),
+            ["retrieval_telemetry_daily_summaries"] = new(
+                "retrieval_telemetry_daily_summaries",
+                "檢索 telemetry 每日彙總",
+                "summary_date DESC, project_id ASC, entry_point ASC",
+                ["summary_date", "tenant_id", "owner_user_id", "project_id", "channel", "entry_point", "purpose", "query_mode", "request_count", "success_count", "error_count", "zero_result_count", "cache_hit_count", "duration_sum_ms", "duration_max_ms", "duration_p95_ms", "result_count_sum", "created_at", "updated_at"],
+                ["tenant_id", "owner_user_id", "project_id", "channel", "entry_point", "purpose", "query_mode"]),
+            ["retrieval_telemetry_daily_hit_summaries"] = new(
+                "retrieval_telemetry_daily_hit_summaries",
+                "檢索命中每日 Top memory 彙總",
+                "summary_date DESC, project_id ASC, entry_point ASC, hit_count DESC",
+                ["summary_date", "tenant_id", "owner_user_id", "project_id", "entry_point", "memory_id", "title", "memory_type", "source_type", "source_ref", "hit_count", "best_rank", "score_sum", "score_max", "created_at", "updated_at"],
+                ["tenant_id", "owner_user_id", "project_id", "entry_point", "memory_id", "title", "memory_type", "source_type", "source_ref"]),
             ["log_ingestion_checkpoints"] = new(
                 "log_ingestion_checkpoints",
                 "log 擷取檢查點",

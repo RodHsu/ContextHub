@@ -291,12 +291,19 @@ public sealed class DockerRuntimeMetricsService(IOptions<DockerRuntimeOptions> o
     private async Task<ContainerStatsResponse> ReadStatsAsync(string containerId, CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource<ContainerStatsResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var progress = new Progress<ContainerStatsResponse>(response =>
         {
             if (completion.TrySetResult(response))
             {
-                linkedCts.Cancel();
+                try
+                {
+                    linkedCts.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Docker.DotNet may deliver a final progress callback while the read is being torn down.
+                }
             }
         });
 
@@ -326,7 +333,18 @@ public sealed class DockerRuntimeMetricsService(IOptions<DockerRuntimeOptions> o
         }
         finally
         {
-            linkedCts.Cancel();
+            try
+            {
+                linkedCts.Cancel();
+                await statsTask;
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or DockerApiException)
+            {
+            }
+            finally
+            {
+                linkedCts.Dispose();
+            }
         }
     }
 

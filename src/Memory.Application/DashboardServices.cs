@@ -835,6 +835,10 @@ public sealed class DashboardQueryService(
         {
             events = [];
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            events = [];
+        }
 
         var samples = events
             .Select(x => new ContextSavingsTelemetrySample(

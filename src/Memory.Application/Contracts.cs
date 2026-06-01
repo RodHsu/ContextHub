@@ -211,7 +211,8 @@ public sealed record RetrievalTelemetryRetentionRunRequest(
     int? DelayBetweenBatchesMs = null,
     int? CommandTimeoutSeconds = null,
     int? MaxDurationMinutes = null,
-    bool? RunVacuumAnalyzeAfterRetention = null);
+    bool? RunVacuumAnalyzeAfterRetention = null,
+    bool? RunVacuumFullAutomatically = null);
 
 public sealed record RetrievalTelemetryRetentionRunResult(
     Guid RunId,
@@ -760,6 +761,8 @@ public interface IApplicationDbContext
     DbSet<MaintenanceRun> MaintenanceRuns { get; }
     DbSet<RetrievalEvent> RetrievalEvents { get; }
     DbSet<RetrievalHit> RetrievalHits { get; }
+    DbSet<RetrievalTelemetryDailySummary> RetrievalTelemetryDailySummaries { get; }
+    DbSet<RetrievalTelemetryDailyHitSummary> RetrievalTelemetryDailyHitSummaries { get; }
     DbSet<RuntimeLogEntry> RuntimeLogEntries { get; }
     DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints { get; }
     DbSet<SourceConnection> SourceConnections { get; }

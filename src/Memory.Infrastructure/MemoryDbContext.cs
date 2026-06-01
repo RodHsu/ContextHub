@@ -34,6 +34,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<RuntimeLogEntry> RuntimeLogEntries => Set<RuntimeLogEntry>();
     public DbSet<RetrievalEvent> RetrievalEvents => Set<RetrievalEvent>();
     public DbSet<RetrievalHit> RetrievalHits => Set<RetrievalHit>();
+    public DbSet<RetrievalTelemetryDailySummary> RetrievalTelemetryDailySummaries => Set<RetrievalTelemetryDailySummary>();
+    public DbSet<RetrievalTelemetryDailyHitSummary> RetrievalTelemetryDailyHitSummaries => Set<RetrievalTelemetryDailyHitSummary>();
     public DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints => Set<LogIngestionCheckpoint>();
     public DbSet<SourceConnection> SourceConnections => Set<SourceConnection>();
     public DbSet<SourceSyncRun> SourceSyncRuns => Set<SourceSyncRun>();
@@ -350,6 +352,59 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Score).HasColumnName("score");
             entity.Property(x => x.Excerpt).HasColumnName("excerpt");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
+        });
+
+        modelBuilder.Entity<RetrievalTelemetryDailySummary>(entity =>
+        {
+            entity.ToTable("retrieval_telemetry_daily_summaries");
+            entity.HasKey(x => new { x.SummaryDate, x.TenantId, x.OwnerUserId, x.ProjectId, x.Channel, x.EntryPoint, x.Purpose, x.QueryMode });
+            entity.Property(x => x.SummaryDate).HasColumnName("summary_date");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.Channel).HasColumnName("channel");
+            entity.Property(x => x.EntryPoint).HasColumnName("entry_point");
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.QueryMode).HasColumnName("query_mode");
+            entity.Property(x => x.RequestCount).HasColumnName("request_count");
+            entity.Property(x => x.SuccessCount).HasColumnName("success_count");
+            entity.Property(x => x.ErrorCount).HasColumnName("error_count");
+            entity.Property(x => x.ZeroResultCount).HasColumnName("zero_result_count");
+            entity.Property(x => x.CacheHitCount).HasColumnName("cache_hit_count");
+            entity.Property(x => x.ResultCountSum).HasColumnName("result_count_sum");
+            entity.Property(x => x.DurationMsSum).HasColumnName("duration_ms_sum");
+            entity.Property(x => x.DurationMsMax).HasColumnName("duration_ms_max");
+            entity.Property(x => x.DurationMsP95).HasColumnName("duration_ms_p95");
+            entity.Property(x => x.FirstSeenAt).HasColumnName("first_seen_at");
+            entity.Property(x => x.LastSeenAt).HasColumnName("last_seen_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => x.SummaryDate);
+            entity.HasIndex(x => new { x.ProjectId, x.EntryPoint, x.SummaryDate });
+        });
+
+        modelBuilder.Entity<RetrievalTelemetryDailyHitSummary>(entity =>
+        {
+            entity.ToTable("retrieval_telemetry_daily_hit_summaries");
+            entity.HasKey(x => new { x.SummaryDate, x.TenantId, x.OwnerUserId, x.ProjectId, x.EntryPoint, x.MemoryId, x.SourceRef });
+            entity.Property(x => x.SummaryDate).HasColumnName("summary_date");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.EntryPoint).HasColumnName("entry_point");
+            entity.Property(x => x.MemoryId).HasColumnName("memory_id");
+            entity.Property(x => x.Title).HasColumnName("title");
+            entity.Property(x => x.MemoryType).HasColumnName("memory_type");
+            entity.Property(x => x.SourceType).HasColumnName("source_type");
+            entity.Property(x => x.SourceRef).HasColumnName("source_ref");
+            entity.Property(x => x.HitCount).HasColumnName("hit_count");
+            entity.Property(x => x.BestRank).HasColumnName("best_rank");
+            entity.Property(x => x.BestScore).HasColumnName("best_score");
+            entity.Property(x => x.AverageScore).HasColumnName("average_score");
+            entity.Property(x => x.FirstSeenAt).HasColumnName("first_seen_at");
+            entity.Property(x => x.LastSeenAt).HasColumnName("last_seen_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => x.SummaryDate);
+            entity.HasIndex(x => new { x.ProjectId, x.EntryPoint, x.SummaryDate, x.HitCount });
         });
 
         modelBuilder.Entity<LogIngestionCheckpoint>(entity =>

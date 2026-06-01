@@ -1080,6 +1080,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         tables.Should().NotBeNull();
         tables!.Should().Contain(x => x.Name == "memory_items");
         tables.Should().Contain(x => x.Name == "maintenance_runs");
+        tables.Should().Contain(x => x.Name == "retrieval_telemetry_daily_summaries");
+        tables.Should().Contain(x => x.Name == "retrieval_telemetry_daily_hit_summaries");
         rows.Should().NotBeNull();
         rows!.Table.Should().Be("memory_items");
         rows.Description.Should().NotBeNullOrWhiteSpace();
@@ -1175,23 +1177,49 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
-    public async Task Retrieval_Telemetry_Retention_Should_Delete_Hits_At_15_Days_And_Events_At_30_Days()
+    public async Task Retrieval_Telemetry_Retention_Should_Delete_Raw_Rows_And_Write_Daily_Summaries()
     {
         var oldEventId = Guid.Parse("93000000-0000-0000-0000-000000000001");
         var middleEventId = Guid.Parse("93000000-0000-0000-0000-000000000002");
         var recentEventId = Guid.Parse("93000000-0000-0000-0000-000000000003");
+        var oldAuditEventId = Guid.Parse("93000000-0000-0000-0000-000000000004");
+        var oldMaintenanceRunId = Guid.Parse("93000000-0000-0000-0000-000000000005");
         var now = DateTimeOffset.UtcNow;
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             dbContext.RetrievalEvents.AddRange(
-                CreateRetentionEvent(oldEventId, now.AddDays(-40), "retention-old"),
-                CreateRetentionEvent(middleEventId, now.AddDays(-20), "retention-middle"),
-                CreateRetentionEvent(recentEventId, now.AddDays(-10), "retention-recent"));
+                CreateRetentionEvent(oldEventId, now.AddDays(-10), "retention-old"),
+                CreateRetentionEvent(middleEventId, now.AddDays(-5), "retention-middle"),
+                CreateRetentionEvent(recentEventId, now.AddDays(-1), "retention-recent"));
             dbContext.RetrievalHits.AddRange(Enumerable.Range(1, 3).Select(index => CreateRetentionHit(oldEventId, $"old hit {index}")));
             dbContext.RetrievalHits.AddRange(Enumerable.Range(1, 4).Select(index => CreateRetentionHit(middleEventId, $"middle hit {index}")));
             dbContext.RetrievalHits.Add(CreateRetentionHit(recentEventId, "recent hit"));
+            dbContext.SecurityAuditEvents.Add(new SecurityAuditEvent
+            {
+                Id = oldAuditEventId,
+                EventType = SecurityAuditEventType.ApiTokenAuthenticationFailed,
+                Outcome = "failure",
+                CreatedAt = now.AddDays(-181)
+            });
+            dbContext.RuntimeLogEntries.Add(new RuntimeLogEntry
+            {
+                ServiceName = "retention-test",
+                Category = "retention-test",
+                Level = "Warning",
+                Message = "old runtime log",
+                CreatedAt = now.AddDays(-31)
+            });
+            dbContext.MaintenanceRuns.Add(new MaintenanceRun
+            {
+                Id = oldMaintenanceRunId,
+                MaintenanceType = MaintenanceRunType.VacuumFullReclaim,
+                Status = MaintenanceRunStatus.Completed,
+                StartedAt = now.AddDays(-181),
+                CompletedAt = now.AddDays(-181).AddMinutes(1),
+                TriggeredBy = "retention-test"
+            });
             await dbContext.SaveChangesAsync(CancellationToken.None);
 
             var service = scope.ServiceProvider.GetRequiredService<IRetrievalTelemetryRetentionService>();
@@ -1221,17 +1249,27 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
             (await dbContext.RetrievalEvents.AnyAsync(x => x.Id == recentEventId)).Should().BeTrue();
             (await dbContext.RetrievalHits.AnyAsync(x => x.RetrievalEventId == recentEventId)).Should().BeTrue();
+            (await dbContext.RetrievalTelemetryDailySummaries.AnyAsync(x => x.EntryPoint == "retention-test")).Should().BeTrue();
+            (await dbContext.RetrievalTelemetryDailyHitSummaries.AnyAsync(x => x.EntryPoint == "retention-test")).Should().BeTrue();
+            (await dbContext.SecurityAuditEvents.AnyAsync(x => x.Id == oldAuditEventId)).Should().BeFalse();
+            (await dbContext.RuntimeLogEntries.AnyAsync(x => x.ServiceName == "retention-test" && x.Message == "old runtime log")).Should().BeFalse();
+            (await dbContext.MaintenanceRuns.AnyAsync(x => x.Id == oldMaintenanceRunId)).Should().BeFalse();
 
             var run = await dbContext.MaintenanceRuns
                 .OrderByDescending(x => x.StartedAt)
                 .FirstAsync(x => x.MaintenanceType == MaintenanceRunType.RetrievalTelemetryRetention);
             run.Status.Should().Be(MaintenanceRunStatus.Completed);
             run.PolicyJson.Should().Contain("hitsRetentionDays");
-            run.PolicyJson.Should().Contain("15");
+            run.PolicyJson.Should().Contain("summaryRetentionDays");
+            run.PolicyJson.Should().Contain("3");
+            run.PolicyJson.Should().Contain("7");
             run.PolicyJson.Should().Contain("eventBatchSize");
             run.PolicyJson.Should().Contain("timeWindowDays");
             run.PolicyJson.Should().Contain("runVacuumAnalyzeAfterRetention");
             run.ResultJson.Should().Contain("deletedHits");
+            run.ResultJson.Should().Contain("upsertedEventSummaryRows");
+            run.ResultJson.Should().Contain("upsertedHitSummaryRows");
+            run.ResultJson.Should().Contain("otherTableRetention");
             run.ResultJson.Should().Contain("hitsWindowStartUtc");
             run.ResultJson.Should().Contain("eventsWindowStartUtc");
             run.ResultJson.Should().Contain("processedHitsWindows");
@@ -1272,6 +1310,10 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         policy.GetProperty("commandTimeoutSeconds").GetInt32().Should().Be(30);
         policy.GetProperty("maxDurationMinutes").GetInt32().Should().Be(30);
         policy.GetProperty("runVacuumAnalyzeAfterRetention").GetBoolean().Should().BeFalse();
+        policy.GetProperty("summaryRetentionDays").GetInt32().Should().Be(30);
+        policy.GetProperty("securityAuditRetentionDays").GetInt32().Should().Be(180);
+        policy.GetProperty("runtimeLogRetentionDays").GetInt32().Should().Be(30);
+        policy.GetProperty("maintenanceRunRetentionDays").GetInt32().Should().Be(180);
 
         using var resultDocument = JsonDocument.Parse(run.ResultJson);
         resultDocument.RootElement.GetProperty("vacuumAnalyzeRequested").GetBoolean().Should().BeFalse();
