@@ -268,6 +268,64 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
+    public async Task Overview_Snapshot_Warning_Popover_Should_Not_Be_Clipped_By_Refresh_Status()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewport = new DashboardViewport("app-browser-999", 999, 1270);
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/?uiProfile=empty");
+        var trigger = page.GetByLabel("顯示資料延遲說明");
+        await trigger.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+        await trigger.HoverAsync();
+
+        await page.Locator(".refresh-status-shell .info-popover-panel").WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 5000
+        });
+        await page.WaitForFunctionAsync(
+            "() => Number(getComputedStyle(document.querySelector('.refresh-status-shell .info-popover-panel')).opacity) > 0.9");
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const shell = document.querySelector('.refresh-status-shell');
+                const panel = document.querySelector('.refresh-status-shell .info-popover-panel');
+                const panelRect = panel?.getBoundingClientRect();
+                const shellRect = shell?.getBoundingClientRect();
+                const sampleX = panelRect ? Math.round(panelRect.left + panelRect.width / 2) : 0;
+                const sampleY = panelRect ? Math.round(Math.min(panelRect.bottom - 4, panelRect.top + panelRect.height / 2)) : 0;
+                const hit = panelRect ? document.elementFromPoint(sampleX, sampleY) : null;
+                return JSON.stringify({
+                    shellContain: shell ? getComputedStyle(shell).contain : '',
+                    shellOverflow: shell ? getComputedStyle(shell).overflow : '',
+                    panelVisible: panel ? getComputedStyle(panel).visibility : '',
+                    panelOpacity: panel ? Number(getComputedStyle(panel).opacity) : 0,
+                    shellBottom: Math.round(shellRect?.bottom ?? 0),
+                    panelBottom: Math.round(panelRect?.bottom ?? 0),
+                    hitPopoverPanel: !!hit?.closest('.info-popover-panel'),
+                    hitClass: hit?.className?.toString() ?? '',
+                    panelText: panel?.textContent?.trim() ?? ''
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var root = document.RootElement;
+        root.GetProperty("shellContain").GetString().Should().NotContain("paint", $"refresh status must not paint-clip the warning popover: {layoutJson}");
+        root.GetProperty("shellOverflow").GetString().Should().Be("visible", $"warning popover must be allowed to overflow refresh status: {layoutJson}");
+        root.GetProperty("panelVisible").GetString().Should().Be("visible", $"warning popover should be visible: {layoutJson}");
+        root.GetProperty("panelOpacity").GetDouble().Should().BeGreaterThan(0.9, $"warning popover should be opaque while hovered: {layoutJson}");
+        root.GetProperty("panelBottom").GetInt32().Should().BeGreaterThan(root.GetProperty("shellBottom").GetInt32(), $"test must cover overflow outside the refresh status shell: {layoutJson}");
+        root.GetProperty("hitPopoverPanel").GetBoolean().Should().BeTrue($"warning popover must receive hit tests outside the refresh status shell: {layoutJson}");
+        root.GetProperty("panelText").GetString().Should().Contain("Snapshot is stale", $"warning popover should expose the stale details: {layoutJson}");
+    }
+
+    [Fact]
     public async Task Reconnect_Modal_Status_Text_Should_Be_Centered()
     {
         await _fixture.EnsureDashboardRunningAsync();

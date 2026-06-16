@@ -30,6 +30,8 @@ public sealed class DashboardQueryService(
         var projectSuggestions = await snapshotStore.GetAsync<DashboardProjectSuggestionsSnapshotPayload>(DashboardSnapshotKeys.DashboardProjectSuggestions, cancellationToken);
         var storageTableStats = await snapshotStore.GetAsync<DashboardStorageTableStatsSnapshotPayload>(DashboardSnapshotKeys.StorageTableStats, cancellationToken);
         var storageLargeTablePreview = await snapshotStore.GetAsync<DashboardStorageLargeTablePreviewSnapshotPayload>(DashboardSnapshotKeys.StorageLargeTablePreview, cancellationToken);
+        var evaluationSummary = await snapshotStore.GetAsync<DashboardEvaluationSummarySnapshotPayload>(DashboardSnapshotKeys.EvaluationSummary, cancellationToken);
+        var contextSavings = await snapshotStore.GetAsync<DashboardContextSavingsSnapshotPayload>(DashboardSnapshotKeys.ContextSavings, cancellationToken);
 
         var sectionStatuses = new[]
         {
@@ -41,6 +43,8 @@ public sealed class DashboardQueryService(
             BuildSectionStatus(DashboardSnapshotKeys.DashboardProjectSuggestions, "Project 建議快照", projectSuggestions, now),
             BuildSectionStatus(DashboardSnapshotKeys.StorageTableStats, "Storage 表統計", storageTableStats, now),
             BuildSectionStatus(DashboardSnapshotKeys.StorageLargeTablePreview, "Storage 大表預覽", storageLargeTablePreview, now),
+            BuildSectionStatus(DashboardSnapshotKeys.EvaluationSummary, "評測摘要", evaluationSummary, now),
+            BuildSectionStatus(DashboardSnapshotKeys.ContextSavings, "Context 節省估算", contextSavings, now),
             BuildSectionStatus(DashboardSnapshotKeys.ResourceChart, "圖表與即時資料", resourceChart, now),
             BuildSectionStatus(DashboardSnapshotKeys.DependencyResources, "Compose 服務資源", dependencyResources, now),
             BuildSectionStatus(DashboardSnapshotKeys.DockerHost, "Docker 主機", dockerHost, now)
@@ -69,8 +73,8 @@ public sealed class DashboardQueryService(
             dockerHost?.Payload ?? CreateUnavailableDockerHost(now),
             dependencyResources?.Payload ?? CreateUnavailableDependencyResources(),
             resourceChart?.Payload.Samples ?? [],
-            await BuildEvaluationSummaryAsync(cancellationToken),
-            await BuildContextSavingsAsync(now, cancellationToken));
+            evaluationSummary?.Payload.Summary,
+            contextSavings?.Payload.Savings ?? CreateEmptyContextSavings(now));
     }
 
     public async Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken)
@@ -185,9 +189,10 @@ public sealed class DashboardQueryService(
                 "尚未收到背景快照。");
         }
 
+        var expectedRefreshAtUtc = envelope.CapturedAtUtc.AddSeconds(Math.Max(1, envelope.RefreshIntervalSeconds));
         var isStale = envelope.StaleAfterUtc < now;
         var warning = isStale
-            ? $"資料已延遲 {Math.Max(1, (int)Math.Round((now - envelope.CapturedAtUtc).TotalSeconds))} 秒。"
+            ? $"資料已延遲 {Math.Max(1, (int)Math.Round((now - expectedRefreshAtUtc).TotalSeconds))} 秒。"
             : string.Empty;
 
         return new DashboardSnapshotSectionStatusResult(
@@ -199,6 +204,21 @@ public sealed class DashboardQueryService(
             envelope.LastError,
             warning);
     }
+
+    private static DashboardContextSavingsResult CreateEmptyContextSavings(DateTimeOffset now)
+        => new(
+            false,
+            0,
+            0,
+            0,
+            0,
+            0d,
+            ContextSavingsEstimator.LowConfidence,
+            0d,
+            0d,
+            now.AddHours(-24),
+            now,
+            []);
 
     private static DashboardPageSnapshotStatusResult BuildPageSnapshotStatus(
         IReadOnlyList<DashboardSnapshotSectionStatusResult> sections,
@@ -801,161 +821,6 @@ public sealed class DashboardQueryService(
         }
 
         return values.Count == 0 ? null : values.ToArray();
-    }
-
-    private async Task<DashboardContextSavingsResult> BuildContextSavingsAsync(
-        DateTimeOffset now,
-        CancellationToken cancellationToken)
-    {
-        var windowStartedAt = now.AddHours(-24);
-        List<ContextSavingsTelemetryEvent> events;
-        try
-        {
-            var actor = actorAccessor.Current;
-            var query = dbContext.RetrievalEvents
-                .AsNoTracking()
-                .Where(x => x.Success)
-                .Where(x => x.CreatedAt >= windowStartedAt && x.CreatedAt <= now);
-
-            if (actor.HasUser)
-            {
-                query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
-            }
-
-            events = await query
-                .OrderByDescending(x => x.CreatedAt)
-                .Take(250)
-                .Select(x => new ContextSavingsTelemetryEvent(
-                    x.CreatedAt,
-                    x.CacheHit,
-                    x.MetadataJson))
-                .ToListAsync(cancellationToken);
-        }
-        catch (NotSupportedException)
-        {
-            events = [];
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            events = [];
-        }
-
-        var samples = events
-            .Select(x => new ContextSavingsTelemetrySample(
-                x.CreatedAt,
-                x.CacheHit,
-                TryReadSavingsEstimate(x.MetadataJson)))
-            .Where(x => x.Savings is not null)
-            .OrderBy(x => x.CreatedAt)
-            .ToArray();
-
-        if (samples.Length == 0)
-        {
-            return new DashboardContextSavingsResult(
-                false,
-                0,
-                0,
-                0,
-                0,
-                0d,
-                ContextSavingsEstimator.LowConfidence,
-                0d,
-                0d,
-                windowStartedAt,
-                now,
-                []);
-        }
-
-        var baseline = samples.Sum(x => x.Savings!.BaselineTokenEstimate);
-        var returned = samples.Sum(x => x.Savings!.ReturnedTokenEstimate);
-        var saved = samples.Sum(x => x.Savings!.EstimatedSavedTokens);
-        var averageSavingPercent = samples.Average(x => x.Savings!.EstimatedSavingPercent);
-        var averageCoverage = samples.Average(x => x.Savings!.SourceCoveragePercent);
-        var cacheHitPercent = samples.Count(x => x.CacheHit) / (double)samples.Length * 100d;
-        var trend = samples
-            .TakeLast(24)
-            .Select(x => new DashboardContextSavingsTrendPointResult(
-                x.CreatedAt,
-                x.Savings!.BaselineTokenEstimate,
-                x.Savings.ReturnedTokenEstimate,
-                x.Savings.EstimatedSavedTokens,
-                x.Savings.EstimatedSavingPercent))
-            .ToArray();
-
-        return new DashboardContextSavingsResult(
-            true,
-            samples.Length,
-            baseline,
-            returned,
-            saved,
-            Math.Round(averageSavingPercent, 2),
-            ResolveSavingsConfidence(averageCoverage),
-            Math.Round(averageCoverage, 2),
-            Math.Round(cacheHitPercent, 2),
-            windowStartedAt,
-            now,
-            trend);
-    }
-
-    private static ContextSavingsEstimateResult? TryReadSavingsEstimate(string metadataJson)
-    {
-        if (string.IsNullOrWhiteSpace(metadataJson))
-        {
-            return null;
-        }
-
-        try
-        {
-            return JsonSerializer.Deserialize<ContextSavingsTelemetryMetadata>(metadataJson, JsonOptions)?.Savings;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static string ResolveSavingsConfidence(double sourceCoveragePercent)
-        => sourceCoveragePercent switch
-        {
-            >= 80d => ContextSavingsEstimator.HighConfidence,
-            >= 50d => ContextSavingsEstimator.MediumConfidence,
-            _ => ContextSavingsEstimator.LowConfidence
-        };
-
-    private async Task<DashboardEvaluationSummaryResult?> BuildEvaluationSummaryAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            var latestRun = await dbContext.EvaluationRuns
-                .AsNoTracking()
-                .OrderByDescending(x => x.StartedAt)
-                .FirstOrDefaultAsync(cancellationToken);
-            if (latestRun is null)
-            {
-                return null;
-            }
-
-            var suiteName = await dbContext.EvaluationSuites
-                .AsNoTracking()
-                .Where(x => x.Id == latestRun.SuiteId)
-                .Select(x => x.Name)
-                .FirstOrDefaultAsync(cancellationToken);
-            return new DashboardEvaluationSummaryResult(
-                latestRun.Id,
-                latestRun.SuiteId,
-                suiteName ?? "Unnamed suite",
-                latestRun.Status,
-                latestRun.HitRate,
-                latestRun.RecallAtK,
-                latestRun.MeanReciprocalRank,
-                latestRun.AverageLatencyMs,
-                latestRun.StartedAt,
-                latestRun.CompletedAt);
-        }
-        catch (NotSupportedException)
-        {
-            return null;
-        }
     }
 
     private async Task<SourceConnection?> ResolveSourceConnectionAsync(Guid sourceConnectionId, CancellationToken cancellationToken)
@@ -1995,19 +1860,6 @@ public sealed class DashboardQueryService(
             return null;
         }
     }
-
-    private sealed record ContextSavingsTelemetryMetadata(
-        ContextSavingsEstimateResult? Savings);
-
-    private sealed record ContextSavingsTelemetryEvent(
-        DateTimeOffset CreatedAt,
-        bool CacheHit,
-        string MetadataJson);
-
-    private sealed record ContextSavingsTelemetrySample(
-        DateTimeOffset CreatedAt,
-        bool CacheHit,
-        ContextSavingsEstimateResult? Savings);
 
     private sealed record ScoredGraphNode(MemoryItem Item, decimal? Score);
 }

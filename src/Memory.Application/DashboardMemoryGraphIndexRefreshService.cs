@@ -20,7 +20,7 @@ public sealed class DashboardMemoryGraphIndexRefreshService(
                 DashboardSnapshotKeys.MemoryGraphIndex,
                 capturedAtUtc,
                 effectiveIntervalSeconds,
-                DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc),
+                DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc, effectiveIntervalSeconds),
                 string.Empty,
                 payload),
             cancellationToken);

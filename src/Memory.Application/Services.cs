@@ -1539,9 +1539,23 @@ public sealed class BackgroundJobProcessor(
     ILogger<BackgroundJobProcessor> logger) : IBackgroundJobProcessor
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan ConversationJobStaleAfter = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan GeneralJobStaleAfter = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan ConversationJobTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan GeneralJobTimeout = TimeSpan.FromMinutes(10);
+    private static readonly string[] BackgroundJobOwnerScopes =
+    [
+        SecurityScopes.MemoryRead,
+        SecurityScopes.MemoryWrite,
+        SecurityScopes.PreferencesRead,
+        SecurityScopes.PreferencesWrite
+    ];
 
     public async Task<JobResult?> ProcessNextAsync(CancellationToken cancellationToken)
     {
+        dbContext.ClearTrackedChanges();
+        await RecoverStaleRunningJobsAsync(cancellationToken);
+
         var job = await dbContext.MemoryJobs
             .OrderBy(x => x.CreatedAt)
             .FirstOrDefaultAsync(x => x.Status == MemoryJobStatus.Pending, cancellationToken);
@@ -1564,38 +1578,43 @@ public sealed class BackgroundJobProcessor(
                 job.OwnerUserId,
                 "job-owner",
                 TenantUserRole.Member,
+                BackgroundJobOwnerScopes,
                 [],
-                [],
-                true);
+                true,
+                IsServiceActor: true);
         }
+
+        using var jobTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        jobTimeout.CancelAfter(GetJobTimeout(job.JobType));
+        var jobCancellationToken = jobTimeout.Token;
 
         try
         {
             switch (job.JobType)
             {
                 case MemoryJobType.Reindex:
-                    await ProcessReindexAsync(job, cancellationToken);
+                    await ProcessReindexAsync(job, jobCancellationToken);
                     break;
                 case MemoryJobType.RefreshSummary:
-                    await ProcessRefreshSummaryAsync(job, cancellationToken);
+                    await ProcessRefreshSummaryAsync(job, jobCancellationToken);
                     break;
                 case MemoryJobType.IngestConversation:
-                    await ProcessConversationCheckpointAsync(job, cancellationToken);
+                    await ProcessConversationCheckpointAsync(job, jobCancellationToken);
                     break;
                 case MemoryJobType.PromoteConversationInsights:
-                    await ProcessConversationPromotionAsync(job, cancellationToken);
+                    await ProcessConversationPromotionAsync(job, jobCancellationToken);
                     break;
                 case MemoryJobType.SyncSource:
-                    await ProcessSourceSyncAsync(job, cancellationToken);
+                    await ProcessSourceSyncAsync(job, jobCancellationToken);
                     break;
                 case MemoryJobType.AnalyzeGovernance:
-                    await ProcessGovernanceAnalysisAsync(job, cancellationToken);
+                    await ProcessGovernanceAnalysisAsync(job, jobCancellationToken);
                     break;
                 case MemoryJobType.RunEvaluation:
-                    await ProcessEvaluationAsync(job, cancellationToken);
+                    await ProcessEvaluationAsync(job, jobCancellationToken);
                     break;
                 case MemoryJobType.ExecuteSuggestedAction:
-                    await ProcessSuggestedActionAsync(job, cancellationToken);
+                    await ProcessSuggestedActionAsync(job, jobCancellationToken);
                     break;
             }
 
@@ -1604,16 +1623,21 @@ public sealed class BackgroundJobProcessor(
 
             job.Status = MemoryJobStatus.Completed;
             job.CompletedAt = clock.UtcNow;
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await cacheStore.IncrementJobsAsync(cancellationToken);
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+            await cacheStore.IncrementJobsAsync(CancellationToken.None);
         }
         catch (Exception ex)
         {
+            var error = ex is OperationCanceledException && !cancellationToken.IsCancellationRequested
+                ? $"Job exceeded timeout of {GetJobTimeout(job.JobType)}."
+                : ex.ToString();
+            dbContext.ClearTrackedChanges();
+            job = await dbContext.MemoryJobs.FirstAsync(x => x.Id == job.Id, CancellationToken.None);
             job.Status = MemoryJobStatus.Failed;
-            job.Error = ex.ToString();
+            job.Error = error;
             job.CompletedAt = clock.UtcNow;
-            await dbContext.SaveChangesAsync(cancellationToken);
-            await cacheStore.IncrementJobsAsync(cancellationToken);
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+            await cacheStore.IncrementJobsAsync(CancellationToken.None);
         }
         finally
         {
@@ -1621,6 +1645,48 @@ public sealed class BackgroundJobProcessor(
         }
 
         return new JobResult(job.Id, job.JobType, job.Status, job.PayloadJson, job.Error, job.CreatedAt, job.StartedAt, job.CompletedAt, job.ProjectId);
+    }
+
+    private static TimeSpan GetJobTimeout(MemoryJobType jobType)
+        => jobType is MemoryJobType.IngestConversation or MemoryJobType.PromoteConversationInsights
+            ? ConversationJobTimeout
+            : GeneralJobTimeout;
+
+    private async Task RecoverStaleRunningJobsAsync(CancellationToken cancellationToken)
+    {
+        var now = clock.UtcNow;
+        var conversationCutoff = now - ConversationJobStaleAfter;
+        var generalCutoff = now - GeneralJobStaleAfter;
+        var staleJobs = await dbContext.MemoryJobs
+            .Where(x => x.Status == MemoryJobStatus.Running &&
+                        x.StartedAt.HasValue &&
+                        ((x.JobType == MemoryJobType.IngestConversation ||
+                          x.JobType == MemoryJobType.PromoteConversationInsights)
+                            ? x.StartedAt.Value <= conversationCutoff
+                            : x.StartedAt.Value <= generalCutoff))
+            .OrderBy(x => x.CreatedAt)
+            .Take(25)
+            .ToListAsync(cancellationToken);
+
+        if (staleJobs.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var staleJob in staleJobs)
+        {
+            logger.LogWarning(
+                "Recovering stale running job {JobId} of type {JobType} started at {StartedAt}.",
+                staleJob.Id,
+                staleJob.JobType,
+                staleJob.StartedAt);
+            staleJob.Status = MemoryJobStatus.Pending;
+            staleJob.StartedAt = null;
+            staleJob.Error = "Recovered stale running job for retry.";
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await cacheStore.IncrementJobsAsync(cancellationToken);
     }
 
     private async Task InvalidateCachesAfterCompletedJobAsync(MemoryJob job, CancellationToken cancellationToken)

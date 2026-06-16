@@ -225,6 +225,9 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             items.Length));
     }
 
+    public Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchConversationCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<ConversationCheckpointSearchResult>>([]);
+
     public Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)
     {
         var candidates = FilterGraphMemories(request, BuildMemories()).ToArray();

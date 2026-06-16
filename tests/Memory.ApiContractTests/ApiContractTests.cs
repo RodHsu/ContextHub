@@ -584,6 +584,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         bootstrapClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bootstrapToken);
         using var bootstrapResponse = await bootstrapClient.GetAsync("/api/status");
         bootstrapResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        using var forbiddenProjectResponse = await bootstrapClient.GetAsync("/api/memories/search?query=ContextHub&projectId=default");
+        forbiddenProjectResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Forbidden);
 
         using var authenticatedClient = secureFactory.CreateClient();
         authenticatedClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", createdToken.PlainToken);
@@ -1642,44 +1644,6 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     {
         var conversationId = $"api-conversation-{Guid.NewGuid():N}";
 
-        using (var scope = environment.GetFactory().Services.CreateScope())
-        {
-            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
-            dbContext.InstanceSettings.Add(new InstanceSetting
-            {
-                InstanceId = ProjectContext.DefaultProjectId,
-                SettingKey = "behavior",
-                ValueJson = JsonSerializer.Serialize(new InstanceBehaviorSettingsResult(
-                    true,
-                    true,
-                    true,
-                    20,
-                    "Automatic",
-                    240,
-                    ProjectContext.DefaultProjectId,
-                    MemoryQueryMode.CurrentOnly,
-                    false,
-                    true,
-                    new DashboardSnapshotPollingSettingsResult(
-                        30,
-                        30,
-                        10,
-                        30,
-                        5,
-                        5,
-                        1),
-                    10,
-                    5,
-                    8,
-                    10,
-                    30)),
-                Revision = 1,
-                UpdatedAt = DateTimeOffset.UtcNow,
-                UpdatedBy = "tests"
-            });
-            await dbContext.SaveChangesAsync(CancellationToken.None);
-        }
-
         using var client = environment.GetFactory().CreateClient();
         using var ingestResponse = await client.PostAsJsonAsync("/api/conversations/ingest", new ConversationIngestRequest(
             ConversationId: conversationId,
@@ -1697,6 +1661,26 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         ingest.Should().NotBeNull();
         ingest!.AutomationScheduled.Should().BeTrue();
 
+        var initialPipeline = await client.GetFromJsonAsync<ConversationPipelineStatusResult>($"/api/conversations/checkpoints/{ingest.CheckpointId}/pipeline");
+        initialPipeline.Should().NotBeNull();
+        initialPipeline!.CheckpointId.Should().Be(ingest.CheckpointId);
+        initialPipeline.PipelineStatus.Should().BeOneOf("checkpoint-only", "ingest-pending");
+
+        using var processResponse = await client.PostAsync($"/api/conversations/checkpoints/{ingest.CheckpointId}/process", null);
+        processResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var processed = await processResponse.Content.ReadFromJsonAsync<ConversationPipelineStatusResult>();
+        processed.Should().NotBeNull();
+        processed!.Insights.Should().NotBeEmpty();
+
+        using var processAgainResponse = await client.PostAsync($"/api/conversations/checkpoints/{ingest.CheckpointId}/process", null);
+        processAgainResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var processedAgain = await processAgainResponse.Content.ReadFromJsonAsync<ConversationPipelineStatusResult>();
+        processedAgain.Should().NotBeNull();
+        processedAgain!.Insights.Count.Should().Be(processed.Insights.Count);
+
+        using var promoteResponse = await client.PostAsJsonAsync("/api/conversations/insights/promote", new ConversationPromotionRetryRequest(conversationId, null));
+        promoteResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
             var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
@@ -1711,6 +1695,11 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var insights = await client.GetFromJsonAsync<List<ConversationInsightResult>>($"/api/conversations/insights?conversationId={conversationId}");
         insights.Should().NotBeNull();
         insights!.Should().Contain(x => x.PromotionStatus == ConversationPromotionStatus.Promoted);
+
+        var promotedPipeline = await client.GetFromJsonAsync<ConversationPipelineStatusResult>($"/api/conversations/checkpoints/{ingest.CheckpointId}/pipeline");
+        promotedPipeline.Should().NotBeNull();
+        promotedPipeline!.PipelineStatus.Should().Be("promoted");
+        promotedPipeline.Insights.Should().Contain(x => x.PromotedMemoryId.HasValue);
     }
 
     private static async Task DrainConversationAutomationAsync(
@@ -1748,7 +1737,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 DashboardSnapshotKeys.MemoryGraphIndex,
                 capturedAtUtc,
                 15,
-                DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc),
+                DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc, 15),
                 string.Empty,
                 payload),
             CancellationToken.None);

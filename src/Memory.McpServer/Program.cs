@@ -62,6 +62,23 @@ var requireAuthentication = app.Services.GetRequiredService<IOptions<ContextHubO
 
 app.UseForwardedHeaders();
 app.UseExceptionHandler();
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (UnauthorizedAccessException ex) when (!context.Response.HasStarted)
+    {
+        context.Response.Clear();
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await Results.Problem(
+            title: "Forbidden",
+            detail: ex.Message,
+            statusCode: StatusCodes.Status403Forbidden)
+            .ExecuteAsync(context);
+    }
+});
 app.Use(CloudflareCacheHeaders.ApplyNoStorePolicyAsync);
 app.UseMiddleware<MaintenanceModeMiddleware>();
 app.UseAuthentication();
@@ -1160,6 +1177,57 @@ conversations.MapGet("/insights", async (
         cancellationToken);
     return Results.Ok(result);
 });
+
+conversations.MapGet("/checkpoints/search", async (
+    string? query,
+    string? projectId,
+    string? conversationId,
+    int? limit,
+    IConversationAutomationService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.SearchCheckpointsAsync(
+        new ConversationCheckpointSearchRequest(query, projectId, conversationId, limit ?? 20),
+        cancellationToken);
+    return Results.Ok(result);
+}).RequireAdminIfEnabled(requireAuthentication);
+
+conversations.MapGet("/checkpoints/{checkpointId:guid}/pipeline", async (
+    Guid checkpointId,
+    IConversationAutomationService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.GetPipelineStatusAsync(checkpointId, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+}).RequireAdminIfEnabled(requireAuthentication);
+
+conversations.MapPost("/checkpoints/{checkpointId:guid}/process", async (
+    Guid checkpointId,
+    IConversationAutomationService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.ProcessCheckpointNowAsync(checkpointId, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["checkpoint"] = [ex.Message]
+        });
+    }
+}).RequireAdminIfEnabled(requireAuthentication);
+
+conversations.MapPost("/insights/promote", async (
+    ConversationPromotionRetryRequest request,
+    IConversationAutomationService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.RetryPromotionAsync(request, cancellationToken);
+    return Results.Ok(result);
+}).RequireAdminIfEnabled(requireAuthentication);
 
 var jobs = app.MapGroup("/api/jobs");
 jobs.RequireAuthIfEnabled(requireAuthentication);

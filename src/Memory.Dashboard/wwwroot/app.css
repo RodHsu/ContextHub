@@ -1122,7 +1122,9 @@ textarea {
     background: rgba(255, 255, 255, 0.025);
     display: grid;
     gap: 0.48rem;
-    contain: layout paint;
+    contain: layout;
+    overflow: visible;
+    position: relative;
 }
 
 .refresh-status-primary {
@@ -5799,6 +5801,11 @@ textarea:focus {
     min-height: var(--dashboard-button-height);
     padding: 0.52rem 0.68rem;
     border-radius: 7px;
+}
+
+.refresh-status-shell:hover,
+.refresh-status-shell:focus-within {
+    z-index: 150;
 }
 
 .panel,

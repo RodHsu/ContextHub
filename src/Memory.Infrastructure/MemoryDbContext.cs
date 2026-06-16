@@ -49,6 +49,9 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<ConversationCheckpoint> ConversationCheckpoints => Set<ConversationCheckpoint>();
     public DbSet<ConversationInsight> ConversationInsights => Set<ConversationInsight>();
 
+    public void ClearTrackedChanges()
+        => ChangeTracker.Clear();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<InstanceSetting>(entity =>

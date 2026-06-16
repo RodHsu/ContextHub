@@ -6,14 +6,14 @@ namespace Memory.UnitTests;
 public sealed class DashboardSnapshotRetentionTests
 {
     [Fact]
-    public void ComputeStaleAfter_Should_Use_Fifteen_Second_Warning_Threshold()
+    public void ComputeStaleAfter_Should_Use_Refresh_Interval_Plus_Thirty_Second_Warning_Threshold()
     {
         var capturedAtUtc = new DateTimeOffset(2026, 4, 15, 6, 0, 0, TimeSpan.Zero);
 
-        var staleAfterUtc = DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc);
+        var staleAfterUtc = DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc, refreshIntervalSeconds: 60);
 
-        Assert.Equal(capturedAtUtc.AddSeconds(15), staleAfterUtc);
-        Assert.Equal(15, DashboardSnapshotStalenessPolicy.WarningThresholdSeconds);
+        Assert.Equal(capturedAtUtc.AddSeconds(90), staleAfterUtc);
+        Assert.Equal(30, DashboardSnapshotStalenessPolicy.WarningThresholdSeconds);
     }
 
     [Fact]

@@ -16,14 +16,16 @@ public static class DashboardSnapshotKeys
     public const string DashboardJobs = "dashboardJobs";
     public const string DashboardLogs = "dashboardLogs";
     public const string DashboardProjectSuggestions = "dashboardProjectSuggestions";
+    public const string EvaluationSummary = "evaluationSummary";
+    public const string ContextSavings = "contextSavings";
 }
 
 public static class DashboardSnapshotStalenessPolicy
 {
-    public const int WarningThresholdSeconds = 15;
+    public const int WarningThresholdSeconds = 30;
 
-    public static DateTimeOffset ComputeStaleAfter(DateTimeOffset capturedAtUtc)
-        => capturedAtUtc.AddSeconds(WarningThresholdSeconds);
+    public static DateTimeOffset ComputeStaleAfter(DateTimeOffset capturedAtUtc, int refreshIntervalSeconds)
+        => capturedAtUtc.AddSeconds(Math.Max(1, refreshIntervalSeconds) + WarningThresholdSeconds);
 }
 
 public sealed record DashboardSnapshotEnvelope<TPayload>(
@@ -97,6 +99,12 @@ public sealed record DashboardLogsSnapshotPayload(
 
 public sealed record DashboardProjectSuggestionsSnapshotPayload(
     IReadOnlyList<ProjectSuggestionResult> Projects);
+
+public sealed record DashboardEvaluationSummarySnapshotPayload(
+    DashboardEvaluationSummaryResult? Summary);
+
+public sealed record DashboardContextSavingsSnapshotPayload(
+    DashboardContextSavingsResult Savings);
 
 public sealed record DashboardMemoryGraphIndexRefreshResult(
     DateTimeOffset CapturedAtUtc,

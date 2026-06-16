@@ -679,6 +679,69 @@ public sealed record ConversationInsightResult(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
 
+public sealed record ConversationCheckpointSearchRequest(
+    string? Query = null,
+    string? ProjectId = null,
+    string? ConversationId = null,
+    int Limit = 20);
+
+public sealed record ConversationCheckpointSearchResult(
+    Guid Id,
+    Guid SessionId,
+    string ConversationId,
+    string TurnId,
+    string ProjectId,
+    string ProjectName,
+    string TaskId,
+    string SourceSystem,
+    ConversationEventType EventType,
+    ConversationSourceKind SourceKind,
+    string SourceRef,
+    string ShortExcerpt,
+    DateTimeOffset CreatedAt,
+    string PipelineStatus,
+    int InsightCount,
+    ConversationPromotionStatus? PromotionStatus,
+    Guid? PromotedMemoryId,
+    string Error);
+
+public sealed record ConversationPipelineJobResult(
+    Guid Id,
+    MemoryJobType JobType,
+    MemoryJobStatus Status,
+    string Error,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? CompletedAt);
+
+public sealed record ConversationPipelineStatusResult(
+    Guid CheckpointId,
+    Guid SessionId,
+    string ConversationId,
+    string TurnId,
+    string ProjectId,
+    string ProjectName,
+    string TaskId,
+    string SourceSystem,
+    ConversationEventType EventType,
+    ConversationSourceKind SourceKind,
+    string SourceRef,
+    string ShortExcerpt,
+    DateTimeOffset CreatedAt,
+    string PipelineStatus,
+    ConversationPipelineJobResult? IngestJob,
+    ConversationPipelineJobResult? PromotionJob,
+    IReadOnlyList<ConversationInsightResult> Insights);
+
+public sealed record ConversationPromotionRetryRequest(
+    string? ConversationId = null,
+    string? ProjectId = null);
+
+public sealed record ConversationPromotionRetryResult(
+    string? ConversationId,
+    string? ProjectId,
+    ConversationAutomationStatusResult AutomationStatus);
+
 public sealed record InstanceSettingsSnapshot(
     string InstanceId,
     string Namespace,
@@ -776,6 +839,7 @@ public interface IApplicationDbContext
     DbSet<ConversationSession> ConversationSessions { get; }
     DbSet<ConversationCheckpoint> ConversationCheckpoints { get; }
     DbSet<ConversationInsight> ConversationInsights { get; }
+    void ClearTrackedChanges();
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
 
@@ -933,6 +997,10 @@ public interface IConversationAutomationService
     Task<ConversationIngestResult> IngestAsync(ConversationIngestRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationSessionResult>> ListSessionsAsync(ConversationSessionListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationInsightResult>> ListInsightsAsync(ConversationInsightListRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
+    Task<ConversationPipelineStatusResult?> GetPipelineStatusAsync(Guid checkpointId, CancellationToken cancellationToken);
+    Task<ConversationPipelineStatusResult> ProcessCheckpointNowAsync(Guid checkpointId, CancellationToken cancellationToken);
+    Task<ConversationPromotionRetryResult> RetryPromotionAsync(ConversationPromotionRetryRequest request, CancellationToken cancellationToken);
     Task<ConversationAutomationStatusResult> GetAutomationStatusAsync(CancellationToken cancellationToken);
     Task ProcessCheckpointJobAsync(Guid checkpointId, CancellationToken cancellationToken);
     Task PromotePendingInsightsAsync(string? conversationId, string? projectId, CancellationToken cancellationToken);

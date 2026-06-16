@@ -35,7 +35,7 @@ public sealed class InstanceBehaviorSettingsAccessor(
 
     internal static InstanceBehaviorSettingsResult CreateDefault()
         => new(
-            ConversationAutomationEnabled: false,
+            ConversationAutomationEnabled: true,
             HostEventIngestionEnabled: true,
             AgentSupplementalIngestionEnabled: true,
             IdleThresholdMinutes: 20,
@@ -300,6 +300,109 @@ public sealed class ConversationAutomationService(
             .ToListAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken)
+    {
+        var query = dbContext.ConversationCheckpoints.AsNoTracking().AsQueryable();
+        var actor = actorAccessor.Current;
+        if (actor.HasUser)
+        {
+            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.ProjectId))
+        {
+            var projectId = ProjectContext.Normalize(request.ProjectId);
+            query = query.Where(x => x.ProjectId == projectId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.ConversationId))
+        {
+            query = query.Where(x => x.ConversationId == request.ConversationId.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Query))
+        {
+            var term = request.Query.Trim().ToLower();
+            query = query.Where(x =>
+                x.ShortExcerpt.ToLower().Contains(term) ||
+                x.UserMessageSummary.ToLower().Contains(term) ||
+                x.AgentMessageSummary.ToLower().Contains(term) ||
+                x.SessionSummary.ToLower().Contains(term) ||
+                x.SourceRef.ToLower().Contains(term));
+        }
+
+        var checkpoints = await query
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(Math.Clamp(request.Limit, 1, 100))
+            .ToListAsync(cancellationToken);
+
+        var results = new List<ConversationCheckpointSearchResult>(checkpoints.Count);
+        foreach (var checkpoint in checkpoints)
+        {
+            var insights = await dbContext.ConversationInsights
+                .AsNoTracking()
+                .Where(x => x.CheckpointId == checkpoint.Id)
+                .OrderByDescending(x => x.UpdatedAt)
+                .ToListAsync(cancellationToken);
+            var pipelineStatus = DeterminePipelineStatus(
+                checkpoint,
+                null,
+                null,
+                insights);
+            var promoted = insights.FirstOrDefault(x => x.PromotionStatus == ConversationPromotionStatus.Promoted);
+            var failed = insights.FirstOrDefault(x => x.PromotionStatus == ConversationPromotionStatus.Failed);
+
+            results.Add(new ConversationCheckpointSearchResult(
+                checkpoint.Id,
+                checkpoint.SessionId,
+                checkpoint.ConversationId,
+                checkpoint.TurnId,
+                checkpoint.ProjectId,
+                checkpoint.ProjectName,
+                checkpoint.TaskId,
+                checkpoint.SourceSystem,
+                checkpoint.EventType,
+                checkpoint.SourceKind,
+                checkpoint.SourceRef,
+                checkpoint.ShortExcerpt,
+                checkpoint.CreatedAt,
+                pipelineStatus,
+                insights.Count,
+                promoted?.PromotionStatus ?? failed?.PromotionStatus ?? insights.FirstOrDefault()?.PromotionStatus,
+                promoted?.PromotedMemoryId,
+                failed?.Error ?? string.Empty));
+        }
+
+        return results;
+    }
+
+    public async Task<ConversationPipelineStatusResult?> GetPipelineStatusAsync(Guid checkpointId, CancellationToken cancellationToken)
+    {
+        var checkpoint = await LoadCheckpointForReadAsync(checkpointId, cancellationToken);
+        if (checkpoint is null)
+        {
+            return null;
+        }
+
+        return await BuildPipelineStatusAsync(checkpoint, cancellationToken);
+    }
+
+    public async Task<ConversationPipelineStatusResult> ProcessCheckpointNowAsync(Guid checkpointId, CancellationToken cancellationToken)
+    {
+        var checkpoint = await LoadCheckpointForReadAsync(checkpointId, cancellationToken)
+            ?? throw new InvalidOperationException($"Conversation checkpoint '{checkpointId}' was not found.");
+
+        await ProcessCheckpointJobAsync(checkpoint.Id, cancellationToken);
+        return await BuildPipelineStatusAsync(checkpoint, cancellationToken);
+    }
+
+    public async Task<ConversationPromotionRetryResult> RetryPromotionAsync(ConversationPromotionRetryRequest request, CancellationToken cancellationToken)
+    {
+        await PromotePendingInsightsAsync(request.ConversationId, request.ProjectId, cancellationToken);
+        var status = await GetAutomationStatusAsync(cancellationToken);
+        return new ConversationPromotionRetryResult(request.ConversationId, request.ProjectId, status);
+    }
+
     public async Task<ConversationAutomationStatusResult> GetAutomationStatusAsync(CancellationToken cancellationToken)
     {
         var since = clock.UtcNow.AddHours(-24);
@@ -336,9 +439,15 @@ public sealed class ConversationAutomationService(
             toolCalls,
             behavior.ExcerptMaxLength);
 
+        var dedupKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var candidate in candidates)
         {
             var dedupKey = BuildInsightDedupKey(checkpoint, candidate);
+            if (!dedupKeys.Add(dedupKey))
+            {
+                continue;
+            }
+
             var exists = await dbContext.ConversationInsights.AnyAsync(x => x.DedupKey == dedupKey, cancellationToken);
             if (exists)
             {
@@ -385,7 +494,8 @@ public sealed class ConversationAutomationService(
     public async Task PromotePendingInsightsAsync(string? conversationId, string? projectId, CancellationToken cancellationToken)
     {
         var query = dbContext.ConversationInsights
-            .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending)
+            .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending ||
+                        x.PromotionStatus == ConversationPromotionStatus.Failed)
             .OrderBy(x => x.CreatedAt)
             .AsQueryable();
 
@@ -403,6 +513,8 @@ public sealed class ConversationAutomationService(
         var items = await query.ToListAsync(cancellationToken);
         foreach (var item in items)
         {
+            var previousActor = actorAccessor.Current;
+            actorAccessor.Current = BuildAutomationActor(item);
             try
             {
                 if (item.InsightType == ConversationInsightType.PreferenceCandidate)
@@ -455,6 +567,10 @@ public sealed class ConversationAutomationService(
                 item.PromotionStatus = ConversationPromotionStatus.Failed;
                 item.Error = ex.ToString();
             }
+            finally
+            {
+                actorAccessor.Current = previousActor;
+            }
 
             item.UpdatedAt = clock.UtcNow;
         }
@@ -483,6 +599,31 @@ public sealed class ConversationAutomationService(
         };
 
         await jobQueue.EnqueueAsync(job, cancellationToken);
+    }
+
+    private static ContextHubRequestActor BuildAutomationActor(ConversationInsight item)
+    {
+        if (!item.TenantId.HasValue || !item.OwnerUserId.HasValue)
+        {
+            return ContextHubRequestActor.Unrestricted;
+        }
+
+        return new ContextHubRequestActor(
+            item.TenantId,
+            item.OwnerUserId,
+            "conversation-automation",
+            TenantUserRole.Member,
+            [
+                SecurityScopes.MemoryRead,
+                SecurityScopes.MemoryWrite,
+                SecurityScopes.PreferencesRead,
+                SecurityScopes.PreferencesWrite
+            ],
+            string.IsNullOrWhiteSpace(item.ProjectId)
+                ? []
+                : [item.ProjectId],
+            IsAuthenticated: true,
+            IsServiceActor: true);
     }
 
     private static bool ShouldScheduleAutomation(ConversationSourceKind sourceKind, InstanceBehaviorSettingsResult behavior)
@@ -533,12 +674,15 @@ public sealed class ConversationAutomationService(
         => JsonSerializer.Deserialize<IReadOnlyList<ConversationToolCallRequest>>(toolCallsJson, JsonOptions) ?? [];
 
     private async Task<Guid?> FindExistingCheckpointJobIdAsync(Guid checkpointId, CancellationToken cancellationToken)
+        => (await FindCheckpointJobAsync(checkpointId, cancellationToken))?.Id;
+
+    private async Task<MemoryJob?> FindCheckpointJobAsync(Guid checkpointId, CancellationToken cancellationToken)
     {
         var jobs = await dbContext.MemoryJobs
             .AsNoTracking()
             .Where(x => x.JobType == MemoryJobType.IngestConversation)
             .OrderByDescending(x => x.CreatedAt)
-            .Take(200)
+            .Take(1000)
             .ToListAsync(cancellationToken);
 
         foreach (var job in jobs)
@@ -546,11 +690,159 @@ public sealed class ConversationAutomationService(
             var payload = TryDeserialize<ConversationCheckpointJobPayload>(job.PayloadJson);
             if (payload?.CheckpointId == checkpointId)
             {
-                return job.Id;
+                return job;
             }
         }
 
         return null;
+    }
+
+    private async Task<MemoryJob?> FindPromotionJobAsync(string conversationId, CancellationToken cancellationToken)
+    {
+        var jobs = await dbContext.MemoryJobs
+            .AsNoTracking()
+            .Where(x => x.JobType == MemoryJobType.PromoteConversationInsights)
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(1000)
+            .ToListAsync(cancellationToken);
+
+        foreach (var job in jobs)
+        {
+            var payload = TryDeserialize<ConversationPromotionJobPayload>(job.PayloadJson);
+            if (string.Equals(payload?.ConversationId, conversationId, StringComparison.Ordinal))
+            {
+                return job;
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<ConversationCheckpoint?> LoadCheckpointForReadAsync(Guid checkpointId, CancellationToken cancellationToken)
+    {
+        var query = dbContext.ConversationCheckpoints.AsNoTracking().Where(x => x.Id == checkpointId);
+        var actor = actorAccessor.Current;
+        if (actor.HasUser)
+        {
+            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        }
+
+        return await query.FirstOrDefaultAsync(cancellationToken);
+    }
+
+    private async Task<ConversationPipelineStatusResult> BuildPipelineStatusAsync(ConversationCheckpoint checkpoint, CancellationToken cancellationToken)
+    {
+        var ingestJob = await FindCheckpointJobAsync(checkpoint.Id, cancellationToken);
+        var promotionJob = await FindPromotionJobAsync(checkpoint.ConversationId, cancellationToken);
+        var insights = await ListInsightsAsync(
+            new ConversationInsightListRequest(
+                checkpoint.ProjectId,
+                checkpoint.ConversationId,
+                null,
+                null,
+                400),
+            cancellationToken);
+        insights = insights
+            .Where(x => x.CheckpointId == checkpoint.Id)
+            .OrderByDescending(x => x.UpdatedAt)
+            .ToArray();
+
+        return new ConversationPipelineStatusResult(
+            checkpoint.Id,
+            checkpoint.SessionId,
+            checkpoint.ConversationId,
+            checkpoint.TurnId,
+            checkpoint.ProjectId,
+            checkpoint.ProjectName,
+            checkpoint.TaskId,
+            checkpoint.SourceSystem,
+            checkpoint.EventType,
+            checkpoint.SourceKind,
+            checkpoint.SourceRef,
+            checkpoint.ShortExcerpt,
+            checkpoint.CreatedAt,
+            DeterminePipelineStatus(checkpoint, ingestJob, promotionJob, insights),
+            ToPipelineJobResult(ingestJob),
+            ToPipelineJobResult(promotionJob),
+            insights);
+    }
+
+    private static ConversationPipelineJobResult? ToPipelineJobResult(MemoryJob? job)
+        => job is null
+            ? null
+            : new ConversationPipelineJobResult(
+                job.Id,
+                job.JobType,
+                job.Status,
+                job.Error,
+                job.CreatedAt,
+                job.StartedAt,
+                job.CompletedAt);
+
+    private static string DeterminePipelineStatus(
+        ConversationCheckpoint checkpoint,
+        MemoryJob? ingestJob,
+        MemoryJob? promotionJob,
+        IReadOnlyList<ConversationInsight> insights)
+        => DeterminePipelineStatus(
+            checkpoint,
+            ingestJob,
+            promotionJob,
+            insights.Select(x => (x.PromotionStatus, x.PromotedMemoryId, x.Error)).ToArray());
+
+    private static string DeterminePipelineStatus(
+        ConversationCheckpoint checkpoint,
+        MemoryJob? ingestJob,
+        MemoryJob? promotionJob,
+        IReadOnlyList<ConversationInsightResult> insights)
+        => DeterminePipelineStatus(
+            checkpoint,
+            ingestJob,
+            promotionJob,
+            insights.Select(x => (x.PromotionStatus, x.PromotedMemoryId, x.Error)).ToArray());
+
+    private static string DeterminePipelineStatus(
+        ConversationCheckpoint _,
+        MemoryJob? ingestJob,
+        MemoryJob? promotionJob,
+        IReadOnlyList<(ConversationPromotionStatus PromotionStatus, Guid? PromotedMemoryId, string Error)> insights)
+    {
+        if (insights.Any(x => x.PromotionStatus == ConversationPromotionStatus.Promoted && x.PromotedMemoryId.HasValue))
+        {
+            return "promoted";
+        }
+
+        if (insights.Any(x => x.PromotionStatus == ConversationPromotionStatus.Failed))
+        {
+            return "promotion-failed";
+        }
+
+        if (promotionJob?.Status == MemoryJobStatus.Failed)
+        {
+            return "promotion-failed";
+        }
+
+        if (promotionJob?.Status is MemoryJobStatus.Pending or MemoryJobStatus.Running)
+        {
+            return "promotion-pending";
+        }
+
+        if (insights.Any(x => x.PromotionStatus == ConversationPromotionStatus.Pending))
+        {
+            return "insight-pending";
+        }
+
+        if (ingestJob?.Status == MemoryJobStatus.Failed)
+        {
+            return "ingest-failed";
+        }
+
+        if (ingestJob?.Status is MemoryJobStatus.Pending or MemoryJobStatus.Running)
+        {
+            return "ingest-pending";
+        }
+
+        return "checkpoint-only";
     }
 
     private async Task<bool> HasPendingPromotionJobAsync(string conversationId, CancellationToken cancellationToken)

@@ -47,6 +47,86 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     }
 
     [DockerRequiredFact]
+    public async Task ProcessJob_WithOwnerActor_Should_Refresh_MemoryGraphIndex_Without_Scope_Warning()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var snapshotStore = scope.ServiceProvider.GetRequiredService<IDashboardSnapshotStore>();
+        var tenantId = Guid.NewGuid();
+        var ownerUserId = Guid.NewGuid();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var projectId = $"GraphOwner_{suffix}";
+        var title = $"Owner graph refresh fixture {suffix}";
+        var startedAt = DateTimeOffset.UtcNow.AddSeconds(-1);
+        dbContext.Tenants.Add(new Tenant
+        {
+            Id = tenantId,
+            Slug = $"graph-owner-{suffix}"[..20],
+            DisplayName = "Graph Owner Tenant",
+            Status = TenantStatus.Active,
+            CreatedAt = startedAt,
+            UpdatedAt = startedAt
+        });
+        dbContext.TenantUsers.Add(new TenantUser
+        {
+            Id = ownerUserId,
+            TenantId = tenantId,
+            Username = $"graph-owner-{suffix}"[..20],
+            DisplayName = "Graph Owner",
+            Role = TenantUserRole.Member,
+            Status = TenantUserStatus.Active,
+            CreatedAt = startedAt,
+            UpdatedAt = startedAt
+        });
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        actorAccessor.Current = new ContextHubRequestActor(
+            tenantId,
+            ownerUserId,
+            "owner",
+            TenantUserRole.Member,
+            [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite],
+            [projectId],
+            true);
+
+        var created = await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: $"repo:graph-owner:{suffix}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: title,
+                Content: $"This fixture validates owner-scoped graph refresh {suffix}.",
+                Summary: title,
+                SourceType: "test",
+                SourceRef: "integration",
+                Tags: ["graph", "owner"],
+                Importance: 0.8m,
+                Confidence: 0.9m,
+                ProjectId: projectId),
+            CancellationToken.None);
+        actorAccessor.Current = ContextHubRequestActor.Unrestricted;
+
+        var processed = await processor.ProcessNextAsync(CancellationToken.None);
+
+        processed.Should().NotBeNull();
+        processed!.Status.Should().Be(MemoryJobStatus.Completed);
+        processed.Error.Should().BeEmpty();
+
+        var snapshot = await snapshotStore.GetAsync<DashboardMemoryGraphIndexSnapshotPayload>(
+            DashboardSnapshotKeys.MemoryGraphIndex,
+            CancellationToken.None);
+        snapshot.Should().NotBeNull();
+        snapshot!.Payload.Graph.Nodes.Should().Contain(node => node.Id == created.Id);
+
+        dbContext.RuntimeLogEntries.Should().NotContain(entry =>
+            entry.CreatedAt >= startedAt &&
+            entry.Message.Contains("Memory graph index event refresh failed", StringComparison.Ordinal));
+    }
+
+    [DockerRequiredFact]
     public async Task Upserting_Shared_Summary_Source_Type_Should_Enqueue_Summary_Refresh_Job()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -388,40 +468,6 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var conversationId = $"conversation-{Guid.NewGuid():N}";
 
-        dbContext.InstanceSettings.Add(new InstanceSetting
-        {
-            InstanceId = ProjectContext.DefaultProjectId,
-            SettingKey = "behavior",
-            ValueJson = JsonSerializer.Serialize(new InstanceBehaviorSettingsResult(
-                true,
-                true,
-                true,
-                20,
-                "Automatic",
-                240,
-                ProjectContext.DefaultProjectId,
-                MemoryQueryMode.CurrentOnly,
-                false,
-                true,
-                new DashboardSnapshotPollingSettingsResult(
-                    30,
-                    30,
-                    10,
-                    30,
-                    5,
-                    5,
-                    1),
-                10,
-                5,
-                8,
-                10,
-                30)),
-            Revision = 1,
-            UpdatedAt = DateTimeOffset.UtcNow,
-            UpdatedBy = "tests"
-        });
-        await dbContext.SaveChangesAsync(CancellationToken.None);
-
         var result = await automationService.IngestAsync(
             new ConversationIngestRequest(
                 ConversationId: conversationId,
@@ -437,6 +483,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             CancellationToken.None);
 
         result.AutomationScheduled.Should().BeTrue();
+        result.JobId.Should().NotBeNull();
 
         await DrainConversationAutomationAsync(processor, dbContext, conversationId, CancellationToken.None);
 
@@ -458,6 +505,48 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             x.MemoryType == MemoryType.Decision &&
             x.SourceType == "conversation-auto" &&
             x.Content.Contains("shared summary layer", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [DockerRequiredFact]
+    public async Task Conversation_Ingest_Should_Recover_Stale_Running_Job_And_Promote()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var automationService = scope.ServiceProvider.GetRequiredService<IConversationAutomationService>();
+        var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var conversationId = $"conversation-stale-{Guid.NewGuid():N}";
+        var summary = "決定：stale running conversation job 必須可自動修正並重試。";
+
+        var result = await automationService.IngestAsync(
+            new ConversationIngestRequest(
+                ConversationId: conversationId,
+                TurnId: "turn-1",
+                EventType: ConversationEventType.SessionCheckpoint,
+                SourceKind: ConversationSourceKind.AgentSupplemental,
+                SourceSystem: "codex",
+                SourceRef: "tests/stale-running",
+                ProjectId: ProjectContext.DefaultProjectId,
+                ProjectName: "ContextHub",
+                AgentMessageSummary: summary,
+                SessionSummary: summary),
+            CancellationToken.None);
+
+        var job = await dbContext.MemoryJobs.SingleAsync(x => x.Id == result.JobId, CancellationToken.None);
+        job.Status = MemoryJobStatus.Running;
+        job.StartedAt = DateTimeOffset.UtcNow.AddMinutes(-10);
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        await DrainConversationAutomationAsync(processor, dbContext, conversationId, CancellationToken.None);
+
+        var recoveredJob = await dbContext.MemoryJobs.SingleAsync(x => x.Id == result.JobId, CancellationToken.None);
+        recoveredJob.Status.Should().Be(MemoryJobStatus.Completed);
+        recoveredJob.Error.Should().Be("Recovered stale running job for retry.");
+        recoveredJob.CompletedAt.Should().NotBeNull();
+
+        var insights = await dbContext.ConversationInsights
+            .Where(x => x.ConversationId == conversationId)
+            .ToListAsync(CancellationToken.None);
+        insights.Should().Contain(x => x.PromotionStatus == ConversationPromotionStatus.Promoted);
     }
 
     private static async Task DrainConversationAutomationAsync(

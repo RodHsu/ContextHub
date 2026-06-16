@@ -1194,6 +1194,9 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
         1));
     }
 
+    public Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchConversationCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<ConversationCheckpointSearchResult>>([]);
+
     public Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)
     {
         LastMemoryGraphRequest = request;

@@ -218,6 +218,32 @@ public sealed class DashboardQueryServiceTests
                 [new DashboardOverviewMetricResult("jobs", "Jobs", 2, "count")],
                 [],
                 [])));
+        snapshotStore.Add(new DashboardSnapshotEnvelope<DashboardEvaluationSummarySnapshotPayload>(
+            DashboardSnapshotKeys.EvaluationSummary,
+            now.AddSeconds(-3),
+            5,
+            now.AddSeconds(2),
+            string.Empty,
+            new DashboardEvaluationSummarySnapshotPayload(null)));
+        snapshotStore.Add(new DashboardSnapshotEnvelope<DashboardContextSavingsSnapshotPayload>(
+            DashboardSnapshotKeys.ContextSavings,
+            now.AddSeconds(-3),
+            60,
+            now.AddSeconds(57),
+            string.Empty,
+            new DashboardContextSavingsSnapshotPayload(new DashboardContextSavingsResult(
+                false,
+                0,
+                0,
+                0,
+                0,
+                0d,
+                ContextSavingsEstimator.LowConfidence,
+                0d,
+                0d,
+                now.AddHours(-24),
+                now,
+                []))));
         snapshotStore.Add(new DashboardSnapshotEnvelope<DashboardResourceChartSnapshotPayload>(
             DashboardSnapshotKeys.ResourceChart,
             now.AddSeconds(-3),
@@ -281,6 +307,37 @@ public sealed class DashboardQueryServiceTests
         overview.SnapshotStatus!.IsStale.Should().BeFalse();
         overview.SnapshotStatus.Warning.Should().BeEmpty();
         overview.SnapshotStatus.Sections.Single(x => x.Key == DashboardSnapshotKeys.ResourceChart).IsStale.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Overview_Should_Respect_Long_Refresh_Interval_Before_Marking_Context_Savings_Stale()
+    {
+        var capturedAtUtc = new DateTimeOffset(2026, 4, 15, 8, 0, 0, TimeSpan.Zero);
+        var snapshotStore = CreateOverviewSnapshotStore(capturedAtUtc, capturedAtUtc.AddSeconds(89));
+        var serviceBeforeGraceExpires = CreateDashboardQueryService(
+            snapshotStore,
+            capturedAtUtc.AddSeconds(89));
+
+        var overviewBeforeGraceExpires = await serviceBeforeGraceExpires.GetOverviewAsync(CancellationToken.None);
+
+        overviewBeforeGraceExpires.SnapshotStatus.Should().NotBeNull();
+        overviewBeforeGraceExpires.SnapshotStatus!.Sections
+            .Single(x => x.Key == DashboardSnapshotKeys.ContextSavings)
+            .IsStale.Should().BeFalse();
+        overviewBeforeGraceExpires.SnapshotStatus.IsStale.Should().BeFalse();
+
+        var snapshotStoreAfterGraceExpires = CreateOverviewSnapshotStore(capturedAtUtc, capturedAtUtc.AddSeconds(91));
+        var serviceAfterGraceExpires = CreateDashboardQueryService(
+            snapshotStoreAfterGraceExpires,
+            capturedAtUtc.AddSeconds(91));
+
+        var overviewAfterGraceExpires = await serviceAfterGraceExpires.GetOverviewAsync(CancellationToken.None);
+
+        var contextSavingsStatus = overviewAfterGraceExpires.SnapshotStatus!.Sections
+            .Single(x => x.Key == DashboardSnapshotKeys.ContextSavings);
+        contextSavingsStatus.IsStale.Should().BeTrue();
+        contextSavingsStatus.Warning.Should().Contain("資料已延遲 31 秒");
+        overviewAfterGraceExpires.SnapshotStatus.IsStale.Should().BeTrue();
     }
 
     [Fact]
@@ -368,6 +425,155 @@ public sealed class DashboardQueryServiceTests
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private static DashboardQueryService CreateDashboardQueryService(
+        IDashboardSnapshotStore snapshotStore,
+        DateTimeOffset now)
+        => new(
+            new UnusedApplicationDbContext(),
+            new UnusedStorageExplorerStore(),
+            snapshotStore,
+            new UnusedMemoryService(),
+            new FakeCacheVersionStore(),
+            new FakeRedisObjectCache(),
+            new FixedTimeProvider(now),
+            new RequestActorAccessor());
+
+    private static FakeDashboardSnapshotStore CreateOverviewSnapshotStore(
+        DateTimeOffset contextSavingsCapturedAtUtc,
+        DateTimeOffset otherCapturedAtUtc)
+    {
+        var snapshotStore = new FakeDashboardSnapshotStore();
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.StatusCore,
+            5,
+            new DashboardStatusCoreSnapshotPayload(
+                "mcp-server",
+                "ContextHub",
+                "1.2.3",
+                otherCapturedAtUtc.AddMinutes(-2),
+                "Http",
+                "CPUExecutionProvider",
+                "compact",
+                "intfloat/multilingual-e5-small",
+                384,
+                512,
+                6,
+                8,
+                true,
+                42),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.DependenciesHealth,
+            5,
+            new DashboardDependenciesHealthSnapshotPayload(
+                [new DashboardServiceHealthResult("postgres", "Healthy", "ok")]),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.RecentOperations,
+            5,
+            new DashboardRecentOperationsSnapshotPayload(
+                [new DashboardOverviewMetricResult("jobs", "Jobs", 2, "count")],
+                [],
+                []),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.DashboardJobs,
+            5,
+            new DashboardJobsSnapshotPayload(new PagedResult<JobListItemResult>([], 1, 10, 0)),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.DashboardLogs,
+            5,
+            new DashboardLogsSnapshotPayload([]),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.DashboardProjectSuggestions,
+            5,
+            new DashboardProjectSuggestionsSnapshotPayload([]),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.StorageTableStats,
+            5,
+            new DashboardStorageTableStatsSnapshotPayload([]),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.StorageLargeTablePreview,
+            5,
+            new DashboardStorageLargeTablePreviewSnapshotPayload([]),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.EvaluationSummary,
+            5,
+            new DashboardEvaluationSummarySnapshotPayload(null),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.ContextSavings,
+            60,
+            new DashboardContextSavingsSnapshotPayload(new DashboardContextSavingsResult(
+                false,
+                0,
+                0,
+                0,
+                0,
+                0d,
+                ContextSavingsEstimator.LowConfidence,
+                0d,
+                0d,
+                contextSavingsCapturedAtUtc.AddHours(-24),
+                contextSavingsCapturedAtUtc,
+                [])),
+            contextSavingsCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.ResourceChart,
+            5,
+            new DashboardResourceChartSnapshotPayload([]),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.DependencyResources,
+            5,
+            new DashboardDependencyResourcesResult("Healthy", string.Empty, [], []),
+            otherCapturedAtUtc);
+        AddSnapshot(
+            snapshotStore,
+            DashboardSnapshotKeys.DockerHost,
+            5,
+            new DashboardDockerHostResult(
+                "Healthy",
+                string.Empty,
+                new DockerHostSummaryResult("docker-dev", "28.0", "Linux", "6.8", 8, 1024, 768, 5, 12, 3, otherCapturedAtUtc)),
+            otherCapturedAtUtc);
+
+        return snapshotStore;
+    }
+
+    private static void AddSnapshot<TPayload>(
+        FakeDashboardSnapshotStore snapshotStore,
+        string key,
+        int refreshIntervalSeconds,
+        TPayload payload,
+        DateTimeOffset capturedAtUtc)
+    {
+        snapshotStore.Add(new DashboardSnapshotEnvelope<TPayload>(
+            key,
+            capturedAtUtc,
+            refreshIntervalSeconds,
+            DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc, refreshIntervalSeconds),
+            string.Empty,
+            payload));
     }
 
     private static MemoryGraphNodeResult CreateGraphNode(
@@ -562,6 +768,10 @@ public sealed class DashboardQueryServiceTests
         public DbSet<ConversationSession> ConversationSessions => throw new NotSupportedException();
         public DbSet<ConversationCheckpoint> ConversationCheckpoints => throw new NotSupportedException();
         public DbSet<ConversationInsight> ConversationInsights => throw new NotSupportedException();
+
+        public void ClearTrackedChanges()
+        {
+        }
 
         public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
             => throw new NotSupportedException();

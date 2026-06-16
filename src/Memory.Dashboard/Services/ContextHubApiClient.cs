@@ -14,6 +14,7 @@ public interface IContextHubApiClient
     Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken);
     Task<DashboardMonitoringResult> GetMonitoringAsync(CancellationToken cancellationToken);
     Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchConversationCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
     Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectSuggestionResult>> GetMemoryProjectsAsync(string? query, int limit, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
@@ -85,6 +86,21 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken)
         => GetRequiredAsync<PagedResult<MemoryListItemResult>>(BuildMemoriesUrl(request), cancellationToken);
+
+    public Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchConversationCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken)
+    {
+        var query = new Dictionary<string, string?>
+        {
+            ["query"] = request.Query,
+            ["projectId"] = request.ProjectId,
+            ["conversationId"] = request.ConversationId,
+            ["limit"] = request.Limit.ToString()
+        };
+
+        return GetRequiredAsync<IReadOnlyList<ConversationCheckpointSearchResult>>(
+            QueryHelpers.AddQueryString("/api/conversations/checkpoints/search", query),
+            cancellationToken);
+    }
 
     public Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)
         => GetRequiredAsync<MemoryGraphResult>(BuildMemoryGraphUrl(request), cancellationToken);

@@ -138,6 +138,34 @@
         <div class="split-layout">
         <section class="panel panel-scroll">
             <div class="panel-title">記憶條目 (@DashboardFormatting.Integer(_page.TotalCount))</div>
+            @if (_page.TotalCount == 0 && _checkpointStaging.Count > 0)
+            {
+                <div class="empty-inline">
+                    <div class="empty-inline-title">正式 memory 查不到，但有 checkpoint staging</div>
+                    <div class="empty-inline-copy">這些資料仍在 conversation checkpoint / insight pipeline，尚未確認正式入庫。</div>
+                </div>
+                <div class="stack-list">
+                    @foreach (var checkpoint in _checkpointStaging)
+                    {
+                        <article class="stack-item">
+                            <div class="stack-item-title">@checkpoint.ShortExcerpt</div>
+                            <div class="stack-item-copy">@checkpoint.ProjectId / @checkpoint.ConversationId</div>
+                            <div class="stack-item-meta">
+                                <span class="status-badge @PipelineStatusClass(checkpoint.PipelineStatus)">@PipelineStatusText(checkpoint.PipelineStatus)</span>
+                                <span>@checkpoint.EventType</span>
+                                @if (checkpoint.PromotedMemoryId.HasValue)
+                                {
+                                    <span>memory: @checkpoint.PromotedMemoryId</span>
+                                }
+                                else if (!string.IsNullOrWhiteSpace(checkpoint.Error))
+                                {
+                                    <span>@checkpoint.Error</span>
+                                }
+                            </div>
+                        </article>
+                    }
+                </div>
+            }
             <div class="table-scroll-shell table-scroll-shell-tall">
                 <table class="data-table data-table-clickable memories-table">
                     <colgroup>
@@ -341,6 +369,7 @@
     private string? _tag;
     private PagedResult<MemoryListItemResult>? _page;
     private MemoryDetailsResult? _selected;
+    private IReadOnlyList<ConversationCheckpointSearchResult> _checkpointStaging = [];
     private bool _loading;
     private DateTimeOffset? _lastUpdatedAt;
     private string? _message;
@@ -386,6 +415,9 @@
                 _selected = await ApiClient.GetMemoryDetailsAsync(_selected.Document.Id, CancellationToken.None);
             }
 
+            _checkpointStaging = _page.TotalCount == 0 && !string.IsNullOrWhiteSpace(_query)
+                ? await LoadCheckpointStagingAsync()
+                : [];
             _lastUpdatedAt = DateTimeOffset.UtcNow;
         }
         finally
@@ -396,6 +428,24 @@
 
     private async Task SelectAsync(Guid id)
         => _selected = await ApiClient.GetMemoryDetailsAsync(id, CancellationToken.None);
+
+    private async Task<IReadOnlyList<ConversationCheckpointSearchResult>> LoadCheckpointStagingAsync()
+    {
+        try
+        {
+            return await ApiClient.SearchConversationCheckpointsAsync(
+                new ConversationCheckpointSearchRequest(
+                    _query,
+                    ResolveSelectedProjectId(),
+                    null,
+                    5),
+                CancellationToken.None);
+        }
+        catch (InvalidOperationException)
+        {
+            return [];
+        }
+    }
 
     private async Task LoadSharedSummaryAsync()
     {
@@ -507,6 +557,28 @@
             "active" or "ready" or "running" => "ok",
             "archived" or "pending" => "warn",
             _ => "neutral"
+        };
+
+    private static string PipelineStatusClass(string status)
+        => status.ToLowerInvariant() switch
+        {
+            "promoted" => "ok",
+            "promotion-failed" or "ingest-failed" => "bad",
+            "checkpoint-only" or "insight-pending" or "promotion-pending" or "ingest-pending" => "warn",
+            _ => "neutral"
+        };
+
+    private static string PipelineStatusText(string status)
+        => status.ToLowerInvariant() switch
+        {
+            "checkpoint-only" => "已在 checkpoint，尚未正式入庫",
+            "ingest-pending" => "等待產生 insight",
+            "ingest-failed" => "insight 產生失敗",
+            "insight-pending" => "insight 待 promotion",
+            "promotion-pending" => "promotion 排程中",
+            "promotion-failed" => "promotion 失敗",
+            "promoted" => "已正式入庫",
+            _ => status
         };
 
     private static string ChangedByText(string changedBy)

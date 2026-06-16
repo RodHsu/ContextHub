@@ -7,8 +7,10 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using StackExchange.Redis;
+using System.Collections.Concurrent;
 using System.Data;
 using System.Globalization;
+using System.Text.Json;
 
 namespace Memory.Infrastructure;
 
@@ -27,6 +29,12 @@ public sealed class DashboardSnapshotCollectorHostedService(
     ILogger<DashboardSnapshotCollectorHostedService> logger) : BackgroundService
 {
     private const int MaxResourceSamples = 15;
+    private const int ContextSavingsMinimumIntervalSeconds = 60;
+    private static readonly TimeSpan StartupDependencyFailureGrace = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan FailureLogThrottle = TimeSpan.FromMinutes(2);
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly ConcurrentDictionary<string, SnapshotFailureState> _failureStates = new(StringComparer.Ordinal);
+    private readonly DateTimeOffset _startedAtUtc = timeProvider.GetUtcNow();
     private readonly SemaphoreSlim _resourceLock = new(1, 1);
     private readonly List<DashboardResourceSampleResult> _resourceSamples = [];
     private DockerRuntimeSnapshot? _previousDockerSnapshot;
@@ -54,6 +62,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
             RunLoopAsync(DashboardSnapshotKeys.StorageTableStats, behavior => behavior.RecentOperationsSeconds, CollectStorageTableStatsAsync, stoppingToken),
             RunLoopAsync(DashboardSnapshotKeys.StorageLargeTablePreview, behavior => behavior.RecentOperationsSeconds, CollectStorageLargeTablePreviewAsync, stoppingToken),
             RunLoopAsync(DashboardSnapshotKeys.ResourceChart, behavior => behavior.ResourceChartSeconds, CollectResourceChartAsync, stoppingToken),
+            RunLoopAsync(DashboardSnapshotKeys.EvaluationSummary, behavior => behavior.RecentOperationsSeconds, CollectEvaluationSummaryAsync, stoppingToken),
+            RunLoopAsync(DashboardSnapshotKeys.ContextSavings, behavior => Math.Max(ContextSavingsMinimumIntervalSeconds, behavior.RecentOperationsSeconds), CollectContextSavingsAsync, stoppingToken),
             RunLoopAsync(DashboardSnapshotKeys.MemoryGraphIndex, behavior => behavior.MemoryGraphIndexSeconds, CollectMemoryGraphIndexAsync, stoppingToken)
         };
 
@@ -76,6 +86,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.StorageTableStats, settings.RecentOperationsSeconds, CollectStorageTableStatsAsync, cancellationToken);
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.StorageLargeTablePreview, settings.RecentOperationsSeconds, CollectStorageLargeTablePreviewAsync, cancellationToken);
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.ResourceChart, settings.ResourceChartSeconds, CollectResourceChartAsync, cancellationToken);
+        await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.EvaluationSummary, settings.RecentOperationsSeconds, CollectEvaluationSummaryAsync, cancellationToken);
     }
 
     private async Task RunLoopAsync(
@@ -110,6 +121,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
         try
         {
             await collectAsync(intervalSeconds, cancellationToken);
+            LogRecoveryIfNeeded(key);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -117,9 +129,91 @@ public sealed class DashboardSnapshotCollectorHostedService(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Dashboard snapshot collector failed for {SnapshotKey}.", key);
-            await UpdateLastErrorAsync<object?>(key, intervalSeconds, ex.Message, cancellationToken);
+            LogCollectorFailure(key, ex);
+            await TryUpdateLastErrorAsync<object?>(key, intervalSeconds, ex.Message, cancellationToken);
         }
+    }
+
+    private void LogCollectorFailure(string key, Exception exception)
+    {
+        var now = timeProvider.GetUtcNow();
+        var state = _failureStates.AddOrUpdate(
+            key,
+            _ => new SnapshotFailureState(1, now, now),
+            (_, current) => current with
+            {
+                Count = current.Count + 1,
+                LastFailureLoggedAtUtc = ShouldLogFailure(current.LastFailureLoggedAtUtc, now)
+                    ? now
+                    : current.LastFailureLoggedAtUtc
+            });
+
+        var firstFailure = state.Count == 1;
+        var throttledRepeat = !firstFailure && state.LastFailureLoggedAtUtc != now;
+        if (throttledRepeat)
+        {
+            logger.LogDebug(
+                exception,
+                "Dashboard snapshot collector repeated failure suppressed for {SnapshotKey}. ConsecutiveFailures={FailureCount}",
+                key,
+                state.Count);
+            return;
+        }
+
+        if (IsWithinStartupGrace(now) && IsTransientDependencyFailure(exception))
+        {
+            logger.LogWarning(
+                exception,
+                "Dashboard snapshot collector transient dependency failure during startup for {SnapshotKey}. ConsecutiveFailures={FailureCount}",
+                key,
+                state.Count);
+            return;
+        }
+
+        logger.LogError(
+            exception,
+            "Dashboard snapshot collector failed for {SnapshotKey}. ConsecutiveFailures={FailureCount}",
+            key,
+            state.Count);
+    }
+
+    private void LogRecoveryIfNeeded(string key)
+    {
+        if (!_failureStates.TryRemove(key, out var state))
+        {
+            return;
+        }
+
+        logger.LogInformation(
+            "Dashboard snapshot collector recovered for {SnapshotKey} after {FailureCount} consecutive failures.",
+            key,
+            state.Count);
+    }
+
+    private bool IsWithinStartupGrace(DateTimeOffset now)
+        => now - _startedAtUtc <= StartupDependencyFailureGrace;
+
+    private static bool ShouldLogFailure(DateTimeOffset lastLoggedAtUtc, DateTimeOffset now)
+        => now - lastLoggedAtUtc >= FailureLogThrottle;
+
+    private static bool IsTransientDependencyFailure(Exception exception)
+        => ContainsException<NpgsqlException>(exception) ||
+           ContainsException<RedisException>(exception) ||
+           ContainsException<TimeoutException>(exception) ||
+           exception.Message.Contains("transient failure", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ContainsException<TException>(Exception exception)
+        where TException : Exception
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is TException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private async Task<DashboardSnapshotPollingSettingsResult> GetPollingSettingsAsync(CancellationToken cancellationToken)
@@ -159,6 +253,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
             DashboardSnapshotKeys.StorageTableStats => defaults.RecentOperationsSeconds,
             DashboardSnapshotKeys.StorageLargeTablePreview => defaults.RecentOperationsSeconds,
             DashboardSnapshotKeys.ResourceChart => defaults.ResourceChartSeconds,
+            DashboardSnapshotKeys.EvaluationSummary => defaults.RecentOperationsSeconds,
+            DashboardSnapshotKeys.ContextSavings => ContextSavingsMinimumIntervalSeconds,
             DashboardSnapshotKeys.MemoryGraphIndex => defaults.MemoryGraphIndexSeconds,
             _ => defaults.StatusCoreSeconds
         };
@@ -397,6 +493,158 @@ public sealed class DashboardSnapshotCollectorHostedService(
             cancellationToken);
     }
 
+    private async Task CollectEvaluationSummaryAsync(int intervalSeconds, CancellationToken cancellationToken)
+    {
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var latestRun = await dbContext.EvaluationRuns
+            .AsNoTracking()
+            .OrderByDescending(x => x.StartedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        DashboardEvaluationSummaryResult? summary = null;
+        if (latestRun is not null)
+        {
+            var suiteName = await dbContext.EvaluationSuites
+                .AsNoTracking()
+                .Where(x => x.Id == latestRun.SuiteId)
+                .Select(x => x.Name)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            summary = new DashboardEvaluationSummaryResult(
+                latestRun.Id,
+                latestRun.SuiteId,
+                suiteName ?? "Unnamed suite",
+                latestRun.Status,
+                latestRun.HitRate,
+                latestRun.RecallAtK,
+                latestRun.MeanReciprocalRank,
+                latestRun.AverageLatencyMs,
+                latestRun.StartedAt,
+                latestRun.CompletedAt);
+        }
+
+        await WriteSnapshotAsync(
+            DashboardSnapshotKeys.EvaluationSummary,
+            intervalSeconds,
+            new DashboardEvaluationSummarySnapshotPayload(summary),
+            cancellationToken);
+    }
+
+    private async Task CollectContextSavingsAsync(int intervalSeconds, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow();
+        var windowStartedAt = now.AddHours(-24);
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var events = await dbContext.RetrievalEvents
+            .AsNoTracking()
+            .Where(x => x.Success)
+            .Where(x => x.CreatedAt >= windowStartedAt && x.CreatedAt <= now)
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(250)
+            .Select(x => new ContextSavingsTelemetryEvent(
+                x.CreatedAt,
+                x.CacheHit,
+                x.MetadataJson))
+            .ToListAsync(cancellationToken);
+
+        var savings = BuildContextSavings(now, windowStartedAt, events);
+        await WriteSnapshotAsync(
+            DashboardSnapshotKeys.ContextSavings,
+            intervalSeconds,
+            new DashboardContextSavingsSnapshotPayload(savings),
+            cancellationToken);
+    }
+
+    private static DashboardContextSavingsResult BuildContextSavings(
+        DateTimeOffset now,
+        DateTimeOffset windowStartedAt,
+        IEnumerable<ContextSavingsTelemetryEvent> events)
+    {
+        var samples = events
+            .Select(x => new ContextSavingsTelemetrySample(
+                x.CreatedAt,
+                x.CacheHit,
+                TryReadSavingsEstimate(x.MetadataJson)))
+            .Where(x => x.Savings is not null)
+            .OrderBy(x => x.CreatedAt)
+            .ToArray();
+
+        if (samples.Length == 0)
+        {
+            return CreateEmptyContextSavings(now, windowStartedAt);
+        }
+
+        var baseline = samples.Sum(x => x.Savings!.BaselineTokenEstimate);
+        var returned = samples.Sum(x => x.Savings!.ReturnedTokenEstimate);
+        var saved = samples.Sum(x => x.Savings!.EstimatedSavedTokens);
+        var averageSavingPercent = samples.Average(x => x.Savings!.EstimatedSavingPercent);
+        var averageCoverage = samples.Average(x => x.Savings!.SourceCoveragePercent);
+        var cacheHitPercent = samples.Count(x => x.CacheHit) / (double)samples.Length * 100d;
+        var trend = samples
+            .TakeLast(24)
+            .Select(x => new DashboardContextSavingsTrendPointResult(
+                x.CreatedAt,
+                x.Savings!.BaselineTokenEstimate,
+                x.Savings.ReturnedTokenEstimate,
+                x.Savings.EstimatedSavedTokens,
+                x.Savings.EstimatedSavingPercent))
+            .ToArray();
+
+        return new DashboardContextSavingsResult(
+            true,
+            samples.Length,
+            baseline,
+            returned,
+            saved,
+            Math.Round(averageSavingPercent, 2),
+            ResolveSavingsConfidence(averageCoverage),
+            Math.Round(averageCoverage, 2),
+            Math.Round(cacheHitPercent, 2),
+            windowStartedAt,
+            now,
+            trend);
+    }
+
+    private static DashboardContextSavingsResult CreateEmptyContextSavings(DateTimeOffset now, DateTimeOffset windowStartedAt)
+        => new(
+            false,
+            0,
+            0,
+            0,
+            0,
+            0d,
+            ContextSavingsEstimator.LowConfidence,
+            0d,
+            0d,
+            windowStartedAt,
+            now,
+            []);
+
+    private static ContextSavingsEstimateResult? TryReadSavingsEstimate(string metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<ContextSavingsTelemetryMetadata>(metadataJson, JsonOptions)?.Savings;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string ResolveSavingsConfidence(double sourceCoveragePercent)
+        => sourceCoveragePercent switch
+        {
+            >= 80d => ContextSavingsEstimator.HighConfidence,
+            >= 50d => ContextSavingsEstimator.MediumConfidence,
+            _ => ContextSavingsEstimator.LowConfidence
+        };
+
     private async Task CollectStorageTableStatsAsync(int intervalSeconds, CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
@@ -543,7 +791,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 key,
                 capturedAtUtc,
                 intervalSeconds,
-                DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc),
+                DashboardSnapshotStalenessPolicy.ComputeStaleAfter(capturedAtUtc, intervalSeconds),
                 string.Empty,
                 payload),
             cancellationToken);
@@ -560,10 +808,31 @@ public sealed class DashboardSnapshotCollectorHostedService(
         await snapshotStore.SetAsync(existing with
         {
             RefreshIntervalSeconds = intervalSeconds,
-            StaleAfterUtc = DashboardSnapshotStalenessPolicy.ComputeStaleAfter(existing.CapturedAtUtc),
+            StaleAfterUtc = DashboardSnapshotStalenessPolicy.ComputeStaleAfter(existing.CapturedAtUtc, intervalSeconds),
             LastError = error
         }, cancellationToken);
     }
+
+    private async Task TryUpdateLastErrorAsync<TPayload>(string key, int intervalSeconds, string error, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await UpdateLastErrorAsync<TPayload>(key, intervalSeconds, error, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Dashboard snapshot collector could not update last error for {SnapshotKey}.", key);
+        }
+    }
+
+    private sealed record SnapshotFailureState(
+        int Count,
+        DateTimeOffset FirstFailureAtUtc,
+        DateTimeOffset LastFailureLoggedAtUtc);
 
     private async Task<DashboardRedisTelemetryResult> CollectRedisTelemetryAsync(
         DockerRuntimeSnapshot dockerSnapshot,
@@ -786,4 +1055,16 @@ public sealed class DashboardSnapshotCollectorHostedService(
             ? parsed
             : 0d;
 
+    private sealed record ContextSavingsTelemetryMetadata(
+        ContextSavingsEstimateResult? Savings);
+
+    private sealed record ContextSavingsTelemetryEvent(
+        DateTimeOffset CreatedAt,
+        bool CacheHit,
+        string MetadataJson);
+
+    private sealed record ContextSavingsTelemetrySample(
+        DateTimeOffset CreatedAt,
+        bool CacheHit,
+        ContextSavingsEstimateResult? Savings);
 }
