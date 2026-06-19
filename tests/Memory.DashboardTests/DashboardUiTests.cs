@@ -238,6 +238,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("Redis 狀態監控");
         overviewHtml.Should().Contain("resource-redis-chart");
         overviewHtml.Should().Contain("Redis resource status chart");
+        overviewHtml.Should().Contain("Estimated Context Savings");
+        overviewHtml.Should().Contain("context-savings-strip");
+        overviewHtml.Should().Contain("Saved tokens");
+        overviewHtml.Should().NotContain("context-savings-panel");
         overviewHtml.Should().Contain("contexthub-redis-1");
         overviewHtml.Should().Contain("近期平均");
         overviewHtml.Should().Contain("每 5 秒刷新");
@@ -303,6 +307,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("資料快照");
         monitoringHtml.Should().Contain("Redis");
         monitoringHtml.Should().Contain("PostgreSQL");
+        monitoringHtml.Should().Contain("Context Savings");
+        monitoringHtml.Should().Contain("monitoring-context-savings-panel");
+        monitoringHtml.Should().Contain("Source coverage");
         monitoringHtml.Should().Contain("資源趨勢");
         monitoringHtml.Should().Contain("Compose 服務資源");
         monitoringHtml.Should().Contain("Docker 主機");

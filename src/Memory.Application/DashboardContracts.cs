@@ -130,7 +130,10 @@ public sealed record DashboardContextSavingsResult(
     double CacheHitPercent,
     DateTimeOffset WindowStartedAtUtc,
     DateTimeOffset WindowEndedAtUtc,
-    IReadOnlyList<DashboardContextSavingsTrendPointResult> Trend);
+    IReadOnlyList<DashboardContextSavingsTrendPointResult> Trend,
+    bool HasRecentData = false,
+    DateTimeOffset? LastSampleAtUtc = null,
+    string WindowLabel = "最近 24 小時");
 
 public sealed record DashboardContextSavingsTrendPointResult(
     DateTimeOffset TimestampUtc,
@@ -225,7 +228,8 @@ public sealed record DashboardMonitoringResult(
     DashboardPageSnapshotStatusResult? SnapshotStatus = null,
     DashboardDockerHostResult? DockerHost = null,
     DashboardDependencyResourcesResult? DependencyResources = null,
-    IReadOnlyList<DashboardResourceSampleResult>? ResourceSamples = null);
+    IReadOnlyList<DashboardResourceSampleResult>? ResourceSamples = null,
+    DashboardContextSavingsResult? ContextSavings = null);
 
 public sealed record RuntimeConfigurationResult(
     string Namespace,

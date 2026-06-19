@@ -1072,6 +1072,9 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         monitoring.Redis.Should().NotBeNull();
         monitoring.Postgres.Should().NotBeNull();
         monitoring.DependencyResources.Should().NotBeNull();
+        monitoring.ContextSavings.Should().NotBeNull();
+        monitoring.ContextSavings!.WindowLabel.Should().NotBeNullOrWhiteSpace();
+        monitoring.SnapshotStatus!.Sections.Should().Contain(x => x.Key == DashboardSnapshotKeys.ContextSavings);
         memories.Should().NotBeNull();
         memories!.Items.Should().Contain(x => x.Id == memoryId);
         details.Should().NotBeNull();

@@ -92,7 +92,11 @@ public enum GovernanceFindingType
     ConflictCandidate,
     StaleSource,
     MissingSource,
-    ReindexRequired
+    ReindexRequired,
+    StaleMemoryCandidate,
+    SupersededMemoryCandidate,
+    DuplicateMemoryCandidate,
+    LowSignalEpisodeCandidate
 }
 
 public enum GovernanceFindingStatus

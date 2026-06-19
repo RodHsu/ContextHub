@@ -55,6 +55,7 @@ public sealed class GovernanceService(
     public async Task AnalyzeAsync(string projectId, CancellationToken cancellationToken)
     {
         var normalizedProjectId = ProjectContext.Normalize(projectId);
+        var now = clock.UtcNow;
         var findings = new List<GovernanceDraft>();
         var sources = await dbContext.SourceConnections
             .AsNoTracking()
@@ -68,7 +69,7 @@ public sealed class GovernanceService(
         foreach (var source in sources.Where(static source => source.Enabled))
         {
             var isStale = !source.LastSuccessfulSyncAt.HasValue ||
-                          source.LastSuccessfulSyncAt.Value < clock.UtcNow.AddHours(-24);
+                          source.LastSuccessfulSyncAt.Value < now.AddHours(-24);
             if (!isStale)
             {
                 continue;
@@ -119,7 +120,7 @@ public sealed class GovernanceService(
                     {
                         findings.Add(new GovernanceDraft(
                             $"duplicate:{normalizedProjectId}:{left.Id}:{right.Id}",
-                            GovernanceFindingType.DuplicateCandidate,
+                            GovernanceFindingType.DuplicateMemoryCandidate,
                             $"可能重複的記憶：{left.Title}",
                             $"兩筆記憶具有相近標題與高重疊摘要，相似度 {similarity:P0}。",
                             null,
@@ -142,6 +143,45 @@ public sealed class GovernanceService(
                     }
                 }
             }
+        }
+
+        foreach (var memory in memories.Where(memory => IsSupersededMemoryCandidate(memory, memories)))
+        {
+            findings.Add(new GovernanceDraft(
+                $"superseded-memory:{normalizedProjectId}:{memory.Id}",
+                GovernanceFindingType.SupersededMemoryCandidate,
+                $"可能已被新版取代：{memory.Title}",
+                "此 active memory 帶有 superseded / replaced 訊號，建議人工確認後再封存或改鏈結。",
+                TryGetConnectorId(memory.MetadataJson),
+                memory.Id,
+                TryGetSupersededByMemoryId(memory.MetadataJson),
+                JsonSerializer.Serialize(new { memory.Status, memory.UpdatedAt, memory.Tags }, JsonOptions)));
+        }
+
+        foreach (var memory in memories.Where(memory => IsStaleMemoryCandidate(memory, now)))
+        {
+            findings.Add(new GovernanceDraft(
+                $"stale-memory:{normalizedProjectId}:{memory.Id}",
+                GovernanceFindingType.StaleMemoryCandidate,
+                $"可能過期的記憶：{memory.Title}",
+                $"此 memory 已 {Math.Max(1, (now - memory.UpdatedAt).Days)} 天未更新，且重要性 / 信心分數不高；建議週期性 review，不自動刪除。",
+                TryGetConnectorId(memory.MetadataJson),
+                memory.Id,
+                null,
+                JsonSerializer.Serialize(new { memory.MemoryType, memory.Importance, memory.Confidence, memory.UpdatedAt }, JsonOptions)));
+        }
+
+        foreach (var memory in memories.Where(memory => IsLowSignalEpisodeCandidate(memory, now)))
+        {
+            findings.Add(new GovernanceDraft(
+                $"low-signal-episode:{normalizedProjectId}:{memory.Id}",
+                GovernanceFindingType.LowSignalEpisodeCandidate,
+                $"低訊號 episode 候選：{memory.Title}",
+                "此 episode 較舊且 importance / confidence 偏低；建議人工確認是否合併、封存或保留。",
+                TryGetConnectorId(memory.MetadataJson),
+                memory.Id,
+                null,
+                JsonSerializer.Serialize(new { memory.Importance, memory.Confidence, memory.UpdatedAt, memory.Tags }, JsonOptions)));
         }
 
         var vectorCandidates = await dbContext.MemoryItems
@@ -223,8 +263,9 @@ public sealed class GovernanceService(
 
         var linkType = draft.Type switch
         {
-            GovernanceFindingType.DuplicateCandidate => "duplicate_of",
+            GovernanceFindingType.DuplicateCandidate or GovernanceFindingType.DuplicateMemoryCandidate => "duplicate_of",
             GovernanceFindingType.ConflictCandidate => "conflicts_with",
+            GovernanceFindingType.SupersededMemoryCandidate => "superseded_by",
             _ => string.Empty
         };
         if (string.IsNullOrWhiteSpace(linkType))
@@ -254,8 +295,9 @@ public sealed class GovernanceService(
         var actionType = draft.Type switch
         {
             GovernanceFindingType.StaleSource => SuggestedActionType.SyncSourceNow,
-            GovernanceFindingType.DuplicateCandidate => SuggestedActionType.MergeDuplicateCandidate,
-            GovernanceFindingType.ConflictCandidate => SuggestedActionType.ReviewConflictCandidate,
+            GovernanceFindingType.DuplicateCandidate or GovernanceFindingType.DuplicateMemoryCandidate => SuggestedActionType.MergeDuplicateCandidate,
+            GovernanceFindingType.ConflictCandidate or GovernanceFindingType.SupersededMemoryCandidate => SuggestedActionType.ReviewConflictCandidate,
+            GovernanceFindingType.StaleMemoryCandidate or GovernanceFindingType.LowSignalEpisodeCandidate => SuggestedActionType.ArchiveStaleMemory,
             GovernanceFindingType.MissingSource => SuggestedActionType.ArchiveStaleMemory,
             GovernanceFindingType.ReindexRequired => SuggestedActionType.ReindexProject,
             _ => (SuggestedActionType?)null
@@ -306,6 +348,79 @@ public sealed class GovernanceService(
         => entity.Status == MemoryStatus.Archived &&
            entity.MetadataJson.Contains("\"missing\":true", StringComparison.OrdinalIgnoreCase) &&
            entity.MetadataJson.Contains("\"sourceManaged\":true", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsStaleMemoryCandidate(MemoryItem entity, DateTimeOffset now)
+        => IsLifecycleCandidate(entity) &&
+           entity.MemoryType is MemoryType.Fact or MemoryType.Episode or MemoryType.Artifact or MemoryType.Summary &&
+           entity.UpdatedAt < now.AddDays(-60) &&
+           entity.Importance <= 0.65m &&
+           entity.Confidence <= 0.80m;
+
+    private static bool IsLowSignalEpisodeCandidate(MemoryItem entity, DateTimeOffset now)
+        => IsLifecycleCandidate(entity) &&
+           entity.MemoryType == MemoryType.Episode &&
+           entity.UpdatedAt < now.AddDays(-30) &&
+           (entity.Importance <= 0.55m || entity.Confidence <= 0.70m);
+
+    private static bool IsSupersededMemoryCandidate(MemoryItem entity, IReadOnlyList<MemoryItem> memories)
+        => IsLifecycleCandidate(entity) &&
+           (HasTag(entity, "superseded") ||
+            HasTag(entity, "replaced") ||
+            HasMetadataProperty(entity.MetadataJson, "supersededByMemoryId") ||
+            HasMetadataProperty(entity.MetadataJson, "replacedByMemoryId") ||
+            TryGetSupersededByMemoryId(entity.MetadataJson) is { } supersededById &&
+            memories.Any(memory => memory.Id == supersededById));
+
+    private static bool IsLifecycleCandidate(MemoryItem entity)
+        => entity.Status == MemoryStatus.Active &&
+           !entity.IsReadOnly &&
+           !HasTag(entity, "keep") &&
+           !HasTag(entity, "pinned") &&
+           entity.MemoryType is not MemoryType.Decision and not MemoryType.Preference;
+
+    private static bool HasTag(MemoryItem entity, string tag)
+        => entity.Tags.Any(candidate => string.Equals(candidate, tag, StringComparison.OrdinalIgnoreCase));
+
+    private static bool HasMetadataProperty(string metadataJson, string propertyName)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(metadataJson) ? "{}" : metadataJson);
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                   document.RootElement.TryGetProperty(propertyName, out _);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static Guid? TryGetSupersededByMemoryId(string metadataJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(metadataJson) ? "{}" : metadataJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            foreach (var propertyName in new[] { "supersededByMemoryId", "replacedByMemoryId" })
+            {
+                if (document.RootElement.TryGetProperty(propertyName, out var value) &&
+                    value.ValueKind == JsonValueKind.String &&
+                    Guid.TryParse(value.GetString(), out var id))
+                {
+                    return id;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return null;
+    }
 
     private static Guid? TryGetConnectorId(string metadataJson)
     {

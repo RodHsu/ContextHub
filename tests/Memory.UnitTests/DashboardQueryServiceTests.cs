@@ -170,8 +170,11 @@ public sealed class DashboardQueryServiceTests
 
         monitoring.Redis.Status.Should().Be("Unavailable");
         monitoring.Postgres.Status.Should().Be("Unavailable");
+        monitoring.ContextSavings.Should().NotBeNull();
+        monitoring.ContextSavings!.HasData.Should().BeFalse();
         monitoring.SnapshotStatus.Should().NotBeNull();
         monitoring.SnapshotStatus!.Sections.Single(x => x.Key == DashboardSnapshotKeys.MonitoringStats).IsStale.Should().BeTrue();
+        monitoring.SnapshotStatus.Sections.Single(x => x.Key == DashboardSnapshotKeys.ContextSavings).IsStale.Should().BeTrue();
     }
 
     [Fact]

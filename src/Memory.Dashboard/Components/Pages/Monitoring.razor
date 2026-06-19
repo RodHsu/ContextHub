@@ -260,6 +260,50 @@
                 </div>
             </section>
 
+            @if ((_monitoring.ContextSavings ?? CreateEmptyContextSavings(_monitoring.SnapshotAtUtc)) is { } contextSavings)
+            {
+                <section class="panel monitoring-context-savings-panel">
+                <div class="monitoring-telemetry-header">
+                    <div>
+                        <div class="panel-title">Context Savings</div>
+                        <div class="settings-section-meta">@ContextSavingsStateText(contextSavings) / @contextSavings.WindowLabel</div>
+                    </div>
+                    <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">Confidence @contextSavings.Confidence</span>
+                </div>
+                <div class="monitoring-context-savings-grid">
+                    <article>
+                        <span>24h savings</span>
+                        <strong>@DashboardFormatting.Percent(contextSavings.AverageSavingPercent)</strong>
+                        <small>@FormatTokenCount(contextSavings.EstimatedSavedTokens)</small>
+                    </article>
+                    <article>
+                        <span>Samples</span>
+                        <strong>@DashboardFormatting.Integer(contextSavings.SampleCount)</strong>
+                        <small>@ContextSavingsLastSampleText(contextSavings)</small>
+                    </article>
+                    <article>
+                        <span>Cache hit</span>
+                        <strong>@DashboardFormatting.Percent(contextSavings.CacheHitPercent)</strong>
+                        <small>@DashboardFormatting.Integer(contextSavings.Trend.Count) trend points</small>
+                    </article>
+                    <article>
+                        <span>Source coverage</span>
+                        <strong>@DashboardFormatting.Percent(contextSavings.SourceCoveragePercent)</strong>
+                        <small>@DashboardFormatting.Integer(contextSavings.ReturnedTokenEstimate) returned tokens</small>
+                    </article>
+                    <div class="monitoring-context-savings-trend">
+                        <svg class="resource-line-chart context-savings-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Monitoring context saving percent trend">
+                            @foreach (var guide in new[] { 14, 28, 42 })
+                            {
+                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                            }
+                            <polyline class="resource-line savings" points="@BuildLinePoints(contextSavings.Trend.Select(x => x.SavingPercent), 100d)"></polyline>
+                        </svg>
+                    </div>
+                </div>
+                </section>
+            }
+
             <div class="monitoring-telemetry-grid">
                 <section class="panel monitoring-telemetry-panel">
                     <div class="monitoring-telemetry-header">
@@ -500,6 +544,46 @@
 
     private static string ServiceDisplayName(string name)
         => DashboardText.Service(name);
+
+    private static string ContextSavingsConfidenceClass(string confidence)
+        => confidence switch
+        {
+            ContextSavingsEstimator.HighConfidence => "ok",
+            ContextSavingsEstimator.MediumConfidence => "warn",
+            ContextSavingsEstimator.LowConfidence => "neutral",
+            _ => "neutral"
+        };
+
+    private static string FormatTokenCount(int value)
+        => $"{DashboardFormatting.Integer(value)} tokens";
+
+    private static DashboardContextSavingsResult CreateEmptyContextSavings(DateTimeOffset now)
+        => new(
+            false,
+            0,
+            0,
+            0,
+            0,
+            0d,
+            ContextSavingsEstimator.LowConfidence,
+            0d,
+            0d,
+            now.AddHours(-24),
+            now,
+            [],
+            false,
+            null,
+            "最近 24 小時");
+
+    private static string ContextSavingsStateText(DashboardContextSavingsResult savings)
+        => savings.HasRecentData
+            ? "successful working-context telemetry"
+            : "等待 working-context telemetry";
+
+    private static string ContextSavingsLastSampleText(DashboardContextSavingsResult savings)
+        => savings.LastSampleAtUtc.HasValue
+            ? savings.LastSampleAtUtc.Value.ToString("yyyy-MM-dd HH:mm 'UTC'")
+            : "waiting";
 
     private string ResourceChartPanelNote()
         => $"每 {DashboardFormatting.Integer(PollingIntervalSeconds)} 秒刷新 / 最近 {DashboardFormatting.Integer(_monitoring?.ResourceSamples?.Count ?? 0)} 筆樣本";

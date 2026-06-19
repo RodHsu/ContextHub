@@ -87,6 +87,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.StorageLargeTablePreview, settings.RecentOperationsSeconds, CollectStorageLargeTablePreviewAsync, cancellationToken);
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.ResourceChart, settings.ResourceChartSeconds, CollectResourceChartAsync, cancellationToken);
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.EvaluationSummary, settings.RecentOperationsSeconds, CollectEvaluationSummaryAsync, cancellationToken);
+        await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.ContextSavings, Math.Max(ContextSavingsMinimumIntervalSeconds, settings.RecentOperationsSeconds), CollectContextSavingsAsync, cancellationToken);
     }
 
     private async Task RunLoopAsync(
@@ -602,7 +603,10 @@ public sealed class DashboardSnapshotCollectorHostedService(
             Math.Round(cacheHitPercent, 2),
             windowStartedAt,
             now,
-            trend);
+            trend,
+            true,
+            samples[^1].CreatedAt,
+            "最近 24 小時");
     }
 
     private static DashboardContextSavingsResult CreateEmptyContextSavings(DateTimeOffset now, DateTimeOffset windowStartedAt)
@@ -618,7 +622,10 @@ public sealed class DashboardSnapshotCollectorHostedService(
             0d,
             windowStartedAt,
             now,
-            []);
+            [],
+            false,
+            null,
+            "最近 24 小時");
 
     private static ContextSavingsEstimateResult? TryReadSavingsEstimate(string metadataJson)
     {

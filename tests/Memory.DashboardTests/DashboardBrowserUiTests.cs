@@ -26,9 +26,9 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
     private static readonly DashboardRouteSpec[] Routes =
     [
-        new("overview", "/", "總覽", [".metric-grid", ".context-savings-panel", ".dashboard-grid", ".resource-chart-grid"], [".page-header", ".metric-grid", ".context-savings-panel", ".dashboard-grid"], [".content", ".dashboard-grid.page-scroll-host"]),
+        new("overview", "/", "總覽", [".metric-grid", ".context-savings-strip", ".dashboard-grid", ".resource-chart-grid"], [".page-header", ".metric-grid", ".context-savings-strip", ".dashboard-grid"], [".content", ".dashboard-grid.page-scroll-host"]),
         new("runtime", "/runtime", "執行參數", [".runtime-page-stack", ".runtime-main-panel", ".runtime-parameters-panel"], [".page-header", ".runtime-main-panel", ".runtime-parameters-panel"], [".content", ".runtime-page-stack"]),
-        new("monitoring", "/monitoring", "狀態監控", [".monitoring-page-stack", ".monitoring-top-grid", ".monitoring-telemetry-grid"], [".page-header", ".monitoring-top-grid", ".monitoring-telemetry-grid"], [".content", ".monitoring-page-stack"]),
+        new("monitoring", "/monitoring", "狀態監控", [".monitoring-page-stack", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".page-header", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".content", ".monitoring-page-stack"]),
         new("memories", "/memories", "記憶資料", [".page-actions-secondary .info-popover", ".filter-panel", ".split-layout"], [".page-header", ".filter-panel", ".split-layout"], [".content", ".split-layout"]),
         new("graph", "/graph", "記憶圖譜", [".graph-workspace", ".graph-filter-panel", ".graph-scroll-shell"], [".page-header", ".graph-workspace"], [".content", ".graph-scroll-shell", ".graph-detail-panel"]),
         new("sources", "/sources", "資料來源", [".sources-page-stack", ".sources-setup-grid", ".sources-workspace-section"], [".page-header", ".sources-setup-grid", ".sources-workspace-section"], [".content", ".sources-page-stack", ".panel-scroll-body"]),
@@ -217,7 +217,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/?uiProfile=dense");
-        await page.Locator(".context-savings-panel").WaitForAsync(new LocatorWaitForOptions
+        await page.Locator(".context-savings-strip").WaitForAsync(new LocatorWaitForOptions
         {
             State = WaitForSelectorState.Visible,
             Timeout = 15000
@@ -243,10 +243,10 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     contentClientWidth: document.querySelector('.content')?.clientWidth ?? 0,
                     metricScrollWidth: document.querySelector('.home-page-body > .metric-grid')?.scrollWidth ?? 0,
                     metricClientWidth: document.querySelector('.home-page-body > .metric-grid')?.clientWidth ?? 0,
-                    savingsScrollWidth: document.querySelector('.context-savings-content')?.scrollWidth ?? 0,
-                    savingsClientWidth: document.querySelector('.context-savings-content')?.clientWidth ?? 0,
+                    savingsScrollWidth: document.querySelector('.context-savings-strip-metrics')?.scrollWidth ?? 0,
+                    savingsClientWidth: document.querySelector('.context-savings-strip-metrics')?.clientWidth ?? 0,
                     metrics: rectOf('.home-page-body > .metric-grid'),
-                    savings: rectOf('.context-savings-panel'),
+                    savings: rectOf('.context-savings-strip'),
                     dashboard: rectOf('.home-page-body > .dashboard-grid')
                 });
             }");
@@ -259,7 +259,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         metrics.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(savings.GetProperty("top").GetInt32(), $"metric cards must finish before context savings starts: {layoutJson}");
         savings.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(dashboard.GetProperty("top").GetInt32(), $"context savings must finish before dashboard grid starts: {layoutJson}");
-        savings.GetProperty("height").GetInt32().Should().BeGreaterThan(160, $"context savings panel should not collapse: {layoutJson}");
+        savings.GetProperty("height").GetInt32().Should().BeInRange(70, 180, $"context savings strip should stay compact and readable: {layoutJson}");
         root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
         root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
         root.GetProperty("contentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("contentClientWidth").GetInt32() + 1);

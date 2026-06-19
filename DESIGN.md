@@ -17,6 +17,11 @@
 
 - `Memory Graph` 相關畫面以 Stitch 專案 `ContextHub Memory Graph` 為主基準。
 - `Graph` refined explorer screen 是目前已確認可對照的主要設計稿。
+- `Context Savings` compact dashboard baseline 已補 Stitch artifact：
+  - project：`projects/2525745562578529015` (`ContextHub Context Savings Compact Dashboard`)
+  - screen：`projects/2525745562578529015/screens/6ae43256689f4181876132939a41b4d5`
+  - design system：`assets/96724f4c496e4ceba84d3765d600da5d`
+  - 使用範圍：首頁 `Estimated Context Savings` compact insight strip、`/monitoring` Context Savings card；維持 dark dense admin console，不做大型 landing-style panel。
 - `Sources`、`Governance`、`Evaluation`、`Inbox` 目前仍缺正式 Stitch screen artifact，屬於已知缺口；新增 UI 變更時不能只看本機 screenshot，後續需補齊設計稿來源。
 
 ### 2.2 Repo 內文件角色

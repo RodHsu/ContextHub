@@ -139,6 +139,7 @@ public sealed class DashboardQueryService(
         var dependencyResources = await snapshotStore.GetAsync<DashboardDependencyResourcesResult>(DashboardSnapshotKeys.DependencyResources, cancellationToken);
         var resourceChart = await snapshotStore.GetAsync<DashboardResourceChartSnapshotPayload>(DashboardSnapshotKeys.ResourceChart, cancellationToken);
         var monitoring = await snapshotStore.GetAsync<DashboardMonitoringSnapshotPayload>(DashboardSnapshotKeys.MonitoringStats, cancellationToken);
+        var contextSavings = await snapshotStore.GetAsync<DashboardContextSavingsSnapshotPayload>(DashboardSnapshotKeys.ContextSavings, cancellationToken);
         var storageTableStats = await snapshotStore.GetAsync<DashboardStorageTableStatsSnapshotPayload>(DashboardSnapshotKeys.StorageTableStats, cancellationToken);
         var storageLargeTablePreview = await snapshotStore.GetAsync<DashboardStorageLargeTablePreviewSnapshotPayload>(DashboardSnapshotKeys.StorageLargeTablePreview, cancellationToken);
 
@@ -150,6 +151,7 @@ public sealed class DashboardQueryService(
             BuildSectionStatus(DashboardSnapshotKeys.DependencyResources, "Compose 服務資源", dependencyResources, now),
             BuildSectionStatus(DashboardSnapshotKeys.ResourceChart, "資源趨勢", resourceChart, now),
             BuildSectionStatus(DashboardSnapshotKeys.MonitoringStats, "Redis / PostgreSQL 統計", monitoring, now),
+            BuildSectionStatus(DashboardSnapshotKeys.ContextSavings, "Context 節省估算", contextSavings, now),
             BuildSectionStatus(DashboardSnapshotKeys.StorageTableStats, "Storage 表統計", storageTableStats, now),
             BuildSectionStatus(DashboardSnapshotKeys.StorageLargeTablePreview, "Storage 大表預覽", storageLargeTablePreview, now)
         };
@@ -168,7 +170,8 @@ public sealed class DashboardQueryService(
             snapshotStatus,
             dockerHost?.Payload ?? CreateUnavailableDockerHost(now),
             dependencyResources?.Payload ?? CreateUnavailableDependencyResources(),
-            resourceChart?.Payload.Samples ?? []);
+            resourceChart?.Payload.Samples ?? [],
+            contextSavings?.Payload.Savings ?? CreateEmptyContextSavings(now));
     }
 
     private static DashboardSnapshotSectionStatusResult BuildSectionStatus<TPayload>(
@@ -218,7 +221,10 @@ public sealed class DashboardQueryService(
             0d,
             now.AddHours(-24),
             now,
-            []);
+            [],
+            false,
+            null,
+            "最近 24 小時");
 
     private static DashboardPageSnapshotStatusResult BuildPageSnapshotStatus(
         IReadOnlyList<DashboardSnapshotSectionStatusResult> sections,
