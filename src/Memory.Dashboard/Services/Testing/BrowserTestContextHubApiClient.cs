@@ -41,6 +41,8 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         var returned = Profile == DashboardBrowserTestProfile.Dense ? 34_780 : 9_640;
         var saved = baseline - returned;
         var sampleCount = Profile == DashboardBrowserTestProfile.Dense ? 42 : 16;
+        var coverage = Profile == DashboardBrowserTestProfile.Dense ? 92.3d : 86.8d;
+        var cacheHit = Profile == DashboardBrowserTestProfile.Dense ? 61.9d : 43.8d;
         var trend = Enumerable.Range(0, 18)
             .Select(index =>
             {
@@ -56,6 +58,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                     Math.Round(savingPercent, 2));
             })
             .ToArray();
+        var windows = BuildContextSavingsWindows(now, baseline, returned, sampleCount, coverage, cacheHit);
 
         return new DashboardContextSavingsResult(
             true,
@@ -65,11 +68,33 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             saved,
             Math.Round(saved / (double)baseline * 100d, 2),
             ContextSavingsEstimator.HighConfidence,
-            Profile == DashboardBrowserTestProfile.Dense ? 92.3d : 86.8d,
-            Profile == DashboardBrowserTestProfile.Dense ? 61.9d : 43.8d,
+            coverage,
+            cacheHit,
             now.AddHours(-24),
             now,
-            trend);
+            trend,
+            true,
+            now.AddMinutes(-5),
+            "24H",
+            windows);
+    }
+
+    private static IReadOnlyList<DashboardContextSavingsWindowResult> BuildContextSavingsWindows(
+        DateTimeOffset now,
+        int baseline,
+        int returned,
+        int sampleCount,
+        double coverage,
+        double cacheHit)
+    {
+        var saved = Math.Max(0, baseline - returned);
+        var savingPercent = baseline > 0 ? Math.Round(saved / (double)baseline * 100d, 2) : 0d;
+        return
+        [
+            new DashboardContextSavingsWindowResult("24h", "24H", true, sampleCount, baseline, returned, saved, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddHours(-24), now, now.AddMinutes(-5)),
+            new DashboardContextSavingsWindowResult("3d", "3D", true, sampleCount * 3, baseline * 3, returned * 3, saved * 3, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddDays(-3), now, now.AddMinutes(-5)),
+            new DashboardContextSavingsWindowResult("7d", "7D", true, sampleCount * 7, baseline * 7, returned * 7, saved * 7, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddDays(-7), now, now.AddMinutes(-5))
+        ];
     }
 
     private static DashboardEvaluationSummaryResult BuildEvaluationSummary()

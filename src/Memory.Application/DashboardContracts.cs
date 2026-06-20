@@ -133,7 +133,24 @@ public sealed record DashboardContextSavingsResult(
     IReadOnlyList<DashboardContextSavingsTrendPointResult> Trend,
     bool HasRecentData = false,
     DateTimeOffset? LastSampleAtUtc = null,
-    string WindowLabel = "最近 24 小時");
+    string WindowLabel = "最近 24 小時",
+    IReadOnlyList<DashboardContextSavingsWindowResult>? Windows = null);
+
+public sealed record DashboardContextSavingsWindowResult(
+    string Key,
+    string Label,
+    bool HasData,
+    int SampleCount,
+    int BaselineTokenEstimate,
+    int ReturnedTokenEstimate,
+    int EstimatedSavedTokens,
+    double SavingPercent,
+    string Confidence,
+    double SourceCoveragePercent,
+    double CacheHitPercent,
+    DateTimeOffset WindowStartedAtUtc,
+    DateTimeOffset WindowEndedAtUtc,
+    DateTimeOffset? LastSampleAtUtc);
 
 public sealed record DashboardContextSavingsTrendPointResult(
     DateTimeOffset TimestampUtc,

@@ -29,7 +29,9 @@ public sealed class DashboardSnapshotCollectorHostedService(
     ILogger<DashboardSnapshotCollectorHostedService> logger) : BackgroundService
 {
     private const int MaxResourceSamples = 15;
+    private const int MaxContextSavingsTrendPoints = 24;
     private const int ContextSavingsMinimumIntervalSeconds = 60;
+    private static readonly TimeSpan ContextSavingsMaxWindow = TimeSpan.FromDays(7);
     private static readonly TimeSpan StartupDependencyFailureGrace = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan FailureLogThrottle = TimeSpan.FromMinutes(2);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -534,14 +536,14 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private async Task CollectContextSavingsAsync(int intervalSeconds, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow();
-        var windowStartedAt = now.AddHours(-24);
+        var windowStartedAt = now.Subtract(ContextSavingsMaxWindow);
         await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
         var events = await dbContext.RetrievalEvents
             .AsNoTracking()
             .Where(x => x.Success)
             .Where(x => x.CreatedAt >= windowStartedAt && x.CreatedAt <= now)
-            .OrderByDescending(x => x.CreatedAt)
-            .Take(250)
+            .Where(x => x.MetadataJson.Contains("\"savings\""))
+            .OrderBy(x => x.CreatedAt)
             .Select(x => new ContextSavingsTelemetryEvent(
                 x.CreatedAt,
                 x.CacheHit,
@@ -556,7 +558,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
             cancellationToken);
     }
 
-    private static DashboardContextSavingsResult BuildContextSavings(
+    internal static DashboardContextSavingsResult BuildContextSavings(
         DateTimeOffset now,
         DateTimeOffset windowStartedAt,
         IEnumerable<ContextSavingsTelemetryEvent> events)
@@ -570,46 +572,153 @@ public sealed class DashboardSnapshotCollectorHostedService(
             .OrderBy(x => x.CreatedAt)
             .ToArray();
 
-        if (samples.Length == 0)
+        var windows = BuildContextSavingsWindows(now, samples);
+        var primaryWindow = windows[0];
+        if (!primaryWindow.HasData)
         {
-            return CreateEmptyContextSavings(now, windowStartedAt);
+            return CreateEmptyContextSavings(now, now.AddHours(-24), windows);
         }
-
-        var baseline = samples.Sum(x => x.Savings!.BaselineTokenEstimate);
-        var returned = samples.Sum(x => x.Savings!.ReturnedTokenEstimate);
-        var saved = samples.Sum(x => x.Savings!.EstimatedSavedTokens);
-        var averageSavingPercent = samples.Average(x => x.Savings!.EstimatedSavingPercent);
-        var averageCoverage = samples.Average(x => x.Savings!.SourceCoveragePercent);
-        var cacheHitPercent = samples.Count(x => x.CacheHit) / (double)samples.Length * 100d;
-        var trend = samples
-            .TakeLast(24)
-            .Select(x => new DashboardContextSavingsTrendPointResult(
-                x.CreatedAt,
-                x.Savings!.BaselineTokenEstimate,
-                x.Savings.ReturnedTokenEstimate,
-                x.Savings.EstimatedSavedTokens,
-                x.Savings.EstimatedSavingPercent))
-            .ToArray();
 
         return new DashboardContextSavingsResult(
             true,
-            samples.Length,
+            primaryWindow.SampleCount,
+            primaryWindow.BaselineTokenEstimate,
+            primaryWindow.ReturnedTokenEstimate,
+            primaryWindow.EstimatedSavedTokens,
+            primaryWindow.SavingPercent,
+            primaryWindow.Confidence,
+            primaryWindow.SourceCoveragePercent,
+            primaryWindow.CacheHitPercent,
+            primaryWindow.WindowStartedAtUtc,
+            now,
+            BuildContextSavingsTrend(samples, primaryWindow.WindowStartedAtUtc, now),
+            true,
+            primaryWindow.LastSampleAtUtc,
+            primaryWindow.Label,
+            windows);
+    }
+
+    private static IReadOnlyList<DashboardContextSavingsWindowResult> BuildContextSavingsWindows(
+        DateTimeOffset now,
+        IReadOnlyList<ContextSavingsTelemetrySample> samples)
+        =>
+        [
+            BuildContextSavingsWindow("24h", "24H", now.AddHours(-24), now, samples),
+            BuildContextSavingsWindow("3d", "3D", now.AddDays(-3), now, samples),
+            BuildContextSavingsWindow("7d", "7D", now.AddDays(-7), now, samples)
+        ];
+
+    private static DashboardContextSavingsWindowResult BuildContextSavingsWindow(
+        string key,
+        string label,
+        DateTimeOffset startedAt,
+        DateTimeOffset endedAt,
+        IReadOnlyList<ContextSavingsTelemetrySample> samples)
+    {
+        var windowSamples = samples
+            .Where(x => x.CreatedAt >= startedAt && x.CreatedAt <= endedAt)
+            .ToArray();
+        if (windowSamples.Length == 0)
+        {
+            return new DashboardContextSavingsWindowResult(
+                key,
+                label,
+                false,
+                0,
+                0,
+                0,
+                0,
+                0d,
+                ContextSavingsEstimator.LowConfidence,
+                0d,
+                0d,
+                startedAt,
+                endedAt,
+                null);
+        }
+
+        var baseline = windowSamples.Sum(x => Math.Max(0, x.Savings!.BaselineTokenEstimate));
+        var returned = windowSamples.Sum(x => Math.Max(0, x.Savings!.ReturnedTokenEstimate));
+        var saved = Math.Max(0, baseline - returned);
+        var savingPercent = baseline > 0
+            ? saved / (double)baseline * 100d
+            : 0d;
+        var coveragePercent = WeightedAverageCoverage(windowSamples, baseline);
+        var cacheHitPercent = windowSamples.Count(x => x.CacheHit) / (double)windowSamples.Length * 100d;
+
+        return new DashboardContextSavingsWindowResult(
+            key,
+            label,
+            true,
+            windowSamples.Length,
             baseline,
             returned,
             saved,
-            Math.Round(averageSavingPercent, 2),
-            ResolveSavingsConfidence(averageCoverage),
-            Math.Round(averageCoverage, 2),
+            Math.Round(savingPercent, 2),
+            ResolveSavingsConfidence(coveragePercent),
+            Math.Round(coveragePercent, 2),
             Math.Round(cacheHitPercent, 2),
-            windowStartedAt,
-            now,
-            trend,
-            true,
-            samples[^1].CreatedAt,
-            "最近 24 小時");
+            startedAt,
+            endedAt,
+            windowSamples[^1].CreatedAt);
     }
 
-    private static DashboardContextSavingsResult CreateEmptyContextSavings(DateTimeOffset now, DateTimeOffset windowStartedAt)
+    private static IReadOnlyList<DashboardContextSavingsTrendPointResult> BuildContextSavingsTrend(
+        IReadOnlyList<ContextSavingsTelemetrySample> samples,
+        DateTimeOffset startedAt,
+        DateTimeOffset endedAt)
+    {
+        var windowSamples = samples
+            .Where(x => x.CreatedAt >= startedAt && x.CreatedAt <= endedAt)
+            .ToArray();
+        if (windowSamples.Length == 0)
+        {
+            return [];
+        }
+
+        var windowSeconds = Math.Max(1d, (endedAt - startedAt).TotalSeconds);
+        var bucketSeconds = Math.Max(1d, Math.Ceiling(windowSeconds / MaxContextSavingsTrendPoints));
+        return windowSamples
+            .GroupBy(x => (int)Math.Floor(Math.Max(0d, (x.CreatedAt - startedAt).TotalSeconds) / bucketSeconds))
+            .OrderBy(group => group.Key)
+            .Select(group =>
+            {
+                var bucketSamples = group.ToArray();
+                var baseline = bucketSamples.Sum(x => Math.Max(0, x.Savings!.BaselineTokenEstimate));
+                var returned = bucketSamples.Sum(x => Math.Max(0, x.Savings!.ReturnedTokenEstimate));
+                var saved = Math.Max(0, baseline - returned);
+                var savingPercent = baseline > 0
+                    ? saved / (double)baseline * 100d
+                    : 0d;
+                return new DashboardContextSavingsTrendPointResult(
+                    bucketSamples[^1].CreatedAt,
+                    baseline,
+                    returned,
+                    saved,
+                    Math.Round(savingPercent, 2));
+            })
+            .ToArray();
+    }
+
+    private static double WeightedAverageCoverage(IReadOnlyList<ContextSavingsTelemetrySample> samples, int baseline)
+    {
+        if (samples.Count == 0)
+        {
+            return 0d;
+        }
+
+        if (baseline <= 0)
+        {
+            return samples.Average(x => x.Savings!.SourceCoveragePercent);
+        }
+
+        return samples.Sum(x => Math.Max(0, x.Savings!.BaselineTokenEstimate) * x.Savings!.SourceCoveragePercent) / baseline;
+    }
+
+    private static DashboardContextSavingsResult CreateEmptyContextSavings(
+        DateTimeOffset now,
+        DateTimeOffset windowStartedAt,
+        IReadOnlyList<DashboardContextSavingsWindowResult>? windows = null)
         => new(
             false,
             0,
@@ -625,7 +734,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
             [],
             false,
             null,
-            "最近 24 小時");
+            "24H",
+            windows ?? BuildContextSavingsWindows(now, []));
 
     private static ContextSavingsEstimateResult? TryReadSavingsEstimate(string metadataJson)
     {
@@ -1091,7 +1201,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private sealed record ContextSavingsTelemetryMetadata(
         ContextSavingsEstimateResult? Savings);
 
-    private sealed record ContextSavingsTelemetryEvent(
+    internal sealed record ContextSavingsTelemetryEvent(
         DateTimeOffset CreatedAt,
         bool CacheHit,
         string MetadataJson);

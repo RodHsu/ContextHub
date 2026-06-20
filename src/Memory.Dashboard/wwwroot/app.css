@@ -1354,7 +1354,7 @@ textarea {
 
 .context-savings-strip-metrics {
     display: grid;
-    grid-template-columns: minmax(56px, 0.75fr) repeat(5, minmax(48px, 1fr)) minmax(86px, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 0.95fr)) repeat(4, minmax(0, 1fr)) minmax(0, 1fr);
     gap: 0;
     min-width: 0;
     border: 1px solid var(--border);
@@ -1365,6 +1365,7 @@ textarea {
 
 .context-savings-strip-metrics > div {
     display: grid;
+    box-sizing: border-box;
     gap: 0.18rem;
     align-content: center;
     min-width: 0;
@@ -1387,14 +1388,25 @@ textarea {
     line-height: 1.15;
 }
 
+.context-savings-strip-metrics small {
+    color: var(--text-muted);
+    font-size: 0.68rem;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
+}
+
 .context-savings-strip-metrics strong {
     font-size: 0.9rem;
     line-height: 1.05;
     overflow-wrap: anywhere;
 }
 
-.context-savings-strip-primary strong {
+.context-savings-window-card strong {
     font-size: 1.08rem;
+}
+
+.context-savings-window-empty {
+    opacity: 0.7;
 }
 
 .context-savings-strip-trend {
@@ -1405,7 +1417,9 @@ textarea {
 }
 
 .context-savings-line-chart {
+    max-width: 100%;
     min-height: 42px;
+    overflow: hidden;
 }
 
 .context-savings-strip-empty .resource-line.savings {
@@ -1423,7 +1437,7 @@ textarea {
 
 .monitoring-context-savings-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(180px, 1.2fr);
+    grid-template-columns: repeat(6, minmax(0, 1fr)) minmax(180px, 1.2fr);
     gap: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -1518,6 +1532,10 @@ textarea {
 
     .context-savings-strip-metrics > div:nth-last-child(2) {
         border-bottom: 1px solid var(--border);
+    }
+
+    .context-savings-strip .context-savings-strip-trend {
+        display: none;
     }
 }
 

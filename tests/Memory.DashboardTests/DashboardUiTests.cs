@@ -245,7 +245,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("Redis resource status chart");
         overviewHtml.Should().Contain("Estimated Context Savings");
         overviewHtml.Should().Contain("context-savings-strip");
-        overviewHtml.Should().Contain("Saved tokens");
+        overviewHtml.Should().Contain("24H");
+        overviewHtml.Should().Contain("3D");
+        overviewHtml.Should().Contain("7D");
         overviewHtml.Should().NotContain("context-savings-panel");
         overviewHtml.Should().Contain("contexthub-redis-1");
         overviewHtml.Should().Contain("近期平均");
@@ -990,6 +992,12 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
                 2_180 + (index * 32),
                 77.86d + (index * 0.18d)))
             .ToArray();
+        var windows = new[]
+        {
+            new DashboardContextSavingsWindowResult("24h", "24H", true, 18, 52_400, 11_680, 40_720, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddHours(-24), now, now.AddMinutes(-3)),
+            new DashboardContextSavingsWindowResult("3d", "3D", true, 54, 157_200, 35_040, 122_160, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddDays(-3), now, now.AddMinutes(-3)),
+            new DashboardContextSavingsWindowResult("7d", "7D", true, 126, 366_800, 81_760, 285_040, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddDays(-7), now, now.AddMinutes(-3))
+        };
 
         return new DashboardContextSavingsResult(
             true,
@@ -1003,7 +1011,11 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             55.6d,
             now.AddHours(-24),
             now,
-            trend);
+            trend,
+            true,
+            now.AddMinutes(-3),
+            "24H",
+            windows);
     }
 
     private static IReadOnlyList<RequestTrafficSampleResult> BuildTrafficSamples()

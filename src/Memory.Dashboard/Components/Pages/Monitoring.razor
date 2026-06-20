@@ -271,13 +271,16 @@
                     <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">Confidence @contextSavings.Confidence</span>
                 </div>
                 <div class="monitoring-context-savings-grid">
+                    @foreach (var window in ContextSavingsWindows(contextSavings))
+                    {
+                        <article>
+                            <span>@window.Label savings</span>
+                            <strong>@DashboardFormatting.Percent(window.SavingPercent)</strong>
+                            <small>@FormatTokenCount(window.EstimatedSavedTokens) / @DashboardFormatting.Integer(window.SampleCount) samples</small>
+                        </article>
+                    }
                     <article>
-                        <span>24h savings</span>
-                        <strong>@DashboardFormatting.Percent(contextSavings.AverageSavingPercent)</strong>
-                        <small>@FormatTokenCount(contextSavings.EstimatedSavedTokens)</small>
-                    </article>
-                    <article>
-                        <span>Samples</span>
+                        <span>24H samples</span>
                         <strong>@DashboardFormatting.Integer(contextSavings.SampleCount)</strong>
                         <small>@ContextSavingsLastSampleText(contextSavings)</small>
                     </article>
@@ -593,6 +596,28 @@
             false,
             null,
             "最近 24 小時");
+
+    private static IReadOnlyList<DashboardContextSavingsWindowResult> ContextSavingsWindows(DashboardContextSavingsResult savings)
+        => savings.Windows is { Count: > 0 }
+            ? savings.Windows
+            :
+            [
+                new DashboardContextSavingsWindowResult(
+                    "24h",
+                    "24H",
+                    savings.HasData,
+                    savings.SampleCount,
+                    savings.BaselineTokenEstimate,
+                    savings.ReturnedTokenEstimate,
+                    savings.EstimatedSavedTokens,
+                    savings.AverageSavingPercent,
+                    savings.Confidence,
+                    savings.SourceCoveragePercent,
+                    savings.CacheHitPercent,
+                    savings.WindowStartedAtUtc,
+                    savings.WindowEndedAtUtc,
+                    savings.LastSampleAtUtc)
+            ];
 
     private static string ContextSavingsStateText(DashboardContextSavingsResult savings)
         => savings.HasRecentData
