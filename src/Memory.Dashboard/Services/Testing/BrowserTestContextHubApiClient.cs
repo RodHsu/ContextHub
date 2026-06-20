@@ -467,6 +467,30 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<EnqueueSummaryRefreshResult> EnqueueSummaryRefreshAsync(EnqueueSummaryRefreshRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new EnqueueSummaryRefreshResult(Guid.NewGuid(), MemoryJobStatus.Pending));
 
+    public Task<MaintenanceStatusResult> GetMaintenanceStatusAsync(CancellationToken cancellationToken)
+        => Task.FromResult(BuildInactiveMaintenanceStatus());
+
+    public Task<MaintenanceStatusResult> ScheduleMaintenanceAsync(MaintenanceWindowRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(BuildInactiveMaintenanceStatus() with
+        {
+            Phase = MaintenancePhase.Scheduled,
+            Reason = request.Reason ?? "Maintenance",
+            Message = request.Message ?? "Scheduled maintenance",
+            RunId = Guid.NewGuid()
+        });
+
+    public Task<MaintenanceStatusResult> StartMaintenanceDrainAsync(Guid? runId, CancellationToken cancellationToken)
+        => Task.FromResult(BuildInactiveMaintenanceStatus() with { Phase = MaintenancePhase.Draining, RunId = runId ?? Guid.NewGuid() });
+
+    public Task<MaintenanceStatusResult> StartMaintenanceAsync(Guid? runId, CancellationToken cancellationToken)
+        => Task.FromResult(BuildInactiveMaintenanceStatus() with { Phase = MaintenancePhase.Running, Active = true, RunId = runId ?? Guid.NewGuid() });
+
+    public Task<MaintenanceStatusResult> CompleteMaintenanceAsync(Guid? runId, CancellationToken cancellationToken)
+        => Task.FromResult(BuildInactiveMaintenanceStatus() with { Phase = MaintenancePhase.Completed, RunId = runId });
+
+    public Task<MaintenanceStatusResult> CancelMaintenanceAsync(Guid? runId, CancellationToken cancellationToken)
+        => Task.FromResult(BuildInactiveMaintenanceStatus() with { Phase = MaintenancePhase.Cancelled, RunId = runId });
+
     public Task<IReadOnlyList<SourceConnectionResult>> GetSourcesAsync(SourceListRequest request, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SourceConnectionResult>>(
             Profile == DashboardBrowserTestProfile.Empty
@@ -475,6 +499,21 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 [
                     new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, "Local Repo", SourceKind.LocalRepo, true, """{"rootPath":"W:/Repositories/WJCY/ContextHub"}""", false, string.Empty, DateTimeOffset.UtcNow.AddMinutes(-10), DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow)
                 ]);
+
+    private static MaintenanceStatusResult BuildInactiveMaintenanceStatus()
+        => new(
+            MaintenancePhase.Inactive,
+            false,
+            string.Empty,
+            string.Empty,
+            null,
+            null,
+            null,
+            null,
+            string.Empty,
+            15,
+            0,
+            []);
 
     public Task<SourceConnectionResult> CreateSourceAsync(SourceConnectionCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, request.Name, request.SourceKind, request.Enabled, request.ConfigJson, !string.IsNullOrWhiteSpace(request.SecretJson), string.Empty, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));

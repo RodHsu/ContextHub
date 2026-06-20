@@ -29,6 +29,44 @@
     }
 
     <div class="split-layout">
+    <section class="panel detail-panel">
+        <div class="panel-title">知識庫維護</div>
+        @if (_maintenance is null)
+        {
+            <div class="empty-inline">維護狀態載入中。</div>
+        }
+        else
+        {
+            <dl class="definition-grid">
+                <div><dt>階段 (Phase)</dt><dd><span class="status-badge @MaintenanceStatusClass(_maintenance.Phase)">@_maintenance.Phase</span></dd></div>
+                <div><dt>Run Id</dt><dd>@(_maintenance.RunId?.ToString("D") ?? "-")</dd></div>
+                <div><dt>Active Leases</dt><dd>@DashboardFormatting.Integer(_maintenance.ActiveLeaseCount)</dd></div>
+                <div><dt>預估結束</dt><dd>@if (_maintenance.EstimatedEndsAtUtc.HasValue) { <ClientLocalTime Value="_maintenance.EstimatedEndsAtUtc.Value" /> } else { <span>-</span> }</dd></div>
+            </dl>
+        }
+        <div class="form-grid">
+            <label>
+                <span>原因 (Reason)</span>
+                <input @bind="_maintenanceReason" />
+            </label>
+            <label>
+                <span>訊息 (Message)</span>
+                <input @bind="_maintenanceMessage" />
+            </label>
+            <label>
+                <span>Drain 等待上限 (分鐘)</span>
+                <input type="number" min="1" max="1440" @bind="_maintenanceMaxDrainWaitMinutes" />
+            </label>
+        </div>
+        <div class="detail-actions">
+            <button class="ghost-button" @onclick="ScheduleMaintenanceAsync" disabled="@MaintenanceActionDisabled">排程</button>
+            <button class="ghost-button" @onclick="StartDrainAsync" disabled="@MaintenanceActionDisabled">Drain</button>
+            <button class="primary-button" @onclick="StartMaintenanceAsync" disabled="@MaintenanceActionDisabled">開始</button>
+            <button class="ghost-button" @onclick="CompleteMaintenanceAsync" disabled="@MaintenanceActionDisabled">完成</button>
+            <button class="ghost-button" @onclick="CancelMaintenanceAsync" disabled="@MaintenanceActionDisabled">取消</button>
+        </div>
+    </section>
+
     <section class="panel">
         <div class="panel-title">重新索引</div>
         <div class="form-grid">
@@ -159,15 +197,21 @@
     private string? _jobType;
     private string? _modelKey;
     private string? _memoryItemId;
+    private string _maintenanceReason = "Knowledge base update";
+    private string _maintenanceMessage = "ContextHub is preparing for knowledge base maintenance. New writes may be paused while active work drains.";
+    private int _maintenanceMaxDrainWaitMinutes = 15;
     private string? _message;
     private long _messageSequence;
     private PagedResult<JobListItemResult>? _jobs;
+    private MaintenanceStatusResult? _maintenance;
     private JobListItemResult? _selectedJob;
     private bool _loading;
+    private bool _maintenanceBusy;
     private DateTimeOffset? _lastUpdatedAt;
     private string? _loadError;
     private InstanceSettingsSnapshot? _settingsSnapshot;
     private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.JobsPollingSeconds ?? DashboardOptionsAccessor.Value.Polling.JobsSeconds;
+    private bool MaintenanceActionDisabled => _loading || _maintenanceBusy;
 
     protected override async Task OnInitializedAsync()
     {
@@ -191,6 +235,7 @@
         await InvokeAsync(StateHasChanged);
         try
         {
+            _maintenance = await ApiClient.GetMaintenanceStatusAsync(_cts.Token);
             _jobs = await ApiClient.GetJobsAsync(
                 new JobListRequest(
                     Parse<MemoryJobStatus>(_status),
@@ -232,6 +277,52 @@
         catch (Exception ex)
         {
             ShowMessage(DashboardUiErrorFormatter.BuildActionError("建立 Reindex 工作", ex));
+        }
+    }
+
+    private async Task ScheduleMaintenanceAsync()
+    {
+        await RunMaintenanceActionAsync(
+            "排程維護",
+            () => ApiClient.ScheduleMaintenanceAsync(
+                new MaintenanceWindowRequest(
+                    Reason: _maintenanceReason,
+                    Message: _maintenanceMessage,
+                    MaxDrainWaitMinutes: _maintenanceMaxDrainWaitMinutes),
+                _cts.Token));
+    }
+
+    private async Task StartDrainAsync()
+        => await RunMaintenanceActionAsync("開始 Drain", () => ApiClient.StartMaintenanceDrainAsync(_maintenance?.RunId, _cts.Token));
+
+    private async Task StartMaintenanceAsync()
+        => await RunMaintenanceActionAsync("開始維護", () => ApiClient.StartMaintenanceAsync(_maintenance?.RunId, _cts.Token));
+
+    private async Task CompleteMaintenanceAsync()
+        => await RunMaintenanceActionAsync("完成維護", () => ApiClient.CompleteMaintenanceAsync(_maintenance?.RunId, _cts.Token));
+
+    private async Task CancelMaintenanceAsync()
+        => await RunMaintenanceActionAsync("取消維護", () => ApiClient.CancelMaintenanceAsync(_maintenance?.RunId, _cts.Token));
+
+    private async Task RunMaintenanceActionAsync(string actionName, Func<Task<MaintenanceStatusResult>> action)
+    {
+        _maintenanceBusy = true;
+        try
+        {
+            _maintenance = await action();
+            ShowMessage($"{actionName} 已送出，目前階段: {_maintenance.Phase}");
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError(actionName, ex));
+        }
+        finally
+        {
+            _maintenanceBusy = false;
         }
     }
 
@@ -311,6 +402,18 @@
             "pending" or "running" => "warn",
             "failed" => "bad",
             _ => "neutral"
+        };
+
+    private static string MaintenanceStatusClass(MaintenancePhase phase)
+        => phase switch
+        {
+            MaintenancePhase.Inactive => "ok",
+            MaintenancePhase.Scheduled => "warn",
+            MaintenancePhase.Draining => "warn",
+            MaintenancePhase.Running => "bad",
+            MaintenancePhase.Completed => "ok",
+            MaintenancePhase.Cancelled => "neutral",
+            _ => "bad"
         };
 
     private string SelectedClass(Guid id)

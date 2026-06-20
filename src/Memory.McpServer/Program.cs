@@ -68,6 +68,27 @@ app.Use(async (context, next) =>
     {
         await next();
     }
+    catch (MaintenanceUnavailableException ex) when (!context.Response.HasStarted)
+    {
+        context.Response.Clear();
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        var retryAfterSeconds = MaintenanceApiHelpers.ComputeRetryAfterSeconds(ex.Status.EstimatedEndsAtUtc);
+        context.Response.Headers["Retry-After"] = retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        context.Response.Headers["X-ContextHub-Maintenance"] = ex.Status.Phase.ToString().ToLowerInvariant();
+        context.Response.Headers["X-ContextHub-Maintenance-Phase"] = ex.Status.Phase.ToString();
+        await Results.Problem(
+            title: "ContextHub maintenance is in progress.",
+            detail: ex.Message,
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            extensions: new Dictionary<string, object?>
+            {
+                ["phase"] = ex.Status.Phase.ToString(),
+                ["runId"] = ex.Status.RunId,
+                ["estimatedEndsAtUtc"] = ex.Status.EstimatedEndsAtUtc,
+                ["activeLeaseCount"] = ex.Status.ActiveLeaseCount
+            })
+            .ExecuteAsync(context);
+    }
     catch (UnauthorizedAccessException ex) when (!context.Response.HasStarted)
     {
         context.Response.Clear();
@@ -1292,9 +1313,9 @@ jobs.MapPost("/summary-refresh", async (EnqueueSummaryRefreshRequest request, IM
 var maintenance = app.MapGroup("/api/maintenance");
 maintenance.RequireAuthIfEnabled(requireAuthentication);
 maintenance.RequireAdminIfEnabled(requireAuthentication);
-maintenance.MapGet("/status", async (IMaintenanceModeStore store, CancellationToken cancellationToken) =>
+maintenance.MapGet("/status", async (IMaintenanceCoordinator coordinator, CancellationToken cancellationToken) =>
 {
-    var result = await store.GetAsync(cancellationToken);
+    var result = await coordinator.GetStatusAsync(cancellationToken);
     return Results.Ok(result);
 });
 
@@ -1314,6 +1335,110 @@ maintenance.MapDelete("/mode", async (
     CancellationToken cancellationToken) =>
 {
     var result = await store.DisableAsync(MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/windows", async (
+    MaintenanceWindowRequest request,
+    IMaintenanceCoordinator coordinator,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.ScheduleAsync(request, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/windows/{runId:guid}/drain", async (
+    Guid runId,
+    IMaintenanceCoordinator coordinator,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.StartDrainAsync(runId, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/windows/current/drain", async (
+    IMaintenanceCoordinator coordinator,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.StartDrainAsync(null, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/windows/{runId:guid}/start", async (
+    Guid runId,
+    IMaintenanceCoordinator coordinator,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.StartRunningAsync(runId, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/windows/current/start", async (
+    IMaintenanceCoordinator coordinator,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.StartRunningAsync(null, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/windows/{runId:guid}/complete", async (
+    Guid runId,
+    IMaintenanceCoordinator coordinator,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.CompleteAsync(runId, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/windows/current/complete", async (
+    IMaintenanceCoordinator coordinator,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.CompleteAsync(null, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/windows/{runId:guid}/cancel", async (
+    Guid runId,
+    IMaintenanceCoordinator coordinator,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.CancelAsync(runId, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/windows/current/cancel", async (
+    IMaintenanceCoordinator coordinator,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.CancelAsync(null, MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor), cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/leases/heartbeat", async (
+    MaintenanceLeaseHeartbeatRequest request,
+    IMaintenanceCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.HeartbeatLeaseAsync(request, cancellationToken);
+    return Results.Ok(result);
+});
+
+maintenance.MapPost("/leases/complete", async (
+    MaintenanceLeaseCompleteRequest request,
+    IMaintenanceCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    var result = await coordinator.CompleteLeaseAsync(request, cancellationToken);
     return Results.Ok(result);
 });
 
@@ -1503,6 +1628,17 @@ internal static class MaintenanceApiHelpers
         }
 
         return actor.IsAuthenticated ? "authenticated-api-token" : "system";
+    }
+
+    public static int ComputeRetryAfterSeconds(DateTimeOffset? estimatedEndsAtUtc)
+    {
+        if (!estimatedEndsAtUtc.HasValue)
+        {
+            return 300;
+        }
+
+        var seconds = (int)Math.Ceiling((estimatedEndsAtUtc.Value - DateTimeOffset.UtcNow).TotalSeconds);
+        return Math.Clamp(seconds, 1, 24 * 60 * 60);
     }
 }
 

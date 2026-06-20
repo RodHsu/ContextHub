@@ -59,7 +59,8 @@ public sealed class ConversationAutomationService(
     IBackgroundJobQueue jobQueue,
     IClock clock,
     IInstanceBehaviorSettingsAccessor behaviorSettingsAccessor,
-    IRequestActorAccessor actorAccessor) : IConversationAutomationService
+    IRequestActorAccessor actorAccessor,
+    IMaintenanceCoordinator maintenanceCoordinator) : IConversationAutomationService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -70,6 +71,11 @@ public sealed class ConversationAutomationService(
         var behavior = await behaviorSettingsAccessor.GetCurrentAsync(cancellationToken);
         var actor = actorAccessor.Current;
         EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        if (!actor.IsServiceActor)
+        {
+            await maintenanceCoordinator.EnsureWriteAllowedAsync("conversation_ingest", cancellationToken);
+        }
+
         var effectiveProjectId = ProjectContext.Normalize(request.ProjectId, behavior.DefaultProjectId);
         var projectName = request.ProjectName?.Trim() ?? string.Empty;
         var session = await dbContext.ConversationSessions

@@ -29,6 +29,12 @@ public interface IContextHubApiClient
     Task<PagedResult<JobListItemResult>> GetJobsAsync(JobListRequest request, CancellationToken cancellationToken);
     Task<EnqueueReindexResult> EnqueueReindexAsync(EnqueueReindexRequest request, CancellationToken cancellationToken);
     Task<EnqueueSummaryRefreshResult> EnqueueSummaryRefreshAsync(EnqueueSummaryRefreshRequest request, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> GetMaintenanceStatusAsync(CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> ScheduleMaintenanceAsync(MaintenanceWindowRequest request, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> StartMaintenanceDrainAsync(Guid? runId, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> StartMaintenanceAsync(Guid? runId, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> CompleteMaintenanceAsync(Guid? runId, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> CancelMaintenanceAsync(Guid? runId, CancellationToken cancellationToken);
     Task<IReadOnlyList<SourceConnectionResult>> GetSourcesAsync(SourceListRequest request, CancellationToken cancellationToken);
     Task<SourceConnectionResult> CreateSourceAsync(SourceConnectionCreateRequest request, CancellationToken cancellationToken);
     Task<SourceConnectionResult> UpdateSourceAsync(SourceConnectionUpdateRequest request, CancellationToken cancellationToken);
@@ -200,6 +206,39 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     {
         using var response = await httpClient.PostAsJsonAsync("/api/jobs/summary-refresh", request, cancellationToken);
         return await ReadRequiredAsync<EnqueueSummaryRefreshResult>(response, cancellationToken);
+    }
+
+    public Task<MaintenanceStatusResult> GetMaintenanceStatusAsync(CancellationToken cancellationToken)
+        => GetRequiredAsync<MaintenanceStatusResult>("/api/maintenance/status", cancellationToken);
+
+    public async Task<MaintenanceStatusResult> ScheduleMaintenanceAsync(MaintenanceWindowRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/maintenance/windows", request, cancellationToken);
+        return await ReadRequiredAsync<MaintenanceStatusResult>(response, cancellationToken);
+    }
+
+    public async Task<MaintenanceStatusResult> StartMaintenanceDrainAsync(Guid? runId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync(BuildMaintenanceRunActionUrl(runId, "drain"), null, cancellationToken);
+        return await ReadRequiredAsync<MaintenanceStatusResult>(response, cancellationToken);
+    }
+
+    public async Task<MaintenanceStatusResult> StartMaintenanceAsync(Guid? runId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync(BuildMaintenanceRunActionUrl(runId, "start"), null, cancellationToken);
+        return await ReadRequiredAsync<MaintenanceStatusResult>(response, cancellationToken);
+    }
+
+    public async Task<MaintenanceStatusResult> CompleteMaintenanceAsync(Guid? runId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync(BuildMaintenanceRunActionUrl(runId, "complete"), null, cancellationToken);
+        return await ReadRequiredAsync<MaintenanceStatusResult>(response, cancellationToken);
+    }
+
+    public async Task<MaintenanceStatusResult> CancelMaintenanceAsync(Guid? runId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync(BuildMaintenanceRunActionUrl(runId, "cancel"), null, cancellationToken);
+        return await ReadRequiredAsync<MaintenanceStatusResult>(response, cancellationToken);
     }
 
     public Task<IReadOnlyList<SourceConnectionResult>> GetSourcesAsync(SourceListRequest request, CancellationToken cancellationToken)
@@ -658,6 +697,11 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
         return QueryHelpers.AddQueryString("/api/jobs", query);
     }
+
+    private static string BuildMaintenanceRunActionUrl(Guid? runId, string action)
+        => runId.HasValue
+            ? $"/api/maintenance/windows/{runId.Value:D}/{action}"
+            : $"/api/maintenance/windows/current/{action}";
 
     private static string BuildLogsUrl(LogQueryRequest request)
     {

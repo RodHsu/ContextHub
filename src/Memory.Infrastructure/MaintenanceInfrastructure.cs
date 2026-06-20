@@ -365,7 +365,14 @@ public sealed class RedisMaintenanceModeStore(
             ActiveLeaseCount = 0,
             ActiveLeases = []
         };
-        await _database.StringSetAsync(StateKey, JsonSerializer.Serialize(stored, SerializerOptions), ttl);
+        var payload = JsonSerializer.Serialize(stored, SerializerOptions);
+        if (ttl.HasValue)
+        {
+            await _database.StringSetAsync(StateKey, payload, new Expiration(ttl.Value));
+            return;
+        }
+
+        await _database.StringSetAsync(StateKey, payload);
     }
 
     private async Task<IReadOnlyList<MaintenanceLeaseResult>> ReadActiveLeasesAsync(CancellationToken cancellationToken)

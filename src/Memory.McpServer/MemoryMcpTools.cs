@@ -8,7 +8,8 @@ namespace Memory.McpServer;
 public sealed class MemoryMcpTools(
     IMemoryService memoryService,
     ILogQueryService logQueryService,
-    IConversationAutomationService conversationAutomationService)
+    IConversationAutomationService conversationAutomationService,
+    IMaintenanceCoordinator maintenanceCoordinator)
 {
     [McpServerTool, Description("Search memory items using hybrid keyword and semantic retrieval.")]
     public Task<IReadOnlyList<MemorySearchHit>> memory_search(
@@ -52,6 +53,18 @@ public sealed class MemoryMcpTools(
                 Telemetry = new RetrievalTelemetryContext("build_working_context", "mcp", "task context bootstrap")
             },
             cancellationToken);
+
+    [McpServerTool, Description("Read current ContextHub maintenance state, including scheduled/draining/running phase and active leases.")]
+    public Task<MaintenanceStatusResult> maintenance_status(CancellationToken cancellationToken = default)
+        => maintenanceCoordinator.GetStatusAsync(cancellationToken);
+
+    [McpServerTool, Description("Heartbeat an agent lease so maintenance can wait for active work to finish before entering running maintenance.")]
+    public Task<MaintenanceLeaseHeartbeatResult> maintenance_lease_heartbeat(MaintenanceLeaseHeartbeatRequest request, CancellationToken cancellationToken = default)
+        => maintenanceCoordinator.HeartbeatLeaseAsync(request, cancellationToken);
+
+    [McpServerTool, Description("Complete an agent lease after work finishes so scheduled maintenance can proceed.")]
+    public Task<MaintenanceStatusResult> maintenance_lease_complete(MaintenanceLeaseCompleteRequest request, CancellationToken cancellationToken = default)
+        => maintenanceCoordinator.CompleteLeaseAsync(request, cancellationToken);
 
     [McpServerTool, Description("Ingest a completed conversation turn or checkpoint into the conversation staging layer for automatic promotion.")]
     public Task<ConversationIngestResult> conversation_ingest(ConversationIngestRequest request, CancellationToken cancellationToken = default)

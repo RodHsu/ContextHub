@@ -1273,7 +1273,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 new StringContent("""{"jsonrpc":"2.0","id":"blocked","method":"tools/list"}""", Encoding.UTF8, "application/json"));
             mcpResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.ServiceUnavailable);
             mcpResponse.Headers.TryGetValues("X-ContextHub-Maintenance", out var maintenanceHeaders).Should().BeTrue();
-            maintenanceHeaders.Should().Contain("true");
+            maintenanceHeaders.Should().Contain("running");
             mcpResponse.Headers.RetryAfter.Should().NotBeNull();
 
             var vacuumResponse = await client.PostAsJsonAsync(
@@ -1308,6 +1308,84 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         }
         finally
         {
+            await client.DeleteAsync("/api/maintenance/mode");
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Maintenance_Windows_Should_Drain_Leases_And_Block_New_Writes()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        await client.DeleteAsync("/api/maintenance/mode");
+        await CompleteActiveMaintenanceLeasesAsync(client);
+
+        try
+        {
+            var leaseResponse = await client.PostAsJsonAsync(
+                "/api/maintenance/leases/heartbeat",
+                new MaintenanceLeaseHeartbeatRequest(
+                    AgentId: "api-contract-agent",
+                    ProjectId: ProjectContext.DefaultProjectId,
+                    ActivityKind: "contract-test",
+                    TtlSeconds: 300));
+            leaseResponse.EnsureSuccessStatusCode();
+            var lease = await leaseResponse.Content.ReadFromJsonAsync<MaintenanceLeaseHeartbeatResult>();
+            lease.Should().NotBeNull();
+            lease!.Lease.BlocksMaintenance.Should().BeTrue();
+
+            var scheduledResponse = await client.PostAsJsonAsync(
+                "/api/maintenance/windows",
+                new MaintenanceWindowRequest(
+                    Reason: "KnowledgeBaseUpdate",
+                    Message: "Waiting for active agents before maintenance.",
+                    MaxDrainWaitMinutes: 15,
+                    TriggeredBy: "api-contract-test"));
+            scheduledResponse.EnsureSuccessStatusCode();
+            var scheduled = await scheduledResponse.Content.ReadFromJsonAsync<MaintenanceStatusResult>();
+            scheduled.Should().NotBeNull();
+            scheduled!.Phase.Should().Be(MaintenancePhase.Scheduled);
+            scheduled.RunId.Should().NotBeNull();
+
+            var drainResponse = await client.PostAsync($"/api/maintenance/windows/{scheduled.RunId:D}/drain", null);
+            drainResponse.EnsureSuccessStatusCode();
+            var draining = await drainResponse.Content.ReadFromJsonAsync<MaintenanceStatusResult>();
+            draining.Should().NotBeNull();
+            draining!.Phase.Should().Be(MaintenancePhase.Draining);
+            draining.ActiveLeaseCount.Should().BeGreaterThanOrEqualTo(1);
+            draining.ActiveLeases.Should().Contain(x => x.LeaseId == lease.Lease.LeaseId);
+
+            using var blockedWriteResponse = await client.PostAsJsonAsync(
+                "/api/jobs/reindex",
+                new EnqueueReindexRequest(ProjectId: ProjectContext.DefaultProjectId));
+            blockedWriteResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.ServiceUnavailable);
+            blockedWriteResponse.Headers.TryGetValues("X-ContextHub-Maintenance-Phase", out var phaseHeaders).Should().BeTrue();
+            phaseHeaders.Should().Contain(nameof(MaintenancePhase.Draining));
+
+            var prematureStartResponse = await client.PostAsync($"/api/maintenance/windows/{scheduled.RunId:D}/start", null);
+            prematureStartResponse.EnsureSuccessStatusCode();
+            var stillDraining = await prematureStartResponse.Content.ReadFromJsonAsync<MaintenanceStatusResult>();
+            stillDraining.Should().NotBeNull();
+            stillDraining!.Phase.Should().Be(MaintenancePhase.Draining);
+
+            await CompleteActiveMaintenanceLeasesAsync(client);
+
+            var startResponse = await client.PostAsync($"/api/maintenance/windows/{scheduled.RunId:D}/start", null);
+            startResponse.EnsureSuccessStatusCode();
+            var running = await startResponse.Content.ReadFromJsonAsync<MaintenanceStatusResult>();
+            running.Should().NotBeNull();
+            running!.Phase.Should().Be(MaintenancePhase.Running);
+            running.Active.Should().BeTrue();
+
+            var completeResponse = await client.PostAsync($"/api/maintenance/windows/{scheduled.RunId:D}/complete", null);
+            completeResponse.EnsureSuccessStatusCode();
+            var completed = await completeResponse.Content.ReadFromJsonAsync<MaintenanceStatusResult>();
+            completed.Should().NotBeNull();
+            completed!.Phase.Should().Be(MaintenancePhase.Completed);
+            completed.Active.Should().BeFalse();
+        }
+        finally
+        {
+            await CompleteActiveMaintenanceLeasesAsync(client);
             await client.DeleteAsync("/api/maintenance/mode");
         }
     }
@@ -2055,6 +2133,23 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         cloudflareValues.Should().ContainSingle("no-store");
         response.Headers.TryGetValues("CDN-Cache-Control", out var cdnValues).Should().BeTrue();
         cdnValues.Should().ContainSingle("no-store");
+    }
+
+    private static async Task CompleteActiveMaintenanceLeasesAsync(HttpClient client)
+    {
+        var status = await client.GetFromJsonAsync<MaintenanceStatusResult>("/api/maintenance/status");
+        if (status is null)
+        {
+            return;
+        }
+
+        foreach (var lease in status.ActiveLeases)
+        {
+            var response = await client.PostAsJsonAsync(
+                "/api/maintenance/leases/complete",
+                new MaintenanceLeaseCompleteRequest(lease.LeaseId));
+            response.EnsureSuccessStatusCode();
+        }
     }
 
     private static HttpClient CreateAnonymousClient(WebApplicationFactory<Program> factory)
