@@ -30,7 +30,9 @@ public sealed class DashboardSnapshotCollectorHostedService(
 {
     private const int MaxResourceSamples = 15;
     private const int MaxContextSavingsTrendPoints = 24;
+    private const int MaxContextSavingsTelemetryEvents = 5_000;
     private const int ContextSavingsMinimumIntervalSeconds = 60;
+    private const int ContextSavingsQueryTimeoutSeconds = 20;
     private static readonly TimeSpan ContextSavingsMaxWindow = TimeSpan.FromDays(7);
     private static readonly TimeSpan StartupDependencyFailureGrace = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan FailureLogThrottle = TimeSpan.FromMinutes(2);
@@ -538,19 +540,23 @@ public sealed class DashboardSnapshotCollectorHostedService(
         var now = timeProvider.GetUtcNow();
         var windowStartedAt = now.Subtract(ContextSavingsMaxWindow);
         await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        dbContext.Database.SetCommandTimeout(ContextSavingsQueryTimeoutSeconds);
         var events = await dbContext.RetrievalEvents
             .AsNoTracking()
             .Where(x => x.Success)
             .Where(x => x.CreatedAt >= windowStartedAt && x.CreatedAt <= now)
-            .Where(x => x.MetadataJson.Contains("\"savings\""))
-            .OrderBy(x => x.CreatedAt)
+            .Where(x => x.EntryPoint == "build_working_context" ||
+                        x.EntryPoint == "mcp.build_working_context" ||
+                        x.EntryPoint == "/api/working-context")
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(MaxContextSavingsTelemetryEvents)
             .Select(x => new ContextSavingsTelemetryEvent(
                 x.CreatedAt,
                 x.CacheHit,
                 x.MetadataJson))
             .ToListAsync(cancellationToken);
 
-        var savings = BuildContextSavings(now, windowStartedAt, events);
+        var savings = BuildContextSavings(now, windowStartedAt, events.OrderBy(x => x.CreatedAt));
         await WriteSnapshotAsync(
             DashboardSnapshotKeys.ContextSavings,
             intervalSeconds,
