@@ -998,6 +998,13 @@ textarea {
     word-break: break-word;
 }
 
+.runtime-dependency-kpi small {
+    color: var(--text-subtle);
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
 .runtime-main-panel .definition-grid dd,
 .runtime-host-card strong,
 .runtime-host-card .stack-item-meta,

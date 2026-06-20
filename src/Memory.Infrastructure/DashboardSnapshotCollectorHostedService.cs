@@ -859,6 +859,10 @@ public sealed class DashboardSnapshotCollectorHostedService(
             var keyCount = long.TryParse(keyCountResult.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedKeyCount)
                 ? parsedKeyCount
                 : 0L;
+            var keyspaceHits = GetRedisInfoLong(infoMap, "keyspace_hits");
+            var keyspaceMisses = GetRedisInfoLong(infoMap, "keyspace_misses");
+            var keyspaceLookups = SumNonNegative(keyspaceHits, keyspaceMisses);
+            var cacheLookups = SumNonNegative(cacheSnapshot.Hits, cacheSnapshot.Misses);
 
             var container = dockerSnapshot.Containers.FirstOrDefault(x => string.Equals(x.Metric.Service, "redis", StringComparison.OrdinalIgnoreCase));
             var storage = DashboardPersistentStorageResolver.Resolve(dockerSnapshot, container, "/data");
@@ -892,7 +896,13 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 cacheSnapshot.Misses,
                 cacheSnapshot.Sets,
                 cacheSnapshot.Bypasses,
-                cacheSnapshot.Errors);
+                cacheSnapshot.Errors,
+                keyspaceHits,
+                keyspaceMisses,
+                keyspaceLookups,
+                CalculateHitPercent(keyspaceHits, keyspaceMisses),
+                cacheLookups,
+                CalculateHitPercent(cacheSnapshot.Hits, cacheSnapshot.Misses));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -963,6 +973,9 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 throw new InvalidOperationException("pg_stat_database returned no row for current database.");
             }
 
+            var blocksRead = reader.GetInt64(3);
+            var blocksHit = reader.GetInt64(4);
+            var blockAccesses = SumNonNegative(blocksRead, blocksHit);
             var container = dockerSnapshot.Containers.FirstOrDefault(x => string.Equals(x.Metric.Service, "postgres", StringComparison.OrdinalIgnoreCase));
             var storage = DashboardPersistentStorageResolver.Resolve(dockerSnapshot, container, "/var/lib/postgresql/data");
             var warning = storage is null
@@ -978,8 +991,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 reader.GetInt32(0),
                 reader.GetInt64(1),
                 reader.GetInt64(2),
-                reader.GetInt64(3),
-                reader.GetInt64(4),
+                blocksRead,
+                blocksHit,
                 reader.GetInt64(5),
                 reader.GetInt64(6),
                 reader.GetInt64(7),
@@ -994,7 +1007,9 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 container?.Metric.DiskWriteBytes ?? 0,
                 storage?.SizeBytes ?? 0,
                 storage?.DisplayName ?? "未配置",
-                reader.GetInt64(13));
+                reader.GetInt64(13),
+                blockAccesses,
+                CalculateHitPercent(blocksHit, blocksRead));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1061,6 +1076,17 @@ public sealed class DashboardSnapshotCollectorHostedService(
            double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
             ? parsed
             : 0d;
+
+    private static long SumNonNegative(long left, long right)
+        => Math.Max(0, left) + Math.Max(0, right);
+
+    private static double CalculateHitPercent(long hits, long misses)
+    {
+        var total = SumNonNegative(hits, misses);
+        return total <= 0
+            ? 0d
+            : Math.Round(Math.Max(0, hits) * 100d / total, 2);
+    }
 
     private sealed record ContextSavingsTelemetryMetadata(
         ContextSavingsEstimateResult? Savings);

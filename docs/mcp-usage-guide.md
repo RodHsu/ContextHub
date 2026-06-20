@@ -262,8 +262,8 @@ query 用「<本次任務描述>」，
 
 ### 7.2 Codex MCP 設定可用
 
-ContextHub 的 canonical MCP entrypoint 是公開遠端 Streamable HTTP endpoint。
-Codex 與其他支援 remote MCP 的 agent 應固定指向：
+ContextHub 的 canonical remote MCP entrypoint 是公開遠端 Streamable HTTP endpoint。
+VS Code 與其他支援 remote MCP 的 agent 應固定指向：
 
 ```toml
 [mcp_servers.contexthub]
@@ -272,8 +272,7 @@ url = "https://context-hub.wjcy.org/mcp"
 bearer_token_env_var = "CONTEXTHUB_MCP_TOKEN"
 ```
 
-不要把 repo 啟動流程回退到 `default` ProjectId、本機 `127.0.0.1`，
-或 stdio bridge 當成預設主入口。
+不要把 repo 啟動流程回退到 `default` ProjectId 或本機 `127.0.0.1`。
 本 repo 的 canonical `ProjectId` 是 `ContextHub`。
 
 Token 應放在環境變數，不要寫進 `config.toml`：
@@ -282,9 +281,20 @@ Token 應放在環境變數，不要寫進 `config.toml`：
 [Environment]::SetEnvironmentVariable("CONTEXTHUB_MCP_TOKEN", "<token>", "User")
 ```
 
+Codex Desktop 的穩定入口則是 stdio bridge：Codex 以本機 child process 載入
+`tools/ContextHub.McpStdioBridge`，bridge 再呼叫遠端
+`https://context-hub.wjcy.org/mcp`。這可以避開 Codex HTTP MCP worker 偶發
+transport/session 初始化失敗，避免 server 明明可用但對話層顯示 ContextHub 未載入。
+
+建議用 repo 啟動腳本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File start-codex-contexthub.ps1
+```
+
 ### 7.3 固定診斷流程
 
-每次懷疑 Codex 沒有載入 ContextHub MCP 時，先跑：
+每次懷疑 ContextHub server 或 Cloudflare edge 有問題時，先跑 raw remote 診斷：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1
@@ -298,21 +308,37 @@ powershell -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1
 - raw MCP `tools/list`
 - `build_working_context(projectId = ContextHub)`
 
-若 raw MCP 成功但 `-RunCodexExec` 或新 Codex Desktop thread 仍看不到 tools，
-問題在 Codex client / Desktop tool injection 層，而不是 ContextHub server
-本身。此時仍應優先檢查 Cloudflare `/mcp*` rules 與 Codex HTTP MCP worker
-相容性。
+若 raw MCP 成功，代表 ContextHub server 與遠端 `/mcp` endpoint 可用。
+如果新 Codex Desktop thread 仍看不到 tools，問題多半在 Codex client / Desktop
+tool injection 層，尤其是 HTTP MCP worker transport，而不是 ContextHub server 本身。
 
-只有在特定 client 不支援 remote Streamable HTTP，或短期遭遇 client HTTP
-transport bug 時，才使用 stdio bridge fallback：
+Codex Desktop 載入問題應接著跑 stdio bridge 診斷：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1
 ```
 
-stdio bridge 讓 client 以本機 child process 連線，再由 bridge 呼叫遠端
-`https://context-hub.wjcy.org/mcp`。它只是 compatibility fallback，不取代
-公開 remote MCP endpoint，也不是「任何 agent 只設定 URL + token」的主方案。
+stdio bridge 讓 Codex 以本機 child process 連線，再由 bridge 呼叫遠端
+`https://context-hub.wjcy.org/mcp`。它不取代公開 remote MCP endpoint；它是
+Codex Desktop 的相容性入口。
+
+若要驗證目前 Codex Desktop session 的 tool injection，而不只是 bridge 本身，請加
+`-RunCodexExec`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1 -RunCodexExec
+```
+
+這個模式會把下列訊號視為不乾淨的啟動狀態：
+
+- `contexthub/memory_search` 沒有完成
+- Codex 仍嘗試用 Streamable HTTP worker 直接連 `https://context-hub.wjcy.org/mcp`
+- 任何 remote MCP worker 印出 `rmcp::transport::worker`、`MCP startup failed` 或 `http/request failed`
+- 其他 remote MCP/plugin 印出 `invalid_grant`、`TokenRefreshFailed` 或 `Auth required`
+
+最後一項通常不是 ContextHub server 問題，但會污染 Codex 啟動輸出，讓對話層或人工判讀
+誤以為 ContextHub 沒載入。處理方式是清掉不用的 OAuth credentials、移除不用的 remote
+MCP server，或暫時停用對應 plugin，然後重跑 `-RunCodexExec`。
 
 Cloudflare edge 行為的固定規則與驗證方式請見
 [`context-hub-cloudflare-rules.md`](context-hub-cloudflare-rules.md)。MCP

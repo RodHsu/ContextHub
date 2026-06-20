@@ -69,6 +69,7 @@ public sealed class ConversationAutomationService(
 
         var behavior = await behaviorSettingsAccessor.GetCurrentAsync(cancellationToken);
         var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var effectiveProjectId = ProjectContext.Normalize(request.ProjectId, behavior.DefaultProjectId);
         var projectName = request.ProjectName?.Trim() ?? string.Empty;
         var session = await dbContext.ConversationSessions
@@ -605,7 +606,8 @@ public sealed class ConversationAutomationService(
     {
         if (!item.TenantId.HasValue || !item.OwnerUserId.HasValue)
         {
-            return ContextHubRequestActor.Unrestricted;
+            throw new InvalidOperationException(
+                $"Conversation insight '{item.Id}' cannot be promoted because it has no tenant/user owner.");
         }
 
         return new ContextHubRequestActor(
@@ -624,6 +626,24 @@ public sealed class ConversationAutomationService(
                 : [item.ProjectId],
             IsAuthenticated: true,
             IsServiceActor: true);
+    }
+
+    private static void EnsureScopeAllowed(ContextHubRequestActor actor, string scope)
+    {
+        if (!actor.IsAuthenticated)
+        {
+            throw new UnauthorizedAccessException("Authentication is required.");
+        }
+
+        if (!actor.HasUser)
+        {
+            throw new UnauthorizedAccessException("Authenticated requests must resolve to a tenant user.");
+        }
+
+        if (!actor.HasScope(scope))
+        {
+            throw new UnauthorizedAccessException($"Scope '{scope}' is required.");
+        }
     }
 
     private static bool ShouldScheduleAutomation(ConversationSourceKind sourceKind, InstanceBehaviorSettingsResult behavior)

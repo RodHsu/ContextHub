@@ -29,6 +29,7 @@ internal sealed class RequestActorMiddleware(RequestDelegate next)
     {
         if (context.User.Identity?.IsAuthenticated != true)
         {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             return ContextHubRequestActor.Unrestricted;
         }
 

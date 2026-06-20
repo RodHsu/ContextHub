@@ -7,6 +7,7 @@ using Memory.Application;
 using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
@@ -20,6 +21,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
             var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -88,6 +90,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         long logId;
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             var entries = new[]
             {
@@ -140,6 +143,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             dbContext.RuntimeLogEntries.Add(new RuntimeLogEntry
             {
@@ -197,6 +201,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         Guid suiteId;
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             var suite = new EvaluationSuite
             {
@@ -237,6 +242,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             dbContext.SourceConnections.Add(new SourceConnection
             {
@@ -282,6 +288,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
             var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
 
@@ -533,6 +540,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var securityService = scope.ServiceProvider.GetRequiredService<ITenantSecurityService>();
             var authResult = await securityService.AuthenticateTokenAsync(
                 createdToken.PlainToken,
@@ -599,6 +607,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             var token = await dbContext.ApiTokens.SingleAsync(x => x.Id == createdToken.Token.Id);
             token.ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
@@ -638,6 +647,123 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Security_Token_Only_Surface_Should_Reject_Anonymous_Requests()
+    {
+        using var anonymousClient = CreateAnonymousClient(environment.GetFactory());
+
+        using var liveResponse = await anonymousClient.GetAsync("/health/live");
+        using var readyResponse = await anonymousClient.GetAsync("/health/ready");
+        using var statusResponse = await anonymousClient.GetAsync("/api/status");
+        using var searchResponse = await anonymousClient.GetAsync("/api/memories/search?query=token");
+        using var summaryRefreshResponse = await anonymousClient.PostAsJsonAsync("/api/jobs/summary-refresh", new EnqueueSummaryRefreshRequest(
+            ProjectId: null,
+            IncludedProjectIds: null));
+        using var conversationResponse = await anonymousClient.PostAsJsonAsync("/api/conversations/ingest", new ConversationIngestRequest(
+            ConversationId: $"anonymous-{Guid.NewGuid():N}",
+            TurnId: "turn-1",
+            EventType: ConversationEventType.SessionCheckpoint,
+            SourceKind: ConversationSourceKind.HostEvent,
+            SourceSystem: "codex",
+            SourceRef: "api-tests"));
+        using var mcpResponse = await anonymousClient.PostAsync(
+            "/mcp",
+            new StringContent("""{"jsonrpc":"2.0","id":"anonymous","method":"tools/list"}""", Encoding.UTF8, "application/json"));
+
+        liveResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        readyResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        statusResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        searchResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        summaryRefreshResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        conversationResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        mcpResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+    }
+
+    [DockerRequiredFact]
+    public async Task Security_Disabled_RequireAuthentication_Should_Not_Enable_Anonymous_Access()
+    {
+        await using var legacyConfiguredFactory = environment.GetFactory().WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureAppConfiguration((_, config) =>
+            {
+                config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["ContextHub:Security:RequireAuthentication"] = "false",
+                    ["ContextHub:Security:BootstrapToken"] = MemoryApplicationFactory.TestBootstrapToken,
+                    ["ContextHub:Security:BootstrapTenantSlug"] = "contract-tests",
+                    ["ContextHub:Security:BootstrapUsername"] = "contract-test-admin",
+                    ["ContextHub:Security:BootstrapAllowedProjectIds"] = ProjectContext.AllProjectIdsSentinel
+                });
+            });
+        });
+
+        using var anonymousClient = CreateAnonymousClient(legacyConfiguredFactory);
+        using var anonymousResponse = await anonymousClient.GetAsync("/api/status");
+        anonymousResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+
+        using var authenticatedClient = legacyConfiguredFactory.CreateClient();
+        authenticatedClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
+        using var authenticatedResponse = await authenticatedClient.GetAsync("/api/status");
+        authenticatedResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+    }
+
+    [DockerRequiredFact]
+    public async Task Security_Service_Writes_Should_Reject_Unrestricted_Actor()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+
+        var act = async () => await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: $"unrestricted-write:{Guid.NewGuid():N}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: "Unrestricted write should fail",
+                Content: "Service writes must not create ownerless rows.",
+                Summary: "Unrestricted write should fail",
+                SourceType: "api-contract",
+                SourceRef: "security",
+                Tags: ["security"],
+                Importance: 0.5m,
+                Confidence: 0.9m,
+                ProjectId: "ContextHub"),
+            CancellationToken.None);
+
+        await act.Should().ThrowAsync<UnauthorizedAccessException>()
+            .WithMessage("Authentication is required.");
+    }
+
+    [DockerRequiredFact]
+    public async Task Security_Authenticated_Service_Write_Should_Set_Owner()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
+        var externalKey = $"authenticated-owner:{Guid.NewGuid():N}";
+
+        var created = await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: externalKey,
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: "Authenticated write should set owner",
+                Content: "Authenticated writes must persist the token owner.",
+                Summary: "Authenticated write should set owner",
+                SourceType: "api-contract",
+                SourceRef: "security",
+                Tags: ["security"],
+                Importance: 0.7m,
+                Confidence: 0.9m,
+                ProjectId: "ContextHub"),
+            CancellationToken.None);
+
+        var row = await dbContext.MemoryItems.SingleAsync(x => x.Id == created.Id);
+        row.TenantId.Should().Be(actor.TenantId);
+        row.OwnerUserId.Should().Be(actor.UserId);
+    }
+
+    [DockerRequiredFact]
     public async Task Dashboard_Memory_Details_Should_Respect_Actor_Owner_Filter()
     {
         var tenantId = Guid.Parse("91000000-0000-0000-0000-000000000001");
@@ -649,6 +775,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var now = DateTimeOffset.UtcNow;
 
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
         var dashboardService = scope.ServiceProvider.GetRequiredService<IDashboardQueryService>();
@@ -766,6 +893,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             await EnsureAdminOwnerAsync(dbContext, adminTenantId, adminUserId, now);
             if (!await dbContext.TenantUsers.AnyAsync(x => x.Id == dashboardServiceUserId))
@@ -917,6 +1045,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         result.TableResults.Should().Contain(x => x.TableName == "retrieval_events" && x.UpdatedRows >= 1);
 
         using var verifyScope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(verifyScope.ServiceProvider);
         var verifyDbContext = verifyScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         (await verifyDbContext.MemoryItems.SingleAsync(x => x.Id == memoryId)).Should().Match<MemoryItem>(x => x.TenantId == adminTenantId && x.OwnerUserId == adminUserId);
         (await verifyDbContext.MemoryJobs.SingleAsync(x => x.Id == jobId)).Should().Match<MemoryJob>(x => x.TenantId == adminTenantId && x.OwnerUserId == adminUserId);
@@ -944,6 +1073,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var legacyMemoryId = Guid.NewGuid();
 
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         await EnsureAdminOwnerAsync(dbContext, adminTenantId, adminUserId, now);
         dbContext.TenantUsers.Add(new TenantUser
@@ -988,6 +1118,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         Guid memoryId;
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
             var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -1193,6 +1324,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             dbContext.RetrievalEvents.AddRange(
                 CreateRetentionEvent(oldEventId, now.AddDays(-10), "retention-old"),
@@ -1245,6 +1377,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             (await dbContext.RetrievalEvents.AnyAsync(x => x.Id == oldEventId)).Should().BeFalse();
             (await dbContext.RetrievalHits.AnyAsync(x => x.RetrievalEventId == oldEventId)).Should().BeFalse();
@@ -1304,6 +1437,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         result.Should().NotBeNull();
 
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var run = await dbContext.MaintenanceRuns.SingleAsync(x => x.Id == result!.RunId);
         using var policyDocument = JsonDocument.Parse(run.PolicyJson);
@@ -1329,6 +1463,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
 
             await memoryService.UpsertAsync(
@@ -1376,6 +1511,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
 
             await memoryService.UpsertAsync(
@@ -1410,6 +1546,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
 
@@ -1507,6 +1644,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
 
             foreach (var index in Enumerable.Range(0, 4))
@@ -1549,6 +1687,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
 
             await memoryService.UpsertAsync(
@@ -1686,6 +1825,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             await DrainConversationAutomationAsync(processor, dbContext, conversationId, CancellationToken.None);
@@ -1730,6 +1870,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     private async Task RefreshMemoryGraphIndexAsync()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var builder = scope.ServiceProvider.GetRequiredService<IDashboardMemoryGraphIndexBuilder>();
         var snapshotStore = scope.ServiceProvider.GetRequiredService<IDashboardSnapshotStore>();
         var capturedAtUtc = DateTimeOffset.UtcNow;
@@ -1751,6 +1892,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
 
             await memoryService.UpsertAsync(
@@ -1913,6 +2055,38 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         cloudflareValues.Should().ContainSingle("no-store");
         response.Headers.TryGetValues("CDN-Cache-Control", out var cdnValues).Should().BeTrue();
         cdnValues.Should().ContainSingle("no-store");
+    }
+
+    private static HttpClient CreateAnonymousClient(WebApplicationFactory<Program> factory)
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = null;
+        return client;
+    }
+
+    private static void UseBootstrapActor(IServiceProvider services)
+    {
+        var dbContext = services.GetRequiredService<MemoryDbContext>();
+        var user = dbContext.TenantUsers
+            .Include(x => x.Tenant)
+            .Single(x => x.Username == "contract-test-admin");
+
+        services.GetRequiredService<IRequestActorAccessor>().Current = new ContextHubRequestActor(
+            user.TenantId,
+            user.Id,
+            user.Username,
+            user.Role,
+            [
+                SecurityScopes.MemoryRead,
+                SecurityScopes.MemoryWrite,
+                SecurityScopes.PreferencesRead,
+                SecurityScopes.PreferencesWrite,
+                SecurityScopes.TokenManage,
+                SecurityScopes.SecurityManage,
+                SecurityScopes.DashboardActAs
+            ],
+            [],
+            IsAuthenticated: true);
     }
 
     private static RetrievalHit CreateRetentionHit(Guid retrievalEventId, string title)

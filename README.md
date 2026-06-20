@@ -78,7 +78,9 @@ MCP tools：
 
 ### 在 VS Code 中設定 ContextHub MCP
 
-ContextHub 目前對外提供的是 `HTTP /mcp` 端點，部署與日常使用請優先採用 **Streamable HTTP** 連線。
+ContextHub 目前對外提供的是 `HTTP /mcp` 端點。VS Code 與其他支援 remote MCP 的 client
+請優先採用 **Streamable HTTP**；Codex Desktop 則建議走本 repo 的 stdio bridge，避免
+Codex HTTP MCP worker 偶發 transport/session 初始化失敗時，對話層誤判 ContextHub 未載入。
 
 本 repo 的 canonical 遠端 MCP entrypoint：
 
@@ -92,7 +94,7 @@ https://context-hub.wjcy.org/mcp
 [Environment]::SetEnvironmentVariable("CONTEXTHUB_MCP_TOKEN", "<token>", "User")
 ```
 
-Codex 設定概念：
+一般 remote MCP client 設定概念：
 
 ```toml
 [mcp_servers.contexthub]
@@ -105,7 +107,7 @@ bearer_token_env_var = "CONTEXTHUB_MCP_TOKEN"
 
 - **本機 Docker Compose**：用 `http://localhost:8080/mcp`
 - **遠端公開入口**：用 `https://context-hub.wjcy.org/mcp` 或自己的 Proxied HTTPS hostname
-- **Codex fallback**：只有當 client 的 remote Streamable HTTP transport 有相容性問題時，才使用 `tools/ContextHub.McpStdioBridge`
+- **Codex Desktop**：用 `tools/ContextHub.McpStdioBridge` 作為 stdio MCP server，再由 bridge 呼叫遠端 `/mcp`
 
 #### VS Code 設定檔位置
 
@@ -165,7 +167,29 @@ bearer_token_env_var = "CONTEXTHUB_MCP_TOKEN"
 - 設定請使用 `type: "http"`
 - `url` 直接指向 `/mcp`
 - 不需要寫 `command` / `args`
-- 不需要用 `stdio`，除非是在診斷已確認 remote transport 相容性問題後短期 fallback
+- 不需要用 `stdio`，這段只適用 VS Code / 支援 remote HTTP 的 client；Codex Desktop 請使用下方 stdio bridge 路徑
+
+#### Codex Desktop 啟動
+
+Codex Desktop 目前建議用 repo 啟動腳本，腳本會先建置 stdio bridge，再用本次 session
+設定覆寫 `contexthub` MCP server：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File start-codex-contexthub.ps1
+```
+
+對應的全域 Codex 設定可使用已建好的 bridge exe：
+
+```toml
+[mcp_servers.contexthub]
+enabled = true
+command = "W:\\Repositories\\WJCY\\ContextHub\\tools\\ContextHub.McpStdioBridge\\bin\\Debug\\net10.0\\ContextHub.McpStdioBridge.exe"
+
+[mcp_servers.contexthub.env]
+CONTEXTHUB_MCP_ENDPOINT = "https://context-hub.wjcy.org/mcp"
+```
+
+`CONTEXTHUB_MCP_TOKEN` 仍放在 User 或 Machine environment，不寫入 `config.toml`。
 
 #### Codex 診斷腳本
 
@@ -181,13 +205,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1 -RunCodexExec
 ```
 
-只有 remote Streamable HTTP client 不穩時，再測 stdio bridge fallback：
+Codex Desktop 載入問題優先測 stdio bridge：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1
 ```
 
-stdio bridge 由本機 child process 接收 stdio MCP，再轉送到遠端 `https://context-hub.wjcy.org/mcp`。它是 compatibility fallback，不是主要部署入口。
+stdio bridge 由本機 child process 接收 stdio MCP，再轉送到遠端 `https://context-hub.wjcy.org/mcp`。
+它不取代公開 remote MCP endpoint；它是 Codex Desktop 的相容性入口，避免 Codex HTTP MCP
+worker 偶發失敗時影響對話可用性。
+
+若要驗證目前 Codex session 真的完成 `contexthub/memory_search` tool call，並且沒有被其他
+remote MCP/plugin 的 stale OAuth 輸出污染，請加 `-RunCodexExec`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1 -RunCodexExec
+```
 
 Cloudflare Proxied hostname 的 MCP path 需套用 `docs/context-hub-cloudflare-rules.md`：
 

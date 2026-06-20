@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net.Http.Headers;
+using Memory.Application;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
@@ -129,6 +131,8 @@ public sealed class ContainerTestEnvironment : IAsyncLifetime
 
 public sealed class MemoryApplicationFactory(string postgresConnectionString, string redisConnectionString) : WebApplicationFactory<Program>
 {
+    public const string TestBootstrapToken = "test-bootstrap-token-for-contract-suite";
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
@@ -141,7 +145,11 @@ public sealed class MemoryApplicationFactory(string postgresConnectionString, st
         builder.UseSetting("Embeddings:MaxTokens", "512");
         builder.UseSetting("Memory:Namespace", "test");
         builder.UseSetting("DatabaseLogging:MinimumLevel", "Error");
-        builder.UseSetting("ContextHub:Security:RequireAuthentication", "false");
+        builder.UseSetting("ContextHub:Security:RequireAuthentication", "true");
+        builder.UseSetting("ContextHub:Security:BootstrapToken", TestBootstrapToken);
+        builder.UseSetting("ContextHub:Security:BootstrapTenantSlug", "contract-tests");
+        builder.UseSetting("ContextHub:Security:BootstrapUsername", "contract-test-admin");
+        builder.UseSetting("ContextHub:Security:BootstrapAllowedProjectIds", ProjectContext.AllProjectIdsSentinel);
         builder.ConfigureAppConfiguration((_, config) =>
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
@@ -155,9 +163,19 @@ public sealed class MemoryApplicationFactory(string postgresConnectionString, st
                 ["Embeddings:MaxTokens"] = "512",
                 ["Memory:Namespace"] = "test",
                 ["DatabaseLogging:MinimumLevel"] = "Error",
-                ["ContextHub:Security:RequireAuthentication"] = "false"
+                ["ContextHub:Security:RequireAuthentication"] = "true",
+                ["ContextHub:Security:BootstrapToken"] = TestBootstrapToken,
+                ["ContextHub:Security:BootstrapTenantSlug"] = "contract-tests",
+                ["ContextHub:Security:BootstrapUsername"] = "contract-test-admin",
+                ["ContextHub:Security:BootstrapAllowedProjectIds"] = ProjectContext.AllProjectIdsSentinel
             });
         });
+    }
+
+    protected override void ConfigureClient(HttpClient client)
+    {
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TestBootstrapToken);
+        base.ConfigureClient(client);
     }
 }
 

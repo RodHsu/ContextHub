@@ -1084,10 +1084,15 @@ public sealed class MemoryService(
     {
         if (!actor.IsAuthenticated)
         {
-            return;
+            throw new UnauthorizedAccessException("Authentication is required.");
         }
 
-        if (!actor.HasUser || !actor.HasScope(scope))
+        if (!actor.HasUser)
+        {
+            throw new UnauthorizedAccessException("Authenticated requests must resolve to a tenant user.");
+        }
+
+        if (!actor.HasScope(scope))
         {
             throw new UnauthorizedAccessException($"Scope '{scope}' is required.");
         }

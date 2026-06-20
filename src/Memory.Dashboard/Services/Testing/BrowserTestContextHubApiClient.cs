@@ -928,7 +928,18 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             1_200,
             900,
             256L * 1024 * 1024,
-            "contexthub_redis-data");
+            "contexthub_redis-data",
+            Profile == DashboardBrowserTestProfile.Dense ? 86_400 : 7_200,
+            Profile == DashboardBrowserTestProfile.Dense ? 3_600 : 800,
+            Profile == DashboardBrowserTestProfile.Dense ? 18_000 : 1_200,
+            42,
+            3,
+            Profile == DashboardBrowserTestProfile.Dense ? 1_640_000 : 96_000,
+            Profile == DashboardBrowserTestProfile.Dense ? 60_000 : 4_000,
+            Profile == DashboardBrowserTestProfile.Dense ? 1_700_000 : 100_000,
+            96.47,
+            Profile == DashboardBrowserTestProfile.Dense ? 90_000 : 8_000,
+            Profile == DashboardBrowserTestProfile.Dense ? 96.0 : 90.0);
 
     private DashboardPostgresTelemetryResult BuildPostgresTelemetry()
         => new(
@@ -953,7 +964,9 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             0,
             1024L * 1024 * 1024,
             "contexthub_postgres-data",
-            Profile == DashboardBrowserTestProfile.Dense ? 640L * 1024 * 1024 : 96L * 1024 * 1024);
+            Profile == DashboardBrowserTestProfile.Dense ? 640L * 1024 * 1024 : 96L * 1024 * 1024,
+            Profile == DashboardBrowserTestProfile.Dense ? 8_520_000 : 444_000,
+            Profile == DashboardBrowserTestProfile.Dense ? 96.24 : 94.59);
 
     private IReadOnlyList<DashboardResourceSampleResult> BuildResourceSamples(IReadOnlyList<RequestTrafficSampleResult> trafficSamples)
         => trafficSamples

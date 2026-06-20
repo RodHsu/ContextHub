@@ -58,7 +58,7 @@ builder.Services.AddMcpServer()
     .WithReadResourceHandler(WorkingContextMcpResources.ReadAsync);
 
 var app = builder.Build();
-var requireAuthentication = app.Services.GetRequiredService<IOptions<ContextHubOptions>>().Value.Security.RequireAuthentication;
+const bool requireAuthentication = true;
 
 app.UseForwardedHeaders();
 app.UseExceptionHandler();
@@ -82,6 +82,17 @@ app.Use(async (context, next) =>
 app.Use(CloudflareCacheHeaders.ApplyNoStorePolicyAsync);
 app.UseMiddleware<MaintenanceModeMiddleware>();
 app.UseAuthentication();
+app.Use(async (context, next) =>
+{
+    if (!RequiresToken(context.Request.Path) ||
+        context.User.Identity?.IsAuthenticated == true)
+    {
+        await next();
+        return;
+    }
+
+    await context.ChallengeAsync(ContextHubAuthentication.Scheme);
+});
 app.UseAuthorization();
 app.UseMiddleware<RequestActorMiddleware>();
 app.Use(async (context, next) =>
@@ -111,7 +122,7 @@ app.Use(async (context, next) =>
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = registration => registration.Tags.Contains("live")
-});
+}).RequireAuthIfEnabled(requireAuthentication);
 
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
@@ -1433,6 +1444,11 @@ static void SetDataSource(HttpContext httpContext, string source)
     httpContext.Response.Headers["X-ContextHub-Data-Source"] = source;
 }
 
+static bool RequiresToken(PathString path)
+    => path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase) ||
+       path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) ||
+       path.StartsWithSegments("/health", StringComparison.OrdinalIgnoreCase);
+
 app.MapPost("/api/performance/measure", async (PerformanceMeasureRequest request, IPerformanceProbeService service, CancellationToken cancellationToken) =>
 {
     var errors = ApiValidation.ValidatePerformanceRequest(request);
@@ -1596,43 +1612,34 @@ internal static class EndpointAuthorizationExtensions
     public static TBuilder RequireAuthIfEnabled<TBuilder>(this TBuilder builder, bool enabled)
         where TBuilder : IEndpointConventionBuilder
     {
-        if (enabled)
-        {
-            builder.RequireAuthorization();
-        }
-
+        _ = enabled;
+        builder.RequireAuthorization();
         return builder;
     }
 
     public static TBuilder RequireAdminIfEnabled<TBuilder>(this TBuilder builder, bool enabled)
         where TBuilder : IEndpointConventionBuilder
     {
-        if (enabled)
+        _ = enabled;
+        builder.AddEndpointFilter(async (context, next) =>
         {
-            builder.AddEndpointFilter(async (context, next) =>
-            {
-                var actor = context.HttpContext.RequestServices.GetRequiredService<IRequestActorAccessor>().Current;
-                return actor.IsAdmin ? await next(context) : Results.Forbid();
-            });
-        }
-
+            var actor = context.HttpContext.RequestServices.GetRequiredService<IRequestActorAccessor>().Current;
+            return actor.IsAdmin ? await next(context) : Results.Forbid();
+        });
         return builder;
     }
 
     public static TBuilder RequireScopeIfEnabled<TBuilder>(this TBuilder builder, bool enabled, string scope)
         where TBuilder : IEndpointConventionBuilder
     {
-        if (enabled)
+        _ = enabled;
+        builder.AddEndpointFilter(async (context, next) =>
         {
-            builder.AddEndpointFilter(async (context, next) =>
-            {
-                var actor = context.HttpContext.RequestServices.GetRequiredService<IRequestActorAccessor>().Current;
-                return actor.HasUser && actor.HasScope(scope)
-                    ? await next(context)
-                    : Results.Forbid();
-            });
-        }
-
+            var actor = context.HttpContext.RequestServices.GetRequiredService<IRequestActorAccessor>().Current;
+            return actor.HasUser && actor.HasScope(scope)
+                ? await next(context)
+                : Results.Forbid();
+        });
         return builder;
     }
 }

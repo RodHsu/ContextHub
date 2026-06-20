@@ -251,6 +251,11 @@ public sealed class SecurityBootstrapHostedService(
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        if (projectIds.Any(x => string.Equals(x, ProjectContext.AllProjectIdsSentinel, StringComparison.Ordinal)))
+        {
+            return [];
+        }
+
         return projectIds.Length > 0 ? projectIds : [ProjectContext.DefaultProjectId];
     }
 }

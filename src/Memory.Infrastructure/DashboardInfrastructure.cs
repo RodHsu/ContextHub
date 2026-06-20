@@ -53,8 +53,8 @@ public sealed class NpgsqlStorageExplorerStore(NpgsqlDataSource dataSource) : IS
                 "memory_items",
                 "記憶主體與 metadata",
                 "updated_at DESC, id DESC",
-                ["id", "project_id", "external_key", "scope", "memory_type", "title", "content", "summary", "tags", "source_type", "source_ref", "importance", "confidence", "version", "status", "is_read_only", "metadata_json", "created_at", "updated_at"],
-                ["project_id", "external_key", "scope", "memory_type", "title", "content", "summary", "tags", "source_type", "source_ref", "status", "metadata_json"]),
+                ["id", "tenant_id", "owner_user_id", "project_id", "external_key", "scope", "memory_type", "title", "content", "summary", "tags", "source_type", "source_ref", "importance", "confidence", "version", "status", "is_read_only", "metadata_json", "created_at", "updated_at"],
+                ["tenant_id", "owner_user_id", "project_id", "external_key", "scope", "memory_type", "title", "content", "summary", "tags", "source_type", "source_ref", "status", "metadata_json"]),
             ["memory_item_revisions"] = new(
                 "memory_item_revisions",
                 "記憶版本快照",

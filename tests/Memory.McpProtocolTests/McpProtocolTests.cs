@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -16,10 +17,24 @@ namespace Memory.McpProtocolTests;
 public sealed class McpProtocolTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Raw_Http_Mcp_Should_Reject_Anonymous_Request()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = null;
+
+        using var response = await client.PostAsync(
+            "/mcp",
+            new StringContent("""{"jsonrpc":"2.0","id":"anonymous","method":"tools/list"}""", Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+    }
+
+    [DockerRequiredFact]
     public async Task Raw_Http_Tools_List_And_Call_Should_Work_After_Sdk_Session_Initialization()
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
             var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -74,6 +89,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         {
             BaseAddress = environment.GetFactory().Server.BaseAddress
         };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
         var transport = new HttpClientTransport(new HttpClientTransportOptions
         {
             Endpoint = new Uri(client.BaseAddress!, "/mcp"),
@@ -235,6 +251,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
 
             await memoryService.UpsertAsync(
@@ -282,6 +299,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
 
             await memoryService.UpsertAsync(
@@ -306,6 +324,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         {
             BaseAddress = environment.GetFactory().Server.BaseAddress
         };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
         var transport = new HttpClientTransport(new HttpClientTransportOptions
         {
             Endpoint = new Uri(client.BaseAddress!, "/mcp"),
@@ -362,6 +381,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             dbContext.InstanceSettings.Add(new InstanceSetting
             {
@@ -403,6 +423,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         {
             BaseAddress = environment.GetFactory().Server.BaseAddress
         };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
         var transport = new HttpClientTransport(new HttpClientTransportOptions
         {
             Endpoint = new Uri(client.BaseAddress!, "/mcp"),
@@ -440,6 +461,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
+            UseBootstrapActor(scope.ServiceProvider);
             var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             await DrainConversationAutomationAsync(processor, dbContext, conversationId, CancellationToken.None);
@@ -471,6 +493,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         {
             BaseAddress = environment.GetFactory().Server.BaseAddress
         };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
         var transport = new HttpClientTransport(new HttpClientTransportOptions
         {
             Endpoint = new Uri(client.BaseAddress!, "/mcp"),
@@ -508,6 +531,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         ExtractToolJsonField(upsertPayload, "sourceType").Should().Be("document");
 
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var document = await dbContext.MemoryItems.SingleAsync(x => x.ExternalKey == externalKey, CancellationToken.None);
 
@@ -559,6 +583,31 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         using var response = await client.SendAsync(request);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStringAsync();
+    }
+
+    private static void UseBootstrapActor(IServiceProvider services)
+    {
+        var dbContext = services.GetRequiredService<MemoryDbContext>();
+        var user = dbContext.TenantUsers
+            .Include(x => x.Tenant)
+            .Single(x => x.Username == "contract-test-admin");
+
+        services.GetRequiredService<IRequestActorAccessor>().Current = new ContextHubRequestActor(
+            user.TenantId,
+            user.Id,
+            user.Username,
+            user.Role,
+            [
+                SecurityScopes.MemoryRead,
+                SecurityScopes.MemoryWrite,
+                SecurityScopes.PreferencesRead,
+                SecurityScopes.PreferencesWrite,
+                SecurityScopes.TokenManage,
+                SecurityScopes.SecurityManage,
+                SecurityScopes.DashboardActAs
+            ],
+            [],
+            IsAuthenticated: true);
     }
 
     private static string ExtractToolText(string payload)

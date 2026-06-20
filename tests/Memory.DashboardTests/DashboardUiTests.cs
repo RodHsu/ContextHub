@@ -310,6 +310,12 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("Context Savings");
         monitoringHtml.Should().Contain("monitoring-context-savings-panel");
         monitoringHtml.Should().Contain("Source coverage");
+        monitoringHtml.Should().Contain("Redis Hit Rate");
+        monitoringHtml.Should().Contain("App Cache Hit");
+        monitoringHtml.Should().Contain("Redis Hits / Misses");
+        monitoringHtml.Should().Contain("App Cache Bypasses / Errors");
+        monitoringHtml.Should().Contain("Buffer Hit Rate");
+        monitoringHtml.Should().Contain("block accesses");
         monitoringHtml.Should().Contain("資源趨勢");
         monitoringHtml.Should().Contain("Compose 服務資源");
         monitoringHtml.Should().Contain("Docker 主機");
@@ -1162,7 +1168,18 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             1_200,
             900,
             256L * 1024 * 1024,
-            "contexthub_redis-data");
+            "contexthub_redis-data",
+            7_200,
+            800,
+            1_200,
+            42,
+            3,
+            96_000,
+            4_000,
+            100_000,
+            96.0,
+            8_000,
+            90.0);
 
     private static DashboardPostgresTelemetryResult BuildPostgresTelemetry()
         => new(
@@ -1187,7 +1204,9 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             0,
             1024L * 1024 * 1024,
             "contexthub_postgres-data",
-            96L * 1024 * 1024);
+            96L * 1024 * 1024,
+            444_000,
+            94.59);
 
     public Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken)
     {

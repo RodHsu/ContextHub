@@ -309,7 +309,7 @@
                     <div class="monitoring-telemetry-header">
                         <div>
                             <div class="panel-title">Redis</div>
-                            <div class="settings-section-meta">快取鍵數、命令處理量、進出流量與容器 I/O。</div>
+                            <div class="settings-section-meta">快取命中率、命中量、鍵數、命令處理量、進出流量與容器 I/O。</div>
                         </div>
                         <span class="status-badge @StatusClass(_monitoring.Redis.Status)">@StatusText(_monitoring.Redis.Status)</span>
                     </div>
@@ -323,6 +323,16 @@
                         <article class="runtime-dependency-kpi">
                             <span>Used Memory</span>
                             <strong>@DashboardFormatting.Bytes(_monitoring.Redis.UsedMemoryBytes)</strong>
+                        </article>
+                        <article class="runtime-dependency-kpi">
+                            <span class="metric-label-with-info">Redis Hit Rate <InfoPopover Label="顯示 Redis Hit Rate 說明" Icon="i" Title="Redis Hit Rate" Text="Redis server keyspace hits / (hits + misses)。這是 Redis 端實際 key lookup 的命中率，可用來判斷 Redis 內部快取是否有效服務讀取。" /></span>
+                            <strong>@DashboardFormatting.Percent(_monitoring.Redis.KeyspaceHitPercent)</strong>
+                            <small>@DashboardFormatting.Integer(_monitoring.Redis.KeyspaceLookups) lookups</small>
+                        </article>
+                        <article class="runtime-dependency-kpi">
+                            <span class="metric-label-with-info">App Cache Hit <InfoPopover Label="顯示 App Cache Hit 說明" Icon="i" Title="App Cache Hit" Text="ContextHub 透過 IRedisObjectCache 記錄的 hits / (hits + misses)。這是應用層快取使用成效，和 Redis server keyspace hit rate 互補。" /></span>
+                            <strong>@DashboardFormatting.Percent(_monitoring.Redis.CacheHitPercent)</strong>
+                            <small>@DashboardFormatting.Integer(_monitoring.Redis.CacheLookups) lookups</small>
                         </article>
                         <article class="runtime-dependency-kpi">
                             <span>Key Count</span>
@@ -341,6 +351,10 @@
                         <div><dt>Total Net Out</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.TotalNetOutputBytes)</dd></div>
                         <div><dt>Instant In</dt><dd>@($"{DashboardFormatting.Decimal(_monitoring.Redis.InstantaneousInputKbps)} KB/s")</dd></div>
                         <div><dt>Instant Out</dt><dd>@($"{DashboardFormatting.Decimal(_monitoring.Redis.InstantaneousOutputKbps)} KB/s")</dd></div>
+                        <div><dt>Redis Hits / Misses</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.KeyspaceHits) / @DashboardFormatting.Integer(_monitoring.Redis.KeyspaceMisses)</dd></div>
+                        <div><dt>App Cache Hits / Misses</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.CacheHits) / @DashboardFormatting.Integer(_monitoring.Redis.CacheMisses)</dd></div>
+                        <div><dt>App Cache Sets</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.CacheSets)</dd></div>
+                        <div><dt>App Cache Bypasses / Errors</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.CacheBypasses) / @DashboardFormatting.Integer(_monitoring.Redis.CacheErrors)</dd></div>
                         <div><dt>Expired Keys</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.ExpiredKeys)</dd></div>
                         <div><dt>Evicted Keys</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.EvictedKeys)</dd></div>
                         <div><dt>Container Network</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.NetworkRxBytes) RX / @DashboardFormatting.Bytes(_monitoring.Redis.NetworkTxBytes) TX</dd></div>
@@ -354,7 +368,7 @@
                     <div class="monitoring-telemetry-header">
                         <div>
                             <div class="panel-title">PostgreSQL</div>
-                            <div class="settings-section-meta">資料庫大小、交易次數、I/O 快取命中與容器流量。</div>
+                            <div class="settings-section-meta">資料庫大小、交易次數、buffer cache 命中率、I/O 量與容器流量。</div>
                         </div>
                         <span class="status-badge @StatusClass(_monitoring.Postgres.Status)">@StatusText(_monitoring.Postgres.Status)</span>
                     </div>
@@ -368,6 +382,11 @@
                         <article class="runtime-dependency-kpi">
                             <span class="metric-label-with-info">DB Size <InfoPopover Label="顯示 DB Size 說明" Icon="i" Title="DB Size" Text="目前 ContextHub PostgreSQL database 的實際資料大小。持續上升通常代表記憶、log、retrieval telemetry 或 job history 正在累積，需搭配資料保留策略與 table size 一起看。" /></span>
                             <strong>@DashboardFormatting.Bytes(_monitoring.Postgres.DatabaseSizeBytes)</strong>
+                        </article>
+                        <article class="runtime-dependency-kpi">
+                            <span class="metric-label-with-info">Buffer Hit Rate <InfoPopover Label="顯示 Buffer Hit Rate 說明" Icon="i" Title="Buffer Hit Rate" Text="PostgreSQL shared buffer hits / (hits + disk reads)。命中率下降通常代表 working set 變大、查詢掃描過多、索引不足或資料庫 memory 配置不足。" /></span>
+                            <strong>@DashboardFormatting.Percent(_monitoring.Postgres.BlockCacheHitPercent)</strong>
+                            <small>@DashboardFormatting.Integer(_monitoring.Postgres.BlockAccesses) block accesses</small>
                         </article>
                         <article class="runtime-dependency-kpi">
                             <span class="metric-label-with-info">Connections <InfoPopover Label="顯示 Connections 說明" Icon="i" Title="Connections" Text="目前連到 PostgreSQL 的 active connections 數量。短暫升高通常正常；長時間接近連線上限時，可能是連線池設定、慢查詢或未釋放連線造成。" /></span>

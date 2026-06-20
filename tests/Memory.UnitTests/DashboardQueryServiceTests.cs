@@ -178,6 +178,94 @@ public sealed class DashboardQueryServiceTests
     }
 
     [Fact]
+    public async Task Monitoring_Should_Return_Cache_Hit_Rates_From_Snapshot()
+    {
+        var now = new DateTimeOffset(2026, 4, 15, 8, 0, 0, TimeSpan.Zero);
+        var snapshotStore = new FakeDashboardSnapshotStore();
+        snapshotStore.Add(new DashboardSnapshotEnvelope<DashboardMonitoringSnapshotPayload>(
+            DashboardSnapshotKeys.MonitoringStats,
+            now.AddSeconds(-2),
+            5,
+            now.AddSeconds(33),
+            string.Empty,
+            new DashboardMonitoringSnapshotPayload(
+                new DashboardRedisTelemetryResult(
+                    "Healthy",
+                    string.Empty,
+                    1024,
+                    2048,
+                    8,
+                    100,
+                    200,
+                    300,
+                    1.5,
+                    2.5,
+                    3,
+                    4,
+                    500,
+                    600,
+                    700,
+                    800,
+                    900,
+                    "redis-data",
+                    72,
+                    8,
+                    12,
+                    1,
+                    0,
+                    190,
+                    10,
+                    200,
+                    95,
+                    80,
+                    90),
+                new DashboardPostgresTelemetryResult(
+                    "Healthy",
+                    string.Empty,
+                    3,
+                    100,
+                    2,
+                    20,
+                    180,
+                    400,
+                    250,
+                    30,
+                    10,
+                    5,
+                    1,
+                    1024,
+                    0,
+                    100,
+                    200,
+                    300,
+                    400,
+                    4096,
+                    "postgres-data",
+                    2048,
+                    200,
+                    90))));
+
+        var service = new DashboardQueryService(
+            new UnusedApplicationDbContext(),
+            new UnusedStorageExplorerStore(),
+            snapshotStore,
+            new UnusedMemoryService(),
+            new FakeCacheVersionStore(),
+            new FakeRedisObjectCache(),
+            new FixedTimeProvider(now),
+            new RequestActorAccessor());
+
+        var monitoring = await service.GetMonitoringAsync(CancellationToken.None);
+
+        monitoring.Redis.KeyspaceLookups.Should().Be(200);
+        monitoring.Redis.KeyspaceHitPercent.Should().Be(95);
+        monitoring.Redis.CacheLookups.Should().Be(80);
+        monitoring.Redis.CacheHitPercent.Should().Be(90);
+        monitoring.Postgres.BlockAccesses.Should().Be(200);
+        monitoring.Postgres.BlockCacheHitPercent.Should().Be(90);
+    }
+
+    [Fact]
     public async Task Overview_Should_Not_Become_Stale_When_Only_Resource_Chart_Is_Stale()
     {
         var now = new DateTimeOffset(2026, 4, 15, 8, 0, 0, TimeSpan.Zero);

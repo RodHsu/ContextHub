@@ -89,7 +89,9 @@ docker compose down -v
 
 ## 4. 綁定 MCP Server
 
-ContextHub 對外提供 `HTTP /mcp` endpoint，MCP client 應使用 Streamable HTTP，不要設定成 `stdio`。
+ContextHub 對外提供 `HTTP /mcp` endpoint。VS Code 與支援 remote MCP 的 client
+應使用 Streamable HTTP；Codex Desktop 在本機建議使用 ContextHub stdio bridge，
+避免 Codex HTTP MCP worker 偶發初始化失敗時誤判 tools 未載入。
 
 ### 4.1 VS Code workspace 設定
 
@@ -161,6 +163,29 @@ ContextHub 對外提供 `HTTP /mcp` endpoint，MCP client 應使用 Streamable H
    - `enqueue_reindex`
 
 若 tools list 不完整，先確認 client 連到的是 `/mcp`，不是 service root。
+
+### 4.3 Codex Desktop 設定
+
+Codex Desktop 建議從 ContextHub repo 啟動：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File start-codex-contexthub.ps1
+```
+
+這支腳本會建置 `tools/ContextHub.McpStdioBridge`，並把本次 Codex session 的
+`contexthub` MCP server 覆寫成 stdio bridge。bridge 會從 User / Machine
+environment 讀取 `CONTEXTHUB_MCP_TOKEN`，不要把 token 寫進 Codex 設定檔。
+
+若需要手動設定全域 Codex config，使用已建好的 bridge exe：
+
+```toml
+[mcp_servers.contexthub]
+enabled = true
+command = "W:\\Repositories\\WJCY\\ContextHub\\tools\\ContextHub.McpStdioBridge\\bin\\Debug\\net10.0\\ContextHub.McpStdioBridge.exe"
+
+[mcp_servers.contexthub.env]
+CONTEXTHUB_MCP_ENDPOINT = "https://context-hub.wjcy.org/mcp"
+```
 
 ## 5. 在 repo 新增 `AGENTS.md`
 

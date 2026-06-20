@@ -191,7 +191,13 @@ public sealed record DashboardRedisTelemetryResult(
     long CacheMisses = 0,
     long CacheSets = 0,
     long CacheBypasses = 0,
-    long CacheErrors = 0);
+    long CacheErrors = 0,
+    long KeyspaceHits = 0,
+    long KeyspaceMisses = 0,
+    long KeyspaceLookups = 0,
+    double KeyspaceHitPercent = 0,
+    long CacheLookups = 0,
+    double CacheHitPercent = 0);
 
 public sealed record DashboardPostgresTelemetryResult(
     string Status,
@@ -215,7 +221,9 @@ public sealed record DashboardPostgresTelemetryResult(
     long DiskWriteBytes,
     long PersistentStorageBytes,
     string PersistentStorageName,
-    long DatabaseSizeBytes);
+    long DatabaseSizeBytes,
+    long BlockAccesses = 0,
+    double BlockCacheHitPercent = 0);
 
 public sealed record DashboardMonitoringResult(
     string Namespace,
