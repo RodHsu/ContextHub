@@ -16,6 +16,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Upsert_ProcessJob_And_Search_Should_Return_Result()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
         var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -50,6 +51,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task ProcessJob_WithOwnerActor_Should_Refresh_MemoryGraphIndex_Without_Scope_Warning()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
         var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -130,6 +132,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Upserting_Shared_Summary_Source_Type_Should_Enqueue_Summary_Refresh_Job()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
 
@@ -161,6 +164,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Refresh_Summary_Rebuild_All_Should_Complete_Without_Query_Translation_Errors()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
         var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -229,6 +233,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Build_Working_Context_Should_Include_User_Preferences()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
 
         var preference = await memoryService.UpsertUserPreferenceAsync(
@@ -252,6 +257,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Search_Should_Write_Retrieval_Telemetry_Event_And_Hits()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
         var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -313,6 +319,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Build_Working_Context_Should_Write_Single_Composite_Telemetry_Event()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
         var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -378,6 +385,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Upserting_Same_User_Preference_Twice_Should_Update_In_Place_Without_Concurrency_Exception()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
 
         var created = await memoryService.UpsertUserPreferenceAsync(
@@ -413,6 +421,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Enqueue_Reindex_Should_Write_New_Model_Key_Vectors()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
         var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -463,6 +472,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Conversation_Ingest_Should_Create_Insights_And_Promote_Them()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var automationService = scope.ServiceProvider.GetRequiredService<IConversationAutomationService>();
         var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -511,6 +521,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     public async Task Conversation_Ingest_Should_Recover_Stale_Running_Job_And_Promote()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
         var automationService = scope.ServiceProvider.GetRequiredService<IConversationAutomationService>();
         var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -569,6 +580,31 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
                 return;
             }
         }
+    }
+
+    private static void UseBootstrapActor(IServiceProvider services)
+    {
+        var dbContext = services.GetRequiredService<MemoryDbContext>();
+        var user = dbContext.TenantUsers
+            .Include(x => x.Tenant)
+            .Single(x => x.Username == "contract-test-admin");
+
+        services.GetRequiredService<IRequestActorAccessor>().Current = new ContextHubRequestActor(
+            user.TenantId,
+            user.Id,
+            user.Username,
+            user.Role,
+            [
+                SecurityScopes.MemoryRead,
+                SecurityScopes.MemoryWrite,
+                SecurityScopes.PreferencesRead,
+                SecurityScopes.PreferencesWrite,
+                SecurityScopes.TokenManage,
+                SecurityScopes.SecurityManage,
+                SecurityScopes.DashboardActAs
+            ],
+            [],
+            IsAuthenticated: true);
     }
 
     private static MemoryItem CreateMemoryItem(string projectId, string externalKey, string title, DateTimeOffset timestamp)

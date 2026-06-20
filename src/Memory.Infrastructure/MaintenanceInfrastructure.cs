@@ -14,42 +14,48 @@ namespace Memory.Infrastructure;
 public sealed class RedisMaintenanceModeStore(
     IConnectionMultiplexer redis,
     IDbContextFactory<MemoryDbContext> dbContextFactory,
-    TimeProvider timeProvider) : IMaintenanceModeStore
+    TimeProvider timeProvider) : IMaintenanceModeStore, IMaintenanceCoordinator
 {
     private const string StateKey = "context-hub:maintenance:state";
+    private const string LeaseIndexKey = "context-hub:maintenance:leases";
+    private const string LeaseKeyPrefix = "context-hub:maintenance:lease:";
+    private const int DefaultDurationMinutes = 90;
+    private const int DefaultMaxDrainWaitMinutes = 15;
+    private const int DefaultLeaseTtlSeconds = 300;
+    private const int CompletedStateTtlSeconds = 3600;
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
     private readonly IDatabase _database = redis.GetDatabase();
 
     public async Task<MaintenanceModeStateResult> GetAsync(CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var payload = await _database.StringGetAsync(StateKey);
-        return payload.IsNullOrEmpty
-            ? Inactive
-            : JsonSerializer.Deserialize<MaintenanceModeStateResult>(payload.ToString(), SerializerOptions) ?? Inactive;
-    }
+        => ToModeState(await GetStatusAsync(cancellationToken));
 
     public async Task<MaintenanceModeStateResult> EnableAsync(MaintenanceModeRequest request, string triggeredBy, CancellationToken cancellationToken)
     {
-        var current = await GetAsync(cancellationToken);
-        if (current.Active)
+        var current = await GetStatusAsync(cancellationToken);
+        if (current.Phase is MaintenancePhase.Scheduled or MaintenancePhase.Draining or MaintenancePhase.Running)
         {
-            return current;
+            return ToModeState(current);
         }
 
         var now = timeProvider.GetUtcNow();
         var estimatedEndsAt = request.EstimatedEndsAtUtc
-            ?? now.AddMinutes(Math.Clamp(request.EstimatedDurationMinutes ?? 90, 1, 24 * 60));
+            ?? now.AddMinutes(Math.Clamp(request.EstimatedDurationMinutes ?? DefaultDurationMinutes, 1, 24 * 60));
+        var normalizedTriggeredBy = NormalizeTriggeredBy(request.TriggeredBy, triggeredBy);
+        var reason = NormalizeOptional(request.Reason, "Maintenance");
+        var message = NormalizeOptional(request.Message, "ContextHub is temporarily unavailable due to maintenance.");
         var run = new MaintenanceRun
         {
             MaintenanceType = MaintenanceRunType.MaintenanceMode,
             Status = MaintenanceRunStatus.Running,
             StartedAt = now,
-            TriggeredBy = NormalizeTriggeredBy(request.TriggeredBy, triggeredBy),
+            TriggeredBy = normalizedTriggeredBy,
             PolicyJson = JsonSerializer.Serialize(new
             {
-                reason = request.Reason ?? "Maintenance",
-                estimatedEndsAtUtc = estimatedEndsAt
+                reason,
+                message,
+                scheduledStartAtUtc = now,
+                estimatedEndsAtUtc = estimatedEndsAt,
+                maxDrainWaitMinutes = DefaultMaxDrainWaitMinutes
             }, SerializerOptions)
         };
 
@@ -59,46 +65,394 @@ public sealed class RedisMaintenanceModeStore(
             await dbContext.SaveChangesAsync(cancellationToken);
         }
 
-        var state = new MaintenanceModeStateResult(
+        var status = new MaintenanceStatusResult(
+            MaintenancePhase.Running,
             true,
-            request.Reason?.Trim() is { Length: > 0 } reason ? reason : "Maintenance",
-            request.Message?.Trim() is { Length: > 0 } message ? message : "ContextHub is temporarily unavailable due to maintenance.",
+            reason,
+            message,
+            now,
             now,
             estimatedEndsAt,
             run.Id,
-            run.TriggeredBy);
-        await _database.StringSetAsync(StateKey, JsonSerializer.Serialize(state, SerializerOptions));
-        return state;
+            normalizedTriggeredBy,
+            DefaultMaxDrainWaitMinutes,
+            0,
+            []);
+        await SetStateAsync(status);
+        return ToModeState(status);
     }
 
     public async Task<MaintenanceModeStateResult> DisableAsync(string triggeredBy, CancellationToken cancellationToken)
-    {
-        var current = await GetAsync(cancellationToken);
-        await _database.KeyDeleteAsync(StateKey);
+        => ToModeState(await CompleteAsync(null, triggeredBy, cancellationToken));
 
-        if (current.RunId.HasValue)
+    public async Task<MaintenanceStatusResult> GetStatusAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var stored = await ReadStoredStatusAsync(cancellationToken);
+        var leases = await ReadActiveLeasesAsync(cancellationToken);
+        return stored with
         {
-            var now = timeProvider.GetUtcNow();
-            await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
-            var run = await dbContext.MaintenanceRuns.FirstOrDefaultAsync(x => x.Id == current.RunId.Value, cancellationToken);
-            if (run is not null)
-            {
-                run.Status = MaintenanceRunStatus.Completed;
-                run.CompletedAt = now;
-                run.ResultJson = JsonSerializer.Serialize(new
-                {
-                    disabledBy = NormalizeTriggeredBy(null, triggeredBy),
-                    activeFromUtc = current.StartedAtUtc,
-                    disabledAtUtc = now
-                }, SerializerOptions);
-                await dbContext.SaveChangesAsync(cancellationToken);
-            }
+            ActiveLeaseCount = leases.Count(x => x.BlocksMaintenance),
+            ActiveLeases = leases
+        };
+    }
+
+    public async Task<MaintenanceStatusResult> ScheduleAsync(MaintenanceWindowRequest request, string triggeredBy, CancellationToken cancellationToken)
+    {
+        var current = await GetStatusAsync(cancellationToken);
+        if (current.Phase is MaintenancePhase.Scheduled or MaintenancePhase.Draining or MaintenancePhase.Running)
+        {
+            return current;
         }
 
-        return Inactive;
+        var now = timeProvider.GetUtcNow();
+        var scheduledStart = request.ScheduledStartAtUtc ?? now;
+        var estimatedEndsAt = request.EstimatedEndsAtUtc
+            ?? scheduledStart.AddMinutes(Math.Clamp(request.EstimatedDurationMinutes ?? DefaultDurationMinutes, 1, 24 * 60));
+        var maxDrainWait = Math.Clamp(request.MaxDrainWaitMinutes ?? DefaultMaxDrainWaitMinutes, 1, 24 * 60);
+        var normalizedTriggeredBy = NormalizeTriggeredBy(request.TriggeredBy, triggeredBy);
+        var reason = NormalizeOptional(request.Reason, "Maintenance");
+        var message = NormalizeOptional(request.Message, "ContextHub maintenance is scheduled. New write operations may be paused during the drain window.");
+        var run = new MaintenanceRun
+        {
+            MaintenanceType = MaintenanceRunType.MaintenanceMode,
+            Status = MaintenanceRunStatus.Scheduled,
+            StartedAt = now,
+            TriggeredBy = normalizedTriggeredBy,
+            PolicyJson = JsonSerializer.Serialize(new
+            {
+                reason,
+                message,
+                scheduledStartAtUtc = scheduledStart,
+                estimatedEndsAtUtc = estimatedEndsAt,
+                maxDrainWaitMinutes = maxDrainWait
+            }, SerializerOptions)
+        };
+
+        await using (var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken))
+        {
+            dbContext.MaintenanceRuns.Add(run);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        var status = new MaintenanceStatusResult(
+            MaintenancePhase.Scheduled,
+            false,
+            reason,
+            message,
+            scheduledStart,
+            null,
+            estimatedEndsAt,
+            run.Id,
+            normalizedTriggeredBy,
+            maxDrainWait,
+            0,
+            []);
+        await SetStateAsync(status);
+        return await GetStatusAsync(cancellationToken);
+    }
+
+    public async Task<MaintenanceStatusResult> StartDrainAsync(Guid? runId, string triggeredBy, CancellationToken cancellationToken)
+    {
+        var current = await GetStatusAsync(cancellationToken);
+        if (current.Phase == MaintenancePhase.Running)
+        {
+            return current;
+        }
+
+        if (current.Phase == MaintenancePhase.Inactive)
+        {
+            current = await ScheduleAsync(new MaintenanceWindowRequest(TriggeredBy: triggeredBy), triggeredBy, cancellationToken);
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var status = current with
+        {
+            Phase = MaintenancePhase.Draining,
+            Active = false,
+            StartedAtUtc = current.StartedAtUtc ?? now,
+            Message = NormalizeOptional(current.Message, "ContextHub maintenance is draining active agent work. New write operations are paused.")
+        };
+        await UpdateRunStatusAsync(status.RunId, MaintenanceRunStatus.Draining, null, null, string.Empty, cancellationToken);
+        await SetStateAsync(status);
+        return await GetStatusAsync(cancellationToken);
+    }
+
+    public async Task<MaintenanceStatusResult> StartRunningAsync(Guid? runId, string triggeredBy, CancellationToken cancellationToken)
+    {
+        var current = await GetStatusAsync(cancellationToken);
+        if (current.Phase == MaintenancePhase.Running)
+        {
+            return current;
+        }
+
+        if (current.Phase != MaintenancePhase.Draining)
+        {
+            current = await StartDrainAsync(runId, triggeredBy, cancellationToken);
+        }
+
+        var drainStartedAt = current.StartedAtUtc ?? timeProvider.GetUtcNow();
+        var drainDeadline = drainStartedAt.AddMinutes(Math.Clamp(current.MaxDrainWaitMinutes, 1, 24 * 60));
+        if (current.ActiveLeaseCount > 0 && timeProvider.GetUtcNow() < drainDeadline)
+        {
+            return current;
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var running = current with
+        {
+            Phase = MaintenancePhase.Running,
+            Active = true,
+            StartedAtUtc = now,
+            Message = NormalizeOptional(current.Message, "ContextHub is temporarily unavailable due to maintenance.")
+        };
+        await UpdateRunStatusAsync(running.RunId, MaintenanceRunStatus.Running, null, null, string.Empty, cancellationToken);
+        await SetStateAsync(running);
+        return await GetStatusAsync(cancellationToken);
+    }
+
+    public async Task<MaintenanceStatusResult> CompleteAsync(Guid? runId, string triggeredBy, CancellationToken cancellationToken)
+    {
+        var current = await GetStatusAsync(cancellationToken);
+        if (current.Phase == MaintenancePhase.Inactive)
+        {
+            return current;
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var resultJson = JsonSerializer.Serialize(new
+        {
+            completedBy = NormalizeTriggeredBy(null, triggeredBy),
+            activeFromUtc = current.StartedAtUtc,
+            completedAtUtc = now
+        }, SerializerOptions);
+        await UpdateRunStatusAsync(current.RunId, MaintenanceRunStatus.Completed, now, resultJson, string.Empty, cancellationToken);
+        var completed = current with { Phase = MaintenancePhase.Completed, Active = false };
+        await SetStateAsync(completed, TimeSpan.FromSeconds(CompletedStateTtlSeconds));
+        return await GetStatusAsync(cancellationToken);
+    }
+
+    public async Task<MaintenanceStatusResult> CancelAsync(Guid? runId, string triggeredBy, CancellationToken cancellationToken)
+    {
+        var current = await GetStatusAsync(cancellationToken);
+        if (current.Phase == MaintenancePhase.Inactive)
+        {
+            return current;
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var resultJson = JsonSerializer.Serialize(new
+        {
+            cancelledBy = NormalizeTriggeredBy(null, triggeredBy),
+            cancelledAtUtc = now
+        }, SerializerOptions);
+        await UpdateRunStatusAsync(current.RunId, MaintenanceRunStatus.Cancelled, now, resultJson, string.Empty, cancellationToken);
+        var cancelled = current with { Phase = MaintenancePhase.Cancelled, Active = false };
+        await SetStateAsync(cancelled, TimeSpan.FromSeconds(CompletedStateTtlSeconds));
+        return await GetStatusAsync(cancellationToken);
+    }
+
+    public async Task<MaintenanceLeaseHeartbeatResult> HeartbeatLeaseAsync(MaintenanceLeaseHeartbeatRequest request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var status = await GetStatusAsync(cancellationToken);
+        var now = timeProvider.GetUtcNow();
+        var leaseId = request.LeaseId ?? Guid.NewGuid();
+        var ttl = TimeSpan.FromSeconds(Math.Clamp(request.TtlSeconds ?? DefaultLeaseTtlSeconds, 30, 30 * 60));
+        var expiresAt = now.Add(ttl);
+        var lease = new MaintenanceLeaseResult(
+            leaseId,
+            NormalizeOptional(request.AgentId, "agent"),
+            ProjectContext.Normalize(request.ProjectId ?? ProjectContext.DefaultProjectId),
+            NormalizeOptional(request.ConversationId, string.Empty),
+            NormalizeOptional(request.TaskId, string.Empty),
+            NormalizeOptional(request.ActivityKind, "context"),
+            request.BlocksMaintenance && status.Phase is not (MaintenancePhase.Draining or MaintenancePhase.Running),
+            now,
+            expiresAt);
+
+        await _database.StringSetAsync(BuildLeaseKey(leaseId), JsonSerializer.Serialize(lease, SerializerOptions), ttl);
+        await _database.SortedSetAddAsync(LeaseIndexKey, leaseId.ToString("D"), expiresAt.ToUnixTimeMilliseconds());
+        return new MaintenanceLeaseHeartbeatResult(lease, await GetStatusAsync(cancellationToken));
+    }
+
+    public async Task<MaintenanceStatusResult> CompleteLeaseAsync(MaintenanceLeaseCompleteRequest request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await _database.KeyDeleteAsync(BuildLeaseKey(request.LeaseId));
+        await _database.SortedSetRemoveAsync(LeaseIndexKey, request.LeaseId.ToString("D"));
+        return await GetStatusAsync(cancellationToken);
+    }
+
+    public async Task EnsureWriteAllowedAsync(string operation, CancellationToken cancellationToken)
+    {
+        var status = await GetStatusAsync(cancellationToken);
+        if (status.Phase is MaintenancePhase.Draining or MaintenancePhase.Running)
+        {
+            throw new MaintenanceUnavailableException(
+                $"ContextHub is {status.Phase.ToString().ToLowerInvariant()}; write operation '{operation}' is paused.",
+                status);
+        }
+    }
+
+    public async Task<bool> CanStartBackgroundJobAsync(CancellationToken cancellationToken)
+    {
+        var status = await GetStatusAsync(cancellationToken);
+        return status.Phase is not (MaintenancePhase.Draining or MaintenancePhase.Running);
     }
 
     private static MaintenanceModeStateResult Inactive { get; } = new(false, string.Empty, string.Empty, null, null, null, string.Empty);
+
+    private static MaintenanceStatusResult InactiveStatus { get; } = new(
+        MaintenancePhase.Inactive,
+        false,
+        string.Empty,
+        string.Empty,
+        null,
+        null,
+        null,
+        null,
+        string.Empty,
+        DefaultMaxDrainWaitMinutes,
+        0,
+        []);
+
+    private async Task<MaintenanceStatusResult> ReadStoredStatusAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var payload = await _database.StringGetAsync(StateKey);
+        if (payload.IsNullOrEmpty)
+        {
+            return InactiveStatus;
+        }
+
+        var text = payload.ToString();
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            if (document.RootElement.TryGetProperty("phase", out _))
+            {
+                return JsonSerializer.Deserialize<MaintenanceStatusResult>(text, SerializerOptions) ?? InactiveStatus;
+            }
+        }
+        catch (JsonException)
+        {
+            return InactiveStatus;
+        }
+
+        var legacy = JsonSerializer.Deserialize<MaintenanceModeStateResult>(text, SerializerOptions);
+        return legacy is null || !legacy.Active
+            ? InactiveStatus
+            : new MaintenanceStatusResult(
+                MaintenancePhase.Running,
+                true,
+                legacy.Reason,
+                legacy.Message,
+                legacy.StartedAtUtc,
+                legacy.StartedAtUtc,
+                legacy.EstimatedEndsAtUtc,
+                legacy.RunId,
+                legacy.TriggeredBy,
+                DefaultMaxDrainWaitMinutes,
+                0,
+                []);
+    }
+
+    private async Task SetStateAsync(MaintenanceStatusResult status, TimeSpan? ttl = null)
+    {
+        var stored = status with
+        {
+            ActiveLeaseCount = 0,
+            ActiveLeases = []
+        };
+        await _database.StringSetAsync(StateKey, JsonSerializer.Serialize(stored, SerializerOptions), ttl);
+    }
+
+    private async Task<IReadOnlyList<MaintenanceLeaseResult>> ReadActiveLeasesAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var now = timeProvider.GetUtcNow();
+        await _database.SortedSetRemoveRangeByScoreAsync(LeaseIndexKey, double.NegativeInfinity, now.ToUnixTimeMilliseconds());
+        var values = await _database.SortedSetRangeByRankAsync(LeaseIndexKey, 0, 499, Order.Ascending);
+        if (values.Length == 0)
+        {
+            return [];
+        }
+
+        var leases = new List<MaintenanceLeaseResult>(values.Length);
+        foreach (var value in values)
+        {
+            if (!Guid.TryParse(value.ToString(), out var leaseId))
+            {
+                continue;
+            }
+
+            var payload = await _database.StringGetAsync(BuildLeaseKey(leaseId));
+            if (payload.IsNullOrEmpty)
+            {
+                await _database.SortedSetRemoveAsync(LeaseIndexKey, value);
+                continue;
+            }
+
+            var lease = JsonSerializer.Deserialize<MaintenanceLeaseResult>(payload.ToString(), SerializerOptions);
+            if (lease is null || lease.ExpiresAtUtc <= now)
+            {
+                await _database.KeyDeleteAsync(BuildLeaseKey(leaseId));
+                await _database.SortedSetRemoveAsync(LeaseIndexKey, value);
+                continue;
+            }
+
+            leases.Add(lease);
+        }
+
+        return leases
+            .OrderBy(x => x.ExpiresAtUtc)
+            .ThenBy(x => x.LeaseId)
+            .ToArray();
+    }
+
+    private async Task UpdateRunStatusAsync(Guid? runId, MaintenanceRunStatus status, DateTimeOffset? completedAt, string? resultJson, string error, CancellationToken cancellationToken)
+    {
+        if (!runId.HasValue)
+        {
+            return;
+        }
+
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var run = await dbContext.MaintenanceRuns.FirstOrDefaultAsync(x => x.Id == runId.Value, cancellationToken);
+        if (run is null)
+        {
+            return;
+        }
+
+        run.Status = status;
+        run.CompletedAt = completedAt;
+        if (resultJson is not null)
+        {
+            run.ResultJson = resultJson;
+        }
+
+        run.Error = error;
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private static MaintenanceModeStateResult ToModeState(MaintenanceStatusResult status)
+        => status.Phase == MaintenancePhase.Running
+            ? new MaintenanceModeStateResult(
+                true,
+                status.Reason,
+                status.Message,
+                status.StartedAtUtc,
+                status.EstimatedEndsAtUtc,
+                status.RunId,
+                status.TriggeredBy)
+            : Inactive;
+
+    private static string BuildLeaseKey(Guid leaseId)
+        => $"{LeaseKeyPrefix}{leaseId:D}";
+
+    private static string NormalizeOptional(string? value, string fallback)
+        => value?.Trim() is { Length: > 0 } normalized ? normalized : fallback;
 
     private static string NormalizeTriggeredBy(string? requested, string fallback)
         => requested?.Trim() is { Length: > 0 } value

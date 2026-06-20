@@ -143,7 +143,8 @@ public sealed record WorkingContextResult(
     IReadOnlyList<UserPreferenceResult> UserPreferences,
     IReadOnlyList<string> SuggestedTests,
     IReadOnlyList<WorkingContextCitation> Citations,
-    ContextSavingsEstimateResult? SavingsEstimate = null);
+    ContextSavingsEstimateResult? SavingsEstimate = null,
+    MaintenanceStatusResult? Maintenance = null);
 
 public sealed record ContextSavingsEstimateResult(
     int BaselineTokenEstimate,
@@ -202,6 +203,67 @@ public sealed record MaintenanceModeRequest(
     DateTimeOffset? EstimatedEndsAtUtc = null,
     int? EstimatedDurationMinutes = null,
     string? TriggeredBy = null);
+
+public enum MaintenancePhase
+{
+    Inactive,
+    Scheduled,
+    Draining,
+    Running,
+    Completed,
+    Failed,
+    Cancelled
+}
+
+public sealed record MaintenanceWindowRequest(
+    string? Reason = null,
+    string? Message = null,
+    DateTimeOffset? ScheduledStartAtUtc = null,
+    DateTimeOffset? EstimatedEndsAtUtc = null,
+    int? EstimatedDurationMinutes = null,
+    int? MaxDrainWaitMinutes = null,
+    string? TriggeredBy = null);
+
+public sealed record MaintenanceStatusResult(
+    MaintenancePhase Phase,
+    bool Active,
+    string Reason,
+    string Message,
+    DateTimeOffset? ScheduledStartAtUtc,
+    DateTimeOffset? StartedAtUtc,
+    DateTimeOffset? EstimatedEndsAtUtc,
+    Guid? RunId,
+    string TriggeredBy,
+    int MaxDrainWaitMinutes,
+    int ActiveLeaseCount,
+    IReadOnlyList<MaintenanceLeaseResult> ActiveLeases);
+
+public sealed record MaintenanceLeaseHeartbeatRequest(
+    Guid? LeaseId = null,
+    string? AgentId = null,
+    string? ProjectId = null,
+    string? ConversationId = null,
+    string? TaskId = null,
+    string? ActivityKind = null,
+    int? TtlSeconds = null,
+    bool BlocksMaintenance = true);
+
+public sealed record MaintenanceLeaseCompleteRequest(Guid LeaseId);
+
+public sealed record MaintenanceLeaseResult(
+    Guid LeaseId,
+    string AgentId,
+    string ProjectId,
+    string ConversationId,
+    string TaskId,
+    string ActivityKind,
+    bool BlocksMaintenance,
+    DateTimeOffset LastSeenAtUtc,
+    DateTimeOffset ExpiresAtUtc);
+
+public sealed record MaintenanceLeaseHeartbeatResult(
+    MaintenanceLeaseResult Lease,
+    MaintenanceStatusResult Maintenance);
 
 public sealed record RetrievalTelemetryRetentionRunRequest(
     string? TriggeredBy = null,
@@ -1017,6 +1079,25 @@ public interface IMaintenanceModeStore
     Task<MaintenanceModeStateResult> GetAsync(CancellationToken cancellationToken);
     Task<MaintenanceModeStateResult> EnableAsync(MaintenanceModeRequest request, string triggeredBy, CancellationToken cancellationToken);
     Task<MaintenanceModeStateResult> DisableAsync(string triggeredBy, CancellationToken cancellationToken);
+}
+
+public interface IMaintenanceCoordinator
+{
+    Task<MaintenanceStatusResult> GetStatusAsync(CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> ScheduleAsync(MaintenanceWindowRequest request, string triggeredBy, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> StartDrainAsync(Guid? runId, string triggeredBy, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> StartRunningAsync(Guid? runId, string triggeredBy, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> CompleteAsync(Guid? runId, string triggeredBy, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> CancelAsync(Guid? runId, string triggeredBy, CancellationToken cancellationToken);
+    Task<MaintenanceLeaseHeartbeatResult> HeartbeatLeaseAsync(MaintenanceLeaseHeartbeatRequest request, CancellationToken cancellationToken);
+    Task<MaintenanceStatusResult> CompleteLeaseAsync(MaintenanceLeaseCompleteRequest request, CancellationToken cancellationToken);
+    Task EnsureWriteAllowedAsync(string operation, CancellationToken cancellationToken);
+    Task<bool> CanStartBackgroundJobAsync(CancellationToken cancellationToken);
+}
+
+public sealed class MaintenanceUnavailableException(string message, MaintenanceStatusResult status) : InvalidOperationException(message)
+{
+    public MaintenanceStatusResult Status { get; } = status;
 }
 
 public interface IMaintenanceRunQueryService

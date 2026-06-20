@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using Memory.Application;
 using Memory.Dashboard.Components;
 using Memory.Dashboard.Services;
@@ -187,9 +189,22 @@ app.UseAntiforgery();
 
 app.MapStaticAssets();
 
-app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
-app.MapGet("/health/ready", async (IContextHubApiClient apiClient, CancellationToken cancellationToken) =>
+app.MapGet("/health/live", (HttpContext context, IOptions<DashboardOptions> options) =>
 {
+    if (!DashboardHealthTokenAuthorization.IsAuthorized(context, options.Value))
+    {
+        return Results.Unauthorized();
+    }
+
+    return Results.Ok(new { status = "live" });
+});
+app.MapGet("/health/ready", async (HttpContext context, IOptions<DashboardOptions> options, IContextHubApiClient apiClient, CancellationToken cancellationToken) =>
+{
+    if (!DashboardHealthTokenAuthorization.IsAuthorized(context, options.Value))
+    {
+        return Results.Unauthorized();
+    }
+
     try
     {
         await apiClient.GetStatusAsync(cancellationToken);
@@ -538,6 +553,36 @@ internal static class AnonymousPaths
         => path.StartsWithSegments("/_blazor") ||
            path.StartsWithSegments("/_framework") ||
            path.StartsWithSegments("/_content");
+}
+
+internal static class DashboardHealthTokenAuthorization
+{
+    private const string BearerPrefix = "Bearer ";
+
+    public static bool IsAuthorized(HttpContext context, DashboardOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(options.ApiToken))
+        {
+            return false;
+        }
+
+        var authorization = context.Request.Headers.Authorization.ToString();
+        if (!authorization.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var token = authorization[BearerPrefix.Length..].Trim();
+        return FixedTimeEquals(token, options.ApiToken.Trim());
+    }
+
+    private static bool FixedTimeEquals(string candidate, string expected)
+    {
+        var candidateBytes = Encoding.UTF8.GetBytes(candidate);
+        var expectedBytes = Encoding.UTF8.GetBytes(expected);
+        return candidateBytes.Length == expectedBytes.Length &&
+               CryptographicOperations.FixedTimeEquals(candidateBytes, expectedBytes);
+    }
 }
 
 internal static class DashboardRouteAuthorization

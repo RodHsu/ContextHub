@@ -152,9 +152,12 @@ public enum MaintenanceRunType
 
 public enum MaintenanceRunStatus
 {
+    Scheduled,
+    Draining,
     Running,
     Completed,
-    Failed
+    Failed,
+    Cancelled
 }
 
 public enum ConversationEventType

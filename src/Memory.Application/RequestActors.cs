@@ -49,5 +49,11 @@ public interface IRequestActorAccessor
 
 public sealed class RequestActorAccessor : IRequestActorAccessor
 {
-    public ContextHubRequestActor Current { get; set; } = ContextHubRequestActor.Unrestricted;
+    private static readonly AsyncLocal<ContextHubRequestActor?> CurrentActor = new();
+
+    public ContextHubRequestActor Current
+    {
+        get => CurrentActor.Value ?? ContextHubRequestActor.Unrestricted;
+        set => CurrentActor.Value = value;
+    }
 }

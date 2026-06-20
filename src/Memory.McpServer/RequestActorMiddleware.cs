@@ -16,13 +16,21 @@ internal sealed class RequestActorMiddleware(RequestDelegate next)
 {
     public async Task InvokeAsync(HttpContext context, IRequestActorAccessor actorAccessor, IApplicationDbContext dbContext)
     {
+        var previousActor = actorAccessor.Current;
         actorAccessor.Current = await ResolveActorAsync(context, dbContext);
-        if (context.Response.StatusCode == StatusCodes.Status403Forbidden)
+        try
         {
-            return;
-        }
+            if (context.Response.StatusCode is StatusCodes.Status401Unauthorized or StatusCodes.Status403Forbidden)
+            {
+                return;
+            }
 
-        await next(context);
+            await next(context);
+        }
+        finally
+        {
+            actorAccessor.Current = previousActor;
+        }
     }
 
     private static async Task<ContextHubRequestActor> ResolveActorAsync(HttpContext context, IApplicationDbContext dbContext)

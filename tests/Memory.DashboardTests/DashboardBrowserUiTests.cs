@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using System.Text.Json;
@@ -2502,6 +2503,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         startInfo.Environment["Dashboard__UseBrowserTestDoubles"] = "true";
         startInfo.Environment["ContextHub__InstanceId"] = "browser-test-instance";
         startInfo.Environment["Dashboard__BaseUrl"] = "http://fake-context-hub";
+        startInfo.Environment["Dashboard__ApiToken"] = "browser-test-dashboard-token";
         startInfo.Environment["Dashboard__AdminUsername"] = "admin";
         startInfo.Environment["Dashboard__AdminPasswordHash"] = "AQAAAAIAAYagAAAAEIbguUQEApMQehlC51gjy+uGulsE4ahRI7UtbdAlSsGMynNrNM3J3KfsJL+3IuBUxQ==";
         startInfo.Environment["Dashboard__SessionTimeoutMinutes"] = "480";
@@ -2521,6 +2523,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         {
             Timeout = TimeSpan.FromSeconds(3)
         };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "browser-test-dashboard-token");
 
         var deadline = DateTime.UtcNow.AddSeconds(30);
         while (DateTime.UtcNow < deadline)

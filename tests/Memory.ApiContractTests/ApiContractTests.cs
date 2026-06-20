@@ -579,7 +579,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 });
             });
         });
-        using var anonymousClient = secureFactory.CreateClient();
+        using var anonymousClient = CreateAnonymousClient(secureFactory);
         using var deniedResponse = await anonymousClient.GetAsync("/api/status");
         deniedResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
 

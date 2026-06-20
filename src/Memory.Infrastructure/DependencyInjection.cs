@@ -87,7 +87,9 @@ public static class DependencyInjection
         services.AddSingleton<IRedisCachePolicy, RedisCachePolicy>();
         services.AddSingleton<IRedisObjectCache, RedisObjectCache>();
         services.AddSingleton<ICacheVersionStore, RedisCacheVersionStore>();
-        services.AddSingleton<IMaintenanceModeStore, RedisMaintenanceModeStore>();
+        services.AddSingleton<RedisMaintenanceModeStore>();
+        services.AddSingleton<IMaintenanceModeStore>(sp => sp.GetRequiredService<RedisMaintenanceModeStore>());
+        services.AddSingleton<IMaintenanceCoordinator>(sp => sp.GetRequiredService<RedisMaintenanceModeStore>());
         services.AddSingleton<IDashboardSnapshotStore, RedisDashboardSnapshotStore>();
         services.AddSingleton<DockerRuntimeMetricsService>();
         services.AddSingleton(TimeProvider.System);

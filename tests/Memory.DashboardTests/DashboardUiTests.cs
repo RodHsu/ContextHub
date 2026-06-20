@@ -18,6 +18,7 @@ namespace Memory.DashboardTests;
 
 public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory>
 {
+    internal const string DashboardApiToken = "dashboard-test-api-token";
     private readonly DashboardApplicationFactory _factory;
 
     public DashboardUiTests(DashboardApplicationFactory factory)
@@ -141,8 +142,12 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
             HandleCookies = true
         });
 
-        using var response = await client.GetAsync("/health/live");
+        using var anonymousResponse = await client.GetAsync("/health/live");
+        anonymousResponse.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        AssertNoStoreHeaders(anonymousResponse);
 
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", DashboardApiToken);
+        using var response = await client.GetAsync("/health/live");
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         AssertNoStoreHeaders(response);
     }
@@ -852,6 +857,7 @@ public sealed class DashboardApplicationFactory : WebApplicationFactory<Program>
                 ["ContextHub:InstanceId"] = "dashboard-test-instance",
                 ["Dashboard:AdminUsername"] = "admin",
                 ["Dashboard:AdminPasswordHash"] = "AQAAAAIAAYagAAAAEIbguUQEApMQehlC51gjy+uGulsE4ahRI7UtbdAlSsGMynNrNM3J3KfsJL+3IuBUxQ==",
+                ["Dashboard:ApiToken"] = DashboardUiTests.DashboardApiToken,
                 ["Dashboard:SessionTimeoutMinutes"] = "480",
                 ["Dashboard:ComposeProject"] = "contexthub",
                 ["Dashboard:DataProtectionPath"] = Path.Combine(Path.GetTempPath(), "contexthub-dashboard-tests", Guid.NewGuid().ToString("N")),
