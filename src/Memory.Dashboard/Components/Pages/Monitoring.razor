@@ -265,7 +265,7 @@
                 <section class="panel monitoring-context-savings-panel">
                 <div class="monitoring-telemetry-header">
                     <div>
-                        <div class="panel-title">脈絡節省量</div>
+                        <div class="panel-title">Token 節省量</div>
                         <div class="settings-section-meta">@ContextSavingsStateText(contextSavings) / @ContextSavingsWindowText(contextSavings)</div>
                     </div>
                     <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">可信度 @ContextSavingsConfidenceText(contextSavings.Confidence)</span>
@@ -274,7 +274,7 @@
                     @foreach (var window in ContextSavingsWindows(contextSavings))
                     {
                         <article class="monitoring-context-savings-window">
-                            <span>@window.Label 節省率</span>
+                            <span>@window.Label 節省量 / 樣本量</span>
                             <strong>@DashboardFormatting.Percent(window.SavingPercent)</strong>
                             <small>
                                 <span>@FormatTokenCount(window.EstimatedSavedTokens)</span>
@@ -283,14 +283,14 @@
                         </article>
                     }
                     <article>
-                        <span>24H 樣本</span>
-                        <strong>@DashboardFormatting.Integer(contextSavings.SampleCount)</strong>
-                        <small>@ContextSavingsLastSampleText(contextSavings)</small>
-                    </article>
-                    <article>
                         <span>快取命中率</span>
                         <strong>@DashboardFormatting.Percent(contextSavings.CacheHitPercent)</strong>
                         <small>@DashboardFormatting.Integer(contextSavings.Trend.Count) 個趨勢點</small>
+                    </article>
+                    <article>
+                        <span>最後樣本</span>
+                        <strong>@ContextSavingsLastSampleText(contextSavings)</strong>
+                        <small>@ContextSavingsWindowText(contextSavings)</small>
                     </article>
                     <article>
                         <span>來源覆蓋率</span>

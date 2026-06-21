@@ -243,11 +243,15 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("Redis 狀態監控");
         overviewHtml.Should().Contain("resource-redis-chart");
         overviewHtml.Should().Contain("Redis resource status chart");
-        overviewHtml.Should().Contain("Estimated Context Savings");
+        overviewHtml.Should().Contain("Token 節省量");
         overviewHtml.Should().Contain("context-savings-strip");
         overviewHtml.Should().Contain("24H");
         overviewHtml.Should().Contain("3D");
         overviewHtml.Should().Contain("7D");
+        overviewHtml.Should().Contain("24H 節省量 / 樣本量");
+        overviewHtml.Should().Contain("3D 節省量 / 樣本量");
+        overviewHtml.Should().Contain("7D 節省量 / 樣本量");
+        overviewHtml.Should().Contain("筆樣本");
         overviewHtml.Should().NotContain("context-savings-panel");
         overviewHtml.Should().Contain("contexthub-redis-1");
         overviewHtml.Should().Contain("近期平均");
@@ -314,8 +318,12 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("資料快照");
         monitoringHtml.Should().Contain("Redis");
         monitoringHtml.Should().Contain("PostgreSQL");
-        monitoringHtml.Should().Contain("脈絡節省量");
+        monitoringHtml.Should().Contain("Token 節省量");
         monitoringHtml.Should().Contain("monitoring-context-savings-panel");
+        monitoringHtml.Should().Contain("24H 節省量 / 樣本量");
+        monitoringHtml.Should().Contain("3D 節省量 / 樣本量");
+        monitoringHtml.Should().Contain("7D 節省量 / 樣本量");
+        monitoringHtml.Should().NotContain("24H 樣本");
         monitoringHtml.Should().Contain("來源覆蓋率");
         monitoringHtml.Should().Contain("Redis 命中率");
         monitoringHtml.Should().Contain("應用快取命中率");
@@ -1110,7 +1118,8 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             BuildPageSnapshotStatus(now),
             BuildDockerHost(now),
             BuildDependencyResources(),
-            BuildResourceSamples(traffic)));
+            BuildResourceSamples(traffic),
+            BuildContextSavings(now)));
     }
 
     private static DashboardPageSnapshotStatusResult BuildPageSnapshotStatus(DateTimeOffset snapshotAtUtc)

@@ -1354,7 +1354,7 @@ textarea {
 
 .context-savings-strip-metrics {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 0.95fr)) repeat(4, minmax(0, 1fr)) minmax(0, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1.05fr)) repeat(3, minmax(0, 0.95fr)) minmax(0, 1fr);
     gap: 0;
     min-width: 0;
     border: 1px solid var(--border);
@@ -1393,6 +1393,15 @@ textarea {
     font-size: 0.68rem;
     line-height: 1.15;
     overflow-wrap: anywhere;
+}
+
+.context-savings-window-card small {
+    display: grid;
+    gap: 0.08rem;
+}
+
+.context-savings-window-card small span {
+    color: var(--text-muted);
 }
 
 .context-savings-strip-metrics strong {

@@ -208,7 +208,8 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             BuildPageSnapshotStatus(now, Profile == DashboardBrowserTestProfile.Empty),
             BuildDockerHost(now),
             BuildDependencyResources(),
-            BuildResourceSamples(trafficSamples)));
+            BuildResourceSamples(trafficSamples),
+            BuildContextSavings(now)));
     }
 
     public Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken)

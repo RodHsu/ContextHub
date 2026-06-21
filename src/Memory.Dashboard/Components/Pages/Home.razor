@@ -81,39 +81,40 @@
             <section class="panel context-savings-strip @(contextSavings.HasRecentData ? string.Empty : "context-savings-strip-empty")">
             <div class="context-savings-strip-title">
                 <div>
-                    <div class="panel-title">Estimated Context Savings</div>
+                    <div class="panel-title">Token 節省量</div>
                     <div class="context-savings-note">@ContextSavingsStateText(contextSavings) / @contextSavings.WindowLabel</div>
                 </div>
-                <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">Confidence @contextSavings.Confidence</span>
+                <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">可信度 @ContextSavingsConfidenceText(contextSavings.Confidence)</span>
             </div>
-            <div class="context-savings-strip-metrics" aria-label="Estimated context savings details">
+            <div class="context-savings-strip-metrics" aria-label="Token savings details">
                 @foreach (var window in ContextSavingsWindows(contextSavings))
                 {
                     <div class="context-savings-window-card @(window.HasData ? string.Empty : "context-savings-window-empty")">
-                        <span>@window.Label</span>
+                        <span>@window.Label 節省量 / 樣本量</span>
                         <strong>@DashboardFormatting.Percent(window.SavingPercent)</strong>
-                        <small>@FormatTokenCount(window.EstimatedSavedTokens)</small>
+                        <small>
+                            <span>@FormatTokenCount(window.EstimatedSavedTokens)</span>
+                            <span>@DashboardFormatting.Integer(window.SampleCount) 筆樣本</span>
+                        </small>
                     </div>
                 }
                 <div>
-                    <span>Samples</span>
-                    <strong>@DashboardFormatting.Integer(contextSavings.SampleCount)</strong>
-                </div>
-                <div>
-                    <span>Cache hit</span>
+                    <span>快取命中率</span>
                     <strong>@DashboardFormatting.Percent(contextSavings.CacheHitPercent)</strong>
+                    <small>@DashboardFormatting.Integer(contextSavings.Trend.Count) 個趨勢點</small>
                 </div>
                 <div>
-                    <span>Coverage</span>
+                    <span>來源覆蓋率</span>
                     <strong>@DashboardFormatting.Percent(contextSavings.SourceCoveragePercent)</strong>
+                    <small>@DashboardFormatting.Integer(contextSavings.ReturnedTokenEstimate) returned tokens</small>
                 </div>
                 <div class="context-savings-strip-last">
-                    <span>Last sample</span>
+                    <span>最後樣本</span>
                     <strong>@ContextSavingsLastSampleText(contextSavings)</strong>
                 </div>
                 <div class="context-savings-strip-trend">
-                    <span>@DashboardFormatting.Integer(contextSavings.Trend.Count) pts</span>
-                    <svg class="resource-line-chart context-savings-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Estimated context saving percent trend">
+                    <span>趨勢</span>
+                    <svg class="resource-line-chart context-savings-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Token saving percent trend">
                         @foreach (var guide in new[] { 14, 28, 42 })
                         {
                             <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
@@ -721,13 +722,22 @@
 
     private static string ContextSavingsStateText(DashboardContextSavingsResult savings)
         => savings.HasRecentData
-            ? "successful working-context telemetry"
+            ? "成功的 working-context telemetry"
             : "等待 working-context telemetry";
 
     private static string ContextSavingsLastSampleText(DashboardContextSavingsResult savings)
         => savings.LastSampleAtUtc.HasValue
             ? savings.LastSampleAtUtc.Value.ToString("yyyy-MM-dd HH:mm 'UTC'")
-            : "waiting";
+            : "等待樣本";
+
+    private static string ContextSavingsConfidenceText(string confidence)
+        => confidence switch
+        {
+            ContextSavingsEstimator.HighConfidence => "高",
+            ContextSavingsEstimator.MediumConfidence => "中",
+            ContextSavingsEstimator.LowConfidence => "低",
+            _ => confidence
+        };
 
     private double CurrentCpuPercent()
         => _resourceSamples.LastOrDefault()?.CpuPercent ?? 0d;
