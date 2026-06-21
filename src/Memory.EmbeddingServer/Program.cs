@@ -130,6 +130,50 @@ app.MapPost("/embed/batch", async (BatchEmbeddingServiceEmbedRequest request, Ca
     return Results.Ok(result);
 });
 
+app.MapPost("/tokens/count", (EmbeddingServiceTokenCountRequest request) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Text))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["text"] = ["Text is required."]
+        });
+    }
+
+    var result = runtime.CountTokens(request);
+    return Results.Ok(result);
+});
+
+app.MapPost("/tokens/count/batch", (BatchEmbeddingServiceTokenCountRequest request) =>
+{
+    if (request.Items.Count == 0)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["items"] = ["At least one item is required."]
+        });
+    }
+
+    if (request.Items.Count > OnnxEmbeddingRuntime.MaxBatchSize)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["items"] = [$"Batch size cannot exceed {OnnxEmbeddingRuntime.MaxBatchSize}."]
+        });
+    }
+
+    if (request.Items.Any(item => string.IsNullOrWhiteSpace(item.Text)))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["items"] = ["All items must include text."]
+        });
+    }
+
+    var result = runtime.CountTokensBatch(request);
+    return Results.Ok(result);
+});
+
 app.Run();
 
 public partial class Program;

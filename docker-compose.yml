@@ -22,7 +22,7 @@ x-dashboard-config: &dashboard-config
 x-telemetry-retention-config: &telemetry-retention-config
   TelemetryRetention__Enabled: ${TELEMETRY_RETENTION_ENABLED:-true}
   TelemetryRetention__HitsRetentionDays: ${TELEMETRY_RETENTION_HITS_DAYS:-3}
-  TelemetryRetention__EventsRetentionDays: ${TELEMETRY_RETENTION_EVENTS_DAYS:-7}
+  TelemetryRetention__EventsRetentionDays: ${TELEMETRY_RETENTION_EVENTS_DAYS:-30}
   TelemetryRetention__SummaryRetentionDays: ${TELEMETRY_RETENTION_SUMMARY_DAYS:-30}
   TelemetryRetention__SecurityAuditRetentionDays: ${TELEMETRY_RETENTION_SECURITY_AUDIT_DAYS:-180}
   TelemetryRetention__RuntimeLogRetentionDays: ${TELEMETRY_RETENTION_RUNTIME_LOG_DAYS:-30}

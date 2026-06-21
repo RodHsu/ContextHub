@@ -34,7 +34,13 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 0d,
                 now.AddHours(-24),
                 now,
-                []);
+                [],
+                false,
+                null,
+                "24H",
+                BuildContextSavingsWindows(now, 0, 0, 0, 0d, 0d),
+                0d,
+                TokenCountingModes.Approximate);
         }
 
         var baseline = Profile == DashboardBrowserTestProfile.Dense ? 186_420 : 48_250;
@@ -89,11 +95,16 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     {
         var saved = Math.Max(0, baseline - returned);
         var savingPercent = baseline > 0 ? Math.Round(saved / (double)baseline * 100d, 2) : 0d;
+        var hasData = sampleCount > 0;
+        var exactCoverage = hasData ? coverage : 0d;
+        var tokenCountingMode = hasData ? TokenCountingModes.Exact : TokenCountingModes.Approximate;
+        var lastSampleAt = hasData ? now.AddMinutes(-5) : (DateTimeOffset?)null;
         return
         [
-            new DashboardContextSavingsWindowResult("24h", "24H", true, sampleCount, baseline, returned, saved, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddHours(-24), now, now.AddMinutes(-5)),
-            new DashboardContextSavingsWindowResult("3d", "3D", true, sampleCount * 3, baseline * 3, returned * 3, saved * 3, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddDays(-3), now, now.AddMinutes(-5)),
-            new DashboardContextSavingsWindowResult("7d", "7D", true, sampleCount * 7, baseline * 7, returned * 7, saved * 7, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddDays(-7), now, now.AddMinutes(-5))
+            new DashboardContextSavingsWindowResult("24h", "24H", hasData, sampleCount, baseline, returned, saved, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddHours(-24), now, lastSampleAt, exactCoverage, tokenCountingMode),
+            new DashboardContextSavingsWindowResult("3d", "3D", hasData, sampleCount * 3, baseline * 3, returned * 3, saved * 3, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddDays(-3), now, lastSampleAt, exactCoverage, tokenCountingMode),
+            new DashboardContextSavingsWindowResult("7d", "7D", hasData, sampleCount * 7, baseline * 7, returned * 7, saved * 7, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddDays(-7), now, lastSampleAt, exactCoverage, tokenCountingMode),
+            new DashboardContextSavingsWindowResult("30d", "30D", hasData, sampleCount * 30, baseline * 30, returned * 30, saved * 30, savingPercent, ContextSavingsEstimator.HighConfidence, coverage, cacheHit, now.AddDays(-30), now, lastSampleAt, exactCoverage, tokenCountingMode)
         ];
     }
 

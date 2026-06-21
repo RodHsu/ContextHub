@@ -23,6 +23,14 @@ public sealed class ContextSavingsEstimatorTests
         estimate.EstimatedSavingPercent.Should().Be(100d);
         estimate.Confidence.Should().Be(ContextSavingsEstimator.HighConfidence);
         estimate.SourceCoveragePercent.Should().Be(100d);
+        estimate.ApproxBaselineTokens.Should().Be(40);
+        estimate.ApproxReturnedTokens.Should().Be(0);
+        estimate.ApproxSavedTokens.Should().Be(40);
+        estimate.ExactBaselineTokens.Should().BeNull();
+        estimate.ExactReturnedTokens.Should().BeNull();
+        estimate.ExactSavedTokens.Should().BeNull();
+        estimate.ExactCoveragePercent.Should().Be(0d);
+        estimate.TokenCountingMode.Should().Be(TokenCountingModes.Approximate);
     }
 
     [Fact]
@@ -58,6 +66,7 @@ public sealed class ContextSavingsEstimatorTests
 
         estimate.ReturnedTokenEstimate.Should().BeGreaterThan(estimate.BaselineTokenEstimate);
         estimate.EstimatedSavedTokens.Should().Be(0);
+        estimate.ApproxSavedTokens.Should().Be(0);
         estimate.EstimatedSavingPercent.Should().Be(0d);
     }
 

@@ -273,7 +273,7 @@
                 <div class="monitoring-context-savings-grid">
                     @foreach (var window in ContextSavingsWindows(contextSavings))
                     {
-                        <article class="monitoring-context-savings-window">
+                        <article class="monitoring-context-savings-window" title="@ContextSavingsTokenModeTooltip(window)">
                             <span>@window.Label 節省量 / 樣本量</span>
                             <strong>@DashboardFormatting.Percent(window.SavingPercent)</strong>
                             <small>
@@ -598,29 +598,81 @@
             [],
             false,
             null,
-            "最近 24 小時");
+            "最近 24 小時",
+            BuildEmptyContextSavingsWindows(now),
+            0d,
+            TokenCountingModes.Approximate);
 
     private static IReadOnlyList<DashboardContextSavingsWindowResult> ContextSavingsWindows(DashboardContextSavingsResult savings)
         => savings.Windows is { Count: > 0 }
             ? savings.Windows
             :
-            [
-                new DashboardContextSavingsWindowResult(
-                    "24h",
-                    "24H",
-                    savings.HasData,
-                    savings.SampleCount,
-                    savings.BaselineTokenEstimate,
-                    savings.ReturnedTokenEstimate,
-                    savings.EstimatedSavedTokens,
-                    savings.AverageSavingPercent,
-                    savings.Confidence,
-                    savings.SourceCoveragePercent,
-                    savings.CacheHitPercent,
-                    savings.WindowStartedAtUtc,
-                    savings.WindowEndedAtUtc,
-                    savings.LastSampleAtUtc)
-            ];
+            FallbackContextSavingsWindows(savings);
+
+    private static IReadOnlyList<DashboardContextSavingsWindowResult> BuildEmptyContextSavingsWindows(DateTimeOffset now)
+        =>
+        [
+            EmptyContextSavingsWindow("24h", "24H", now.AddHours(-24), now),
+            EmptyContextSavingsWindow("3d", "3D", now.AddDays(-3), now),
+            EmptyContextSavingsWindow("7d", "7D", now.AddDays(-7), now),
+            EmptyContextSavingsWindow("30d", "30D", now.AddDays(-30), now)
+        ];
+
+    private static IReadOnlyList<DashboardContextSavingsWindowResult> FallbackContextSavingsWindows(DashboardContextSavingsResult savings)
+        =>
+        [
+            new DashboardContextSavingsWindowResult(
+                "24h",
+                "24H",
+                savings.HasData,
+                savings.SampleCount,
+                savings.BaselineTokenEstimate,
+                savings.ReturnedTokenEstimate,
+                savings.EstimatedSavedTokens,
+                savings.AverageSavingPercent,
+                savings.Confidence,
+                savings.SourceCoveragePercent,
+                savings.CacheHitPercent,
+                savings.WindowStartedAtUtc,
+                savings.WindowEndedAtUtc,
+                savings.LastSampleAtUtc,
+                savings.ExactCoveragePercent,
+                savings.TokenCountingMode),
+            EmptyContextSavingsWindow("3d", "3D", savings.WindowEndedAtUtc.AddDays(-3), savings.WindowEndedAtUtc),
+            EmptyContextSavingsWindow("7d", "7D", savings.WindowEndedAtUtc.AddDays(-7), savings.WindowEndedAtUtc),
+            EmptyContextSavingsWindow("30d", "30D", savings.WindowEndedAtUtc.AddDays(-30), savings.WindowEndedAtUtc)
+        ];
+
+    private static DashboardContextSavingsWindowResult EmptyContextSavingsWindow(
+        string key,
+        string label,
+        DateTimeOffset startedAt,
+        DateTimeOffset endedAt)
+        => new(
+            key,
+            label,
+            false,
+            0,
+            0,
+            0,
+            0,
+            0d,
+            ContextSavingsEstimator.LowConfidence,
+            0d,
+            0d,
+            startedAt,
+            endedAt,
+            null,
+            0d,
+            TokenCountingModes.Approximate);
+
+    private static string ContextSavingsTokenModeTooltip(DashboardContextSavingsWindowResult window)
+        => window.TokenCountingMode switch
+        {
+            TokenCountingModes.Exact => $"使用 tokenizer 精準 token 計算，exact coverage {DashboardFormatting.Percent(window.ExactCoveragePercent)}。",
+            TokenCountingModes.Mixed => $"部分樣本使用 tokenizer 精準 token，exact coverage {DashboardFormatting.Percent(window.ExactCoveragePercent)}，不足部分採估算 token。",
+            _ => "目前使用低成本估算 token；embedding tokenizer 無可用精準覆蓋。"
+        };
 
     private static string ContextSavingsStateText(DashboardContextSavingsResult savings)
         => savings.HasRecentData

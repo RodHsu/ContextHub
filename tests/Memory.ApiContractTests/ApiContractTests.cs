@@ -66,8 +66,12 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         context.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         contextPayload.Should().NotBeNull();
         contextPayload!.SavingsEstimate.Should().NotBeNull();
+        contextPayload.SavingsEstimate!.ApproxBaselineTokens.Should().Be(contextPayload.SavingsEstimate.BaselineTokenEstimate);
+        contextPayload.SavingsEstimate.TokenCountingMode.Should().NotBeNullOrWhiteSpace();
         overview.Should().NotBeNull();
         overview!.ContextSavings.Should().NotBeNull();
+        overview.ContextSavings!.Windows.Should().NotBeNull();
+        overview.ContextSavings.Windows!.Select(x => x.Key).Should().Contain(["24h", "3d", "7d", "30d"]);
     }
 
     [DockerRequiredFact]
@@ -1228,6 +1232,9 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         monitoring.DependencyResources.Should().NotBeNull();
         monitoring.ContextSavings.Should().NotBeNull();
         monitoring.ContextSavings!.WindowLabel.Should().NotBeNullOrWhiteSpace();
+        monitoring.ContextSavings.Windows.Should().NotBeNull();
+        monitoring.ContextSavings.Windows!.Select(x => x.Key).Should().Contain(["24h", "3d", "7d", "30d"]);
+        monitoring.ContextSavings.TokenCountingMode.Should().NotBeNullOrWhiteSpace();
         monitoring.SnapshotStatus!.Sections.Should().Contain(x => x.Key == DashboardSnapshotKeys.ContextSavings);
         memories.Should().NotBeNull();
         memories!.Items.Should().Contain(x => x.Id == memoryId);

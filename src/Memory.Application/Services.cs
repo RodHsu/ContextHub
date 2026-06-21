@@ -389,6 +389,7 @@ public sealed class MemoryService(
     IClock clock,
     IInstanceBehaviorSettingsAccessor behaviorSettingsAccessor,
     IRetrievalTelemetryService retrievalTelemetryService,
+    ITokenCountingService tokenCountingService,
     IRequestActorAccessor actorAccessor,
     IMaintenanceCoordinator maintenanceCoordinator) : IMemoryService
 {
@@ -656,7 +657,7 @@ public sealed class MemoryService(
                 userPreferenceSearch.Preferences,
                 suggestedTests,
                 citations);
-            result = result with { SavingsEstimate = ContextSavingsEstimator.Estimate(hits, result) };
+            result = result with { SavingsEstimate = await BuildContextSavingsEstimateAsync(hits, result, cancellationToken) };
             await objectCache.SetAsync(cacheKey, "working-context-final", result, cachePolicy.WorkingContextTtl, cancellationToken);
             var resultWithMaintenance = result with { Maintenance = maintenance };
             await TryRecordWorkingContextTelemetryAsync(request, hits, resultWithMaintenance, cacheHit, usedFallback, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "origin", "working-context", version.Value, cancellationToken);
@@ -732,6 +733,107 @@ public sealed class MemoryService(
         excerpt = excerpt.Trim();
         return excerpt.Length <= maxLength ? excerpt : $"{excerpt[..maxLength]}…";
     }
+
+    private async Task<ContextSavingsEstimateResult> BuildContextSavingsEstimateAsync(
+        IReadOnlyList<MemorySearchHit> hits,
+        WorkingContextResult result,
+        CancellationToken cancellationToken)
+    {
+        var approximate = ContextSavingsEstimator.Estimate(hits, result);
+        var distinctHitIds = hits
+            .Select(hit => hit.MemoryId)
+            .Distinct()
+            .ToArray();
+        if (distinctHitIds.Length == 0)
+        {
+            return approximate;
+        }
+
+        var sourceTexts = await dbContext.MemoryItems
+            .AsNoTracking()
+            .Where(item => distinctHitIds.Contains(item.Id))
+            .Select(item => item.Content)
+            .ToListAsync(cancellationToken);
+        var returnedTexts = BuildReturnedContextTokenTexts(result);
+        if (sourceTexts.Count == 0 && returnedTexts.Count == 0)
+        {
+            return approximate;
+        }
+
+        var requests = sourceTexts
+            .Concat(returnedTexts)
+            .Select(text => new TokenCountRequest(text))
+            .ToArray();
+        var counts = await tokenCountingService.CountAsync(requests, cancellationToken);
+        var sourceCounts = counts.Take(sourceTexts.Count).ToArray();
+        var returnedCounts = counts.Skip(sourceTexts.Count).ToArray();
+        var exactSourceCount = sourceCounts.Count(count => count.ExactAvailable && count.ExactTokens.HasValue);
+        var exactCoveragePercent = distinctHitIds.Length > 0
+            ? exactSourceCount / (double)distinctHitIds.Length * 100d
+            : 0d;
+
+        var exactBaseline = exactSourceCount > 0
+            ? sourceCounts.Where(count => count.ExactAvailable && count.ExactTokens.HasValue).Sum(count => count.ExactTokens!.Value)
+            : (int?)null;
+        var exactReturnedAvailable = returnedCounts.Length == 0 ||
+                                     returnedCounts.All(count => count.ExactAvailable && count.ExactTokens.HasValue);
+        var exactReturned = exactReturnedAvailable
+            ? returnedCounts.Sum(count => count.ExactTokens ?? 0)
+            : (int?)null;
+        var exactSaved = exactBaseline.HasValue && exactReturned.HasValue
+            ? Math.Max(0, exactBaseline.Value - exactReturned.Value)
+            : (int?)null;
+        var useExactAsPrimary = exactBaseline.HasValue &&
+                                exactReturned.HasValue &&
+                                exactCoveragePercent >= 80d;
+        var primaryBaseline = useExactAsPrimary ? exactBaseline!.Value : approximate.BaselineTokenEstimate;
+        var primaryReturned = useExactAsPrimary ? exactReturned!.Value : approximate.ReturnedTokenEstimate;
+        var primarySaved = useExactAsPrimary ? exactSaved!.Value : approximate.EstimatedSavedTokens;
+        var primarySavingPercent = primaryBaseline > 0
+            ? primarySaved / (double)primaryBaseline * 100d
+            : 0d;
+        var countingMode = useExactAsPrimary
+            ? TokenCountingModes.Exact
+            : exactCoveragePercent > 0d
+                ? TokenCountingModes.Mixed
+                : TokenCountingModes.Approximate;
+
+        return approximate with
+        {
+            BaselineTokenEstimate = primaryBaseline,
+            ReturnedTokenEstimate = primaryReturned,
+            EstimatedSavedTokens = primarySaved,
+            EstimatedSavingPercent = Math.Round(primarySavingPercent, 2),
+            Confidence = useExactAsPrimary
+                ? ContextSavingsEstimator.ResolveConfidence(exactCoveragePercent)
+                : approximate.Confidence,
+            SourceCoveragePercent = useExactAsPrimary
+                ? Math.Round(exactCoveragePercent, 2)
+                : approximate.SourceCoveragePercent,
+            ExactBaselineTokens = exactBaseline,
+            ExactReturnedTokens = exactReturned,
+            ExactSavedTokens = exactSaved,
+            ExactCoveragePercent = Math.Round(exactCoveragePercent, 2),
+            TokenCountingMode = countingMode
+        };
+    }
+
+    private static IReadOnlyList<string> BuildReturnedContextTokenTexts(WorkingContextResult result)
+    {
+        var texts = new List<string>();
+        AddSections(result.Facts, texts);
+        AddSections(result.Decisions, texts);
+        AddSections(result.Episodes, texts);
+        AddSections(result.Artifacts, texts);
+        texts.AddRange(result.RecentLogs.Select(log => $"{log.Message}\n{log.Exception}".Trim()));
+        texts.AddRange(result.UserPreferences.Select(preference => $"{preference.Key}\n{preference.Content}\n{preference.Rationale}".Trim()));
+        texts.AddRange(result.SuggestedTests);
+        texts.AddRange(result.Citations.Select(citation => $"{citation.SourceRef}\n{citation.Excerpt}".Trim()));
+        return texts.Where(text => !string.IsNullOrWhiteSpace(text)).ToArray();
+    }
+
+    private static void AddSections(IEnumerable<WorkingContextSection> sections, List<string> texts)
+        => texts.AddRange(sections.Select(section => $"{section.Title}\n{section.Summary}\n{section.Excerpt}".Trim()));
 
     private async Task<IReadOnlyList<ChunkSearchHit>> SearchSemanticHitsAsync(
         string query,

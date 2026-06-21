@@ -188,7 +188,30 @@ public sealed record ContextSavingsEstimateResult(
     int EstimatedSavedTokens,
     double EstimatedSavingPercent,
     string Confidence,
-    double SourceCoveragePercent);
+    double SourceCoveragePercent,
+    int ApproxBaselineTokens = 0,
+    int ApproxReturnedTokens = 0,
+    int ApproxSavedTokens = 0,
+    int? ExactBaselineTokens = null,
+    int? ExactReturnedTokens = null,
+    int? ExactSavedTokens = null,
+    double ExactCoveragePercent = 0d,
+    string TokenCountingMode = TokenCountingModes.Approximate);
+
+public static class TokenCountingModes
+{
+    public const string Approximate = "Approximate";
+    public const string Exact = "Exact";
+    public const string Mixed = "Mixed";
+}
+
+public sealed record TokenCountRequest(string Text);
+
+public sealed record TokenCountResult(
+    int ApproximateTokens,
+    int? ExactTokens,
+    bool ExactAvailable,
+    string CountingMode);
 
 public sealed record EnqueueReindexRequest(
     string? ModelKey = null,
@@ -975,6 +998,11 @@ public interface IEmbeddingProvider
     bool BatchingEnabled { get; }
     Task<EmbeddingVector> EmbedAsync(string text, EmbeddingPurpose purpose, CancellationToken cancellationToken);
     Task<IReadOnlyList<EmbeddingVector>> EmbedBatchAsync(IReadOnlyList<BatchEmbeddingItem> items, CancellationToken cancellationToken);
+}
+
+public interface ITokenCountingService
+{
+    Task<IReadOnlyList<TokenCountResult>> CountAsync(IReadOnlyList<TokenCountRequest> requests, CancellationToken cancellationToken);
 }
 
 public interface ICacheVersionStore

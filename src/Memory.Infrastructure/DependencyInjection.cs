@@ -75,6 +75,7 @@ public static class DependencyInjection
         services.AddScoped<IVectorStore, NpgsqlSearchStore>();
         services.AddScoped<IStorageExplorerStore, NpgsqlStorageExplorerStore>();
         services.AddScoped<IRetrievalTelemetryService, DatabaseRetrievalTelemetryService>();
+        services.AddScoped<ITokenCountingService, TokenCountingService>();
         services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
         services.AddScoped<IVacuumFullReclaimService, VacuumFullReclaimService>();
         services.AddScoped<IDomainOwnerRepairService, DomainOwnerRepairService>();

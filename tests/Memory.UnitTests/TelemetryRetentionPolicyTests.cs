@@ -12,7 +12,7 @@ public sealed class TelemetryRetentionPolicyTests
         var policy = RetrievalTelemetryRetentionPolicy.Create(new TelemetryRetentionOptions(), new RetrievalTelemetryRetentionRunRequest());
 
         policy.HitsRetentionDays.Should().Be(3);
-        policy.EventsRetentionDays.Should().Be(7);
+        policy.EventsRetentionDays.Should().Be(30);
         policy.SummaryRetentionDays.Should().Be(30);
         policy.SecurityAuditRetentionDays.Should().Be(180);
         policy.RuntimeLogRetentionDays.Should().Be(30);

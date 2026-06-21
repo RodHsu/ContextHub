@@ -108,6 +108,44 @@ internal sealed class OnnxEmbeddingRuntime(
         return await EmbedCoreBatchAsync(request.Items, cancellationToken);
     }
 
+    public EmbeddingServiceTokenCountResponse CountTokens(EmbeddingServiceTokenCountRequest request)
+    {
+        if (!IsReady)
+        {
+            throw new InvalidOperationException("Embedding runtime is not ready.");
+        }
+
+        var result = CountTokensCore(request.Text);
+        return new EmbeddingServiceTokenCountResponse(
+            _profile.ModelKey,
+            _profile.MaxTokens,
+            result.TokenCount,
+            result.Truncated);
+    }
+
+    public BatchEmbeddingServiceTokenCountResponse CountTokensBatch(BatchEmbeddingServiceTokenCountRequest request)
+    {
+        if (!IsReady)
+        {
+            throw new InvalidOperationException("Embedding runtime is not ready.");
+        }
+
+        if (request.Items.Count == 0)
+        {
+            throw new InvalidOperationException("Batch request must contain at least one item.");
+        }
+
+        if (request.Items.Count > MaxBatchSize)
+        {
+            throw new InvalidOperationException($"Batch request exceeds the maximum supported size of {MaxBatchSize}.");
+        }
+
+        return new BatchEmbeddingServiceTokenCountResponse(
+            _profile.ModelKey,
+            _profile.MaxTokens,
+            request.Items.Select(item => CountTokensCore(item.Text)).ToArray());
+    }
+
     public async ValueTask DisposeAsync()
     {
         _session?.Dispose();
@@ -246,6 +284,14 @@ internal sealed class OnnxEmbeddingRuntime(
             Enumerable.Repeat(1L, tokenIds.Length).ToArray(),
             tokenCount,
             truncated);
+    }
+
+    private BatchTokenCountResult CountTokensCore(string text)
+    {
+        var tokenizer = _tokenizer ?? throw new InvalidOperationException("Tokenizer is not initialized.");
+        var tokenIds = tokenizer.EncodeToIds((text ?? string.Empty).Trim(), true, true, true, true).ToArray();
+        var tokenCount = tokenIds.Length;
+        return new BatchTokenCountResult(tokenCount, tokenCount > _profile.MaxTokens);
     }
 
     private static List<NamedOnnxValue> BuildInputs(InferenceSession session, IReadOnlyList<PreparedEmbeddingInput> inputsBatch)

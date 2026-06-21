@@ -25,7 +25,15 @@ public static class ContextSavingsEstimator
             saved,
             Math.Round(savingPercent, 2),
             ResolveConfidence(coveragePercent),
-            Math.Round(coveragePercent, 2));
+            Math.Round(coveragePercent, 2),
+            baseline,
+            returned,
+            saved,
+            null,
+            null,
+            null,
+            0d,
+            TokenCountingModes.Approximate);
     }
 
     public static int EstimateTextTokens(string? text)
@@ -77,7 +85,7 @@ public static class ContextSavingsEstimator
             EstimateTextTokens(section.Summary) +
             EstimateTextTokens(section.Excerpt));
 
-    private static string ResolveConfidence(double sourceCoveragePercent)
+    public static string ResolveConfidence(double sourceCoveragePercent)
         => sourceCoveragePercent switch
         {
             >= 80d => HighConfidence,

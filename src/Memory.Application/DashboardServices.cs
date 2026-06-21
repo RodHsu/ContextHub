@@ -224,7 +224,38 @@ public sealed class DashboardQueryService(
             [],
             false,
             null,
-            "最近 24 小時");
+            "最近 24 小時",
+            [
+                CreateEmptyContextSavingsWindow("24h", "24H", now.AddHours(-24), now),
+                CreateEmptyContextSavingsWindow("3d", "3D", now.AddDays(-3), now),
+                CreateEmptyContextSavingsWindow("7d", "7D", now.AddDays(-7), now),
+                CreateEmptyContextSavingsWindow("30d", "30D", now.AddDays(-30), now)
+            ],
+            0d,
+            TokenCountingModes.Approximate);
+
+    private static DashboardContextSavingsWindowResult CreateEmptyContextSavingsWindow(
+        string key,
+        string label,
+        DateTimeOffset startedAtUtc,
+        DateTimeOffset endedAtUtc)
+        => new(
+            key,
+            label,
+            false,
+            0,
+            0,
+            0,
+            0,
+            0d,
+            ContextSavingsEstimator.LowConfidence,
+            0d,
+            0d,
+            startedAtUtc,
+            endedAtUtc,
+            null,
+            0d,
+            TokenCountingModes.Approximate);
 
     private static DashboardPageSnapshotStatusResult BuildPageSnapshotStatus(
         IReadOnlyList<DashboardSnapshotSectionStatusResult> sections,

@@ -134,7 +134,9 @@ public sealed record DashboardContextSavingsResult(
     bool HasRecentData = false,
     DateTimeOffset? LastSampleAtUtc = null,
     string WindowLabel = "最近 24 小時",
-    IReadOnlyList<DashboardContextSavingsWindowResult>? Windows = null);
+    IReadOnlyList<DashboardContextSavingsWindowResult>? Windows = null,
+    double ExactCoveragePercent = 0d,
+    string TokenCountingMode = TokenCountingModes.Approximate);
 
 public sealed record DashboardContextSavingsWindowResult(
     string Key,
@@ -150,14 +152,18 @@ public sealed record DashboardContextSavingsWindowResult(
     double CacheHitPercent,
     DateTimeOffset WindowStartedAtUtc,
     DateTimeOffset WindowEndedAtUtc,
-    DateTimeOffset? LastSampleAtUtc);
+    DateTimeOffset? LastSampleAtUtc,
+    double ExactCoveragePercent = 0d,
+    string TokenCountingMode = TokenCountingModes.Approximate);
 
 public sealed record DashboardContextSavingsTrendPointResult(
     DateTimeOffset TimestampUtc,
     int BaselineTokenEstimate,
     int ReturnedTokenEstimate,
     int EstimatedSavedTokens,
-    double SavingPercent);
+    double SavingPercent,
+    double ExactCoveragePercent = 0d,
+    string TokenCountingMode = TokenCountingModes.Approximate);
 
 public sealed record DashboardRuntimeParameterResult(
     string Section,

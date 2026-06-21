@@ -140,6 +140,26 @@ public sealed record BatchEmbeddingServiceEmbedResponse(
     int MaxTokens,
     IReadOnlyList<BatchEmbeddingResult> Results);
 
+public sealed record EmbeddingServiceTokenCountRequest(string Text);
+
+public sealed record EmbeddingServiceTokenCountResponse(
+    string ModelKey,
+    int MaxTokens,
+    int TokenCount,
+    bool Truncated);
+
+public sealed record BatchEmbeddingServiceTokenCountRequest(
+    IReadOnlyList<EmbeddingServiceTokenCountRequest> Items);
+
+public sealed record BatchTokenCountResult(
+    int TokenCount,
+    bool Truncated);
+
+public sealed record BatchEmbeddingServiceTokenCountResponse(
+    string ModelKey,
+    int MaxTokens,
+    IReadOnlyList<BatchTokenCountResult> Results);
+
 public sealed record EmbeddingServiceInfoResult(
     string Profile,
     string ModelId,
