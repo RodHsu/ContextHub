@@ -85,6 +85,29 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Context_Bootstrap_Endpoint_Should_Describe_ContextHub_Without_Defaulting_ProjectId()
+    {
+        using var client = environment.GetFactory().CreateClient();
+
+        var bootstrap = await client.GetFromJsonAsync<ContextHubBootstrapResult>("/api/context/bootstrap");
+        var projectBootstrap = await client.GetFromJsonAsync<ContextHubBootstrapResult>("/api/context/bootstrap?projectId=ContextHub");
+
+        bootstrap.Should().NotBeNull();
+        bootstrap!.Service.Name.Should().Be("ContextHub");
+        bootstrap.Project.ProjectIdProvided.Should().BeFalse();
+        bootstrap.Project.ProjectId.Should().BeNull();
+        bootstrap.Project.Guidance.Should().Contain("projectId");
+        bootstrap.UserPreferences.BootstrapDisclosure.Should().Be("summary-and-policy");
+        bootstrap.UserPreferences.AvailableKinds.Should().Contain(nameof(UserPreferenceKind.ToolingPreference));
+        bootstrap.Warnings.Should().Contain(x => x.Contains("ProjectContext.DefaultProjectId", StringComparison.Ordinal));
+
+        projectBootstrap.Should().NotBeNull();
+        projectBootstrap!.Project.ProjectIdProvided.Should().BeTrue();
+        projectBootstrap.Project.ProjectId.Should().Be("ContextHub");
+        projectBootstrap.Project.RecommendedWorkingContextCall.Should().Contain("projectId=\"ContextHub\"");
+    }
+
+    [DockerRequiredFact]
     public async Task Log_Endpoints_Should_Query_Db_First_Runtime_Logs()
     {
         long logId;

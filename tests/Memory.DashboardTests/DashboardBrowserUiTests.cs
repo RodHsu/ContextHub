@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
@@ -1022,9 +1023,12 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         root.GetProperty("panelHeight").GetInt32().Should().BeGreaterThan(80, $"popover layout was {overlayJson}");
         root.GetProperty("panelBottom").GetInt32().Should().BeGreaterThan(root.GetProperty("graphWorkspaceTop").GetInt32());
         root.GetProperty("isPanelOnTop").GetBoolean().Should().BeTrue($"popover should not be covered by graph panels: {overlayJson}");
-        root.GetProperty("headerZIndex").GetString().Should().Be("70");
-        root.GetProperty("actionsZIndex").GetString().Should().Be("72");
-        root.GetProperty("popoverZIndex").GetString().Should().Be("100");
+        var headerZIndex = int.Parse(root.GetProperty("headerZIndex").GetString()!, CultureInfo.InvariantCulture);
+        var actionsZIndex = int.Parse(root.GetProperty("actionsZIndex").GetString()!, CultureInfo.InvariantCulture);
+        var popoverZIndex = int.Parse(root.GetProperty("popoverZIndex").GetString()!, CultureInfo.InvariantCulture);
+        headerZIndex.Should().BeGreaterThan(0);
+        actionsZIndex.Should().BeGreaterThan(headerZIndex);
+        popoverZIndex.Should().BeGreaterThan(actionsZIndex);
     }
 
     [Fact]

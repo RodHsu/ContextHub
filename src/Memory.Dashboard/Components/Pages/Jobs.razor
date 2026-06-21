@@ -28,7 +28,7 @@
         <div class="inline-error">@_loadError</div>
     }
 
-    <div class="split-layout">
+    <div class="split-layout jobs-control-layout">
     <section class="panel detail-panel">
         <div class="panel-title">知識庫維護</div>
         @if (_maintenance is null)
@@ -67,9 +67,15 @@
         </div>
     </section>
 
-    <section class="panel">
-        <div class="panel-title">重新索引</div>
-        <div class="form-grid">
+    <section class="panel jobs-reindex-panel">
+        <div class="panel-heading-row">
+            <div>
+                <div class="panel-title">重新索引</div>
+                <div class="panel-heading-meta panel-heading-meta-left">留空即使用 active model 與全量記憶；指定 Id 時只重建單筆。</div>
+            </div>
+            <button class="primary-button jobs-reindex-inline-button" @onclick="RunReindexAsync" disabled="@_loading">排入佇列</button>
+        </div>
+        <div class="form-grid jobs-reindex-grid">
             <label>
                 <span>模型鍵值 (Model Key)</span>
                 <input @bind="_modelKey" placeholder="可留空使用 active model" />
@@ -108,8 +114,8 @@
     </section>
     </div>
 
-    <div class="split-layout">
-    <section class="panel panel-scroll">
+    <div class="split-layout jobs-workspace-layout">
+    <section class="panel panel-scroll jobs-list-panel">
         <div class="panel-title">背景工作 (@(_jobs is null ? "-" : DashboardFormatting.Integer(_jobs.TotalCount)))</div>
         <div class="panel-scroll-body detail-scroll-shell">
             @if (_jobs is null)
@@ -124,25 +130,35 @@
             else
             {
                 <div class="table-scroll-shell">
-                    <table class="data-table">
+                    <table class="data-table jobs-table">
+                        <colgroup>
+                            <col class="jobs-table-col-time" />
+                            <col class="jobs-table-col-id" />
+                            <col class="jobs-table-col-type" />
+                            <col class="jobs-table-col-status" />
+                            <col class="jobs-table-col-payload" />
+                            <col class="jobs-table-col-error" />
+                        </colgroup>
                         <thead>
                             <tr>
                                 <th>建立時間</th>
-                                <th>工作類型 (Job Type)</th>
-                                <th>狀態 (Status)</th>
-                                <th>內容 (Payload)</th>
-                                <th>錯誤 (Error)</th>
+                                <th>工作 Id</th>
+                                <th>類型</th>
+                                <th>狀態</th>
+                                <th>內容摘要</th>
+                                <th>錯誤</th>
                             </tr>
                         </thead>
                         <tbody>
                             @foreach (var job in _jobs.Items)
                             {
                                 <tr class="@SelectedClass(job.Id)" @onclick="@(() => SelectJob(job))">
-                                    <td><ClientLocalTime Value="job.CreatedAt" /></td>
+                                    <td class="jobs-time-cell"><ClientLocalTime Value="job.CreatedAt" /></td>
+                                    <td class="jobs-id-cell" title="@job.Id.ToString("D")">@job.Id</td>
                                     <td>@DashboardText.Label(job.JobType)</td>
                                     <td><span class="status-badge @StatusClass(job.Status.ToString())">@DashboardText.Label(job.Status)</span></td>
-                                    <td class="truncate-cell">@job.PayloadJson</td>
-                                    <td class="truncate-cell">@job.Error</td>
+                                    <td class="truncate-cell jobs-payload-cell" title="@job.PayloadJson">@job.PayloadJson</td>
+                                    <td class="truncate-cell jobs-error-cell" title="@job.Error">@(!string.IsNullOrWhiteSpace(job.Error) ? job.Error : "-")</td>
                                 </tr>
                             }
                         </tbody>
@@ -167,7 +183,7 @@
                 </div>
 
                 <dl class="definition-grid">
-                    <div><dt>工作 Id</dt><dd>@_selectedJob.Id</dd></div>
+                    <div class="job-detail-id-row"><dt>工作 Id</dt><dd class="job-detail-id">@_selectedJob.Id</dd></div>
                     <div><dt>工作類型</dt><dd>@DashboardText.Label(_selectedJob.JobType)</dd></div>
                     <div><dt>狀態</dt><dd>@DashboardText.Label(_selectedJob.Status)</dd></div>
                     <div><dt>建立時間</dt><dd><ClientLocalTime Value="_selectedJob.CreatedAt" /></dd></div>

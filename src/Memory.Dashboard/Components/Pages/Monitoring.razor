@@ -265,32 +265,35 @@
                 <section class="panel monitoring-context-savings-panel">
                 <div class="monitoring-telemetry-header">
                     <div>
-                        <div class="panel-title">Context Savings</div>
-                        <div class="settings-section-meta">@ContextSavingsStateText(contextSavings) / @contextSavings.WindowLabel</div>
+                        <div class="panel-title">脈絡節省量</div>
+                        <div class="settings-section-meta">@ContextSavingsStateText(contextSavings) / @ContextSavingsWindowText(contextSavings)</div>
                     </div>
-                    <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">Confidence @contextSavings.Confidence</span>
+                    <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">可信度 @ContextSavingsConfidenceText(contextSavings.Confidence)</span>
                 </div>
                 <div class="monitoring-context-savings-grid">
                     @foreach (var window in ContextSavingsWindows(contextSavings))
                     {
-                        <article>
-                            <span>@window.Label savings</span>
+                        <article class="monitoring-context-savings-window">
+                            <span>@window.Label 節省率</span>
                             <strong>@DashboardFormatting.Percent(window.SavingPercent)</strong>
-                            <small>@FormatTokenCount(window.EstimatedSavedTokens) / @DashboardFormatting.Integer(window.SampleCount) samples</small>
+                            <small>
+                                <span>@FormatTokenCount(window.EstimatedSavedTokens)</span>
+                                <span>@DashboardFormatting.Integer(window.SampleCount) 筆樣本</span>
+                            </small>
                         </article>
                     }
                     <article>
-                        <span>24H samples</span>
+                        <span>24H 樣本</span>
                         <strong>@DashboardFormatting.Integer(contextSavings.SampleCount)</strong>
                         <small>@ContextSavingsLastSampleText(contextSavings)</small>
                     </article>
                     <article>
-                        <span>Cache hit</span>
+                        <span>快取命中率</span>
                         <strong>@DashboardFormatting.Percent(contextSavings.CacheHitPercent)</strong>
-                        <small>@DashboardFormatting.Integer(contextSavings.Trend.Count) trend points</small>
+                        <small>@DashboardFormatting.Integer(contextSavings.Trend.Count) 個趨勢點</small>
                     </article>
                     <article>
-                        <span>Source coverage</span>
+                        <span>來源覆蓋率</span>
                         <strong>@DashboardFormatting.Percent(contextSavings.SourceCoveragePercent)</strong>
                         <small>@DashboardFormatting.Integer(contextSavings.ReturnedTokenEstimate) returned tokens</small>
                     </article>
@@ -324,46 +327,46 @@
 
                     <div class="runtime-dependency-kpi-grid">
                         <article class="runtime-dependency-kpi">
-                            <span>Used Memory</span>
+                            <span class="metric-label-with-info">已用記憶體 <InfoPopover Label="顯示已用記憶體說明" Icon="i" Title="已用記憶體" Text="Redis 目前配置並使用中的記憶體量。若接近 Max Memory，可能會觸發 eviction 或造成寫入壓力。" /></span>
                             <strong>@DashboardFormatting.Bytes(_monitoring.Redis.UsedMemoryBytes)</strong>
                         </article>
                         <article class="runtime-dependency-kpi">
-                            <span class="metric-label-with-info">Redis Hit Rate <InfoPopover Label="顯示 Redis Hit Rate 說明" Icon="i" Title="Redis Hit Rate" Text="Redis server keyspace hits / (hits + misses)。這是 Redis 端實際 key lookup 的命中率，可用來判斷 Redis 內部快取是否有效服務讀取。" /></span>
+                            <span class="metric-label-with-info">Redis 命中率 <InfoPopover Label="顯示 Redis 命中率說明" Icon="i" Title="Redis 命中率" Text="Redis server keyspace hits / (hits + misses)。這是 Redis 端實際 key lookup 的命中率，可用來判斷 Redis 內部快取是否有效服務讀取。" /></span>
                             <strong>@DashboardFormatting.Percent(_monitoring.Redis.KeyspaceHitPercent)</strong>
                             <small>@DashboardFormatting.Integer(_monitoring.Redis.KeyspaceLookups) lookups</small>
                         </article>
                         <article class="runtime-dependency-kpi">
-                            <span class="metric-label-with-info">App Cache Hit <InfoPopover Label="顯示 App Cache Hit 說明" Icon="i" Title="App Cache Hit" Text="ContextHub 透過 IRedisObjectCache 記錄的 hits / (hits + misses)。這是應用層快取使用成效，和 Redis server keyspace hit rate 互補。" /></span>
+                            <span class="metric-label-with-info">應用快取命中率 <InfoPopover Label="顯示應用快取命中率說明" Icon="i" Title="應用快取命中率" Text="ContextHub 透過 IRedisObjectCache 記錄的 hits / (hits + misses)。這是應用層快取使用成效，和 Redis server keyspace hit rate 互補。" /></span>
                             <strong>@DashboardFormatting.Percent(_monitoring.Redis.CacheHitPercent)</strong>
                             <small>@DashboardFormatting.Integer(_monitoring.Redis.CacheLookups) lookups</small>
                         </article>
                         <article class="runtime-dependency-kpi">
-                            <span>Key Count</span>
+                            <span class="metric-label-with-info">鍵數 <InfoPopover Label="顯示鍵數說明" Icon="i" Title="鍵數" Text="目前 Redis 內可見 key 的數量。突然暴增通常代表 cache key 維度過寬、TTL 不合理，或背景工作產生過多暫存資料。" /></span>
                             <strong>@DashboardFormatting.Integer(_monitoring.Redis.KeyCount)</strong>
                         </article>
                         <article class="runtime-dependency-kpi">
-                            <span>Storage</span>
+                            <span class="metric-label-with-info">儲存量 <InfoPopover Label="顯示儲存量說明" Icon="i" Title="儲存量" Text="Redis Docker volume 的粗略儲存占用。若 Redis 使用 AOF/RDB 持久化，這裡可用來觀察 volume 成長。" /></span>
                             <strong>@DashboardFormatting.Bytes(_monitoring.Redis.PersistentStorageBytes)</strong>
                         </article>
                     </div>
 
                     <dl class="definition-grid monitoring-definition-grid">
-                        <div><dt>Max Memory</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.MaxMemoryBytes)</dd></div>
-                        <div><dt>Total Commands</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.TotalCommandsProcessed)</dd></div>
-                        <div><dt>Total Net In</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.TotalNetInputBytes)</dd></div>
-                        <div><dt>Total Net Out</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.TotalNetOutputBytes)</dd></div>
-                        <div><dt>Instant In</dt><dd>@($"{DashboardFormatting.Decimal(_monitoring.Redis.InstantaneousInputKbps)} KB/s")</dd></div>
-                        <div><dt>Instant Out</dt><dd>@($"{DashboardFormatting.Decimal(_monitoring.Redis.InstantaneousOutputKbps)} KB/s")</dd></div>
-                        <div><dt>Redis Hits / Misses</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.KeyspaceHits) / @DashboardFormatting.Integer(_monitoring.Redis.KeyspaceMisses)</dd></div>
-                        <div><dt>App Cache Hits / Misses</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.CacheHits) / @DashboardFormatting.Integer(_monitoring.Redis.CacheMisses)</dd></div>
-                        <div><dt>App Cache Sets</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.CacheSets)</dd></div>
-                        <div><dt>App Cache Bypasses / Errors</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.CacheBypasses) / @DashboardFormatting.Integer(_monitoring.Redis.CacheErrors)</dd></div>
-                        <div><dt>Expired Keys</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.ExpiredKeys)</dd></div>
-                        <div><dt>Evicted Keys</dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.EvictedKeys)</dd></div>
-                        <div><dt>Container Network</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.NetworkRxBytes) RX / @DashboardFormatting.Bytes(_monitoring.Redis.NetworkTxBytes) TX</dd></div>
-                        <div><dt>Container Disk I/O</dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.DiskReadBytes) Read / @DashboardFormatting.Bytes(_monitoring.Redis.DiskWriteBytes) Write</dd></div>
-                        <div class="monitoring-definition-span"><dt>Storage Target</dt><dd>@_monitoring.Redis.PersistentStorageName</dd></div>
-                        <div class="monitoring-definition-span"><dt>Container</dt><dd>@ContainerSummary("redis")</dd></div>
+                        <div><dt class="metric-label-with-info">記憶體上限 <InfoPopover Label="顯示記憶體上限說明" Icon="i" Title="記憶體上限" Text="Redis maxmemory 設定或容器偵測到的上限。已用記憶體接近此值時，需觀察 eviction 與命中率。" /></dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.MaxMemoryBytes)</dd></div>
+                        <div><dt class="metric-label-with-info">命令總量 <InfoPopover Label="顯示命令總量說明" Icon="i" Title="命令總量" Text="Redis 啟動後處理過的命令累積數。可用來對照流量尖峰、快取活動與應用重試。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.TotalCommandsProcessed)</dd></div>
+                        <div><dt class="metric-label-with-info">累積進站流量 <InfoPopover Label="顯示累積進站流量說明" Icon="i" Title="累積進站流量" Text="Redis container 累積 RX。突然升高時，可對照 cache rebuild、批次查詢或背景工作。" /></dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.TotalNetInputBytes)</dd></div>
+                        <div><dt class="metric-label-with-info">累積傳出流量 <InfoPopover Label="顯示累積傳出流量說明" Icon="i" Title="累積傳出流量" Text="Redis container 累積 TX。高傳出量通常代表快取命中後大量回傳資料。" /></dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.TotalNetOutputBytes)</dd></div>
+                        <div><dt class="metric-label-with-info">即時進站 <InfoPopover Label="顯示即時進站說明" Icon="i" Title="即時進站" Text="Redis 目前每秒輸入速率。用來觀察短時間寫入或查詢流量變化。" /></dt><dd>@($"{DashboardFormatting.Decimal(_monitoring.Redis.InstantaneousInputKbps)} KB/s")</dd></div>
+                        <div><dt class="metric-label-with-info">即時傳出 <InfoPopover Label="顯示即時傳出說明" Icon="i" Title="即時傳出" Text="Redis 目前每秒輸出速率。若長時間高於平常值，需對照應用快取讀取量。" /></dt><dd>@($"{DashboardFormatting.Decimal(_monitoring.Redis.InstantaneousOutputKbps)} KB/s")</dd></div>
+                        <div><dt class="metric-label-with-info">Redis 命中 / 未命中 <InfoPopover Label="顯示 Redis 命中未命中說明" Icon="i" Title="Redis 命中 / 未命中" Text="Redis keyspace hits 與 misses 累積值，是 Redis 命中率的分子與分母來源。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.KeyspaceHits) / @DashboardFormatting.Integer(_monitoring.Redis.KeyspaceMisses)</dd></div>
+                        <div><dt class="metric-label-with-info">應用快取命中 / 未命中 <InfoPopover Label="顯示應用快取命中未命中說明" Icon="i" Title="應用快取命中 / 未命中" Text="ContextHub 應用層快取 hits 與 misses。可用來判斷程式是否真的走快取路徑。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.CacheHits) / @DashboardFormatting.Integer(_monitoring.Redis.CacheMisses)</dd></div>
+                        <div><dt class="metric-label-with-info">應用快取寫入 <InfoPopover Label="顯示應用快取寫入說明" Icon="i" Title="應用快取寫入" Text="應用層成功寫入快取的次數。若持續增加但命中率低，可能 key 設計或 TTL 需要調整。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.CacheSets)</dd></div>
+                        <div><dt class="metric-label-with-info">快取略過 / 錯誤 <InfoPopover Label="顯示快取略過錯誤說明" Icon="i" Title="快取略過 / 錯誤" Text="略過快取與快取錯誤累積值。錯誤增加時，需檢查 Redis 連線、序列化或 timeout。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.CacheBypasses) / @DashboardFormatting.Integer(_monitoring.Redis.CacheErrors)</dd></div>
+                        <div><dt class="metric-label-with-info">過期鍵 <InfoPopover Label="顯示過期鍵說明" Icon="i" Title="過期鍵" Text="因 TTL 到期而被 Redis 移除的 key 數。可用來判斷快取生命週期是否正常運作。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.ExpiredKeys)</dd></div>
+                        <div><dt class="metric-label-with-info">淘汰鍵 <InfoPopover Label="顯示淘汰鍵說明" Icon="i" Title="淘汰鍵" Text="因記憶體壓力被 Redis eviction policy 淘汰的 key 數。正常情況應低且穩定；增加代表記憶體或 TTL 壓力。" /></dt><dd>@DashboardFormatting.Integer(_monitoring.Redis.EvictedKeys)</dd></div>
+                        <div><dt class="metric-label-with-info">容器網路 <InfoPopover Label="顯示容器網路說明" Icon="i" Title="容器網路" Text="Redis container 層級累積 RX / TX，用來確認服務間傳輸量是否異常。" /></dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.NetworkRxBytes) RX / @DashboardFormatting.Bytes(_monitoring.Redis.NetworkTxBytes) TX</dd></div>
+                        <div><dt class="metric-label-with-info">容器磁碟 I/O <InfoPopover Label="顯示容器磁碟 I/O 說明" Icon="i" Title="容器磁碟 I/O" Text="Redis container 層級累積讀寫量。若持久化開啟，高寫入可能與 AOF/RDB 或資料重建有關。" /></dt><dd>@DashboardFormatting.Bytes(_monitoring.Redis.DiskReadBytes) Read / @DashboardFormatting.Bytes(_monitoring.Redis.DiskWriteBytes) Write</dd></div>
+                        <div class="monitoring-definition-span"><dt class="metric-label-with-info">儲存目標 <InfoPopover Label="顯示儲存目標說明" Icon="i" Title="儲存目標" Text="Redis 使用的 Docker volume 或 host path。清理或備份前要確認這個位置。" /></dt><dd>@_monitoring.Redis.PersistentStorageName</dd></div>
+                        <div class="monitoring-definition-span"><dt class="metric-label-with-info">容器 <InfoPopover Label="顯示容器說明" Icon="i" Title="容器" Text="目前偵測到的 Redis compose container、執行狀態、健康狀態與 restart 次數。" /></dt><dd>@ContainerSummary("redis")</dd></div>
                     </dl>
                 </section>
 
@@ -621,13 +624,25 @@
 
     private static string ContextSavingsStateText(DashboardContextSavingsResult savings)
         => savings.HasRecentData
-            ? "successful working-context telemetry"
+            ? "成功的 working-context telemetry"
             : "等待 working-context telemetry";
 
     private static string ContextSavingsLastSampleText(DashboardContextSavingsResult savings)
         => savings.LastSampleAtUtc.HasValue
             ? savings.LastSampleAtUtc.Value.ToString("yyyy-MM-dd HH:mm 'UTC'")
-            : "waiting";
+            : "等待樣本";
+
+    private static string ContextSavingsWindowText(DashboardContextSavingsResult savings)
+        => savings.WindowLabel.Replace("最近", "主視窗：最近", StringComparison.Ordinal);
+
+    private static string ContextSavingsConfidenceText(string confidence)
+        => confidence switch
+        {
+            ContextSavingsEstimator.HighConfidence => "高",
+            ContextSavingsEstimator.MediumConfidence => "中",
+            ContextSavingsEstimator.LowConfidence => "低",
+            _ => confidence
+        };
 
     private string ResourceChartPanelNote()
         => $"每 {DashboardFormatting.Integer(PollingIntervalSeconds)} 秒刷新 / 最近 {DashboardFormatting.Integer(_monitoring?.ResourceSamples?.Count ?? 0)} 筆樣本";

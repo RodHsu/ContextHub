@@ -63,6 +63,7 @@ ContextHub 是一套本機部署、純 Docker Compose 的 MCP knowledge system�
 
 MCP tools：
 
+- `describe_context_hub`
 - `memory_search`
 - `memory_get`
 - `memory_upsert`
@@ -75,6 +76,8 @@ MCP tools：
 - `user_preference_upsert`
 - `user_preference_list`
 - `user_preference_archive`
+
+第一次接入 MCP、尚未知道 repo `ProjectId` 時，agent 應先呼叫 `describe_context_hub`。這個 tool 不需要 `projectId`，只回傳 ContextHub 的用途、能力、建議啟動流程與 user preference 揭露政策；它不會把未帶 `projectId` 的請求默默當成 `default` 專案。正式讀取任務 context 前，仍應先從 repo 規則或 repo root 名稱解析明確 `ProjectId`，再呼叫 `build_working_context(projectId=...)`。
 
 ### 在 VS Code 中設定 ContextHub MCP
 
@@ -235,6 +238,7 @@ Cloudflare Proxied hostname 的 MCP path 需套用 `docs/context-hub-cloudflare-
 1. 在 VS Code Command Palette 執行 `MCP: List Servers`
 2. 確認 `contextHub` 可以正常 Start / Restart
 3. 在 agent mode 中確認能列出 ContextHub tools，例如：
+   - `describe_context_hub`
    - `build_working_context`
    - `memory_search`
    - `log_search`
@@ -340,6 +344,7 @@ Cloudflare Proxied hostname 的 MCP path 需套用 `docs/context-hub-cloudflare-
 - `GET /api/memories/{id}/details`
 - `GET /api/logs/search`
 - `GET /api/logs/{id}`
+- `GET /api/context/bootstrap`
 - `POST /api/context/build`
 - `POST /api/performance/measure`
 - `GET /api/jobs`

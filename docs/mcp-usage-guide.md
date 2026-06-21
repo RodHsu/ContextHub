@@ -60,6 +60,21 @@ ContextHub 的定位不是把所有歷史對話全文塞進 prompt，而是讓�
 
 ## 3. 對話生命週期怎麼用
 
+### 3.0 第一次接入 MCP
+
+如果 agent 還不知道這個 MCP server 的用途，或 repo 還沒有明確指定 `ProjectId`，先呼叫 `describe_context_hub`。
+
+建議流程：
+
+```text
+第一次接入 MCP
+  -> describe_context_hub()
+  -> 從 repo 規則或 repo root 名稱解析 ProjectId
+  -> build_working_context(projectId=..., query=任務描述)
+```
+
+`describe_context_hub` 的 `projectId` 是 optional。未帶 `projectId` 時，回應會提醒後續正式讀寫必須使用明確 `ProjectId`，不會把請求默默落到 `default` 專案。這個 bootstrap 回應只揭露 user preference 的摘要與政策；完整偏好仍透過 `build_working_context` 或 `user_preference_list` 取得。
+
 ### 3.1 開始新對話
 
 目標：快速把同 repo 的長期脈絡帶回來，避免重新蒐集一次。
@@ -168,6 +183,7 @@ query 用「<目前任務描述>」，
 
 | 情境 | Tool | 什麼時候用 | 期待結果 |
 |---|---|---|---|
+| 第一次接入 MCP | `describe_context_hub` | agent 尚不知道 ContextHub 用途或還沒決定 `ProjectId` | 服務用途、能力、啟動流程與 `ProjectId` 提醒 |
 | 新對話剛開始 | `build_working_context` | 需要快速恢復任務脈絡 | 結構化 facts / decisions / preferences / citations |
 | 想查某個主題是否已有記錄 | `memory_search` | 需要補精準知識 | 命中相關 memory 摘要 |
 | 想看某個 memory 全文 | `memory_get` | 已知 item id | 完整 memory document |

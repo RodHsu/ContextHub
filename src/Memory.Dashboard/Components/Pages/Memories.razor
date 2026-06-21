@@ -135,8 +135,8 @@
     }
     else
     {
-        <div class="split-layout">
-        <section class="panel panel-scroll">
+        <div class="split-layout memories-workspace-layout">
+        <section class="panel panel-scroll memories-list-panel">
             <div class="panel-title">記憶條目 (@DashboardFormatting.Integer(_page.TotalCount))</div>
             @if (_page.TotalCount == 0 && _checkpointStaging.Count > 0)
             {
@@ -171,23 +171,17 @@
                     <colgroup>
                         <col class="memories-table-col-title" />
                         <col class="memories-table-col-project" />
-                        <col class="memories-table-col-scope" />
                         <col class="memories-table-col-type" />
                         <col class="memories-table-col-source" />
-                        <col class="memories-table-col-tags" />
-                        <col class="memories-table-col-status" />
                         <col class="memories-table-col-updated" />
                     </colgroup>
                     <thead>
                         <tr>
-                            <th class="memories-table-head"><span class="table-head-primary">標題</span><span class="table-head-secondary">Title</span></th>
-                            <th class="memories-table-head"><span class="table-head-primary">專案</span><span class="table-head-secondary">Project</span></th>
-                            <th class="memories-table-head"><span class="table-head-primary">範圍</span><span class="table-head-secondary">Scope</span></th>
-                            <th class="memories-table-head"><span class="table-head-primary">類型</span><span class="table-head-secondary">Type</span></th>
-                            <th class="memories-table-head"><span class="table-head-primary">來源</span><span class="table-head-secondary">Source</span></th>
-                            <th class="memories-table-head"><span class="table-head-primary">標籤</span><span class="table-head-secondary">Tags</span></th>
-                            <th class="memories-table-head"><span class="table-head-primary">狀態</span><span class="table-head-secondary">Status</span></th>
-                            <th class="memories-table-head"><span class="table-head-primary">更新時間</span><span class="table-head-secondary">Updated</span></th>
+                            <th class="memories-table-head">記憶內容</th>
+                            <th class="memories-table-head">專案與範圍</th>
+                            <th class="memories-table-head">類型與狀態</th>
+                            <th class="memories-table-head">來源與標籤</th>
+                            <th class="memories-table-head">更新時間</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -200,20 +194,20 @@
                                 </td>
                                 <td>
                                     <div class="table-title memories-cell-project" title="@item.ProjectId">@item.ProjectId</div>
+                                    <div class="table-subtitle">@DashboardText.Label(item.Scope)</div>
                                     @if (item.IsReadOnly)
                                     {
                                         <div class="table-subtitle">summary / readonly</div>
                                     }
                                 </td>
-                                <td><span class="memories-cell-badge" title="@DashboardText.Label(item.Scope)">@DashboardText.Label(item.Scope)</span></td>
-                                <td><span class="memories-cell-badge" title="@DashboardText.Label(item.MemoryType)">@DashboardText.Label(item.MemoryType)</span></td>
                                 <td>
+                                    <span class="memories-cell-badge" title="@DashboardText.Label(item.MemoryType)">@DashboardText.Label(item.MemoryType)</span>
+                                    <span class="status-badge @StatusClass(item.Status.ToString())">@DashboardText.Label(item.Status)</span>
+                                </td>
+                                <td class="memories-source-cell">
                                     <div class="memories-cell-clamp" title="@($"{item.SourceType} / {item.SourceRef}")">@item.SourceType / @item.SourceRef</div>
+                                    <div class="table-subtitle memories-cell-tags" title="@string.Join(", ", item.Tags)">@BuildTagSummary(item.Tags)</div>
                                 </td>
-                                <td>
-                                    <div class="memories-cell-clamp" title="@string.Join(", ", item.Tags)">@string.Join(", ", item.Tags)</div>
-                                </td>
-                                <td><span class="status-badge @StatusClass(item.Status.ToString())">@DashboardText.Label(item.Status)</span></td>
                                 <td><span class="memories-cell-time"><ClientLocalTime Value="item.UpdatedAt" /></span></td>
                             </tr>
                         }
@@ -590,6 +584,11 @@
             "restore" => "還原",
             _ => changedBy
         };
+
+    private static string BuildTagSummary(IReadOnlyList<string> tags)
+        => tags.Count == 0
+            ? "無標籤"
+            : string.Join("、", tags.Take(3)) + (tags.Count > 3 ? $" +{tags.Count - 3}" : string.Empty);
 
     private static string? NormalizeEmpty(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value;

@@ -2008,6 +2008,7 @@ public static class DependencyInjection
         services.AddSingleton<IClock, SystemClock>();
         services.AddScoped<IRequestActorAccessor, RequestActorAccessor>();
         services.AddScoped<IChunkingService, ChunkingService>();
+        services.AddScoped<IContextHubBootstrapService, ContextHubBootstrapService>();
         services.AddScoped<IMemoryService, MemoryService>();
         services.AddScoped<IDashboardQueryService, DashboardQueryService>();
         services.AddScoped<IDashboardMemoryGraphIndexBuilder, DashboardMemoryGraphIndexBuilder>();

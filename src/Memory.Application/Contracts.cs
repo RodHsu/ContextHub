@@ -146,6 +146,42 @@ public sealed record WorkingContextResult(
     ContextSavingsEstimateResult? SavingsEstimate = null,
     MaintenanceStatusResult? Maintenance = null);
 
+public sealed record ContextHubBootstrapRequest(string? ProjectId = null);
+
+public sealed record ContextHubBootstrapResult(
+    ContextHubBootstrapServiceInfo Service,
+    ContextHubBootstrapProjectInfo Project,
+    ContextHubBootstrapCapabilities Capabilities,
+    IReadOnlyList<string> RecommendedStartupFlow,
+    ContextHubBootstrapUserPreferencesInfo UserPreferences,
+    IReadOnlyList<string> Warnings);
+
+public sealed record ContextHubBootstrapServiceInfo(
+    string Name,
+    string Purpose,
+    string ContractVersion);
+
+public sealed record ContextHubBootstrapProjectInfo(
+    string? ProjectId,
+    bool ProjectIdProvided,
+    bool ProjectIdRequiredForWork,
+    string Guidance,
+    string? RecommendedWorkingContextCall = null);
+
+public sealed record ContextHubBootstrapCapabilities(
+    bool WorkingContext,
+    bool MemorySearch,
+    bool MemoryReadWrite,
+    bool ConversationCheckpoint,
+    bool UserPreferences,
+    bool RuntimeLogs,
+    bool MaintenanceStatus);
+
+public sealed record ContextHubBootstrapUserPreferencesInfo(
+    bool IncludedByDefaultInWorkingContext,
+    string BootstrapDisclosure,
+    IReadOnlyList<string> AvailableKinds);
+
 public sealed record ContextSavingsEstimateResult(
     int BaselineTokenEstimate,
     int ReturnedTokenEstimate,
@@ -1029,6 +1065,11 @@ public interface IMemoryService
     Task<UserPreferenceResult> UpsertUserPreferenceAsync(UserPreferenceUpsertRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<UserPreferenceResult>> ListUserPreferencesAsync(UserPreferenceListRequest request, CancellationToken cancellationToken);
     Task<UserPreferenceResult> ArchiveUserPreferenceAsync(UserPreferenceArchiveRequest request, CancellationToken cancellationToken);
+}
+
+public interface IContextHubBootstrapService
+{
+    ContextHubBootstrapResult Describe(ContextHubBootstrapRequest request);
 }
 
 public interface ITenantSecurityService

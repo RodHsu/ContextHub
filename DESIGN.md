@@ -22,6 +22,8 @@
   - screen：`projects/2525745562578529015/screens/6ae43256689f4181876132939a41b4d5`
   - design system：`assets/96724f4c496e4ceba84d3765d600da5d`
   - 使用範圍：首頁 `Estimated Context Savings` compact insight strip、`/monitoring` Context Savings card；維持 dark dense admin console，不做大型 landing-style panel。
+- 2026-06-21 browser feedback pass 期間，Codex 目前可用工具沒有 Stitch connector；本輪先依既有 Stitch baseline、已附 browser comments 與本文件基準修正實作，未新增或冒用其他設計工具 artifact。
+- `Jobs`、`Memories`、`Monitoring telemetry` 目前仍缺獨立 Stitch screen artifact；本輪先把它們收斂到 dense admin console 的 production layout：主資訊不換行、次要資訊合併到 subtitle 或 detail panel、避免把所有 raw 欄位同時塞進窄表格。
 - `Sources`、`Governance`、`Evaluation`、`Inbox` 目前仍缺正式 Stitch screen artifact，屬於已知缺口；新增 UI 變更時不能只看本機 screenshot，後續需補齊設計稿來源。
 
 ### 2.2 Repo 內文件角色
@@ -44,8 +46,17 @@
 - 初始 render 必須先追求可讀性，再追求一次塞進全部空白邊界。
 - 小型圖譜不應被過大的 baseline canvas 壓到過度縮放。
 - fullscreen 與 normal view 都必須維持節點、連線與側欄的可讀性。
+- 空狀態要明確說明是「沒有可繪製節點、篩選無交集、或 graph index 尚未刷新」這類資料狀態；不要只顯示空白 canvas 或模糊錯誤文字。
+- 記憶圖譜的定位是脈絡檢視與關聯探索，不是 memory list 的替代品。若使用者需要逐筆檢索與欄位比對，應回到 `Memories` 頁；Graph 頁只承擔 hub、鄰域、explicit link 與 similarity layer 的視覺化。
 
-### 3.3 新頁面同步確認
+### 3.3 Dense admin data layout
+
+- 表格欄位過多時，優先合併同類資訊，而不是縮小字級或讓內容硬換行。例如 `Memories` 將 scope 併入 project、status 併入 type、tags 併入 source；`Jobs` 明確保留 job id 並避免換行。
+- 工具性 form 不應佔用大型空白 panel；只保留必要欄位、直接 action 與一行操作說明。
+- 所有可疑或容易誤解的 runtime / telemetry 指標都應有 `InfoPopover`，同一頁內不能只有部分 KPI 有說明、部分明細沒有說明。
+- `InfoPopover` 必須能越過 panel 邊界顯示；新增 scroll shell 或 overflow clipping 時，要同步檢查 tooltip z-index 與 clipping。
+
+### 3.4 新頁面同步確認
 
 新開發頁面至少要做三件事：
 

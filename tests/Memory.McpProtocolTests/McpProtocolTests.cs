@@ -104,7 +104,20 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         sessionId.Should().NotBeNullOrWhiteSpace();
 
         var toolsPayload = await SendMcpAsync(client, sessionId!, 2, "tools/list", new { });
-        var searchPayload = await SendMcpAsync(client, sessionId!, 3, "tools/call", new
+        var bootstrapPayload = await SendMcpAsync(client, sessionId!, 3, "tools/call", new
+        {
+            name = "describe_context_hub",
+            arguments = new { }
+        });
+        var bootstrapWithProjectPayload = await SendMcpAsync(client, sessionId!, 4, "tools/call", new
+        {
+            name = "describe_context_hub",
+            arguments = new
+            {
+                projectId = "ContextHub"
+            }
+        });
+        var searchPayload = await SendMcpAsync(client, sessionId!, 5, "tools/call", new
         {
             name = "memory_search",
             arguments = new
@@ -114,7 +127,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
                 includeArchived = false
             }
         });
-        var logPayload = await SendMcpAsync(client, sessionId!, 4, "tools/call", new
+        var logPayload = await SendMcpAsync(client, sessionId!, 6, "tools/call", new
         {
             name = "log_search",
             arguments = new
@@ -128,7 +141,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
                 }
             }
         });
-        var userPreferencePayload = await SendMcpAsync(client, sessionId!, 5, "tools/call", new
+        var userPreferencePayload = await SendMcpAsync(client, sessionId!, 7, "tools/call", new
         {
             name = "user_preference_upsert",
             arguments = new
@@ -144,7 +157,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
                 }
             }
         });
-        var userPreferenceUpdatePayload = await SendMcpAsync(client, sessionId!, 6, "tools/call", new
+        var userPreferenceUpdatePayload = await SendMcpAsync(client, sessionId!, 8, "tools/call", new
         {
             name = "user_preference_upsert",
             arguments = new
@@ -160,7 +173,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
                 }
             }
         });
-        var contextPayload = await SendMcpAsync(client, sessionId!, 7, "tools/call", new
+        var contextPayload = await SendMcpAsync(client, sessionId!, 9, "tools/call", new
         {
             name = "build_working_context",
             arguments = new
@@ -174,9 +187,23 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             }
         });
 
+        var bootstrap = ExtractToolJson(bootstrapPayload);
+        var bootstrapProject = bootstrap.GetProperty("project");
+        var bootstrapWithProject = ExtractToolJson(bootstrapWithProjectPayload);
+        var bootstrapWithProjectInfo = bootstrapWithProject.GetProperty("project");
+
+        toolsPayload.Should().Contain("describe_context_hub");
         toolsPayload.Should().Contain("memory_search");
         toolsPayload.Should().Contain("log_search");
         toolsPayload.Should().Contain("user_preference_upsert");
+        bootstrap.GetProperty("service").GetProperty("name").GetString().Should().Be("ContextHub");
+        bootstrapProject.GetProperty("projectIdProvided").GetBoolean().Should().BeFalse();
+        bootstrapProject.GetProperty("projectId").ValueKind.Should().Be(JsonValueKind.Null);
+        bootstrapProject.GetProperty("guidance").GetString().Should().Contain("projectId");
+        bootstrap.GetProperty("userPreferences").GetProperty("bootstrapDisclosure").GetString().Should().Be("summary-and-policy");
+        bootstrapWithProjectInfo.GetProperty("projectIdProvided").GetBoolean().Should().BeTrue();
+        bootstrapWithProjectInfo.GetProperty("projectId").GetString().Should().Be("ContextHub");
+        bootstrapWithProjectInfo.GetProperty("recommendedWorkingContextCall").GetString().Should().Contain("projectId=\"ContextHub\"");
         searchPayload.Should().Contain("MCP transport note");
         logPayload.Should().Contain("trace-mcp-log-1");
         logPayload.Should().Contain("trace-mcp-log-2");
@@ -199,6 +226,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         var tools = await client.ListToolsAsync();
 
         tools.Should().NotBeEmpty();
+        tools.Select(x => x.ProtocolTool.Name).Should().Contain("describe_context_hub");
         tools.Select(x => x.ProtocolTool.Name).Should().Contain("memory_search");
         tools.Select(x => x.ProtocolTool.Name).Should().Contain("user_preference_upsert");
     }
@@ -622,10 +650,16 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
 
     private static string ExtractToolJsonField(string payload, string fieldName)
     {
-        using var document = JsonDocument.Parse(ExtractToolText(payload));
-        return document.RootElement.TryGetProperty(fieldName, out var value)
+        var root = ExtractToolJson(payload);
+        return root.TryGetProperty(fieldName, out var value)
             ? value.GetString() ?? string.Empty
             : string.Empty;
+    }
+
+    private static JsonElement ExtractToolJson(string payload)
+    {
+        using var document = JsonDocument.Parse(ExtractToolText(payload));
+        return document.RootElement.Clone();
     }
 
     private static string ExtractResourceText(string payload)

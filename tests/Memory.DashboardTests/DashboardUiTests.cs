@@ -314,19 +314,19 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("資料快照");
         monitoringHtml.Should().Contain("Redis");
         monitoringHtml.Should().Contain("PostgreSQL");
-        monitoringHtml.Should().Contain("Context Savings");
+        monitoringHtml.Should().Contain("脈絡節省量");
         monitoringHtml.Should().Contain("monitoring-context-savings-panel");
-        monitoringHtml.Should().Contain("Source coverage");
-        monitoringHtml.Should().Contain("Redis Hit Rate");
-        monitoringHtml.Should().Contain("App Cache Hit");
-        monitoringHtml.Should().Contain("Redis Hits / Misses");
-        monitoringHtml.Should().Contain("App Cache Bypasses / Errors");
+        monitoringHtml.Should().Contain("來源覆蓋率");
+        monitoringHtml.Should().Contain("Redis 命中率");
+        monitoringHtml.Should().Contain("應用快取命中率");
+        monitoringHtml.Should().Contain("Redis 命中 / 未命中");
+        monitoringHtml.Should().Contain("快取略過 / 錯誤");
         monitoringHtml.Should().Contain("Buffer Hit Rate");
         monitoringHtml.Should().Contain("block accesses");
         monitoringHtml.Should().Contain("資源趨勢");
         monitoringHtml.Should().Contain("Compose 服務資源");
         monitoringHtml.Should().Contain("Docker 主機");
-        monitoringHtml.Should().Contain("Total Commands");
+        monitoringHtml.Should().Contain("命令總量");
         monitoringHtml.Should().Contain("Connections");
         monitoringHtml.Should().Contain("顯示 DB Size 說明");
         monitoringHtml.Should().Contain("目前 ContextHub PostgreSQL database 的實際資料大小");
@@ -399,7 +399,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         memoriesHtml.Should().Contain("查看共用綜合層");
         memoriesHtml.Should().Contain("重建共用綜合層");
         memoriesHtml.Should().Contain("共用綜合層");
-        memoriesHtml.Should().Contain("table-head-secondary");
+        memoriesHtml.Should().Contain("記憶內容");
+        memoriesHtml.Should().Contain("專案與範圍");
+        memoriesHtml.Should().Contain("類型與狀態");
+        memoriesHtml.Should().Contain("來源與標籤");
 
         using var graphResponse = await client.GetAsync("/graph");
         graphResponse.StatusCode.Should().Be(HttpStatusCode.OK);

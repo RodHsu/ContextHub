@@ -141,7 +141,7 @@
                 <div class="graph-panel-header">
                     <div class="graph-panel-header-copy">
                         <div class="panel-title">記憶關聯</div>
-                        <div class="table-subtitle">以文件關聯圖的方式檢視分類、主要關聯與相鄰記憶。</div>
+                        <div class="table-subtitle">用來看「哪些記憶互相支撐同一個脈絡」，不是一般資料清單；關聯不足時會先顯示索引與篩選狀態。</div>
                         <div class="graph-status-strip">
                             <span class="graph-status-chip">@CurrentProjectScopeLabel</span>
                             <span class="graph-status-chip">@GraphModeLabel</span>
@@ -243,11 +243,24 @@
                     <div class="graph-pan-content" @ref="_panContentRef" style="@PanContentDimensionsStyle">
                         @if (_graph is null)
                         {
-                            <div class="graph-empty-state">正在載入圖譜…</div>
+                            <div class="graph-empty-state graph-empty-state-rich">
+                                <div class="graph-empty-kicker">圖譜載入中</div>
+                                <strong>正在讀取記憶關聯 snapshot</strong>
+                                <p>這裡會呈現 explicit links、similarity layer 與目前篩選下的 hub 節點。</p>
+                            </div>
                         }
                         else if (_graph.Nodes.Count == 0)
                         {
-                            <div class="graph-empty-state">目前條件下沒有可顯示的記憶節點。</div>
+                            <div class="graph-empty-state graph-empty-state-rich">
+                                <div class="graph-empty-kicker">目前沒有可繪製節點</div>
+                                <strong>這通常是資料或篩選狀態，不是圖形引擎問題</strong>
+                                <p>@GraphEmptyStateMessage</p>
+                                <div class="graph-empty-actions">
+                                    <span>@CurrentProjectScopeLabel</span>
+                                    <span>@GraphModeLabel</span>
+                                    <span>@(string.IsNullOrWhiteSpace(_viewQuery) ? "未套用搜尋" : $"搜尋：{_viewQuery}")</span>
+                                </div>
+                            </div>
                         }
                         else
                         {
@@ -323,7 +336,7 @@
                     <section class="memory-detail-section graph-overview-section">
                         <div class="graph-view-kicker">目前視圖</div>
                         <div class="graph-view-details-title">@GraphOverviewTitle</div>
-                        <div class="graph-view-details-copy">單擊節點查看內容與相鄰記憶；使用搜尋、分類與顯示模式縮小圖面。</div>
+                        <div class="graph-view-details-copy">單擊節點查看內容與相鄰記憶；使用搜尋、分類與顯示模式縮小圖面。若沒有節點，先放寬篩選或確認 graph index snapshot 是否完成。</div>
                         <div class="graph-view-metrics">
                             <div class="graph-view-metric"><span>節點</span><strong>@DashboardFormatting.Integer(VisibleNodes.Count)</strong></div>
                             <div class="graph-view-metric"><span>關聯</span><strong>@DashboardFormatting.Integer(VisibleEdges.Count)</strong></div>
@@ -552,6 +565,10 @@
     private int GraphPollingIntervalSeconds => DashboardOptionsAccessor.Value.Polling.GraphSeconds;
     private string AutoRefreshLabel => GraphPollingIntervalSeconds <= 0 ? "背景刷新關閉" : $"背景每 {GraphPollingIntervalSeconds} 秒刷新";
     private string ExpandedCanvasCss => _isCanvasExpanded ? "graph-canvas-panel-expanded" : string.Empty;
+    private string GraphEmptyStateMessage
+        => _graph?.Stats.SeedCount == 0
+            ? "目前篩選條件沒有找到可當作圖譜種子的記憶。請放寬專案、範圍、類型、狀態、標籤或搜尋條件。"
+            : "目前有候選種子，但沒有形成可顯示的關聯節點。請切到 ProjectFull、啟用相似關聯，或等待 graph index snapshot 刷新後再檢查。";
 
     protected override async Task OnInitializedAsync()
     {

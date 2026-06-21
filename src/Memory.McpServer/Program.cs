@@ -879,6 +879,14 @@ app.MapPost("/api/context/build", async (WorkingContextRequest request, IMemoryS
     return Results.Ok(result);
 }).RequireAuthIfEnabled(requireAuthentication).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
+app.MapGet("/api/context/bootstrap", (
+    string? projectId,
+    IContextHubBootstrapService service) =>
+{
+    var result = service.Describe(new ContextHubBootstrapRequest(projectId));
+    return Results.Ok(result);
+}).RequireAuthIfEnabled(requireAuthentication);
+
 var sources = app.MapGroup("/api/sources");
 sources.RequireAuthIfEnabled(requireAuthentication);
 sources.RequireAdminIfEnabled(requireAuthentication);

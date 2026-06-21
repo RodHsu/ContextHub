@@ -6,11 +6,16 @@ namespace Memory.McpServer;
 
 [McpServerToolType]
 public sealed class MemoryMcpTools(
+    IContextHubBootstrapService bootstrapService,
     IMemoryService memoryService,
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
     IMaintenanceCoordinator maintenanceCoordinator)
 {
+    [McpServerTool, Description("Describe ContextHub purpose, capabilities, startup flow, and projectId guidance for first-time agent onboarding.")]
+    public ContextHubBootstrapResult describe_context_hub(string? projectId = null)
+        => bootstrapService.Describe(new ContextHubBootstrapRequest(projectId));
+
     [McpServerTool, Description("Search memory items using hybrid keyword and semantic retrieval.")]
     public Task<IReadOnlyList<MemorySearchHit>> memory_search(
         string query,

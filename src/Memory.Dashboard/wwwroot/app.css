@@ -1471,6 +1471,15 @@ textarea {
     overflow-wrap: anywhere;
 }
 
+.monitoring-context-savings-window small {
+    display: grid;
+    gap: 0.08rem;
+}
+
+.monitoring-context-savings-window small span {
+    color: var(--text-muted);
+}
+
 @media (max-width: 1280px) {
     .monitoring-context-savings-grid {
         grid-template-columns: 1fr;
@@ -2486,25 +2495,19 @@ textarea {
 }
 
 .memories-table-col-title {
-    width: 27%;
+    width: 36%;
 }
 
 .memories-table-col-project {
-    width: 15%;
+    width: 18%;
 }
 
-.memories-table-col-scope,
 .memories-table-col-type {
-    width: 9%;
-}
-
-.memories-table-col-source,
-.memories-table-col-tags {
     width: 14%;
 }
 
-.memories-table-col-status {
-    width: 9%;
+.memories-table-col-source {
+    width: 20%;
 }
 
 .memories-table-col-updated {
@@ -2530,6 +2533,7 @@ textarea {
 
 .memories-cell-title,
 .memories-cell-summary,
+.memories-cell-tags,
 .memories-cell-clamp {
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -2542,6 +2546,7 @@ textarea {
 }
 
 .memories-cell-summary,
+.memories-cell-tags,
 .memories-cell-clamp {
     -webkit-line-clamp: 2;
     line-clamp: 2;
@@ -2562,6 +2567,104 @@ textarea {
 
 .memories-cell-time {
     font-variant-numeric: tabular-nums;
+}
+
+.memories-source-cell {
+    min-width: 0;
+}
+
+.memories-table .status-badge {
+    margin-top: 0.32rem;
+}
+
+.memories-workspace-layout {
+    grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+}
+
+.memories-list-panel .table-scroll-shell {
+    min-height: 420px;
+}
+
+.jobs-control-layout {
+    grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+    align-items: stretch;
+}
+
+.jobs-reindex-panel {
+    display: grid;
+    align-content: start;
+    gap: 0.72rem;
+}
+
+.jobs-reindex-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.jobs-reindex-inline-button {
+    white-space: nowrap;
+    align-self: start;
+}
+
+.jobs-workspace-layout {
+    grid-template-columns: minmax(0, 1.18fr) minmax(360px, 0.82fr);
+}
+
+.jobs-table {
+    table-layout: fixed;
+    min-width: 960px;
+}
+
+.jobs-table-col-time {
+    width: 10.5rem;
+}
+
+.jobs-table-col-id {
+    width: 19rem;
+}
+
+.jobs-table-col-type {
+    width: 8.5rem;
+}
+
+.jobs-table-col-status {
+    width: 6.5rem;
+}
+
+.jobs-table-col-payload {
+    width: auto;
+}
+
+.jobs-table-col-error {
+    width: 11rem;
+}
+
+.jobs-id-cell,
+.job-detail-id {
+    white-space: nowrap;
+    word-break: keep-all;
+    overflow-wrap: normal;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.jobs-time-cell {
+    white-space: normal;
+}
+
+.job-detail-id-row {
+    grid-column: 1 / -1;
+}
+
+.job-detail-id {
+    overflow-x: auto;
+    max-width: 100%;
+    padding-bottom: 0.15rem;
+}
+
+.jobs-payload-cell,
+.jobs-error-cell {
+    max-width: 0;
 }
 
 .stack-list {
@@ -4486,12 +4589,12 @@ textarea:focus {
     display: inline-flex;
     align-items: center;
     flex: 0 0 auto;
-    z-index: 1;
+    z-index: 60;
 }
 
 .info-popover:hover,
 .info-popover:focus-within {
-    z-index: 100;
+    z-index: 6000;
 }
 
 .info-popover-trigger {
@@ -4525,14 +4628,14 @@ textarea:focus {
     border-radius: var(--radius);
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg-elevated) 92%, black 8%);
-    box-shadow: 0 18px 38px rgba(0, 0, 0, 0.26);
+    box-shadow: 0 18px 38px rgba(0, 0, 0, 0.34);
     color: var(--text);
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
     transform: translateY(-6px);
     transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
-    z-index: 100;
+    z-index: 6001;
 }
 
 .info-popover:hover .info-popover-panel,
@@ -4579,6 +4682,14 @@ textarea:focus {
     left: 0;
     right: auto;
     width: min(20rem, calc(100vw - 2rem));
+}
+
+.panel:has(.info-popover:hover),
+.panel:has(.info-popover:focus-within),
+.monitoring-telemetry-panel:has(.info-popover:hover),
+.monitoring-telemetry-panel:has(.info-popover:focus-within) {
+    overflow: visible;
+    z-index: 5000;
 }
 
 .theme-switcher {
@@ -6235,42 +6346,46 @@ textarea:focus {
 
 @media (max-width: 1280px) and (min-width: 961px) {
     .memories-page-body > .split-layout {
-        grid-template-columns: minmax(0, 1.34fr) minmax(300px, 0.66fr);
+        grid-template-columns: minmax(0, 1.24fr) minmax(320px, 0.76fr);
     }
 
     .memories-page-body .memories-table-col-title {
-        width: 36%;
+        width: 40%;
     }
 
     .memories-page-body .memories-table-col-project {
-        width: 18%;
+        width: 20%;
     }
 
-    .memories-page-body .memories-table-col-scope,
     .memories-page-body .memories-table-col-type {
-        width: 12%;
-    }
-
-    .memories-page-body .memories-table-col-status {
-        width: 10%;
+        width: 15%;
     }
 
     .memories-page-body .memories-table-col-updated {
-        width: 12%;
+        width: 13%;
     }
 
     .memories-page-body .memories-table-col-source,
-    .memories-page-body .memories-table-col-tags,
-    .memories-page-body .memories-table th:nth-child(5),
-    .memories-page-body .memories-table td:nth-child(5),
-    .memories-page-body .memories-table th:nth-child(6),
-    .memories-page-body .memories-table td:nth-child(6) {
+    .memories-page-body .memories-table th:nth-child(4),
+    .memories-page-body .memories-table td:nth-child(4) {
         display: none;
     }
 
     .memories-page-body .memories-table th,
     .memories-page-body .memories-table td {
         padding-inline: 0.72rem;
+    }
+}
+
+@media (max-width: 1180px) {
+    .jobs-control-layout,
+    .jobs-workspace-layout,
+    .memories-workspace-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .jobs-reindex-grid {
+        grid-template-columns: minmax(0, 1fr);
     }
 }
 

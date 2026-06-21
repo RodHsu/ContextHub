@@ -842,6 +842,59 @@
     background: color-mix(in srgb, var(--bg-panel) 78%, transparent);
 }
 
+.graph-empty-state-rich {
+    flex-direction: column;
+    gap: 0.58rem;
+    padding: 1.5rem;
+    line-height: 1.55;
+    text-align: center;
+}
+
+.graph-empty-state-rich strong {
+    color: var(--text);
+    font-size: 1rem;
+}
+
+.graph-empty-state-rich p {
+    max-width: 58ch;
+    margin: 0;
+    color: var(--text-muted);
+}
+
+.graph-empty-kicker {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.6rem;
+    padding: 0.18rem 0.58rem;
+    border-radius: 999px;
+    color: color-mix(in srgb, var(--accent) 78%, var(--text) 22%);
+    background: color-mix(in srgb, var(--accent-soft) 76%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+    font-size: 0.72rem;
+    font-weight: 800;
+}
+
+.graph-empty-actions {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.3rem;
+}
+
+.graph-empty-actions span {
+    display: inline-flex;
+    min-height: 1.55rem;
+    align-items: center;
+    padding: 0.16rem 0.52rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+    background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+    color: var(--text-subtle);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
 .graph-canvas-panel-expanded {
     position: fixed;
     inset: 1rem;
