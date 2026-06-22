@@ -14,7 +14,8 @@ Expected upstream aliases from `docker-compose.release.yml`:
 
 ```text
 context-hub-dashboard:8088
-context-hub-mcp-server:8080
+context-hub-mcp-server-a:8080
+context-hub-mcp-server-b:8080
 ```
 
 Origin cache header policy:
@@ -38,6 +39,12 @@ Only static asset file extensions should be eligible for edge cache.
 Apply the Cloudflare edge rules in
 [`context-hub-cloudflare-rules.md`](context-hub-cloudflare-rules.md) before
 treating MCP failures as origin or application failures.
+
+Release deploys run two fixed MCP backends (`mcp-server-a` and `mcp-server-b`).
+Nginx should route `/mcp` and `/api/` through the `contexthub_mcp` upstream so
+one backend can be recreated while the other continues serving existing agents.
+The deployment script performs public MCP smoke checks between backend updates;
+do not collapse the upstream back to a single `context-hub-mcp-server` target.
 
 Cloudflare rules for `/mcp*`:
 
@@ -64,6 +71,12 @@ Example Nginx server:
 map $http_upgrade $connection_upgrade {
     default upgrade;
     '' close;
+}
+
+upstream contexthub_mcp {
+    server context-hub-mcp-server-a:8080 max_fails=2 fail_timeout=10s;
+    server context-hub-mcp-server-b:8080 max_fails=2 fail_timeout=10s;
+    keepalive 32;
 }
 
 server {
@@ -94,11 +107,11 @@ server {
         proxy_request_buffering off;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
-        proxy_pass http://context-hub-mcp-server:8080;
+        proxy_pass http://contexthub_mcp;
     }
 
     location /api/ {
-        proxy_pass http://context-hub-mcp-server:8080;
+        proxy_pass http://contexthub_mcp;
     }
 
     location /_blazor {

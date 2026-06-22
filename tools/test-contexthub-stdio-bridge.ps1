@@ -3,6 +3,7 @@ param(
     [string]$Endpoint = "https://context-hub.wjcy.org/mcp",
     [string]$ProjectId = "ContextHub",
     [string]$Query = "ContextHub MCP stdio bridge diagnostics",
+    [switch]$RunReconnectRegression,
     [switch]$RunCodexExec,
     [string]$CodexModel = "gpt-5.5"
 )
@@ -65,7 +66,7 @@ $null = Get-ContextHubToken
 $buildOutputPath = Join-Path ([System.IO.Path]::GetTempPath()) ("contexthub-stdio-bridge-" + [System.Guid]::NewGuid().ToString("N"))
 $bridgeDllPath = Join-Path $buildOutputPath "ContextHub.McpStdioBridge.dll"
 
-Write-Host "1/5 build stdio bridge"
+Write-Host "1/6 build stdio bridge"
 dotnet build $ProjectPath --output $buildOutputPath -p:UseAppHost=false
 if ($LASTEXITCODE -ne 0) {
     throw "dotnet build failed with exit code $LASTEXITCODE."
@@ -75,7 +76,18 @@ if (-not (Test-Path -LiteralPath $bridgeDllPath)) {
 }
 
 try {
-    Write-Host "2/5 initialize bridge and list tools"
+    if ($RunReconnectRegression) {
+        Write-Host "2/6 run stdio bridge reconnect regression tests"
+        dotnet test "tests\Memory.UnitTests\Memory.UnitTests.csproj" --no-restore --filter McpStdioBridgeTests
+        if ($LASTEXITCODE -ne 0) {
+            throw "stdio bridge reconnect regression tests failed with exit code $LASTEXITCODE."
+        }
+    }
+    else {
+        Write-Host "2/6 reconnect regression tests skipped. Re-run with -RunReconnectRegression to validate retry/no-retry behavior."
+    }
+
+    Write-Host "3/6 initialize bridge and list tools"
     $messages = @(
         '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"stdio-bridge-diagnostics","version":"1.0"}}}',
         '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
@@ -94,7 +106,7 @@ try {
     }
     Write-Host "Required tools listed through stdio bridge."
 
-    Write-Host "3/5 build_working_context through stdio bridge"
+    Write-Host "4/6 build_working_context through stdio bridge"
     $contextPayload = @{
         jsonrpc = "2.0"
         id = 3
@@ -122,11 +134,11 @@ try {
     }
     Write-Host "build_working_context succeeded through stdio bridge."
 
-    Write-Host "4/5 current Codex MCP config"
+    Write-Host "5/6 current Codex MCP config"
     codex mcp get contexthub
 
     if ($RunCodexExec) {
-        Write-Host "5/5 optional codex exec verification using current config"
+        Write-Host "6/6 optional codex exec verification using current config"
         $previousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
@@ -154,11 +166,11 @@ try {
         $hasCompletedToolCall = $codexText.Contains("mcp: contexthub/memory_search") -and $codexText.Contains("(completed)")
         $hasSucceededAnswer = $codexText -match "(?i)\bsucceeded\b"
         if (-not $hasCompletedToolCall -or -not $hasSucceededAnswer) {
-            throw "codex exec did not show a completed contexthub/memory_search tool call."
+            throw "codex exec did not show a completed contexthub/memory_search tool call. Raw MCP and stdio bridge may be healthy while this specific Codex session path is stale."
         }
     }
     else {
-        Write-Host "5/5 optional codex exec verification skipped. Re-run with -RunCodexExec after switching Codex config to stdio."
+        Write-Host "6/6 optional codex exec verification skipped. Re-run with -RunCodexExec after switching Codex config to stdio."
     }
 }
 finally {

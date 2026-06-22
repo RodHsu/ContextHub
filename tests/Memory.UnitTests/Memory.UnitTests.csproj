@@ -26,4 +26,13 @@
     <ProjectReference Include="..\..\src\Memory.Worker\Memory.Worker.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\..\tools\ContextHub.McpStdioBridge\BridgeLogger.cs" Link="McpStdioBridge\BridgeLogger.cs" />
+    <Compile Include="..\..\tools\ContextHub.McpStdioBridge\BridgeOptions.cs" Link="McpStdioBridge\BridgeOptions.cs" />
+    <Compile Include="..\..\tools\ContextHub.McpStdioBridge\BridgeRetryPolicy.cs" Link="McpStdioBridge\BridgeRetryPolicy.cs" />
+    <Compile Include="..\..\tools\ContextHub.McpStdioBridge\RemoteMcpClient.cs" Link="McpStdioBridge\RemoteMcpClient.cs" />
+    <Compile Include="..\..\tools\ContextHub.McpStdioBridge\RemoteMcpRequestException.cs" Link="McpStdioBridge\RemoteMcpRequestException.cs" />
+    <Compile Include="..\..\tools\ContextHub.McpStdioBridge\StdioBridge.cs" Link="McpStdioBridge\StdioBridge.cs" />
+  </ItemGroup>
+
 </Project>

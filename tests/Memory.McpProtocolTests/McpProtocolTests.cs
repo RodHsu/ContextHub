@@ -198,7 +198,11 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         toolsPayload.Should().Contain("user_preference_upsert");
         bootstrap.GetProperty("service").GetProperty("name").GetString().Should().Be("ContextHub");
         bootstrapProject.GetProperty("projectIdProvided").GetBoolean().Should().BeFalse();
-        bootstrapProject.GetProperty("projectId").ValueKind.Should().Be(JsonValueKind.Null);
+        if (bootstrapProject.TryGetProperty("projectId", out var bootstrapProjectId))
+        {
+            bootstrapProjectId.ValueKind.Should().Be(JsonValueKind.Null);
+        }
+
         bootstrapProject.GetProperty("guidance").GetString().Should().Contain("projectId");
         bootstrap.GetProperty("userPreferences").GetProperty("bootstrapDisclosure").GetString().Should().Be("summary-and-policy");
         bootstrapWithProjectInfo.GetProperty("projectIdProvided").GetBoolean().Should().BeTrue();

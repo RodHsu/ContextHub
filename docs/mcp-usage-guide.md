@@ -301,6 +301,9 @@ Codex Desktop 的穩定入口則是 stdio bridge：Codex 以本機 child process
 `tools/ContextHub.McpStdioBridge`，bridge 再呼叫遠端
 `https://context-hub.wjcy.org/mcp`。這可以避開 Codex HTTP MCP worker 偶發
 transport/session 初始化失敗，避免 server 明明可用但對話層顯示 ContextHub 未載入。
+bridge 會在 remote `/mcp` redeploy、session stale 或 transient transport error 後重建
+remote MCP session；read-only tools 會自動重試一次，write/job/maintenance mutation tools
+不自動重送。
 
 建議用 repo 啟動腳本：
 
@@ -319,9 +322,11 @@ powershell -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1
 這支腳本會驗證：
 
 - `codex mcp get contexthub`
+- `/api/status` build metadata
 - 未帶 token 的 `/mcp` 回 `401`
 - raw MCP `initialize`
 - raw MCP `tools/list`
+- raw MCP `maintenance_status` 不是 Running maintenance
 - `build_working_context(projectId = ContextHub)`
 
 若 raw MCP 成功，代表 ContextHub server 與遠端 `/mcp` endpoint 可用。
@@ -337,6 +342,13 @@ powershell -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1
 stdio bridge 讓 Codex 以本機 child process 連線，再由 bridge 呼叫遠端
 `https://context-hub.wjcy.org/mcp`。它不取代公開 remote MCP endpoint；它是
 Codex Desktop 的相容性入口。
+
+若要同時驗證 bridge 的 reconnect/no-retry regression，請加
+`-RunReconnectRegression`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1 -RunReconnectRegression
+```
 
 若要驗證目前 Codex Desktop session 的 tool injection，而不只是 bridge 本身，請加
 `-RunCodexExec`：
@@ -355,6 +367,17 @@ powershell -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1 
 最後一項通常不是 ContextHub server 問題，但會污染 Codex 啟動輸出，讓對話層或人工判讀
 誤以為 ContextHub 沒載入。處理方式是清掉不用的 OAuth credentials、移除不用的 remote
 MCP server，或暫時停用對應 plugin，然後重跑 `-RunCodexExec`。
+
+若 `tool_search` 能列出 metadata，但實際 MCP tool call 回 `Transport closed`，不要先判定
+ContextHub server down。這代表目前 Codex session 的 active MCP transport 可能 stale。
+固定判斷順序是：
+
+1. 跑 raw MCP 診斷確認公開 `/mcp`。
+2. 跑 stdio bridge 診斷確認 bridge 自癒。
+3. 跑 `-RunCodexExec` 確認 Codex session path。
+
+redeploy 後不應把「重開對話串」當作常態解法；bridge 應自動 reconnect。只有 raw MCP 與
+stdio bridge 都正常、但特定 Codex session path 仍 stale 時，才需要刷新該 session。
 
 Cloudflare edge 行為的固定規則與驗證方式請見
 [`context-hub-cloudflare-rules.md`](context-hub-cloudflare-rules.md)。MCP
