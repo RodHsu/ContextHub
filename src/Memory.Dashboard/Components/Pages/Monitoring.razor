@@ -274,19 +274,15 @@
                     @foreach (var window in ContextSavingsWindows(contextSavings))
                     {
                         <article class="monitoring-context-savings-window" title="@ContextSavingsTokenModeTooltip(window)">
-                            <span>@window.Label 節省量 / 樣本量</span>
+                            <span>@window.Label 節省量 / 快取命中率</span>
                             <strong>@DashboardFormatting.Percent(window.SavingPercent)</strong>
                             <small>
                                 <span>@FormatTokenCount(window.EstimatedSavedTokens)</span>
+                                <span>快取 @DashboardFormatting.Percent(window.CacheHitPercent)</span>
                                 <span>@DashboardFormatting.Integer(window.SampleCount) 筆樣本</span>
                             </small>
                         </article>
                     }
-                    <article>
-                        <span>快取命中率</span>
-                        <strong>@DashboardFormatting.Percent(contextSavings.CacheHitPercent)</strong>
-                        <small>@DashboardFormatting.Integer(contextSavings.Trend.Count) 個趨勢點</small>
-                    </article>
                     <article>
                         <span>最後樣本</span>
                         <strong>@ContextSavingsLastSampleText(contextSavings)</strong>

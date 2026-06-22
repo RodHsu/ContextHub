@@ -1354,7 +1354,7 @@ textarea {
 
 .context-savings-strip-metrics {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1.02fr)) repeat(3, minmax(0, 0.9fr)) minmax(0, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1.05fr)) repeat(2, minmax(0, 0.9fr)) minmax(0, 1fr);
     gap: 0;
     min-width: 0;
     border: 1px solid var(--border);
@@ -1446,7 +1446,7 @@ textarea {
 
 .monitoring-context-savings-grid {
     display: grid;
-    grid-template-columns: repeat(7, minmax(0, 1fr)) minmax(180px, 1.2fr);
+    grid-template-columns: repeat(6, minmax(0, 1fr)) minmax(180px, 1.2fr);
     gap: 0;
     border: 1px solid var(--border);
     border-radius: var(--radius);
