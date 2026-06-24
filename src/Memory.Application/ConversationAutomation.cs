@@ -70,13 +70,14 @@ public sealed class ConversationAutomationService(
 
         var behavior = await behaviorSettingsAccessor.GetCurrentAsync(cancellationToken);
         var actor = actorAccessor.Current;
-        EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         if (!actor.IsServiceActor)
         {
             await maintenanceCoordinator.EnsureWriteAllowedAsync("conversation_ingest", cancellationToken);
         }
 
         var effectiveProjectId = ProjectContext.Normalize(request.ProjectId, behavior.DefaultProjectId);
+        ActorAuthorization.EnsureProjectAllowed(actor, effectiveProjectId, write: true);
         var projectName = request.ProjectName?.Trim() ?? string.Empty;
         var session = await dbContext.ConversationSessions
             .FirstOrDefaultAsync(
@@ -207,14 +208,20 @@ public sealed class ConversationAutomationService(
     {
         var query = dbContext.ConversationSessions.AsNoTracking().AsQueryable();
         var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         if (actor.HasUser)
         {
             query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+            if (actor.AllowedProjectIds.Count > 0)
+            {
+                query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
+            ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
             query = query.Where(x => x.ProjectId == projectId);
         }
 
@@ -250,14 +257,20 @@ public sealed class ConversationAutomationService(
     {
         var query = dbContext.ConversationInsights.AsNoTracking().AsQueryable();
         var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         if (actor.HasUser)
         {
             query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+            if (actor.AllowedProjectIds.Count > 0)
+            {
+                query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
+            ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
             query = query.Where(x => x.ProjectId == projectId);
         }
 
@@ -632,24 +645,6 @@ public sealed class ConversationAutomationService(
                 : [item.ProjectId],
             IsAuthenticated: true,
             IsServiceActor: true);
-    }
-
-    private static void EnsureScopeAllowed(ContextHubRequestActor actor, string scope)
-    {
-        if (!actor.IsAuthenticated)
-        {
-            throw new UnauthorizedAccessException("Authentication is required.");
-        }
-
-        if (!actor.HasUser)
-        {
-            throw new UnauthorizedAccessException("Authenticated requests must resolve to a tenant user.");
-        }
-
-        if (!actor.HasScope(scope))
-        {
-            throw new UnauthorizedAccessException($"Scope '{scope}' is required.");
-        }
     }
 
     private static bool ShouldScheduleAutomation(ConversationSourceKind sourceKind, InstanceBehaviorSettingsResult behavior)

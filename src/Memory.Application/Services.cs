@@ -628,10 +628,15 @@ public sealed class MemoryService(
                 usedFallback = hits.Count > 0;
             }
 
-            var logService = new LogQueryService(dbContext);
-            var recentLogs = await logService.SearchAsync(
-                new LogQueryRequest(Query: request.Query, Limit: request.RecentLogLimit, ProjectId: request.ProjectId),
-                cancellationToken);
+            IReadOnlyList<LogEntryResult> recentLogs = [];
+            if (actor.IsAdmin || actor.HasScope(SecurityScopes.LogsRead))
+            {
+                var logService = new LogQueryService(dbContext, actorAccessor);
+                recentLogs = await logService.SearchAsync(
+                    new LogQueryRequest(Query: request.Query, Limit: request.RecentLogLimit, ProjectId: request.ProjectId),
+                    cancellationToken);
+            }
+
             var userPreferenceSearch = await SearchUserPreferencesAsync(request.Query, 3, cancellationToken);
 
             var facts = MapContext(hits.Where(x => x.MemoryType == MemoryType.Fact).Take(request.Limit));
@@ -1022,15 +1027,34 @@ public sealed class MemoryService(
         await EnsureWriteAllowedUnlessServiceAsync("enqueue_reindex", cancellationToken);
         var actor = actorAccessor.Current;
         EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        var projectId = ProjectContext.Normalize(request.ProjectId);
+        if (request.MemoryItemId.HasValue)
+        {
+            var itemProjectId = await dbContext.MemoryItems
+                .AsNoTracking()
+                .Where(x => x.Id == request.MemoryItemId.Value)
+                .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+                .Select(x => x.ProjectId)
+                .FirstOrDefaultAsync(cancellationToken)
+                ?? throw new UnauthorizedAccessException($"Memory item '{request.MemoryItemId.Value}' is not writable for the current token.");
+
+            EnsureProjectAllowed(actor, itemProjectId, write: true);
+            projectId = itemProjectId;
+        }
+        else
+        {
+            EnsureProjectAllowed(actor, projectId, write: true);
+        }
+
         var job = new MemoryJob
         {
             TenantId = actor.TenantId,
             OwnerUserId = actor.UserId,
-            ProjectId = ProjectContext.Normalize(request.ProjectId),
+            ProjectId = projectId,
             JobType = MemoryJobType.Reindex,
             Status = MemoryJobStatus.Pending,
             PayloadJson = JsonSerializer.Serialize(
-                new ReindexJobPayload(request.ModelKey ?? embeddingProvider.ModelKey, request.MemoryItemId, ProjectContext.Normalize(request.ProjectId)),
+                new ReindexJobPayload(request.ModelKey ?? embeddingProvider.ModelKey, request.MemoryItemId, projectId),
                 JsonOptions),
             CreatedAt = clock.UtcNow
         };
@@ -1238,7 +1262,7 @@ public sealed class MemoryService(
     {
         await EnsureWriteAllowedUnlessServiceAsync("promote_log_slice", cancellationToken);
         var projectId = ProjectContext.Normalize(request.ProjectId);
-        var logService = new LogQueryService(dbContext);
+        var logService = new LogQueryService(dbContext, actorAccessor);
         var logs = await logService.SearchAsync(
             new LogQueryRequest(
                 Query: request.Query,
@@ -1559,12 +1583,15 @@ public sealed class MemoryService(
     private sealed record SummaryRefreshJobPayload(string? ProjectId, IReadOnlyList<string> IncludedProjectIds, bool RebuildAll);
 }
 
-public sealed class LogQueryService(IApplicationDbContext dbContext) : ILogQueryService
+public sealed class LogQueryService(IApplicationDbContext dbContext, IRequestActorAccessor actorAccessor) : ILogQueryService
 {
     public async Task<IReadOnlyList<LogEntryResult>> SearchAsync(LogQueryRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.LogsRead);
         var query = dbContext.RuntimeLogEntries.AsQueryable();
         var projectId = ProjectContext.Normalize(request.ProjectId);
+        ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
         var serviceNames = SplitFilterValues(request.ServiceName);
         var levels = SplitFilterValues(request.Level);
 
@@ -1640,8 +1667,13 @@ public sealed class LogQueryService(IApplicationDbContext dbContext) : ILogQuery
 
     public async Task<LogEntryResult?> GetAsync(long id, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.LogsRead);
         return await dbContext.RuntimeLogEntries
             .Where(x => x.Id == id)
+            .Where(x => actor.IsAdmin ||
+                        actor.AllowedProjectIds.Count == 0 ||
+                        actor.AllowedProjectIds.Contains(x.ProjectId))
             .Select(x => new LogEntryResult(
                 x.Id,
                 x.ServiceName,
@@ -1866,6 +1898,16 @@ public sealed class BackgroundJobProcessor(
         if (payload.MemoryItemId.HasValue)
         {
             chunks = chunks.Where(x => x.MemoryItemId == payload.MemoryItemId.Value);
+            chunks = chunks.Where(x => x.MemoryItem!.ProjectId == job.ProjectId);
+            if (job.TenantId.HasValue)
+            {
+                chunks = chunks.Where(x => x.MemoryItem!.TenantId == job.TenantId);
+            }
+
+            if (job.OwnerUserId.HasValue)
+            {
+                chunks = chunks.Where(x => x.MemoryItem!.OwnerUserId == job.OwnerUserId);
+            }
         }
         else
         {

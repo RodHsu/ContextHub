@@ -66,6 +66,9 @@ builder.Services.AddOptions<DashboardOptions>()
     .Validate(options => !string.IsNullOrWhiteSpace(options.BaseUrl), "Dashboard:BaseUrl is required.")
     .Validate(options => !string.IsNullOrWhiteSpace(options.AdminUsername), "Dashboard:AdminUsername is required.")
     .Validate(options => !string.IsNullOrWhiteSpace(options.AdminPasswordHash), "Dashboard:AdminPasswordHash is required.")
+    .Validate(
+        options => !builder.Environment.IsProduction() || !DashboardOptions.IsDefaultAdminPasswordHash(options.AdminPasswordHash),
+        "Dashboard:AdminPasswordHash must not use the built-in default in Production.")
     .ValidateOnStart();
 builder.Services.Configure<MemoryOptions>(builder.Configuration.GetSection(MemoryOptions.SectionName));
 builder.Services.AddSingleton<IPasswordHasher<object>, PasswordHasher<object>>();
@@ -145,6 +148,8 @@ builder.Services.AddScoped<IDashboardRuntimeSettingsAccessor, DashboardRuntimeSe
 builder.Services.AddScoped<IInstanceTransferService, InstanceTransferService>();
 
 var app = builder.Build();
+
+await ValidateProductionDashboardCredentialsAsync(app.Services, app.Environment, CancellationToken.None);
 
 app.UseForwardedHeaders();
 if (!app.Environment.IsDevelopment())
@@ -239,6 +244,11 @@ app.MapPost("/account/login", async (
 
         if (user is not null && !string.IsNullOrWhiteSpace(user.PasswordHash))
         {
+            if (app.Environment.IsProduction() && DashboardOptions.IsDefaultAdminPasswordHash(user.PasswordHash))
+            {
+                return Results.Redirect($"/login?error=invalid&returnUrl={Uri.EscapeDataString(DashboardRouting.NormalizeReturnUrl(form.ReturnUrl))}");
+            }
+
             var userVerification = passwordHasher.VerifyHashedPassword(new object(), user.PasswordHash, form.Password ?? string.Empty);
             if (userVerification != PasswordVerificationResult.Failed)
             {
@@ -251,6 +261,11 @@ app.MapPost("/account/login", async (
     }
 
     var settings = await instanceSettingsService.GetDashboardAuthenticationSettingsAsync(context.RequestAborted);
+    if (app.Environment.IsProduction() && DashboardOptions.IsDefaultAdminPasswordHash(settings.AdminPasswordHash))
+    {
+        throw new InvalidOperationException("Dashboard default admin password hash is not allowed in Production.");
+    }
+
     var verification = passwordHasher.VerifyHashedPassword(new object(), settings.AdminPasswordHash, form.Password ?? string.Empty);
     if (!string.Equals(form.Username, settings.AdminUsername, StringComparison.Ordinal) ||
         verification == PasswordVerificationResult.Failed)
@@ -377,6 +392,36 @@ async Task<IResult> SignInLegacyAdminAsync(HttpContext context, DashboardAuthent
     });
 
     return Results.Redirect(DashboardRouting.NormalizeReturnUrl(returnUrl));
+}
+
+static async Task ValidateProductionDashboardCredentialsAsync(
+    IServiceProvider services,
+    IWebHostEnvironment environment,
+    CancellationToken cancellationToken)
+{
+    if (!environment.IsProduction())
+    {
+        return;
+    }
+
+    await using var scope = services.CreateAsyncScope();
+    var dbContext = scope.ServiceProvider.GetService<MemoryDbContext>();
+    if (dbContext is null)
+    {
+        return;
+    }
+
+    var defaultAdminExists = await dbContext.TenantUsers
+        .AsNoTracking()
+        .AnyAsync(
+            x => x.Status == TenantUserStatus.Active &&
+                 (x.Role == TenantUserRole.Owner || x.Role == TenantUserRole.Admin) &&
+                 x.PasswordHash == DashboardOptions.DefaultAdminPasswordHash,
+            cancellationToken);
+    if (defaultAdminExists)
+    {
+        throw new InvalidOperationException("Production contains an active dashboard owner/admin with the built-in default password hash.");
+    }
 }
 
 async Task<TenantUser> EnsureDashboardAdminUserAsync(

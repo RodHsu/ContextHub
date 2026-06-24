@@ -320,7 +320,8 @@ public sealed class TenantSecurityService(
     public async Task<ApiTokenCreatedResult> CreateMyTokenAsync(ApiTokenCreateRequest request, CancellationToken cancellationToken)
     {
         var actor = RequireUserActor();
-        return await CreateTokenAsync(request with
+        var constrained = await ConstrainSelfServiceTokenRequestAsync(actor, request, cancellationToken);
+        return await CreateTokenAsync(constrained with
         {
             TenantId = actor.TenantId!.Value,
             OwnerUserId = actor.UserId!.Value
@@ -335,7 +336,8 @@ public sealed class TenantSecurityService(
             cancellationToken)
             ?? throw new InvalidOperationException("API token not found.");
 
-        return await UpdateTokenAsync(token.Id, request, cancellationToken);
+        var constrained = await ConstrainSelfServiceTokenUpdateAsync(actor, request, cancellationToken);
+        return await UpdateTokenAsync(token.Id, constrained, cancellationToken);
     }
 
     public async Task<ApiTokenCreatedResult> RegenerateMyTokenAsync(Guid tokenId, CancellationToken cancellationToken)
@@ -445,6 +447,128 @@ public sealed class TenantSecurityService(
             .OrderBy(x => x.ProjectId)
             .Select(x => x.ProjectId)
             .ToArrayAsync(cancellationToken);
+    }
+
+    private async Task<ApiTokenCreateRequest> ConstrainSelfServiceTokenRequestAsync(
+        ContextHubRequestActor actor,
+        ApiTokenCreateRequest request,
+        CancellationToken cancellationToken)
+    {
+        var scopes = NormalizeSelfServiceScopes(actor, request.Scopes);
+        var allowedProjectIds = await NormalizeSelfServiceAllowedProjectIdsAsync(actor, request.AllowedProjectIds, cancellationToken);
+        return request with
+        {
+            Scopes = scopes,
+            AllowedProjectIds = allowedProjectIds
+        };
+    }
+
+    private async Task<ApiTokenUpdateRequest> ConstrainSelfServiceTokenUpdateAsync(
+        ContextHubRequestActor actor,
+        ApiTokenUpdateRequest request,
+        CancellationToken cancellationToken)
+    {
+        var scopes = request.Scopes is null
+            ? null
+            : NormalizeSelfServiceScopes(actor, request.Scopes);
+        var allowedProjectIds = request.AllowedProjectIds is null
+            ? null
+            : await NormalizeSelfServiceAllowedProjectIdsAsync(actor, request.AllowedProjectIds, cancellationToken);
+        return request with
+        {
+            Scopes = scopes,
+            AllowedProjectIds = allowedProjectIds
+        };
+    }
+
+    private static string[] NormalizeSelfServiceScopes(ContextHubRequestActor actor, IReadOnlyList<string>? requested)
+    {
+        var scopes = NormalizeScopes(requested);
+        if (scopes.Length == 0)
+        {
+            throw new InvalidOperationException("At least one scope is required.");
+        }
+
+        if (actor.Role is not TenantUserRole.Owner and not TenantUserRole.Admin &&
+            scopes.Any(scope =>
+                string.Equals(scope, SecurityScopes.SecurityManage, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(scope, SecurityScopes.DashboardActAs, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException("Privileged scopes can only be delegated by an owner or admin.");
+        }
+
+        var missingScopes = scopes
+            .Where(scope => !actor.HasScope(scope))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (missingScopes.Length > 0)
+        {
+            throw new InvalidOperationException($"Cannot delegate scopes not held by the current actor: {string.Join(", ", missingScopes)}.");
+        }
+
+        return scopes;
+    }
+
+    private async Task<string[]> NormalizeSelfServiceAllowedProjectIdsAsync(
+        ContextHubRequestActor actor,
+        IReadOnlyList<string>? requested,
+        CancellationToken cancellationToken)
+    {
+        var requestedAllProjects = requested is { Count: > 0 } &&
+            requested.Any(x => string.Equals(x?.Trim(), ProjectContext.AllProjectIdsSentinel, StringComparison.OrdinalIgnoreCase));
+        if (requestedAllProjects)
+        {
+            if (actor.Role is TenantUserRole.Owner or TenantUserRole.Admin &&
+                actor.AllowedProjectIds.Count == 0)
+            {
+                return [];
+            }
+
+            throw new InvalidOperationException("All-project tokens can only be created by an unrestricted owner or admin.");
+        }
+
+        var normalized = requested is { Count: > 0 }
+            ? requested
+                .Select(x => ProjectContext.Normalize(x))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray()
+            : await dbContext.TenantProjectGrants
+                .Where(x => x.TenantId == actor.TenantId!.Value && x.CanRead)
+                .OrderBy(x => x.ProjectId)
+                .Select(x => x.ProjectId)
+                .ToArrayAsync(cancellationToken);
+
+        var effectiveAllowedProjects = actor.AllowedProjectIds.Count > 0
+            ? actor.AllowedProjectIds
+            : await dbContext.TenantProjectGrants
+                .Where(x => x.TenantId == actor.TenantId!.Value && x.CanRead)
+                .OrderBy(x => x.ProjectId)
+                .Select(x => x.ProjectId)
+                .ToArrayAsync(cancellationToken);
+
+        if (effectiveAllowedProjects.Count == 0 && actor.Role is TenantUserRole.Owner or TenantUserRole.Admin)
+        {
+            return normalized;
+        }
+
+        if (normalized.Length == 0)
+        {
+            throw new InvalidOperationException("A project-scoped token must include at least one allowed project.");
+        }
+
+        var unauthorizedProjects = normalized
+            .Where(projectId => !ProjectContext.IsShared(projectId) &&
+                                !ProjectContext.IsUser(projectId) &&
+                                !effectiveAllowedProjects.Any(allowed => string.Equals(allowed, projectId, StringComparison.OrdinalIgnoreCase)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (unauthorizedProjects.Length > 0)
+        {
+            throw new InvalidOperationException($"Cannot delegate projects not allowed for the current actor: {string.Join(", ", unauthorizedProjects)}.");
+        }
+
+        return normalized;
     }
 
     private static string GenerateToken()

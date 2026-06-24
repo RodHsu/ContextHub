@@ -9,7 +9,8 @@ namespace Memory.Application;
 public sealed class MemoryTransferService(
     IApplicationDbContext dbContext,
     IMemoryService memoryService,
-    IRuntimeConfigurationAccessor runtimeConfigurationAccessor) : IMemoryTransferService
+    IRuntimeConfigurationAccessor runtimeConfigurationAccessor,
+    IRequestActorAccessor actorAccessor) : IMemoryTransferService
 {
     private const int TransferFormatVersion = 1;
     private const int Pbkdf2Iterations = 100_000;
@@ -110,9 +111,18 @@ public sealed class MemoryTransferService(
 
     private IQueryable<Memory.Domain.MemoryItem> QueryItems(MemoryExportRequest request)
     {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        var allowedProjects = ProjectContext.ResolveSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
+        ActorAuthorization.EnsureProjectsAllowed(actor, allowedProjects, write: false);
         var query = dbContext.MemoryItems
             .AsNoTracking()
             .AsQueryable();
+
+        if (actor.HasUser)
+        {
+            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        }
 
         if (!string.IsNullOrWhiteSpace(request.Query))
         {
@@ -150,7 +160,6 @@ public sealed class MemoryTransferService(
             query = query.Where(x => x.Tags.Contains(request.Tag));
         }
 
-        var allowedProjects = ProjectContext.ResolveSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
         query = query.Where(x => allowedProjects.Contains(x.ProjectId));
 
         return query;

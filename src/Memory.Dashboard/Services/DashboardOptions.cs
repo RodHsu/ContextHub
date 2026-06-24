@@ -6,6 +6,9 @@ public sealed class DashboardOptions
     public const string DefaultAdminUsername = "admin";
     public const string DefaultAdminPasswordHash = "AQAAAAIAAYagAAAAEIbguUQEApMQehlC51gjy+uGulsE4ahRI7UtbdAlSsGMynNrNM3J3KfsJL+3IuBUxQ==";
 
+    public static bool IsDefaultAdminPasswordHash(string? passwordHash)
+        => string.Equals(passwordHash?.Trim(), DefaultAdminPasswordHash, StringComparison.Ordinal);
+
     public string BaseUrl { get; set; } = "http://127.0.0.1:8080";
     public string InstanceId { get; set; } = string.Empty;
     public string AdminUsername { get; set; } = DefaultAdminUsername;

@@ -2391,7 +2391,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
     public Uri BaseUri => new($"http://127.0.0.1:{_port}/");
 
-    public string ArtifactDirectory { get; } = Path.Combine(Path.GetTempPath(), "contexthub-dashboard-browser-artifacts", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss"));
+    public string ArtifactDirectory { get; } = CreateRepoTestDataPath("browser-artifacts", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss"));
 
     public async Task InitializeAsync()
     {
@@ -2492,7 +2492,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
             throw new FileNotFoundException("Dashboard project for browser tests was not found.", dashboardProject);
         }
 
-        var dataProtectionPath = Path.Combine(Path.GetTempPath(), "contexthub-dashboard-browser-tests", Guid.NewGuid().ToString("N"));
+        var dataProtectionPath = CreateRepoTestDataPath("browser-dataprotection", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dataProtectionPath);
 
         var startInfo = new ProcessStartInfo("dotnet", $"run --no-build --project \"{dashboardProject}\" -- --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
@@ -2519,6 +2519,17 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start dashboard process for browser tests.");
         _ = _process.StandardOutput.ReadToEndAsync();
         _ = _process.StandardError.ReadToEndAsync();
+    }
+
+    private static string CreateRepoTestDataPath(params string[] segments)
+    {
+        var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var pathSegments = new[] { repoRoot, ".agent", "local", "test-results", "dashboard-tests" }
+            .Concat(segments)
+            .ToArray();
+        var path = Path.Combine(pathSegments);
+        Directory.CreateDirectory(path);
+        return path;
     }
 
     private async Task WaitForDashboardAsync()

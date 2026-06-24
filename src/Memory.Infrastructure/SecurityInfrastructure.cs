@@ -2,12 +2,13 @@ using System.Security.Cryptography;
 using System.Text;
 using Memory.Application;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 
 namespace Memory.Infrastructure;
 
-public sealed class AesSecretProtector(IConfiguration configuration) : ISecretProtector
+public sealed class AesSecretProtector(IConfiguration configuration, IHostEnvironment environment) : ISecretProtector
 {
-    private readonly byte[] _key = DeriveKey(configuration);
+    private readonly byte[] _key = DeriveKey(configuration, environment);
 
     public string Protect(string plaintext)
     {
@@ -52,18 +53,28 @@ public sealed class AesSecretProtector(IConfiguration configuration) : ISecretPr
         return Encoding.UTF8.GetString(plaintext);
     }
 
-    private static byte[] DeriveKey(IConfiguration configuration)
+    private static byte[] DeriveKey(IConfiguration configuration, IHostEnvironment environment)
     {
-        var secretMaterial =
+        var configuredSecret =
             configuration["ContextHub:SecretKey"]
-            ?? configuration["Dashboard:SecretKey"]
-            ?? string.Join(
+            ?? configuration["Dashboard:SecretKey"];
+        if (!string.IsNullOrWhiteSpace(configuredSecret))
+        {
+            return SHA256.HashData(Encoding.UTF8.GetBytes(configuredSecret));
+        }
+
+        if (environment.IsProduction())
+        {
+            throw new InvalidOperationException("ContextHub:SecretKey or Dashboard:SecretKey is required in Production.");
+        }
+
+        var fallbackSecret = string.Join(
                 "|",
                 configuration.GetConnectionString("Postgres") ?? string.Empty,
                 configuration.GetConnectionString("Redis") ?? string.Empty,
                 configuration["ContextHub:InstanceId"] ?? string.Empty,
                 configuration["Dashboard:InstanceId"] ?? string.Empty,
                 Environment.MachineName);
-        return SHA256.HashData(Encoding.UTF8.GetBytes(secretMaterial));
+        return SHA256.HashData(Encoding.UTF8.GetBytes(fallbackSecret));
     }
 }

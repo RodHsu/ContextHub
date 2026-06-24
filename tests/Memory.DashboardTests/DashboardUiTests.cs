@@ -881,7 +881,7 @@ public sealed class DashboardApplicationFactory : WebApplicationFactory<Program>
                 ["Dashboard:ApiToken"] = DashboardUiTests.DashboardApiToken,
                 ["Dashboard:SessionTimeoutMinutes"] = "480",
                 ["Dashboard:ComposeProject"] = "contexthub",
-                ["Dashboard:DataProtectionPath"] = Path.Combine(Path.GetTempPath(), "contexthub-dashboard-tests", Guid.NewGuid().ToString("N")),
+                ["Dashboard:DataProtectionPath"] = CreateRepoTestDataPath("dataprotection", Guid.NewGuid().ToString("N")),
                 ["Memory:Namespace"] = "context-hub-test",
                 ["ConnectionStrings:Postgres"] = "Host=127.0.0.1;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub"
             });
@@ -895,6 +895,17 @@ public sealed class DashboardApplicationFactory : WebApplicationFactory<Program>
             services.AddSingleton<IDockerMetricsService, FakeDockerMetricsService>();
             services.AddSingleton<IInstanceSettingsService, FakeInstanceSettingsService>();
         });
+    }
+
+    private static string CreateRepoTestDataPath(params string[] segments)
+    {
+        var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var pathSegments = new[] { repoRoot, ".agent", "local", "test-results", "dashboard-tests" }
+            .Concat(segments)
+            .ToArray();
+        var path = Path.Combine(pathSegments);
+        Directory.CreateDirectory(path);
+        return path;
     }
 }
 

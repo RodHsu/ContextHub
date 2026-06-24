@@ -8,7 +8,8 @@ public sealed class LocalDotEnvConfigurationTests
     [Fact]
     public void ReadDotEnv_Should_Parse_Quoted_And_Exported_Values()
     {
-        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.env");
+        var testDirectory = CreateRepoTestDataPath("dot-env", Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(testDirectory, "test.env");
         try
         {
             File.WriteAllLines(path,
@@ -27,7 +28,18 @@ public sealed class LocalDotEnvConfigurationTests
         }
         finally
         {
-            File.Delete(path);
+            Directory.Delete(testDirectory, recursive: true);
         }
+    }
+
+    private static string CreateRepoTestDataPath(params string[] segments)
+    {
+        var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var pathSegments = new[] { repoRoot, ".agent", "local", "test-results", "unit-tests" }
+            .Concat(segments)
+            .ToArray();
+        var path = Path.Combine(pathSegments);
+        Directory.CreateDirectory(path);
+        return path;
     }
 }
