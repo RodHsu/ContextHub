@@ -143,12 +143,12 @@ app.Use(async (context, next) =>
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = registration => registration.Tags.Contains("live")
-}).RequireAuthIfEnabled(requireAuthentication);
+}).AllowAnonymous();
 
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
     Predicate = registration => registration.Tags.Contains("ready")
-}).RequireAuthIfEnabled(requireAuthentication);
+}).AllowAnonymous();
 
 app.MapGet("/api/status", async (
     IDashboardSnapshotStore snapshotStore,
@@ -1592,8 +1592,7 @@ static void SetDataSource(HttpContext httpContext, string source)
 
 static bool RequiresToken(PathString path)
     => path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase) ||
-       path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) ||
-       path.StartsWithSegments("/health", StringComparison.OrdinalIgnoreCase);
+       path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
 
 app.MapPost("/api/performance/measure", async (PerformanceMeasureRequest request, IPerformanceProbeService service, CancellationToken cancellationToken) =>
 {

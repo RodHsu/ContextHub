@@ -674,7 +674,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
-    public async Task Security_Token_Only_Surface_Should_Reject_Anonymous_Requests()
+    public async Task Security_Token_Only_Surface_Should_Allow_Health_And_Reject_Anonymous_Api_Requests()
     {
         using var anonymousClient = CreateAnonymousClient(environment.GetFactory());
 
@@ -696,8 +696,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             "/mcp",
             new StringContent("""{"jsonrpc":"2.0","id":"anonymous","method":"tools/list"}""", Encoding.UTF8, "application/json"));
 
-        liveResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
-        readyResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        liveResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        readyResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         statusResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
         searchResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
         summaryRefreshResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);

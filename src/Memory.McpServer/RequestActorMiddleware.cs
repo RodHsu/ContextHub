@@ -16,6 +16,12 @@ internal sealed class RequestActorMiddleware(RequestDelegate next)
 {
     public async Task InvokeAsync(HttpContext context, IRequestActorAccessor actorAccessor, IApplicationDbContext dbContext)
     {
+        if (IsHealthCheck(context.Request.Path))
+        {
+            await next(context);
+            return;
+        }
+
         var previousActor = actorAccessor.Current;
         actorAccessor.Current = await ResolveActorAsync(context, dbContext);
         try
@@ -101,4 +107,8 @@ internal sealed class RequestActorMiddleware(RequestDelegate next)
         => context.Request.Headers.ContainsKey(ContextHubActAsHeaders.TenantId) ||
            context.Request.Headers.ContainsKey(ContextHubActAsHeaders.UserId) ||
            context.Request.Headers.ContainsKey(ContextHubActAsHeaders.Username);
+
+    private static bool IsHealthCheck(PathString path)
+        => path.StartsWithSegments("/health/live", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/health/ready", StringComparison.OrdinalIgnoreCase);
 }
