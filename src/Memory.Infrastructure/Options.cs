@@ -80,3 +80,23 @@ public sealed class TelemetryRetentionOptions
     public bool RunVacuumAnalyzeAfterRetention { get; set; } = true;
     public bool RunVacuumFullAutomatically { get; set; }
 }
+
+public sealed class MemoryDataRetentionOptions
+{
+    public const string SectionName = "MemoryDataRetention";
+    public bool Enabled { get; set; } = true;
+    public bool AutoApplyEnabled { get; set; }
+    public int ArchivedItemsRetentionDays { get; set; } = 365;
+    public int HitWindowDays { get; set; } = 180;
+    public long MaxRecentHitCount { get; set; }
+    public int MaxLinkDegree { get; set; }
+    public decimal MaxImportance { get; set; } = 0.55m;
+    public decimal MaxConfidence { get; set; } = 0.70m;
+    public int PreviewLimit { get; set; } = 50;
+    public int BatchSize { get; set; } = 1_000;
+    public int DelayBetweenBatchesMs { get; set; } = 150;
+    public string RunAtLocalTime { get; set; } = "04:00";
+    public string TimeZone { get; set; } = "Asia/Taipei";
+    public int CommandTimeoutSeconds { get; set; } = 300;
+    public int MaxDurationMinutes { get; set; } = 20;
+}

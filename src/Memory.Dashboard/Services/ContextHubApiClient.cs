@@ -35,6 +35,8 @@ public interface IContextHubApiClient
     Task<MaintenanceStatusResult> StartMaintenanceAsync(Guid? runId, CancellationToken cancellationToken);
     Task<MaintenanceStatusResult> CompleteMaintenanceAsync(Guid? runId, CancellationToken cancellationToken);
     Task<MaintenanceStatusResult> CancelMaintenanceAsync(Guid? runId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaintenanceRunResult>> GetMaintenanceRunsAsync(int limit, CancellationToken cancellationToken);
+    Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<SourceConnectionResult>> GetSourcesAsync(SourceListRequest request, CancellationToken cancellationToken);
     Task<SourceConnectionResult> CreateSourceAsync(SourceConnectionCreateRequest request, CancellationToken cancellationToken);
     Task<SourceConnectionResult> UpdateSourceAsync(SourceConnectionUpdateRequest request, CancellationToken cancellationToken);
@@ -239,6 +241,20 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     {
         using var response = await httpClient.PostAsync(BuildMaintenanceRunActionUrl(runId, "cancel"), null, cancellationToken);
         return await ReadRequiredAsync<MaintenanceStatusResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<MaintenanceRunResult>> GetMaintenanceRunsAsync(int limit, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<MaintenanceRunResult>>(
+            QueryHelpers.AddQueryString("/api/maintenance/runs", new Dictionary<string, string?>
+            {
+                ["limit"] = limit.ToString()
+            }),
+            cancellationToken);
+
+    public async Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/maintenance/memory-data-retention/run", request, cancellationToken);
+        return await ReadRequiredAsync<MemoryDataRetentionRunResult>(response, cancellationToken);
     }
 
     public Task<IReadOnlyList<SourceConnectionResult>> GetSourcesAsync(SourceListRequest request, CancellationToken cancellationToken)

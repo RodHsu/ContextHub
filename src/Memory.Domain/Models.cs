@@ -147,7 +147,8 @@ public enum MaintenanceRunType
     RetrievalTelemetryRetention,
     MaintenanceMode,
     VacuumFullReclaim,
-    DomainOwnerRepair
+    DomainOwnerRepair,
+    MemoryDataRetention
 }
 
 public enum MaintenanceRunStatus

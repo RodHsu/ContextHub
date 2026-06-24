@@ -93,6 +93,84 @@
     </section>
 
     <section class="panel detail-panel">
+        <div class="panel-heading-row">
+            <div>
+                <div class="panel-title">Memory Retention</div>
+                <div class="panel-heading-meta panel-heading-meta-left">每日排程只產生分類清單；刪除需人工或 agent 明確觸發。</div>
+            </div>
+            <span class="status-badge neutral">@RetentionModeText</span>
+        </div>
+
+        <dl class="definition-grid">
+            <div><dt>最近執行</dt><dd>@if (_lastRetentionRun?.CompletedAt.HasValue == true) { <ClientLocalTime Value="_lastRetentionRun.CompletedAt.Value" /> } else { <span>-</span> }</dd></div>
+            <div><dt>Auto-delete</dt><dd>@DashboardFormatting.Integer(LastRetentionAutoDeleteCount)</dd></div>
+            <div><dt>Review</dt><dd>@DashboardFormatting.Integer(LastRetentionReviewCount)</dd></div>
+            <div><dt>狀態</dt><dd>@(_lastRetentionRun?.Status.ToString() ?? "-")</dd></div>
+        </dl>
+
+        <div class="detail-actions">
+            <button class="ghost-button" @onclick="ClassifyRetentionAsync" disabled="@RetentionActionDisabled">產生清單</button>
+            <button class="ghost-button" @onclick="PreviewRetentionDeleteAsync" disabled="@RetentionActionDisabled">預覽刪除</button>
+            <button class="primary-button" @onclick="ApplyRetentionDeleteAsync" disabled="@(!CanApplyRetentionDelete)">確認套用 Auto-delete</button>
+            <button class="ghost-button" @onclick="CopyRetentionResultAsync" disabled="@(_retentionResult is null)">複製結果</button>
+        </div>
+
+        @if (_retentionResult is not null)
+        {
+            <div class="subpanel-title">目前結果</div>
+            <dl class="definition-grid">
+                <div><dt>模式</dt><dd>@_retentionResult.Mode</dd></div>
+                <div><dt>可自動刪除</dt><dd>@DashboardFormatting.Integer(_retentionResult.AutoDeleteCandidateCount)</dd></div>
+                <div><dt>需審核</dt><dd>@DashboardFormatting.Integer(_retentionResult.ReviewCandidateCount)</dd></div>
+                <div><dt>已刪除 items</dt><dd>@DashboardFormatting.Integer(_retentionResult.DeletedMemoryItems)</dd></div>
+            </dl>
+
+            @if (_retentionResult.BlockedReasons.Count > 0)
+            {
+                <div class="compact-chip-row">
+                    @foreach (var reason in _retentionResult.BlockedReasons)
+                    {
+                        <span class="status-badge warn">@reason</span>
+                    }
+                </div>
+            }
+
+            <div class="table-scroll-shell">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>類別</th>
+                            <th>記憶</th>
+                            <th>訊號</th>
+                            <th>建議</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var candidate in _retentionResult.AutoDeleteCandidates.Take(5))
+                        {
+                            <tr>
+                                <td><span class="status-badge bad">Auto-delete</span></td>
+                                <td class="truncate-cell" title="@candidate.MemoryId.ToString("D")">@candidate.Title</td>
+                                <td>@CandidateSignalText(candidate)</td>
+                                <td>@candidate.RecommendedAction</td>
+                            </tr>
+                        }
+                        @foreach (var candidate in _retentionResult.ReviewCandidates.Take(5))
+                        {
+                            <tr>
+                                <td><span class="status-badge warn">Review</span></td>
+                                <td class="truncate-cell" title="@candidate.MemoryId.ToString("D")">@candidate.Title</td>
+                                <td>@CandidateSignalText(candidate)</td>
+                                <td>@candidate.RecommendedAction</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+
+    <section class="panel detail-panel">
         <div class="panel-title">工作篩選</div>
         <div class="filter-grid">
             <select @bind="_status">
@@ -220,14 +298,25 @@
     private long _messageSequence;
     private PagedResult<JobListItemResult>? _jobs;
     private MaintenanceStatusResult? _maintenance;
+    private IReadOnlyList<MaintenanceRunResult> _maintenanceRuns = [];
+    private MaintenanceRunResult? _lastRetentionRun;
+    private MemoryDataRetentionRunResult? _retentionResult;
     private JobListItemResult? _selectedJob;
     private bool _loading;
     private bool _maintenanceBusy;
+    private bool _retentionBusy;
     private DateTimeOffset? _lastUpdatedAt;
     private string? _loadError;
     private InstanceSettingsSnapshot? _settingsSnapshot;
     private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.JobsPollingSeconds ?? DashboardOptionsAccessor.Value.Polling.JobsSeconds;
     private bool MaintenanceActionDisabled => _loading || _maintenanceBusy;
+    private bool RetentionActionDisabled => _loading || _retentionBusy;
+    private bool CanApplyRetentionDelete => !RetentionActionDisabled &&
+        _retentionResult?.Mode == MemoryDataRetentionRunMode.PreviewDelete &&
+        _retentionResult.AutoDeleteCandidateCount > 0;
+    private string RetentionModeText => _retentionResult?.Mode.ToString() ?? "Classification";
+    private long LastRetentionAutoDeleteCount => _retentionResult?.AutoDeleteCandidateCount ?? ReadRetentionCount(_lastRetentionRun, "autoDeleteCandidateCount");
+    private long LastRetentionReviewCount => _retentionResult?.ReviewCandidateCount ?? ReadRetentionCount(_lastRetentionRun, "reviewCandidateCount");
 
     protected override async Task OnInitializedAsync()
     {
@@ -252,6 +341,11 @@
         try
         {
             _maintenance = await ApiClient.GetMaintenanceStatusAsync(_cts.Token);
+            _maintenanceRuns = await ApiClient.GetMaintenanceRunsAsync(25, _cts.Token);
+            _lastRetentionRun = _maintenanceRuns
+                .Where(x => x.MaintenanceType == MaintenanceRunType.MemoryDataRetention)
+                .OrderByDescending(x => x.StartedAt)
+                .FirstOrDefault();
             _jobs = await ApiClient.GetJobsAsync(
                 new JobListRequest(
                     Parse<MemoryJobStatus>(_status),
@@ -342,6 +436,52 @@
         }
     }
 
+    private async Task ClassifyRetentionAsync()
+        => await RunRetentionAsync(
+            "產生 retention 清單",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "dashboard",
+                Mode: MemoryDataRetentionRunMode.Classify,
+                IncludeCandidateDetails: true));
+
+    private async Task PreviewRetentionDeleteAsync()
+        => await RunRetentionAsync(
+            "預覽 auto-delete",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "dashboard",
+                Mode: MemoryDataRetentionRunMode.PreviewDelete,
+                IncludeCandidateDetails: true));
+
+    private async Task ApplyRetentionDeleteAsync()
+        => await RunRetentionAsync(
+            "套用 auto-delete",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "dashboard",
+                Mode: MemoryDataRetentionRunMode.ApplyAutoDelete,
+                IncludeCandidateDetails: true));
+
+    private async Task RunRetentionAsync(string actionName, MemoryDataRetentionRunRequest request)
+    {
+        _retentionBusy = true;
+        try
+        {
+            _retentionResult = await ApiClient.RunMemoryDataRetentionAsync(request, _cts.Token);
+            ShowMessage($"{actionName} 已完成：Auto-delete {_retentionResult.AutoDeleteCandidateCount}，Review {_retentionResult.ReviewCandidateCount}。");
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError(actionName, ex));
+        }
+        finally
+        {
+            _retentionBusy = false;
+        }
+    }
+
     private void SelectJob(JobListItemResult job)
         => _selectedJob = job;
 
@@ -360,6 +500,28 @@
         catch (JSException)
         {
             ShowMessage("複製失敗，請改用手動複製工作內容。");
+        }
+    }
+
+    private async Task CopyRetentionResultAsync()
+    {
+        if (_retentionResult is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(_retentionResult, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)
+            {
+                WriteIndented = true
+            });
+            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", json);
+            ShowMessage("已複製 retention 結果，可交給 agent 進一步判斷。");
+        }
+        catch (JSException)
+        {
+            ShowMessage("複製失敗，請改用手動複製 retention 結果。");
         }
     }
 
@@ -434,6 +596,29 @@
 
     private string SelectedClass(Guid id)
         => _selectedJob?.Id == id ? "selected-row" : string.Empty;
+
+    private static string CandidateSignalText(MemoryDataRetentionCandidateResult candidate)
+        => $"hit {DashboardFormatting.Integer(candidate.RecentHitCount)}、link {DashboardFormatting.Integer(candidate.LinkDegree)}、I {candidate.Importance:0.##}、C {candidate.Confidence:0.##}";
+
+    private static long ReadRetentionCount(MaintenanceRunResult? run, string propertyName)
+    {
+        if (run is null || string.IsNullOrWhiteSpace(run.ResultJson))
+        {
+            return 0;
+        }
+
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(run.ResultJson);
+            return document.RootElement.TryGetProperty(propertyName, out var value) && value.TryGetInt64(out var count)
+                ? count
+                : 0;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return 0;
+        }
+    }
 
     public ValueTask DisposeAsync()
     {

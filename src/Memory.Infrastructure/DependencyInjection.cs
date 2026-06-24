@@ -39,6 +39,7 @@ public static class DependencyInjection
         services.Configure<DatabaseLoggingOptions>(configuration.GetSection(DatabaseLoggingOptions.SectionName));
         services.PostConfigure<DatabaseLoggingOptions>(options => options.ServiceName = serviceName);
         services.Configure<TelemetryRetentionOptions>(configuration.GetSection(TelemetryRetentionOptions.SectionName));
+        services.Configure<MemoryDataRetentionOptions>(configuration.GetSection(MemoryDataRetentionOptions.SectionName));
         services.AddOptions<DockerRuntimeOptions>()
             .Configure(options =>
             {
@@ -77,6 +78,7 @@ public static class DependencyInjection
         services.AddScoped<IRetrievalTelemetryService, DatabaseRetrievalTelemetryService>();
         services.AddScoped<ITokenCountingService, TokenCountingService>();
         services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
+        services.AddScoped<IMemoryDataRetentionService, MemoryDataRetentionService>();
         services.AddScoped<IVacuumFullReclaimService, VacuumFullReclaimService>();
         services.AddScoped<IDomainOwnerRepairService, DomainOwnerRepairService>();
         services.AddScoped<IMaintenanceRunQueryService, MaintenanceRunQueryService>();

@@ -514,7 +514,8 @@ public sealed class InProcessMaintenanceRunRecoveryHostedService(
                 x.Status == MaintenanceRunStatus.Running &&
                 x.TriggeredBy != "scheduled" &&
                 (x.MaintenanceType == MaintenanceRunType.RetrievalTelemetryRetention ||
-                 x.MaintenanceType == MaintenanceRunType.VacuumFullReclaim) &&
+                 x.MaintenanceType == MaintenanceRunType.VacuumFullReclaim ||
+                 x.MaintenanceType == MaintenanceRunType.MemoryDataRetention) &&
                 x.StartedAt < now)
             .ToListAsync(cancellationToken);
 
@@ -2376,6 +2377,1096 @@ public sealed class DomainOwnerRepairService(
                 : fallback.Trim();
 }
 
+public sealed record MemoryDataRetentionPolicy(
+    int ArchivedItemsRetentionDays,
+    int HitWindowDays,
+    long MaxRecentHitCount,
+    int MaxLinkDegree,
+    decimal MaxImportance,
+    decimal MaxConfidence,
+    int PreviewLimit,
+    int BatchSize,
+    int DelayBetweenBatchesMs,
+    int CommandTimeoutSeconds,
+    TimeSpan MaxDuration,
+    bool AutoApplyEnabled)
+{
+    public static MemoryDataRetentionPolicy Create(
+        MemoryDataRetentionOptions options,
+        MemoryDataRetentionRunRequest request)
+        => new(
+            Math.Max(1, request.ArchivedItemsRetentionDays ?? options.ArchivedItemsRetentionDays),
+            Math.Max(1, request.HitWindowDays ?? options.HitWindowDays),
+            Math.Max(0, request.MaxRecentHitCount ?? options.MaxRecentHitCount),
+            Math.Max(0, request.MaxLinkDegree ?? options.MaxLinkDegree),
+            Math.Clamp(request.MaxImportance ?? options.MaxImportance, 0m, 1m),
+            Math.Clamp(request.MaxConfidence ?? options.MaxConfidence, 0m, 1m),
+            Math.Clamp(request.PreviewLimit ?? options.PreviewLimit, 1, 500),
+            Math.Clamp(request.BatchSize ?? options.BatchSize, 1, 100_000),
+            Math.Clamp(request.DelayBetweenBatchesMs ?? options.DelayBetweenBatchesMs, 0, 60_000),
+            Math.Clamp(request.CommandTimeoutSeconds ?? options.CommandTimeoutSeconds, 1, 3600),
+            TimeSpan.FromMinutes(Math.Clamp(request.MaxDurationMinutes ?? options.MaxDurationMinutes, 1, 30)),
+            options.AutoApplyEnabled);
+
+    public MemoryDataRetentionPolicyThresholds ToThresholds()
+        => new(
+            ArchivedItemsRetentionDays,
+            HitWindowDays,
+            MaxRecentHitCount,
+            MaxLinkDegree,
+            MaxImportance,
+            MaxConfidence,
+            PreviewLimit);
+}
+
+public sealed class MemoryDataRetentionService(
+    NpgsqlDataSource dataSource,
+    IDbContextFactory<MemoryDbContext> dbContextFactory,
+    IOptions<MemoryDataRetentionOptions> options,
+    ICacheVersionStore cacheStore,
+    TimeProvider timeProvider,
+    ILogger<MemoryDataRetentionService> logger) : IMemoryDataRetentionService
+{
+    private const long AdvisoryLockKey = 941223;
+    private const string MemoryStatusArchived = "Archived";
+    private static readonly string[] RetentionTables =
+    [
+        "memory_links",
+        "memory_item_revisions",
+        "memory_chunk_vectors",
+        "memory_item_chunks",
+        "memory_items"
+    ];
+    private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
+    private const string ClassificationCte = """
+        WITH recent_hits AS (
+            SELECT memory_id, COALESCE(SUM(hit_count), 0)::bigint AS recent_hit_count
+            FROM retrieval_telemetry_daily_hit_summaries
+            WHERE summary_date >= @hit_window_start
+            GROUP BY memory_id
+        ),
+        link_degrees AS (
+            SELECT memory_id, COUNT(*)::int AS link_degree
+            FROM (
+                SELECT from_id AS memory_id FROM memory_links
+                UNION ALL
+                SELECT to_id AS memory_id FROM memory_links
+            ) links
+            GROUP BY memory_id
+        ),
+        classified AS (
+            SELECT
+                mi.id,
+                mi.project_id,
+                mi.title,
+                mi.memory_type,
+                mi.status,
+                mi.importance,
+                mi.confidence,
+                mi.updated_at,
+                COALESCE(rh.recent_hit_count, 0)::bigint AS recent_hit_count,
+                COALESCE(ld.link_degree, 0)::int AS link_degree,
+                (mi.metadata_json::text ILIKE '%"missing":true%' AND mi.metadata_json::text ILIKE '%"sourceManaged":true%') AS source_managed_missing,
+                (
+                    EXISTS (
+                        SELECT 1
+                        FROM unnest(mi.tags) tag
+                        WHERE lower(tag) IN ('superseded', 'replaced')
+                    )
+                    OR mi.metadata_json::text ILIKE '%"supersededByMemoryId"%'
+                    OR mi.metadata_json::text ILIKE '%"replacedByMemoryId"%'
+                ) AS superseded_or_replaced,
+                mi.memory_type IN ('Decision', 'Preference') AS protected_type,
+                EXISTS (
+                    SELECT 1
+                    FROM unnest(mi.tags) tag
+                    WHERE lower(tag) IN ('keep', 'pinned')
+                ) AS protected_tag,
+                (
+                    mi.status = 'Active'
+                    AND mi.memory_type IN ('Fact', 'Episode', 'Artifact', 'Summary')
+                    AND mi.updated_at < @stale_cutoff
+                    AND mi.importance <= 0.65
+                    AND mi.confidence <= 0.80
+                ) AS stale_active,
+                (
+                    mi.status = 'Active'
+                    AND mi.memory_type = 'Episode'
+                    AND mi.updated_at < @episode_cutoff
+                    AND (mi.importance <= 0.55 OR mi.confidence <= 0.70)
+                ) AS low_signal_episode,
+                (
+                    mi.status = 'Archived'
+                    AND mi.updated_at < @cutoff
+                    AND mi.importance <= @max_importance
+                    AND mi.confidence <= @max_confidence
+                    AND COALESCE(rh.recent_hit_count, 0) <= @max_recent_hit_count
+                    AND COALESCE(ld.link_degree, 0) <= @max_link_degree
+                    AND mi.memory_type NOT IN ('Decision', 'Preference')
+                    AND NOT mi.is_read_only
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM unnest(mi.tags) tag
+                        WHERE lower(tag) IN ('keep', 'pinned')
+                    )
+                ) AS is_auto_delete,
+                mi.is_read_only
+            FROM memory_items mi
+            LEFT JOIN recent_hits rh ON rh.memory_id = mi.id
+            LEFT JOIN link_degrees ld ON ld.memory_id = mi.id
+            WHERE
+                (mi.status = 'Archived' AND mi.updated_at < @cutoff)
+                OR (
+                    mi.status = 'Active'
+                    AND (
+                        (
+                            mi.memory_type IN ('Fact', 'Episode', 'Artifact', 'Summary')
+                            AND mi.updated_at < @stale_cutoff
+                            AND mi.importance <= 0.65
+                            AND mi.confidence <= 0.80
+                        )
+                        OR (
+                            mi.memory_type = 'Episode'
+                            AND mi.updated_at < @episode_cutoff
+                            AND (mi.importance <= 0.55 OR mi.confidence <= 0.70)
+                        )
+                        OR (mi.metadata_json::text ILIKE '%"missing":true%' AND mi.metadata_json::text ILIKE '%"sourceManaged":true%')
+                        OR EXISTS (
+                            SELECT 1
+                            FROM unnest(mi.tags) tag
+                            WHERE lower(tag) IN ('superseded', 'replaced')
+                        )
+                        OR mi.metadata_json::text ILIKE '%"supersededByMemoryId"%'
+                        OR mi.metadata_json::text ILIKE '%"replacedByMemoryId"%'
+                    )
+                )
+        )
+        """;
+    private readonly MemoryDataRetentionOptions _options = options.Value;
+
+    public async Task<MemoryDataRetentionRunResult> RunAsync(string triggeredBy, CancellationToken cancellationToken)
+        => await RunAsync(new MemoryDataRetentionRunRequest(TriggeredBy: triggeredBy), triggeredBy, cancellationToken);
+
+    public async Task<MemoryDataRetentionRunResult> RunAsync(MemoryDataRetentionRunRequest request, string fallbackTriggeredBy, CancellationToken cancellationToken)
+    {
+        var policy = MemoryDataRetentionPolicy.Create(_options, request);
+        var mode = ResolveMode(request, policy);
+        var now = timeProvider.GetUtcNow();
+        var startedAt = now;
+        var cutoff = now.AddDays(-policy.ArchivedItemsRetentionDays);
+        var hitWindowStart = DateOnly.FromDateTime(now.AddDays(-policy.HitWindowDays).UtcDateTime);
+        var run = new MaintenanceRun
+        {
+            MaintenanceType = MaintenanceRunType.MemoryDataRetention,
+            Status = MaintenanceRunStatus.Running,
+            StartedAt = startedAt,
+            TriggeredBy = NormalizeTriggeredBy(request.TriggeredBy, fallbackTriggeredBy),
+            PolicyJson = JsonSerializer.Serialize(new
+            {
+                mode,
+                archivedItemsRetentionDays = policy.ArchivedItemsRetentionDays,
+                hitWindowDays = policy.HitWindowDays,
+                maxRecentHitCount = policy.MaxRecentHitCount,
+                maxLinkDegree = policy.MaxLinkDegree,
+                maxImportance = policy.MaxImportance,
+                maxConfidence = policy.MaxConfidence,
+                previewLimit = policy.PreviewLimit,
+                batchSize = policy.BatchSize,
+                delayBetweenBatchesMs = policy.DelayBetweenBatchesMs,
+                commandTimeoutSeconds = policy.CommandTimeoutSeconds,
+                maxDurationMinutes = policy.MaxDuration.TotalMinutes,
+                cutoffUtc = cutoff,
+                previewOnly = request.PreviewOnly,
+                autoApplyEnabled = policy.AutoApplyEnabled
+            }, SerializerOptions)
+        };
+
+        await using (var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken))
+        {
+            dbContext.MaintenanceRuns.Add(run);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var lockCommand = connection.CreateCommand();
+        lockCommand.CommandTimeout = policy.CommandTimeoutSeconds;
+        lockCommand.CommandText = "SELECT pg_try_advisory_lock(@lock_key);";
+        lockCommand.Parameters.Add(new NpgsqlParameter<long>("lock_key", AdvisoryLockKey));
+        var locked = (bool)(await lockCommand.ExecuteScalarAsync(cancellationToken) ?? false);
+        if (!locked)
+        {
+            var completedAt = timeProvider.GetUtcNow();
+            var emptyClassification = MemoryDataRetentionClassification.Empty(policy);
+            var skippedJson = BuildResultJson(startedAt, completedAt, cutoff, 0, 0, 0, 0, 0, [], mode, emptyClassification, request.PreviewOnly, policy, true, "anotherRunActive");
+            await UpdateRunAsync(run.Id, MaintenanceRunStatus.Completed, completedAt, skippedJson, string.Empty, cancellationToken);
+            return BuildRunResult(run.Id, cutoff, 0, 0, 0, 0, 0, [], request.PreviewOnly, mode, emptyClassification, startedAt, completedAt, skippedJson);
+        }
+
+        long deletedItems = 0;
+        long deletedLinks = 0;
+        long deletedRevisions = 0;
+        long deletedChunks = 0;
+        long deletedVectors = 0;
+        string? stoppedReason = null;
+        MemoryDataRetentionClassification classification = MemoryDataRetentionClassification.Empty(policy);
+        IReadOnlyList<string> affectedProjectIds = [];
+
+        try
+        {
+            classification = await ClassifyAsync(connection, cutoff, hitWindowStart, policy, request.IncludeCandidateDetails, cancellationToken);
+            affectedProjectIds = await ReadAffectedProjectIdsAsync(connection, cutoff, hitWindowStart, policy, cancellationToken);
+
+            if (mode == MemoryDataRetentionRunMode.PreviewDelete)
+            {
+                var preview = await PreviewAsync(connection, cutoff, hitWindowStart, policy, cancellationToken);
+                deletedItems = preview.DeletedItems;
+                deletedLinks = preview.DeletedLinks;
+                deletedRevisions = preview.DeletedRevisions;
+                deletedChunks = preview.DeletedChunks;
+                deletedVectors = preview.DeletedVectors;
+            }
+            else if (mode == MemoryDataRetentionRunMode.ApplyAutoDelete)
+            {
+                while (true)
+                {
+                    if (ShouldStopForMaxDuration(startedAt, timeProvider, policy, out stoppedReason))
+                    {
+                        break;
+                    }
+
+                    var batch = await DeleteBatchAsync(connection, cutoff, hitWindowStart, policy, cancellationToken);
+                    deletedItems += batch.DeletedItems;
+                    deletedLinks += batch.DeletedLinks;
+                    deletedRevisions += batch.DeletedRevisions;
+                    deletedChunks += batch.DeletedChunks;
+                    deletedVectors += batch.DeletedVectors;
+
+                    if (batch.DeletedItems == 0)
+                    {
+                        break;
+                    }
+
+                    await UpdateRunAsync(
+                        run.Id,
+                        MaintenanceRunStatus.Running,
+                        null,
+                        BuildResultJson(
+                            startedAt,
+                            null,
+                            cutoff,
+                            deletedItems,
+                            deletedLinks,
+                            deletedRevisions,
+                            deletedChunks,
+                            deletedVectors,
+                            affectedProjectIds,
+                            mode,
+                            classification,
+                            request.PreviewOnly,
+                            policy,
+                            false,
+                            stoppedReason,
+                            completed: false),
+                        string.Empty,
+                        cancellationToken);
+
+                    if (policy.DelayBetweenBatchesMs > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(policy.DelayBetweenBatchesMs), cancellationToken);
+                    }
+                }
+
+                if (deletedItems > 0)
+                {
+                    await BumpCacheVersionsAsync(affectedProjectIds, cancellationToken);
+                }
+            }
+
+            var completedAt = timeProvider.GetUtcNow();
+            var completedJson = BuildResultJson(
+                startedAt,
+                completedAt,
+                cutoff,
+                deletedItems,
+                deletedLinks,
+                deletedRevisions,
+                deletedChunks,
+                deletedVectors,
+                affectedProjectIds,
+                mode,
+                classification,
+                request.PreviewOnly,
+                policy,
+                false,
+                stoppedReason,
+                completed: true);
+            await UpdateRunAsync(run.Id, MaintenanceRunStatus.Completed, completedAt, completedJson, string.Empty, cancellationToken);
+            return BuildRunResult(run.Id, cutoff, deletedItems, deletedLinks, deletedRevisions, deletedChunks, deletedVectors, affectedProjectIds, request.PreviewOnly, mode, classification, startedAt, completedAt, completedJson);
+        }
+        catch (Exception ex)
+        {
+            var completedAt = timeProvider.GetUtcNow();
+            logger.LogError(ex, "Memory data retention run {MaintenanceRunId} failed.", run.Id);
+            var failedJson = BuildResultJson(
+                startedAt,
+                completedAt,
+                cutoff,
+                deletedItems,
+                deletedLinks,
+                deletedRevisions,
+                deletedChunks,
+                deletedVectors,
+                affectedProjectIds,
+                mode,
+                classification,
+                request.PreviewOnly,
+                policy,
+                false,
+                stoppedReason,
+                completed: true,
+                error: ex.Message);
+            await UpdateRunAsync(run.Id, MaintenanceRunStatus.Failed, completedAt, failedJson, ex.Message, CancellationToken.None);
+            throw;
+        }
+        finally
+        {
+            await using var unlockCommand = connection.CreateCommand();
+            unlockCommand.CommandTimeout = policy.CommandTimeoutSeconds;
+            unlockCommand.CommandText = "SELECT pg_advisory_unlock(@lock_key);";
+            unlockCommand.Parameters.Add(new NpgsqlParameter<long>("lock_key", AdvisoryLockKey));
+            await unlockCommand.ExecuteNonQueryAsync(CancellationToken.None);
+        }
+    }
+
+    private async Task<MemoryDataRetentionBatchResult> DeleteBatchAsync(
+        NpgsqlConnection connection,
+        DateTimeOffset cutoffUtc,
+        DateOnly hitWindowStart,
+        MemoryDataRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            WITH recent_hits AS (
+                SELECT memory_id, COALESCE(SUM(hit_count), 0)::bigint AS recent_hit_count
+                FROM retrieval_telemetry_daily_hit_summaries
+                WHERE summary_date >= @hit_window_start
+                GROUP BY memory_id
+            ),
+            link_degrees AS (
+                SELECT memory_id, COUNT(*)::int AS link_degree
+                FROM (
+                    SELECT from_id AS memory_id FROM memory_links
+                    UNION ALL
+                    SELECT to_id AS memory_id FROM memory_links
+                ) links
+                GROUP BY memory_id
+            ),
+            target AS (
+                SELECT mi.id
+                FROM memory_items mi
+                LEFT JOIN recent_hits rh ON rh.memory_id = mi.id
+                LEFT JOIN link_degrees ld ON ld.memory_id = mi.id
+                WHERE mi.status = @status
+                  AND mi.updated_at < @cutoff
+                  AND mi.importance <= @max_importance
+                  AND mi.confidence <= @max_confidence
+                  AND COALESCE(rh.recent_hit_count, 0) <= @max_recent_hit_count
+                  AND COALESCE(ld.link_degree, 0) <= @max_link_degree
+                  AND mi.memory_type NOT IN ('Decision', 'Preference')
+                  AND NOT mi.is_read_only
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM unnest(mi.tags) tag
+                      WHERE lower(tag) IN ('keep', 'pinned')
+                  )
+                ORDER BY mi.updated_at ASC, mi.id ASC
+                LIMIT @batch_size
+            ),
+            deleted_links AS (
+                DELETE FROM memory_links ml
+                USING target
+                WHERE ml.from_id = target.id
+                   OR ml.to_id = target.id
+                RETURNING 1
+            ),
+            deleted_revisions AS (
+                DELETE FROM memory_item_revisions mir
+                USING target
+                WHERE mir.memory_item_id = target.id
+                RETURNING 1
+            ),
+            target_chunks AS (
+                SELECT mic.id
+                FROM memory_item_chunks mic
+                JOIN target ON target.id = mic.memory_item_id
+            ),
+            deleted_vectors AS (
+                DELETE FROM memory_chunk_vectors mcv
+                USING target_chunks
+                WHERE mcv.chunk_id = target_chunks.id
+                RETURNING 1
+            ),
+            deleted_chunks AS (
+                DELETE FROM memory_item_chunks mic
+                USING target
+                WHERE mic.memory_item_id = target.id
+                RETURNING 1
+            ),
+            deleted_items AS (
+                DELETE FROM memory_items mi
+                USING target
+                WHERE mi.id = target.id
+                RETURNING 1
+            )
+            SELECT
+                (SELECT COUNT(*)::bigint FROM deleted_items) AS deleted_items,
+                (SELECT COUNT(*)::bigint FROM deleted_links) AS deleted_links,
+                (SELECT COUNT(*)::bigint FROM deleted_revisions) AS deleted_revisions,
+                (SELECT COUNT(*)::bigint FROM deleted_chunks) AS deleted_chunks,
+                (SELECT COUNT(*)::bigint FROM deleted_vectors) AS deleted_vectors;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<string>("status", MemoryStatusArchived));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoffUtc));
+        AddPolicyParameters(command, policy, hitWindowStart);
+        command.Parameters.Add(new NpgsqlParameter<int>("batch_size", policy.BatchSize));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new MemoryDataRetentionBatchResult(0, 0, 0, 0, 0);
+        }
+
+        return new MemoryDataRetentionBatchResult(
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetInt64(3),
+            reader.GetInt64(4));
+    }
+
+    private async Task<MemoryDataRetentionBatchResult> PreviewAsync(
+        NpgsqlConnection connection,
+        DateTimeOffset cutoffUtc,
+        DateOnly hitWindowStart,
+        MemoryDataRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            WITH recent_hits AS (
+                SELECT memory_id, COALESCE(SUM(hit_count), 0)::bigint AS recent_hit_count
+                FROM retrieval_telemetry_daily_hit_summaries
+                WHERE summary_date >= @hit_window_start
+                GROUP BY memory_id
+            ),
+            link_degrees AS (
+                SELECT memory_id, COUNT(*)::int AS link_degree
+                FROM (
+                    SELECT from_id AS memory_id FROM memory_links
+                    UNION ALL
+                    SELECT to_id AS memory_id FROM memory_links
+                ) links
+                GROUP BY memory_id
+            ),
+            target AS (
+                SELECT mi.id
+                FROM memory_items mi
+                LEFT JOIN recent_hits rh ON rh.memory_id = mi.id
+                LEFT JOIN link_degrees ld ON ld.memory_id = mi.id
+                WHERE mi.status = @status
+                  AND mi.updated_at < @cutoff
+                  AND mi.importance <= @max_importance
+                  AND mi.confidence <= @max_confidence
+                  AND COALESCE(rh.recent_hit_count, 0) <= @max_recent_hit_count
+                  AND COALESCE(ld.link_degree, 0) <= @max_link_degree
+                  AND mi.memory_type NOT IN ('Decision', 'Preference')
+                  AND NOT mi.is_read_only
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM unnest(mi.tags) tag
+                      WHERE lower(tag) IN ('keep', 'pinned')
+                  )
+            ),
+            target_chunks AS (
+                SELECT mic.id
+                FROM memory_item_chunks mic
+                JOIN target ON target.id = mic.memory_item_id
+            )
+            SELECT
+                (SELECT COUNT(*)::bigint FROM target) AS deleted_items,
+                (SELECT COUNT(*)::bigint FROM memory_links ml JOIN target ON ml.from_id = target.id OR ml.to_id = target.id) AS deleted_links,
+                (SELECT COUNT(*)::bigint FROM memory_item_revisions mir JOIN target ON mir.memory_item_id = target.id) AS deleted_revisions,
+                (SELECT COUNT(*)::bigint FROM target_chunks) AS deleted_chunks,
+                (SELECT COUNT(*)::bigint FROM memory_chunk_vectors mcv JOIN target_chunks ON target_chunks.id = mcv.chunk_id) AS deleted_vectors;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<string>("status", MemoryStatusArchived));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoffUtc));
+        AddPolicyParameters(command, policy, hitWindowStart);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new MemoryDataRetentionBatchResult(0, 0, 0, 0, 0);
+        }
+
+        return new MemoryDataRetentionBatchResult(
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetInt64(3),
+            reader.GetInt64(4));
+    }
+
+    private async Task<IReadOnlyList<string>> ReadAffectedProjectIdsAsync(
+        NpgsqlConnection connection,
+        DateTimeOffset cutoffUtc,
+        DateOnly hitWindowStart,
+        MemoryDataRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            WITH recent_hits AS (
+                SELECT memory_id, COALESCE(SUM(hit_count), 0)::bigint AS recent_hit_count
+                FROM retrieval_telemetry_daily_hit_summaries
+                WHERE summary_date >= @hit_window_start
+                GROUP BY memory_id
+            ),
+            link_degrees AS (
+                SELECT memory_id, COUNT(*)::int AS link_degree
+                FROM (
+                    SELECT from_id AS memory_id FROM memory_links
+                    UNION ALL
+                    SELECT to_id AS memory_id FROM memory_links
+                ) links
+                GROUP BY memory_id
+            )
+            SELECT DISTINCT mi.project_id
+            FROM memory_items mi
+            LEFT JOIN recent_hits rh ON rh.memory_id = mi.id
+            LEFT JOIN link_degrees ld ON ld.memory_id = mi.id
+            WHERE mi.status = @status
+              AND mi.updated_at < @cutoff
+              AND mi.importance <= @max_importance
+              AND mi.confidence <= @max_confidence
+              AND COALESCE(rh.recent_hit_count, 0) <= @max_recent_hit_count
+              AND COALESCE(ld.link_degree, 0) <= @max_link_degree
+              AND mi.memory_type NOT IN ('Decision', 'Preference')
+              AND NOT mi.is_read_only
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM unnest(mi.tags) tag
+                  WHERE lower(tag) IN ('keep', 'pinned')
+              )
+            ORDER BY project_id ASC;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<string>("status", MemoryStatusArchived));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoffUtc));
+        AddPolicyParameters(command, policy, hitWindowStart);
+
+        var projectIds = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            projectIds.Add(ProjectContext.Normalize(reader.GetString(0)));
+        }
+
+        return projectIds;
+    }
+
+    private async Task<MemoryDataRetentionClassification> ClassifyAsync(
+        NpgsqlConnection connection,
+        DateTimeOffset cutoffUtc,
+        DateOnly hitWindowStart,
+        MemoryDataRetentionPolicy policy,
+        bool includeCandidateDetails,
+        CancellationToken cancellationToken)
+    {
+        long autoDeleteCount;
+        long reviewCount;
+
+        await using (var countCommand = connection.CreateCommand())
+        {
+            countCommand.CommandTimeout = policy.CommandTimeoutSeconds;
+            countCommand.CommandText = ClassificationCte + """
+
+                SELECT
+                    COUNT(*) FILTER (WHERE is_auto_delete)::bigint AS auto_delete_count,
+                    COUNT(*) FILTER (WHERE NOT is_auto_delete)::bigint AS review_count
+                FROM classified;
+                """;
+            AddClassificationParameters(countCommand, cutoffUtc, hitWindowStart, policy);
+
+            await using var reader = await countCommand.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return MemoryDataRetentionClassification.Empty(policy);
+            }
+
+            autoDeleteCount = reader.GetInt64(0);
+            reviewCount = reader.GetInt64(1);
+        }
+
+        var autoDeleteCandidates = includeCandidateDetails
+            ? await ReadCandidatesAsync(connection, cutoffUtc, hitWindowStart, policy, true, cancellationToken)
+            : [];
+        var reviewCandidates = includeCandidateDetails
+            ? await ReadCandidatesAsync(connection, cutoffUtc, hitWindowStart, policy, false, cancellationToken)
+            : [];
+
+        var reasonCodes = autoDeleteCandidates
+            .Concat(reviewCandidates)
+            .SelectMany(x => x.ReasonCodes)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var blockedReasons = reviewCandidates
+            .SelectMany(x => x.BlockedReasons)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return new MemoryDataRetentionClassification(
+            policy.ToThresholds(),
+            autoDeleteCount,
+            reviewCount,
+            autoDeleteCandidates,
+            reviewCandidates,
+            reasonCodes,
+            blockedReasons);
+    }
+
+    private async Task<IReadOnlyList<MemoryDataRetentionCandidateResult>> ReadCandidatesAsync(
+        NpgsqlConnection connection,
+        DateTimeOffset cutoffUtc,
+        DateOnly hitWindowStart,
+        MemoryDataRetentionPolicy policy,
+        bool autoDelete,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = ClassificationCte + """
+
+            SELECT
+                id,
+                project_id,
+                title,
+                memory_type,
+                status,
+                importance,
+                confidence,
+                updated_at,
+                recent_hit_count,
+                link_degree,
+                is_auto_delete,
+                source_managed_missing,
+                superseded_or_replaced,
+                protected_type,
+                is_read_only,
+                protected_tag,
+                stale_active,
+                low_signal_episode
+            FROM classified
+            WHERE is_auto_delete = @is_auto_delete
+            ORDER BY updated_at ASC, id ASC
+            LIMIT @preview_limit;
+            """;
+        AddClassificationParameters(command, cutoffUtc, hitWindowStart, policy);
+        command.Parameters.Add(new NpgsqlParameter<bool>("is_auto_delete", autoDelete));
+        command.Parameters.Add(new NpgsqlParameter<int>("preview_limit", policy.PreviewLimit));
+
+        var candidates = new List<MemoryDataRetentionCandidateResult>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var row = new MemoryDataRetentionCandidateRow(
+                reader.GetGuid(0),
+                ProjectContext.Normalize(reader.GetString(1)),
+                reader.GetString(2),
+                ParseEnum<MemoryType>(reader.GetString(3), MemoryType.Episode),
+                ParseEnum<MemoryStatus>(reader.GetString(4), MemoryStatus.Active),
+                reader.GetDecimal(5),
+                reader.GetDecimal(6),
+                reader.GetFieldValue<DateTimeOffset>(7),
+                reader.GetInt64(8),
+                reader.GetInt32(9),
+                reader.GetBoolean(10),
+                reader.GetBoolean(11),
+                reader.GetBoolean(12),
+                reader.GetBoolean(13),
+                reader.GetBoolean(14),
+                reader.GetBoolean(15),
+                reader.GetBoolean(16),
+                reader.GetBoolean(17));
+            candidates.Add(MapCandidate(row, policy));
+        }
+
+        return candidates;
+    }
+
+    private async Task BumpCacheVersionsAsync(IReadOnlyList<string> affectedProjectIds, CancellationToken cancellationToken)
+    {
+        await cacheStore.IncrementAsync(cancellationToken);
+        foreach (var projectId in affectedProjectIds)
+        {
+            await cacheStore.IncrementProjectAsync(projectId, cancellationToken);
+        }
+    }
+
+    private static string BuildResultJson(
+        DateTimeOffset startedAtUtc,
+        DateTimeOffset? completedAtUtc,
+        DateTimeOffset cutoffUtc,
+        long deletedItems,
+        long deletedLinks,
+        long deletedRevisions,
+        long deletedChunks,
+        long deletedVectors,
+        IReadOnlyList<string> affectedProjectIds,
+        MemoryDataRetentionRunMode mode,
+        MemoryDataRetentionClassification classification,
+        bool previewOnly,
+        MemoryDataRetentionPolicy policy,
+        bool skipped,
+        string? stoppedReason,
+        bool completed = true,
+        string error = "")
+        => JsonSerializer.Serialize(new
+        {
+            mode,
+            archivedItemsRetentionDays = policy.ArchivedItemsRetentionDays,
+            hitWindowDays = policy.HitWindowDays,
+            maxRecentHitCount = policy.MaxRecentHitCount,
+            maxLinkDegree = policy.MaxLinkDegree,
+            maxImportance = policy.MaxImportance,
+            maxConfidence = policy.MaxConfidence,
+            previewLimit = policy.PreviewLimit,
+            cutoffUtc,
+            skipped,
+            completed,
+            batchSize = policy.BatchSize,
+            delayBetweenBatchesMs = policy.DelayBetweenBatchesMs,
+            commandTimeoutSeconds = policy.CommandTimeoutSeconds,
+            maxDurationMinutes = policy.MaxDuration.TotalMinutes,
+            deletedItems,
+            deletedLinks,
+            deletedRevisions,
+            deletedChunks,
+            deletedVectors,
+            affectedProjectIds,
+            previewOnly,
+            autoDeleteCandidateCount = classification.AutoDeleteCandidateCount,
+            reviewCandidateCount = classification.ReviewCandidateCount,
+            autoDeleteCandidates = classification.AutoDeleteCandidates,
+            reviewCandidates = classification.ReviewCandidates,
+            reasonCodes = classification.ReasonCodes,
+            blockedReasons = classification.BlockedReasons,
+            policyThresholds = classification.PolicyThresholds,
+            startedAtUtc,
+            completedAtUtc,
+            durationMs = completedAtUtc.HasValue
+                ? (double?)(completedAtUtc.Value - startedAtUtc).TotalMilliseconds
+                : null,
+            stoppedReason,
+            error = string.IsNullOrWhiteSpace(error) ? null : error,
+            retentionTables = RetentionTables
+        }, SerializerOptions);
+
+    private static MemoryDataRetentionRunMode ResolveMode(MemoryDataRetentionRunRequest request, MemoryDataRetentionPolicy policy)
+    {
+        if (request.PreviewOnly)
+        {
+            return MemoryDataRetentionRunMode.PreviewDelete;
+        }
+
+        if (request.Mode == MemoryDataRetentionRunMode.ApplyAutoDelete)
+        {
+            return MemoryDataRetentionRunMode.ApplyAutoDelete;
+        }
+
+        if (request.Mode == MemoryDataRetentionRunMode.PreviewDelete)
+        {
+            return MemoryDataRetentionRunMode.PreviewDelete;
+        }
+
+        return policy.AutoApplyEnabled
+            ? MemoryDataRetentionRunMode.ApplyAutoDelete
+            : MemoryDataRetentionRunMode.Classify;
+    }
+
+    private static void AddPolicyParameters(NpgsqlCommand command, MemoryDataRetentionPolicy policy, DateOnly hitWindowStart)
+    {
+        command.Parameters.Add(new NpgsqlParameter<DateOnly>("hit_window_start", hitWindowStart));
+        command.Parameters.Add(new NpgsqlParameter<long>("max_recent_hit_count", policy.MaxRecentHitCount));
+        command.Parameters.Add(new NpgsqlParameter<int>("max_link_degree", policy.MaxLinkDegree));
+        command.Parameters.Add(new NpgsqlParameter<decimal>("max_importance", policy.MaxImportance));
+        command.Parameters.Add(new NpgsqlParameter<decimal>("max_confidence", policy.MaxConfidence));
+    }
+
+    private static void AddClassificationParameters(
+        NpgsqlCommand command,
+        DateTimeOffset cutoffUtc,
+        DateOnly hitWindowStart,
+        MemoryDataRetentionPolicy policy)
+    {
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoffUtc));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("stale_cutoff", cutoffUtc.AddDays(policy.ArchivedItemsRetentionDays - 60)));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("episode_cutoff", cutoffUtc.AddDays(policy.ArchivedItemsRetentionDays - 30)));
+        AddPolicyParameters(command, policy, hitWindowStart);
+    }
+
+    private static MemoryDataRetentionCandidateResult MapCandidate(MemoryDataRetentionCandidateRow row, MemoryDataRetentionPolicy policy)
+    {
+        var reasonCodes = new List<string>();
+        var blockedReasons = new List<string>();
+
+        if (row.Status == MemoryStatus.Archived)
+        {
+            reasonCodes.Add("archivedRetentionExpired");
+        }
+
+        if (row.Importance <= policy.MaxImportance)
+        {
+            reasonCodes.Add("lowImportance");
+        }
+        else
+        {
+            blockedReasons.Add("highImportance");
+        }
+
+        if (row.Confidence <= policy.MaxConfidence)
+        {
+            reasonCodes.Add("lowConfidence");
+        }
+        else
+        {
+            blockedReasons.Add("highConfidence");
+        }
+
+        if (row.RecentHitCount <= policy.MaxRecentHitCount)
+        {
+            reasonCodes.Add("lowRecentHits");
+        }
+        else
+        {
+            blockedReasons.Add("recentHits");
+        }
+
+        if (row.LinkDegree <= policy.MaxLinkDegree)
+        {
+            reasonCodes.Add("lowLinkDegree");
+        }
+        else
+        {
+            blockedReasons.Add("linkedMemory");
+        }
+
+        if (row.SourceManagedMissing)
+        {
+            reasonCodes.Add("sourceManagedMissing");
+        }
+
+        if (row.SupersededOrReplaced)
+        {
+            reasonCodes.Add("supersededOrReplaced");
+        }
+
+        if (row.StaleActive)
+        {
+            reasonCodes.Add("staleActive");
+            blockedReasons.Add("activeNeedsReview");
+        }
+
+        if (row.LowSignalEpisode)
+        {
+            reasonCodes.Add("lowSignalEpisode");
+            blockedReasons.Add("activeNeedsReview");
+        }
+
+        if (row.ProtectedType)
+        {
+            blockedReasons.Add("protectedType");
+        }
+
+        if (row.IsReadOnly)
+        {
+            blockedReasons.Add("readOnly");
+        }
+
+        if (row.ProtectedTag)
+        {
+            blockedReasons.Add("protectedTag");
+        }
+
+        var action = ResolveRecommendedAction(row);
+        return new MemoryDataRetentionCandidateResult(
+            row.MemoryId,
+            row.ProjectId,
+            row.Title,
+            row.MemoryType,
+            row.Status,
+            row.Importance,
+            row.Confidence,
+            row.UpdatedAtUtc,
+            row.RecentHitCount,
+            row.LinkDegree,
+            action,
+            reasonCodes.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+            blockedReasons.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+    }
+
+    private static MemoryRetentionRecommendedAction ResolveRecommendedAction(MemoryDataRetentionCandidateRow row)
+    {
+        if (row.IsAutoDelete)
+        {
+            return MemoryRetentionRecommendedAction.Delete;
+        }
+
+        if (row.ProtectedType || row.IsReadOnly || row.ProtectedTag)
+        {
+            return MemoryRetentionRecommendedAction.Keep;
+        }
+
+        if (row.Status == MemoryStatus.Active && row.SupersededOrReplaced)
+        {
+            return MemoryRetentionRecommendedAction.Merge;
+        }
+
+        if (row.Status == MemoryStatus.Active && (row.StaleActive || row.LowSignalEpisode || row.SourceManagedMissing))
+        {
+            return MemoryRetentionRecommendedAction.Archive;
+        }
+
+        return MemoryRetentionRecommendedAction.NeedsReview;
+    }
+
+    private static TEnum ParseEnum<TEnum>(string value, TEnum fallback)
+        where TEnum : struct, Enum
+        => Enum.TryParse<TEnum>(value, true, out var parsed) ? parsed : fallback;
+
+    private static MemoryDataRetentionRunResult BuildRunResult(
+        Guid runId,
+        DateTimeOffset cutoffUtc,
+        long deletedItems,
+        long deletedLinks,
+        long deletedRevisions,
+        long deletedChunks,
+        long deletedVectors,
+        IReadOnlyList<string> affectedProjectIds,
+        bool previewOnly,
+        MemoryDataRetentionRunMode mode,
+        MemoryDataRetentionClassification classification,
+        DateTimeOffset startedAtUtc,
+        DateTimeOffset completedAtUtc,
+        string resultJson)
+        => new(
+            runId,
+            cutoffUtc,
+            deletedItems,
+            deletedLinks,
+            deletedRevisions,
+            deletedChunks,
+            deletedVectors,
+            affectedProjectIds,
+            previewOnly,
+            mode,
+            classification.PolicyThresholds,
+            classification.AutoDeleteCandidateCount,
+            classification.ReviewCandidateCount,
+            classification.AutoDeleteCandidates,
+            classification.ReviewCandidates,
+            classification.ReasonCodes,
+            classification.BlockedReasons,
+            startedAtUtc,
+            completedAtUtc,
+            resultJson);
+
+    private async Task UpdateRunAsync(
+        Guid runId,
+        MaintenanceRunStatus status,
+        DateTimeOffset? completedAt,
+        string resultJson,
+        string error,
+        CancellationToken cancellationToken)
+    {
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var run = await dbContext.MaintenanceRuns.FirstAsync(x => x.Id == runId, cancellationToken);
+        run.Status = status;
+        run.CompletedAt = completedAt;
+        run.ResultJson = resultJson;
+        run.Error = error;
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private static bool ShouldStopForMaxDuration(
+        DateTimeOffset startedAt,
+        TimeProvider timeProvider,
+        MemoryDataRetentionPolicy policy,
+        out string? stoppedReason)
+    {
+        if ((timeProvider.GetUtcNow() - startedAt) >= policy.MaxDuration)
+        {
+            stoppedReason = "maxDurationReached";
+            return true;
+        }
+
+        stoppedReason = null;
+        return false;
+    }
+
+    private static string NormalizeTriggeredBy(string? requested, string fallback)
+        => requested?.Trim() is { Length: > 0 } value
+            ? value
+            : string.IsNullOrWhiteSpace(fallback)
+                ? "system"
+                : fallback.Trim();
+
+    private sealed record MemoryDataRetentionClassification(
+        MemoryDataRetentionPolicyThresholds PolicyThresholds,
+        long AutoDeleteCandidateCount,
+        long ReviewCandidateCount,
+        IReadOnlyList<MemoryDataRetentionCandidateResult> AutoDeleteCandidates,
+        IReadOnlyList<MemoryDataRetentionCandidateResult> ReviewCandidates,
+        IReadOnlyList<string> ReasonCodes,
+        IReadOnlyList<string> BlockedReasons)
+    {
+        public static MemoryDataRetentionClassification Empty(MemoryDataRetentionPolicy policy)
+            => new(policy.ToThresholds(), 0, 0, [], [], [], []);
+    }
+
+    private sealed record MemoryDataRetentionCandidateRow(
+        Guid MemoryId,
+        string ProjectId,
+        string Title,
+        MemoryType MemoryType,
+        MemoryStatus Status,
+        decimal Importance,
+        decimal Confidence,
+        DateTimeOffset UpdatedAtUtc,
+        long RecentHitCount,
+        int LinkDegree,
+        bool IsAutoDelete,
+        bool SourceManagedMissing,
+        bool SupersededOrReplaced,
+        bool ProtectedType,
+        bool IsReadOnly,
+        bool ProtectedTag,
+        bool StaleActive,
+        bool LowSignalEpisode);
+
+    private sealed record MemoryDataRetentionBatchResult(
+        long DeletedItems,
+        long DeletedLinks,
+        long DeletedRevisions,
+        long DeletedChunks,
+        long DeletedVectors);
+}
+
 public sealed class TelemetryRetentionHostedService(
     IServiceProvider serviceProvider,
     IOptions<TelemetryRetentionOptions> options,
@@ -2422,6 +3513,81 @@ public sealed class TelemetryRetentionHostedService(
         var runAt = TimeOnly.TryParse(_options.RunAtLocalTime, out var parsed)
             ? parsed
             : new TimeOnly(3, 30);
+        var nextLocal = new DateTimeOffset(localNow.Date + runAt.ToTimeSpan(), localNow.Offset);
+        if (nextLocal <= localNow)
+        {
+            nextLocal = nextLocal.AddDays(1);
+        }
+
+        var nextUtc = TimeZoneInfo.ConvertTime(nextLocal, TimeZoneInfo.Utc);
+        var delay = nextUtc - nowUtc;
+        return delay <= TimeSpan.Zero ? TimeSpan.FromSeconds(1) : delay;
+    }
+
+    private static TimeZoneInfo ResolveTimeZone(string timeZoneId)
+    {
+        if (string.IsNullOrWhiteSpace(timeZoneId))
+        {
+            return TimeZoneInfo.Utc;
+        }
+
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById(timeZoneId.Trim());
+        }
+        catch (TimeZoneNotFoundException) when (string.Equals(timeZoneId, "Asia/Taipei", StringComparison.OrdinalIgnoreCase))
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("Taipei Standard Time");
+        }
+    }
+}
+
+public sealed class MemoryDataRetentionHostedService(
+    IServiceProvider serviceProvider,
+    IOptions<MemoryDataRetentionOptions> options,
+    TimeProvider timeProvider,
+    ILogger<MemoryDataRetentionHostedService> logger) : BackgroundService
+{
+    private readonly MemoryDataRetentionOptions _options = options.Value;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (!_options.Enabled)
+        {
+            logger.LogInformation("Memory data retention hosted service is disabled.");
+            return;
+        }
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var delay = GetDelayUntilNextRun(timeProvider.GetUtcNow());
+            await Task.Delay(delay, stoppingToken);
+
+            try
+            {
+                using var scope = serviceProvider.CreateScope();
+                var service = scope.ServiceProvider.GetRequiredService<IMemoryDataRetentionService>();
+                await service.RunAsync("scheduled", stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Scheduled memory data retention failed.");
+                await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+            }
+        }
+    }
+
+    internal TimeSpan GetDelayUntilNextRun(DateTimeOffset nowUtc)
+    {
+        var timeZone = ResolveTimeZone(_options.TimeZone);
+        var localNow = TimeZoneInfo.ConvertTime(nowUtc, timeZone);
+        var runAt = TimeOnly.TryParse(_options.RunAtLocalTime, out var parsed)
+            ? parsed
+            : new TimeOnly(4, 0);
         var nextLocal = new DateTimeOffset(localNow.Date + runAt.ToTimeSpan(), localNow.Offset);
         if (nextLocal <= localNow)
         {

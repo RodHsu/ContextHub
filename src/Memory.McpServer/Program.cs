@@ -1475,6 +1475,19 @@ maintenance.MapPost("/vacuum-full-reclaim/run", async (
     return Results.Ok(result);
 });
 
+maintenance.MapPost("/memory-data-retention/run", async (
+    MemoryDataRetentionRunRequest request,
+    IMemoryDataRetentionService service,
+    IRequestActorAccessor actorAccessor,
+    IHostApplicationLifetime applicationLifetime) =>
+{
+    var result = await service.RunAsync(
+        request,
+        MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor),
+        applicationLifetime.ApplicationStopping);
+    return Results.Ok(result);
+});
+
 maintenance.MapPost("/domain-owner-repair/preview", async (
     DomainOwnerRepairRequest request,
     IDomainOwnerRepairService service,

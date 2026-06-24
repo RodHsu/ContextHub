@@ -355,6 +355,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         var jobsHtml = WebUtility.HtmlDecode(await jobsResponse.Content.ReadAsStringAsync());
         jobsHtml.Should().Contain("工作細節");
         jobsHtml.Should().Contain("複製 JSON");
+        jobsHtml.Should().Contain("Memory Retention");
+        jobsHtml.Should().Contain("產生清單");
+        jobsHtml.Should().Contain("確認套用 Auto-delete");
 
         using var logsResponse = await client.GetAsync("/logs");
         logsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -1401,6 +1404,27 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
     public Task<MaintenanceStatusResult> CancelMaintenanceAsync(Guid? runId, CancellationToken cancellationToken)
         => Task.FromResult(BuildInactiveMaintenanceStatus() with { Phase = MaintenancePhase.Cancelled, RunId = runId });
 
+    public Task<IReadOnlyList<MaintenanceRunResult>> GetMaintenanceRunsAsync(int limit, CancellationToken cancellationToken)
+    {
+        var result = BuildRetentionResult(MemoryDataRetentionRunMode.Classify);
+        return Task.FromResult<IReadOnlyList<MaintenanceRunResult>>(
+        [
+            new MaintenanceRunResult(
+                result.RunId,
+                MaintenanceRunType.MemoryDataRetention,
+                MaintenanceRunStatus.Completed,
+                result.StartedAtUtc,
+                result.CompletedAtUtc,
+                "dashboard-test",
+                """{"mode":"Classify"}""",
+                result.ResultJson,
+                string.Empty)
+        ]);
+    }
+
+    public Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(BuildRetentionResult(request.Mode));
+
     public Task<IReadOnlyList<SourceConnectionResult>> GetSourcesAsync(SourceListRequest request, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SourceConnectionResult>>(
         [
@@ -1421,6 +1445,78 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             15,
             0,
             []);
+
+    private static MemoryDataRetentionRunResult BuildRetentionResult(MemoryDataRetentionRunMode mode)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var thresholds = new MemoryDataRetentionPolicyThresholds(365, 180, 0, 0, 0.55m, 0.70m, 50);
+        var autoDeleteCandidates = new[]
+        {
+            new MemoryDataRetentionCandidateResult(
+                Guid.Parse("62000000-0000-0000-0000-000000000001"),
+                ProjectContext.DefaultProjectId,
+                "Expired low signal memory",
+                MemoryType.Episode,
+                MemoryStatus.Archived,
+                0.20m,
+                0.40m,
+                now.AddDays(-400),
+                0,
+                0,
+                MemoryRetentionRecommendedAction.Delete,
+                ["archivedRetentionExpired", "lowImportance", "lowConfidence"],
+                [])
+        };
+        var reviewCandidates = new[]
+        {
+            new MemoryDataRetentionCandidateResult(
+                Guid.Parse("62000000-0000-0000-0000-000000000002"),
+                ProjectContext.DefaultProjectId,
+                "Important archived decision",
+                MemoryType.Decision,
+                MemoryStatus.Archived,
+                0.95m,
+                0.90m,
+                now.AddDays(-500),
+                1,
+                2,
+                MemoryRetentionRecommendedAction.Keep,
+                ["archivedRetentionExpired"],
+                ["protectedType", "linkedMemory"])
+        };
+        var deletedItems = mode == MemoryDataRetentionRunMode.ApplyAutoDelete ? 1 : 0;
+        var resultJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            mode,
+            autoDeleteCandidateCount = autoDeleteCandidates.Length,
+            reviewCandidateCount = reviewCandidates.Length,
+            deletedItems,
+            blockedReasons = new[] { "protectedType", "linkedMemory" },
+            policyThresholds = thresholds
+        }, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+
+        return new MemoryDataRetentionRunResult(
+            Guid.NewGuid(),
+            now.AddDays(-365),
+            deletedItems,
+            deletedItems,
+            deletedItems,
+            deletedItems,
+            deletedItems,
+            [ProjectContext.DefaultProjectId],
+            mode == MemoryDataRetentionRunMode.PreviewDelete,
+            mode,
+            thresholds,
+            autoDeleteCandidates.Length,
+            reviewCandidates.Length,
+            autoDeleteCandidates,
+            reviewCandidates,
+            ["archivedRetentionExpired", "lowImportance", "lowConfidence"],
+            ["protectedType", "linkedMemory"],
+            now.AddSeconds(-2),
+            now,
+            resultJson);
+    }
 
     public Task<SourceConnectionResult> CreateSourceAsync(SourceConnectionCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, request.Name, request.SourceKind, request.Enabled, request.ConfigJson, !string.IsNullOrWhiteSpace(request.SecretJson), string.Empty, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));

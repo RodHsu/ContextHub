@@ -345,6 +345,86 @@ public sealed record RetrievalTelemetryRetentionRunResult(
     DateTimeOffset CompletedAtUtc,
     string ResultJson);
 
+public enum MemoryDataRetentionRunMode
+{
+    Classify,
+    PreviewDelete,
+    ApplyAutoDelete
+}
+
+public enum MemoryRetentionRecommendedAction
+{
+    Keep,
+    Archive,
+    Merge,
+    Delete,
+    Restore,
+    NeedsReview
+}
+
+public sealed record MemoryDataRetentionRunRequest(
+    string? TriggeredBy = null,
+    MemoryDataRetentionRunMode Mode = MemoryDataRetentionRunMode.Classify,
+    int? ArchivedItemsRetentionDays = null,
+    int? BatchSize = null,
+    int? DelayBetweenBatchesMs = null,
+    int? CommandTimeoutSeconds = null,
+    int? MaxDurationMinutes = null,
+    bool PreviewOnly = false,
+    int? HitWindowDays = null,
+    long? MaxRecentHitCount = null,
+    int? MaxLinkDegree = null,
+    decimal? MaxImportance = null,
+    decimal? MaxConfidence = null,
+    int? PreviewLimit = null,
+    bool IncludeCandidateDetails = true);
+
+public sealed record MemoryDataRetentionPolicyThresholds(
+    int ArchivedItemsRetentionDays,
+    int HitWindowDays,
+    long MaxRecentHitCount,
+    int MaxLinkDegree,
+    decimal MaxImportance,
+    decimal MaxConfidence,
+    int PreviewLimit);
+
+public sealed record MemoryDataRetentionCandidateResult(
+    Guid MemoryId,
+    string ProjectId,
+    string Title,
+    MemoryType MemoryType,
+    MemoryStatus Status,
+    decimal Importance,
+    decimal Confidence,
+    DateTimeOffset UpdatedAtUtc,
+    long RecentHitCount,
+    int LinkDegree,
+    MemoryRetentionRecommendedAction RecommendedAction,
+    IReadOnlyList<string> ReasonCodes,
+    IReadOnlyList<string> BlockedReasons);
+
+public sealed record MemoryDataRetentionRunResult(
+    Guid RunId,
+    DateTimeOffset CutoffUtc,
+    long DeletedMemoryItems,
+    long DeletedLinks,
+    long DeletedRevisions,
+    long DeletedChunks,
+    long DeletedVectors,
+    IReadOnlyList<string> AffectedProjectIds,
+    bool PreviewOnly,
+    MemoryDataRetentionRunMode Mode,
+    MemoryDataRetentionPolicyThresholds PolicyThresholds,
+    long AutoDeleteCandidateCount,
+    long ReviewCandidateCount,
+    IReadOnlyList<MemoryDataRetentionCandidateResult> AutoDeleteCandidates,
+    IReadOnlyList<MemoryDataRetentionCandidateResult> ReviewCandidates,
+    IReadOnlyList<string> ReasonCodes,
+    IReadOnlyList<string> BlockedReasons,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset CompletedAtUtc,
+    string ResultJson);
+
 public sealed record VacuumFullReclaimRunRequest(
     string? TriggeredBy = null);
 
@@ -1178,6 +1258,12 @@ public interface IRetrievalTelemetryRetentionService
 {
     Task<RetrievalTelemetryRetentionRunResult> RunAsync(string triggeredBy, CancellationToken cancellationToken);
     Task<RetrievalTelemetryRetentionRunResult> RunAsync(RetrievalTelemetryRetentionRunRequest request, string fallbackTriggeredBy, CancellationToken cancellationToken);
+}
+
+public interface IMemoryDataRetentionService
+{
+    Task<MemoryDataRetentionRunResult> RunAsync(string triggeredBy, CancellationToken cancellationToken);
+    Task<MemoryDataRetentionRunResult> RunAsync(MemoryDataRetentionRunRequest request, string fallbackTriggeredBy, CancellationToken cancellationToken);
 }
 
 public interface IVacuumFullReclaimService

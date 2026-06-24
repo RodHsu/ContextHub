@@ -528,6 +528,27 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<MaintenanceStatusResult> CancelMaintenanceAsync(Guid? runId, CancellationToken cancellationToken)
         => Task.FromResult(BuildInactiveMaintenanceStatus() with { Phase = MaintenancePhase.Cancelled, RunId = runId });
 
+    public Task<IReadOnlyList<MaintenanceRunResult>> GetMaintenanceRunsAsync(int limit, CancellationToken cancellationToken)
+    {
+        var result = BuildRetentionResult(MemoryDataRetentionRunMode.Classify);
+        return Task.FromResult<IReadOnlyList<MaintenanceRunResult>>(
+        [
+            new MaintenanceRunResult(
+                result.RunId,
+                MaintenanceRunType.MemoryDataRetention,
+                MaintenanceRunStatus.Completed,
+                result.StartedAtUtc,
+                result.CompletedAtUtc,
+                "browser-test",
+                """{"mode":"Classify"}""",
+                result.ResultJson,
+                string.Empty)
+        ]);
+    }
+
+    public Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(BuildRetentionResult(request.Mode));
+
     public Task<IReadOnlyList<SourceConnectionResult>> GetSourcesAsync(SourceListRequest request, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SourceConnectionResult>>(
             Profile == DashboardBrowserTestProfile.Empty
@@ -551,6 +572,78 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             15,
             0,
             []);
+
+    private static MemoryDataRetentionRunResult BuildRetentionResult(MemoryDataRetentionRunMode mode)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var thresholds = new MemoryDataRetentionPolicyThresholds(365, 180, 0, 0, 0.55m, 0.70m, 50);
+        var autoDeleteCandidates = new[]
+        {
+            new MemoryDataRetentionCandidateResult(
+                Guid.Parse("61000000-0000-0000-0000-000000000001"),
+                ProjectContext.DefaultProjectId,
+                "Expired connector cache fragment",
+                MemoryType.Episode,
+                MemoryStatus.Archived,
+                0.20m,
+                0.40m,
+                now.AddDays(-420),
+                0,
+                0,
+                MemoryRetentionRecommendedAction.Delete,
+                ["archivedRetentionExpired", "lowImportance", "lowConfidence", "lowRecentHits", "lowLinkDegree"],
+                [])
+        };
+        var reviewCandidates = new[]
+        {
+            new MemoryDataRetentionCandidateResult(
+                Guid.Parse("61000000-0000-0000-0000-000000000002"),
+                ProjectContext.DefaultProjectId,
+                "Archived decision with links",
+                MemoryType.Decision,
+                MemoryStatus.Archived,
+                0.90m,
+                0.92m,
+                now.AddDays(-500),
+                2,
+                3,
+                MemoryRetentionRecommendedAction.Keep,
+                ["archivedRetentionExpired"],
+                ["highImportance", "highConfidence", "recentHits", "linkedMemory", "protectedType"])
+        };
+        var deletedItems = mode == MemoryDataRetentionRunMode.ApplyAutoDelete ? autoDeleteCandidates.Length : 0;
+        var resultJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            mode,
+            autoDeleteCandidateCount = autoDeleteCandidates.Length,
+            reviewCandidateCount = reviewCandidates.Length,
+            deletedItems,
+            blockedReasons = new[] { "protectedType", "linkedMemory" },
+            policyThresholds = thresholds
+        }, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+
+        return new MemoryDataRetentionRunResult(
+            Guid.NewGuid(),
+            now.AddDays(-365),
+            deletedItems,
+            deletedItems,
+            deletedItems,
+            deletedItems,
+            deletedItems,
+            [ProjectContext.DefaultProjectId],
+            mode == MemoryDataRetentionRunMode.PreviewDelete,
+            mode,
+            thresholds,
+            autoDeleteCandidates.Length,
+            reviewCandidates.Length,
+            autoDeleteCandidates,
+            reviewCandidates,
+            ["archivedRetentionExpired", "lowImportance", "lowConfidence"],
+            ["protectedType", "linkedMemory"],
+            now.AddSeconds(-2),
+            now,
+            resultJson);
+    }
 
     public Task<SourceConnectionResult> CreateSourceAsync(SourceConnectionCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, request.Name, request.SourceKind, request.Enabled, request.ConfigJson, !string.IsNullOrWhiteSpace(request.SecretJson), string.Empty, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));

@@ -1567,6 +1567,246 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Memory_Data_Retention_Run_Should_Preview_Then_Delete_Archived_Memory_Data()
+    {
+        var projectId = $"MemoryRetention_{Guid.NewGuid():N}";
+        var autoDeleteId = Guid.Empty;
+        var reviewArchivedId = Guid.Empty;
+        var activeId = Guid.Empty;
+        var reviewActiveId = Guid.Empty;
+        CacheVersionStamp beforePreviewStamp;
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+            var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var cacheStore = scope.ServiceProvider.GetRequiredService<ICacheVersionStore>();
+            var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
+            var now = DateTimeOffset.UtcNow;
+            var oldArchivedCutoff = now.AddDays(-4_000);
+
+            var autoDelete = await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    ExternalKey: $"memory-retention-auto-{Guid.NewGuid():N}",
+                    Scope: MemoryScope.Project,
+                    MemoryType: MemoryType.Episode,
+                    Title: "Memory retention auto-delete fixture",
+                    Content: "Archived low-signal memory retention fixture used to create chunks and vectors.",
+                    Summary: "Archived low-signal retention fixture",
+                    SourceType: "document",
+                    SourceRef: "tests/memory-retention",
+                    Tags: ["retention", "archived", "sourceManaged"],
+                    Importance: 0.2m,
+                    Confidence: 0.4m,
+                    MetadataJson: """{"sourceManaged":true,"missing":true}""",
+                    ProjectId: projectId),
+                CancellationToken.None);
+            var reviewArchived = await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    ExternalKey: $"memory-retention-review-archived-{Guid.NewGuid():N}",
+                    Scope: MemoryScope.Project,
+                    MemoryType: MemoryType.Decision,
+                    Title: "Memory retention review archived fixture",
+                    Content: "Important archived memory retention fixture should require review.",
+                    Summary: "Review archived retention fixture",
+                    SourceType: "document",
+                    SourceRef: "tests/memory-retention",
+                    Tags: ["retention", "archived"],
+                    Importance: 0.95m,
+                    Confidence: 0.95m,
+                    ProjectId: projectId),
+                CancellationToken.None);
+            var active = await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    ExternalKey: $"memory-retention-active-{Guid.NewGuid():N}",
+                    Scope: MemoryScope.Project,
+                    MemoryType: MemoryType.Artifact,
+                    Title: "Memory retention active fixture",
+                    Content: "Active memory retention fixture should not be deleted by retention.",
+                    Summary: "Active retention fixture",
+                    SourceType: "document",
+                    SourceRef: "tests/memory-retention",
+                    Tags: ["retention", "active"],
+                    Importance: 0.7m,
+                    Confidence: 0.9m,
+                    ProjectId: projectId),
+                CancellationToken.None);
+            var reviewActive = await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    ExternalKey: $"memory-retention-review-active-{Guid.NewGuid():N}",
+                    Scope: MemoryScope.Project,
+                    MemoryType: MemoryType.Episode,
+                    Title: "Memory retention active review fixture",
+                    Content: "Active low-signal memory retention fixture should require review before archive/delete.",
+                    Summary: "Active review retention fixture",
+                    SourceType: "document",
+                    SourceRef: "tests/memory-retention",
+                    Tags: ["retention", "low-signal"],
+                    Importance: 0.2m,
+                    Confidence: 0.4m,
+                    ProjectId: projectId),
+                CancellationToken.None);
+
+            autoDeleteId = autoDelete.Id;
+            reviewArchivedId = reviewArchived.Id;
+            activeId = active.Id;
+            reviewActiveId = reviewActive.Id;
+
+            var reindex = await memoryService.EnqueueReindexAsync(
+                new EnqueueReindexRequest(MemoryItemId: autoDelete.Id, ProjectId: projectId),
+                CancellationToken.None);
+            for (var attempt = 0; attempt < 100; attempt++)
+            {
+                await processor.ProcessNextAsync(CancellationToken.None);
+                var job = await dbContext.MemoryJobs.AsNoTracking().SingleAsync(x => x.Id == reindex.JobId, CancellationToken.None);
+                if (job.Status is MemoryJobStatus.Completed or MemoryJobStatus.Failed)
+                {
+                    break;
+                }
+            }
+            (await dbContext.MemoryJobs.AsNoTracking().SingleAsync(x => x.Id == reindex.JobId, CancellationToken.None))
+                .Status.Should().Be(MemoryJobStatus.Completed);
+
+            var vectorReadyChunkIds = await dbContext.MemoryItemChunks
+                .Where(x => x.MemoryItemId == autoDelete.Id)
+                .Select(x => x.Id)
+                .ToListAsync(CancellationToken.None);
+            (await dbContext.MemoryChunkVectors.AnyAsync(x => vectorReadyChunkIds.Contains(x.ChunkId), CancellationToken.None))
+                .Should().BeTrue();
+
+            dbContext.MemoryLinks.Add(new MemoryLink
+            {
+                FromId = reviewArchived.Id,
+                ToId = active.Id,
+                LinkType = "retention-test",
+                CreatedAt = now
+            });
+
+            var autoDeleteEntity = await dbContext.MemoryItems.SingleAsync(x => x.Id == autoDelete.Id);
+            autoDeleteEntity.Status = MemoryStatus.Archived;
+            autoDeleteEntity.UpdatedAt = oldArchivedCutoff;
+
+            var reviewArchivedEntity = await dbContext.MemoryItems.SingleAsync(x => x.Id == reviewArchived.Id);
+            reviewArchivedEntity.Status = MemoryStatus.Archived;
+            reviewArchivedEntity.UpdatedAt = oldArchivedCutoff;
+
+            var activeEntity = await dbContext.MemoryItems.SingleAsync(x => x.Id == active.Id);
+            activeEntity.Status = MemoryStatus.Active;
+            activeEntity.UpdatedAt = oldArchivedCutoff;
+
+            var reviewActiveEntity = await dbContext.MemoryItems.SingleAsync(x => x.Id == reviewActive.Id);
+            reviewActiveEntity.Status = MemoryStatus.Active;
+            reviewActiveEntity.UpdatedAt = oldArchivedCutoff;
+
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+            beforePreviewStamp = await cacheStore.GetVersionStampAsync([projectId], actor, includeShared: false, CancellationToken.None);
+        }
+
+        using var client = environment.GetFactory().CreateClient();
+        using var classifyResponse = await client.PostAsJsonAsync(
+            "/api/maintenance/memory-data-retention/run",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "memory-retention-classify-test",
+                Mode: MemoryDataRetentionRunMode.Classify,
+                ArchivedItemsRetentionDays: 3650,
+                BatchSize: 1,
+                DelayBetweenBatchesMs: 0,
+                CommandTimeoutSeconds: 30,
+                MaxDurationMinutes: 5,
+                IncludeCandidateDetails: true));
+        classifyResponse.EnsureSuccessStatusCode();
+        var classify = await classifyResponse.Content.ReadFromJsonAsync<MemoryDataRetentionRunResult>();
+        classify.Should().NotBeNull();
+        classify!.Mode.Should().Be(MemoryDataRetentionRunMode.Classify);
+        classify.DeletedMemoryItems.Should().Be(0);
+        classify.AutoDeleteCandidateCount.Should().BeGreaterThanOrEqualTo(1);
+        classify.ReviewCandidateCount.Should().BeGreaterThanOrEqualTo(2);
+        classify.AutoDeleteCandidates.Select(x => x.MemoryId).Should().Contain(autoDeleteId);
+        classify.ReviewCandidates.Select(x => x.MemoryId).Should().Contain(reviewArchivedId);
+        classify.ReviewCandidates.Select(x => x.MemoryId).Should().Contain(reviewActiveId);
+
+        using var previewResponse = await client.PostAsJsonAsync(
+            "/api/maintenance/memory-data-retention/run",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "memory-retention-preview-test",
+                Mode: MemoryDataRetentionRunMode.PreviewDelete,
+                ArchivedItemsRetentionDays: 3650,
+                BatchSize: 1,
+                DelayBetweenBatchesMs: 0,
+                CommandTimeoutSeconds: 30,
+                MaxDurationMinutes: 5,
+                IncludeCandidateDetails: true));
+        previewResponse.EnsureSuccessStatusCode();
+        var preview = await previewResponse.Content.ReadFromJsonAsync<MemoryDataRetentionRunResult>();
+        preview.Should().NotBeNull();
+        preview!.Mode.Should().Be(MemoryDataRetentionRunMode.PreviewDelete);
+        preview.AffectedProjectIds.Should().Contain(projectId);
+        preview.DeletedMemoryItems.Should().Be(1);
+        preview.DeletedRevisions.Should().BeGreaterThanOrEqualTo(1);
+        preview.DeletedChunks.Should().BeGreaterThanOrEqualTo(1);
+        preview.DeletedVectors.Should().BeGreaterThanOrEqualTo(1);
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var cacheStore = scope.ServiceProvider.GetRequiredService<ICacheVersionStore>();
+            var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
+            var afterPreviewStamp = await cacheStore.GetVersionStampAsync([projectId], actor, includeShared: false, CancellationToken.None);
+
+            (await dbContext.MemoryItems.AnyAsync(x => x.Id == autoDeleteId)).Should().BeTrue();
+            (await dbContext.MemoryItems.AnyAsync(x => x.Id == reviewArchivedId)).Should().BeTrue();
+            afterPreviewStamp.ProjectVersions[projectId].Should().Be(beforePreviewStamp.ProjectVersions[projectId]);
+        }
+
+        using var applyResponse = await client.PostAsJsonAsync(
+            "/api/maintenance/memory-data-retention/run",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "memory-retention-apply-test",
+                Mode: MemoryDataRetentionRunMode.ApplyAutoDelete,
+                ArchivedItemsRetentionDays: 3650,
+                BatchSize: 1,
+                DelayBetweenBatchesMs: 0,
+                CommandTimeoutSeconds: 30,
+                MaxDurationMinutes: 5));
+        applyResponse.EnsureSuccessStatusCode();
+        var apply = await applyResponse.Content.ReadFromJsonAsync<MemoryDataRetentionRunResult>();
+        apply.Should().NotBeNull();
+        apply!.Mode.Should().Be(MemoryDataRetentionRunMode.ApplyAutoDelete);
+        apply.AffectedProjectIds.Should().Contain(projectId);
+        apply.DeletedMemoryItems.Should().Be(1);
+        apply.DeletedVectors.Should().BeGreaterThanOrEqualTo(1);
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var cacheStore = scope.ServiceProvider.GetRequiredService<ICacheVersionStore>();
+            var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
+            var afterApplyStamp = await cacheStore.GetVersionStampAsync([projectId], actor, includeShared: false, CancellationToken.None);
+
+            (await dbContext.MemoryItems.AnyAsync(x => x.Id == autoDeleteId)).Should().BeFalse();
+            (await dbContext.MemoryItemChunks.AnyAsync(x => x.MemoryItemId == autoDeleteId)).Should().BeFalse();
+            (await dbContext.MemoryLinks.AnyAsync(x => x.FromId == autoDeleteId || x.ToId == autoDeleteId)).Should().BeFalse();
+            (await dbContext.MemoryItems.AnyAsync(x => x.Id == reviewArchivedId)).Should().BeTrue();
+            (await dbContext.MemoryItems.AnyAsync(x => x.Id == activeId)).Should().BeTrue();
+            (await dbContext.MemoryItems.AnyAsync(x => x.Id == reviewActiveId)).Should().BeTrue();
+            afterApplyStamp.ProjectVersions[projectId].Should().BeGreaterThan(beforePreviewStamp.ProjectVersions[projectId]);
+
+            var run = await dbContext.MaintenanceRuns.SingleAsync(x => x.Id == apply.RunId);
+            using var policyDocument = JsonDocument.Parse(run.PolicyJson);
+            policyDocument.RootElement.GetProperty("mode").GetInt32().Should().Be((int)MemoryDataRetentionRunMode.ApplyAutoDelete);
+            using var resultDocument = JsonDocument.Parse(run.ResultJson);
+            resultDocument.RootElement.GetProperty("deletedVectors").GetInt64().Should().BeGreaterThanOrEqualTo(1);
+            resultDocument.RootElement.GetProperty("autoDeleteCandidateCount").GetInt64().Should().BeGreaterThanOrEqualTo(1);
+            resultDocument.RootElement.GetProperty("reviewCandidateCount").GetInt64().Should().BeGreaterThanOrEqualTo(2);
+            resultDocument.RootElement.GetProperty("affectedProjectIds").EnumerateArray().Select(x => x.GetString()).Should().Contain(projectId);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Memories_Endpoint_Should_Allow_Querying_By_ProjectId_Without_Project_Filter()
     {
         using (var scope = environment.GetFactory().Services.CreateScope())

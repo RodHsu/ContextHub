@@ -864,7 +864,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
             .AnyAsync(
                 x => x.Status == MaintenanceRunStatus.Running &&
                      (x.MaintenanceType == MaintenanceRunType.RetrievalTelemetryRetention ||
-                      x.MaintenanceType == MaintenanceRunType.VacuumFullReclaim),
+                      x.MaintenanceType == MaintenanceRunType.VacuumFullReclaim ||
+                      x.MaintenanceType == MaintenanceRunType.MemoryDataRetention),
                 cancellationToken);
     }
 
