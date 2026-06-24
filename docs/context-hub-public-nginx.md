@@ -74,6 +74,7 @@ map $http_upgrade $connection_upgrade {
 }
 
 upstream contexthub_mcp {
+    ip_hash;
     server context-hub-mcp-server-a:8080 max_fails=2 fail_timeout=10s;
     server context-hub-mcp-server-b:8080 max_fails=2 fail_timeout=10s;
     keepalive 32;
