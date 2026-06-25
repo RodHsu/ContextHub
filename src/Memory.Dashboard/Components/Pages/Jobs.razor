@@ -28,9 +28,17 @@
         <div class="inline-error">@_loadError</div>
     }
 
-    <div class="split-layout jobs-control-layout">
-    <section class="panel detail-panel">
-        <div class="panel-title">知識庫維護</div>
+    <section class="panel jobs-operations-panel">
+        <div class="panel-heading-row jobs-operations-heading">
+            <div>
+                <div class="panel-title">維護與工作控制</div>
+                <div class="panel-heading-meta panel-heading-meta-left">維護狀態、reindex 與工作查詢集中在同一列，保留背景工作清單作為主視圖。</div>
+            </div>
+        </div>
+
+        <div class="jobs-operations-grid">
+            <div class="jobs-operation-card jobs-maintenance-card">
+        <div class="jobs-operation-title">知識庫維護</div>
         @if (_maintenance is null)
         {
             <div class="empty-inline">維護狀態載入中。</div>
@@ -44,7 +52,7 @@
                 <div><dt>預估結束</dt><dd>@if (_maintenance.EstimatedEndsAtUtc.HasValue) { <ClientLocalTime Value="_maintenance.EstimatedEndsAtUtc.Value" /> } else { <span>-</span> }</dd></div>
             </dl>
         }
-        <div class="form-grid">
+        <div class="form-grid jobs-maintenance-grid">
             <label>
                 <span>原因 (Reason)</span>
                 <input @bind="_maintenanceReason" />
@@ -65,12 +73,12 @@
             <button class="ghost-button" @onclick="CompleteMaintenanceAsync" disabled="@MaintenanceActionDisabled">完成</button>
             <button class="ghost-button" @onclick="CancelMaintenanceAsync" disabled="@MaintenanceActionDisabled">取消</button>
         </div>
-    </section>
+            </div>
 
-    <section class="panel jobs-reindex-panel">
-        <div class="panel-heading-row">
+            <div class="jobs-operation-card jobs-reindex-panel">
+        <div class="panel-heading-row jobs-operation-card-heading">
             <div>
-                <div class="panel-title">重新索引</div>
+                <div class="jobs-operation-title">重新索引</div>
                 <div class="panel-heading-meta panel-heading-meta-left">留空即使用 active model 與全量記憶；指定 Id 時只重建單筆。</div>
             </div>
             <button class="primary-button jobs-reindex-inline-button" @onclick="RunReindexAsync" disabled="@_loading">排入佇列</button>
@@ -90,9 +98,134 @@
         {
             <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
         }
+            </div>
+
+            <div class="jobs-operation-card jobs-filter-card">
+                <div class="jobs-operation-title">工作篩選</div>
+                <div class="filter-grid jobs-filter-grid">
+                    <select @bind="_status">
+                        <option value="">全部狀態</option>
+                        @foreach (var status in Enum.GetValues<MemoryJobStatus>())
+                        {
+                            <option value="@status">@DashboardText.Label(status)</option>
+                        }
+                    </select>
+                    <select @bind="_jobType">
+                        <option value="">全部類型</option>
+                        @foreach (var type in Enum.GetValues<MemoryJobType>())
+                        {
+                            <option value="@type">@DashboardText.Label(type)</option>
+                        }
+                    </select>
+                    <button class="ghost-button" @onclick="LoadAsync">查詢</button>
+                </div>
+            </div>
+        </div>
     </section>
 
-    <section class="panel detail-panel">
+    <div class="split-layout jobs-workspace-layout">
+    <section class="panel panel-scroll jobs-list-panel">
+        <div class="panel-heading-row jobs-list-heading">
+            <div>
+                <div class="panel-title">背景工作 (@(_jobs is null ? "-" : DashboardFormatting.Integer(_jobs.TotalCount)))</div>
+                <div class="panel-heading-meta panel-heading-meta-left">點選工作列可在右側檢視完整 payload 與錯誤內容。</div>
+            </div>
+        </div>
+        <div class="panel-scroll-body detail-scroll-shell">
+            @if (_jobs is null)
+            {
+                <div class="skeleton-stack">
+                    @for (var i = 0; i < 5; i++)
+                    {
+                        <div class="skeleton-line @(i == 0 ? "skeleton-line-md" : "skeleton-line-lg")"></div>
+                    }
+                </div>
+            }
+            else
+            {
+                <div class="table-scroll-shell table-scroll-shell-tall jobs-table-shell">
+                    <table class="data-table data-table-clickable jobs-table">
+                        <colgroup>
+                            <col class="jobs-table-col-time" />
+                            <col class="jobs-table-col-job" />
+                            <col class="jobs-table-col-status" />
+                            <col class="jobs-table-col-summary" />
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th>建立時間</th>
+                                <th>工作</th>
+                                <th>狀態</th>
+                                <th>內容與錯誤摘要</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var job in _jobs.Items)
+                            {
+                                <tr class="@SelectedClass(job.Id)" @onclick="@(() => SelectJob(job))">
+                                    <td class="jobs-time-cell"><ClientLocalTime Value="job.CreatedAt" /></td>
+                                    <td class="jobs-job-cell">
+                                        <div class="jobs-row-primary">@DashboardText.Label(job.JobType)</div>
+                                        <div class="jobs-id-cell" title="@job.Id.ToString("D")">@job.Id</div>
+                                    </td>
+                                    <td><span class="status-badge @StatusClass(job.Status.ToString())">@DashboardText.Label(job.Status)</span></td>
+                                    <td class="jobs-summary-cell">
+                                        <div class="truncate-cell jobs-payload-cell" title="@job.PayloadJson">@job.PayloadJson</div>
+                                        @if (!string.IsNullOrWhiteSpace(job.Error))
+                                        {
+                                            <div class="truncate-cell jobs-error-cell" title="@job.Error">@job.Error</div>
+                                        }
+                                        else
+                                        {
+                                            <div class="jobs-row-meta">無錯誤</div>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    </section>
+
+    <section class="panel detail-panel panel-scroll">
+        <div class="panel-title">工作細節</div>
+        <div class="panel-scroll-body detail-scroll-shell">
+            @if (_selectedJob is null)
+            {
+                <div class="empty-inline">點選左側工作列顯示詳細內容。</div>
+            }
+            else
+            {
+                <div class="detail-actions">
+                    <button class="ghost-button" @onclick="CopySelectedJobAsync">複製 JSON</button>
+                    <span class="detail-actions-copy">包含 job id、status、payload 與 error，適合直接貼給 agent 分析。</span>
+                </div>
+
+                <dl class="definition-grid">
+                    <div class="job-detail-id-row"><dt>工作 Id</dt><dd class="job-detail-id">@_selectedJob.Id</dd></div>
+                    <div><dt>工作類型</dt><dd>@DashboardText.Label(_selectedJob.JobType)</dd></div>
+                    <div><dt>狀態</dt><dd>@DashboardText.Label(_selectedJob.Status)</dd></div>
+                    <div><dt>建立時間</dt><dd><ClientLocalTime Value="_selectedJob.CreatedAt" /></dd></div>
+                    <div><dt>開始時間</dt><dd>@if (_selectedJob.StartedAt.HasValue) { <ClientLocalTime Value="_selectedJob.StartedAt.Value" /> } else { <span>-</span> }</dd></div>
+                    <div><dt>完成時間</dt><dd>@if (_selectedJob.CompletedAt.HasValue) { <ClientLocalTime Value="_selectedJob.CompletedAt.Value" /> } else { <span>-</span> }</dd></div>
+                </dl>
+
+                <div class="subpanel-title">內容 (Payload)</div>
+                <div class="code-block">@_selectedJob.PayloadJson</div>
+
+                @if (!string.IsNullOrWhiteSpace(_selectedJob.Error))
+                {
+                    <div class="subpanel-title">錯誤 (Error)</div>
+                    <div class="code-block">@_selectedJob.Error</div>
+                }
+            }
+        </div>
+    </section>
+    </div>
+
+    <section class="panel detail-panel jobs-retention-panel">
         <div class="panel-heading-row">
             <div>
                 <div class="panel-title">Memory Retention</div>
@@ -101,7 +234,7 @@
             <span class="status-badge neutral">@RetentionModeText</span>
         </div>
 
-        <dl class="definition-grid">
+        <dl class="definition-grid jobs-retention-summary-grid">
             <div><dt>最近執行</dt><dd>@if (_lastRetentionRun?.CompletedAt.HasValue == true) { <ClientLocalTime Value="_lastRetentionRun.CompletedAt.Value" /> } else { <span>-</span> }</dd></div>
             <div><dt>Auto-delete</dt><dd>@DashboardFormatting.Integer(LastRetentionAutoDeleteCount)</dd></div>
             <div><dt>Review</dt><dd>@DashboardFormatting.Integer(LastRetentionReviewCount)</dd></div>
@@ -169,118 +302,6 @@
             </div>
         }
     </section>
-
-    <section class="panel detail-panel">
-        <div class="panel-title">工作篩選</div>
-        <div class="filter-grid">
-            <select @bind="_status">
-                <option value="">全部狀態</option>
-                @foreach (var status in Enum.GetValues<MemoryJobStatus>())
-                {
-                    <option value="@status">@DashboardText.Label(status)</option>
-                }
-            </select>
-            <select @bind="_jobType">
-                <option value="">全部類型</option>
-                @foreach (var type in Enum.GetValues<MemoryJobType>())
-                {
-                    <option value="@type">@DashboardText.Label(type)</option>
-                }
-            </select>
-            <button class="ghost-button" @onclick="LoadAsync">查詢</button>
-        </div>
-    </section>
-    </div>
-
-    <div class="split-layout jobs-workspace-layout">
-    <section class="panel panel-scroll jobs-list-panel">
-        <div class="panel-title">背景工作 (@(_jobs is null ? "-" : DashboardFormatting.Integer(_jobs.TotalCount)))</div>
-        <div class="panel-scroll-body detail-scroll-shell">
-            @if (_jobs is null)
-            {
-                <div class="skeleton-stack">
-                    @for (var i = 0; i < 5; i++)
-                    {
-                        <div class="skeleton-line @(i == 0 ? "skeleton-line-md" : "skeleton-line-lg")"></div>
-                    }
-                </div>
-            }
-            else
-            {
-                <div class="table-scroll-shell">
-                    <table class="data-table jobs-table">
-                        <colgroup>
-                            <col class="jobs-table-col-time" />
-                            <col class="jobs-table-col-id" />
-                            <col class="jobs-table-col-type" />
-                            <col class="jobs-table-col-status" />
-                            <col class="jobs-table-col-payload" />
-                            <col class="jobs-table-col-error" />
-                        </colgroup>
-                        <thead>
-                            <tr>
-                                <th>建立時間</th>
-                                <th>工作 Id</th>
-                                <th>類型</th>
-                                <th>狀態</th>
-                                <th>內容摘要</th>
-                                <th>錯誤</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @foreach (var job in _jobs.Items)
-                            {
-                                <tr class="@SelectedClass(job.Id)" @onclick="@(() => SelectJob(job))">
-                                    <td class="jobs-time-cell"><ClientLocalTime Value="job.CreatedAt" /></td>
-                                    <td class="jobs-id-cell" title="@job.Id.ToString("D")">@job.Id</td>
-                                    <td>@DashboardText.Label(job.JobType)</td>
-                                    <td><span class="status-badge @StatusClass(job.Status.ToString())">@DashboardText.Label(job.Status)</span></td>
-                                    <td class="truncate-cell jobs-payload-cell" title="@job.PayloadJson">@job.PayloadJson</td>
-                                    <td class="truncate-cell jobs-error-cell" title="@job.Error">@(!string.IsNullOrWhiteSpace(job.Error) ? job.Error : "-")</td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
-            }
-        </div>
-    </section>
-
-    <section class="panel detail-panel panel-scroll">
-        <div class="panel-title">工作細節</div>
-        <div class="panel-scroll-body detail-scroll-shell">
-            @if (_selectedJob is null)
-            {
-                <div class="empty-inline">點選左側工作列顯示詳細內容。</div>
-            }
-            else
-            {
-                <div class="detail-actions">
-                    <button class="ghost-button" @onclick="CopySelectedJobAsync">複製 JSON</button>
-                    <span class="detail-actions-copy">包含 job id、status、payload 與 error，適合直接貼給 agent 分析。</span>
-                </div>
-
-                <dl class="definition-grid">
-                    <div class="job-detail-id-row"><dt>工作 Id</dt><dd class="job-detail-id">@_selectedJob.Id</dd></div>
-                    <div><dt>工作類型</dt><dd>@DashboardText.Label(_selectedJob.JobType)</dd></div>
-                    <div><dt>狀態</dt><dd>@DashboardText.Label(_selectedJob.Status)</dd></div>
-                    <div><dt>建立時間</dt><dd><ClientLocalTime Value="_selectedJob.CreatedAt" /></dd></div>
-                    <div><dt>開始時間</dt><dd>@if (_selectedJob.StartedAt.HasValue) { <ClientLocalTime Value="_selectedJob.StartedAt.Value" /> } else { <span>-</span> }</dd></div>
-                    <div><dt>完成時間</dt><dd>@if (_selectedJob.CompletedAt.HasValue) { <ClientLocalTime Value="_selectedJob.CompletedAt.Value" /> } else { <span>-</span> }</dd></div>
-                </dl>
-
-                <div class="subpanel-title">內容 (Payload)</div>
-                <div class="code-block">@_selectedJob.PayloadJson</div>
-
-                @if (!string.IsNullOrWhiteSpace(_selectedJob.Error))
-                {
-                    <div class="subpanel-title">錯誤 (Error)</div>
-                    <div class="code-block">@_selectedJob.Error</div>
-                }
-            }
-        </div>
-    </section>
-    </div>
     </ChildContent>
 </PageViewport>
 

@@ -39,7 +39,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("inbox", "/inbox", "收件匣", [".inbox-page-stack", ".metric-grid", ".inbox-workspace-section"], [".page-header", ".metric-grid", ".inbox-workspace-section"], [".content", ".inbox-page-stack", ".panel-scroll-body"]),
         new("preferences", "/preferences", "使用者偏好", [".split-layout", ".preferences-list-panel", ".stack-scroll-shell"], [".page-header", ".split-layout"], [".content", ".stack-scroll-shell"]),
         new("logs", "/logs", "日誌", [".logs-filter-grid", ".split-layout", ".table-scroll-shell"], [".filter-panel", ".split-layout"], [".content", ".table-scroll-shell"]),
-        new("jobs", "/jobs", "工作佇列", [".split-layout", ".data-table", ".detail-panel"], [".page-header", ".jobs-page-body > .split-layout:last-of-type"], [".content", ".panel-scroll-body"]),
+        new("jobs", "/jobs", "工作佇列", [".jobs-operations-panel", ".jobs-list-panel", ".jobs-table", ".detail-panel"], [".page-header", ".jobs-operations-panel", ".jobs-page-body > .split-layout"], [".content", ".jobs-table-shell", ".panel-scroll-body"]),
         new("storage", "/storage", "資料庫檢視", [".storage-layout", ".storage-table-panel", ".storage-detail-panel"], [".storage-table-panel", ".storage-detail-panel"], [".content", ".storage-table-list", ".table-scroll-shell"]),
         new("security", "/security", "安全管理", [".security-layout", ".settings-form-grid", ".table-scroll-shell"], [".page-header", ".security-layout"], [".content", ".security-layout"]),
         new("performance", "/performance", "效能", [".performance-form-grid", ".performance-config-footer", ".empty-inline"], [".page-header", ".performance-page-body"], [".content", ".performance-results-shell"]),
@@ -54,6 +54,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         Routes.Single(route => route.Name == "memories"),
         Routes.Single(route => route.Name == "graph"),
         Routes.Single(route => route.Name == "logs"),
+        Routes.Single(route => route.Name == "jobs"),
         Routes.Single(route => route.Name == "storage"),
         Routes.Single(route => route.Name == "performance")
     ];
@@ -2234,6 +2235,11 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             case "logs":
                 await page.Locator(".data-table-clickable tbody tr").First.ClickAsync();
                 await page.Locator(".detail-actions").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+                break;
+
+            case "jobs":
+                await page.Locator(".jobs-table tbody tr").First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+                await page.Locator(".job-detail-id").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
                 break;
 
             case "storage":
