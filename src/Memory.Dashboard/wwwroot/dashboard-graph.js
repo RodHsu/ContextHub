@@ -1,6 +1,6 @@
 (() => {
     const instances = new WeakMap();
-    const padding = 28;
+    const padding = 40;
     const minScale = 0.25;
     const maxScale = 2.4;
     const dragThreshold = 4;

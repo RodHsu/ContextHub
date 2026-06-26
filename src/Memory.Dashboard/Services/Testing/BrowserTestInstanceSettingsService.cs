@@ -1,10 +1,15 @@
 using Memory.Application;
+using Microsoft.AspNetCore.Identity;
 
 namespace Memory.Dashboard.Services.Testing;
 
 internal sealed class BrowserTestInstanceSettingsService(
-    DashboardBrowserTestProfileAccessor profileAccessor) : IInstanceSettingsService
+    DashboardBrowserTestProfileAccessor profileAccessor,
+    IPasswordHasher<object> passwordHasher) : IInstanceSettingsService
 {
+    private const string BrowserTestAdminPassword = "ContextHub!123";
+    private readonly string _adminPasswordHash = passwordHasher.HashPassword(new object(), BrowserTestAdminPassword);
+
     public Task<InstanceSettingsSnapshot> GetSnapshotAsync(CancellationToken cancellationToken)
         => Task.FromResult(CreateSnapshot());
 
@@ -53,7 +58,7 @@ internal sealed class BrowserTestInstanceSettingsService(
     public Task<DashboardAuthenticationSettings> GetDashboardAuthenticationSettingsAsync(CancellationToken cancellationToken)
         => Task.FromResult(new DashboardAuthenticationSettings(
             "admin",
-            "AQAAAAIAAYagAAAAEIbguUQEApMQehlC51gjy+uGulsE4ahRI7UtbdAlSsGMynNrNM3J3KfsJL+3IuBUxQ==",
+            _adminPasswordHash,
             480));
 
     private InstanceSettingsSnapshot CreateSnapshot()
