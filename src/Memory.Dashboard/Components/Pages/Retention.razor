@@ -1,0 +1,794 @@
+@page "/retention"
+@implements IAsyncDisposable
+@inject IContextHubApiClient ApiClient
+@inject IJSRuntime JsRuntime
+@inject IOptions<DashboardOptions> DashboardOptionsAccessor
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+@using Memory.Dashboard.Services
+@using System.Text.Json
+
+<PageTitle>Context Hub | 記憶整理</PageTitle>
+
+<PageViewport Title="記憶整理"
+              Subtitle="檢視 retention 排程產生的自動刪除與人工審核清單，整理 action plan 後交由人工或 agent 套用。"
+              BodyClass="page-viewport-body retention-page-body">
+    <Actions>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           IsRefreshing="_loading"
+                           PollingIntervalSeconds="@PollingIntervalSeconds" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="ClassifyRetentionAsync" disabled="@RetentionActionDisabled">產生整理清單</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        @if (!string.IsNullOrWhiteSpace(_loadError))
+        {
+            <div class="inline-error">@_loadError</div>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(_message))
+        {
+            <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
+        }
+
+        <section class="panel retention-command-panel">
+            <div class="panel-heading-row">
+                <div>
+                    <div class="panel-title">Retention Review Workspace</div>
+                    <div class="panel-heading-meta panel-heading-meta-left">每日排程只分類；刪除必須先 preview，再由 admin 明確套用。</div>
+                </div>
+                <span class="status-badge neutral">@RetentionModeText</span>
+            </div>
+
+            <dl class="definition-grid retention-summary-grid">
+                <div><dt>最近執行</dt><dd>@if (_lastRetentionRun?.CompletedAt.HasValue == true) { <ClientLocalTime Value="_lastRetentionRun.CompletedAt.Value" /> } else { <span>-</span> }</dd></div>
+                <div><dt>Auto-delete</dt><dd>@DashboardFormatting.Integer(LastRetentionAutoDeleteCount)</dd></div>
+                <div><dt>Review</dt><dd>@DashboardFormatting.Integer(LastRetentionReviewCount)</dd></div>
+                <div><dt>Blocked</dt><dd>@DashboardFormatting.Integer(CurrentBlockedReasons.Count)</dd></div>
+                <div><dt>狀態</dt><dd>@(_lastRetentionRun?.Status.ToString() ?? "-")</dd></div>
+            </dl>
+
+            <div class="retention-command-grid">
+                <button class="ghost-button" @onclick="ClassifyRetentionAsync" disabled="@RetentionActionDisabled">重新分類</button>
+                <button class="ghost-button" @onclick="PreviewRetentionDeleteAsync" disabled="@RetentionActionDisabled">預覽刪除</button>
+                <button class="primary-button" @onclick="ApplyRetentionDeleteAsync" disabled="@(!CanApplyRetentionDelete)">確認套用 Auto-delete</button>
+                <button class="ghost-button" @onclick="CopyReviewPlanAsync" disabled="@(!VisibleDecisions.Any())">複製整理計畫</button>
+                <button class="ghost-button" @onclick="CopyRetentionResultAsync" disabled="@(CurrentResult is null)">複製原始結果</button>
+            </div>
+
+            @if (CurrentBlockedReasons.Count > 0)
+            {
+                <div class="compact-chip-row retention-blocked-row">
+                    @foreach (var reason in CurrentBlockedReasons)
+                    {
+                        <span class="status-badge warn">@reason</span>
+                    }
+                </div>
+            }
+        </section>
+
+        <section class="panel filter-panel retention-filter-panel">
+            <div class="filter-grid retention-filter-grid">
+                <input @bind="_candidateQuery" @bind:event="oninput" placeholder="搜尋標題、ProjectId、reason 或 memory id" />
+                <select @bind="_candidateKind">
+                    <option value="">全部清單</option>
+                    <option value="auto">Auto-delete</option>
+                    <option value="review">Review</option>
+                </select>
+                <select @bind="_actionFilter">
+                    <option value="">全部建議</option>
+                    @foreach (var action in Enum.GetValues<MemoryRetentionRecommendedAction>())
+                    {
+                        <option value="@action">@ActionText(action)</option>
+                    }
+                </select>
+                <select @bind="_decisionFilter">
+                    <option value="">全部決策</option>
+                    <option value="changed">已調整</option>
+                    <option value="noted">有備註</option>
+                    <option value="blocked">有阻擋原因</option>
+                </select>
+            </div>
+        </section>
+
+        <div class="split-layout retention-workspace-layout">
+            <section class="panel panel-scroll retention-list-panel">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">整理候選 (@DashboardFormatting.Integer(VisibleDecisions.Count))</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">點選候選項目後在右側調整 action 與 note。</div>
+                    </div>
+                </div>
+
+                <div class="panel-scroll-body detail-scroll-shell">
+                    @if (CurrentResult is null)
+                    {
+                        <div class="empty-inline">目前沒有可檢視的整理結果。請先產生整理清單，或等待每日排程產生結果。</div>
+                    }
+                    else if (VisibleDecisions.Count == 0)
+                    {
+                        <div class="empty-inline">沒有符合目前篩選條件的候選項目。</div>
+                    }
+                    else
+                    {
+                        <div class="table-scroll-shell table-scroll-shell-tall retention-table-shell">
+                            <table class="data-table data-table-clickable retention-table">
+                                <colgroup>
+                                    <col class="retention-table-col-kind" />
+                                    <col class="retention-table-col-memory" />
+                                    <col class="retention-table-col-signal" />
+                                    <col class="retention-table-col-action" />
+                                </colgroup>
+                                <thead>
+                                    <tr>
+                                        <th>清單</th>
+                                        <th>記憶</th>
+                                        <th>訊號與原因</th>
+                                        <th>決策</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var decision in VisibleDecisions)
+                                    {
+                                        <tr class="@SelectedCandidateClass(decision.Candidate.MemoryId)" @onclick="@(() => SelectCandidate(decision.Candidate.MemoryId))">
+                                            <td><span class="status-badge @CandidateKindClass(decision.Kind)">@CandidateKindText(decision.Kind)</span></td>
+                                            <td>
+                                                <div class="table-title retention-memory-title" title="@decision.Candidate.Title">@decision.Candidate.Title</div>
+                                                <div class="table-subtitle retention-memory-meta">@decision.Candidate.ProjectId / @DashboardText.Label(decision.Candidate.MemoryType) / @DashboardText.Label(decision.Candidate.Status)</div>
+                                                <div class="table-subtitle retention-memory-id">@decision.Candidate.MemoryId</div>
+                                            </td>
+                                            <td>
+                                                <div>@CandidateSignalText(decision.Candidate)</div>
+                                                <div class="retention-reason-row">
+                                                    @foreach (var reason in decision.Candidate.ReasonCodes.Take(3))
+                                                    {
+                                                        <span class="status-badge neutral">@reason</span>
+                                                    }
+                                                    @foreach (var reason in decision.Candidate.BlockedReasons.Take(2))
+                                                    {
+                                                        <span class="status-badge warn">@reason</span>
+                                                    }
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <div class="table-title">@ActionText(decision.SelectedAction)</div>
+                                                <div class="table-subtitle">@DecisionStateText(decision)</div>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                </div>
+            </section>
+
+            <section class="panel detail-panel panel-scroll retention-detail-panel">
+                <div class="panel-title">候選細節與整理決策</div>
+                <div class="panel-scroll-body detail-scroll-shell">
+                    @if (SelectedDecision is null)
+                    {
+                        <div class="empty-inline">點選左側候選項目後編輯 review decision。</div>
+                    }
+                    else
+                    {
+                        <dl class="definition-grid retention-detail-grid">
+                            <div><dt>Memory Id</dt><dd class="retention-memory-id">@SelectedDecision.Candidate.MemoryId</dd></div>
+                            <div><dt>Project</dt><dd>@SelectedDecision.Candidate.ProjectId</dd></div>
+                            <div><dt>類型</dt><dd>@DashboardText.Label(SelectedDecision.Candidate.MemoryType)</dd></div>
+                            <div><dt>狀態</dt><dd>@DashboardText.Label(SelectedDecision.Candidate.Status)</dd></div>
+                            <div><dt>重要性</dt><dd>@SelectedDecision.Candidate.Importance.ToString("0.##")</dd></div>
+                            <div><dt>可信度</dt><dd>@SelectedDecision.Candidate.Confidence.ToString("0.##")</dd></div>
+                            <div><dt>Hits</dt><dd>@DashboardFormatting.Integer(SelectedDecision.Candidate.RecentHitCount)</dd></div>
+                            <div><dt>Links</dt><dd>@DashboardFormatting.Integer(SelectedDecision.Candidate.LinkDegree)</dd></div>
+                            <div><dt>更新時間</dt><dd><ClientLocalTime Value="SelectedDecision.Candidate.UpdatedAtUtc" /></dd></div>
+                        </dl>
+
+                        <div class="subpanel-title">整理決策</div>
+                        <div class="form-grid retention-decision-grid">
+                            <label>
+                                <span>Action</span>
+                                <select @bind="SelectedDecision.SelectedAction">
+                                    @foreach (var action in Enum.GetValues<MemoryRetentionRecommendedAction>())
+                                    {
+                                        <option value="@action">@ActionText(action)</option>
+                                    }
+                                </select>
+                            </label>
+                            <label class="span-2">
+                                <span>Review note</span>
+                                <textarea @bind="SelectedDecision.Note" placeholder="補充人工或 agent 判斷，例如保留理由、合併目標、刪除前需確認事項。"></textarea>
+                            </label>
+                        </div>
+
+                        <div class="detail-actions">
+                            <button class="ghost-button" @onclick="ResetSelectedDecision">還原建議</button>
+                            <a class="ghost-button button-link" href="@($"/memories?query={Uri.EscapeDataString(SelectedDecision.Candidate.MemoryId.ToString("D"))}")">開啟記憶資料</a>
+                        </div>
+
+                        <div class="subpanel-title">Reason codes</div>
+                        <div class="compact-chip-row">
+                            @foreach (var reason in SelectedDecision.Candidate.ReasonCodes)
+                            {
+                                <span class="status-badge neutral">@reason</span>
+                            }
+                        </div>
+
+                        @if (SelectedDecision.Candidate.BlockedReasons.Count > 0)
+                        {
+                            <div class="subpanel-title">Blocked reasons</div>
+                            <div class="compact-chip-row">
+                                @foreach (var reason in SelectedDecision.Candidate.BlockedReasons)
+                                {
+                                    <span class="status-badge warn">@reason</span>
+                                }
+                            </div>
+                        }
+                    }
+                </div>
+            </section>
+        </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private readonly CancellationTokenSource _cts = new();
+    private Task? _pollingTask;
+    private IReadOnlyList<MaintenanceRunResult> _maintenanceRuns = [];
+    private MaintenanceRunResult? _lastRetentionRun;
+    private MemoryDataRetentionRunResult? _retentionResult;
+    private MemoryDataRetentionRunResult? _latestRunResult;
+    private readonly Dictionary<Guid, RetentionDecisionDraft> _decisionDrafts = [];
+    private string? _candidateQuery;
+    private string? _candidateKind;
+    private string? _actionFilter;
+    private string? _decisionFilter;
+    private Guid? _selectedCandidateId;
+    private bool _loading;
+    private bool _retentionBusy;
+    private string? _loadError;
+    private string? _message;
+    private long _messageSequence;
+    private DateTimeOffset? _lastUpdatedAt;
+    private InstanceSettingsSnapshot? _settingsSnapshot;
+
+    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.JobsPollingSeconds ?? DashboardOptionsAccessor.Value.Polling.JobsSeconds;
+    private bool RetentionActionDisabled => _loading || _retentionBusy;
+    private bool CanApplyRetentionDelete => !RetentionActionDisabled &&
+        CurrentResult?.Mode == MemoryDataRetentionRunMode.PreviewDelete &&
+        CurrentResult.AutoDeleteCandidateCount > 0;
+    private MemoryDataRetentionRunResult? CurrentResult => _retentionResult ?? _latestRunResult;
+    private string RetentionModeText => CurrentResult?.Mode.ToString() ?? "No result";
+    private long LastRetentionAutoDeleteCount => CurrentResult?.AutoDeleteCandidateCount ?? ReadRetentionCount(_lastRetentionRun, "autoDeleteCandidateCount");
+    private long LastRetentionReviewCount => CurrentResult?.ReviewCandidateCount ?? ReadRetentionCount(_lastRetentionRun, "reviewCandidateCount");
+    private IReadOnlyList<string> CurrentBlockedReasons => CurrentResult?.BlockedReasons ?? [];
+    private IReadOnlyList<RetentionDecisionDraft> VisibleDecisions => BuildVisibleDecisions();
+    private RetentionDecisionDraft? SelectedDecision => _selectedCandidateId.HasValue && _decisionDrafts.TryGetValue(_selectedCandidateId.Value, out var decision)
+        ? decision
+        : null;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settingsSnapshot = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
+        await LoadAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _pollingTask = PollAsync(PollingIntervalSeconds);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            _maintenanceRuns = await ApiClient.GetMaintenanceRunsAsync(50, _cts.Token);
+            _lastRetentionRun = _maintenanceRuns
+                .Where(x => x.MaintenanceType == MaintenanceRunType.MemoryDataRetention)
+                .OrderByDescending(x => x.StartedAt)
+                .FirstOrDefault();
+            _latestRunResult = TryReadRetentionResult(_lastRetentionRun);
+            SyncDecisionDrafts();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("記憶整理", ex, CurrentResult is not null);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task ClassifyRetentionAsync()
+        => await RunRetentionAsync(
+            "產生整理清單",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "dashboard-retention",
+                Mode: MemoryDataRetentionRunMode.Classify,
+                IncludeCandidateDetails: true));
+
+    private async Task PreviewRetentionDeleteAsync()
+        => await RunRetentionAsync(
+            "預覽 auto-delete",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "dashboard-retention",
+                Mode: MemoryDataRetentionRunMode.PreviewDelete,
+                IncludeCandidateDetails: true));
+
+    private async Task ApplyRetentionDeleteAsync()
+        => await RunRetentionAsync(
+            "套用 auto-delete",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "dashboard-retention",
+                Mode: MemoryDataRetentionRunMode.ApplyAutoDelete,
+                IncludeCandidateDetails: true));
+
+    private async Task RunRetentionAsync(string actionName, MemoryDataRetentionRunRequest request)
+    {
+        _retentionBusy = true;
+        try
+        {
+            _retentionResult = await ApiClient.RunMemoryDataRetentionAsync(request, _cts.Token);
+            SyncDecisionDrafts();
+            ShowMessage($"{actionName} 已完成：Auto-delete {_retentionResult.AutoDeleteCandidateCount}，Review {_retentionResult.ReviewCandidateCount}。");
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(DashboardUiErrorFormatter.BuildActionError(actionName, ex));
+        }
+        finally
+        {
+            _retentionBusy = false;
+        }
+    }
+
+    private void SyncDecisionDrafts()
+    {
+        if (CurrentResult is null)
+        {
+            return;
+        }
+
+        var candidates = EnumerateCandidateDrafts(CurrentResult).ToArray();
+        foreach (var candidate in candidates)
+        {
+            if (_decisionDrafts.ContainsKey(candidate.Candidate.MemoryId))
+            {
+                continue;
+            }
+
+            _decisionDrafts[candidate.Candidate.MemoryId] = candidate;
+        }
+
+        var candidateIds = candidates.Select(x => x.Candidate.MemoryId).ToHashSet();
+        foreach (var staleId in _decisionDrafts.Keys.Where(id => !candidateIds.Contains(id)).ToArray())
+        {
+            _decisionDrafts.Remove(staleId);
+        }
+
+        if (_selectedCandidateId is null || !_decisionDrafts.ContainsKey(_selectedCandidateId.Value))
+        {
+            _selectedCandidateId = VisibleDecisions.FirstOrDefault()?.Candidate.MemoryId;
+        }
+    }
+
+    private IReadOnlyList<RetentionDecisionDraft> BuildVisibleDecisions()
+    {
+        var decisions = _decisionDrafts.Values.AsEnumerable();
+        if (!string.IsNullOrWhiteSpace(_candidateKind))
+        {
+            decisions = decisions.Where(x => string.Equals(x.Kind, _candidateKind, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (Enum.TryParse<MemoryRetentionRecommendedAction>(_actionFilter, true, out var action))
+        {
+            decisions = decisions.Where(x => x.Candidate.RecommendedAction == action || x.SelectedAction == action);
+        }
+
+        if (!string.IsNullOrWhiteSpace(_decisionFilter))
+        {
+            decisions = _decisionFilter switch
+            {
+                "changed" => decisions.Where(x => x.SelectedAction != x.Candidate.RecommendedAction),
+                "noted" => decisions.Where(x => !string.IsNullOrWhiteSpace(x.Note)),
+                "blocked" => decisions.Where(x => x.Candidate.BlockedReasons.Count > 0),
+                _ => decisions
+            };
+        }
+
+        if (!string.IsNullOrWhiteSpace(_candidateQuery))
+        {
+            var query = _candidateQuery.Trim();
+            decisions = decisions.Where(x =>
+                x.Candidate.MemoryId.ToString("D").Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                x.Candidate.Title.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                x.Candidate.ProjectId.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                x.Candidate.ReasonCodes.Any(reason => reason.Contains(query, StringComparison.OrdinalIgnoreCase)) ||
+                x.Candidate.BlockedReasons.Any(reason => reason.Contains(query, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return decisions
+            .OrderBy(x => x.Kind == "auto" ? 0 : 1)
+            .ThenByDescending(x => x.Candidate.Importance)
+            .ThenBy(x => x.Candidate.Title, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private void SelectCandidate(Guid memoryId)
+        => _selectedCandidateId = memoryId;
+
+    private void ResetSelectedDecision()
+    {
+        if (SelectedDecision is null)
+        {
+            return;
+        }
+
+        SelectedDecision.SelectedAction = SelectedDecision.Candidate.RecommendedAction;
+        SelectedDecision.Note = string.Empty;
+    }
+
+    private async Task CopyRetentionResultAsync()
+    {
+        if (CurrentResult is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var json = JsonSerializer.Serialize(CurrentResult, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            {
+                WriteIndented = true
+            });
+            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", json);
+            ShowMessage("已複製 retention 原始結果。");
+        }
+        catch (JSException)
+        {
+            ShowMessage("複製失敗，請改用手動複製 retention 結果。");
+        }
+    }
+
+    private async Task CopyReviewPlanAsync()
+    {
+        try
+        {
+            var plan = VisibleDecisions.Select(x => new
+            {
+                x.Kind,
+                memoryId = x.Candidate.MemoryId,
+                x.Candidate.ProjectId,
+                x.Candidate.Title,
+                memoryType = x.Candidate.MemoryType.ToString(),
+                status = x.Candidate.Status.ToString(),
+                recommendedAction = x.Candidate.RecommendedAction.ToString(),
+                selectedAction = x.SelectedAction.ToString(),
+                note = x.Note,
+                x.Candidate.ReasonCodes,
+                x.Candidate.BlockedReasons
+            });
+            var json = JsonSerializer.Serialize(plan, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            {
+                WriteIndented = true
+            });
+            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", json);
+            ShowMessage("已複製整理計畫，可交給 agent 或人工審核後套用。");
+        }
+        catch (JSException)
+        {
+            ShowMessage("複製失敗，請改用手動複製整理計畫。");
+        }
+    }
+
+    private void ShowMessage(string message)
+    {
+        _message = message;
+        _messageSequence++;
+    }
+
+    private void ClearMessage()
+        => _message = null;
+
+    private Task PollAsync(int intervalSeconds)
+    {
+        if (intervalSeconds <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(_cts.Token))
+                {
+                    await LoadAsync();
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
+    }
+
+    private static IEnumerable<RetentionDecisionDraft> EnumerateCandidateDrafts(MemoryDataRetentionRunResult result)
+    {
+        foreach (var candidate in result.AutoDeleteCandidates)
+        {
+            yield return new RetentionDecisionDraft("auto", candidate, candidate.RecommendedAction);
+        }
+
+        foreach (var candidate in result.ReviewCandidates)
+        {
+            yield return new RetentionDecisionDraft("review", candidate, candidate.RecommendedAction);
+        }
+    }
+
+    private static MemoryDataRetentionRunResult? TryReadRetentionResult(MaintenanceRunResult? run)
+    {
+        if (run is null || string.IsNullOrWhiteSpace(run.ResultJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(run.ResultJson);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("autoDeleteCandidateCount", out _) &&
+                !root.TryGetProperty("reviewCandidateCount", out _))
+            {
+                return null;
+            }
+
+            var thresholds = ReadThresholds(root);
+            var mode = ReadEnum(root, "mode", MemoryDataRetentionRunMode.Classify);
+            var startedAt = ReadDate(root, "startedAtUtc") ?? run.StartedAt;
+            var completedAt = ReadDate(root, "completedAtUtc") ?? run.CompletedAt ?? startedAt;
+            var cutoff = ReadDate(root, "cutoffUtc") ?? startedAt.AddDays(-thresholds.ArchivedItemsRetentionDays);
+            var autoCandidates = ReadCandidates(root, "autoDeleteCandidates");
+            var reviewCandidates = ReadCandidates(root, "reviewCandidates");
+            var autoCount = ReadLong(root, "autoDeleteCandidateCount", autoCandidates.Count);
+            var reviewCount = ReadLong(root, "reviewCandidateCount", reviewCandidates.Count);
+
+            return new MemoryDataRetentionRunResult(
+                run.Id,
+                cutoff,
+                ReadLong(root, "deletedMemoryItems", 0),
+                ReadLong(root, "deletedLinks", 0),
+                ReadLong(root, "deletedRevisions", 0),
+                ReadLong(root, "deletedChunks", 0),
+                ReadLong(root, "deletedVectors", 0),
+                ReadStringArray(root, "affectedProjectIds"),
+                ReadBool(root, "previewOnly", mode == MemoryDataRetentionRunMode.PreviewDelete),
+                mode,
+                thresholds,
+                autoCount,
+                reviewCount,
+                autoCandidates,
+                reviewCandidates,
+                ReadStringArray(root, "reasonCodes"),
+                ReadStringArray(root, "blockedReasons"),
+                startedAt,
+                completedAt,
+                run.ResultJson);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static MemoryDataRetentionPolicyThresholds ReadThresholds(JsonElement root)
+    {
+        if (root.TryGetProperty("policyThresholds", out var thresholds) && thresholds.ValueKind == JsonValueKind.Object)
+        {
+            return new MemoryDataRetentionPolicyThresholds(
+                (int)ReadLong(thresholds, "archivedItemsRetentionDays", 365),
+                (int)ReadLong(thresholds, "hitWindowDays", 180),
+                ReadLong(thresholds, "maxRecentHitCount", 0),
+                (int)ReadLong(thresholds, "maxLinkDegree", 0),
+                ReadDecimal(thresholds, "maxImportance", 0.55m),
+                ReadDecimal(thresholds, "maxConfidence", 0.70m),
+                (int)ReadLong(thresholds, "previewLimit", 50));
+        }
+
+        return new MemoryDataRetentionPolicyThresholds(
+            (int)ReadLong(root, "archivedItemsRetentionDays", 365),
+            (int)ReadLong(root, "hitWindowDays", 180),
+            ReadLong(root, "maxRecentHitCount", 0),
+            (int)ReadLong(root, "maxLinkDegree", 0),
+            ReadDecimal(root, "maxImportance", 0.55m),
+            ReadDecimal(root, "maxConfidence", 0.70m),
+            50);
+    }
+
+    private static IReadOnlyList<MemoryDataRetentionCandidateResult> ReadCandidates(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var element) || element.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var candidates = new List<MemoryDataRetentionCandidateResult>();
+        foreach (var item in element.EnumerateArray())
+        {
+            if (!Guid.TryParse(ReadString(item, "memoryId"), out var memoryId))
+            {
+                continue;
+            }
+
+            candidates.Add(new MemoryDataRetentionCandidateResult(
+                memoryId,
+                ReadString(item, "projectId", ProjectContext.DefaultProjectId),
+                ReadString(item, "title", memoryId.ToString("D")),
+                ReadEnum(item, "memoryType", MemoryType.Artifact),
+                ReadEnum(item, "status", MemoryStatus.Archived),
+                ReadDecimal(item, "importance", 0),
+                ReadDecimal(item, "confidence", 0),
+                ReadDate(item, "updatedAtUtc") ?? DateTimeOffset.MinValue,
+                ReadLong(item, "recentHitCount", 0),
+                (int)ReadLong(item, "linkDegree", 0),
+                ReadEnum(item, "recommendedAction", MemoryRetentionRecommendedAction.NeedsReview),
+                ReadStringArray(item, "reasonCodes"),
+                ReadStringArray(item, "blockedReasons")));
+        }
+
+        return candidates;
+    }
+
+    private static IReadOnlyList<string> ReadStringArray(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var element) || element.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return element.EnumerateArray()
+            .Select(x => x.GetString())
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x!)
+            .ToArray();
+    }
+
+    private static string ReadString(JsonElement root, string propertyName, string fallback = "")
+        => root.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? fallback
+            : fallback;
+
+    private static long ReadLong(JsonElement root, string propertyName, long fallback)
+        => root.TryGetProperty(propertyName, out var value) && value.TryGetInt64(out var number)
+            ? number
+            : fallback;
+
+    private static decimal ReadDecimal(JsonElement root, string propertyName, decimal fallback)
+        => root.TryGetProperty(propertyName, out var value) && value.TryGetDecimal(out var number)
+            ? number
+            : fallback;
+
+    private static bool ReadBool(JsonElement root, string propertyName, bool fallback)
+        => root.TryGetProperty(propertyName, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : fallback;
+
+    private static DateTimeOffset? ReadDate(JsonElement root, string propertyName)
+        => root.TryGetProperty(propertyName, out var value) && value.TryGetDateTimeOffset(out var date)
+            ? date
+            : null;
+
+    private static TEnum ReadEnum<TEnum>(JsonElement root, string propertyName, TEnum fallback)
+        where TEnum : struct, Enum
+        => Enum.TryParse<TEnum>(ReadString(root, propertyName), true, out var parsed) ? parsed : fallback;
+
+    private static long ReadRetentionCount(MaintenanceRunResult? run, string propertyName)
+    {
+        if (run is null || string.IsNullOrWhiteSpace(run.ResultJson))
+        {
+            return 0;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(run.ResultJson);
+            return document.RootElement.TryGetProperty(propertyName, out var value) && value.TryGetInt64(out var count)
+                ? count
+                : 0;
+        }
+        catch (JsonException)
+        {
+            return 0;
+        }
+    }
+
+    private static string CandidateSignalText(MemoryDataRetentionCandidateResult candidate)
+        => $"hit {DashboardFormatting.Integer(candidate.RecentHitCount)} / link {DashboardFormatting.Integer(candidate.LinkDegree)} / I {candidate.Importance:0.##} / C {candidate.Confidence:0.##}";
+
+    private static string CandidateKindText(string kind)
+        => kind == "auto" ? "Auto-delete" : "Review";
+
+    private static string CandidateKindClass(string kind)
+        => kind == "auto" ? "bad" : "warn";
+
+    private string SelectedCandidateClass(Guid memoryId)
+        => _selectedCandidateId == memoryId ? "selected-row" : string.Empty;
+
+    private static string ActionText(MemoryRetentionRecommendedAction action)
+        => action switch
+        {
+            MemoryRetentionRecommendedAction.Keep => "保留",
+            MemoryRetentionRecommendedAction.Archive => "封存",
+            MemoryRetentionRecommendedAction.Merge => "合併",
+            MemoryRetentionRecommendedAction.Delete => "刪除",
+            MemoryRetentionRecommendedAction.Restore => "還原",
+            MemoryRetentionRecommendedAction.NeedsReview => "需要審核",
+            _ => action.ToString()
+        };
+
+    private static string DecisionStateText(RetentionDecisionDraft decision)
+    {
+        if (decision.SelectedAction != decision.Candidate.RecommendedAction)
+        {
+            return $"已由 {ActionText(decision.Candidate.RecommendedAction)} 改為 {ActionText(decision.SelectedAction)}";
+        }
+
+        return string.IsNullOrWhiteSpace(decision.Note) ? "沿用建議" : "沿用建議，有備註";
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        if (_pollingTask is not null)
+        {
+            _ = CompleteDisposeAsync(_pollingTask, _cts);
+            return ValueTask.CompletedTask;
+        }
+
+        _cts.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static async Task CompleteDisposeAsync(Task pollingTask, CancellationTokenSource cts)
+    {
+        try
+        {
+            await pollingTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+
+    private sealed class RetentionDecisionDraft(string kind, MemoryDataRetentionCandidateResult candidate, MemoryRetentionRecommendedAction selectedAction)
+    {
+        public string Kind { get; } = kind;
+        public MemoryDataRetentionCandidateResult Candidate { get; } = candidate;
+        public MemoryRetentionRecommendedAction SelectedAction { get; set; } = selectedAction;
+        public string Note { get; set; } = string.Empty;
+    }
+}

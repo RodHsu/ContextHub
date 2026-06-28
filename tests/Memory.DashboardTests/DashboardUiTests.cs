@@ -288,6 +288,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().NotContain("sidebar-footer");
         overviewHtml.IndexOf("狀態監控", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("執行參數", StringComparison.Ordinal));
         overviewHtml.IndexOf("記憶圖譜", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
+        overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal));
+        overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("資料來源", StringComparison.Ordinal));
         overviewHtml.IndexOf("日誌", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
         overviewHtml.IndexOf("收件匣", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("使用者偏好", StringComparison.Ordinal));
         overviewHtml.IndexOf("資料庫檢視", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("安全管理", StringComparison.Ordinal));
@@ -356,8 +358,21 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         jobsHtml.Should().Contain("工作細節");
         jobsHtml.Should().Contain("複製 JSON");
         jobsHtml.Should().Contain("Memory Retention");
-        jobsHtml.Should().Contain("產生清單");
-        jobsHtml.Should().Contain("確認套用 Auto-delete");
+        jobsHtml.Should().Contain("開啟記憶整理");
+        jobsHtml.Should().Contain("快速產生清單");
+        jobsHtml.Should().Contain("完整檢視、篩選、逐筆 action 與 note 編輯請到記憶整理頁。");
+
+        using var retentionResponse = await client.GetAsync("/retention");
+        retentionResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var retentionHtml = WebUtility.HtmlDecode(await retentionResponse.Content.ReadAsStringAsync());
+        retentionHtml.Should().Contain("記憶整理");
+        retentionHtml.Should().Contain("Retention Review Workspace");
+        retentionHtml.Should().Contain("整理候選");
+        retentionHtml.Should().Contain("Expired low signal memory");
+        retentionHtml.Should().Contain("Important archived decision");
+        retentionHtml.Should().Contain("Review note");
+        retentionHtml.Should().Contain("複製整理計畫");
+        retentionHtml.Should().Contain("開啟記憶資料");
 
         using var logsResponse = await client.GetAsync("/logs");
         logsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -1501,6 +1516,8 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             mode,
             autoDeleteCandidateCount = autoDeleteCandidates.Length,
             reviewCandidateCount = reviewCandidates.Length,
+            autoDeleteCandidates,
+            reviewCandidates,
             deletedItems,
             blockedReasons = new[] { "protectedType", "linkedMemory" },
             policyThresholds = thresholds

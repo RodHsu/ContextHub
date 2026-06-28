@@ -204,6 +204,13 @@ textarea {
     color: var(--text);
 }
 
+.button-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+}
+
 .primary-button:hover,
 .ghost-button:hover {
     transform: translateY(-1px);
@@ -2813,6 +2820,135 @@ textarea {
 
 .jobs-retention-summary-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.jobs-retention-handoff {
+    margin-top: 0.75rem;
+    min-height: auto;
+    padding: 0.72rem 0.85rem;
+}
+
+.retention-page-body {
+    grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.retention-command-panel {
+    display: grid;
+    gap: 0.78rem;
+}
+
+.retention-summary-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.retention-command-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, auto));
+    justify-content: start;
+    gap: 0.55rem;
+    min-width: 0;
+}
+
+.retention-command-grid > * {
+    min-width: 0;
+}
+
+.retention-blocked-row {
+    padding-top: 0.12rem;
+}
+
+.retention-filter-panel {
+    padding-block: 0.72rem;
+}
+
+.retention-filter-grid {
+    grid-template-columns: minmax(18rem, 1.6fr) repeat(3, minmax(10rem, 0.8fr));
+}
+
+.retention-workspace-layout {
+    grid-template-columns: minmax(0, 1.25fr) minmax(360px, 0.75fr);
+    align-items: stretch;
+    min-height: 0;
+}
+
+.retention-list-panel {
+    min-height: clamp(440px, calc(var(--dashboard-viewport-height) - 320px), 760px);
+}
+
+.retention-table-shell {
+    min-height: clamp(340px, calc(var(--dashboard-viewport-height) - 420px), 640px);
+    max-height: none;
+}
+
+.retention-table {
+    table-layout: fixed;
+    min-width: 920px;
+}
+
+.retention-table tbody tr {
+    cursor: pointer;
+}
+
+.retention-table-col-kind {
+    width: 8.5rem;
+}
+
+.retention-table-col-memory {
+    width: 27rem;
+}
+
+.retention-table-col-signal {
+    width: 26rem;
+}
+
+.retention-table-col-action {
+    width: 13rem;
+}
+
+.retention-memory-title,
+.retention-memory-meta,
+.retention-memory-id {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.retention-memory-id {
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 0.76rem;
+    color: var(--text-subtle);
+}
+
+.retention-reason-row {
+    display: flex;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    margin-top: 0.38rem;
+}
+
+.retention-reason-row .status-badge {
+    padding: 0.22rem 0.48rem;
+    font-size: 0.75rem;
+}
+
+.retention-detail-panel {
+    min-height: clamp(440px, calc(var(--dashboard-viewport-height) - 320px), 760px);
+}
+
+.retention-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.retention-detail-grid > div:first-child {
+    grid-column: 1 / -1;
+}
+
+.retention-decision-grid {
+    grid-template-columns: minmax(12rem, 0.55fr) minmax(0, 1.45fr);
+    align-items: start;
+}
+
+.retention-decision-grid textarea {
+    min-height: 112px;
 }
 
 .stack-list {
@@ -6527,6 +6663,7 @@ textarea:focus {
 
 @media (max-width: 1180px) {
     .jobs-workspace-layout,
+    .retention-workspace-layout,
     .memories-workspace-layout {
         grid-template-columns: minmax(0, 1fr);
     }
@@ -6536,12 +6673,16 @@ textarea:focus {
     }
 
     .jobs-maintenance-card .definition-grid,
-    .jobs-retention-summary-grid {
+    .jobs-retention-summary-grid,
+    .retention-summary-grid,
+    .retention-detail-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     .jobs-maintenance-grid,
-    .jobs-reindex-grid {
+    .jobs-reindex-grid,
+    .retention-filter-grid,
+    .retention-decision-grid {
         grid-template-columns: minmax(0, 1fr);
     }
 
@@ -6626,6 +6767,14 @@ textarea:focus {
 
     .jobs-operations-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .retention-workspace-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .retention-command-grid {
+        grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr));
     }
 
     .jobs-maintenance-card {

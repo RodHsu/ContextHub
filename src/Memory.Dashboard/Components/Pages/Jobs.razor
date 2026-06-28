@@ -242,9 +242,8 @@
         </dl>
 
         <div class="detail-actions">
-            <button class="ghost-button" @onclick="ClassifyRetentionAsync" disabled="@RetentionActionDisabled">產生清單</button>
-            <button class="ghost-button" @onclick="PreviewRetentionDeleteAsync" disabled="@RetentionActionDisabled">預覽刪除</button>
-            <button class="primary-button" @onclick="ApplyRetentionDeleteAsync" disabled="@(!CanApplyRetentionDelete)">確認套用 Auto-delete</button>
+            <a class="primary-button button-link" href="/retention">開啟記憶整理</a>
+            <button class="ghost-button" @onclick="ClassifyRetentionAsync" disabled="@RetentionActionDisabled">快速產生清單</button>
             <button class="ghost-button" @onclick="CopyRetentionResultAsync" disabled="@(_retentionResult is null)">複製結果</button>
         </div>
 
@@ -300,7 +299,12 @@
                     </tbody>
                 </table>
             </div>
+
         }
+
+        <div class="empty-inline jobs-retention-handoff">
+            完整檢視、篩選、逐筆 action 與 note 編輯請到記憶整理頁。
+        </div>
     </section>
     </ChildContent>
 </PageViewport>
