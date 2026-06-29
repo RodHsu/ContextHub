@@ -265,6 +265,62 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchConversationCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<ConversationCheckpointSearchResult>>([]);
 
+    public Task<IReadOnlyList<ChatGptProposalResult>> GetChatGptProposalsAsync(ChatGptProposalListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<ChatGptProposalResult>>([
+            new ChatGptProposalResult(
+                Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                "memory_upsert",
+                ChatGptProposalStatus.Pending,
+                request.ProjectId ?? ProjectContext.DefaultProjectId,
+                request.ProjectId ?? ProjectContext.DefaultProjectId,
+                "ChatGPT proposed memory",
+                "Pending write proposal from ChatGPT gateway.",
+                """{"externalKey":"chatgpt:test","title":"ChatGPT proposed memory"}""",
+                "chatgpt-test-user",
+                "chatgpt-test@example.invalid",
+                "ChatGPT Test User",
+                null,
+                string.Empty,
+                DateTimeOffset.UtcNow.AddMinutes(-12),
+                DateTimeOffset.UtcNow.AddMinutes(-4))
+        ]);
+
+    public Task<ChatGptProposalResult> ApproveChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken)
+        => Task.FromResult(new ChatGptProposalResult(
+            id,
+            "memory_upsert",
+            ChatGptProposalStatus.Applied,
+            ProjectContext.DefaultProjectId,
+            ProjectContext.DefaultProjectId,
+            "ChatGPT proposed memory",
+            note,
+            """{"externalKey":"chatgpt:test"}""",
+            "chatgpt-test-user",
+            "chatgpt-test@example.invalid",
+            "ChatGPT Test User",
+            Guid.NewGuid(),
+            string.Empty,
+            DateTimeOffset.UtcNow.AddMinutes(-12),
+            DateTimeOffset.UtcNow));
+
+    public Task<ChatGptProposalResult> RejectChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken)
+        => Task.FromResult(new ChatGptProposalResult(
+            id,
+            "memory_upsert",
+            ChatGptProposalStatus.Rejected,
+            ProjectContext.DefaultProjectId,
+            ProjectContext.DefaultProjectId,
+            "ChatGPT proposed memory",
+            note,
+            """{"externalKey":"chatgpt:test"}""",
+            "chatgpt-test-user",
+            "chatgpt-test@example.invalid",
+            "ChatGPT Test User",
+            null,
+            note,
+            DateTimeOffset.UtcNow.AddMinutes(-12),
+            DateTimeOffset.UtcNow));
+
     public Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)
     {
         var candidates = FilterGraphMemories(request, BuildMemories()).ToArray();

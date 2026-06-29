@@ -291,7 +291,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal));
         overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("資料來源", StringComparison.Ordinal));
         overviewHtml.IndexOf("日誌", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
-        overviewHtml.IndexOf("收件匣", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("使用者偏好", StringComparison.Ordinal));
+        overviewHtml.IndexOf("收件匣", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("偏好", StringComparison.Ordinal));
         overviewHtml.IndexOf("資料庫檢視", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("安全管理", StringComparison.Ordinal));
 
         using var runtimeResponse = await client.GetAsync("/runtime");
@@ -965,6 +965,39 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
     public MemoryListRequest? LastMemoryListRequest { get; private set; }
     public MemoryGraphRequest? LastMemoryGraphRequest { get; private set; }
 
+    public Task<IReadOnlyList<ChatGptProposalResult>> GetChatGptProposalsAsync(ChatGptProposalListRequest request, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var projectId = string.IsNullOrWhiteSpace(request.ProjectId) ? "ContextHub" : request.ProjectId;
+        IReadOnlyList<ChatGptProposalResult> proposals =
+        [
+            new ChatGptProposalResult(
+                Guid.Parse("a4e69c1e-74a3-47a2-8c76-a823a8ff7e8d"),
+                "memory_upsert",
+                ChatGptProposalStatus.Pending,
+                projectId,
+                projectId,
+                "ChatGPT proposal",
+                "Pending ChatGPT memory proposal.",
+                "{\"title\":\"ChatGPT proposal\"}",
+                "chatgpt-test-user",
+                "chatgpt@example.test",
+                "ChatGPT Test User",
+                null,
+                string.Empty,
+                now.AddMinutes(-10),
+                now)
+        ];
+
+        return Task.FromResult(proposals);
+    }
+
+    public Task<ChatGptProposalResult> ApproveChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken)
+        => Task.FromResult(BuildDecidedChatGptProposal(id, ChatGptProposalStatus.Applied));
+
+    public Task<ChatGptProposalResult> RejectChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken)
+        => Task.FromResult(BuildDecidedChatGptProposal(id, ChatGptProposalStatus.Rejected));
+
     public Task<SystemStatusResult> GetStatusAsync(CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
@@ -989,6 +1022,27 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             false,
             string.Empty,
             string.Empty));
+    }
+
+    private static ChatGptProposalResult BuildDecidedChatGptProposal(Guid id, ChatGptProposalStatus status)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return new ChatGptProposalResult(
+            id,
+            "memory_upsert",
+            status,
+            "ContextHub",
+            "ContextHub",
+            "ChatGPT proposal",
+            "Reviewed ChatGPT memory proposal.",
+            "{\"title\":\"ChatGPT proposal\"}",
+            "chatgpt-test-user",
+            "chatgpt@example.test",
+            "ChatGPT Test User",
+            status == ChatGptProposalStatus.Applied ? Guid.Parse("9ad7235d-6b10-4a2e-b06e-3291d73e878d") : null,
+            string.Empty,
+            now.AddMinutes(-10),
+            now);
     }
 
     public Task<DashboardOverviewResult> GetOverviewAsync(CancellationToken cancellationToken)

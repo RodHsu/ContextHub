@@ -1,0 +1,172 @@
+@page "/chatgpt-proposals"
+@using Memory.Application
+@using Memory.Dashboard.Services
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>ChatGPT 寫入審核</PageTitle>
+
+<PageViewport Title="ChatGPT 寫入審核"
+              Subtitle="檢視 ChatGPT 送出的 durable memory 與 preference 變更 proposal，批准後才會寫入 ContextHub。"
+              BodyClass="page-viewport-body page-grid-body chatgpt-proposals-page-body">
+    <Actions>
+        <button type="button" class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+    </Actions>
+    <ChildContent>
+        <section class="filter-panel chatgpt-proposals-filter">
+            <div class="filter-grid">
+                <label>
+                    <span>Project</span>
+                    <input @bind="_projectId" placeholder="ContextHub" />
+                </label>
+                <label>
+                    <span>Status</span>
+                    <select @bind="_status">
+                        <option value="">全部</option>
+                        <option value="Pending">Pending</option>
+                        <option value="Applied">Applied</option>
+                        <option value="Rejected">Rejected</option>
+                        <option value="Failed">Failed</option>
+                    </select>
+                </label>
+                <div class="filter-action-cell">
+                    <button type="button" class="ghost-button" @onclick="LoadAsync" disabled="@_loading">套用</button>
+                </div>
+            </div>
+        </section>
+
+        @if (!string.IsNullOrWhiteSpace(_error))
+        {
+            <div class="inline-error">@_error</div>
+        }
+        else if (_loading)
+        {
+            <div class="empty-inline">讀取中...</div>
+        }
+        else if (_proposals.Count == 0)
+        {
+            <div class="empty-state">目前沒有符合條件的 ChatGPT proposal。</div>
+        }
+        else
+        {
+            <section class="panel chatgpt-proposals-panel">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">Proposal Queue</div>
+                        <div class="table-subtitle">Payload 可選取與複製；一般 UI 文字保持不可選取。</div>
+                    </div>
+                </div>
+                <div class="table-scroll-shell">
+                    <table class="data-table chatgpt-proposals-table">
+                        <thead>
+                            <tr>
+                                <th>狀態</th>
+                                <th>Tool</th>
+                                <th>Project</th>
+                                <th>Title</th>
+                                <th>來源</th>
+                                <th>更新時間</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var item in _proposals)
+                            {
+                                <tr>
+                                    <td><span class="status-badge @StatusClass(item.Status)">@item.Status</span></td>
+                                    <td><code>@item.ToolName</code></td>
+                                    <td>@item.ProjectId</td>
+                                    <td>
+                                        <strong>@item.Title</strong>
+                                        <div class="table-subtitle">@item.Summary</div>
+                                        @if (!string.IsNullOrWhiteSpace(item.Error))
+                                        {
+                                            <div class="inline-error">@item.Error</div>
+                                        }
+                                        <details class="payload-details">
+                                            <summary>Payload</summary>
+                                            <pre class="payload-preview code-block">@item.PayloadJson</pre>
+                                        </details>
+                                    </td>
+                                    <td>@DisplayUser(item)</td>
+                                    <td><ClientLocalTime Value="item.UpdatedAt" /></td>
+                                    <td class="actions-cell">
+                                        @if (item.Status == ChatGptProposalStatus.Pending)
+                                        {
+                                            <button type="button" class="primary-button compact" @onclick="() => ApproveAsync(item.Id)">批准</button>
+                                            <button type="button" class="ghost-button compact" @onclick="() => RejectAsync(item.Id)">拒絕</button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        }
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private List<ChatGptProposalResult> _proposals = [];
+    private string _projectId = "ContextHub";
+    private string _status = "Pending";
+    private bool _loading;
+    private string _error = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+        => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = string.Empty;
+        try
+        {
+            ChatGptProposalStatus? parsedStatus = string.IsNullOrWhiteSpace(_status)
+                ? null
+                : Enum.Parse<ChatGptProposalStatus>(_status);
+            var result = await ApiClient.GetChatGptProposalsAsync(
+                new ChatGptProposalListRequest(
+                    string.IsNullOrWhiteSpace(_projectId) ? null : _projectId.Trim(),
+                    parsedStatus,
+                    100),
+                CancellationToken.None);
+            _proposals = result.ToList();
+        }
+        catch (Exception ex)
+        {
+            _error = DashboardUiErrorFormatter.BuildLoadError("ChatGPT proposal", ex, _proposals.Count > 0);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task ApproveAsync(Guid id)
+    {
+        await ApiClient.ApproveChatGptProposalAsync(id, "Approved from Dashboard.", CancellationToken.None);
+        await LoadAsync();
+    }
+
+    private async Task RejectAsync(Guid id)
+    {
+        await ApiClient.RejectChatGptProposalAsync(id, "Rejected from Dashboard.", CancellationToken.None);
+        await LoadAsync();
+    }
+
+    private static string DisplayUser(ChatGptProposalResult item)
+        => string.IsNullOrWhiteSpace(item.OAuthEmail)
+            ? item.OAuthSubject
+            : item.OAuthEmail;
+
+    private static string StatusClass(ChatGptProposalStatus status)
+        => status switch
+        {
+            ChatGptProposalStatus.Pending => "warn",
+            ChatGptProposalStatus.Applied => "ok",
+            ChatGptProposalStatus.Rejected => "bad",
+            ChatGptProposalStatus.Failed => "bad",
+            _ => string.Empty
+        };
+}

@@ -3,15 +3,26 @@
 
 <PageTitle>Context Hub | 錯誤</PageTitle>
 
-<div class="empty-state">
-    <div class="empty-title">主控台發生錯誤</div>
-    <div class="empty-copy">這個請求未能完成，請重新整理或檢查 `mcp-server` / Docker stack 狀態。</div>
+<PageViewport Title="主控台發生錯誤"
+              Subtitle="這個請求未能完成，請重新整理或檢查 mcp-server / Docker stack 狀態。"
+              BodyClass="page-viewport-body page-grid-body boundary-page-body">
+    <ChildContent>
+        <section class="panel boundary-panel">
+            <div class="panel-title">錯誤診斷</div>
+            <div class="empty-inline">若問題持續發生，請保留 Request ID 並檢查服務狀態。</div>
 
-    @if (ShowRequestId)
-    {
-        <div class="code-block">Request ID: @RequestId</div>
-    }
-</div>
+            @if (ShowRequestId)
+            {
+                <div class="code-block">Request ID: @RequestId</div>
+            }
+
+            <div class="settings-button-row">
+                <a class="primary-button" href="/">回到總覽</a>
+                <a class="ghost-button" href="/monitoring">查看狀態監控</a>
+            </div>
+        </section>
+    </ChildContent>
+</PageViewport>
 
 @code{
     [CascadingParameter]

@@ -1,0 +1,910 @@
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
+using FluentAssertions;
+using Memory.Application;
+using Memory.Domain;
+using Memory.Infrastructure;
+using Memory.Tests.Shared;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol.Client;
+using Testcontainers.PostgreSql;
+using Testcontainers.Redis;
+
+namespace Memory.ChatGptGatewayTests;
+
+public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environment) : IClassFixture<ChatGptGatewayTestEnvironment>
+{
+    private const string ProjectId = ChatGptGatewayTestConstants.ProjectId;
+    private const string TestToken = ChatGptGatewayTestConstants.TestToken;
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Mcp_Should_Reject_Anonymous_Request()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = null;
+
+        using var response = await client.PostAsync(
+            "/mcp",
+            new StringContent("""{"jsonrpc":"2.0","id":"anonymous","method":"tools/list"}""", Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+    }
+
+    [DockerRequiredFact]
+    public async Task Tool_Discovery_Should_Expose_Only_ChatGpt_Allowed_Tools()
+    {
+        using var httpClient = CreateAuthorizedClient(environment.GetFactory());
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri(httpClient.BaseAddress!, "/mcp"),
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, httpClient);
+
+        await using var client = await McpClient.CreateAsync(transport);
+        var toolNames = (await client.ListToolsAsync())
+            .Select(x => x.ProtocolTool.Name)
+            .ToArray();
+
+        toolNames.Should().Contain([
+            "describe_context_hub",
+            "build_working_context",
+            "memory_search",
+            "memory_get",
+            "project_artifacts_list",
+            "project_artifacts_search",
+            "project_artifact_get",
+            "log_search",
+            "log_read",
+            "conversation_ingest",
+            "memory_upsert",
+            "memory_update",
+            "user_preference_upsert",
+            "promote_log_slice_to_memory",
+            "project_artifact_publish",
+            "project_artifact_upload_object",
+            "chatgpt_proposals_list",
+            "chatgpt_proposal_approve",
+            "chatgpt_proposal_reject"
+        ]);
+        toolNames.Should().NotContain([
+            "enqueue_reindex",
+            "conversation_insights_promote",
+            "system_status",
+            "sessions_list"
+        ]);
+    }
+
+    [DockerRequiredFact]
+    public async Task Proposal_Approval_Should_Bridge_ChatGpt_And_Codex_Read_Paths()
+    {
+        var externalKey = $"chatgpt-gateway:{Guid.NewGuid():N}";
+        var rejectedExternalKey = $"chatgpt-gateway-rejected:{Guid.NewGuid():N}";
+
+        await SeedCodexReadableMemoryAsync("Gateway read fixture", "ChatGPT gateway can read authorized project memory.");
+
+        var captureHandler = new SessionCaptureHandler(environment.GetFactory().Server.CreateHandler());
+        using var client = CreateAuthorizedClient(environment.GetFactory(), captureHandler);
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri(client.BaseAddress!, "/mcp"),
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, client);
+
+        await using var mcpClient = await McpClient.CreateAsync(transport);
+        _ = await mcpClient.ListToolsAsync();
+        var sessionId = captureHandler.SessionId;
+        sessionId.Should().NotBeNullOrWhiteSpace();
+
+        var readPayload = await SendMcpAsync(client, sessionId!, 2, "tools/call", new
+        {
+            name = "memory_search",
+            arguments = new
+            {
+                query = "authorized project memory",
+                projectId = ProjectId,
+                limit = 5
+            }
+        });
+        ExtractToolText(readPayload).Should().Contain("Gateway read fixture");
+
+        var unauthorizedProjectPayload = await SendMcpAsync(client, sessionId!, 3, "tools/call", new
+        {
+            name = "memory_search",
+            arguments = new
+            {
+                query = "authorized project memory",
+                projectId = "UnauthorizedProject",
+                limit = 5
+            }
+        });
+        ExtractToolText(unauthorizedProjectPayload).Should().Contain("An error occurred invoking 'memory_search'.");
+
+        var proposalPayload = await SendMcpAsync(client, sessionId!, 4, "tools/call", new
+        {
+            name = "memory_upsert",
+            arguments = new
+            {
+                request = new
+                {
+                    externalKey,
+                    scope = "Project",
+                    memoryType = "Fact",
+                    title = "Approved ChatGPT gateway proposal",
+                    content = "Approved ChatGPT proposal content should be visible to Codex and ChatGPT readers.",
+                    summary = "Approved ChatGPT proposal summary",
+                    sourceType = "chatgpt",
+                    sourceRef = "chatgpt-mcp-gateway-tests",
+                    tags = new[] { "chatgpt", "gateway" },
+                    importance = 0.8m,
+                    confidence = 0.9m,
+                    projectId = ProjectId
+                }
+            }
+        });
+        var proposal = ExtractToolJson(proposalPayload);
+        proposal.GetProperty("status").GetString().Should().Be("Pending");
+        var proposalId = proposal.GetProperty("id").GetGuid();
+
+        await DurableMemoryShouldNotExistAsync(externalKey);
+
+        var listPayload = await SendMcpAsync(client, sessionId!, 5, "tools/call", new
+        {
+            name = "chatgpt_proposals_list",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    status = "Pending",
+                    limit = 10
+                }
+            }
+        });
+        ExtractToolText(listPayload).Should().Contain(proposalId.ToString("D"));
+
+        var approvePayload = await SendMcpAsync(client, sessionId!, 6, "tools/call", new
+        {
+            name = "chatgpt_proposal_approve",
+            arguments = new
+            {
+                request = new
+                {
+                    proposalId,
+                    note = "Approved by gateway integration test."
+                }
+            }
+        });
+        var approved = ExtractToolJson(approvePayload);
+        approved.GetProperty("status").GetString().Should().Be("Applied");
+        approved.GetProperty("appliedResourceId").ValueKind.Should().Be(JsonValueKind.String);
+
+        await DurableMemoryShouldExistAsync(externalKey);
+        await CodexWorkingContextShouldContainAsync("Approved ChatGPT proposal", "Approved ChatGPT gateway proposal");
+
+        var gatewayReadAfterApproval = await SendMcpAsync(client, sessionId!, 7, "tools/call", new
+        {
+            name = "memory_search",
+            arguments = new
+            {
+                query = "Approved ChatGPT proposal",
+                projectId = ProjectId,
+                limit = 5
+            }
+        });
+        ExtractToolText(gatewayReadAfterApproval).Should().Contain("Approved ChatGPT gateway proposal");
+
+        var artifactProposalPayload = await SendMcpAsync(client, sessionId!, 8, "tools/call", new
+        {
+            name = "project_artifact_publish",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    title = "ChatGPT artifact exchange proposal",
+                    summary = "Gateway artifact proposal should become shared same-project knowledge after approval.",
+                    content = "Artifact snippet shared from ChatGPT simulation for Codex interop.",
+                    kind = "Snippet",
+                    sourceSystem = "chatgpt-mcp-gateway",
+                    sourceRef = "chatgpt-mcp-gateway-tests/artifacts",
+                    tags = new[] { "chatgpt", "artifact-exchange" }
+                }
+            }
+        });
+        var artifactProposal = ExtractToolJson(artifactProposalPayload);
+        artifactProposal.GetProperty("status").GetString().Should().Be("Pending");
+        var artifactProposalId = artifactProposal.GetProperty("id").GetGuid();
+
+        await ProjectArtifactShouldNotExistAsync("ChatGPT artifact exchange proposal");
+
+        var approveArtifactPayload = await SendMcpAsync(client, sessionId!, 9, "tools/call", new
+        {
+            name = "chatgpt_proposal_approve",
+            arguments = new
+            {
+                request = new
+                {
+                    proposalId = artifactProposalId,
+                    note = "Approved artifact exchange proposal by gateway integration test."
+                }
+            }
+        });
+        var approvedArtifact = ExtractToolJson(approveArtifactPayload);
+        approvedArtifact.GetProperty("status").GetString().Should().Be("Applied");
+
+        var codexArtifact = await CodexProjectArtifactSearchShouldContainAsync("Artifact snippet shared from ChatGPT", "ChatGPT artifact exchange proposal");
+
+        var gatewayArtifactSearch = await SendMcpAsync(client, sessionId!, 10, "tools/call", new
+        {
+            name = "project_artifacts_search",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    query = "Artifact snippet shared from ChatGPT",
+                    limit = 5
+                }
+            }
+        });
+        ExtractToolText(gatewayArtifactSearch).Should().Contain("ChatGPT artifact exchange proposal");
+
+        var gatewayArtifactGet = await SendMcpAsync(client, sessionId!, 11, "tools/call", new
+        {
+            name = "project_artifact_get",
+            arguments = new
+            {
+                memoryId = codexArtifact.MemoryId
+            }
+        });
+        ExtractToolText(gatewayArtifactGet).Should().Contain("Artifact snippet shared from ChatGPT simulation");
+
+        var codexExternalArtifact = await PublishCodexExternalArtifactAsync(
+            "Codex R2 pointer artifact",
+            "Codex published an R2 object pointer for ChatGPT readers.",
+            "wjcy-context-artifacts",
+            $"chatgpt-gateway-tests/{Guid.NewGuid():N}.md",
+            DateTimeOffset.UtcNow.AddHours(1));
+
+        var gatewayCodexArtifactList = await SendMcpAsync(client, sessionId!, 12, "tools/call", new
+        {
+            name = "project_artifacts_list",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    query = "Codex R2 pointer",
+                    kind = "ExternalObject",
+                    sourceSystem = "codex",
+                    includeExpired = false,
+                    limit = 5
+                }
+            }
+        });
+        var codexArtifactListText = ExtractToolText(gatewayCodexArtifactList);
+        codexArtifactListText.Should().Contain("Codex R2 pointer artifact");
+        codexArtifactListText.Should().Contain("wjcy-context-artifacts");
+
+        var gatewayCodexArtifactGet = await SendMcpAsync(client, sessionId!, 13, "tools/call", new
+        {
+            name = "project_artifact_get",
+            arguments = new
+            {
+                memoryId = codexExternalArtifact.MemoryId
+            }
+        });
+        var codexArtifactGetText = ExtractToolText(gatewayCodexArtifactGet);
+        codexArtifactGetText.Should().Contain("Codex R2 pointer artifact");
+        codexArtifactGetText.Should().Contain("ExternalObject");
+        codexArtifactGetText.Should().Contain("expiresAt");
+
+        var expiredCodexArtifact = await PublishCodexExternalArtifactAsync(
+            "Expired Codex R2 pointer artifact",
+            "Expired Codex object pointers should be hidden by default.",
+            "fake-bucket",
+            $"chatgpt-gateway-tests/expired-{Guid.NewGuid():N}.md",
+            DateTimeOffset.UtcNow.AddMinutes(-10));
+
+        var nonExpiredOnlyPayload = await SendMcpAsync(client, sessionId!, 14, "tools/call", new
+        {
+            name = "project_artifacts_list",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    query = "Expired Codex R2 pointer",
+                    includeExpired = false,
+                    limit = 5
+                }
+            }
+        });
+        ExtractToolText(nonExpiredOnlyPayload).Should().NotContain("Expired Codex R2 pointer artifact");
+
+        var includeExpiredPayload = await SendMcpAsync(client, sessionId!, 15, "tools/call", new
+        {
+            name = "project_artifacts_list",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    query = "Expired Codex R2 pointer",
+                    includeExpired = true,
+                    limit = 5
+                }
+            }
+        });
+        var includeExpiredText = ExtractToolText(includeExpiredPayload);
+        includeExpiredText.Should().Contain("Expired Codex R2 pointer artifact");
+        includeExpiredText.Should().Contain("isExpired");
+
+        var dryRunPrune = await PruneExpiredArtifactsAsync(dryRun: true);
+        dryRunPrune.ScannedCount.Should().BeGreaterThanOrEqualTo(1);
+        dryRunPrune.Items.Should().Contain(x => x.MemoryId == expiredCodexArtifact.MemoryId && x.Key == expiredCodexArtifact.ObjectRef!.Key);
+        FakeProjectArtifactObjectStore.Deletes.Should().BeEmpty();
+
+        var actualPrune = await PruneExpiredArtifactsAsync(dryRun: false);
+        actualPrune.DeletedObjectCount.Should().BeGreaterThanOrEqualTo(1);
+        actualPrune.ArchivedArtifactCount.Should().BeGreaterThanOrEqualTo(1);
+        actualPrune.Items.Should().Contain(x => x.MemoryId == expiredCodexArtifact.MemoryId && x.ArchivedArtifact);
+        FakeProjectArtifactObjectStore.Deletes.Should().Contain(expiredCodexArtifact.ObjectRef!);
+        await ProjectArtifactShouldBeArchivedAsync(expiredCodexArtifact.MemoryId);
+
+        var managedUploadProposalPayload = await SendMcpAsync(client, sessionId!, 16, "tools/call", new
+        {
+            name = "project_artifact_upload_object",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    title = "ChatGPT managed R2 upload proposal",
+                    summary = "Managed upload should write object storage only after approval.",
+                    contentBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes("Managed artifact content should live in object storage.")),
+                    fileName = "managed-artifact.md",
+                    contentType = "text/markdown",
+                    expiresAt = DateTimeOffset.UtcNow.AddHours(2),
+                    sourceSystem = "chatgpt-mcp-gateway",
+                    sourceRef = $"chatgpt-managed-upload:{Guid.NewGuid():N}",
+                    tags = new[] { "chatgpt", "managed-upload" }
+                }
+            }
+        });
+        var managedUploadProposal = ExtractToolJson(managedUploadProposalPayload);
+        managedUploadProposal.GetProperty("status").GetString().Should().Be("Pending");
+        var managedUploadProposalId = managedUploadProposal.GetProperty("id").GetGuid();
+        FakeProjectArtifactObjectStore.Uploads.Should().BeEmpty();
+        await ProjectArtifactShouldNotExistAsync("ChatGPT managed R2 upload proposal");
+
+        var approveManagedUploadPayload = await SendMcpAsync(client, sessionId!, 17, "tools/call", new
+        {
+            name = "chatgpt_proposal_approve",
+            arguments = new
+            {
+                request = new
+                {
+                    proposalId = managedUploadProposalId,
+                    note = "Approved managed object upload by gateway integration test."
+                }
+            }
+        });
+        ExtractToolJson(approveManagedUploadPayload).GetProperty("status").GetString().Should().Be("Applied");
+        FakeProjectArtifactObjectStore.Uploads.Should().ContainSingle(x => x.FileName == "managed-artifact.md");
+
+        var managedUploadListPayload = await SendMcpAsync(client, sessionId!, 18, "tools/call", new
+        {
+            name = "project_artifacts_list",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    query = "ChatGPT managed R2 upload",
+                    includeExpired = false,
+                    limit = 5
+                }
+            }
+        });
+        var managedUploadText = ExtractToolText(managedUploadListPayload);
+        managedUploadText.Should().Contain("ChatGPT managed R2 upload proposal");
+        managedUploadText.Should().Contain("fake-r2");
+        managedUploadText.Should().NotContain("Managed artifact content should live in object storage.");
+
+        var rejectProposalPayload = await SendMcpAsync(client, sessionId!, 19, "tools/call", new
+        {
+            name = "memory_upsert",
+            arguments = new
+            {
+                request = new
+                {
+                    externalKey = rejectedExternalKey,
+                    scope = "Project",
+                    memoryType = "Fact",
+                    title = "Rejected ChatGPT gateway proposal",
+                    content = "Rejected proposal content must not be durable memory.",
+                    summary = "Rejected proposal summary",
+                    sourceType = "chatgpt",
+                    sourceRef = "chatgpt-mcp-gateway-tests",
+                    tags = new[] { "chatgpt", "gateway" },
+                    importance = 0.8m,
+                    confidence = 0.9m,
+                    projectId = ProjectId
+                }
+            }
+        });
+        var rejectedProposalId = ExtractToolJson(rejectProposalPayload).GetProperty("id").GetGuid();
+
+        var rejectPayload = await SendMcpAsync(client, sessionId!, 20, "tools/call", new
+        {
+            name = "chatgpt_proposal_reject",
+            arguments = new
+            {
+                request = new
+                {
+                    proposalId = rejectedProposalId,
+                    note = "Rejected by gateway integration test."
+                }
+            }
+        });
+        ExtractToolJson(rejectPayload).GetProperty("status").GetString().Should().Be("Rejected");
+        await DurableMemoryShouldNotExistAsync(rejectedExternalKey);
+
+        var rejectedArtifactProposalPayload = await SendMcpAsync(client, sessionId!, 21, "tools/call", new
+        {
+            name = "project_artifact_publish",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    title = "Rejected ChatGPT artifact exchange proposal",
+                    summary = "Rejected artifact summary",
+                    content = "Rejected artifact content must not be shared.",
+                    kind = "Snippet",
+                    sourceSystem = "chatgpt-mcp-gateway",
+                    sourceRef = "chatgpt-mcp-gateway-tests/rejected-artifacts"
+                }
+            }
+        });
+        var rejectedArtifactProposalId = ExtractToolJson(rejectedArtifactProposalPayload).GetProperty("id").GetGuid();
+
+        var rejectArtifactPayload = await SendMcpAsync(client, sessionId!, 22, "tools/call", new
+        {
+            name = "chatgpt_proposal_reject",
+            arguments = new
+            {
+                request = new
+                {
+                    proposalId = rejectedArtifactProposalId,
+                    note = "Rejected artifact exchange proposal by gateway integration test."
+                }
+            }
+        });
+        ExtractToolJson(rejectArtifactPayload).GetProperty("status").GetString().Should().Be("Rejected");
+        await ProjectArtifactShouldNotExistAsync("Rejected ChatGPT artifact exchange proposal");
+    }
+
+    private async Task SeedCodexReadableMemoryAsync(string title, string content)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: $"chatgpt-gateway-read:{Guid.NewGuid():N}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: title,
+                Content: content,
+                Summary: content,
+                SourceType: "test",
+                SourceRef: "chatgpt-gateway-tests",
+                Tags: ["chatgpt", "gateway"],
+                Importance: 0.8m,
+                Confidence: 0.9m,
+                ProjectId: ProjectId),
+            CancellationToken.None);
+    }
+
+    private async Task DurableMemoryShouldExistAsync(string externalKey)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var exists = await dbContext.MemoryItems.AnyAsync(x => x.ExternalKey == externalKey, CancellationToken.None);
+        exists.Should().BeTrue();
+    }
+
+    private async Task DurableMemoryShouldNotExistAsync(string externalKey)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var exists = await dbContext.MemoryItems.AnyAsync(x => x.ExternalKey == externalKey, CancellationToken.None);
+        exists.Should().BeFalse();
+    }
+
+    private async Task CodexWorkingContextShouldContainAsync(string query, string expected)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var context = await memoryService.BuildWorkingContextAsync(
+            new WorkingContextRequest(
+                query,
+                Limit: 5,
+                RecentLogLimit: 0,
+                ProjectId: ProjectId),
+            CancellationToken.None);
+
+        JsonSerializer.Serialize(context).Should().Contain(expected);
+    }
+
+    private async Task<ProjectArtifactResult> CodexProjectArtifactSearchShouldContainAsync(string query, string expectedTitle)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var artifactExchange = scope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>();
+        var results = await artifactExchange.SearchAsync(
+            new ProjectArtifactSearchRequest(ProjectId, query, Limit: 5),
+            CancellationToken.None);
+
+        var artifact = results.Should().ContainSingle(x => x.Title == expectedTitle).Subject;
+        artifact.ProjectId.Should().Be(ProjectId);
+        artifact.Kind.Should().Be(ProjectArtifactKind.Snippet);
+        artifact.SourceSystem.Should().Be("chatgpt-mcp-gateway");
+        return artifact;
+    }
+
+    private async Task<ProjectArtifactResult> PublishCodexExternalArtifactAsync(
+        string title,
+        string summary,
+        string bucket,
+        string key,
+        DateTimeOffset expiresAt)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var artifactExchange = scope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>();
+        var artifact = await artifactExchange.PublishAsync(
+            new ProjectArtifactPublishRequest(
+                ProjectId,
+                title,
+                summary,
+                Content: string.Empty,
+                Kind: ProjectArtifactKind.ExternalObject,
+                SourceSystem: "codex",
+                SourceRef: $"codex-r2-pointer:{Guid.NewGuid():N}",
+                Tags: ["codex", "r2-pointer"],
+                ObjectRef: new ProjectArtifactObjectRef(
+                    Provider: "r2",
+                    Bucket: bucket,
+                    Key: key,
+                    ExpiresAt: expiresAt,
+                    ContentType: "text/markdown"),
+                ExpiresAt: expiresAt),
+            CancellationToken.None);
+
+        artifact.Kind.Should().Be(ProjectArtifactKind.ExternalObject);
+        artifact.ObjectRef.Should().NotBeNull();
+        artifact.ObjectRef!.Provider.Should().Be("r2");
+        artifact.ExpiresAt.Should().BeCloseTo(expiresAt, TimeSpan.FromSeconds(1));
+        return artifact;
+    }
+
+    private async Task ProjectArtifactShouldNotExistAsync(string title)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var exists = await dbContext.MemoryItems.AnyAsync(
+            x => x.ProjectId == ProjectId &&
+                 x.Title == title &&
+                 x.MemoryType == MemoryType.Artifact &&
+                 x.SourceType == ProjectArtifactExchangeService.SourceType,
+            CancellationToken.None);
+        exists.Should().BeFalse();
+    }
+
+    private async Task<ProjectArtifactExpiredObjectPruneResult> PruneExpiredArtifactsAsync(bool dryRun)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var artifactExchange = scope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>();
+        return await artifactExchange.PruneExpiredObjectsAsync(
+            new ProjectArtifactExpiredObjectPruneRequest(ProjectId, Limit: 20, DryRun: dryRun),
+            CancellationToken.None);
+    }
+
+    private async Task ProjectArtifactShouldBeArchivedAsync(Guid memoryId)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var artifact = await dbContext.MemoryItems.SingleAsync(x => x.Id == memoryId, CancellationToken.None);
+        artifact.Status.Should().Be(MemoryStatus.Archived);
+        artifact.Tags.Should().Contain("artifact-object-pruned");
+    }
+
+    private static HttpClient CreateAuthorizedClient(ChatGptGatewayApplicationFactory factory, HttpMessageHandler? handler = null)
+    {
+        var client = handler is null
+            ? factory.CreateClient()
+            : new HttpClient(handler) { BaseAddress = factory.Server.BaseAddress };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TestToken);
+        return client;
+    }
+
+    private static async Task<string> SendMcpAsync(HttpClient client, string sessionId, int id, string method, object @params)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = JsonContent.Create(new
+            {
+                jsonrpc = "2.0",
+                id,
+                method,
+                @params
+            })
+        };
+        request.Headers.Add("Mcp-Session-Id", sessionId);
+        request.Headers.Add("MCP-Protocol-Version", "2025-03-26");
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+
+        using var response = await client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadAsStringAsync();
+    }
+
+    private static void UseGatewayActor(IServiceProvider services)
+    {
+        var dbContext = services.GetRequiredService<MemoryDbContext>();
+        var user = dbContext.TenantUsers
+            .Include(x => x.Tenant)
+            .Single(x => x.Username == "gateway-test-admin");
+
+        services.GetRequiredService<IRequestActorAccessor>().Current = new ContextHubRequestActor(
+            user.TenantId,
+            user.Id,
+            user.Username,
+            user.Role,
+            [
+                SecurityScopes.MemoryRead,
+                SecurityScopes.MemoryWrite,
+                SecurityScopes.PreferencesRead,
+                SecurityScopes.PreferencesWrite,
+                SecurityScopes.LogsRead
+            ],
+            [ProjectId],
+            IsAuthenticated: true);
+    }
+
+    private static JsonElement ExtractToolJson(string payload)
+    {
+        using var document = JsonDocument.Parse(ExtractToolText(payload));
+        return document.RootElement.Clone();
+    }
+
+    private static string ExtractToolText(string payload)
+    {
+        return ExtractSseJson(payload)
+            .GetProperty("result")
+            .GetProperty("content")[0]
+            .GetProperty("text")
+            .GetString()
+            ?? string.Empty;
+    }
+
+    private static JsonElement ExtractSseJson(string payload)
+    {
+        var dataLine = payload
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault(line => line.StartsWith("data: ", StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("Expected SSE data line.");
+
+        using var document = JsonDocument.Parse(dataLine["data: ".Length..]);
+        return document.RootElement.Clone();
+    }
+
+    private sealed class SessionCaptureHandler(HttpMessageHandler innerHandler) : DelegatingHandler(innerHandler)
+    {
+        public string? SessionId { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = await base.SendAsync(request, cancellationToken);
+            if (string.IsNullOrWhiteSpace(SessionId) &&
+                (response.Headers.TryGetValues("Mcp-Session-Id", out var values) ||
+                 response.Headers.TryGetValues("mcp-session-id", out values)))
+            {
+                SessionId = values.SingleOrDefault();
+            }
+
+            return response;
+        }
+    }
+}
+
+public sealed class ChatGptGatewayTestEnvironment : IAsyncLifetime
+{
+    private PostgreSqlContainer? _postgres;
+    private RedisContainer? _redis;
+
+    public ChatGptGatewayApplicationFactory? Factory { get; private set; }
+
+    public async Task InitializeAsync()
+    {
+        if (!DockerTestGate.Current.IsAvailable)
+        {
+            return;
+        }
+
+        _postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true)
+            .WithDatabase("contexthub")
+            .WithUsername("contexthub")
+            .WithPassword("contexthub")
+            .Build();
+
+        _redis = new RedisBuilder("redis:7.4-alpine")
+            .WithPortBinding(6379, true)
+            .Build();
+
+        await _postgres.StartAsync();
+        await _redis.StartAsync();
+
+        FakeProjectArtifactObjectStore.Reset();
+        Factory = new ChatGptGatewayApplicationFactory(_postgres.GetConnectionString(), _redis.GetConnectionString());
+        await WaitForReadinessAsync();
+    }
+
+    public async Task DisposeAsync()
+    {
+        if (Factory is not null)
+        {
+            await Factory.DisposeAsync();
+        }
+
+        if (_redis is not null)
+        {
+            await _redis.DisposeAsync();
+        }
+
+        if (_postgres is not null)
+        {
+            await _postgres.DisposeAsync();
+        }
+    }
+
+    public ChatGptGatewayApplicationFactory GetFactory()
+        => Factory ?? throw new InvalidOperationException(DockerTestGate.Current.Reason);
+
+    private async Task WaitForReadinessAsync()
+    {
+        using var client = GetFactory().CreateClient();
+        var startedAt = DateTimeOffset.UtcNow;
+        while (DateTimeOffset.UtcNow - startedAt < TimeSpan.FromSeconds(30))
+        {
+            try
+            {
+                using var response = await client.GetAsync("/health/ready");
+                if (response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+            }
+            catch
+            {
+            }
+
+            await Task.Delay(500);
+        }
+
+        throw new TimeoutException("Timed out waiting for the ChatGPT gateway test server readiness endpoint.");
+    }
+}
+
+public sealed class ChatGptGatewayApplicationFactory(string postgresConnectionString, string redisConnectionString) : WebApplicationFactory<Program>
+{
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.UseEnvironment("Testing");
+        builder.UseSetting("ConnectionStrings:Postgres", postgresConnectionString);
+        builder.UseSetting("ConnectionStrings:Redis", redisConnectionString);
+        builder.UseSetting("Embeddings:Provider", "Deterministic");
+        builder.UseSetting("Embeddings:Profile", "compact");
+        builder.UseSetting("Embeddings:ModelKey", "deterministic-384");
+        builder.UseSetting("Embeddings:Dimensions", "384");
+        builder.UseSetting("Embeddings:MaxTokens", "512");
+        builder.UseSetting("Memory:Namespace", "chatgpt-gateway-tests");
+        builder.UseSetting("DatabaseLogging:MinimumLevel", "Error");
+        builder.UseSetting("ContextHub:Security:RequireAuthentication", "true");
+        builder.UseSetting("ContextHub:Security:BootstrapToken", "gateway-test-bootstrap-token");
+        builder.UseSetting("ContextHub:Security:BootstrapTenantSlug", "chatgpt-gateway-tests");
+        builder.UseSetting("ContextHub:Security:BootstrapUsername", "gateway-test-admin");
+        builder.UseSetting("ContextHub:Security:BootstrapAllowedProjectIds", ProjectContext.AllProjectIdsSentinel);
+        builder.UseSetting("ChatGptGateway:OAuth:TestMode", "true");
+        builder.UseSetting("ChatGptGateway:OAuth:TestBearerToken", ChatGptGatewayTestConstants.TestToken);
+        builder.UseSetting("ChatGptGateway:OAuth:TestSubject", "chatgpt-gateway-test-subject");
+        builder.UseSetting("ChatGptGateway:OAuth:TestEmail", "chatgpt-gateway@example.test");
+        builder.UseSetting("ChatGptGateway:OAuth:TestName", "ChatGPT Gateway Test User");
+        builder.UseSetting("ChatGptGateway:AllowedProjectIds:0", ChatGptGatewayTestConstants.ProjectId);
+        builder.ConfigureAppConfiguration((_, config) =>
+        {
+            config.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:Postgres"] = postgresConnectionString,
+                ["ConnectionStrings:Redis"] = redisConnectionString,
+                ["Embeddings:Provider"] = "Deterministic",
+                ["Embeddings:Profile"] = "compact",
+                ["Embeddings:ModelKey"] = "deterministic-384",
+                ["Embeddings:Dimensions"] = "384",
+                ["Embeddings:MaxTokens"] = "512",
+                ["Memory:Namespace"] = "chatgpt-gateway-tests",
+                ["DatabaseLogging:MinimumLevel"] = "Error",
+                ["ContextHub:Security:RequireAuthentication"] = "true",
+                ["ContextHub:Security:BootstrapToken"] = "gateway-test-bootstrap-token",
+                ["ContextHub:Security:BootstrapTenantSlug"] = "chatgpt-gateway-tests",
+                ["ContextHub:Security:BootstrapUsername"] = "gateway-test-admin",
+                ["ContextHub:Security:BootstrapAllowedProjectIds"] = ProjectContext.AllProjectIdsSentinel,
+                ["ChatGptGateway:OAuth:TestMode"] = "true",
+                ["ChatGptGateway:OAuth:TestBearerToken"] = ChatGptGatewayTestConstants.TestToken,
+                ["ChatGptGateway:OAuth:TestSubject"] = "chatgpt-gateway-test-subject",
+                ["ChatGptGateway:OAuth:TestEmail"] = "chatgpt-gateway@example.test",
+                ["ChatGptGateway:OAuth:TestName"] = "ChatGPT Gateway Test User",
+                ["ChatGptGateway:AllowedProjectIds:0"] = ChatGptGatewayTestConstants.ProjectId
+            });
+        });
+        builder.ConfigureTestServices(services =>
+        {
+            services.AddSingleton<IProjectArtifactObjectStore, FakeProjectArtifactObjectStore>();
+        });
+    }
+}
+
+internal static class ChatGptGatewayTestConstants
+{
+    public const string ProjectId = "ContextHubChatGptGatewayTest";
+    public const string TestToken = "test-chatgpt-gateway-token";
+}
+
+internal sealed class FakeProjectArtifactObjectStore : IProjectArtifactObjectStore
+{
+    private static readonly List<ProjectArtifactObjectUploadRequest> UploadLog = [];
+    private static readonly List<ProjectArtifactObjectRef> DeleteLog = [];
+
+    public static IReadOnlyList<ProjectArtifactObjectUploadRequest> Uploads => UploadLog.ToArray();
+    public static IReadOnlyList<ProjectArtifactObjectRef> Deletes => DeleteLog.ToArray();
+
+    public static void Reset()
+    {
+        UploadLog.Clear();
+        DeleteLog.Clear();
+    }
+
+    public Task<ProjectArtifactObjectRef> UploadAsync(ProjectArtifactObjectUploadRequest request, CancellationToken cancellationToken)
+    {
+        UploadLog.Add(request);
+        return Task.FromResult(new ProjectArtifactObjectRef(
+            "fake-r2",
+            "fake-bucket",
+            $"managed/{request.ProjectId}/{Guid.NewGuid():N}/{request.FileName}",
+            $"https://r2.example.invalid/managed/{Uri.EscapeDataString(request.FileName)}",
+            request.ExpiresAt,
+            "FAKE-SHA256",
+            request.Content.LongLength,
+            request.ContentType));
+    }
+
+    public Task DeleteAsync(ProjectArtifactObjectRef objectRef, CancellationToken cancellationToken)
+    {
+        DeleteLog.Add(objectRef);
+        return Task.CompletedTask;
+    }
+}

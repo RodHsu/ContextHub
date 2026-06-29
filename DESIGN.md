@@ -15,6 +15,17 @@
 
 ### 2.1 Stitch baseline
 
+- `Full-site UI/UX refresh` 以 Stitch 專案 `ContextHub Full Site UI UX Refresh` 作為 2026-06-29 起的全站基準：
+  - project：`projects/952128967416801377`
+  - design system：`assets/c68e3953f5af4004b3e2e7e72e91568c` (`ContextHub Admin`)
+  - 使用範圍：所有 dashboard 可達 route，包含主導覽頁、管理頁、Token 頁、ChatGPT 寫入審核、Login、Forbidden、NotFound、Error。
+  - 設計方向：dark dense admin console、短導覽 label、任務分組 sidebar、共用 page header / panel / table / form / empty state / detail panel / scroll shell；不做 landing page、decorative gradient/orb 或大型 marketing whitespace。
+  - RWD 驗收：以 `1920x1080`、`1366x768`、`1280x800`、`1024x768`、`800x1280`、`390x844` 為主要 viewport；連續 resize `1920 -> 1600 -> 1366 -> 1280 -> 1024 -> 800 -> 768 -> 390` 不得出現 body horizontal overflow、panel overlap、scroll trap 或 tooltip/menu clipping。
+- 全站 route 對應 Stitch 設計稿：
+  - Auth / boundary pages：`projects/952128967416801377/screens/d8431ed48c0d4b2a9af1bd9650481541`，對應 `/login`、`/forbidden`、`/not-found`、`/Error`。
+  - Operations Monitoring：`projects/952128967416801377/screens/1916647a3e6e48cfa2c4e85007dc6e75`，對應 `/`、`/monitoring`、`/runtime`、`/logs`、`/jobs`、`/performance`。
+  - Knowledge Work / Review：`projects/952128967416801377/screens/301434fd263547918f18a6e772217a53`，對應 `/graph`、`/memories`、`/retention`、`/sources`、`/inbox`、`/governance`、`/evaluation`、`/chatgpt-proposals`。
+  - Admin Settings / Personal Account：`projects/952128967416801377/screens/ce85635f0d76482d8cd249835acfecbf`，對應 `/preferences`、`/storage`、`/security`、`/settings`、`/account/tokens`。
 - `Memory Graph` 相關畫面以 Stitch 專案 `ContextHub Memory Graph` 為主基準。
 - `Graph` refined explorer screen 是目前已確認可對照的主要設計稿。
 - `Token 節省量` compact dashboard baseline 已補 Stitch artifact：
@@ -24,9 +35,7 @@
   - 使用範圍：首頁 `Token 節省量` compact insight strip、`/monitoring` Token 節省量 card；維持 dark dense admin console，不做大型 landing-style panel。
   - 指標語彙：以 token 為計算單位，標題與欄位使用 `Token 節省量`，各視窗合併呈現 `24H/3D/7D/30D 節省量 / 樣本量`，避免使用容易誤解為一般對話數量的 `對話節省量`。
   - token 口徑：卡片主畫面保持 compact，只顯示節省率、節省 token 與樣本量；`精準 token` / `估算 token` / exact coverage 放在 tooltip，避免 8 欄視窗在 app-browser 寬度下被文字撐高。
-- 2026-06-21 browser feedback pass 期間，Codex 目前可用工具沒有 Stitch connector；本輪先依既有 Stitch baseline、已附 browser comments 與本文件基準修正實作，未新增或冒用其他設計工具 artifact。
-- `Jobs`、`Memories`、`Monitoring telemetry` 目前仍缺獨立 Stitch screen artifact；本輪先把它們收斂到 dense admin console 的 production layout：主資訊不換行、次要資訊合併到 subtitle 或 detail panel、避免把所有 raw 欄位同時塞進窄表格。
-- `Sources`、`Governance`、`Evaluation`、`Inbox` 目前仍缺正式 Stitch screen artifact，屬於已知缺口；新增 UI 變更時不能只看本機 screenshot，後續需補齊設計稿來源。
+- 2026-06-21 browser feedback pass 期間，Codex 可用工具沒有 Stitch connector；該輪只依既有 baseline 修正。2026-06-29 已補 full-site Stitch project，後續 UI 變更應優先對照上述全站 screens。
 
 ### 2.2 Repo 內文件角色
 

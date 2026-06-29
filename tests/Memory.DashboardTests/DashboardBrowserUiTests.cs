@@ -20,17 +20,30 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
     private static readonly DashboardViewport[] Viewports =
     [
-        new("desktop", 1440, 900),
+        new("1080p", 1920, 1080),
         new("wide-2k", 2560, 1440),
-        new("tablet", 1024, 1366),
+        new("desktop", 1366, 768),
+        new("tab-s7-landscape", 1280, 800),
+        new("compact-browser", 1024, 768),
+        new("tab-s7-portrait", 800, 1280),
         new("mobile", 390, 844)
     ];
 
     private static readonly DashboardViewport[] RwdBaselineViewports =
     [
         new("1080p", 1920, 1080),
+        new("desktop", 1366, 768),
+        new("compact-browser", 1024, 768),
         new("tab-s7-portrait", 800, 1280),
-        new("tab-s7-landscape", 1280, 800)
+        new("tab-s7-landscape", 1280, 800),
+        new("mobile", 390, 844)
+    ];
+
+    private static readonly DashboardViewport[] ThemeSmokeViewports =
+    [
+        new("desktop", 1366, 768),
+        new("tab-s7-portrait", 800, 1280),
+        new("mobile", 390, 844)
     ];
 
     private static readonly DashboardRouteSpec[] Routes =
@@ -44,13 +57,18 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("governance", "/governance", "治理檢查", [".governance-page-stack", ".metric-grid", ".governance-workspace-section"], [".page-header", ".metric-grid", ".governance-workspace-section"], [".content", ".governance-page-stack", ".panel-scroll-body"]),
         new("evaluation", "/evaluation", "評估驗證", [".evaluation-page-stack", ".filter-panel", ".evaluation-workspace-section"], [".page-header", ".filter-panel", ".evaluation-workspace-section"], [".content", ".evaluation-page-stack", ".panel-scroll-body"]),
         new("inbox", "/inbox", "收件匣", [".inbox-page-stack", ".metric-grid", ".inbox-workspace-section"], [".page-header", ".metric-grid", ".inbox-workspace-section"], [".content", ".inbox-page-stack", ".panel-scroll-body"]),
+        new("chatgpt-proposals", "/chatgpt-proposals", "ChatGPT 寫入審核", [".chatgpt-proposals-filter", ".chatgpt-proposals-panel", ".table-scroll-shell"], [".page-header", ".chatgpt-proposals-filter", ".chatgpt-proposals-panel"], [".content", ".table-scroll-shell"]),
         new("preferences", "/preferences", "使用者偏好", [".split-layout", ".preferences-list-panel"], [".page-header", ".split-layout"], [".content", ".preferences-list-panel"]),
+        new("account-tokens", "/account/tokens", "我的 Token", [".settings-form-grid", ".security-token-table", ".table-scroll-shell"], [".page-header", ".panel"], [".content", ".table-scroll-shell"]),
         new("logs", "/logs", "日誌", [".logs-filter-grid", ".split-layout", ".table-scroll-shell"], [".filter-panel", ".split-layout"], [".content", ".table-scroll-shell"]),
         new("jobs", "/jobs", "工作佇列", [".jobs-operations-panel", ".jobs-list-panel", ".jobs-table", ".detail-panel"], [".page-header", ".jobs-operations-panel", ".jobs-page-body > .split-layout"], [".content", ".jobs-table-shell", ".panel-scroll-body"]),
         new("storage", "/storage", "資料庫檢視", [".storage-layout", ".storage-table-panel", ".storage-detail-panel"], [".storage-table-panel", ".storage-detail-panel"], [".content", ".storage-table-list", ".table-scroll-shell"]),
         new("security", "/security", "安全管理", [".security-layout", ".settings-form-grid", ".table-scroll-shell"], [".page-header", ".security-layout"], [".content", ".security-layout"]),
         new("performance", "/performance", "效能", [".performance-form-grid", ".performance-config-footer", ".empty-inline"], [".page-header", ".performance-page-body"], [".content", ".performance-results-shell"]),
-        new("settings", "/settings", "系統設定", [".settings-layout", ".settings-form-grid", ".settings-transfer-panel"], [".settings-info-panel", ".settings-auth-panel"], [".content", ".settings-layout"])
+        new("settings", "/settings", "系統設定", [".settings-layout", ".settings-form-grid", ".settings-transfer-panel"], [".settings-info-panel", ".settings-auth-panel"], [".content", ".settings-layout"]),
+        new("forbidden", "/forbidden", "無權限", [".panel", ".empty-inline"], [".page-header", ".panel"], [".content", ".panel"]),
+        new("not-found", "/not-found", "找不到頁面", [".boundary-panel", ".empty-inline"], [".page-header", ".boundary-panel"], [".content", ".boundary-panel"]),
+        new("error", "/Error", "主控台發生錯誤", [".boundary-panel", ".empty-inline"], [".page-header", ".boundary-panel"], [".content", ".boundary-panel"])
     ];
 
     private static readonly DashboardRouteSpec[] DenseRoutes =
@@ -94,7 +112,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         foreach (var theme in Themes)
         {
-            foreach (var viewport in Viewports)
+            foreach (var viewport in ThemeSmokeViewports)
             {
                 foreach (var route in Routes)
                 {
@@ -190,17 +208,15 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var resizeViewports = new[]
         {
             new DashboardViewport("1080p", 1920, 1080),
+            new DashboardViewport("desktop-fluid", 1600, 900),
+            new DashboardViewport("desktop", 1366, 768),
             new DashboardViewport("tab-s7-landscape", 1280, 800),
+            new DashboardViewport("compact-browser", 1024, 768),
             new DashboardViewport("tab-s7-portrait", 800, 1280),
-            new DashboardViewport("compact-browser", 1024, 768)
+            new DashboardViewport("narrow-tablet", 768, 1024),
+            new DashboardViewport("mobile", 390, 844)
         };
-        var routes = DenseRoutes
-            .Concat([
-                Routes.Single(route => route.Name == "security"),
-                Routes.Single(route => route.Name == "settings")
-            ])
-            .DistinctBy(route => route.Name)
-            .ToArray();
+        var routes = Routes;
 
         foreach (var route in routes)
         {
@@ -579,7 +595,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         await using var context = await _fixture.CreateContextAsync(Viewports[0]);
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync(new Uri(_fixture.BaseUri, "/login").ToString());
+        await page.GotoAsync(new Uri(_fixture.BaseUri, "/login?error=invalid").ToString());
         await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
 
         var stylesJson = await page.EvaluateAsync<string>(
@@ -1884,7 +1900,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }";
 
         var beforeJson = await page.EvaluateAsync<string>(rectScript);
-        await page.GetByRole(AriaRole.Button, new() { Name = "刷新" }).ClickAsync(new LocatorClickOptions { NoWaitAfter = true });
+        await page.GetByRole(AriaRole.Button, new() { Name = "刷新" }).ClickAsync();
         await page.WaitForTimeoutAsync(150);
         var duringJson = await page.EvaluateAsync<string>(rectScript);
         await page.WaitForFunctionAsync("() => !document.querySelector('button.primary-button[disabled]')");
@@ -2308,7 +2324,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         await page.WaitForTimeoutAsync(600);
         await page.Locator("input[name='Username']").FillAsync("admin");
         await page.Locator("input[name='Password']").FillAsync("ContextHub!123");
-        await page.GetByRole(AriaRole.Button, new() { Name = "登入" }).ClickAsync(new LocatorClickOptions { NoWaitAfter = true });
+        await page.GetByRole(AriaRole.Button, new() { Name = "登入" }).ClickAsync();
         await page.WaitForURLAsync($"**{relativeUrlWithProfile}*", new PageWaitForURLOptions { Timeout = 15000 });
         await page.WaitForTimeoutAsync(400);
     }

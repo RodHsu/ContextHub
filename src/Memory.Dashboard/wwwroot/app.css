@@ -5245,6 +5245,28 @@ textarea:focus {
     vertical-align: top;
 }
 
+.payload-preview {
+    max-width: min(68vw, 960px);
+    max-height: 18rem;
+    overflow: auto;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.actions-cell {
+    text-align: right;
+    white-space: nowrap;
+}
+
+.compact {
+    min-height: 2rem;
+    padding: 0.35rem 0.65rem;
+}
+
 .data-table-clickable tbody tr:hover,
 .data-table-clickable tbody tr.selected-row {
     background: var(--accent-soft);
@@ -6795,5 +6817,338 @@ textarea:focus {
 
     .jobs-table-shell {
         min-height: 220px;
+    }
+}
+
+/* Stitch full-site RWD guardrails: project projects/952128967416801377. */
+html,
+body {
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+body {
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+input,
+select,
+textarea,
+code,
+pre,
+.code-block,
+.payload-preview,
+.data-table code,
+.security-token-table td,
+.chatgpt-proposals-table td,
+.stack-item-copy,
+.runtime-parameters-panel tbody td:last-child,
+.runtime-parameter-value,
+.logs-message-cell,
+.logs-trace-cell,
+.toast-error,
+.login-error,
+.inline-error {
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+button:disabled,
+.primary-button:disabled,
+.ghost-button:disabled,
+[aria-disabled="true"] {
+    cursor: not-allowed;
+    pointer-events: none;
+    opacity: 0.58;
+    box-shadow: none;
+}
+
+.dashboard-shell,
+.main-shell,
+.content,
+.page-viewport,
+.page-viewport-body,
+.page-scroll-host,
+.panel,
+.filter-panel,
+.detail-panel,
+.split-layout,
+.sources-split-layout,
+.evaluation-split-layout,
+.governance-split-layout,
+.inbox-split-layout,
+.storage-layout,
+.security-layout,
+.settings-layout,
+.table-scroll-shell,
+.panel-scroll-body,
+.stack-scroll-shell {
+    min-width: 0;
+}
+
+.table-scroll-shell,
+.page-scroll-host,
+.panel-scroll-body,
+.stack-scroll-shell {
+    overflow-x: auto;
+    overscroll-behavior: contain;
+}
+
+.data-table {
+    max-width: 100%;
+}
+
+.data-table th,
+.data-table td {
+    overflow-wrap: anywhere;
+}
+
+.actions-cell,
+.security-token-actions-cell {
+    white-space: nowrap;
+}
+
+.chatgpt-proposals-page-body,
+.boundary-page-body {
+    align-content: start;
+}
+
+.chatgpt-proposals-filter .filter-grid {
+    grid-template-columns: minmax(12rem, 1fr) minmax(10rem, 0.7fr) auto;
+    align-items: end;
+}
+
+.filter-action-cell {
+    display: flex;
+    align-items: end;
+    min-width: 0;
+}
+
+.filter-action-cell .ghost-button {
+    width: 100%;
+}
+
+.chatgpt-proposals-panel,
+.boundary-panel {
+    min-width: 0;
+}
+
+.chatgpt-proposals-table {
+    min-width: 920px;
+}
+
+.payload-details {
+    margin-top: 0.45rem;
+}
+
+.payload-details > summary {
+    width: fit-content;
+    color: var(--accent);
+    cursor: pointer;
+    font-weight: 700;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.payload-preview {
+    max-height: clamp(10rem, 28vh, 24rem);
+    overflow: auto;
+    white-space: pre-wrap;
+}
+
+.boundary-panel {
+    max-width: 56rem;
+}
+
+@media (max-width: 1366px) and (min-width: 961px) {
+    :root,
+    :root[data-theme="dark"],
+    :root[data-theme="light"] {
+        --sidebar-width: 228px;
+        --dashboard-content-padding: 0.82rem;
+        --dashboard-page-gap: 0.72rem;
+        --dashboard-grid-gap: 0.72rem;
+        --dashboard-form-gap: 0.58rem;
+        --dashboard-panel-padding-block: 0.72rem;
+        --dashboard-panel-padding-inline: 0.78rem;
+        --dashboard-table-cell-padding-y: 0.48rem;
+        --dashboard-table-cell-padding-x: 0.55rem;
+    }
+
+    .brand-subtitle,
+    .topbar-subtitle {
+        display: none;
+    }
+
+    .sidebar {
+        padding: 0.72rem;
+    }
+
+    .nav-item {
+        min-height: 2.08rem;
+        padding: 0.48rem 0.55rem;
+        gap: 0.52rem;
+    }
+
+    .topbar {
+        min-height: 60px;
+        padding: 0.62rem 0.82rem;
+    }
+
+    .page-header h1 {
+        font-size: 1.34rem;
+    }
+
+    .page-subtitle {
+        white-space: normal;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+    }
+
+    .metric-grid,
+    .monitoring-top-grid,
+    .monitoring-telemetry-grid,
+    .settings-layout {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 1024px) {
+    .dashboard-shell {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr);
+        height: auto;
+        max-height: none;
+        overflow: visible;
+    }
+
+    .sidebar {
+        position: static;
+        height: auto;
+        max-height: 34vh;
+        overflow: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .sidebar-inner {
+        min-height: 0;
+        gap: 0.55rem;
+    }
+
+    .sidebar-nav {
+        grid-template-columns: repeat(auto-fit, minmax(min(9.5rem, 100%), 1fr));
+    }
+
+    .topbar {
+        position: relative;
+        min-height: 0;
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+
+    .topbar-context,
+    .topbar-actions {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .content {
+        overflow: visible;
+    }
+
+    .page-header,
+    .settings-layout,
+    .security-layout,
+    .storage-layout,
+    .split-layout,
+    .sources-split-layout,
+    .evaluation-split-layout,
+    .governance-split-layout,
+    .inbox-split-layout,
+    .chatgpt-proposals-filter .filter-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .table-scroll-shell,
+    .panel-scroll-body,
+    .stack-scroll-shell {
+        max-height: none;
+    }
+}
+
+@media (max-width: 640px) {
+    :root,
+    :root[data-theme="dark"],
+    :root[data-theme="light"] {
+        --dashboard-content-padding: 0.68rem;
+        --dashboard-page-gap: 0.62rem;
+        --dashboard-grid-gap: 0.62rem;
+        --dashboard-form-gap: 0.55rem;
+    }
+
+    .brand {
+        align-items: center;
+    }
+
+    .brand-mark {
+        width: 2rem;
+        height: 2rem;
+    }
+
+    .sidebar {
+        max-height: 42vh;
+        padding: 0.58rem;
+    }
+
+    .sidebar-nav {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .nav-item {
+        min-height: 2.15rem;
+        padding: 0.46rem 0.5rem;
+    }
+
+    .topbar-user,
+    .topbar-actions form,
+    .topbar-actions .ghost-button,
+    .theme-switcher,
+    .theme-switcher-toggle {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .page-actions,
+    .page-actions-primary,
+    .page-actions-secondary,
+    .settings-button-row,
+    .filter-action-cell {
+        width: 100%;
+    }
+
+    .page-actions .primary-button,
+    .page-actions .ghost-button,
+    .settings-button-row .primary-button,
+    .settings-button-row .ghost-button,
+    .filter-action-cell .ghost-button {
+        width: 100%;
+    }
+
+    .context-savings-strip-metrics,
+    .metric-grid,
+    .monitoring-top-grid,
+    .monitoring-telemetry-grid,
+    .settings-toggle-grid,
+    .settings-operation-list,
+    .settings-cadence-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .chatgpt-proposals-table,
+    .security-token-table {
+        min-width: 760px;
     }
 }

@@ -143,6 +143,22 @@
                             </span>
                             <span class="nav-label">資料來源</span>
                         </NavLink>
+                        }
+                    </nav>
+
+                    @if (isAdmin)
+                    {
+                    <div class="sidebar-section-label">審核治理</div>
+                    <nav class="sidebar-nav">
+                        <NavLink class="nav-item" href="/inbox">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M4 5h16v11H4z" />
+                                    <path d="M4 13h4l2 3h4l2-3h4" />
+                                </svg>
+                            </span>
+                            <span class="nav-label">收件匣</span>
+                        </NavLink>
                         <NavLink class="nav-item" href="/governance">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -150,7 +166,7 @@
                                     <path d="m9.5 12 1.5 1.5 3.5-3.5" />
                                 </svg>
                             </span>
-                            <span class="nav-label">治理檢查</span>
+                            <span class="nav-label">治理</span>
                         </NavLink>
                         <NavLink class="nav-item" href="/evaluation">
                             <span class="nav-icon" aria-hidden="true">
@@ -161,19 +177,20 @@
                                     <path d="M17 15v-3" />
                                 </svg>
                             </span>
-                            <span class="nav-label">評估驗證</span>
+                            <span class="nav-label">評估</span>
                         </NavLink>
-                        <NavLink class="nav-item" href="/inbox">
+                        <NavLink class="nav-item" href="/chatgpt-proposals">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M4 5h16v11H4z" />
-                                    <path d="M4 13h4l2 3h4l2-3h4" />
+                                    <path d="M5 5h14v10H7l-2 3V5Z" />
+                                    <path d="M8 9h8" />
+                                    <path d="M8 12h5" />
                                 </svg>
                             </span>
-                            <span class="nav-label">收件匣</span>
+                            <span class="nav-label">ChatGPT</span>
                         </NavLink>
-                        }
                     </nav>
+                    }
 
                     <div class="sidebar-section-label">管理設定</div>
                     <nav class="sidebar-nav">
@@ -184,16 +201,7 @@
                                     <path d="M4 20a8 8 0 0 1 16 0" />
                                 </svg>
                             </span>
-                            <span class="nav-label">使用者偏好</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/account/tokens">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M15 7a4 4 0 1 1-2.8 6.8L7 19H4v-3l5.2-5.2A4 4 0 0 1 15 7Z" />
-                                    <path d="m14 10 2 2" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">我的 Token</span>
+                            <span class="nav-label">偏好</span>
                         </NavLink>
                         @if (isAdmin)
                         {
@@ -227,6 +235,19 @@
                             <span class="nav-label">系統設定</span>
                         </NavLink>
                         }
+                    </nav>
+
+                    <div class="sidebar-section-label">個人帳號</div>
+                    <nav class="sidebar-nav">
+                        <NavLink class="nav-item" href="/account/tokens">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M15 7a4 4 0 1 1-2.8 6.8L7 19H4v-3l5.2-5.2A4 4 0 0 1 15 7Z" />
+                                    <path d="m14 10 2 2" />
+                                </svg>
+                            </span>
+                            <span class="nav-label">Token</span>
+                        </NavLink>
                     </nav>
 
                     <div class="sidebar-bottom">

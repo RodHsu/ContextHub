@@ -1,0 +1,142 @@
+using System.Security.Claims;
+using System.Text.Encodings.Web;
+using Memory.Application;
+using Memory.Domain;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+
+namespace Memory.ChatGptGateway;
+
+internal static class GatewayAuthentication
+{
+    public const string TestScheme = "ChatGptGatewayTest";
+    public const string SubjectClaim = "chatgpt:subject";
+}
+
+internal sealed class ChatGptTestAuthenticationHandler(
+    IOptionsMonitor<AuthenticationSchemeOptions> options,
+    ILoggerFactory logger,
+    UrlEncoder encoder,
+    IOptions<ChatGptGatewayOptions> gatewayOptions)
+    : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
+{
+    protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+    {
+        var configured = gatewayOptions.Value.OAuth.TestBearerToken;
+        var authorization = Request.Headers.Authorization.ToString();
+        if (string.IsNullOrWhiteSpace(configured) ||
+            !authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(authorization["Bearer ".Length..].Trim(), configured, StringComparison.Ordinal))
+        {
+            return Task.FromResult(AuthenticateResult.NoResult());
+        }
+
+        var oauth = gatewayOptions.Value.OAuth;
+        var claims = new List<Claim>
+        {
+            new(GatewayAuthentication.SubjectClaim, oauth.TestSubject),
+            new(ClaimTypes.NameIdentifier, oauth.TestSubject),
+            new(ClaimTypes.Name, oauth.TestName),
+            new(ClaimTypes.Email, oauth.TestEmail)
+        };
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, GatewayAuthentication.TestScheme));
+        return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(principal, GatewayAuthentication.TestScheme)));
+    }
+}
+
+internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
+{
+    public async Task InvokeAsync(
+        HttpContext context,
+        IRequestActorAccessor actorAccessor,
+        IOptions<ChatGptGatewayOptions> gatewayOptions,
+        IOptions<ContextHubOptions> contextHubOptions,
+        IApplicationDbContext dbContext)
+    {
+        if (IsHealthCheck(context.Request.Path))
+        {
+            await next(context);
+            return;
+        }
+
+        if (context.User.Identity?.IsAuthenticated != true)
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+
+        var oauth = gatewayOptions.Value.OAuth;
+        var subject = ReadClaim(context.User, GatewayAuthentication.SubjectClaim, ClaimTypes.NameIdentifier, oauth.SubjectClaim);
+        if (string.IsNullOrWhiteSpace(subject))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+
+        var username = NormalizeUsername(contextHubOptions.Value.Security.BootstrapUsername);
+        var serviceUser = await dbContext.TenantUsers
+            .Include(x => x.Tenant)
+            .FirstOrDefaultAsync(
+                x => x.Username == username &&
+                     x.Status == TenantUserStatus.Active &&
+                     x.Tenant != null &&
+                     x.Tenant.Status == TenantStatus.Active,
+                context.RequestAborted);
+        if (serviceUser is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            await context.Response.WriteAsync("ChatGPT gateway service actor is not initialized.", context.RequestAborted);
+            return;
+        }
+
+        var previous = actorAccessor.Current;
+        actorAccessor.Current = new ContextHubRequestActor(
+            serviceUser.TenantId,
+            serviceUser.Id,
+            $"chatgpt:{subject}",
+            serviceUser.Role,
+            [
+                SecurityScopes.MemoryRead,
+                SecurityScopes.MemoryWrite,
+                SecurityScopes.PreferencesRead,
+                SecurityScopes.PreferencesWrite,
+                SecurityScopes.LogsRead
+            ],
+            gatewayOptions.Value.AllowedProjectIds
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => ProjectContext.Normalize(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray(),
+            IsAuthenticated: true);
+        try
+        {
+            await next(context);
+        }
+        finally
+        {
+            actorAccessor.Current = previous;
+        }
+    }
+
+    private static string NormalizeUsername(string value)
+        => value.Trim().ToLowerInvariant();
+
+    private static string? ReadClaim(ClaimsPrincipal principal, params string[] types)
+    {
+        foreach (var type in types)
+        {
+            var value = principal.FindFirstValue(type);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsHealthCheck(PathString path)
+        => path.StartsWithSegments("/health/live", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/health/ready", StringComparison.OrdinalIgnoreCase);
+}

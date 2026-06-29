@@ -1269,6 +1269,47 @@ conversations.MapPost("/insights/promote", async (
     return Results.Ok(result);
 }).RequireAdminIfEnabled(requireAuthentication);
 
+var chatGpt = app.MapGroup("/api/chatgpt");
+chatGpt.RequireAuthIfEnabled(requireAuthentication);
+chatGpt.MapGet("/proposals", async (
+    string? projectId,
+    string? status,
+    int? limit,
+    IChatGptProposalService service,
+    CancellationToken cancellationToken) =>
+{
+    if (!EnumParser.TryParse(status, out ChatGptProposalStatus? parsedStatus, out var statusError))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["status"] = [statusError ?? "Unsupported ChatGptProposalStatus value."]
+        });
+    }
+
+    var result = await service.ListAsync(new ChatGptProposalListRequest(projectId, parsedStatus, limit ?? 50), cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+
+chatGpt.MapPost("/proposals/{proposalId:guid}/approve", async (
+    Guid proposalId,
+    ChatGptProposalDecisionBody body,
+    IChatGptProposalService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.ApproveAsync(new ChatGptProposalDecisionRequest(proposalId, body.Note ?? string.Empty), cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
+chatGpt.MapPost("/proposals/{proposalId:guid}/reject", async (
+    Guid proposalId,
+    ChatGptProposalDecisionBody body,
+    IChatGptProposalService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.RejectAsync(new ChatGptProposalDecisionRequest(proposalId, body.Note ?? string.Empty), cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
 var jobs = app.MapGroup("/api/jobs");
 jobs.RequireAuthIfEnabled(requireAuthentication);
 jobs.RequireAdminIfEnabled(requireAuthentication);
@@ -1693,6 +1734,7 @@ internal static class ApiValidation
 }
 
 internal sealed record UserPreferenceArchiveBody(bool Archived = true);
+internal sealed record ChatGptProposalDecisionBody(string? Note = null);
 internal sealed record TenantUserCreateBody(
     string Username,
     string DisplayName,

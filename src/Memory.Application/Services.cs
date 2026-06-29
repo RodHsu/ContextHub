@@ -2154,6 +2154,8 @@ public static class DependencyInjection
         services.AddScoped<IChunkingService, ChunkingService>();
         services.AddScoped<IContextHubBootstrapService, ContextHubBootstrapService>();
         services.AddScoped<IMemoryService, MemoryService>();
+        services.AddSingleton<IProjectArtifactObjectStore, DisabledProjectArtifactObjectStore>();
+        services.AddScoped<IProjectArtifactExchangeService, ProjectArtifactExchangeService>();
         services.AddScoped<IDashboardQueryService, DashboardQueryService>();
         services.AddScoped<IDashboardMemoryGraphIndexBuilder, DashboardMemoryGraphIndexBuilder>();
         services.AddScoped<IDashboardMemoryGraphIndexRefreshService, DashboardMemoryGraphIndexRefreshService>();
@@ -2162,6 +2164,7 @@ public static class DependencyInjection
         services.AddScoped<IPerformanceProbeService, PerformanceProbeService>();
         services.AddScoped<IInstanceBehaviorSettingsAccessor, InstanceBehaviorSettingsAccessor>();
         services.AddScoped<IConversationAutomationService, ConversationAutomationService>();
+        services.AddScoped<IChatGptProposalService, ChatGptProposalService>();
         services.AddScoped<ITenantSecurityService, TenantSecurityService>();
         services.AddScoped<ISourceConnectionService, SourceConnectionService>();
         services.AddScoped<ISourceSyncService, SourceSyncService>();

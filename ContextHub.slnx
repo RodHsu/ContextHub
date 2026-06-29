@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Memory.Application/Memory.Application.csproj" />
+    <Project Path="src/Memory.ChatGptGateway/Memory.ChatGptGateway.csproj" />
     <Project Path="src/Memory.Dashboard/Memory.Dashboard.csproj" />
     <Project Path="src/Memory.Domain/Memory.Domain.csproj" />
     <Project Path="src/Memory.EmbeddingServer/Memory.EmbeddingServer.csproj" />
@@ -10,6 +11,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Memory.ApiContractTests/Memory.ApiContractTests.csproj" />
+    <Project Path="tests/Memory.ChatGptGatewayTests/Memory.ChatGptGatewayTests.csproj" />
     <Project Path="tests/Memory.ComposeSmokeTests/Memory.ComposeSmokeTests.csproj" />
     <Project Path="tests/Memory.DashboardTests/Memory.DashboardTests.csproj" />
     <Project Path="tests/Memory.IntegrationTests/Memory.IntegrationTests.csproj" />

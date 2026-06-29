@@ -73,6 +73,125 @@ public sealed record MemoryDocument(
     string ProjectId = ProjectContext.DefaultProjectId,
     bool IsReadOnly = false);
 
+public enum ProjectArtifactKind
+{
+    Summary,
+    Snippet,
+    FileReference,
+    ExternalObject
+}
+
+public sealed record ProjectArtifactObjectRef(
+    string Provider,
+    string Bucket,
+    string Key,
+    string? Uri = null,
+    DateTimeOffset? ExpiresAt = null,
+    string? Sha256 = null,
+    long? SizeBytes = null,
+    string? ContentType = null);
+
+public sealed record ProjectArtifactPublishRequest(
+    string ProjectId,
+    string Title,
+    string Summary,
+    string Content,
+    ProjectArtifactKind Kind = ProjectArtifactKind.Summary,
+    string SourceSystem = "codex",
+    string SourceRef = "",
+    IReadOnlyList<string>? Tags = null,
+    string? ExternalKey = null,
+    ProjectArtifactObjectRef? ObjectRef = null,
+    DateTimeOffset? ExpiresAt = null,
+    string MetadataJson = "{}");
+
+public sealed record ProjectArtifactManagedObjectPublishRequest(
+    string ProjectId,
+    string Title,
+    string Summary,
+    string ContentBase64,
+    string FileName,
+    string ContentType,
+    DateTimeOffset ExpiresAt,
+    string SourceSystem = "codex",
+    string SourceRef = "",
+    IReadOnlyList<string>? Tags = null,
+    string? ExternalKey = null,
+    string MetadataJson = "{}");
+
+public sealed record ProjectArtifactListRequest(
+    string ProjectId,
+    string? Query = null,
+    ProjectArtifactKind? Kind = null,
+    string? SourceSystem = null,
+    bool IncludeExpired = false,
+    int Limit = 50);
+
+public sealed record ProjectArtifactSearchRequest(
+    string ProjectId,
+    string Query,
+    ProjectArtifactKind? Kind = null,
+    string? SourceSystem = null,
+    bool IncludeExpired = false,
+    int Limit = 10);
+
+public sealed record ProjectArtifactResult(
+    Guid MemoryId,
+    string ExternalKey,
+    string ProjectId,
+    ProjectArtifactKind Kind,
+    string Title,
+    string Summary,
+    string ContentPreview,
+    string SourceSystem,
+    string SourceRef,
+    IReadOnlyList<string> Tags,
+    ProjectArtifactObjectRef? ObjectRef,
+    DateTimeOffset? ExpiresAt,
+    bool IsExpired,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record ProjectArtifactObjectUploadRequest(
+    string ProjectId,
+    string FileName,
+    string ContentType,
+    byte[] Content,
+    DateTimeOffset ExpiresAt,
+    string SourceSystem,
+    string SourceRef,
+    IReadOnlyDictionary<string, string> Metadata);
+
+public sealed record ProjectArtifactExpiredObjectPruneRequest(
+    string? ProjectId = null,
+    int Limit = 100,
+    bool DryRun = false);
+
+public sealed record ProjectArtifactExpiredObjectPruneResult(
+    int ScannedCount,
+    int DeletedObjectCount,
+    int ArchivedArtifactCount,
+    int FailedCount,
+    IReadOnlyList<ProjectArtifactExpiredObjectPruneItem> Items);
+
+public sealed record ProjectArtifactExpiredObjectPruneItem(
+    Guid MemoryId,
+    string ProjectId,
+    string Title,
+    ProjectArtifactKind Kind,
+    string Bucket,
+    string Key,
+    DateTimeOffset? ExpiresAt,
+    bool DeletedObject,
+    bool ArchivedArtifact,
+    string Error);
+
+public interface IProjectArtifactObjectStore
+{
+    Task<ProjectArtifactObjectRef> UploadAsync(ProjectArtifactObjectUploadRequest request, CancellationToken cancellationToken);
+    Task DeleteAsync(ProjectArtifactObjectRef objectRef, CancellationToken cancellationToken);
+}
+
 public sealed record WorkingContextRequest(
     string Query,
     int Limit = 5,
@@ -943,6 +1062,50 @@ public sealed record ConversationPromotionRetryResult(
     string? ProjectId,
     ConversationAutomationStatusResult AutomationStatus);
 
+public enum ChatGptProposalStatus
+{
+    Pending,
+    Applied,
+    Rejected,
+    Failed
+}
+
+public sealed record ChatGptProposalCreateRequest(
+    string ToolName,
+    string ProjectId,
+    string PayloadJson,
+    string Title,
+    string Summary,
+    string OAuthSubject = "",
+    string OAuthEmail = "",
+    string OAuthName = "");
+
+public sealed record ChatGptProposalListRequest(
+    string? ProjectId = null,
+    ChatGptProposalStatus? Status = null,
+    int Limit = 50);
+
+public sealed record ChatGptProposalDecisionRequest(
+    Guid ProposalId,
+    string Note = "");
+
+public sealed record ChatGptProposalResult(
+    Guid Id,
+    string ToolName,
+    ChatGptProposalStatus Status,
+    string ProjectId,
+    string ProjectName,
+    string Title,
+    string Summary,
+    string PayloadJson,
+    string OAuthSubject,
+    string OAuthEmail,
+    string OAuthName,
+    Guid? AppliedResourceId,
+    string Error,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
 public sealed record InstanceSettingsSnapshot(
     string InstanceId,
     string Namespace,
@@ -1175,6 +1338,16 @@ public interface IMemoryService
     Task<UserPreferenceResult> ArchiveUserPreferenceAsync(UserPreferenceArchiveRequest request, CancellationToken cancellationToken);
 }
 
+public interface IProjectArtifactExchangeService
+{
+    Task<ProjectArtifactResult> PublishAsync(ProjectArtifactPublishRequest request, CancellationToken cancellationToken);
+    Task<ProjectArtifactResult> UploadManagedObjectAsync(ProjectArtifactManagedObjectPublishRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProjectArtifactResult>> ListAsync(ProjectArtifactListRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProjectArtifactResult>> SearchAsync(ProjectArtifactSearchRequest request, CancellationToken cancellationToken);
+    Task<ProjectArtifactResult?> GetAsync(Guid memoryId, CancellationToken cancellationToken);
+    Task<ProjectArtifactExpiredObjectPruneResult> PruneExpiredObjectsAsync(ProjectArtifactExpiredObjectPruneRequest request, CancellationToken cancellationToken);
+}
+
 public interface IContextHubBootstrapService
 {
     ContextHubBootstrapResult Describe(ContextHubBootstrapRequest request);
@@ -1215,6 +1388,14 @@ public interface IConversationAutomationService
     Task<ConversationAutomationStatusResult> GetAutomationStatusAsync(CancellationToken cancellationToken);
     Task ProcessCheckpointJobAsync(Guid checkpointId, CancellationToken cancellationToken);
     Task PromotePendingInsightsAsync(string? conversationId, string? projectId, CancellationToken cancellationToken);
+}
+
+public interface IChatGptProposalService
+{
+    Task<ChatGptProposalResult> CreateAsync(ChatGptProposalCreateRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ChatGptProposalResult>> ListAsync(ChatGptProposalListRequest request, CancellationToken cancellationToken);
+    Task<ChatGptProposalResult> ApproveAsync(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken);
+    Task<ChatGptProposalResult> RejectAsync(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken);
 }
 
 public interface ILogQueryService

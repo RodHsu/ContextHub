@@ -40,6 +40,7 @@ public static class DependencyInjection
         services.PostConfigure<DatabaseLoggingOptions>(options => options.ServiceName = serviceName);
         services.Configure<TelemetryRetentionOptions>(configuration.GetSection(TelemetryRetentionOptions.SectionName));
         services.Configure<MemoryDataRetentionOptions>(configuration.GetSection(MemoryDataRetentionOptions.SectionName));
+        services.Configure<ProjectArtifactObjectStorageOptions>(configuration.GetSection(ProjectArtifactObjectStorageOptions.SectionName));
         services.AddOptions<DockerRuntimeOptions>()
             .Configure(options =>
             {
@@ -76,6 +77,7 @@ public static class DependencyInjection
         services.AddScoped<IVectorStore, NpgsqlSearchStore>();
         services.AddScoped<IStorageExplorerStore, NpgsqlStorageExplorerStore>();
         services.AddScoped<IRetrievalTelemetryService, DatabaseRetrievalTelemetryService>();
+        services.AddSingleton<IProjectArtifactObjectStore, S3CompatibleProjectArtifactObjectStore>();
         services.AddScoped<ITokenCountingService, TokenCountingService>();
         services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
         services.AddScoped<IMemoryDataRetentionService, MemoryDataRetentionService>();
@@ -124,6 +126,8 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
         })
         .AddHttpMessageHandler<RequestTrafficDelegatingHandler>();
+        services.AddHttpClient(nameof(S3CompatibleProjectArtifactObjectStore))
+            .AddHttpMessageHandler<RequestTrafficDelegatingHandler>();
 
         services.AddSingleton<IEmbeddingProvider>(sp =>
         {

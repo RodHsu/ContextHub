@@ -2,7 +2,17 @@
 
 <PageTitle>Context Hub | 找不到頁面</PageTitle>
 
-<div class="empty-state">
-    <div class="empty-title">找不到頁面</div>
-    <div class="empty-copy">要求的路由不存在，請從左側導覽重新選擇功能。</div>
-</div>
+<PageViewport Title="找不到頁面"
+              Subtitle="要求的路由不存在，請從導覽重新選擇功能。"
+              BodyClass="page-viewport-body page-grid-body boundary-page-body">
+    <ChildContent>
+        <section class="panel boundary-panel">
+            <div class="panel-title">路由不存在</div>
+            <div class="empty-inline">請回到總覽或選擇可用功能。</div>
+            <div class="settings-button-row">
+                <a class="primary-button" href="/">回到總覽</a>
+                <a class="ghost-button" href="/memories">前往記憶資料</a>
+            </div>
+        </section>
+    </ChildContent>
+</PageViewport>

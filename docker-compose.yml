@@ -39,6 +39,27 @@ x-telemetry-retention-config: &telemetry-retention-config
   TelemetryRetention__RunVacuumAnalyzeAfterRetention: ${TELEMETRY_RETENTION_RUN_VACUUM_ANALYZE_AFTER_RETENTION:-true}
   TelemetryRetention__RunVacuumFullAutomatically: ${TELEMETRY_RETENTION_RUN_VACUUM_FULL_AUTOMATICALLY:-true}
 
+x-chatgpt-gateway-config: &chatgpt-gateway-config
+  ChatGptGateway__OAuth__Authority: ${CHATGPT_GATEWAY_OAUTH_AUTHORITY:-}
+  ChatGptGateway__OAuth__ClientId: ${CHATGPT_GATEWAY_OAUTH_CLIENT_ID:-}
+  ChatGptGateway__OAuth__ClientSecret: ${CHATGPT_GATEWAY_OAUTH_CLIENT_SECRET:-}
+  ChatGptGateway__OAuth__TestMode: ${CHATGPT_GATEWAY_OAUTH_TEST_MODE:-false}
+  ChatGptGateway__OAuth__TestBearerToken: ${CHATGPT_GATEWAY_OAUTH_TEST_BEARER_TOKEN:-}
+  ChatGptGateway__ContextHub__BaseUrl: http://mcp-server:8080
+  ChatGptGateway__ContextHub__ServiceToken: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN}
+  ChatGptGateway__AllowedProjectIds__0: ${CHATGPT_GATEWAY_ALLOWED_PROJECT_ID:-ContextHub}
+
+x-project-artifact-object-storage-config: &project-artifact-object-storage-config
+  ProjectArtifacts__ObjectStorage__Enabled: ${PROJECT_ARTIFACT_OBJECT_STORAGE_ENABLED:-false}
+  ProjectArtifacts__ObjectStorage__Provider: ${PROJECT_ARTIFACT_OBJECT_STORAGE_PROVIDER:-r2}
+  ProjectArtifacts__ObjectStorage__Endpoint: ${PROJECT_ARTIFACT_OBJECT_STORAGE_ENDPOINT:-}
+  ProjectArtifacts__ObjectStorage__AccessKeyId: ${PROJECT_ARTIFACT_OBJECT_STORAGE_ACCESS_KEY_ID:-}
+  ProjectArtifacts__ObjectStorage__SecretAccessKey: ${PROJECT_ARTIFACT_OBJECT_STORAGE_SECRET_ACCESS_KEY:-}
+  ProjectArtifacts__ObjectStorage__Bucket: ${PROJECT_ARTIFACT_OBJECT_STORAGE_BUCKET:-}
+  ProjectArtifacts__ObjectStorage__Region: ${PROJECT_ARTIFACT_OBJECT_STORAGE_REGION:-auto}
+  ProjectArtifacts__ObjectStorage__PublicBaseUrl: ${PROJECT_ARTIFACT_OBJECT_STORAGE_PUBLIC_BASE_URL:-}
+  ProjectArtifacts__ObjectStorage__MaxObjectBytes: ${PROJECT_ARTIFACT_OBJECT_STORAGE_MAX_OBJECT_BYTES:-10485760}
+
 services:
   embedding-service:
     image: contexthub-embedding-service:latest
@@ -124,7 +145,7 @@ services:
       ContextHub__Security__BootstrapTenantSlug: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TENANT_SLUG:-context-team}
       ContextHub__Security__BootstrapUsername: ${CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME:-dashboard-service}
       ContextHub__Security__BootstrapAllowedProjectIds: ${CONTEXTHUB_SECURITY_BOOTSTRAP_ALLOWED_PROJECT_IDS:-ContextHub}
-      <<: [*embedding-config, *telemetry-retention-config]
+      <<: [*embedding-config, *telemetry-retention-config, *project-artifact-object-storage-config]
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
       Dashboard__ComposeProject: ${DASHBOARD_COMPOSE_PROJECT:-contexthub}
@@ -157,6 +178,44 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  chatgpt-gateway:
+    image: contexthub-chatgpt-gateway:latest
+    build:
+      context: .
+      dockerfile: src/Memory.ChatGptGateway/Dockerfile
+      args:
+        APP_VERSION: ${CONTEXTHUB_BUILD_VERSION:-1.1.0}
+        BUILD_TIMESTAMP_UTC: ${CONTEXTHUB_BUILD_TIMESTAMP_UTC:-}
+    restart: always
+    environment:
+      ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
+      ContextHub__Security__BootstrapTenantSlug: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TENANT_SLUG:-context-team}
+      ContextHub__Security__BootstrapUsername: ${CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME:-dashboard-service}
+      <<: [*embedding-config, *telemetry-retention-config, *chatgpt-gateway-config, *project-artifact-object-storage-config]
+      Embeddings__Provider: Http
+      Embeddings__BaseUrl: http://embedding-service:8081
+      ASPNETCORE_URLS: http://0.0.0.0:8083
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      ConnectionStrings__Redis: redis:6379
+      Memory__Namespace: contexthub
+      DatabaseLogging__MinimumLevel: Warning
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    ports:
+      - "${CHATGPT_GATEWAY_HOST_BIND:-127.0.0.1}:${CHATGPT_GATEWAY_HOST_PORT:-8094}:8083"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/health/ready"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 90s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   worker:
     image: contexthub-worker:latest
     build:
@@ -168,7 +227,7 @@ services:
     restart: always
     environment:
       ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
-      <<: [*embedding-config, *telemetry-retention-config]
+      <<: [*embedding-config, *telemetry-retention-config, *project-artifact-object-storage-config]
       ASPNETCORE_URLS: http://0.0.0.0:8082
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081

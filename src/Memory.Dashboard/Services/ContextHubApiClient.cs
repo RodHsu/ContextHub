@@ -15,6 +15,9 @@ public interface IContextHubApiClient
     Task<DashboardMonitoringResult> GetMonitoringAsync(CancellationToken cancellationToken);
     Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchConversationCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ChatGptProposalResult>> GetChatGptProposalsAsync(ChatGptProposalListRequest request, CancellationToken cancellationToken);
+    Task<ChatGptProposalResult> ApproveChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken);
+    Task<ChatGptProposalResult> RejectChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken);
     Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectSuggestionResult>> GetMemoryProjectsAsync(string? query, int limit, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
@@ -108,6 +111,32 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         return GetRequiredAsync<IReadOnlyList<ConversationCheckpointSearchResult>>(
             QueryHelpers.AddQueryString("/api/conversations/checkpoints/search", query),
             cancellationToken);
+    }
+
+    public Task<IReadOnlyList<ChatGptProposalResult>> GetChatGptProposalsAsync(ChatGptProposalListRequest request, CancellationToken cancellationToken)
+    {
+        var query = new Dictionary<string, string?>
+        {
+            ["projectId"] = request.ProjectId,
+            ["status"] = request.Status?.ToString(),
+            ["limit"] = request.Limit.ToString()
+        };
+
+        return GetRequiredAsync<IReadOnlyList<ChatGptProposalResult>>(
+            QueryHelpers.AddQueryString("/api/chatgpt/proposals", query),
+            cancellationToken);
+    }
+
+    public async Task<ChatGptProposalResult> ApproveChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/chatgpt/proposals/{id:D}/approve", new { note }, cancellationToken);
+        return await ReadRequiredAsync<ChatGptProposalResult>(response, cancellationToken);
+    }
+
+    public async Task<ChatGptProposalResult> RejectChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/chatgpt/proposals/{id:D}/reject", new { note }, cancellationToken);
+        return await ReadRequiredAsync<ChatGptProposalResult>(response, cancellationToken);
     }
 
     public Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)

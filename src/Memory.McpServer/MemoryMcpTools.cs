@@ -10,6 +10,8 @@ public sealed class MemoryMcpTools(
     IMemoryService memoryService,
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
+    IProjectArtifactExchangeService artifactExchangeService,
+    IChatGptProposalService chatGptProposalService,
     IMaintenanceCoordinator maintenanceCoordinator)
 {
     [McpServerTool, Description("Describe ContextHub purpose, capabilities, startup flow, and projectId guidance for first-time agent onboarding.")]
@@ -41,6 +43,30 @@ public sealed class MemoryMcpTools(
     [McpServerTool, Description("Get a single memory item by id.")]
     public Task<MemoryDocument?> memory_get(Guid id, CancellationToken cancellationToken = default)
         => memoryService.GetAsync(id, cancellationToken);
+
+    [McpServerTool, Description("Publish a project-scoped artifact summary, snippet, file reference, or external object pointer for other agents using the same ProjectId.")]
+    public Task<ProjectArtifactResult> project_artifact_publish(ProjectArtifactPublishRequest request, CancellationToken cancellationToken = default)
+        => artifactExchangeService.PublishAsync(request, cancellationToken);
+
+    [McpServerTool, Description("Upload managed artifact content to configured object storage, then publish only the expiring object pointer for agents using the same ProjectId.")]
+    public Task<ProjectArtifactResult> project_artifact_upload_object(ProjectArtifactManagedObjectPublishRequest request, CancellationToken cancellationToken = default)
+        => artifactExchangeService.UploadManagedObjectAsync(request, cancellationToken);
+
+    [McpServerTool, Description("List project-scoped artifact exchange records for the same ProjectId.")]
+    public Task<IReadOnlyList<ProjectArtifactResult>> project_artifacts_list(ProjectArtifactListRequest request, CancellationToken cancellationToken = default)
+        => artifactExchangeService.ListAsync(request, cancellationToken);
+
+    [McpServerTool, Description("Search project-scoped artifact exchange records by content, title, summary, or source reference.")]
+    public Task<IReadOnlyList<ProjectArtifactResult>> project_artifacts_search(ProjectArtifactSearchRequest request, CancellationToken cancellationToken = default)
+        => artifactExchangeService.SearchAsync(request, cancellationToken);
+
+    [McpServerTool, Description("Get one project-scoped artifact exchange record by memory id.")]
+    public Task<ProjectArtifactResult?> project_artifact_get(Guid memoryId, CancellationToken cancellationToken = default)
+        => artifactExchangeService.GetAsync(memoryId, cancellationToken);
+
+    [McpServerTool, Description("Delete expired managed project artifact objects from configured object storage and archive their artifact exchange records. Intended for Codex or agent maintenance, not ChatGPT direct use.")]
+    public Task<ProjectArtifactExpiredObjectPruneResult> project_artifacts_prune_expired_objects(ProjectArtifactExpiredObjectPruneRequest request, CancellationToken cancellationToken = default)
+        => artifactExchangeService.PruneExpiredObjectsAsync(request, cancellationToken);
 
     [McpServerTool, Description("Create or replace a memory item using an external key.")]
     public Task<MemoryDocument> memory_upsert(MemoryUpsertRequest request, CancellationToken cancellationToken = default)
@@ -114,4 +140,16 @@ public sealed class MemoryMcpTools(
     [McpServerTool, Description("Archive or restore a user preference by id.")]
     public Task<UserPreferenceResult> user_preference_archive(UserPreferenceArchiveRequest request, CancellationToken cancellationToken = default)
         => memoryService.ArchiveUserPreferenceAsync(request, cancellationToken);
+
+    [McpServerTool, Description("List pending, applied, rejected, or failed ChatGPT write proposals for review.")]
+    public Task<IReadOnlyList<ChatGptProposalResult>> chatgpt_proposals_list(ChatGptProposalListRequest request, CancellationToken cancellationToken = default)
+        => chatGptProposalService.ListAsync(request, cancellationToken);
+
+    [McpServerTool, Description("Approve a ChatGPT write proposal and apply it through ContextHub write use cases.")]
+    public Task<ChatGptProposalResult> chatgpt_proposal_approve(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
+        => chatGptProposalService.ApproveAsync(request, cancellationToken);
+
+    [McpServerTool, Description("Reject a pending ChatGPT write proposal without changing durable ContextHub memory.")]
+    public Task<ChatGptProposalResult> chatgpt_proposal_reject(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
+        => chatGptProposalService.RejectAsync(request, cancellationToken);
 }
