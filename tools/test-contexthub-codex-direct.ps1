@@ -1,3 +1,8 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    "PSAvoidUsingPositionalParameters",
+    "",
+    Justification = "The codex CLI requires positional subcommands."
+)]
 param(
     [string]$Endpoint = "https://context-hub.wjcy.org/mcp",
     [string]$ProjectId = "ContextHub",
@@ -28,7 +33,7 @@ function Get-ContextHubToken {
     throw "CONTEXTHUB_MCP_TOKEN is not set in process, user, or machine environment."
 }
 
-function New-McpHeaders {
+function Get-McpHeader {
     param([string]$Token, [string]$SessionId)
 
     $headers = @{
@@ -73,7 +78,7 @@ function ConvertTo-HeaderMap {
     return $map
 }
 
-function New-HttpResponseRecord {
+function ConvertTo-HttpResponseRecord {
     param([object]$Response)
 
     $headers = ConvertTo-HeaderMap -Headers $Response.Headers
@@ -120,11 +125,11 @@ function Invoke-WebRequestAllowError {
 
     try {
         $response = Invoke-WebRequest -Uri $Uri -Method $Method -Headers $Headers -Body $Body -UseBasicParsing -TimeoutSec $TimeoutSec
-        return New-HttpResponseRecord -Response $response
+        return ConvertTo-HttpResponseRecord -Response $response
     }
     catch {
         if ($_.Exception.Response) {
-            return New-HttpResponseRecord -Response $_.Exception.Response
+            return ConvertTo-HttpResponseRecord -Response $_.Exception.Response
         }
 
         throw
@@ -172,7 +177,14 @@ function Get-DirectMcpConfig {
 function Assert-CodexMcpCallSucceeded {
     param([string]$Output)
 
-    if ($Output -match "rmcp::transport::worker|MCP startup failed|http/request failed|Transport closed") {
+    $hasCompletedToolCall = $Output.Contains("mcp: contexthub/memory_search") -and $Output.Contains("(completed)")
+    $hasSucceededAnswer = $Output -match "(?i)\bsucceeded\b"
+    $hasPostSuccessSessionDeleteNoise =
+        $hasCompletedToolCall -and
+        $hasSucceededAnswer -and
+        $Output -match "fail to delete session|http_method=`"DELETE`""
+
+    if (-not $hasPostSuccessSessionDeleteNoise -and $Output -match "rmcp::transport::worker|MCP startup failed|http/request failed|Transport closed") {
         throw "codex exec reported native remote MCP transport failure."
     }
 
@@ -180,8 +192,6 @@ function Assert-CodexMcpCallSucceeded {
         throw "codex exec reported stale OAuth or unauthenticated remote MCP noise."
     }
 
-    $hasCompletedToolCall = $Output.Contains("mcp: contexthub/memory_search") -and $Output.Contains("(completed)")
-    $hasSucceededAnswer = $Output -match "(?i)\bsucceeded\b"
     if (-not $hasCompletedToolCall -or -not $hasSucceededAnswer) {
         throw "codex exec did not show a completed contexthub/memory_search tool call."
     }
@@ -189,17 +199,17 @@ function Assert-CodexMcpCallSucceeded {
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $token = Get-ContextHubToken
-$baseHeaders = New-McpHeaders -Token $token
+$baseHeaders = Get-McpHeader -Token $token
 
-Write-Host "1/5 unauthenticated remote MCP should return 401 without browser challenge"
+Write-Output "1/5 unauthenticated remote MCP should return 401 without browser challenge"
 $unauthResponse = Invoke-WebRequestAllowError -Uri $Endpoint -Method Get -TimeoutSec 15
 if ([int]$unauthResponse.StatusCode -ne 401) {
     throw "Expected 401 from unauthenticated MCP request, got $($unauthResponse.StatusCode)."
 }
 Assert-NoBrowserChallenge -Response $unauthResponse
-Write-Host "Remote MCP returned 401 as expected."
+Write-Output "Remote MCP returned 401 as expected."
 
-Write-Host "2/5 raw remote MCP initialize and tools/list"
+Write-Output "2/5 raw remote MCP initialize and tools/list"
 $initPayload = @{
     jsonrpc = "2.0"
     id = 1
@@ -218,7 +228,7 @@ $sessionId = [string]$initResponse.Headers["Mcp-Session-Id"]
 if (-not $sessionId) {
     throw "MCP initialize did not return Mcp-Session-Id."
 }
-$sessionHeaders = New-McpHeaders -Token $token -SessionId $sessionId
+$sessionHeaders = Get-McpHeader -Token $token -SessionId $sessionId
 
 $toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
     jsonrpc = "2.0"
@@ -233,9 +243,9 @@ foreach ($requiredTool in @("memory_search", "build_working_context", "conversat
         throw "Required ContextHub MCP tool '$requiredTool' was not listed."
     }
 }
-Write-Host "Raw remote MCP tools/list succeeded."
+Write-Output "Raw remote MCP tools/list succeeded."
 
-Write-Host "3/5 raw remote MCP build_working_context"
+Write-Output "3/5 raw remote MCP build_working_context"
 $contextResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
     jsonrpc = "2.0"
     id = 3
@@ -257,9 +267,9 @@ $contextText = [string]$contextJson.result.content[0].text
 if ($contextText -notmatch "userPreferences|facts|decisions|recentLogs") {
     throw "build_working_context returned an unexpected payload."
 }
-Write-Host "Raw remote MCP build_working_context succeeded."
+Write-Output "Raw remote MCP build_working_context succeeded."
 
-Write-Host "4/5 isolated Codex native remote MCP verification"
+Write-Output "4/5 isolated Codex native remote MCP verification"
 $directConfig = Get-DirectMcpConfig -Endpoint $Endpoint
 $prompt = "Use ContextHub MCP memory_search with projectId=$ProjectId, query=$Query, limit=1. Do not use shell or raw HTTP. Reply only whether the direct MCP tool call succeeded."
 $previousErrorActionPreference = $ErrorActionPreference
@@ -281,15 +291,15 @@ finally {
 }
 
 $codexText = ($codexOutput | Out-String).Trim()
-Write-Host $codexText
+Write-Output $codexText
 if ($codexExitCode -ne 0) {
     throw "codex exec failed with exit code $codexExitCode."
 }
 Assert-CodexMcpCallSucceeded -Output $codexText
-Write-Host "Isolated Codex native remote MCP verification passed."
+Write-Output "Isolated Codex native remote MCP verification passed."
 
 if ($ApplyUserConfig) {
-    Write-Host "5/5 applying native remote MCP to user Codex config"
+    Write-Output "5/5 applying native remote MCP to user Codex config"
     codex mcp remove contexthub 2>$null
     codex mcp add contexthub --url $Endpoint --bearer-token-env-var CONTEXTHUB_MCP_TOKEN
     if ($LASTEXITCODE -ne 0) {
@@ -299,7 +309,7 @@ if ($ApplyUserConfig) {
     codex mcp get contexthub
 }
 else {
-    Write-Host "5/5 user Codex config unchanged. Re-run with -ApplyUserConfig after isolated verification if you want to switch the global config."
+    Write-Output "5/5 user Codex config unchanged. Re-run with -ApplyUserConfig after isolated verification if you want to switch the global config."
 }
 
-Write-Host "ContextHub Codex native remote MCP diagnostics passed."
+Write-Output "ContextHub Codex native remote MCP diagnostics passed."
