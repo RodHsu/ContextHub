@@ -297,19 +297,42 @@ Token 應放在環境變數，不要寫進 `config.toml`：
 [Environment]::SetEnvironmentVariable("CONTEXTHUB_MCP_TOKEN", "<token>", "User")
 ```
 
-Codex Desktop 的穩定入口則是 stdio bridge：Codex 以本機 child process 載入
-`tools/ContextHub.McpStdioBridge`，bridge 再呼叫遠端
-`https://context-hub.wjcy.org/mcp`。這可以避開 Codex HTTP MCP worker 偶發
-transport/session 初始化失敗，避免 server 明明可用但對話層顯示 ContextHub 未載入。
-bridge 會在 remote `/mcp` redeploy、session stale 或 transient transport error 後重建
-remote MCP session；read-only tools 會自動重試一次，write/job/maintenance mutation tools
-不自動重送。
+Codex 端正式入口就是 remote MCP。先用隔離診斷確認 native remote MCP 能在
+Codex worker 內完成 tool call；通過後把使用者層級 Codex config 固定為 `url`
+與 `bearer_token_env_var`，不要再把本機 stdio bridge 當日常入口：
 
-建議用 repo 啟動腳本：
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\test-contexthub-codex-direct.ps1
+```
+
+這支腳本不會改全域 Codex config。只有隔離驗證通過且決定正式切換時，才加
+`-ApplyUserConfig`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\test-contexthub-codex-direct.ps1 -ApplyUserConfig
+```
+
+repo 啟動腳本預設也使用 native remote，不會 build 或啟動本機 bridge：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File start-codex-contexthub.ps1
 ```
+
+stdio bridge 只保留為 legacy compatibility / diagnostics，不是正式入口。若需要排查
+Codex native remote regression，可顯式要求本機 child process 載入
+`tools/ContextHub.McpStdioBridge`，bridge 再呼叫遠端
+`https://context-hub.wjcy.org/mcp`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File start-codex-contexthub.ps1 -UseStdioBridge
+```
+
+若 direct native remote 診斷失敗，但 raw MCP 成功，代表
+ContextHub server 與公開 `/mcp` endpoint 可用，問題多半在 Codex worker 或 Cloudflare
+edge 對非瀏覽器 Streamable HTTP client 的處理。此時先依
+[`context-hub-cloudflare-rules.md`](context-hub-cloudflare-rules.md) 檢查 `/mcp*`
+cache、challenge、buffering、mTLS 與 dedicated proxied hostname；stdio bridge 只能作為
+臨時診斷對照，不應成為完成標準。
 
 ### 7.3 固定診斷流程
 
@@ -329,19 +352,28 @@ powershell -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1
 - raw MCP `maintenance_status` 不是 Running maintenance
 - `build_working_context(projectId = ContextHub)`
 
+若 raw remote 診斷通過，接著跑 Codex native remote 隔離診斷：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\test-contexthub-codex-direct.ps1
+```
+
+它會用 `codex exec --ignore-user-config --ephemeral` 與一次性的
+`mcp_servers.contexthub={ url = "...", bearer_token_env_var = "CONTEXTHUB_MCP_TOKEN" }`
+設定驗證 Codex worker 本身，不讀取既有 `~/.codex/config.toml`，也不寫入全域設定。
+
 若 raw MCP 成功，代表 ContextHub server 與遠端 `/mcp` endpoint 可用。
 如果新 Codex Desktop thread 仍看不到 tools，問題多半在 Codex client / Desktop
 tool injection 層，尤其是 HTTP MCP worker transport，而不是 ContextHub server 本身。
 
-Codex Desktop 載入問題應接著跑 stdio bridge 診斷：
+如果要確認 legacy stdio bridge fallback 是否仍可用，再跑 stdio bridge 診斷：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\test-contexthub-stdio-bridge.ps1
 ```
 
 stdio bridge 讓 Codex 以本機 child process 連線，再由 bridge 呼叫遠端
-`https://context-hub.wjcy.org/mcp`。它不取代公開 remote MCP endpoint；它是
-Codex Desktop 的相容性入口。
+`https://context-hub.wjcy.org/mcp`。它不取代公開 remote MCP endpoint，也不是日常入口。
 
 若要同時驗證 bridge 的 reconnect/no-retry regression，請加
 `-RunReconnectRegression`：
@@ -373,8 +405,8 @@ ContextHub server down。這代表目前 Codex session 的 active MCP transport 
 固定判斷順序是：
 
 1. 跑 raw MCP 診斷確認公開 `/mcp`。
-2. 跑 stdio bridge 診斷確認 bridge 自癒。
-3. 跑 `-RunCodexExec` 確認 Codex session path。
+2. 跑 Codex native remote 診斷確認 Codex worker 可直接使用知識庫。
+3. 必要時才跑 stdio bridge 診斷，作為 legacy fallback 對照。
 
 redeploy 後不應把「重開對話串」當作常態解法；bridge 應自動 reconnect。只有 raw MCP 與
 stdio bridge 都正常、但特定 Codex session path 仍 stale 時，才需要刷新該 session。

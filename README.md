@@ -170,29 +170,33 @@ bearer_token_env_var = "CONTEXTHUB_MCP_TOKEN"
 - 設定請使用 `type: "http"`
 - `url` 直接指向 `/mcp`
 - 不需要寫 `command` / `args`
-- 不需要用 `stdio`，這段只適用 VS Code / 支援 remote HTTP 的 client；Codex Desktop 請使用下方 stdio bridge 路徑
+- 不需要用 `stdio`；Codex Desktop 也應使用同一個 remote HTTP endpoint
 
 #### Codex Desktop 啟動
 
-Codex Desktop 目前建議用 repo 啟動腳本，腳本會先建置 stdio bridge，再用本次 session
-設定覆寫 `contexthub` MCP server：
+Codex Desktop 建議用 repo 啟動腳本，腳本預設使用 remote MCP，不會在本機建置或啟動
+stdio bridge：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File start-codex-contexthub.ps1
 ```
 
-對應的全域 Codex 設定可使用已建好的 bridge exe：
+對應的全域 Codex 設定應使用 remote MCP endpoint：
 
 ```toml
 [mcp_servers.contexthub]
 enabled = true
-command = "W:\\Repositories\\WJCY\\ContextHub\\tools\\ContextHub.McpStdioBridge\\bin\\Debug\\net10.0\\ContextHub.McpStdioBridge.exe"
-
-[mcp_servers.contexthub.env]
-CONTEXTHUB_MCP_ENDPOINT = "https://context-hub.wjcy.org/mcp"
+url = "https://context-hub.wjcy.org/mcp"
+bearer_token_env_var = "CONTEXTHUB_MCP_TOKEN"
 ```
 
 `CONTEXTHUB_MCP_TOKEN` 仍放在 User 或 Machine environment，不寫入 `config.toml`。
+
+stdio bridge 只保留為 legacy diagnostics；需要對照排查時才顯式使用：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File start-codex-contexthub.ps1 -UseStdioBridge
+```
 
 #### Codex 診斷腳本
 
