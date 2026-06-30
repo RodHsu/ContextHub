@@ -902,6 +902,114 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Memory_Get_Should_Allow_Service_Actor_Project_Read_Interop()
+    {
+        var tenantId = Guid.NewGuid();
+        var ownerUserId = Guid.NewGuid();
+        var serviceUserId = Guid.NewGuid();
+        var projectId = $"ServiceInterop_{Guid.NewGuid():N}";
+        var deniedProjectId = $"ServiceInteropDenied_{Guid.NewGuid():N}";
+        var memoryId = Guid.NewGuid();
+        var deniedMemoryId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+
+        dbContext.Tenants.Add(new Tenant
+        {
+            Id = tenantId,
+            Slug = $"svc-interop-{Guid.NewGuid():N}"[..24],
+            DisplayName = "Service Interop Tenant",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        dbContext.TenantUsers.AddRange(
+            new TenantUser
+            {
+                Id = ownerUserId,
+                TenantId = tenantId,
+                Username = "service-interop-owner",
+                DisplayName = "Service Interop Owner",
+                Role = TenantUserRole.Member,
+                CreatedAt = now,
+                UpdatedAt = now
+            },
+            new TenantUser
+            {
+                Id = serviceUserId,
+                TenantId = tenantId,
+                Username = "service-interop-gateway",
+                DisplayName = "Service Interop Gateway",
+                Role = TenantUserRole.Member,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        dbContext.MemoryItems.AddRange(
+            new MemoryItem
+            {
+                Id = memoryId,
+                TenantId = tenantId,
+                OwnerUserId = ownerUserId,
+                ProjectId = projectId,
+                ExternalKey = $"service-interop:allowed:{memoryId:N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Fact,
+                Title = "Service actor visible project memory",
+                Content = "Project-gated service actors should read approved interop knowledge.",
+                Summary = "Service actor visible project memory",
+                SourceType = "test",
+                SourceRef = "api-contract",
+                Importance = 0.7m,
+                Confidence = 0.9m,
+                CreatedAt = now,
+                UpdatedAt = now
+            },
+            new MemoryItem
+            {
+                Id = deniedMemoryId,
+                TenantId = tenantId,
+                OwnerUserId = ownerUserId,
+                ProjectId = deniedProjectId,
+                ExternalKey = $"service-interop:denied:{deniedMemoryId:N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Fact,
+                Title = "Service actor denied project memory",
+                Content = "Project allowlist must still constrain service actor reads.",
+                Summary = "Service actor denied project memory",
+                SourceType = "test",
+                SourceRef = "api-contract",
+                Importance = 0.7m,
+                Confidence = 0.9m,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        actorAccessor.Current = new ContextHubRequestActor(
+            tenantId,
+            serviceUserId,
+            "service-interop-gateway",
+            TenantUserRole.Member,
+            [SecurityScopes.MemoryRead],
+            [projectId],
+            IsAuthenticated: true,
+            IsServiceActor: true);
+
+        var allowed = await memoryService.GetAsync(memoryId, CancellationToken.None);
+        allowed.Should().NotBeNull();
+        allowed!.Id.Should().Be(memoryId);
+
+        var denied = async () => await memoryService.GetAsync(deniedMemoryId, CancellationToken.None);
+        await denied.Should().ThrowAsync<UnauthorizedAccessException>();
+    }
+
+    [DockerRequiredFact]
     public async Task Domain_Owner_Repair_Should_Preview_And_Apply_Admin_Owner_Migration()
     {
         var adminTenantId = Guid.Parse("72000000-0000-0000-0000-000000000001");

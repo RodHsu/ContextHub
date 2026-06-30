@@ -530,8 +530,13 @@ public sealed class MemoryService(
         EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var entity = await dbContext.MemoryItems
             .Where(x => x.Id == id)
-            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
             .FirstOrDefaultAsync(cancellationToken);
+        if (entity is not null)
+        {
+            EnsureProjectAllowed(actor, entity.ProjectId, write: false);
+        }
+
         return entity is null ? null : Map(entity);
     }
 
@@ -561,7 +566,7 @@ public sealed class MemoryService(
             var items = await dbContext.MemoryItems
                 .Where(x => itemIds.Contains(x.Id))
                 .Where(x => allowedProjects.Contains(x.ProjectId))
-                .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+                .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
                 .ToDictionaryAsync(x => x.Id, cancellationToken);
             var merged = HybridSearchComposer.Compose(keywordHits, semanticHits, items, request.Limit, request.IncludeArchived);
 
@@ -701,7 +706,7 @@ public sealed class MemoryService(
         var items = await dbContext.MemoryItems
             .AsNoTracking()
             .Where(x => allowedProjects.Contains(x.ProjectId))
-            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
             .Where(x => x.Status != MemoryStatus.Archived)
             .OrderByDescending(x => x.Importance)
             .ThenByDescending(x => x.UpdatedAt)

@@ -108,7 +108,8 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
                 .Select(x => ProjectContext.Normalize(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
-            IsAuthenticated: true);
+            IsAuthenticated: true,
+            IsServiceActor: true);
         try
         {
             await next(context);
