@@ -4,6 +4,13 @@ This document defines the Cloudflare edge policy for ContextHub MCP traffic.
 The `context-hub.wjcy.org` DNS record must stay Proxied. Do not switch it to
 DNS-only to debug MCP, because that exposes the origin IP.
 
+Public MCP endpoints:
+
+```text
+/mcp       Codex/full ContextHub MCP
+/mcp-chat  restricted chat-agent MCP gateway for ChatGPT and future chat agents
+```
+
 ## Match expression
 
 Use the same expression for MCP-specific Cache, Configuration, and WAF rules:
@@ -11,6 +18,9 @@ Use the same expression for MCP-specific Cache, Configuration, and WAF rules:
 ```text
 (http.host eq "context-hub.wjcy.org" and starts_with(http.request.uri.path, "/mcp"))
 ```
+
+This intentionally includes `/mcp-chat`. If a Cloudflare UI rule uses explicit
+path equality instead of `starts_with`, include both `/mcp` and `/mcp-chat`.
 
 For dynamic REST/API traffic, use:
 
@@ -26,7 +36,7 @@ For dynamic REST/API traffic, use:
 
 ## Cache Rules
 
-Create a Cache Rule for `/mcp*`:
+Create a Cache Rule for `/mcp*`, including `/mcp-chat`:
 
 ```text
 Action:
@@ -58,7 +68,8 @@ CF-Cache-Status: DYNAMIC or BYPASS
 
 ## Configuration Rules
 
-Create a Configuration Rule for `/mcp*` that disables browser-facing features:
+Create a Configuration Rule for `/mcp*`, including `/mcp-chat`, that disables
+browser-facing features:
 
 ```text
 Disable:
@@ -72,13 +83,13 @@ Disable:
 ```
 
 If the plan exposes a request or response buffering setting, set buffering to
-`none` for `/mcp*`. MCP Streamable HTTP/SSE clients expect raw protocol
-responses and should not receive transformed HTML, JavaScript injection, or
-buffered event streams.
+`none` for `/mcp*` and `/mcp-chat*`. MCP Streamable HTTP/SSE clients expect raw
+protocol responses and should not receive transformed HTML, JavaScript
+injection, or buffered event streams.
 
 ## WAF and bot rules
 
-Create a WAF exception for `/mcp*`:
+Create a WAF exception for `/mcp*`, including `/mcp-chat`:
 
 ```text
 Skip:
@@ -143,6 +154,19 @@ Run the local diagnostic script:
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1
 ```
 
+Run the chat-agent gateway diagnostic script:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1
+```
+
+For authorized ChatGPT simulation, set `CONTEXTHUB_MCP_CHAT_TOKEN` to a valid
+OIDC access token for the chat-agent client and require the authorized checks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -RequireAuthorizationToken
+```
+
 To include Codex tool-injection verification:
 
 ```powershell
@@ -162,6 +186,10 @@ Invoke-WebRequest `
 
 The unauthenticated MCP request should return `401`, include a `CF-RAY` header,
 and must not return a browser challenge HTML page.
+
+The unauthenticated `/mcp-chat` request has the same expectations. It must not
+be routed to `/mcp`; it must proxy to `chatgpt-gateway:8083/mcp` so ChatGPT and
+future chat agents only see restricted gateway tools and proposal-gated writes.
 
 The diagnostic script also probes `curl.exe -sv --http1.1` output. If it sees
 TLS renegotiation/client-certificate negotiation, Cloudflare mTLS or a related

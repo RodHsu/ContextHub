@@ -16,6 +16,22 @@ ContextHub 的定位不是把所有歷史對話全文塞進 prompt，而是讓�
 - runtime logs
 - 結構化 working context
 
+## 1.1 Public Endpoints
+
+正式公開入口分成兩個，不要混用：
+
+```text
+https://context-hub.wjcy.org/mcp
+  Codex/full ContextHub MCP。這是 Codex 的正式 remote MCP 入口。
+
+https://context-hub.wjcy.org/mcp-chat
+  ChatGPT 與未來 chat agent 的 restricted MCP gateway。
+```
+
+`/mcp-chat` 會轉到 `Memory.ChatGptGateway`，只暴露受控 allowlist tools、
+project allowlist、OIDC/OAuth、audit/rate limit 與 proposal-gated durable
+write。ChatGPT custom MCP app 應填 `/mcp-chat`，不要填 `/mcp`。
+
 ## 2. 核心使用原則
 
 ### 2.1 先查再做，不要先猜

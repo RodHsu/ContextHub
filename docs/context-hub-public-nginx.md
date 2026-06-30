@@ -16,6 +16,7 @@ Expected upstream aliases from `docker-compose.release.yml`:
 context-hub-dashboard:8088
 context-hub-mcp-server-a:8080
 context-hub-mcp-server-b:8080
+context-hub-chatgpt-gateway:8083
 ```
 
 Origin cache header policy:
@@ -33,32 +34,52 @@ Dashboard HTML, health checks, Blazor transport, API, MCP:
 ```
 
 Cloudflare Cache Rules should not override the origin `no-store` policy for
-`/api/*`, `/mcp*`, `/_blazor*`, `/health*`, `/login*`, or `/account*`.
+`/api/*`, `/mcp*`, `/mcp-chat*`, `/_blazor*`, `/health*`, `/login*`, or
+`/account*`.
 Only static asset file extensions should be eligible for edge cache.
 
 Apply the Cloudflare edge rules in
 [`context-hub-cloudflare-rules.md`](context-hub-cloudflare-rules.md) before
 treating MCP failures as origin or application failures.
 
-Release deploys run two fixed MCP backends (`mcp-server-a` and `mcp-server-b`).
-Nginx should route `/mcp` and `/api/` through the `contexthub_mcp` upstream so
-one backend can be recreated while the other continues serving existing agents.
-The deployment script performs public MCP smoke checks between backend updates;
-do not collapse the upstream back to a single `context-hub-mcp-server` target.
+Release deploys run two fixed full MCP backends (`mcp-server-a` and
+`mcp-server-b`). Nginx should route `/mcp` and `/api/` through the
+`contexthub_mcp` upstream so one backend can be recreated while the other
+continues serving existing agents. The deployment script performs public MCP
+smoke checks between backend updates; do not collapse the upstream back to a
+single `context-hub-mcp-server` target.
 
-Cloudflare rules for `/mcp*`:
+Public MCP routes:
+
+```text
+/mcp       -> Codex/full ContextHub MCP, via mcp-server-a/b
+/mcp-chat  -> restricted chat-agent MCP gateway, via chatgpt-gateway:8083/mcp
+```
+
+`/mcp-chat` is the public endpoint for ChatGPT custom MCP apps and future chat
+agents. It must stay separate from `/mcp`: chat agents only see the gateway
+allowlist, project allowlist, OIDC/OAuth checks, rate limit, audit, and
+proposal-gated durable writes.
+
+After any release that recreates `dashboard`, `mcp-server-a/b`, or
+`chatgpt-gateway`, reload Nginx after `nginx -t`. The current Nginx deployment
+resolves Docker DNS at config load time, so a reload is required to avoid stale
+upstream container IPs after Docker recreates containers.
+
+Cloudflare rules for `/mcp*` and `/mcp-chat*`:
 
 ```text
 DNS:
   Keep the record Proxied (orange-cloud). Do not switch to DNS-only just to fix MCP.
 
 Cache:
-  Bypass cache for /mcp*
+  Bypass cache for /mcp* and /mcp-chat*
   Do not override origin Cache-Control / CDN-Cache-Control no-store
 
 Transform / challenges:
   Do not apply response transformation, Rocket Loader, JS challenge, or managed challenge
-  to /mcp*. MCP clients are non-browser clients and expect raw Streamable HTTP/SSE.
+  to /mcp* or /mcp-chat*. MCP clients are non-browser clients and expect raw
+  Streamable HTTP/SSE.
 
 Security:
   Enforce access with bearer tokens, WAF allow/block rules, and rate limits.
@@ -111,6 +132,24 @@ server {
         proxy_pass http://contexthub_mcp;
     }
 
+    location = /mcp-chat {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
+        add_header Cloudflare-CDN-Cache-Control "no-store" always;
+        add_header CDN-Cache-Control "no-store" always;
+        add_header X-Accel-Buffering "no" always;
+        gzip off;
+        proxy_cache off;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Accept $http_accept;
+        proxy_set_header Mcp-Session-Id $http_mcp_session_id;
+        proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
+        proxy_pass http://context-hub-chatgpt-gateway:8083/mcp;
+    }
+
     location /api/ {
         proxy_pass http://contexthub_mcp;
     }
@@ -132,4 +171,18 @@ server {
     server_name context-hub.wjcy.org;
     return 301 https://$host$request_uri;
 }
+```
+
+Post-deploy smoke checks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1 -RunCodexExec
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1
+```
+
+For full ChatGPT simulation, set `CONTEXTHUB_MCP_CHAT_TOKEN` to a valid OIDC
+access token for the ChatGPT/custom chat-agent client and rerun:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -RequireAuthorizationToken
 ```
