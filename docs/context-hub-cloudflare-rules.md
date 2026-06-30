@@ -9,6 +9,8 @@ Public MCP endpoints:
 ```text
 /mcp       Codex/full ContextHub MCP
 /mcp-chat  restricted chat-agent MCP gateway for ChatGPT and future chat agents
+/.well-known/oauth-protected-resource/mcp-chat
+          OAuth protected resource metadata for ChatGPT MCP OAuth discovery
 ```
 
 ## Match expression
@@ -16,11 +18,15 @@ Public MCP endpoints:
 Use the same expression for MCP-specific Cache, Configuration, and WAF rules:
 
 ```text
-(http.host eq "context-hub.wjcy.org" and starts_with(http.request.uri.path, "/mcp"))
+(http.host eq "context-hub.wjcy.org" and (
+  starts_with(http.request.uri.path, "/mcp") or
+  http.request.uri.path eq "/.well-known/oauth-protected-resource/mcp-chat"
+))
 ```
 
 This intentionally includes `/mcp-chat`. If a Cloudflare UI rule uses explicit
-path equality instead of `starts_with`, include both `/mcp` and `/mcp-chat`.
+path equality instead of `starts_with`, include `/mcp`, `/mcp-chat`, and
+`/.well-known/oauth-protected-resource/mcp-chat`.
 
 For dynamic REST/API traffic, use:
 
@@ -36,7 +42,8 @@ For dynamic REST/API traffic, use:
 
 ## Cache Rules
 
-Create a Cache Rule for `/mcp*`, including `/mcp-chat`:
+Create a Cache Rule for `/mcp*`, including `/mcp-chat` and the OAuth protected
+resource metadata path:
 
 ```text
 Action:
@@ -68,8 +75,8 @@ CF-Cache-Status: DYNAMIC or BYPASS
 
 ## Configuration Rules
 
-Create a Configuration Rule for `/mcp*`, including `/mcp-chat`, that disables
-browser-facing features:
+Create a Configuration Rule for `/mcp*`, including `/mcp-chat` and the OAuth
+protected resource metadata path, that disables browser-facing features:
 
 ```text
 Disable:
@@ -89,7 +96,8 @@ injection, or buffered event streams.
 
 ## WAF and bot rules
 
-Create a WAF exception for `/mcp*`, including `/mcp-chat`:
+Create a WAF exception for `/mcp*`, including `/mcp-chat` and the OAuth
+protected resource metadata path:
 
 ```text
 Skip:

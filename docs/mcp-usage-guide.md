@@ -32,6 +32,17 @@ https://context-hub.wjcy.org/mcp-chat
 project allowlist、OIDC/OAuth、audit/rate limit 與 proposal-gated durable
 write。ChatGPT custom MCP app 應填 `/mcp-chat`，不要填 `/mcp`。
 
+OAuth discovery 使用同一個 domain，不新增 hostname：
+
+```text
+https://context-hub.wjcy.org/.well-known/oauth-protected-resource/mcp-chat
+```
+
+`/mcp-chat` 的未授權回應會帶 `WWW-Authenticate` 與上述
+`resource_metadata` URL，ChatGPT 會依此連到設定的 OIDC provider。正式
+Developer Mode app 建立時，把 ChatGPT 顯示的 OAuth callback URL 加到同一個
+OIDC client allowlist，然後用 `/mcp-chat` 重新連線。
+
 ## 2. 核心使用原則
 
 ### 2.1 先查再做，不要先猜

@@ -54,6 +54,8 @@ Public MCP routes:
 ```text
 /mcp       -> Codex/full ContextHub MCP, via mcp-server-a/b
 /mcp-chat  -> restricted chat-agent MCP gateway, via chatgpt-gateway:8083/mcp
+/.well-known/oauth-protected-resource/mcp-chat
+          -> OAuth protected resource metadata for /mcp-chat
 ```
 
 `/mcp-chat` is the public endpoint for ChatGPT custom MCP apps and future chat
@@ -150,6 +152,17 @@ server {
         proxy_pass http://context-hub-chatgpt-gateway:8083/mcp;
     }
 
+    location = /.well-known/oauth-protected-resource/mcp-chat {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
+        add_header Cloudflare-CDN-Cache-Control "no-store" always;
+        add_header CDN-Cache-Control "no-store" always;
+        add_header X-Accel-Buffering "no" always;
+        proxy_cache off;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_pass http://context-hub-chatgpt-gateway:8083/.well-known/oauth-protected-resource/mcp-chat;
+    }
+
     location /api/ {
         proxy_pass http://contexthub_mcp;
     }
@@ -186,3 +199,19 @@ access token for the ChatGPT/custom chat-agent client and rerun:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -RequireAuthorizationToken
 ```
+
+For ChatGPT Developer Mode, create the custom MCP app with this MCP URL:
+
+```text
+https://context-hub.wjcy.org/mcp-chat
+```
+
+The gateway returns `WWW-Authenticate` with:
+
+```text
+resource_metadata="https://context-hub.wjcy.org/.well-known/oauth-protected-resource/mcp-chat"
+```
+
+Add the ChatGPT-provided OAuth callback URL to the configured OIDC client
+allowlist, then rerun the authorized smoke check with a token from the same OIDC
+client.

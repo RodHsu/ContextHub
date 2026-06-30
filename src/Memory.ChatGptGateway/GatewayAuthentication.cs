@@ -139,5 +139,6 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
 
     private static bool IsHealthCheck(PathString path)
         => path.StartsWithSegments("/health/live", StringComparison.OrdinalIgnoreCase) ||
-           path.StartsWithSegments("/health/ready", StringComparison.OrdinalIgnoreCase);
+           path.StartsWithSegments("/health/ready", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/.well-known/oauth-protected-resource/mcp-chat", StringComparison.OrdinalIgnoreCase);
 }

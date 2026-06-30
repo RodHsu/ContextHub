@@ -23,6 +23,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 {
     private const string ProjectId = ChatGptGatewayTestConstants.ProjectId;
     private const string TestToken = ChatGptGatewayTestConstants.TestToken;
+    internal const string PublicMcpUrl = "https://context-hub.example.test/mcp-chat";
+    internal const string PublicResourceMetadataUrl = "https://context-hub.example.test/.well-known/oauth-protected-resource/mcp-chat";
+    internal const string TestAuthority = "https://oidc.example.test/context-hub";
 
     [DockerRequiredFact]
     public async Task Raw_Http_Mcp_Should_Reject_Anonymous_Request()
@@ -35,6 +38,29 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             new StringContent("""{"jsonrpc":"2.0","id":"anonymous","method":"tools/list"}""", Encoding.UTF8, "application/json"));
 
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        response.Headers.WwwAuthenticate.Select(x => x.ToString())
+            .Should().Contain(x => x.Contains($"resource_metadata=\"{PublicResourceMetadataUrl}\"", StringComparison.Ordinal));
+    }
+
+    [DockerRequiredFact]
+    public async Task OAuth_Protected_Resource_Metadata_Should_Describe_Public_Chat_Gateway()
+    {
+        using var client = environment.GetFactory().CreateClient();
+
+        using var response = await client.GetAsync("/.well-known/oauth-protected-resource/mcp-chat");
+
+        response.EnsureSuccessStatusCode();
+        var metadata = await response.Content.ReadFromJsonAsync<JsonElement>();
+        metadata.GetProperty("resource").GetString().Should().Be(PublicMcpUrl);
+        metadata.GetProperty("authorization_servers").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().ContainSingle(TestAuthority);
+        metadata.GetProperty("scopes_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().Contain(["openid", "profile", "email"]);
+        metadata.GetProperty("bearer_methods_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().Contain("header");
     }
 
     [DockerRequiredFact]
@@ -830,10 +856,13 @@ public sealed class ChatGptGatewayApplicationFactory(string postgresConnectionSt
         builder.UseSetting("ContextHub:Security:BootstrapUsername", "gateway-test-admin");
         builder.UseSetting("ContextHub:Security:BootstrapAllowedProjectIds", ProjectContext.AllProjectIdsSentinel);
         builder.UseSetting("ChatGptGateway:OAuth:TestMode", "true");
+        builder.UseSetting("ChatGptGateway:OAuth:Authority", ChatGptGatewayMcpTests.TestAuthority);
         builder.UseSetting("ChatGptGateway:OAuth:TestBearerToken", ChatGptGatewayTestConstants.TestToken);
         builder.UseSetting("ChatGptGateway:OAuth:TestSubject", "chatgpt-gateway-test-subject");
         builder.UseSetting("ChatGptGateway:OAuth:TestEmail", "chatgpt-gateway@example.test");
         builder.UseSetting("ChatGptGateway:OAuth:TestName", "ChatGPT Gateway Test User");
+        builder.UseSetting("ChatGptGateway:PublicMcpUrl", ChatGptGatewayMcpTests.PublicMcpUrl);
+        builder.UseSetting("ChatGptGateway:PublicResourceMetadataUrl", ChatGptGatewayMcpTests.PublicResourceMetadataUrl);
         builder.UseSetting("ChatGptGateway:AllowedProjectIds:0", ChatGptGatewayTestConstants.ProjectId);
         builder.ConfigureAppConfiguration((_, config) =>
         {
@@ -854,10 +883,13 @@ public sealed class ChatGptGatewayApplicationFactory(string postgresConnectionSt
                 ["ContextHub:Security:BootstrapUsername"] = "gateway-test-admin",
                 ["ContextHub:Security:BootstrapAllowedProjectIds"] = ProjectContext.AllProjectIdsSentinel,
                 ["ChatGptGateway:OAuth:TestMode"] = "true",
+                ["ChatGptGateway:OAuth:Authority"] = ChatGptGatewayMcpTests.TestAuthority,
                 ["ChatGptGateway:OAuth:TestBearerToken"] = ChatGptGatewayTestConstants.TestToken,
                 ["ChatGptGateway:OAuth:TestSubject"] = "chatgpt-gateway-test-subject",
                 ["ChatGptGateway:OAuth:TestEmail"] = "chatgpt-gateway@example.test",
                 ["ChatGptGateway:OAuth:TestName"] = "ChatGPT Gateway Test User",
+                ["ChatGptGateway:PublicMcpUrl"] = ChatGptGatewayMcpTests.PublicMcpUrl,
+                ["ChatGptGateway:PublicResourceMetadataUrl"] = ChatGptGatewayMcpTests.PublicResourceMetadataUrl,
                 ["ChatGptGateway:AllowedProjectIds:0"] = ChatGptGatewayTestConstants.ProjectId
             });
         });
