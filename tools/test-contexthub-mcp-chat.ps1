@@ -310,8 +310,10 @@ $contextResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeader
     params = @{
         name = "build_working_context"
         arguments = @{
-            projectId = $ProjectId
-            query = $Query
+            request = @{
+                projectId = $ProjectId
+                query = $Query
+            }
         }
     }
 }
@@ -381,12 +383,21 @@ $proposalResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeade
     params = @{
         name = "memory_upsert"
         arguments = @{
-            projectId = $ProjectId
-            kind = "Fact"
-            externalKey = $proposalKey
-            summary = "MCP chat gateway smoke proposal"
-            content = "Temporary proposal created by tools/test-contexthub-mcp-chat.ps1 and rejected during verification."
-            tags = @("mcp-chat-smoke")
+            request = @{
+                projectId = $ProjectId
+                externalKey = $proposalKey
+                scope = "Project"
+                memoryType = "Fact"
+                title = "MCP chat gateway smoke proposal"
+                summary = "MCP chat gateway smoke proposal"
+                content = "Temporary proposal created by tools/test-contexthub-mcp-chat.ps1 and rejected during verification."
+                sourceType = "diagnostic"
+                sourceRef = "tools/test-contexthub-mcp-chat.ps1"
+                tags = @("mcp-chat-smoke")
+                importance = 0.1
+                confidence = 0.1
+                metadataJson = "{}"
+            }
         }
     }
 }
@@ -394,7 +405,7 @@ $proposalJson = Read-SseDataJson -Content $proposalResponse.Content
 Assert-ToolCallSucceeded -Json $proposalJson -ToolName "memory_upsert proposal"
 
 $proposalText = @($proposalJson.result.content | ForEach-Object { $_.text }) -join "`n"
-$proposalId = [regex]::Match($proposalText, "proposalId[`"':\s]+([A-Za-z0-9_\-]+)").Groups[1].Value
+$proposalId = [regex]::Match($proposalText, "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").Value
 if (-not $proposalId) {
     $proposalListResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
         jsonrpc = "2.0"
@@ -403,16 +414,18 @@ if (-not $proposalId) {
         params = @{
             name = "chatgpt_proposals_list"
             arguments = @{
-                projectId = $ProjectId
-                status = "Pending"
-                limit = 20
+                request = @{
+                    projectId = $ProjectId
+                    status = "Pending"
+                    limit = 20
+                }
             }
         }
     }
     $proposalListJson = Read-SseDataJson -Content $proposalListResponse.Content
     Assert-ToolCallSucceeded -Json $proposalListJson -ToolName "chatgpt_proposals_list"
     $proposalListText = @($proposalListJson.result.content | ForEach-Object { $_.text }) -join "`n"
-    $proposalId = [regex]::Match($proposalListText, [regex]::Escape($proposalKey) + ".*?([0-9a-fA-F-]{36})").Groups[1].Value
+    $proposalId = [regex]::Match($proposalListText, "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").Value
 }
 
 if (-not $proposalId) {
@@ -426,9 +439,10 @@ $rejectResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders
     params = @{
         name = "chatgpt_proposal_reject"
         arguments = @{
-            projectId = $ProjectId
-            proposalId = $proposalId
-            reason = "MCP chat gateway smoke rejection"
+            request = @{
+                proposalId = $proposalId
+                note = "MCP chat gateway smoke rejection"
+            }
         }
     }
 }
