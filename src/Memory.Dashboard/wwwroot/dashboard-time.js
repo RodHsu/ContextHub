@@ -15,13 +15,8 @@ window.contextHubTime = {
         const hour = String(value.getHours()).padStart(2, "0");
         const minute = String(value.getMinutes()).padStart(2, "0");
         const second = String(value.getSeconds()).padStart(2, "0");
-        const offsetMinutes = -value.getTimezoneOffset();
-        const sign = offsetMinutes >= 0 ? "+" : "-";
-        const absoluteOffsetMinutes = Math.abs(offsetMinutes);
-        const offsetHours = String(Math.floor(absoluteOffsetMinutes / 60)).padStart(2, "0");
-        const offsetRemainderMinutes = String(absoluteOffsetMinutes % 60).padStart(2, "0");
 
-        return `${year}-${month}-${day} ${hour}:${minute}:${second} GMT${sign}${offsetHours}:${offsetRemainderMinutes}`;
+        return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
     },
 
     formatRelativeTimestamp(isoValue) {

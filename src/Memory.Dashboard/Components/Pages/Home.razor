@@ -107,7 +107,16 @@
                 </div>
                 <div class="context-savings-strip-last">
                     <span>最後樣本</span>
-                    <strong>@ContextSavingsLastSampleText(contextSavings)</strong>
+                    <strong>
+                        @if (contextSavings.LastSampleAtUtc.HasValue)
+                        {
+                            <ClientLocalTime Value="contextSavings.LastSampleAtUtc.Value" />
+                        }
+                        else
+                        {
+                            <span>等待樣本</span>
+                        }
+                    </strong>
                 </div>
                 <div class="context-savings-strip-trend">
                     <span>趨勢</span>
@@ -773,11 +782,6 @@
         => savings.HasRecentData
             ? "成功的 working-context telemetry"
             : "等待 working-context telemetry";
-
-    private static string ContextSavingsLastSampleText(DashboardContextSavingsResult savings)
-        => savings.LastSampleAtUtc.HasValue
-            ? savings.LastSampleAtUtc.Value.ToString("yyyy-MM-dd HH:mm 'UTC'")
-            : "等待樣本";
 
     private static string ContextSavingsConfidenceText(string confidence)
         => confidence switch

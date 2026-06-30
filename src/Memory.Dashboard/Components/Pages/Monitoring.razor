@@ -285,7 +285,16 @@
                     }
                     <article>
                         <span>最後樣本</span>
-                        <strong>@ContextSavingsLastSampleText(contextSavings)</strong>
+                        <strong>
+                            @if (contextSavings.LastSampleAtUtc.HasValue)
+                            {
+                                <ClientLocalTime Value="contextSavings.LastSampleAtUtc.Value" />
+                            }
+                            else
+                            {
+                                <span>等待樣本</span>
+                            }
+                        </strong>
                         <small>@ContextSavingsWindowText(contextSavings)</small>
                     </article>
                     <article>
@@ -674,11 +683,6 @@
         => savings.HasRecentData
             ? "成功的 working-context telemetry"
             : "等待 working-context telemetry";
-
-    private static string ContextSavingsLastSampleText(DashboardContextSavingsResult savings)
-        => savings.LastSampleAtUtc.HasValue
-            ? savings.LastSampleAtUtc.Value.ToString("yyyy-MM-dd HH:mm 'UTC'")
-            : "等待樣本";
 
     private static string ContextSavingsWindowText(DashboardContextSavingsResult savings)
         => savings.WindowLabel.Replace("最近", "主視窗：最近", StringComparison.Ordinal);

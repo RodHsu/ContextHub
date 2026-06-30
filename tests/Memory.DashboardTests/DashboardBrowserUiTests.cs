@@ -353,6 +353,11 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         root.GetProperty("contentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("contentClientWidth").GetInt32() + 1);
         root.GetProperty("metricScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("metricClientWidth").GetInt32() + 1);
         root.GetProperty("savingsScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("savingsClientWidth").GetInt32() + 1);
+
+        var lastSampleText = (await page.Locator(".context-savings-strip-last strong").InnerTextAsync()).Trim();
+        lastSampleText.Should().NotContain("UTC");
+        lastSampleText.Should().NotContain("GMT");
+        lastSampleText.Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$");
     }
 
     [Fact]
@@ -885,14 +890,18 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         var initialUpdatedText = (await firstUpdatedCell.InnerTextAsync()).Trim();
         initialUpdatedText.Should().NotBeNullOrWhiteSpace();
-        initialUpdatedText.Should().Contain("GMT");
+        initialUpdatedText.Should().NotContain("UTC");
+        initialUpdatedText.Should().NotContain("GMT");
+        initialUpdatedText.Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$");
 
         await page.GetByRole(AriaRole.Button, new() { Name = "查看共用綜合層" }).ClickAsync();
         await page.WaitForTimeoutAsync(500);
 
         var refreshedUpdatedText = (await firstUpdatedCell.InnerTextAsync()).Trim();
         refreshedUpdatedText.Should().NotBeNullOrWhiteSpace();
-        refreshedUpdatedText.Should().Contain("GMT");
+        refreshedUpdatedText.Should().NotContain("UTC");
+        refreshedUpdatedText.Should().NotContain("GMT");
+        refreshedUpdatedText.Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$");
 
         var rowHeights = await page.EvaluateAsync<double[]>(
             "() => Array.from(document.querySelectorAll('.memories-table tbody tr')).slice(0, 4).map(row => row.getBoundingClientRect().height)");

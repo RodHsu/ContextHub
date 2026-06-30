@@ -58,7 +58,4 @@ public static class DashboardFormatting
 
     public static string Timestamp(DateTimeOffset value)
         => value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-
-    public static string TimestampWithZone(DateTimeOffset value)
-        => value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss 'GMT'zzz");
 }
