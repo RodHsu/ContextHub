@@ -19,6 +19,13 @@ public sealed class OAuthOptions
     public string ClientId { get; set; } = string.Empty;
     public string ClientSecret { get; set; } = string.Empty;
     public string[] Scopes { get; set; } = ["openid", "profile", "email"];
+    public bool SelfHosted { get; set; }
+    public string SelfHostedIssuer { get; set; } = string.Empty;
+    public string SelfHostedSigningKey { get; set; } = string.Empty;
+    public string[] AllowedRedirectUris { get; set; } = [];
+    public string[] AllowedRedirectUriPrefixes { get; set; } = [];
+    public int AuthorizationCodeLifetimeMinutes { get; set; } = 5;
+    public int AccessTokenLifetimeMinutes { get; set; } = 60;
     public string NameClaim { get; set; } = "name";
     public string EmailClaim { get; set; } = "email";
     public string SubjectClaim { get; set; } = "sub";

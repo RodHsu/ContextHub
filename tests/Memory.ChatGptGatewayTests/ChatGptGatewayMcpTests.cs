@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -8,6 +9,7 @@ using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
@@ -26,6 +28,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     internal const string PublicMcpUrl = "https://context-hub.example.test/mcp-chat";
     internal const string PublicResourceMetadataUrl = "https://context-hub.example.test/.well-known/oauth-protected-resource/mcp-chat";
     internal const string TestAuthority = "https://oidc.example.test/context-hub";
+    internal const string SelfHostedIssuer = "https://context-hub.example.test";
+    internal const string SelfHostedClientId = "context-hub-chatgpt-self-hosted-test";
+    internal const string SelfHostedSigningKey = "0123456789abcdef0123456789abcdef";
 
     [DockerRequiredFact]
     public async Task Raw_Http_Mcp_Should_Reject_Anonymous_Request()
@@ -61,6 +66,108 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         metadata.GetProperty("bearer_methods_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("header");
+    }
+
+    [DockerRequiredFact]
+    public async Task SelfHosted_OAuth_Authorization_Code_Should_Issue_Mcp_Bearer_Token()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true);
+        using var setupScope = factory.Services.CreateScope();
+        var dbContext = setupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var passwordHasher = setupScope.ServiceProvider.GetRequiredService<IPasswordHasher<object>>();
+        var user = await dbContext.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
+        user.Email = "oauth-user@example.test";
+        user.DisplayName = "OAuth Test User";
+        user.PasswordHash = passwordHasher.HashPassword(new object(), "oauth-password");
+        await dbContext.SaveChangesAsync();
+
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
+        var verifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+        var challenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(verifier)));
+        var redirectUri = "https://chatgpt.com/aip/context-hub/callback";
+        var authorizePath = "/oauth/chat/authorize?" + string.Join('&', new Dictionary<string, string>
+        {
+            ["response_type"] = "code",
+            ["client_id"] = SelfHostedClientId,
+            ["redirect_uri"] = redirectUri,
+            ["scope"] = "openid profile email",
+            ["state"] = "state-123",
+            ["code_challenge"] = challenge,
+            ["code_challenge_method"] = "S256"
+        }.Select(x => $"{Uri.EscapeDataString(x.Key)}={Uri.EscapeDataString(x.Value)}"));
+
+        using var metadataResponse = await client.GetAsync("/.well-known/oauth-authorization-server/mcp-chat");
+        var metadataBody = await metadataResponse.Content.ReadAsStringAsync();
+        metadataResponse.IsSuccessStatusCode.Should().BeTrue(metadataBody);
+        var metadata = await metadataResponse.Content.ReadFromJsonAsync<JsonElement>();
+        metadata.GetProperty("issuer").GetString().Should().Be(SelfHostedIssuer);
+        metadata.GetProperty("authorization_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/authorize");
+        metadata.GetProperty("token_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/token");
+
+        using var authorizePageResponse = await client.GetAsync(authorizePath);
+        authorizePageResponse.EnsureSuccessStatusCode();
+        (await authorizePageResponse.Content.ReadAsStringAsync()).Should().Contain("Connect ContextHub");
+
+        using var authorizeResponse = await client.PostAsync(
+            authorizePath,
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["username"] = "gateway-test-admin",
+                ["password"] = "oauth-password"
+            }));
+        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Redirect);
+        var location = authorizeResponse.Headers.Location;
+        location.Should().NotBeNull();
+        location!.ToString().Should().StartWith(redirectUri);
+        var callbackQuery = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(location.Query);
+        var code = callbackQuery["code"].ToString();
+        code.Should().NotBeNullOrWhiteSpace();
+        callbackQuery["state"].ToString().Should().Be("state-123");
+
+        using var tokenResponse = await client.PostAsync(
+            "/oauth/chat/token",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "authorization_code",
+                ["client_id"] = SelfHostedClientId,
+                ["code"] = code,
+                ["redirect_uri"] = redirectUri,
+                ["code_verifier"] = verifier
+            }));
+        tokenResponse.EnsureSuccessStatusCode();
+        var tokenJson = await tokenResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var accessToken = tokenJson.GetProperty("access_token").GetString();
+        accessToken.Should().NotBeNullOrWhiteSpace();
+        tokenJson.GetProperty("token_type").GetString().Should().Be("Bearer");
+
+        using var mcpClient = factory.CreateClient();
+        mcpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using var initializeRequest = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = JsonContent.Create(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2025-06-18",
+                    capabilities = new { },
+                    clientInfo = new { name = "self-hosted-oauth-test", version = "1.0" }
+                }
+            })
+        };
+        initializeRequest.Headers.Accept.ParseAdd("application/json");
+        initializeRequest.Headers.Accept.ParseAdd("text/event-stream");
+        using var initializeResponse = await mcpClient.SendAsync(initializeRequest);
+        initializeResponse.EnsureSuccessStatusCode();
+        initializeResponse.Headers.TryGetValues("Mcp-Session-Id", out var sessionValues).Should().BeTrue();
     }
 
     [DockerRequiredFact]
@@ -738,6 +845,12 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         return document.RootElement.Clone();
     }
 
+    private static string Base64UrlEncode(byte[] bytes)
+        => Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
     private sealed class SessionCaptureHandler(HttpMessageHandler innerHandler) : DelegatingHandler(innerHandler)
     {
         public string? SessionId { get; private set; }
@@ -763,6 +876,8 @@ public sealed class ChatGptGatewayTestEnvironment : IAsyncLifetime
     private RedisContainer? _redis;
 
     public ChatGptGatewayApplicationFactory? Factory { get; private set; }
+    public string PostgresConnectionString => _postgres?.GetConnectionString() ?? throw new InvalidOperationException(DockerTestGate.Current.Reason);
+    public string RedisConnectionString => _redis?.GetConnectionString() ?? throw new InvalidOperationException(DockerTestGate.Current.Reason);
 
     public async Task InitializeAsync()
     {
@@ -836,7 +951,10 @@ public sealed class ChatGptGatewayTestEnvironment : IAsyncLifetime
     }
 }
 
-public sealed class ChatGptGatewayApplicationFactory(string postgresConnectionString, string redisConnectionString) : WebApplicationFactory<Program>
+public sealed class ChatGptGatewayApplicationFactory(
+    string postgresConnectionString,
+    string redisConnectionString,
+    bool selfHostedOAuth = false) : WebApplicationFactory<Program>
 {
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -855,8 +973,14 @@ public sealed class ChatGptGatewayApplicationFactory(string postgresConnectionSt
         builder.UseSetting("ContextHub:Security:BootstrapTenantSlug", "chatgpt-gateway-tests");
         builder.UseSetting("ContextHub:Security:BootstrapUsername", "gateway-test-admin");
         builder.UseSetting("ContextHub:Security:BootstrapAllowedProjectIds", ProjectContext.AllProjectIdsSentinel);
-        builder.UseSetting("ChatGptGateway:OAuth:TestMode", "true");
-        builder.UseSetting("ChatGptGateway:OAuth:Authority", ChatGptGatewayMcpTests.TestAuthority);
+        builder.UseSetting("ChatGptGateway:OAuth:TestMode", selfHostedOAuth ? "false" : "true");
+        builder.UseSetting("ChatGptGateway:OAuth:Authority", selfHostedOAuth ? string.Empty : ChatGptGatewayMcpTests.TestAuthority);
+        builder.UseSetting("ChatGptGateway:OAuth:SelfHosted", selfHostedOAuth ? "true" : "false");
+        builder.UseSetting("ChatGptGateway:OAuth:SelfHostedIssuer", ChatGptGatewayMcpTests.SelfHostedIssuer);
+        builder.UseSetting("ChatGptGateway:OAuth:SelfHostedSigningKey", ChatGptGatewayMcpTests.SelfHostedSigningKey);
+        builder.UseSetting("ChatGptGateway:OAuth:ClientId", selfHostedOAuth ? ChatGptGatewayMcpTests.SelfHostedClientId : "chatgpt-gateway-test-client");
+        builder.UseSetting("ChatGptGateway:OAuth:AllowedRedirectUriPrefixes:0", "https://chatgpt.com/");
+        builder.UseSetting("ChatGptGateway:OAuth:AllowedRedirectUriPrefixes:1", "https://chat.openai.com/");
         builder.UseSetting("ChatGptGateway:OAuth:TestBearerToken", ChatGptGatewayTestConstants.TestToken);
         builder.UseSetting("ChatGptGateway:OAuth:TestSubject", "chatgpt-gateway-test-subject");
         builder.UseSetting("ChatGptGateway:OAuth:TestEmail", "chatgpt-gateway@example.test");
@@ -882,8 +1006,14 @@ public sealed class ChatGptGatewayApplicationFactory(string postgresConnectionSt
                 ["ContextHub:Security:BootstrapTenantSlug"] = "chatgpt-gateway-tests",
                 ["ContextHub:Security:BootstrapUsername"] = "gateway-test-admin",
                 ["ContextHub:Security:BootstrapAllowedProjectIds"] = ProjectContext.AllProjectIdsSentinel,
-                ["ChatGptGateway:OAuth:TestMode"] = "true",
-                ["ChatGptGateway:OAuth:Authority"] = ChatGptGatewayMcpTests.TestAuthority,
+                ["ChatGptGateway:OAuth:TestMode"] = selfHostedOAuth ? "false" : "true",
+                ["ChatGptGateway:OAuth:Authority"] = selfHostedOAuth ? string.Empty : ChatGptGatewayMcpTests.TestAuthority,
+                ["ChatGptGateway:OAuth:SelfHosted"] = selfHostedOAuth ? "true" : "false",
+                ["ChatGptGateway:OAuth:SelfHostedIssuer"] = ChatGptGatewayMcpTests.SelfHostedIssuer,
+                ["ChatGptGateway:OAuth:SelfHostedSigningKey"] = ChatGptGatewayMcpTests.SelfHostedSigningKey,
+                ["ChatGptGateway:OAuth:ClientId"] = selfHostedOAuth ? ChatGptGatewayMcpTests.SelfHostedClientId : "chatgpt-gateway-test-client",
+                ["ChatGptGateway:OAuth:AllowedRedirectUriPrefixes:0"] = "https://chatgpt.com/",
+                ["ChatGptGateway:OAuth:AllowedRedirectUriPrefixes:1"] = "https://chat.openai.com/",
                 ["ChatGptGateway:OAuth:TestBearerToken"] = ChatGptGatewayTestConstants.TestToken,
                 ["ChatGptGateway:OAuth:TestSubject"] = "chatgpt-gateway-test-subject",
                 ["ChatGptGateway:OAuth:TestEmail"] = "chatgpt-gateway@example.test",

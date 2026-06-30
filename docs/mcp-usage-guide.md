@@ -36,12 +36,24 @@ OAuth discovery 使用同一個 domain，不新增 hostname：
 
 ```text
 https://context-hub.wjcy.org/.well-known/oauth-protected-resource/mcp-chat
+https://context-hub.wjcy.org/.well-known/oauth-authorization-server/mcp-chat
+https://context-hub.wjcy.org/oauth/chat/authorize
+https://context-hub.wjcy.org/oauth/chat/token
 ```
 
 `/mcp-chat` 的未授權回應會帶 `WWW-Authenticate` 與上述
-`resource_metadata` URL，ChatGPT 會依此連到設定的 OIDC provider。正式
-Developer Mode app 建立時，把 ChatGPT 顯示的 OAuth callback URL 加到同一個
-OIDC client allowlist，然後用 `/mcp-chat` 重新連線。
+`resource_metadata` URL。正式 Developer Mode app 建立時，MCP URL 填
+`https://context-hub.wjcy.org/mcp-chat`；若使用 ContextHub self-hosted OAuth，
+authorization server metadata 會回傳同 domain 的 `/oauth/chat/authorize` 與
+`/oauth/chat/token`，登入使用既有 active ContextHub tenant user。若改接外部
+OIDC provider，則把 ChatGPT 顯示的 OAuth callback URL 加到該 OIDC client
+allowlist，然後用 `/mcp-chat` 重新連線。
+
+完成接入前必須通過三項驗證：
+
+- Codex 既有 `/mcp` 正常，`codex mcp get contexthub` 仍為 `streamable_http` 指向 `/mcp`。
+- ChatGPT 模擬接入 `/mcp-chat` 成功，restricted tool discovery、read tools、未授權 project/未知 tool/缺 token 拒絕、proposal write 都符合預期。
+- Codex 與 ChatGPT gateway 互通成功：ChatGPT proposal 建立後由 Codex/agent approve 或 reject，approve 後雙方都讀得到同一筆 knowledge，reject 不污染 durable memory。
 
 ## 2. 核心使用原則
 

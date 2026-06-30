@@ -11,6 +11,10 @@ Public MCP endpoints:
 /mcp-chat  restricted chat-agent MCP gateway for ChatGPT and future chat agents
 /.well-known/oauth-protected-resource/mcp-chat
           OAuth protected resource metadata for ChatGPT MCP OAuth discovery
+/.well-known/oauth-authorization-server/mcp-chat
+          OAuth authorization server metadata for ContextHub self-hosted OAuth
+/oauth/chat/*
+          ContextHub self-hosted OAuth authorization code flow
 ```
 
 ## Match expression
@@ -20,13 +24,17 @@ Use the same expression for MCP-specific Cache, Configuration, and WAF rules:
 ```text
 (http.host eq "context-hub.wjcy.org" and (
   starts_with(http.request.uri.path, "/mcp") or
-  http.request.uri.path eq "/.well-known/oauth-protected-resource/mcp-chat"
+  http.request.uri.path eq "/.well-known/oauth-protected-resource/mcp-chat" or
+  http.request.uri.path eq "/.well-known/oauth-authorization-server/mcp-chat" or
+  starts_with(http.request.uri.path, "/oauth/chat/")
 ))
 ```
 
 This intentionally includes `/mcp-chat`. If a Cloudflare UI rule uses explicit
 path equality instead of `starts_with`, include `/mcp`, `/mcp-chat`, and
-`/.well-known/oauth-protected-resource/mcp-chat`.
+`/.well-known/oauth-protected-resource/mcp-chat`,
+`/.well-known/oauth-authorization-server/mcp-chat`, `/oauth/chat/authorize`, and
+`/oauth/chat/token`.
 
 For dynamic REST/API traffic, use:
 
@@ -42,8 +50,8 @@ For dynamic REST/API traffic, use:
 
 ## Cache Rules
 
-Create a Cache Rule for `/mcp*`, including `/mcp-chat` and the OAuth protected
-resource metadata path:
+Create a Cache Rule for `/mcp*`, including `/mcp-chat`, both OAuth metadata
+paths, and `/oauth/chat/*`:
 
 ```text
 Action:
@@ -75,8 +83,8 @@ CF-Cache-Status: DYNAMIC or BYPASS
 
 ## Configuration Rules
 
-Create a Configuration Rule for `/mcp*`, including `/mcp-chat` and the OAuth
-protected resource metadata path, that disables browser-facing features:
+Create a Configuration Rule for `/mcp*`, including `/mcp-chat`, both OAuth
+metadata paths, and `/oauth/chat/*`, that disables browser-facing features:
 
 ```text
 Disable:
@@ -96,8 +104,8 @@ injection, or buffered event streams.
 
 ## WAF and bot rules
 
-Create a WAF exception for `/mcp*`, including `/mcp-chat` and the OAuth
-protected resource metadata path:
+Create a WAF exception for `/mcp*`, including `/mcp-chat`, both OAuth metadata
+paths, and `/oauth/chat/*`:
 
 ```text
 Skip:
@@ -169,7 +177,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-ch
 ```
 
 For authorized ChatGPT simulation, set `CONTEXTHUB_MCP_CHAT_TOKEN` to a valid
-OIDC access token for the chat-agent client and require the authorized checks:
+OAuth access token for the chat-agent client and require the authorized checks:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -RequireAuthorizationToken

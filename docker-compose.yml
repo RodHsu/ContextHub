@@ -45,6 +45,11 @@ x-chatgpt-gateway-config: &chatgpt-gateway-config
   ChatGptGateway__OAuth__ClientSecret: ${CHATGPT_GATEWAY_OAUTH_CLIENT_SECRET:-}
   ChatGptGateway__OAuth__TestMode: ${CHATGPT_GATEWAY_OAUTH_TEST_MODE:-false}
   ChatGptGateway__OAuth__TestBearerToken: ${CHATGPT_GATEWAY_OAUTH_TEST_BEARER_TOKEN:-}
+  ChatGptGateway__OAuth__SelfHosted: ${CHATGPT_GATEWAY_OAUTH_SELF_HOSTED:-false}
+  ChatGptGateway__OAuth__SelfHostedIssuer: ${CHATGPT_GATEWAY_OAUTH_SELF_HOSTED_ISSUER:-}
+  ChatGptGateway__OAuth__SelfHostedSigningKey: ${CHATGPT_GATEWAY_OAUTH_SELF_HOSTED_SIGNING_KEY:-}
+  ChatGptGateway__OAuth__AllowedRedirectUriPrefixes__0: ${CHATGPT_GATEWAY_OAUTH_ALLOWED_REDIRECT_URI_PREFIX_0:-https://chatgpt.com/}
+  ChatGptGateway__OAuth__AllowedRedirectUriPrefixes__1: ${CHATGPT_GATEWAY_OAUTH_ALLOWED_REDIRECT_URI_PREFIX_1:-https://chat.openai.com/}
   ChatGptGateway__ContextHub__BaseUrl: http://mcp-server:8080
   ChatGptGateway__ContextHub__ServiceToken: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN}
   ChatGptGateway__PublicMcpUrl: ${CHATGPT_GATEWAY_PUBLIC_MCP_URL:-}

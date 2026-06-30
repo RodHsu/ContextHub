@@ -56,6 +56,11 @@ Public MCP routes:
 /mcp-chat  -> restricted chat-agent MCP gateway, via chatgpt-gateway:8083/mcp
 /.well-known/oauth-protected-resource/mcp-chat
           -> OAuth protected resource metadata for /mcp-chat
+/.well-known/oauth-authorization-server/mcp-chat
+          -> OAuth authorization server metadata for ContextHub self-hosted OAuth
+/oauth/chat/authorize
+/oauth/chat/token
+          -> ContextHub self-hosted OAuth authorization code flow for chat agents
 ```
 
 `/mcp-chat` is the public endpoint for ChatGPT custom MCP apps and future chat
@@ -163,6 +168,27 @@ server {
         proxy_pass http://context-hub-chatgpt-gateway:8083/.well-known/oauth-protected-resource/mcp-chat;
     }
 
+    location = /.well-known/oauth-authorization-server/mcp-chat {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
+        add_header Cloudflare-CDN-Cache-Control "no-store" always;
+        add_header CDN-Cache-Control "no-store" always;
+        add_header X-Accel-Buffering "no" always;
+        proxy_cache off;
+        proxy_buffering off;
+        proxy_pass http://context-hub-chatgpt-gateway:8083/.well-known/oauth-authorization-server/mcp-chat;
+    }
+
+    location /oauth/chat/ {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
+        add_header Cloudflare-CDN-Cache-Control "no-store" always;
+        add_header CDN-Cache-Control "no-store" always;
+        add_header X-Accel-Buffering "no" always;
+        proxy_cache off;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_pass http://context-hub-chatgpt-gateway:8083;
+    }
+
     location /api/ {
         proxy_pass http://contexthub_mcp;
     }
@@ -193,7 +219,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1
 ```
 
-For full ChatGPT simulation, set `CONTEXTHUB_MCP_CHAT_TOKEN` to a valid OIDC
+For full ChatGPT simulation, set `CONTEXTHUB_MCP_CHAT_TOKEN` to a valid OAuth
 access token for the ChatGPT/custom chat-agent client and rerun:
 
 ```powershell
@@ -212,6 +238,8 @@ The gateway returns `WWW-Authenticate` with:
 resource_metadata="https://context-hub.wjcy.org/.well-known/oauth-protected-resource/mcp-chat"
 ```
 
-Add the ChatGPT-provided OAuth callback URL to the configured OIDC client
-allowlist, then rerun the authorized smoke check with a token from the same OIDC
-client.
+If using ContextHub self-hosted OAuth, the authorization server metadata endpoint
+must expose `/oauth/chat/authorize` and `/oauth/chat/token`; the diagnostic script
+checks this before authorized MCP calls. If using an external OIDC provider, add
+the ChatGPT-provided OAuth callback URL to the configured OIDC client allowlist,
+then rerun the authorized smoke check with a token from the same OIDC client.
