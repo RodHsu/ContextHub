@@ -7152,3 +7152,406 @@ button:disabled,
         min-width: 760px;
     }
 }
+
+/* Stitch scroll shell refresh: projects/8445492905770989666. */
+:root,
+:root[data-theme="dark"] {
+    --bg: #090b10;
+    --bg-elevated: #10131a;
+    --bg-panel: #151922;
+    --bg-panel-hover: #1d2330;
+    --surface-muted: #111722;
+    --border: rgba(148, 163, 184, 0.14);
+    --border-strong: rgba(148, 163, 184, 0.24);
+    --text: #e6eaf2;
+    --text-muted: #a6afbf;
+    --text-subtle: #737f92;
+    --accent: #3b82f6;
+    --accent-soft: rgba(59, 130, 246, 0.14);
+    --ok: #14b8a6;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+    --radius: 8px;
+    --radius-sm: 7px;
+    --shadow: none;
+    --scrollbar-size: 9px;
+}
+
+@media (min-width: 1025px) {
+    html,
+    body {
+        height: var(--dashboard-viewport-height);
+        min-height: var(--dashboard-viewport-height);
+        max-height: var(--dashboard-viewport-height);
+        overflow: hidden;
+        background: var(--bg);
+    }
+
+    html::-webkit-scrollbar,
+    body::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+    }
+
+    .dashboard-shell {
+        height: var(--dashboard-viewport-height);
+        min-height: 0;
+        max-height: var(--dashboard-viewport-height);
+        overflow: hidden;
+    }
+
+    .main-shell {
+        height: var(--dashboard-viewport-height);
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .sidebar {
+        position: sticky;
+        top: 0;
+        height: var(--dashboard-viewport-height);
+        min-height: 0;
+        max-height: var(--dashboard-viewport-height);
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+    }
+
+    .sidebar::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+    }
+
+    .sidebar-inner {
+        min-height: min-content;
+    }
+
+    .topbar {
+        flex: 0 0 auto;
+        height: 64px;
+        min-height: 64px;
+        border-bottom-color: var(--border);
+        background: color-mix(in srgb, var(--bg-elevated) 92%, black 8%);
+    }
+
+    .content {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-x: auto;
+        overflow-y: auto;
+        scrollbar-gutter: stable;
+        overscroll-behavior: contain;
+    }
+
+    .page-viewport,
+    .page-viewport-body,
+    .split-layout,
+    .sources-split-layout,
+    .evaluation-split-layout,
+    .governance-split-layout,
+    .inbox-split-layout,
+    .storage-layout,
+    .security-layout,
+    .settings-layout,
+    .runtime-page-stack,
+    .monitoring-page-stack,
+    .sources-page-stack,
+    .governance-page-stack,
+    .evaluation-page-stack,
+    .inbox-page-stack,
+    .jobs-page-body > .split-layout,
+    .memories-page-body > .split-layout,
+    .split-page-body > .split-layout,
+    .storage-page-body > .storage-layout {
+        min-height: 0;
+        max-height: none;
+        overflow: visible;
+    }
+
+    .page-scroll-host {
+        min-height: 0;
+        max-height: none;
+        max-width: 100%;
+        overflow: visible !important;
+        overscroll-behavior-x: contain;
+    }
+
+    .panel-scroll,
+    .panel-scroll-body,
+    .stack-scroll-shell,
+    .storage-table-list {
+        min-height: 0;
+        max-height: none;
+        overflow: visible !important;
+        padding-right: 0;
+        scrollbar-width: auto;
+    }
+
+    .preferences-list-panel {
+        overflow: visible !important;
+    }
+
+    .storage-table-panel {
+        position: static;
+        top: auto;
+        max-height: none;
+    }
+
+    .table-scroll-shell {
+        max-height: none;
+        overflow-x: auto !important;
+        overflow-y: visible !important;
+        overscroll-behavior-x: contain;
+        scrollbar-gutter: auto;
+    }
+
+    .table-scroll-shell .data-table thead th {
+        position: sticky;
+        top: 0;
+    }
+}
+
+body {
+    background: var(--bg);
+}
+
+input,
+select,
+textarea,
+.primary-button,
+.ghost-button,
+.theme-switcher-toggle,
+.filter-advanced,
+.toggle-field,
+.status-badge,
+.sidebar-build,
+.metric-card,
+.panel,
+.filter-panel,
+.detail-panel,
+.stack-item,
+.empty-inline,
+.empty-state {
+    border-radius: var(--radius-sm);
+}
+
+.panel,
+.filter-panel,
+.detail-panel,
+.metric-card,
+.stack-item,
+.empty-inline,
+.empty-state {
+    background: color-mix(in srgb, var(--bg-panel) 94%, black 6%);
+    border-color: var(--border);
+    box-shadow: none;
+}
+
+.primary-button {
+    background: var(--accent);
+    box-shadow: none;
+}
+
+.ghost-button,
+.theme-switcher-toggle {
+    background: color-mix(in srgb, var(--bg-panel) 74%, transparent);
+    border-color: var(--border);
+}
+
+input,
+select,
+textarea {
+    background-color: color-mix(in srgb, var(--bg) 70%, var(--bg-panel) 30%);
+}
+
+.nav-item.active {
+    background: color-mix(in srgb, var(--accent) 13%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.nav-item:hover {
+    background: color-mix(in srgb, var(--bg-panel-hover) 88%, transparent);
+}
+
+.status-badge.ok {
+    color: color-mix(in srgb, var(--ok) 78%, white 22%);
+    background: color-mix(in srgb, var(--ok) 14%, transparent);
+    border-color: color-mix(in srgb, var(--ok) 28%, transparent);
+}
+
+.status-badge.warn {
+    color: color-mix(in srgb, var(--warn) 78%, white 22%);
+    background: color-mix(in srgb, var(--warn) 14%, transparent);
+    border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
+.status-badge.bad {
+    color: color-mix(in srgb, var(--bad) 76%, white 24%);
+    background: color-mix(in srgb, var(--bad) 13%, transparent);
+    border-color: color-mix(in srgb, var(--bad) 30%, transparent);
+}
+
+@media (max-width: 1024px) {
+    html,
+    body {
+        width: 100%;
+        max-width: 100vw;
+        height: auto;
+        min-height: var(--dashboard-viewport-height);
+        max-height: none;
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+
+    .dashboard-shell {
+        width: 100vw;
+        max-width: 100vw;
+        overflow-x: hidden;
+    }
+
+    .dashboard-shell,
+    .main-shell,
+    .content,
+    .page-viewport,
+    .page-viewport-body {
+        height: auto;
+        max-height: none;
+        overflow: visible;
+    }
+
+    .main-shell,
+    .content,
+    .topbar,
+    .sidebar {
+        width: 100%;
+        max-width: 100vw;
+        overflow-x: hidden;
+    }
+
+    .content {
+        overflow-x: auto;
+    }
+
+    .dashboard-shell {
+        overflow-x: hidden;
+    }
+
+    .sidebar {
+        max-height: none;
+        overflow-y: visible;
+        max-width: 100%;
+    }
+
+    .sidebar-inner {
+        min-height: 0;
+    }
+
+    .table-scroll-shell {
+        overflow-x: auto;
+        overflow-y: visible !important;
+        max-height: none;
+    }
+
+    .panel-scroll-body,
+    .stack-scroll-shell {
+        overflow: visible;
+        max-height: none;
+        padding-right: 0;
+    }
+
+    .page-scroll-host {
+        max-width: 100%;
+        overflow: visible !important;
+        max-height: none;
+        padding-right: 0;
+    }
+
+    .monitoring-page-stack,
+    .monitoring-top-grid,
+    .monitoring-telemetry-grid,
+    .resource-chart-grid,
+    .host-grid {
+        max-width: 100%;
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .resource-chart-card,
+    .host-stat,
+    .context-savings-strip,
+    .monitoring-context-savings-panel {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .monitoring-context-savings-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (min-width: 1025px) {
+    .dashboard-grid.page-scroll-host,
+    .home-page-body > .dashboard-grid.page-scroll-host,
+    .monitoring-page-stack,
+    .security-layout,
+    .settings-layout,
+    .page-viewport-body > .page-scroll-host,
+    .page-viewport-body.page-scroll-host {
+        height: auto !important;
+        max-height: none !important;
+        overflow: visible !important;
+    }
+}
+
+@media (max-width: 640px) {
+    .sidebar {
+        padding: 0.58rem;
+    }
+
+    .sidebar-nav {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.3rem;
+    }
+
+    .nav-item {
+        min-width: 0;
+        gap: 0.42rem;
+        padding-inline: 0.48rem;
+    }
+
+    .nav-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .topbar,
+    .content {
+        max-width: 100%;
+    }
+}
+
+@media (max-width: 800px) {
+    .context-savings-strip {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .context-savings-strip-metrics {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .context-savings-strip-metrics > div {
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .context-savings-strip-metrics > div:last-child {
+        border-bottom: 0;
+    }
+
+    .context-savings-strip-trend {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}

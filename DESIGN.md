@@ -15,6 +15,14 @@
 
 ### 2.1 Stitch baseline
 
+- `Scroll shell dashboard refresh` 以 Stitch 專案 `ContextHub Scroll Shell Dashboard Refresh` 作為 2026-06-30 起的捲軸與現代化 layout 修正基準：
+  - project：`projects/8445492905770989666`
+  - design system：`assets/1987d0d5ee564b3d8bfe881294353ee2` (`Precision Operations`)
+  - Desktop operations screen：`projects/8445492905770989666/screens/9e627253621e48aeaa1f22ce02d0480b`
+  - Tab S7 portrait screen：`projects/8445492905770989666/screens/9de66a570f8247619bca3adacac243b0`
+  - 使用範圍：全站 app shell、sidebar、topbar、panel、table scroll shell、RWD scroll ownership。
+  - 設計方向：參考 shadcn-admin / Tabler / Grafana 類型 dashboard 的 app-shell 密度與 panel grid；desktop 僅 `.content` 擁有主要垂直捲動，sidebar 隱藏自身 scrollbar，表格只負責水平 overflow，避免 body / content / panel 同時出現垂直 scrollbar。
+  - 視覺方向：near-black neutral surfaces、7px 控制元件 radius、低陰影 tonal layer、blue / teal / amber / red functional accents；避免單一藍紫色系、marketing hero、gradient orb 或 oversized cards。
 - `Full-site UI/UX refresh` 以 Stitch 專案 `ContextHub Full Site UI UX Refresh` 作為 2026-06-29 起的全站基準：
   - project：`projects/952128967416801377`
   - design system：`assets/c68e3953f5af4004b3e2e7e72e91568c` (`ContextHub Admin`)

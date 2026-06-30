@@ -2275,6 +2275,8 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 $"scroll traps on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
             usability.BadScrollbarWarnings.Should().BeEmpty(
                 $"expected visible or usable scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+            usability.DoubleScrollbarWarnings.Should().BeEmpty(
+                $"unexpected double vertical scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
         }
     }
 
@@ -2314,6 +2316,8 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 $"scroll traps after resize on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
             usability.BadScrollbarWarnings.Should().BeEmpty(
                 $"expected visible or usable scrollbars after resize on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+            usability.DoubleScrollbarWarnings.Should().BeEmpty(
+                $"unexpected double vertical scrollbars after resize on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
         }
     }
 
@@ -2478,9 +2482,12 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 ]));
                 const scrollTrapWarnings = [];
                 const badScrollbarWarnings = [];
+                const doubleScrollbarWarnings = [];
                 const targets = [];
                 const isScrollableOverflow = overflow => ['auto', 'scroll', 'overlay'].includes(overflow);
                 const isBlockedOverflow = overflow => ['hidden', 'clip'].includes(overflow);
+                const allowedDesktopVerticalScrollbarSelectors = new Set(['.content']);
+                const visibleVerticalScrollbars = [];
 
                 for (const selector of uniqueSelectors) {
                     const elements = Array.from(document.querySelectorAll(selector));
@@ -2496,6 +2503,10 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                         const needsY = element.scrollHeight > element.clientHeight + 2;
                         const canScrollY = element.scrollTop < element.scrollHeight - element.clientHeight || element.scrollTop > 0;
                         const needsX = element.scrollWidth > element.clientWidth + 2;
+                        const visibleVerticalScrollbar = needsY &&
+                            isScrollableOverflow(overflowY) &&
+                            element.offsetWidth > element.clientWidth + 2 &&
+                            style.scrollbarWidth !== 'none';
                         const identity = `${selector}[${index}]`;
 
                         targets.push({
@@ -2507,7 +2518,8 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                             overflowY,
                             overflowX,
                             needsY,
-                            canScrollY
+                            canScrollY,
+                            visibleVerticalScrollbar
                         });
 
                         if (needsY && isBlockedOverflow(overflowY)) {
@@ -2520,6 +2532,10 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
                         if (needsX && isBlockedOverflow(overflowX)) {
                             scrollTrapWarnings.push(`${identity} needs horizontal scroll but overflow-x is ${overflowX}`);
+                        }
+
+                        if (visibleVerticalScrollbar) {
+                            visibleVerticalScrollbars.push({ selector, identity });
                         }
                     });
                 }
@@ -2538,6 +2554,21 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     scrollTrapWarnings.push(`document needs vertical scroll but html/body/content do not expose a usable scroll host`);
                 }
 
+                const desktopShell = window.innerWidth >= 1025;
+                if (desktopShell) {
+                    const unexpected = visibleVerticalScrollbars
+                        .filter(item => !allowedDesktopVerticalScrollbarSelectors.has(item.selector))
+                        .map(item => item.identity);
+                    if (unexpected.length > 0) {
+                        doubleScrollbarWarnings.push(`desktop shell exposes nested vertical scrollbars: ${unexpected.join(', ')}`);
+                    }
+
+                    const content = visibleVerticalScrollbars.filter(item => item.selector === '.content');
+                    if (content.length > 1) {
+                        doubleScrollbarWarnings.push(`desktop shell exposes multiple content vertical scrollbars: ${content.map(item => item.identity).join(', ')}`);
+                    }
+                }
+
                 return JSON.stringify({
                     viewportWidth: window.innerWidth,
                     viewportHeight: window.innerHeight,
@@ -2545,6 +2576,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     contentNeedsY,
                     scrollTrapWarnings,
                     badScrollbarWarnings,
+                    doubleScrollbarWarnings,
                     targets
                 });
             }",
@@ -2556,6 +2588,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }) ?? new RwdUsabilitySnapshot();
         snapshot.ScrollTrapWarnings ??= [];
         snapshot.BadScrollbarWarnings ??= [];
+        snapshot.DoubleScrollbarWarnings ??= [];
         snapshot.RawJson = snapshotJson;
         return snapshot;
     }
@@ -2590,6 +2623,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         public string RawJson { get; set; } = string.Empty;
         public List<string> ScrollTrapWarnings { get; set; } = [];
         public List<string> BadScrollbarWarnings { get; set; } = [];
+        public List<string> DoubleScrollbarWarnings { get; set; } = [];
     }
 }
 
