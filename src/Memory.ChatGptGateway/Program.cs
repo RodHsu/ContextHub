@@ -129,6 +129,26 @@ app.Use(async (context, next) =>
     }
 });
 app.Use(CloudflareCacheHeaders.ApplyNoStorePolicyAsync);
+app.Use(async (context, next) =>
+{
+    if (IsProtectedResourceMetadataPath(context.Request.Path))
+    {
+        await CreateProtectedResourceMetadata(
+            context,
+            context.RequestServices.GetRequiredService<IOptions<ChatGptGatewayOptions>>()).ExecuteAsync(context);
+        return;
+    }
+
+    if (IsAuthorizationServerMetadataPath(context.Request.Path))
+    {
+        await CreateAuthorizationServerMetadata(
+            context,
+            context.RequestServices.GetRequiredService<IOptions<ChatGptGatewayOptions>>()).ExecuteAsync(context);
+        return;
+    }
+
+    await next();
+});
 app.UseAuthentication();
 app.Use(async (context, next) =>
 {
@@ -168,51 +188,9 @@ app.MapGet("/api/status", (IOptions<ChatGptGatewayOptions> options) => Results.O
     proposalWriteTools = options.Value.ProposalWriteTools
 })).RequireAuthorization();
 
-app.MapGet("/.well-known/oauth-protected-resource/mcp-chat", (
-    HttpContext context,
-    IOptions<ChatGptGatewayOptions> options) =>
-{
-    var value = options.Value;
-    var publicMcpUrl = ResolvePublicMcpUrl(context, value);
-    var authorizationServer = SelfHostedOAuthService.ResolveIssuer(context, value);
-    var metadata = new OAuthProtectedResourceMetadata(
-        publicMcpUrl,
-        [authorizationServer],
-        value.OAuth.Scopes
-            .Where(scope => !string.IsNullOrWhiteSpace(scope))
-            .Select(scope => scope.Trim())
-            .Distinct(StringComparer.Ordinal)
-            .ToArray(),
-        ["header"],
-        "ContextHub MCP Chat Gateway");
+app.MapGet("/.well-known/oauth-protected-resource/{resource?}", CreateProtectedResourceMetadata).AllowAnonymous();
 
-    return Results.Json(metadata);
-}).AllowAnonymous();
-
-app.MapGet("/.well-known/oauth-authorization-server/mcp-chat", (
-    HttpContext context,
-    IOptions<ChatGptGatewayOptions> options) =>
-{
-    var value = options.Value;
-    var issuer = SelfHostedOAuthService.ResolveIssuer(context, value);
-    var metadata = new OAuthAuthorizationServerMetadata(
-        issuer,
-        $"{issuer}/oauth/chat/authorize",
-        $"{issuer}/oauth/chat/token",
-        ["code"],
-        ["authorization_code"],
-        ["S256"],
-        string.IsNullOrWhiteSpace(value.OAuth.ClientSecret)
-            ? ["none"]
-            : ["client_secret_basic", "client_secret_post"],
-        value.OAuth.Scopes
-            .Where(scope => !string.IsNullOrWhiteSpace(scope))
-            .Select(scope => scope.Trim())
-            .Distinct(StringComparer.Ordinal)
-            .ToArray());
-
-    return Results.Json(metadata);
-}).AllowAnonymous();
+app.MapGet("/.well-known/oauth-authorization-server/{resource?}", CreateAuthorizationServerMetadata).AllowAnonymous();
 
 app.MapGet("/oauth/chat/authorize", async (
     HttpContext context,
@@ -287,12 +265,29 @@ app.MapMcp("/mcp").RequireAuthorization();
 app.Run();
 
 static bool IsPublicPath(PathString path)
-    => path.StartsWithSegments("/health/live", StringComparison.OrdinalIgnoreCase) ||
-       path.StartsWithSegments("/health/ready", StringComparison.OrdinalIgnoreCase) ||
-       path.StartsWithSegments("/.well-known/oauth-protected-resource/mcp-chat", StringComparison.OrdinalIgnoreCase) ||
-       path.StartsWithSegments("/.well-known/oauth-authorization-server/mcp-chat", StringComparison.OrdinalIgnoreCase) ||
-       path.StartsWithSegments("/oauth/chat/authorize", StringComparison.OrdinalIgnoreCase) ||
-       path.StartsWithSegments("/oauth/chat/token", StringComparison.OrdinalIgnoreCase);
+{
+    var value = path.Value ?? string.Empty;
+    return value.StartsWith("/health/live", StringComparison.OrdinalIgnoreCase) ||
+           value.StartsWith("/health/ready", StringComparison.OrdinalIgnoreCase) ||
+           IsProtectedResourceMetadataPath(path) ||
+           IsAuthorizationServerMetadataPath(path) ||
+           value.StartsWith("/oauth/chat/authorize", StringComparison.OrdinalIgnoreCase) ||
+           value.StartsWith("/oauth/chat/token", StringComparison.OrdinalIgnoreCase);
+}
+
+static bool IsProtectedResourceMetadataPath(PathString path)
+{
+    var value = path.Value ?? string.Empty;
+    return string.Equals(value, "/.well-known/oauth-protected-resource", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(value, "/.well-known/oauth-protected-resource/mcp-chat", StringComparison.OrdinalIgnoreCase);
+}
+
+static bool IsAuthorizationServerMetadataPath(PathString path)
+{
+    var value = path.Value ?? string.Empty;
+    return string.Equals(value, "/.well-known/oauth-authorization-server", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(value, "/.well-known/oauth-authorization-server/mcp-chat", StringComparison.OrdinalIgnoreCase);
+}
 
 static string Required(string value, string key)
     => string.IsNullOrWhiteSpace(value)
@@ -326,6 +321,47 @@ static string ResolvePublicResourceMetadataUrl(HttpContext context, ChatGptGatew
 
     return $"{context.Request.Scheme}://{context.Request.Host}{context.Request.PathBase}/.well-known/oauth-protected-resource/mcp-chat";
 }
+
+static IResult CreateProtectedResourceMetadata(HttpContext context, IOptions<ChatGptGatewayOptions> options)
+{
+    var value = options.Value;
+    var publicMcpUrl = ResolvePublicMcpUrl(context, value);
+    var authorizationServer = SelfHostedOAuthService.ResolveIssuer(context, value);
+    var metadata = new OAuthProtectedResourceMetadata(
+        publicMcpUrl,
+        [authorizationServer],
+        NormalizeScopes(value.OAuth.Scopes),
+        ["header"],
+        "ContextHub MCP Chat Gateway");
+
+    return Results.Json(metadata);
+}
+
+static IResult CreateAuthorizationServerMetadata(HttpContext context, IOptions<ChatGptGatewayOptions> options)
+{
+    var value = options.Value;
+    var issuer = SelfHostedOAuthService.ResolveIssuer(context, value);
+    var metadata = new OAuthAuthorizationServerMetadata(
+        issuer,
+        $"{issuer}/oauth/chat/authorize",
+        $"{issuer}/oauth/chat/token",
+        ["code"],
+        ["authorization_code"],
+        ["S256"],
+        string.IsNullOrWhiteSpace(value.OAuth.ClientSecret)
+            ? ["none"]
+            : ["client_secret_basic", "client_secret_post"],
+        NormalizeScopes(value.OAuth.Scopes));
+
+    return Results.Json(metadata);
+}
+
+static string[] NormalizeScopes(IEnumerable<string> scopes)
+    => scopes
+        .Where(scope => !string.IsNullOrWhiteSpace(scope))
+        .Select(scope => scope.Trim())
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
 
 static (string ClientId, string ClientSecret) ReadBasicClientCredentials(string authorization)
 {

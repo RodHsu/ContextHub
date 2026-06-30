@@ -9,7 +9,9 @@ param(
     [string]$UnauthorizedProjectId = "ContextHubChatGptGatewayDenied",
     [string]$Query = "ContextHub MCP chat gateway diagnostics",
     [string]$ResourceMetadataUrl = "https://context-hub.wjcy.org/.well-known/oauth-protected-resource/mcp-chat",
+    [string]$RootResourceMetadataUrl = "https://context-hub.wjcy.org/.well-known/oauth-protected-resource",
     [string]$AuthorizationServerMetadataUrl = "https://context-hub.wjcy.org/.well-known/oauth-authorization-server/mcp-chat",
+    [string]$RootAuthorizationServerMetadataUrl = "https://context-hub.wjcy.org/.well-known/oauth-authorization-server",
     [string]$TokenEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_TOKEN",
     [switch]$RequireAuthorizationToken,
     [switch]$RunProposalSmoke
@@ -215,7 +217,7 @@ function Assert-ToolCallRejected {
     throw "Expected rejection for $Scenario, but the call succeeded."
 }
 
-Write-Host "1/8 unauthenticated MCP chat gateway should return 401 without browser challenge"
+Write-Host "1/10 unauthenticated MCP chat gateway should return 401 without browser challenge"
 $unauthResponse = Invoke-WebRequestAllowError -Uri $Endpoint -Method Get -TimeoutSec 15
 if ([int]$unauthResponse.StatusCode -ne 401) {
     throw "Expected 401 from unauthenticated MCP chat request, got $($unauthResponse.StatusCode)."
@@ -226,7 +228,7 @@ Assert-HeaderContains -Response $unauthResponse -HeaderName "WWW-Authenticate" -
 Assert-NoBrowserChallenge -Response $unauthResponse
 Write-Host "Unauthenticated /mcp-chat returned 401 with no-store."
 
-Write-Host "2/8 OAuth protected resource metadata should describe MCP chat gateway"
+Write-Host "2/10 OAuth protected resource metadata should describe MCP chat gateway"
 $metadataResponse = Invoke-WebRequestAllowError -Uri $ResourceMetadataUrl -Method Get -TimeoutSec 15
 if ([int]$metadataResponse.StatusCode -ne 200) {
     throw "Expected 200 from OAuth protected resource metadata, got $($metadataResponse.StatusCode)."
@@ -246,7 +248,19 @@ if (@($metadata.bearer_methods_supported) -notcontains "header") {
     throw "OAuth protected resource metadata must include bearer_methods_supported=header."
 }
 
-Write-Host "3/8 OAuth authorization server metadata should expose authorization code endpoints"
+Write-Host "3/10 root OAuth protected resource metadata should also be public"
+$rootMetadataResponse = Invoke-WebRequestAllowError -Uri $RootResourceMetadataUrl -Method Get -TimeoutSec 15
+if ([int]$rootMetadataResponse.StatusCode -ne 200) {
+    throw "Expected 200 from root OAuth protected resource metadata, got $($rootMetadataResponse.StatusCode)."
+}
+
+Assert-NoBrowserChallenge -Response $rootMetadataResponse
+$rootMetadata = $rootMetadataResponse.Content | ConvertFrom-Json
+if ([string]$rootMetadata.resource -ne $Endpoint) {
+    throw "Expected root OAuth protected resource metadata resource '$Endpoint', got '$($rootMetadata.resource)'."
+}
+
+Write-Host "4/10 OAuth authorization server metadata should expose authorization code endpoints"
 $authorizationMetadataResponse = Invoke-WebRequestAllowError -Uri $AuthorizationServerMetadataUrl -Method Get -TimeoutSec 15
 if ([int]$authorizationMetadataResponse.StatusCode -ne 200) {
     throw "Expected 200 from OAuth authorization server metadata, got $($authorizationMetadataResponse.StatusCode)."
@@ -270,6 +284,18 @@ if (@($authorizationMetadata.code_challenge_methods_supported) -notcontains "S25
     throw "OAuth authorization server metadata must include PKCE S256 support."
 }
 
+Write-Host "5/10 root OAuth authorization server metadata should also be public"
+$rootAuthorizationMetadataResponse = Invoke-WebRequestAllowError -Uri $RootAuthorizationServerMetadataUrl -Method Get -TimeoutSec 15
+if ([int]$rootAuthorizationMetadataResponse.StatusCode -ne 200) {
+    throw "Expected 200 from root OAuth authorization server metadata, got $($rootAuthorizationMetadataResponse.StatusCode)."
+}
+
+Assert-NoBrowserChallenge -Response $rootAuthorizationMetadataResponse
+$rootAuthorizationMetadata = $rootAuthorizationMetadataResponse.Content | ConvertFrom-Json
+if ([string]$rootAuthorizationMetadata.authorization_endpoint -ne [string]$authorizationMetadata.authorization_endpoint) {
+    throw "Root OAuth authorization metadata must expose the same authorization endpoint."
+}
+
 $token = Get-OptionalBearerToken -Name $TokenEnvironmentVariable
 if ([string]::IsNullOrWhiteSpace($token)) {
     if ($RequireAuthorizationToken) {
@@ -282,7 +308,7 @@ if ([string]::IsNullOrWhiteSpace($token)) {
 
 $baseHeaders = New-McpHeaders -Token $token
 
-Write-Host "4/8 initialize MCP chat gateway session"
+Write-Host "6/10 initialize MCP chat gateway session"
 $initResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $baseHeaders -Payload @{
     jsonrpc = "2.0"
     id = 1
@@ -302,7 +328,7 @@ if (-not $sessionId) {
 }
 $sessionHeaders = New-McpHeaders -Token $token -SessionId $sessionId
 
-Write-Host "5/8 tools/list should expose only restricted chat gateway tools"
+Write-Host "7/10 tools/list should expose only restricted chat gateway tools"
 $toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
     jsonrpc = "2.0"
     id = 2
@@ -349,7 +375,7 @@ foreach ($name in $forbiddenTools) {
 }
 Write-Host "Restricted tool allowlist verified ($($toolNames.Count) tools)."
 
-Write-Host "6/8 authorized read tools should work for allowed project"
+Write-Host "8/10 authorized read tools should work for allowed project"
 $contextResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
     jsonrpc = "2.0"
     id = 3
@@ -384,7 +410,7 @@ $searchJson = Read-SseDataJson -Content $searchResponse.Content
 Assert-ToolCallSucceeded -Json $searchJson -ToolName "memory_search"
 Write-Host "Allowed project read tools completed."
 
-Write-Host "7/8 unauthorized project and unknown tool should be rejected"
+Write-Host "9/10 unauthorized project and unknown tool should be rejected"
 $deniedProjectResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
     jsonrpc = "2.0"
     id = 5
@@ -417,11 +443,11 @@ Assert-ToolCallRejected -Json $unknownToolJson -Scenario "forbidden tool enqueue
 Write-Host "Boundary checks completed."
 
 if (-not $RunProposalSmoke) {
-    Write-Host "8/8 proposal smoke skipped. Pass -RunProposalSmoke to create and reject a test proposal."
+    Write-Host "10/10 proposal smoke skipped. Pass -RunProposalSmoke to create and reject a test proposal."
     return
 }
 
-Write-Host "8/8 proposal write should create pending proposal and allow rejection"
+Write-Host "10/10 proposal write should create pending proposal and allow rejection"
 $proposalKey = "mcp-chat-smoke-" + (Get-Date -Format "yyyyMMddHHmmss")
 $proposalResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
     jsonrpc = "2.0"

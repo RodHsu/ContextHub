@@ -53,10 +53,14 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         using var client = environment.GetFactory().CreateClient();
 
         using var response = await client.GetAsync("/.well-known/oauth-protected-resource/mcp-chat");
+        using var rootResponse = await client.GetAsync("/.well-known/oauth-protected-resource");
 
         response.EnsureSuccessStatusCode();
+        rootResponse.EnsureSuccessStatusCode();
         var metadata = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var rootMetadata = await rootResponse.Content.ReadFromJsonAsync<JsonElement>();
         metadata.GetProperty("resource").GetString().Should().Be(PublicMcpUrl);
+        rootMetadata.GetProperty("resource").GetString().Should().Be(PublicMcpUrl);
         metadata.GetProperty("authorization_servers").EnumerateArray()
             .Select(x => x.GetString())
             .Should().ContainSingle(TestAuthority);
@@ -103,10 +107,14 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         }.Select(x => $"{Uri.EscapeDataString(x.Key)}={Uri.EscapeDataString(x.Value)}"));
 
         using var metadataResponse = await client.GetAsync("/.well-known/oauth-authorization-server/mcp-chat");
+        using var rootMetadataResponse = await client.GetAsync("/.well-known/oauth-authorization-server");
         var metadataBody = await metadataResponse.Content.ReadAsStringAsync();
         metadataResponse.IsSuccessStatusCode.Should().BeTrue(metadataBody);
+        rootMetadataResponse.EnsureSuccessStatusCode();
         var metadata = await metadataResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var rootMetadata = await rootMetadataResponse.Content.ReadFromJsonAsync<JsonElement>();
         metadata.GetProperty("issuer").GetString().Should().Be(SelfHostedIssuer);
+        rootMetadata.GetProperty("issuer").GetString().Should().Be(SelfHostedIssuer);
         metadata.GetProperty("authorization_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/authorize");
         metadata.GetProperty("token_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/token");
 
