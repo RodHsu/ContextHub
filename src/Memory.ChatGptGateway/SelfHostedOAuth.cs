@@ -1,7 +1,9 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Net;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 using Memory.Application;
 using Memory.Domain;
 using Microsoft.AspNetCore.Identity;
@@ -16,10 +18,13 @@ internal sealed class SelfHostedOAuthService(
     IApplicationDbContext dbContext,
     IPasswordHasher<object> passwordHasher,
     IMemoryCache cache,
-    IOptions<ChatGptGatewayOptions> gatewayOptions)
+    IOptions<ChatGptGatewayOptions> gatewayOptions,
+    IChatGptOAuthClientMetadataFetcher clientMetadataFetcher,
+    ILogger<SelfHostedOAuthService> logger)
 {
     private const string CodeCachePrefix = "chatgpt-oauth-code:";
     private const string RefreshTokenCachePrefix = "chatgpt-oauth-refresh:";
+    private const string RegisteredClientCachePrefix = "chatgpt-oauth-registered-client:";
     private static readonly JwtSecurityTokenHandler TokenHandler = new();
 
     public async Task<AuthorizeValidationResult> ValidateAuthorizeRequestAsync(
@@ -34,42 +39,123 @@ internal sealed class SelfHostedOAuthService(
         var codeChallengeMethod = query["code_challenge_method"].ToString();
         var scope = NormalizeScopes(query["scope"].ToString(), options.Scopes);
         var state = query["state"].ToString();
+        var resource = query["resource"].ToString();
 
         if (!options.SelfHosted)
         {
+            LogOAuthAuthorizeValidation(clientId, redirectUri, scope, resource, "failed", "self_hosted_disabled");
             return AuthorizeValidationResult.Fail("Self-hosted OAuth is not enabled.");
         }
 
-        if (string.IsNullOrWhiteSpace(clientId) ||
-            !string.Equals(clientId, options.ClientId, StringComparison.Ordinal))
+        var clientValidation = await ValidateAuthorizeClientAsync(clientId, redirectUri, options, cancellationToken);
+        if (!clientValidation.Success)
         {
+            LogOAuthAuthorizeValidation(clientId, redirectUri, scope, resource, "failed", clientValidation.FailureReason);
             return AuthorizeValidationResult.Fail("Invalid OAuth client.");
         }
 
         if (!string.Equals(responseType, "code", StringComparison.Ordinal))
         {
+            LogOAuthAuthorizeValidation(clientId, redirectUri, scope, resource, "failed", "unsupported_response_type");
             return AuthorizeValidationResult.Fail("Unsupported OAuth response_type.");
         }
 
         if (!IsRedirectUriAllowed(redirectUri, options))
         {
+            LogOAuthAuthorizeValidation(clientId, redirectUri, scope, resource, "failed", "redirect_not_allowed");
             return AuthorizeValidationResult.Fail("Redirect URI is not allowed.");
         }
 
         if (string.IsNullOrWhiteSpace(codeChallenge) ||
             !string.Equals(codeChallengeMethod, "S256", StringComparison.OrdinalIgnoreCase))
         {
+            LogOAuthAuthorizeValidation(clientId, redirectUri, scope, resource, "failed", "pkce_s256_required");
             return AuthorizeValidationResult.Fail("PKCE S256 is required.");
         }
 
-        await Task.CompletedTask;
+        LogOAuthAuthorizeValidation(clientId, redirectUri, scope, resource, "success", string.Empty);
         return AuthorizeValidationResult.Ok(new AuthorizeRequest(
             clientId,
             redirectUri,
             scope,
             state,
             codeChallenge,
-            "S256"));
+            "S256",
+            resource));
+    }
+
+    public OAuthClientRegistrationResult RegisterClient(OAuthClientRegistrationRequest request)
+    {
+        var options = gatewayOptions.Value.OAuth;
+        if (!options.SelfHosted)
+        {
+            LogOAuthRegister(string.Empty, string.Empty, "failed", "self_hosted_disabled");
+            return OAuthClientRegistrationResult.Fail("Self-hosted OAuth is not enabled.");
+        }
+
+        var redirectUris = request.RedirectUris?
+            .Where(uri => !string.IsNullOrWhiteSpace(uri))
+            .Select(uri => uri.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray() ?? [];
+        if (redirectUris.Length == 0)
+        {
+            LogOAuthRegister(string.Empty, string.Empty, "failed", "missing_redirect_uris");
+            return OAuthClientRegistrationResult.Fail("At least one redirect URI is required.");
+        }
+
+        var invalidRedirectUri = redirectUris.FirstOrDefault(uri => !IsRedirectUriAllowed(uri, options));
+        if (invalidRedirectUri is not null)
+        {
+            LogOAuthRegister(GetHost(invalidRedirectUri), string.Empty, "failed", "redirect_not_allowed");
+            return OAuthClientRegistrationResult.Fail("Redirect URI is not allowed.");
+        }
+
+        var tokenEndpointAuthMethod = string.IsNullOrWhiteSpace(request.TokenEndpointAuthMethod)
+            ? "none"
+            : request.TokenEndpointAuthMethod.Trim();
+        if (!string.Equals(tokenEndpointAuthMethod, "none", StringComparison.Ordinal))
+        {
+            LogOAuthRegister(GetHost(redirectUris[0]), string.Empty, "failed", "unsupported_token_auth_method");
+            return OAuthClientRegistrationResult.Fail("Only public PKCE clients with token_endpoint_auth_method=none are supported.");
+        }
+
+        var grantTypes = NormalizeRegistrationList(request.GrantTypes, ["authorization_code", "refresh_token"]);
+        if (!grantTypes.Contains("authorization_code", StringComparer.Ordinal))
+        {
+            LogOAuthRegister(GetHost(redirectUris[0]), string.Empty, "failed", "authorization_code_required");
+            return OAuthClientRegistrationResult.Fail("authorization_code grant is required.");
+        }
+
+        var responseTypes = NormalizeRegistrationList(request.ResponseTypes, ["code"]);
+        if (!responseTypes.Contains("code", StringComparer.Ordinal))
+        {
+            LogOAuthRegister(GetHost(redirectUris[0]), string.Empty, "failed", "code_response_required");
+            return OAuthClientRegistrationResult.Fail("code response type is required.");
+        }
+
+        var clientId = $"contexthub-chatgpt-dcr-{Guid.NewGuid():N}";
+        var registered = new RegisteredOAuthClient(
+            clientId,
+            redirectUris,
+            tokenEndpointAuthMethod,
+            grantTypes,
+            responseTypes,
+            DateTimeOffset.UtcNow);
+        cache.Set(
+            RegisteredClientCachePrefix + clientId,
+            registered,
+            TimeSpan.FromDays(Math.Max(30, options.RegisteredClientLifetimeDays)));
+
+        LogOAuthRegister(GetHost(redirectUris[0]), clientId, "success", string.Empty);
+        return OAuthClientRegistrationResult.Ok(new OAuthClientRegistrationResponse(
+            clientId,
+            new DateTimeOffset(DateTime.UtcNow).ToUnixTimeSeconds(),
+            redirectUris,
+            tokenEndpointAuthMethod,
+            grantTypes,
+            responseTypes,
+            request.Scope ?? string.Join(' ', options.Scopes)));
     }
 
     public async Task<AuthorizeResult> AuthorizeAsync(
@@ -89,12 +175,14 @@ internal sealed class SelfHostedOAuthService(
                 cancellationToken);
         if (user is null || string.IsNullOrWhiteSpace(user.PasswordHash))
         {
+            LogOAuthAuthorizeLogin(request, "failed", "invalid_credentials");
             return AuthorizeResult.Fail("Invalid username or password.");
         }
 
         var verification = passwordHasher.VerifyHashedPassword(new object(), user.PasswordHash, password);
         if (verification == PasswordVerificationResult.Failed)
         {
+            LogOAuthAuthorizeLogin(request, "failed", "invalid_credentials");
             return AuthorizeResult.Fail("Invalid username or password.");
         }
 
@@ -108,6 +196,7 @@ internal sealed class SelfHostedOAuthService(
             request.RedirectUri,
             request.Scope,
             request.CodeChallenge,
+            request.Resource,
             user.Id,
             user.TenantId,
             user.Username,
@@ -124,6 +213,7 @@ internal sealed class SelfHostedOAuthService(
             ["state"] = request.State,
             ["iss"] = ResolveAuthorizationResponseIssuer(options)
         });
+        LogOAuthAuthorizeLogin(request, "success", string.Empty);
         return AuthorizeResult.Ok(request.RedirectUri + redirect);
     }
 
@@ -132,25 +222,21 @@ internal sealed class SelfHostedOAuthService(
         string redirectUri,
         string clientId,
         string? clientSecret,
-        string codeVerifier)
+        string codeVerifier,
+        string? resource)
     {
         var options = gatewayOptions.Value.OAuth;
         if (!options.SelfHosted)
         {
+            LogOAuthToken(clientId, "authorization_code", resource, "failed", "self_hosted_disabled");
             return OAuthTokenResult.Fail("Self-hosted OAuth is not enabled.");
-        }
-
-        if (!string.Equals(clientId, options.ClientId, StringComparison.Ordinal) ||
-            (!string.IsNullOrWhiteSpace(options.ClientSecret) &&
-             !string.Equals(clientSecret, options.ClientSecret, StringComparison.Ordinal)))
-        {
-            return OAuthTokenResult.Fail("Invalid OAuth client.");
         }
 
         if (string.IsNullOrWhiteSpace(code) ||
             !cache.TryGetValue<AuthorizationCodePayload>(CodeCachePrefix + code, out var payload) ||
             payload is null)
         {
+            LogOAuthToken(clientId, "authorization_code", resource, "failed", "invalid_code");
             return OAuthTokenResult.Fail("Invalid authorization code.");
         }
 
@@ -159,14 +245,39 @@ internal sealed class SelfHostedOAuthService(
         if (!string.Equals(payload.RedirectUri, redirectUri, StringComparison.Ordinal) ||
             !string.Equals(payload.ClientId, clientId, StringComparison.Ordinal))
         {
+            LogOAuthToken(clientId, "authorization_code", resource, "failed", "code_binding_mismatch");
             return OAuthTokenResult.Fail("Authorization code binding mismatch.");
+        }
+
+        if (!IsTokenClientAllowed(clientId, clientSecret, options))
+        {
+            LogOAuthToken(clientId, "authorization_code", resource, "failed", "invalid_client");
+            return OAuthTokenResult.Fail("Invalid OAuth client.");
+        }
+
+        if (!IsTokenResourceAllowed(payload.Resource, resource))
+        {
+            LogOAuthToken(clientId, "authorization_code", resource, "failed", "resource_mismatch");
+            return OAuthTokenResult.Fail("OAuth resource binding mismatch.");
+        }
+
+        if (string.IsNullOrWhiteSpace(resource) && !string.IsNullOrWhiteSpace(payload.Resource))
+        {
+            logger.LogWarning(
+                "ChatGPT OAuth token request omitted resource. event={Event} clientKind={ClientKind} resourcePresent={ResourcePresent} status={Status}",
+                "chatgpt_oauth_token",
+                GetClientKind(clientId),
+                false,
+                "legacy_accepted");
         }
 
         if (!ValidatePkce(payload.CodeChallenge, codeVerifier))
         {
+            LogOAuthToken(clientId, "authorization_code", resource, "failed", "invalid_pkce_verifier");
             return OAuthTokenResult.Fail("Invalid PKCE verifier.");
         }
 
+        LogOAuthToken(clientId, "authorization_code", resource, "success", string.Empty);
         return CreateTokenResult(payload, options);
     }
 
@@ -178,13 +289,13 @@ internal sealed class SelfHostedOAuthService(
         var options = gatewayOptions.Value.OAuth;
         if (!options.SelfHosted)
         {
+            LogOAuthToken(clientId, "refresh_token", null, "failed", "self_hosted_disabled");
             return OAuthTokenResult.Fail("Self-hosted OAuth is not enabled.");
         }
 
-        if (!string.Equals(clientId, options.ClientId, StringComparison.Ordinal) ||
-            (!string.IsNullOrWhiteSpace(options.ClientSecret) &&
-             !string.Equals(clientSecret, options.ClientSecret, StringComparison.Ordinal)))
+        if (!IsTokenClientAllowed(clientId, clientSecret, options))
         {
+            LogOAuthToken(clientId, "refresh_token", null, "failed", "invalid_client");
             return OAuthTokenResult.Fail("Invalid OAuth client.");
         }
 
@@ -192,10 +303,18 @@ internal sealed class SelfHostedOAuthService(
             !cache.TryGetValue<AuthorizationCodePayload>(RefreshTokenCachePrefix + refreshToken, out var payload) ||
             payload is null)
         {
+            LogOAuthToken(clientId, "refresh_token", null, "failed", "invalid_refresh_token");
             return OAuthTokenResult.Fail("Invalid refresh token.");
         }
 
+        if (!string.Equals(payload.ClientId, clientId, StringComparison.Ordinal))
+        {
+            LogOAuthToken(clientId, "refresh_token", null, "failed", "refresh_binding_mismatch");
+            return OAuthTokenResult.Fail("Refresh token binding mismatch.");
+        }
+
         cache.Remove(RefreshTokenCachePrefix + refreshToken);
+        LogOAuthToken(clientId, "refresh_token", payload.Resource, "success", string.Empty);
         return CreateTokenResult(payload, options);
     }
 
@@ -268,7 +387,7 @@ internal sealed class SelfHostedOAuthService(
         };
         var token = new JwtSecurityToken(
             issuer,
-            options.ClientId,
+            string.IsNullOrWhiteSpace(payload.Resource) ? options.ClientId : payload.Resource,
             claims,
             now,
             now.AddMinutes(Math.Max(1, options.AccessTokenLifetimeMinutes)),
@@ -329,6 +448,117 @@ internal sealed class SelfHostedOAuthService(
             .Any(prefix => redirectUri.StartsWith(prefix.Trim(), StringComparison.Ordinal));
     }
 
+    private async Task<ClientValidationResult> ValidateAuthorizeClientAsync(
+        string clientId,
+        string redirectUri,
+        OAuthOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(clientId))
+        {
+            return ClientValidationResult.Fail("missing_client_id");
+        }
+
+        if (string.Equals(clientId, options.ClientId, StringComparison.Ordinal))
+        {
+            return ClientValidationResult.Ok();
+        }
+
+        if (cache.TryGetValue<RegisteredOAuthClient>(RegisteredClientCachePrefix + clientId, out var registered) &&
+            registered is not null)
+        {
+            return registered.RedirectUris.Contains(redirectUri, StringComparer.Ordinal)
+                ? ClientValidationResult.Ok()
+                : ClientValidationResult.Fail("registered_redirect_mismatch");
+        }
+
+        if (!IsChatGptClientMetadataDocumentId(clientId))
+        {
+            return ClientValidationResult.Fail("unknown_client");
+        }
+
+        try
+        {
+            var metadata = await clientMetadataFetcher.FetchAsync(clientId, cancellationToken);
+            if (metadata?.RedirectUris is null ||
+                !metadata.RedirectUris.Contains(redirectUri, StringComparer.Ordinal))
+            {
+                return ClientValidationResult.Fail("cimd_redirect_mismatch");
+            }
+
+            var tokenMethod = string.IsNullOrWhiteSpace(metadata.TokenEndpointAuthMethod)
+                ? "none"
+                : metadata.TokenEndpointAuthMethod.Trim();
+            if (!string.Equals(tokenMethod, "none", StringComparison.Ordinal))
+            {
+                return ClientValidationResult.Fail("cimd_token_auth_method_unsupported");
+            }
+
+            return ClientValidationResult.Ok();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            logger.LogWarning(
+                ex,
+                "Failed to fetch ChatGPT OAuth client metadata. event={Event} clientKind={ClientKind} redirectHost={RedirectHost} status={Status} failureReason={FailureReason}",
+                "chatgpt_oauth_authorize_validate",
+                "cimd",
+                GetHost(redirectUri),
+                "failed",
+                "cimd_fetch_failed");
+            return ClientValidationResult.Fail("cimd_fetch_failed");
+        }
+    }
+
+    private static bool IsTokenClientAllowed(string clientId, string? clientSecret, OAuthOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(clientId))
+        {
+            return false;
+        }
+
+        if (string.Equals(clientId, options.ClientId, StringComparison.Ordinal))
+        {
+            return string.IsNullOrWhiteSpace(options.ClientSecret) ||
+                   string.Equals(clientSecret, options.ClientSecret, StringComparison.Ordinal);
+        }
+
+        return clientId.StartsWith("contexthub-chatgpt-dcr-", StringComparison.Ordinal) ||
+               IsChatGptClientMetadataDocumentId(clientId);
+    }
+
+    private static bool IsTokenResourceAllowed(string codeResource, string? tokenResource)
+    {
+        if (string.IsNullOrWhiteSpace(tokenResource))
+        {
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(codeResource))
+        {
+            return false;
+        }
+
+        return string.Equals(codeResource, tokenResource.Trim(), StringComparison.Ordinal);
+    }
+
+    private static bool IsChatGptClientMetadataDocumentId(string clientId)
+    {
+        return Uri.TryCreate(clientId, UriKind.Absolute, out var uri) &&
+               uri.Scheme == Uri.UriSchemeHttps &&
+               string.Equals(uri.Host, "chatgpt.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string[] NormalizeRegistrationList(IReadOnlyList<string>? values, string[] defaults)
+    {
+        var normalized = values?
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        return normalized is { Length: > 0 } ? normalized : defaults;
+    }
+
     private static string? ResolveAuthorizationResponseIssuer(OAuthOptions options)
     {
         if (options.SelfHosted && !string.IsNullOrWhiteSpace(options.SelfHostedIssuer))
@@ -343,6 +573,85 @@ internal sealed class SelfHostedOAuthService(
 
         return null;
     }
+
+    private void LogOAuthAuthorizeValidation(
+        string clientId,
+        string redirectUri,
+        string scope,
+        string resource,
+        string status,
+        string failureReason)
+    {
+        logger.LogInformation(
+            "ChatGPT OAuth authorize validation. event={Event} clientKind={ClientKind} redirectHost={RedirectHost} scope={Scope} resourcePresent={ResourcePresent} status={Status} failureReason={FailureReason}",
+            "chatgpt_oauth_authorize_validate",
+            GetClientKind(clientId),
+            GetHost(redirectUri),
+            scope,
+            !string.IsNullOrWhiteSpace(resource),
+            status,
+            failureReason);
+    }
+
+    private void LogOAuthAuthorizeLogin(AuthorizeRequest request, string status, string failureReason)
+    {
+        logger.LogInformation(
+            "ChatGPT OAuth authorize login. event={Event} clientKind={ClientKind} redirectHost={RedirectHost} scope={Scope} resourcePresent={ResourcePresent} status={Status} failureReason={FailureReason}",
+            "chatgpt_oauth_authorize_login",
+            GetClientKind(request.ClientId),
+            GetHost(request.RedirectUri),
+            request.Scope,
+            !string.IsNullOrWhiteSpace(request.Resource),
+            status,
+            failureReason);
+    }
+
+    private void LogOAuthToken(string clientId, string grantType, string? resource, string status, string failureReason)
+    {
+        logger.LogInformation(
+            "ChatGPT OAuth token exchange. event={Event} clientKind={ClientKind} grantType={GrantType} resourcePresent={ResourcePresent} status={Status} failureReason={FailureReason}",
+            "chatgpt_oauth_token",
+            GetClientKind(clientId),
+            grantType,
+            !string.IsNullOrWhiteSpace(resource),
+            status,
+            failureReason);
+    }
+
+    private void LogOAuthRegister(string redirectHost, string clientId, string status, string failureReason)
+    {
+        logger.LogInformation(
+            "ChatGPT OAuth dynamic client registration. event={Event} clientKind={ClientKind} redirectHost={RedirectHost} resourcePresent={ResourcePresent} status={Status} failureReason={FailureReason}",
+            "chatgpt_oauth_register",
+            GetClientKind(clientId),
+            redirectHost,
+            false,
+            status,
+            failureReason);
+    }
+
+    private static string GetClientKind(string clientId)
+    {
+        if (string.IsNullOrWhiteSpace(clientId))
+        {
+            return "missing";
+        }
+
+        if (clientId.StartsWith("https://chatgpt.com/", StringComparison.OrdinalIgnoreCase))
+        {
+            return "cimd";
+        }
+
+        if (clientId.StartsWith("contexthub-chatgpt-dcr-", StringComparison.Ordinal))
+        {
+            return "dcr";
+        }
+
+        return "configured";
+    }
+
+    private static string GetHost(string value)
+        => Uri.TryCreate(value, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
 
     private static string NormalizeScopes(string requested, IReadOnlyList<string> supported)
     {
@@ -380,7 +689,8 @@ internal sealed record AuthorizeRequest(
     string Scope,
     string State,
     string CodeChallenge,
-    string CodeChallengeMethod);
+    string CodeChallengeMethod,
+    string Resource);
 
 internal sealed record AuthorizeValidationResult(bool Success, AuthorizeRequest? Request, string Error)
 {
@@ -405,8 +715,49 @@ internal sealed record AuthorizationCodePayload(
     string RedirectUri,
     string Scope,
     string CodeChallenge,
+    string Resource,
     Guid UserId,
     Guid TenantId,
     string Username,
     string Email,
     string DisplayName);
+
+public sealed record OAuthClientRegistrationRequest(
+    [property: JsonPropertyName("redirect_uris")] IReadOnlyList<string>? RedirectUris,
+    [property: JsonPropertyName("token_endpoint_auth_method")] string? TokenEndpointAuthMethod,
+    [property: JsonPropertyName("grant_types")] IReadOnlyList<string>? GrantTypes,
+    [property: JsonPropertyName("response_types")] IReadOnlyList<string>? ResponseTypes,
+    [property: JsonPropertyName("scope")] string? Scope,
+    [property: JsonPropertyName("client_name")] string? ClientName);
+
+internal sealed record OAuthClientRegistrationResult(
+    bool Success,
+    OAuthClientRegistrationResponse? Registration,
+    string Error)
+{
+    public static OAuthClientRegistrationResult Ok(OAuthClientRegistrationResponse registration) => new(true, registration, string.Empty);
+    public static OAuthClientRegistrationResult Fail(string error) => new(false, null, error);
+}
+
+public sealed record OAuthClientRegistrationResponse(
+    [property: JsonPropertyName("client_id")] string ClientId,
+    [property: JsonPropertyName("client_id_issued_at")] long ClientIdIssuedAt,
+    [property: JsonPropertyName("redirect_uris")] IReadOnlyList<string> RedirectUris,
+    [property: JsonPropertyName("token_endpoint_auth_method")] string TokenEndpointAuthMethod,
+    [property: JsonPropertyName("grant_types")] IReadOnlyList<string> GrantTypes,
+    [property: JsonPropertyName("response_types")] IReadOnlyList<string> ResponseTypes,
+    [property: JsonPropertyName("scope")] string Scope);
+
+internal sealed record RegisteredOAuthClient(
+    string ClientId,
+    IReadOnlyList<string> RedirectUris,
+    string TokenEndpointAuthMethod,
+    IReadOnlyList<string> GrantTypes,
+    IReadOnlyList<string> ResponseTypes,
+    DateTimeOffset RegisteredAt);
+
+internal sealed record ClientValidationResult(bool Success, string FailureReason)
+{
+    public static ClientValidationResult Ok() => new(true, string.Empty);
+    public static ClientValidationResult Fail(string failureReason) => new(false, failureReason);
+}

@@ -16,7 +16,10 @@ param(
     [string]$RootOpenIdConfigurationUrl = "https://context-hub.wjcy.org/.well-known/openid-configuration",
     [string]$UserInfoUrl = "https://context-hub.wjcy.org/userinfo",
     [string]$TokenEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_TOKEN",
+    [string]$OAuthUsernameEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_USERNAME",
+    [string]$OAuthPasswordEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_PASSWORD",
     [switch]$RequireAuthorizationToken,
+    [switch]$RunDynamicClientRegistrationSmoke,
     [switch]$RunProposalSmoke
 )
 
@@ -130,11 +133,17 @@ function Invoke-WebRequestAllowError {
         [string]$Method = "Get",
         [hashtable]$Headers,
         [object]$Body,
+        [switch]$NoRedirect,
         [int]$TimeoutSec = 45
     )
 
     try {
-        $response = Invoke-WebRequest -Uri $Uri -Method $Method -Headers $Headers -Body $Body -UseBasicParsing -TimeoutSec $TimeoutSec
+        if ($NoRedirect) {
+            $response = Invoke-WebRequest -Uri $Uri -Method $Method -Headers $Headers -Body $Body -UseBasicParsing -TimeoutSec $TimeoutSec -MaximumRedirection 0
+        }
+        else {
+            $response = Invoke-WebRequest -Uri $Uri -Method $Method -Headers $Headers -Body $Body -UseBasicParsing -TimeoutSec $TimeoutSec
+        }
         return New-HttpResponseRecord -Response $response
     }
     catch {
@@ -144,6 +153,176 @@ function Invoke-WebRequestAllowError {
 
         throw
     }
+}
+
+function ConvertTo-Base64Url {
+    param([byte[]]$Bytes)
+
+    return [Convert]::ToBase64String($Bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+}
+
+function New-CodeVerifier {
+    $bytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    return ConvertTo-Base64Url -Bytes $bytes
+}
+
+function New-CodeChallenge {
+    param([string]$Verifier)
+
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($Verifier)
+    $hash = [System.Security.Cryptography.SHA256]::HashData($bytes)
+    return ConvertTo-Base64Url -Bytes $hash
+}
+
+function New-QueryString {
+    param([hashtable]$Values)
+
+    $pairs = @()
+    foreach ($key in $Values.Keys) {
+        $pairs += [Uri]::EscapeDataString([string]$key) + "=" + [Uri]::EscapeDataString([string]$Values[$key])
+    }
+
+    return $pairs -join "&"
+}
+
+function Read-QueryParameter {
+    param(
+        [string]$Query,
+        [string]$Name
+    )
+
+    $trimmed = $Query.TrimStart("?")
+    foreach ($pair in ($trimmed -split "&")) {
+        if ([string]::IsNullOrWhiteSpace($pair)) {
+            continue
+        }
+
+        $parts = $pair -split "=", 2
+        $key = [System.Net.WebUtility]::UrlDecode($parts[0])
+        if ([string]::Equals($key, $Name, [StringComparison]::Ordinal)) {
+            if ($parts.Count -lt 2) {
+                return ""
+            }
+
+            return [System.Net.WebUtility]::UrlDecode($parts[1])
+        }
+    }
+
+    return ""
+}
+
+function Get-OAuthAccessTokenViaDcr {
+    param(
+        [string]$AuthorizationMetadataUrl,
+        [string]$Resource,
+        [string]$Username,
+        [string]$Password
+    )
+
+    $metadataResponse = Invoke-WebRequestAllowError -Uri $AuthorizationMetadataUrl -Method Get -TimeoutSec 15
+    if ([int]$metadataResponse.StatusCode -ne 200) {
+        throw "Expected 200 from OAuth authorization metadata before DCR smoke, got $($metadataResponse.StatusCode)."
+    }
+
+    $metadata = $metadataResponse.Content | ConvertFrom-Json
+    if (-not $metadata.registration_endpoint) {
+        throw "OAuth metadata does not include registration_endpoint."
+    }
+
+    $redirectUri = "https://chatgpt.com/connector/oauth/contexthub-smoke-" + [Guid]::NewGuid().ToString("N")
+    $registrationBody = @{
+        redirect_uris = @($redirectUri)
+        token_endpoint_auth_method = "none"
+        grant_types = @("authorization_code", "refresh_token")
+        response_types = @("code")
+        scope = "openid profile email offline_access"
+    } | ConvertTo-Json -Depth 10
+
+    $registrationResponse = Invoke-WebRequestAllowError `
+        -Uri ([string]$metadata.registration_endpoint) `
+        -Method Post `
+        -Headers @{ "Content-Type" = "application/json"; Accept = "application/json" } `
+        -Body $registrationBody `
+        -TimeoutSec 15
+    if ([int]$registrationResponse.StatusCode -ne 201) {
+        throw "Expected 201 from OAuth dynamic client registration, got $($registrationResponse.StatusCode): $($registrationResponse.Content)"
+    }
+
+    $registration = $registrationResponse.Content | ConvertFrom-Json
+    if (-not $registration.client_id) {
+        throw "Dynamic client registration response did not include client_id."
+    }
+
+    $verifier = New-CodeVerifier
+    $challenge = New-CodeChallenge -Verifier $verifier
+    $authorizeUri = [string]$metadata.authorization_endpoint + "?" + (New-QueryString -Values @{
+        response_type = "code"
+        client_id = [string]$registration.client_id
+        redirect_uri = $redirectUri
+        scope = "openid profile email offline_access"
+        state = "mcp-chat-dcr-smoke"
+        code_challenge = $challenge
+        code_challenge_method = "S256"
+        resource = $Resource
+    })
+
+    $authorizePageResponse = Invoke-WebRequestAllowError -Uri $authorizeUri -Method Get -TimeoutSec 15
+    if ([int]$authorizePageResponse.StatusCode -ne 200) {
+        throw "Expected 200 from OAuth authorize page during DCR smoke, got $($authorizePageResponse.StatusCode)."
+    }
+
+    $formBody = New-QueryString -Values @{
+        username = $Username
+        password = $Password
+    }
+    $authorizeResponse = Invoke-WebRequestAllowError `
+        -Uri $authorizeUri `
+        -Method Post `
+        -Headers @{ "Content-Type" = "application/x-www-form-urlencoded" } `
+        -Body $formBody `
+        -NoRedirect `
+        -TimeoutSec 15
+    if ([int]$authorizeResponse.StatusCode -ne 303) {
+        throw "Expected 303 from OAuth authorize submit during DCR smoke, got $($authorizeResponse.StatusCode): $($authorizeResponse.Content)"
+    }
+
+    $location = [string]$authorizeResponse.Headers["Location"]
+    if (-not $location) {
+        throw "OAuth authorize response did not include Location."
+    }
+
+    $callback = [Uri]$location
+    $code = Read-QueryParameter -Query $callback.Query -Name "code"
+    if (-not $code) {
+        throw "OAuth callback did not include authorization code."
+    }
+
+    $tokenBody = New-QueryString -Values @{
+        grant_type = "authorization_code"
+        client_id = [string]$registration.client_id
+        code = $code
+        redirect_uri = $redirectUri
+        code_verifier = $verifier
+        resource = $Resource
+    }
+    $tokenResponse = Invoke-WebRequestAllowError `
+        -Uri ([string]$metadata.token_endpoint) `
+        -Method Post `
+        -Headers @{ "Content-Type" = "application/x-www-form-urlencoded"; Accept = "application/json" } `
+        -Body $tokenBody `
+        -TimeoutSec 15
+    if ([int]$tokenResponse.StatusCode -ne 200) {
+        throw "Expected 200 from OAuth token endpoint during DCR smoke, got $($tokenResponse.StatusCode): $($tokenResponse.Content)"
+    }
+
+    $tokenJson = $tokenResponse.Content | ConvertFrom-Json
+    if (-not $tokenJson.access_token) {
+        throw "OAuth token endpoint did not return access_token."
+    }
+
+    Write-Host "Dynamic client registration OAuth token exchange completed."
+    return [string]$tokenJson.access_token
 }
 
 function Invoke-McpJsonRpc {
@@ -283,8 +462,16 @@ if ([string]$authorizationMetadata.token_endpoint -notmatch "/oauth/chat/token$"
     throw "OAuth authorization server metadata must expose /oauth/chat/token, got '$($authorizationMetadata.token_endpoint)'."
 }
 
+if ([string]$authorizationMetadata.registration_endpoint -notmatch "/oauth/chat/register$") {
+    throw "OAuth authorization server metadata must expose /oauth/chat/register, got '$($authorizationMetadata.registration_endpoint)'."
+}
+
 if (@($authorizationMetadata.code_challenge_methods_supported) -notcontains "S256") {
     throw "OAuth authorization server metadata must include PKCE S256 support."
+}
+
+if ($authorizationMetadata.client_id_metadata_document_supported -ne $true) {
+    throw "OAuth authorization server metadata must include client_id_metadata_document_supported=true."
 }
 
 Write-Host "5/12 root OAuth authorization server metadata should also be public"
@@ -319,8 +506,16 @@ if ([string]$oidcMetadata.token_endpoint -notmatch "/oauth/chat/token$") {
     throw "OpenID Connect metadata must expose /oauth/chat/token, got '$($oidcMetadata.token_endpoint)'."
 }
 
+if ([string]$oidcMetadata.registration_endpoint -notmatch "/oauth/chat/register$") {
+    throw "OpenID Connect metadata must expose /oauth/chat/register, got '$($oidcMetadata.registration_endpoint)'."
+}
+
 if ([string]$oidcMetadata.userinfo_endpoint -notmatch "/userinfo$") {
     throw "OpenID Connect metadata must expose /userinfo, got '$($oidcMetadata.userinfo_endpoint)'."
+}
+
+if ($oidcMetadata.client_id_metadata_document_supported -ne $true) {
+    throw "OpenID Connect metadata must include client_id_metadata_document_supported=true."
 }
 
 if (@($oidcMetadata.grant_types_supported) -notcontains "refresh_token") {
@@ -352,6 +547,20 @@ if ([string]$rootOidcMetadata.userinfo_endpoint -ne [string]$oidcMetadata.userin
 }
 
 $token = Get-OptionalBearerToken -Name $TokenEnvironmentVariable
+if ($RunDynamicClientRegistrationSmoke) {
+    $oauthUsername = Get-OptionalBearerToken -Name $OAuthUsernameEnvironmentVariable
+    $oauthPassword = Get-OptionalBearerToken -Name $OAuthPasswordEnvironmentVariable
+    if ([string]::IsNullOrWhiteSpace($oauthUsername) -or [string]::IsNullOrWhiteSpace($oauthPassword)) {
+        throw "$OAuthUsernameEnvironmentVariable and $OAuthPasswordEnvironmentVariable are required when -RunDynamicClientRegistrationSmoke is set."
+    }
+
+    $token = Get-OAuthAccessTokenViaDcr `
+        -AuthorizationMetadataUrl $AuthorizationServerMetadataUrl `
+        -Resource $Endpoint `
+        -Username $oauthUsername `
+        -Password $oauthPassword
+}
+
 if ([string]::IsNullOrWhiteSpace($token)) {
     if ($RequireAuthorizationToken) {
         throw "$TokenEnvironmentVariable is required for authorized MCP chat gateway verification."

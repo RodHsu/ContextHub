@@ -29,7 +29,9 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 builder.Services.AddProblemDetails();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddMemoryCache();
+builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IPasswordHasher<object>, PasswordHasher<object>>();
+builder.Services.AddSingleton<IChatGptOAuthClientMetadataFetcher, HttpChatGptOAuthClientMetadataFetcher>();
 builder.Services.AddMemoryApplication();
 builder.Services.AddMemoryInfrastructure(builder.Configuration, "chatgpt-gateway");
 builder.Services.AddScoped<SelfHostedOAuthService>();
@@ -52,7 +54,7 @@ else if (gatewayOptions.OAuth.SelfHosted)
                 ValidateIssuer = true,
                 ValidIssuer = issuer,
                 ValidateAudience = true,
-                ValidAudience = Required(gatewayOptions.OAuth.ClientId, "ChatGptGateway:OAuth:ClientId"),
+                ValidAudiences = ResolveSelfHostedAudiences(gatewayOptions),
                 ValidateLifetime = true,
                 ValidateIssuerSigningKey = true,
                 IssuerSigningKey = SelfHostedOAuthService.BuildSigningKey(
@@ -240,6 +242,25 @@ app.MapPost("/oauth/chat/authorize", async (
     return new SeeOtherRedirectResult(result.RedirectUri);
 }).AllowAnonymous();
 
+app.MapPost("/oauth/chat/register", async (
+    HttpContext context,
+    SelfHostedOAuthService oauth) =>
+{
+    var request = await context.Request.ReadFromJsonAsync<OAuthClientRegistrationRequest>(context.RequestAborted);
+    if (request is null)
+    {
+        return Results.Json(new OAuthError("invalid_client_metadata", "Registration payload is required."), statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var result = oauth.RegisterClient(request);
+    if (!result.Success || result.Registration is null)
+    {
+        return Results.Json(new OAuthError("invalid_client_metadata", result.Error), statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    return Results.Json(result.Registration, statusCode: StatusCodes.Status201Created);
+}).AllowAnonymous();
+
 app.MapPost("/oauth/chat/token", async (
     HttpContext context,
     SelfHostedOAuthService oauth) =>
@@ -256,7 +277,8 @@ app.MapPost("/oauth/chat/token", async (
             form["redirect_uri"].ToString(),
             clientId,
             clientSecret,
-            form["code_verifier"].ToString()),
+            form["code_verifier"].ToString(),
+            form["resource"].ToString()),
         "refresh_token" => oauth.RefreshAccessToken(
             form["refresh_token"].ToString(),
             clientId,
@@ -298,6 +320,7 @@ static bool IsPublicPath(PathString path)
            IsAuthorizationServerMetadataPath(path) ||
            IsOpenIdConfigurationPath(path) ||
            value.StartsWith("/oauth/chat/authorize", StringComparison.OrdinalIgnoreCase) ||
+           value.StartsWith("/oauth/chat/register", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/oauth/chat/token", StringComparison.OrdinalIgnoreCase);
 }
 
@@ -326,6 +349,20 @@ static string Required(string value, string key)
     => string.IsNullOrWhiteSpace(value)
         ? throw new InvalidOperationException($"{key} is required when ChatGptGateway:OAuth:TestMode is false.")
         : value.Trim();
+
+static string[] ResolveSelfHostedAudiences(ChatGptGatewayOptions options)
+{
+    var audiences = new List<string>
+    {
+        Required(options.OAuth.ClientId, "ChatGptGateway:OAuth:ClientId")
+    };
+    if (!string.IsNullOrWhiteSpace(options.PublicMcpUrl))
+    {
+        audiences.Add(options.PublicMcpUrl.Trim());
+    }
+
+    return audiences.Distinct(StringComparer.Ordinal).ToArray();
+}
 
 static void AppendOAuthResourceChallenge(HttpContext context)
 {
@@ -378,12 +415,14 @@ static IResult CreateAuthorizationServerMetadata(HttpContext context, IOptions<C
         issuer,
         $"{issuer}/oauth/chat/authorize",
         $"{issuer}/oauth/chat/token",
+        $"{issuer}/oauth/chat/register",
         ["code"],
         ["authorization_code", "refresh_token"],
         ["S256"],
         string.IsNullOrWhiteSpace(value.OAuth.ClientSecret)
             ? ["none"]
             : ["client_secret_basic", "client_secret_post"],
+        true,
         NormalizeScopes(value.OAuth.Scopes));
 
     return Results.Json(metadata);
@@ -397,6 +436,7 @@ static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGa
         issuer,
         $"{issuer}/oauth/chat/authorize",
         $"{issuer}/oauth/chat/token",
+        $"{issuer}/oauth/chat/register",
         $"{issuer}/userinfo",
         ["code"],
         ["authorization_code", "refresh_token"],
@@ -404,6 +444,7 @@ static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGa
         string.IsNullOrWhiteSpace(value.OAuth.ClientSecret)
             ? ["none"]
             : ["client_secret_basic", "client_secret_post"],
+        true,
         ["public"],
         ["HS256"],
         NormalizeScopes(value.OAuth.Scopes),
@@ -520,21 +561,25 @@ internal sealed record OAuthAuthorizationServerMetadata(
     [property: JsonPropertyName("issuer")] string Issuer,
     [property: JsonPropertyName("authorization_endpoint")] string AuthorizationEndpoint,
     [property: JsonPropertyName("token_endpoint")] string TokenEndpoint,
+    [property: JsonPropertyName("registration_endpoint")] string RegistrationEndpoint,
     [property: JsonPropertyName("response_types_supported")] IReadOnlyList<string> ResponseTypesSupported,
     [property: JsonPropertyName("grant_types_supported")] IReadOnlyList<string> GrantTypesSupported,
     [property: JsonPropertyName("code_challenge_methods_supported")] IReadOnlyList<string> CodeChallengeMethodsSupported,
     [property: JsonPropertyName("token_endpoint_auth_methods_supported")] IReadOnlyList<string> TokenEndpointAuthMethodsSupported,
+    [property: JsonPropertyName("client_id_metadata_document_supported")] bool ClientIdMetadataDocumentSupported,
     [property: JsonPropertyName("scopes_supported")] IReadOnlyList<string> ScopesSupported);
 
 internal sealed record OpenIdConfigurationMetadata(
     [property: JsonPropertyName("issuer")] string Issuer,
     [property: JsonPropertyName("authorization_endpoint")] string AuthorizationEndpoint,
     [property: JsonPropertyName("token_endpoint")] string TokenEndpoint,
+    [property: JsonPropertyName("registration_endpoint")] string RegistrationEndpoint,
     [property: JsonPropertyName("userinfo_endpoint")] string UserInfoEndpoint,
     [property: JsonPropertyName("response_types_supported")] IReadOnlyList<string> ResponseTypesSupported,
     [property: JsonPropertyName("grant_types_supported")] IReadOnlyList<string> GrantTypesSupported,
     [property: JsonPropertyName("code_challenge_methods_supported")] IReadOnlyList<string> CodeChallengeMethodsSupported,
     [property: JsonPropertyName("token_endpoint_auth_methods_supported")] IReadOnlyList<string> TokenEndpointAuthMethodsSupported,
+    [property: JsonPropertyName("client_id_metadata_document_supported")] bool ClientIdMetadataDocumentSupported,
     [property: JsonPropertyName("subject_types_supported")] IReadOnlyList<string> SubjectTypesSupported,
     [property: JsonPropertyName("id_token_signing_alg_values_supported")] IReadOnlyList<string> IdTokenSigningAlgValuesSupported,
     [property: JsonPropertyName("scopes_supported")] IReadOnlyList<string> ScopesSupported,

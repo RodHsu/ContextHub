@@ -27,6 +27,7 @@ public sealed class OAuthOptions
     public int AuthorizationCodeLifetimeMinutes { get; set; } = 5;
     public int AccessTokenLifetimeMinutes { get; set; } = 60;
     public int RefreshTokenLifetimeDays { get; set; } = 30;
+    public int RegisteredClientLifetimeDays { get; set; } = 30;
     public string NameClaim { get; set; } = "name";
     public string EmailClaim { get; set; } = "email";
     public string SubjectClaim { get; set; } = "sub";
