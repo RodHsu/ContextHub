@@ -166,7 +166,12 @@ internal sealed class SelfHostedOAuthService(
         }
 
         var token = CreateAccessToken(payload, options);
-        return OAuthTokenResult.Ok(token, Math.Max(1, options.AccessTokenLifetimeMinutes) * 60, payload.Scope);
+        var idToken = payload.Scope
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Contains("openid", StringComparer.Ordinal)
+            ? CreateIdToken(payload, options)
+            : string.Empty;
+        return OAuthTokenResult.Ok(token, idToken, Math.Max(1, options.AccessTokenLifetimeMinutes) * 60, payload.Scope);
     }
 
     public static string ResolveIssuer(HttpContext context, ChatGptGatewayOptions options)
@@ -214,6 +219,31 @@ internal sealed class SelfHostedOAuthService(
             new(ClaimTypes.Name, string.IsNullOrWhiteSpace(payload.DisplayName) ? payload.Username : payload.DisplayName),
             new(ClaimTypes.Email, payload.Email),
             new("scope", payload.Scope),
+            new("tenant_id", payload.TenantId.ToString("D")),
+            new("tenant_user_id", payload.UserId.ToString("D"))
+        };
+        var token = new JwtSecurityToken(
+            issuer,
+            options.ClientId,
+            claims,
+            now,
+            now.AddMinutes(Math.Max(1, options.AccessTokenLifetimeMinutes)),
+            new SigningCredentials(BuildSigningKey(options.SelfHostedSigningKey), SecurityAlgorithms.HmacSha256));
+        return TokenHandler.WriteToken(token);
+    }
+
+    private string CreateIdToken(AuthorizationCodePayload payload, OAuthOptions options)
+    {
+        var issuer = string.IsNullOrWhiteSpace(options.SelfHostedIssuer)
+            ? throw new InvalidOperationException("ChatGptGateway:OAuth:SelfHostedIssuer is required when SelfHosted is true.")
+            : options.SelfHostedIssuer.Trim().TrimEnd('/');
+        var now = DateTime.UtcNow;
+        var displayName = string.IsNullOrWhiteSpace(payload.DisplayName) ? payload.Username : payload.DisplayName;
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, payload.Username),
+            new(JwtRegisteredClaimNames.Email, payload.Email),
+            new(JwtRegisteredClaimNames.Name, displayName),
             new("tenant_id", payload.TenantId.ToString("D")),
             new("tenant_user_id", payload.UserId.ToString("D"))
         };
@@ -295,10 +325,10 @@ internal sealed record AuthorizeResult(bool Success, string RedirectUri, string 
     public static AuthorizeResult Fail(string error) => new(false, string.Empty, error);
 }
 
-internal sealed record OAuthTokenResult(bool Success, string AccessToken, int ExpiresIn, string Scope, string Error)
+internal sealed record OAuthTokenResult(bool Success, string AccessToken, string IdToken, int ExpiresIn, string Scope, string Error)
 {
-    public static OAuthTokenResult Ok(string accessToken, int expiresIn, string scope) => new(true, accessToken, expiresIn, scope, string.Empty);
-    public static OAuthTokenResult Fail(string error) => new(false, string.Empty, 0, string.Empty, error);
+    public static OAuthTokenResult Ok(string accessToken, string idToken, int expiresIn, string scope) => new(true, accessToken, idToken, expiresIn, scope, string.Empty);
+    public static OAuthTokenResult Fail(string error) => new(false, string.Empty, string.Empty, 0, string.Empty, error);
 }
 
 internal sealed record AuthorizationCodePayload(

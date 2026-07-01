@@ -1243,7 +1243,7 @@ public sealed class MemoryService(
             throw new UnauthorizedAccessException("Authentication is required.");
         }
 
-        if (!actor.HasUser)
+        if (!actor.HasUser && !actor.IsServiceActor)
         {
             throw new UnauthorizedAccessException("Authenticated requests must resolve to a tenant user.");
         }

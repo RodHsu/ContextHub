@@ -901,8 +901,27 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private async Task CollectMemoryGraphIndexAsync(int intervalSeconds, CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var previousActor = actorAccessor.Current;
+        actorAccessor.Current = new ContextHubRequestActor(
+            null,
+            null,
+            "dashboard-snapshot-collector",
+            null,
+            [SecurityScopes.MemoryRead],
+            [],
+            IsAuthenticated: true,
+            IsServiceActor: true);
+
         var refreshService = scope.ServiceProvider.GetRequiredService<IDashboardMemoryGraphIndexRefreshService>();
-        await refreshService.RefreshAsync("scheduled", intervalSeconds, cancellationToken);
+        try
+        {
+            await refreshService.RefreshAsync("scheduled", intervalSeconds, cancellationToken);
+        }
+        finally
+        {
+            actorAccessor.Current = previousActor;
+        }
     }
 
     private DashboardResourceSampleResult BuildResourceSample(DockerRuntimeSnapshot snapshot, RequestTrafficSampleResult requestSample)

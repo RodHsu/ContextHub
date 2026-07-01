@@ -129,6 +129,59 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     }
 
     [DockerRequiredFact]
+    public async Task ServiceActor_WithoutTenantUser_Should_Search_For_DashboardSnapshotCollector()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var projectId = $"ServiceGraph_{suffix}";
+        var title = $"Service actor graph fixture {suffix}";
+
+        await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: $"repo:service-graph:{suffix}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: title,
+                Content: $"Dashboard snapshot collector service actor search fixture {suffix}.",
+                Summary: title,
+                SourceType: "test",
+                SourceRef: "integration",
+                Tags: ["graph", "service-actor"],
+                Importance: 0.8m,
+                Confidence: 0.9m,
+                ProjectId: projectId),
+            CancellationToken.None);
+
+        var processed = await processor.ProcessNextAsync(CancellationToken.None);
+        processed.Should().NotBeNull();
+        processed!.Status.Should().Be(MemoryJobStatus.Completed);
+
+        actorAccessor.Current = new ContextHubRequestActor(
+            null,
+            null,
+            "dashboard-snapshot-collector",
+            null,
+            [SecurityScopes.MemoryRead],
+            [],
+            IsAuthenticated: true,
+            IsServiceActor: true);
+
+        var act = async () => await memoryService.SearchAsync(
+            new MemorySearchRequest(
+                $"service actor graph fixture {suffix}",
+                Limit: 5,
+                IncludeArchived: false,
+                ProjectId: projectId),
+            CancellationToken.None);
+
+        await act.Should().NotThrowAsync<UnauthorizedAccessException>();
+    }
+
+    [DockerRequiredFact]
     public async Task Upserting_Shared_Summary_Source_Type_Should_Enqueue_Summary_Refresh_Job()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

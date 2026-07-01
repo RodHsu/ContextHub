@@ -11,6 +11,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using System.Text.Json.Serialization;
 using System.Net;
+using System.Security.Claims;
 using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -147,6 +148,14 @@ app.Use(async (context, next) =>
         return;
     }
 
+    if (IsOpenIdConfigurationPath(context.Request.Path))
+    {
+        await CreateOpenIdConfiguration(
+            context,
+            context.RequestServices.GetRequiredService<IOptions<ChatGptGatewayOptions>>()).ExecuteAsync(context);
+        return;
+    }
+
     await next();
 });
 app.UseAuthentication();
@@ -191,6 +200,8 @@ app.MapGet("/api/status", (IOptions<ChatGptGatewayOptions> options) => Results.O
 app.MapGet("/.well-known/oauth-protected-resource/{resource?}", CreateProtectedResourceMetadata).AllowAnonymous();
 
 app.MapGet("/.well-known/oauth-authorization-server/{resource?}", CreateAuthorizationServerMetadata).AllowAnonymous();
+
+app.MapGet("/.well-known/openid-configuration/{resource?}", CreateOpenIdConfiguration).AllowAnonymous();
 
 app.MapGet("/oauth/chat/authorize", async (
     HttpContext context,
@@ -255,10 +266,13 @@ app.MapPost("/oauth/chat/token", async (
 
     return Results.Json(new OAuthTokenResponse(
         result.AccessToken,
+        string.IsNullOrWhiteSpace(result.IdToken) ? null : result.IdToken,
         "Bearer",
         result.ExpiresIn,
         result.Scope));
 }).AllowAnonymous();
+
+app.MapGet("/userinfo", (ClaimsPrincipal user) => Results.Json(CreateUserInfo(user))).RequireAuthorization();
 
 app.MapMcp("/mcp").RequireAuthorization();
 
@@ -271,6 +285,7 @@ static bool IsPublicPath(PathString path)
            value.StartsWith("/health/ready", StringComparison.OrdinalIgnoreCase) ||
            IsProtectedResourceMetadataPath(path) ||
            IsAuthorizationServerMetadataPath(path) ||
+           IsOpenIdConfigurationPath(path) ||
            value.StartsWith("/oauth/chat/authorize", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/oauth/chat/token", StringComparison.OrdinalIgnoreCase);
 }
@@ -287,6 +302,13 @@ static bool IsAuthorizationServerMetadataPath(PathString path)
     var value = path.Value ?? string.Empty;
     return string.Equals(value, "/.well-known/oauth-authorization-server", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(value, "/.well-known/oauth-authorization-server/mcp-chat", StringComparison.OrdinalIgnoreCase);
+}
+
+static bool IsOpenIdConfigurationPath(PathString path)
+{
+    var value = path.Value ?? string.Empty;
+    return string.Equals(value, "/.well-known/openid-configuration", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(value, "/.well-known/openid-configuration/mcp-chat", StringComparison.OrdinalIgnoreCase);
 }
 
 static string Required(string value, string key)
@@ -354,6 +376,50 @@ static IResult CreateAuthorizationServerMetadata(HttpContext context, IOptions<C
         NormalizeScopes(value.OAuth.Scopes));
 
     return Results.Json(metadata);
+}
+
+static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGatewayOptions> options)
+{
+    var value = options.Value;
+    var issuer = SelfHostedOAuthService.ResolveIssuer(context, value);
+    var metadata = new OpenIdConfigurationMetadata(
+        issuer,
+        $"{issuer}/oauth/chat/authorize",
+        $"{issuer}/oauth/chat/token",
+        $"{issuer}/userinfo",
+        ["code"],
+        ["authorization_code"],
+        ["S256"],
+        string.IsNullOrWhiteSpace(value.OAuth.ClientSecret)
+            ? ["none"]
+            : ["client_secret_basic", "client_secret_post"],
+        ["public"],
+        ["HS256"],
+        NormalizeScopes(value.OAuth.Scopes),
+        ["sub", "name", "email", "tenant_id", "tenant_user_id"]);
+
+    return Results.Json(metadata);
+}
+
+static OpenIdUserInfo CreateUserInfo(ClaimsPrincipal user)
+{
+    var subject = user.FindFirstValue("sub") ??
+                  user.FindFirstValue(ClaimTypes.NameIdentifier) ??
+                  user.Identity?.Name ??
+                  string.Empty;
+    var name = user.FindFirstValue("name") ??
+               user.FindFirstValue(ClaimTypes.Name) ??
+               subject;
+    var email = user.FindFirstValue("email") ??
+                user.FindFirstValue(ClaimTypes.Email) ??
+                string.Empty;
+
+    return new OpenIdUserInfo(
+        subject,
+        name,
+        email,
+        user.FindFirstValue("tenant_id"),
+        user.FindFirstValue("tenant_user_id"));
 }
 
 static string[] NormalizeScopes(IEnumerable<string> scopes)
@@ -449,11 +515,39 @@ internal sealed record OAuthAuthorizationServerMetadata(
     [property: JsonPropertyName("token_endpoint_auth_methods_supported")] IReadOnlyList<string> TokenEndpointAuthMethodsSupported,
     [property: JsonPropertyName("scopes_supported")] IReadOnlyList<string> ScopesSupported);
 
+internal sealed record OpenIdConfigurationMetadata(
+    [property: JsonPropertyName("issuer")] string Issuer,
+    [property: JsonPropertyName("authorization_endpoint")] string AuthorizationEndpoint,
+    [property: JsonPropertyName("token_endpoint")] string TokenEndpoint,
+    [property: JsonPropertyName("userinfo_endpoint")] string UserInfoEndpoint,
+    [property: JsonPropertyName("response_types_supported")] IReadOnlyList<string> ResponseTypesSupported,
+    [property: JsonPropertyName("grant_types_supported")] IReadOnlyList<string> GrantTypesSupported,
+    [property: JsonPropertyName("code_challenge_methods_supported")] IReadOnlyList<string> CodeChallengeMethodsSupported,
+    [property: JsonPropertyName("token_endpoint_auth_methods_supported")] IReadOnlyList<string> TokenEndpointAuthMethodsSupported,
+    [property: JsonPropertyName("subject_types_supported")] IReadOnlyList<string> SubjectTypesSupported,
+    [property: JsonPropertyName("id_token_signing_alg_values_supported")] IReadOnlyList<string> IdTokenSigningAlgValuesSupported,
+    [property: JsonPropertyName("scopes_supported")] IReadOnlyList<string> ScopesSupported,
+    [property: JsonPropertyName("claims_supported")] IReadOnlyList<string> ClaimsSupported);
+
 internal sealed record OAuthTokenResponse(
     [property: JsonPropertyName("access_token")] string AccessToken,
+    [property: JsonPropertyName("id_token")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? IdToken,
     [property: JsonPropertyName("token_type")] string TokenType,
     [property: JsonPropertyName("expires_in")] int ExpiresIn,
     [property: JsonPropertyName("scope")] string Scope);
+
+internal sealed record OpenIdUserInfo(
+    [property: JsonPropertyName("sub")] string Subject,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("email")] string Email,
+    [property: JsonPropertyName("tenant_id")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? TenantId,
+    [property: JsonPropertyName("tenant_user_id")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? TenantUserId);
 
 internal sealed record OAuthError(
     [property: JsonPropertyName("error")] string Error,

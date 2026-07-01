@@ -70,6 +70,25 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         metadata.GetProperty("bearer_methods_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("header");
+
+        using var oidcResponse = await client.GetAsync("/.well-known/openid-configuration/mcp-chat");
+        using var rootOidcResponse = await client.GetAsync("/.well-known/openid-configuration");
+
+        oidcResponse.EnsureSuccessStatusCode();
+        rootOidcResponse.EnsureSuccessStatusCode();
+        var oidcMetadata = await oidcResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var rootOidcMetadata = await rootOidcResponse.Content.ReadFromJsonAsync<JsonElement>();
+        oidcMetadata.GetProperty("issuer").GetString().Should().Be(TestAuthority);
+        rootOidcMetadata.GetProperty("issuer").GetString().Should().Be(TestAuthority);
+        oidcMetadata.GetProperty("authorization_endpoint").GetString().Should().Be($"{TestAuthority}/oauth/chat/authorize");
+        oidcMetadata.GetProperty("token_endpoint").GetString().Should().Be($"{TestAuthority}/oauth/chat/token");
+        oidcMetadata.GetProperty("userinfo_endpoint").GetString().Should().Be($"{TestAuthority}/userinfo");
+        oidcMetadata.GetProperty("id_token_signing_alg_values_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().Contain("HS256");
+        oidcMetadata.GetProperty("claims_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().Contain(["sub", "name", "email"]);
     }
 
     [DockerRequiredFact]
@@ -108,15 +127,24 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
         using var metadataResponse = await client.GetAsync("/.well-known/oauth-authorization-server/mcp-chat");
         using var rootMetadataResponse = await client.GetAsync("/.well-known/oauth-authorization-server");
+        using var oidcMetadataResponse = await client.GetAsync("/.well-known/openid-configuration/mcp-chat");
+        using var rootOidcMetadataResponse = await client.GetAsync("/.well-known/openid-configuration");
         var metadataBody = await metadataResponse.Content.ReadAsStringAsync();
         metadataResponse.IsSuccessStatusCode.Should().BeTrue(metadataBody);
         rootMetadataResponse.EnsureSuccessStatusCode();
+        oidcMetadataResponse.EnsureSuccessStatusCode();
+        rootOidcMetadataResponse.EnsureSuccessStatusCode();
         var metadata = await metadataResponse.Content.ReadFromJsonAsync<JsonElement>();
         var rootMetadata = await rootMetadataResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var oidcMetadata = await oidcMetadataResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var rootOidcMetadata = await rootOidcMetadataResponse.Content.ReadFromJsonAsync<JsonElement>();
         metadata.GetProperty("issuer").GetString().Should().Be(SelfHostedIssuer);
         rootMetadata.GetProperty("issuer").GetString().Should().Be(SelfHostedIssuer);
+        oidcMetadata.GetProperty("issuer").GetString().Should().Be(SelfHostedIssuer);
+        rootOidcMetadata.GetProperty("issuer").GetString().Should().Be(SelfHostedIssuer);
         metadata.GetProperty("authorization_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/authorize");
         metadata.GetProperty("token_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/token");
+        oidcMetadata.GetProperty("userinfo_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/userinfo");
 
         using var authorizePageResponse = await client.GetAsync(authorizePath);
         authorizePageResponse.EnsureSuccessStatusCode();
@@ -151,8 +179,21 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         tokenResponse.EnsureSuccessStatusCode();
         var tokenJson = await tokenResponse.Content.ReadFromJsonAsync<JsonElement>();
         var accessToken = tokenJson.GetProperty("access_token").GetString();
+        var idToken = tokenJson.GetProperty("id_token").GetString();
         accessToken.Should().NotBeNullOrWhiteSpace();
+        idToken.Should().NotBeNullOrWhiteSpace();
         tokenJson.GetProperty("token_type").GetString().Should().Be("Bearer");
+
+        using var userInfoClient = factory.CreateClient();
+        userInfoClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using var userInfoResponse = await userInfoClient.GetAsync("/userinfo");
+        userInfoResponse.EnsureSuccessStatusCode();
+        var userInfo = await userInfoResponse.Content.ReadFromJsonAsync<JsonElement>();
+        userInfo.GetProperty("sub").GetString().Should().Be("gateway-test-admin");
+        userInfo.GetProperty("name").GetString().Should().Be("OAuth Test User");
+        userInfo.GetProperty("email").GetString().Should().Be("oauth-user@example.test");
+        userInfo.GetProperty("tenant_id").GetString().Should().NotBeNullOrWhiteSpace();
+        userInfo.GetProperty("tenant_user_id").GetString().Should().NotBeNullOrWhiteSpace();
 
         using var mcpClient = factory.CreateClient();
         mcpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
