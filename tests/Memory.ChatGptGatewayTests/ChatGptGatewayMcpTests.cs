@@ -66,7 +66,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .Should().ContainSingle(TestAuthority);
         metadata.GetProperty("scopes_supported").EnumerateArray()
             .Select(x => x.GetString())
-            .Should().Contain(["openid", "profile", "email"]);
+            .Should().Contain(["openid", "profile", "email", "offline_access"]);
         metadata.GetProperty("bearer_methods_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("header");
@@ -89,6 +89,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         oidcMetadata.GetProperty("claims_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain(["sub", "name", "email"]);
+        oidcMetadata.GetProperty("scopes_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().Contain("offline_access");
     }
 
     [DockerRequiredFact]
@@ -119,7 +122,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             ["response_type"] = "code",
             ["client_id"] = SelfHostedClientId,
             ["redirect_uri"] = redirectUri,
-            ["scope"] = "openid profile email",
+            ["scope"] = "openid profile email offline_access",
             ["state"] = "state-123",
             ["code_challenge"] = challenge,
             ["code_challenge_method"] = "S256"
@@ -180,9 +183,35 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var tokenJson = await tokenResponse.Content.ReadFromJsonAsync<JsonElement>();
         var accessToken = tokenJson.GetProperty("access_token").GetString();
         var idToken = tokenJson.GetProperty("id_token").GetString();
+        var refreshToken = tokenJson.GetProperty("refresh_token").GetString();
         accessToken.Should().NotBeNullOrWhiteSpace();
         idToken.Should().NotBeNullOrWhiteSpace();
+        refreshToken.Should().NotBeNullOrWhiteSpace();
         tokenJson.GetProperty("token_type").GetString().Should().Be("Bearer");
+        tokenJson.GetProperty("scope").GetString().Should().Contain("offline_access");
+
+        using var refreshResponse = await client.PostAsync(
+            "/oauth/chat/token",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["client_id"] = SelfHostedClientId,
+                ["refresh_token"] = refreshToken!
+            }));
+        refreshResponse.EnsureSuccessStatusCode();
+        var refreshedJson = await refreshResponse.Content.ReadFromJsonAsync<JsonElement>();
+        refreshedJson.GetProperty("access_token").GetString().Should().NotBeNullOrWhiteSpace();
+        refreshedJson.GetProperty("refresh_token").GetString().Should().NotBeNullOrWhiteSpace();
+
+        using var reusedRefreshResponse = await client.PostAsync(
+            "/oauth/chat/token",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["client_id"] = SelfHostedClientId,
+                ["refresh_token"] = refreshToken!
+            }));
+        reusedRefreshResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
 
         using var userInfoClient = factory.CreateClient();
         userInfoClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);

@@ -239,7 +239,17 @@ resource_metadata="https://context-hub.wjcy.org/.well-known/oauth-protected-reso
 ```
 
 If using ContextHub self-hosted OAuth, the authorization server metadata endpoint
-must expose `/oauth/chat/authorize` and `/oauth/chat/token`; the diagnostic script
-checks this before authorized MCP calls. If using an external OIDC provider, add
-the ChatGPT-provided OAuth callback URL to the configured OIDC client allowlist,
-then rerun the authorized smoke check with a token from the same OIDC client.
+must expose `/oauth/chat/authorize`, `/oauth/chat/token`, and `/userinfo`, while
+OpenID discovery must advertise `offline_access`. In ChatGPT Developer Mode, set
+scopes to:
+
+```text
+openid profile email offline_access
+```
+
+Click `Scan Tools`, complete OAuth, wait for the scan to finish, then click
+`Create`. The app must then be selected from the tools menu in a new chat, unless
+it has been published and connected for the workspace. If using an external OIDC
+provider, add the ChatGPT-provided OAuth callback URL to the configured OIDC
+client allowlist, then rerun the authorized smoke check with a token from the same
+OIDC client.

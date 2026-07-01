@@ -13,6 +13,10 @@ Public MCP endpoints:
           OAuth protected resource metadata for ChatGPT MCP OAuth discovery
 /.well-known/oauth-authorization-server/mcp-chat
           OAuth authorization server metadata for ContextHub self-hosted OAuth
+/.well-known/openid-configuration/mcp-chat
+          OpenID Connect discovery metadata for ChatGPT MCP OAuth discovery
+/userinfo
+          OpenID Connect userinfo endpoint for ChatGPT MCP OAuth identity
 /oauth/chat/*
           ContextHub self-hosted OAuth authorization code flow
 ```
@@ -26,6 +30,8 @@ Use the same expression for MCP-specific Cache, Configuration, and WAF rules:
   starts_with(http.request.uri.path, "/mcp") or
   http.request.uri.path eq "/.well-known/oauth-protected-resource/mcp-chat" or
   http.request.uri.path eq "/.well-known/oauth-authorization-server/mcp-chat" or
+  http.request.uri.path eq "/.well-known/openid-configuration/mcp-chat" or
+  http.request.uri.path eq "/userinfo" or
   starts_with(http.request.uri.path, "/oauth/chat/")
 ))
 ```
@@ -33,8 +39,9 @@ Use the same expression for MCP-specific Cache, Configuration, and WAF rules:
 This intentionally includes `/mcp-chat`. If a Cloudflare UI rule uses explicit
 path equality instead of `starts_with`, include `/mcp`, `/mcp-chat`, and
 `/.well-known/oauth-protected-resource/mcp-chat`,
-`/.well-known/oauth-authorization-server/mcp-chat`, `/oauth/chat/authorize`, and
-`/oauth/chat/token`.
+`/.well-known/oauth-authorization-server/mcp-chat`,
+`/.well-known/openid-configuration/mcp-chat`, `/userinfo`,
+`/oauth/chat/authorize`, and `/oauth/chat/token`.
 
 For dynamic REST/API traffic, use:
 

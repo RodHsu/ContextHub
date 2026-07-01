@@ -248,17 +248,27 @@ app.MapPost("/oauth/chat/token", async (
     var (basicClientId, basicClientSecret) = ReadBasicClientCredentials(context.Request.Headers.Authorization.ToString());
     var clientId = string.IsNullOrWhiteSpace(basicClientId) ? form["client_id"].ToString() : basicClientId;
     var clientSecret = string.IsNullOrWhiteSpace(basicClientSecret) ? form["client_secret"].ToString() : basicClientSecret;
-    if (!string.Equals(form["grant_type"].ToString(), "authorization_code", StringComparison.Ordinal))
+    var grantType = form["grant_type"].ToString();
+    var result = grantType switch
     {
-        return Results.Json(new OAuthError("unsupported_grant_type", "Only authorization_code is supported."), statusCode: StatusCodes.Status400BadRequest);
+        "authorization_code" => oauth.ExchangeCode(
+            form["code"].ToString(),
+            form["redirect_uri"].ToString(),
+            clientId,
+            clientSecret,
+            form["code_verifier"].ToString()),
+        "refresh_token" => oauth.RefreshAccessToken(
+            form["refresh_token"].ToString(),
+            clientId,
+            clientSecret),
+        _ => OAuthTokenResult.Fail("Only authorization_code and refresh_token are supported.")
+    };
+    if (!string.Equals(grantType, "authorization_code", StringComparison.Ordinal) &&
+        !string.Equals(grantType, "refresh_token", StringComparison.Ordinal))
+    {
+        return Results.Json(new OAuthError("unsupported_grant_type", result.Error), statusCode: StatusCodes.Status400BadRequest);
     }
 
-    var result = oauth.ExchangeCode(
-        form["code"].ToString(),
-        form["redirect_uri"].ToString(),
-        clientId,
-        clientSecret,
-        form["code_verifier"].ToString());
     if (!result.Success)
     {
         return Results.Json(new OAuthError("invalid_grant", result.Error), statusCode: StatusCodes.Status400BadRequest);
@@ -267,6 +277,7 @@ app.MapPost("/oauth/chat/token", async (
     return Results.Json(new OAuthTokenResponse(
         result.AccessToken,
         string.IsNullOrWhiteSpace(result.IdToken) ? null : result.IdToken,
+        string.IsNullOrWhiteSpace(result.RefreshToken) ? null : result.RefreshToken,
         "Bearer",
         result.ExpiresIn,
         result.Scope));
@@ -534,6 +545,9 @@ internal sealed record OAuthTokenResponse(
     [property: JsonPropertyName("id_token")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? IdToken,
+    [property: JsonPropertyName("refresh_token")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? RefreshToken,
     [property: JsonPropertyName("token_type")] string TokenType,
     [property: JsonPropertyName("expires_in")] int ExpiresIn,
     [property: JsonPropertyName("scope")] string Scope);

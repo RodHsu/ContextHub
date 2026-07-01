@@ -37,17 +37,22 @@ OAuth discovery 使用同一個 domain，不新增 hostname：
 ```text
 https://context-hub.wjcy.org/.well-known/oauth-protected-resource/mcp-chat
 https://context-hub.wjcy.org/.well-known/oauth-authorization-server/mcp-chat
+https://context-hub.wjcy.org/.well-known/openid-configuration/mcp-chat
 https://context-hub.wjcy.org/oauth/chat/authorize
 https://context-hub.wjcy.org/oauth/chat/token
+https://context-hub.wjcy.org/userinfo
 ```
 
 `/mcp-chat` 的未授權回應會帶 `WWW-Authenticate` 與上述
 `resource_metadata` URL。正式 Developer Mode app 建立時，MCP URL 填
 `https://context-hub.wjcy.org/mcp-chat`；若使用 ContextHub self-hosted OAuth，
 authorization server metadata 會回傳同 domain 的 `/oauth/chat/authorize` 與
-`/oauth/chat/token`，登入使用既有 active ContextHub tenant user。若改接外部
-OIDC provider，則把 ChatGPT 顯示的 OAuth callback URL 加到該 OIDC client
-allowlist，然後用 `/mcp-chat` 重新連線。
+`/oauth/chat/token`，登入使用既有 active ContextHub tenant user。OAuth scopes
+填 `openid profile email offline_access`，讓 ChatGPT 可取得 user identity 與
+refresh token。建立 app 時需完成 OAuth 授權、等待 `Scan Tools` 完成，再按
+`Create`；之後在新 chat 的 tools menu 選取此 draft/dev app，或 publish 到
+workspace 後讓使用者 connect。若改接外部 OIDC provider，則把 ChatGPT 顯示的
+OAuth callback URL 加到該 OIDC client allowlist，然後用 `/mcp-chat` 重新連線。
 
 完成接入前必須通過三項驗證：
 

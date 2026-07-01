@@ -19,6 +19,7 @@ internal sealed class SelfHostedOAuthService(
     IOptions<ChatGptGatewayOptions> gatewayOptions)
 {
     private const string CodeCachePrefix = "chatgpt-oauth-code:";
+    private const string RefreshTokenCachePrefix = "chatgpt-oauth-refresh:";
     private static readonly JwtSecurityTokenHandler TokenHandler = new();
 
     public async Task<AuthorizeValidationResult> ValidateAuthorizeRequestAsync(
@@ -165,13 +166,36 @@ internal sealed class SelfHostedOAuthService(
             return OAuthTokenResult.Fail("Invalid PKCE verifier.");
         }
 
-        var token = CreateAccessToken(payload, options);
-        var idToken = payload.Scope
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Contains("openid", StringComparer.Ordinal)
-            ? CreateIdToken(payload, options)
-            : string.Empty;
-        return OAuthTokenResult.Ok(token, idToken, Math.Max(1, options.AccessTokenLifetimeMinutes) * 60, payload.Scope);
+        return CreateTokenResult(payload, options);
+    }
+
+    public OAuthTokenResult RefreshAccessToken(
+        string refreshToken,
+        string clientId,
+        string? clientSecret)
+    {
+        var options = gatewayOptions.Value.OAuth;
+        if (!options.SelfHosted)
+        {
+            return OAuthTokenResult.Fail("Self-hosted OAuth is not enabled.");
+        }
+
+        if (!string.Equals(clientId, options.ClientId, StringComparison.Ordinal) ||
+            (!string.IsNullOrWhiteSpace(options.ClientSecret) &&
+             !string.Equals(clientSecret, options.ClientSecret, StringComparison.Ordinal)))
+        {
+            return OAuthTokenResult.Fail("Invalid OAuth client.");
+        }
+
+        if (string.IsNullOrWhiteSpace(refreshToken) ||
+            !cache.TryGetValue<AuthorizationCodePayload>(RefreshTokenCachePrefix + refreshToken, out var payload) ||
+            payload is null)
+        {
+            return OAuthTokenResult.Fail("Invalid refresh token.");
+        }
+
+        cache.Remove(RefreshTokenCachePrefix + refreshToken);
+        return CreateTokenResult(payload, options);
     }
 
     public static string ResolveIssuer(HttpContext context, ChatGptGatewayOptions options)
@@ -204,6 +228,25 @@ internal sealed class SelfHostedOAuthService(
         }
 
         return new SymmetricSecurityKey(bytes);
+    }
+
+    private OAuthTokenResult CreateTokenResult(AuthorizationCodePayload payload, OAuthOptions options)
+    {
+        var token = CreateAccessToken(payload, options);
+        var requestedScopes = payload.Scope
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var idToken = requestedScopes.Contains("openid", StringComparer.Ordinal)
+            ? CreateIdToken(payload, options)
+            : string.Empty;
+        var refreshToken = requestedScopes.Contains("offline_access", StringComparer.Ordinal)
+            ? CreateRefreshToken(payload, options)
+            : string.Empty;
+        return OAuthTokenResult.Ok(
+            token,
+            idToken,
+            string.IsNullOrWhiteSpace(refreshToken) ? null : refreshToken,
+            Math.Max(1, options.AccessTokenLifetimeMinutes) * 60,
+            payload.Scope);
     }
 
     private string CreateAccessToken(AuthorizationCodePayload payload, OAuthOptions options)
@@ -255,6 +298,16 @@ internal sealed class SelfHostedOAuthService(
             now.AddMinutes(Math.Max(1, options.AccessTokenLifetimeMinutes)),
             new SigningCredentials(BuildSigningKey(options.SelfHostedSigningKey), SecurityAlgorithms.HmacSha256));
         return TokenHandler.WriteToken(token);
+    }
+
+    private string CreateRefreshToken(AuthorizationCodePayload payload, OAuthOptions options)
+    {
+        var refreshToken = CreateTokenValue(32);
+        cache.Set(
+            RefreshTokenCachePrefix + refreshToken,
+            payload,
+            TimeSpan.FromDays(Math.Max(1, options.RefreshTokenLifetimeDays)));
+        return refreshToken;
     }
 
     private static bool IsRedirectUriAllowed(string redirectUri, OAuthOptions options)
@@ -325,10 +378,10 @@ internal sealed record AuthorizeResult(bool Success, string RedirectUri, string 
     public static AuthorizeResult Fail(string error) => new(false, string.Empty, error);
 }
 
-internal sealed record OAuthTokenResult(bool Success, string AccessToken, string IdToken, int ExpiresIn, string Scope, string Error)
+internal sealed record OAuthTokenResult(bool Success, string AccessToken, string IdToken, string? RefreshToken, int ExpiresIn, string Scope, string Error)
 {
-    public static OAuthTokenResult Ok(string accessToken, string idToken, int expiresIn, string scope) => new(true, accessToken, idToken, expiresIn, scope, string.Empty);
-    public static OAuthTokenResult Fail(string error) => new(false, string.Empty, string.Empty, 0, string.Empty, error);
+    public static OAuthTokenResult Ok(string accessToken, string idToken, string? refreshToken, int expiresIn, string scope) => new(true, accessToken, idToken, refreshToken, expiresIn, scope, string.Empty);
+    public static OAuthTokenResult Fail(string error) => new(false, string.Empty, string.Empty, null, 0, string.Empty, error);
 }
 
 internal sealed record AuthorizationCodePayload(

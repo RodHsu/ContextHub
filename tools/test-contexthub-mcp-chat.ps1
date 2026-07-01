@@ -327,6 +327,10 @@ if (@($oidcMetadata.id_token_signing_alg_values_supported) -notcontains "HS256")
     throw "OpenID Connect metadata must include HS256 id_token support."
 }
 
+if (@($oidcMetadata.scopes_supported) -notcontains "offline_access") {
+    throw "OpenID Connect metadata must advertise offline_access refresh-token support."
+}
+
 if (@($oidcMetadata.claims_supported) -notcontains "sub") {
     throw "OpenID Connect metadata must include sub claim support."
 }
