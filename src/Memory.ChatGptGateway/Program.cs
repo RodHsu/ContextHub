@@ -237,7 +237,7 @@ app.MapPost("/oauth/chat/authorize", async (
         return Results.Content(RenderOAuthLogin(validation.Request, result.Error), "text/html", Encoding.UTF8, StatusCodes.Status401Unauthorized);
     }
 
-    return Results.Redirect(result.RedirectUri);
+    return new SeeOtherRedirectResult(result.RedirectUri);
 }).AllowAnonymous();
 
 app.MapPost("/oauth/chat/token", async (
@@ -566,6 +566,16 @@ internal sealed record OpenIdUserInfo(
 internal sealed record OAuthError(
     [property: JsonPropertyName("error")] string Error,
     [property: JsonPropertyName("error_description")] string ErrorDescription);
+
+internal sealed class SeeOtherRedirectResult(string location) : IResult
+{
+    public Task ExecuteAsync(HttpContext httpContext)
+    {
+        httpContext.Response.StatusCode = StatusCodes.Status303SeeOther;
+        httpContext.Response.Headers.Location = location;
+        return Task.CompletedTask;
+    }
+}
 
 internal static class CloudflareCacheHeaders
 {

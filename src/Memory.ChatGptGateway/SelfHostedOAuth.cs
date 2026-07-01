@@ -121,7 +121,8 @@ internal sealed class SelfHostedOAuthService(
         var redirect = QueryString.Create(new Dictionary<string, string?>
         {
             ["code"] = code,
-            ["state"] = request.State
+            ["state"] = request.State,
+            ["iss"] = ResolveAuthorizationResponseIssuer(options)
         });
         return AuthorizeResult.Ok(request.RedirectUri + redirect);
     }
@@ -326,6 +327,21 @@ internal sealed class SelfHostedOAuthService(
         return options.AllowedRedirectUriPrefixes
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Any(prefix => redirectUri.StartsWith(prefix.Trim(), StringComparison.Ordinal));
+    }
+
+    private static string? ResolveAuthorizationResponseIssuer(OAuthOptions options)
+    {
+        if (options.SelfHosted && !string.IsNullOrWhiteSpace(options.SelfHostedIssuer))
+        {
+            return options.SelfHostedIssuer.Trim().TrimEnd('/');
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.Authority))
+        {
+            return options.Authority.Trim().TrimEnd('/');
+        }
+
+        return null;
     }
 
     private static string NormalizeScopes(string requested, IReadOnlyList<string> supported)

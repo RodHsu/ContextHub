@@ -166,7 +166,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 ["username"] = "gateway-test-admin",
                 ["password"] = "oauth-password"
             }));
-        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Redirect);
+        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.SeeOther);
         var location = authorizeResponse.Headers.Location;
         location.Should().NotBeNull();
         location!.ToString().Should().StartWith(redirectUri);
@@ -174,6 +174,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var code = callbackQuery["code"].ToString();
         code.Should().NotBeNullOrWhiteSpace();
         callbackQuery["state"].ToString().Should().Be("state-123");
+        callbackQuery["iss"].ToString().Should().Be(SelfHostedIssuer);
 
         using var tokenResponse = await client.PostAsync(
             "/oauth/chat/token",
