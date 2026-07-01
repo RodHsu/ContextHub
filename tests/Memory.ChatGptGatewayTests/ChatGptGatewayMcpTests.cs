@@ -148,6 +148,12 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         metadata.GetProperty("authorization_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/authorize");
         metadata.GetProperty("token_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/token");
         oidcMetadata.GetProperty("userinfo_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/userinfo");
+        metadata.GetProperty("grant_types_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().Contain("refresh_token");
+        oidcMetadata.GetProperty("grant_types_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().Contain("refresh_token");
 
         using var authorizePageResponse = await client.GetAsync(authorizePath);
         authorizePageResponse.EnsureSuccessStatusCode();

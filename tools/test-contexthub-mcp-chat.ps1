@@ -323,6 +323,10 @@ if ([string]$oidcMetadata.userinfo_endpoint -notmatch "/userinfo$") {
     throw "OpenID Connect metadata must expose /userinfo, got '$($oidcMetadata.userinfo_endpoint)'."
 }
 
+if (@($oidcMetadata.grant_types_supported) -notcontains "refresh_token") {
+    throw "OpenID Connect metadata must include refresh_token grant support."
+}
+
 if (@($oidcMetadata.id_token_signing_alg_values_supported) -notcontains "HS256") {
     throw "OpenID Connect metadata must include HS256 id_token support."
 }

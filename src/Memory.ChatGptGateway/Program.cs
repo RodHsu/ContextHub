@@ -379,7 +379,7 @@ static IResult CreateAuthorizationServerMetadata(HttpContext context, IOptions<C
         $"{issuer}/oauth/chat/authorize",
         $"{issuer}/oauth/chat/token",
         ["code"],
-        ["authorization_code"],
+        ["authorization_code", "refresh_token"],
         ["S256"],
         string.IsNullOrWhiteSpace(value.OAuth.ClientSecret)
             ? ["none"]
@@ -399,7 +399,7 @@ static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGa
         $"{issuer}/oauth/chat/token",
         $"{issuer}/userinfo",
         ["code"],
-        ["authorization_code"],
+        ["authorization_code", "refresh_token"],
         ["S256"],
         string.IsNullOrWhiteSpace(value.OAuth.ClientSecret)
             ? ["none"]
