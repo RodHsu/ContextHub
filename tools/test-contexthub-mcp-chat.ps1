@@ -163,7 +163,14 @@ function ConvertTo-Base64Url {
 
 function New-CodeVerifier {
     $bytes = [byte[]]::new(32)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    }
+    finally {
+        $rng.Dispose()
+    }
+
     return ConvertTo-Base64Url -Bytes $bytes
 }
 
@@ -171,7 +178,14 @@ function New-CodeChallenge {
     param([string]$Verifier)
 
     $bytes = [System.Text.Encoding]::ASCII.GetBytes($Verifier)
-    $hash = [System.Security.Cryptography.SHA256]::HashData($bytes)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash($bytes)
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
     return ConvertTo-Base64Url -Bytes $hash
 }
 
