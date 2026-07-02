@@ -207,13 +207,19 @@ internal sealed class SelfHostedOAuthService(
             payload,
             TimeSpan.FromMinutes(Math.Max(1, options.AuthorizationCodeLifetimeMinutes)));
 
-        var redirect = QueryString.Create(new Dictionary<string, string?>
+        var includeIssuer = options.IncludeIssuerInAuthorizationResponse;
+        var redirectValues = new Dictionary<string, string?>
         {
             ["code"] = code,
-            ["state"] = request.State,
-            ["iss"] = ResolveAuthorizationResponseIssuer(options)
-        });
-        LogOAuthAuthorizeLogin(request, "success", string.Empty);
+            ["state"] = request.State
+        };
+        if (includeIssuer)
+        {
+            redirectValues["iss"] = ResolveAuthorizationResponseIssuer(options);
+        }
+
+        var redirect = QueryString.Create(redirectValues);
+        LogOAuthAuthorizeLogin(request, "success", string.Empty, includeIssuer);
         return AuthorizeResult.Ok(request.RedirectUri + redirect);
     }
 
@@ -519,8 +525,14 @@ internal sealed class SelfHostedOAuthService(
 
         if (string.Equals(clientId, options.ClientId, StringComparison.Ordinal))
         {
-            return string.IsNullOrWhiteSpace(options.ClientSecret) ||
-                   string.Equals(clientSecret, options.ClientSecret, StringComparison.Ordinal);
+            return string.IsNullOrWhiteSpace(options.ClientSecret)
+                ? string.IsNullOrWhiteSpace(clientSecret)
+                : string.Equals(clientSecret, options.ClientSecret, StringComparison.Ordinal);
+        }
+
+        if (!string.IsNullOrWhiteSpace(clientSecret))
+        {
+            return false;
         }
 
         return clientId.StartsWith("contexthub-chatgpt-dcr-", StringComparison.Ordinal) ||
@@ -593,15 +605,20 @@ internal sealed class SelfHostedOAuthService(
             failureReason);
     }
 
-    private void LogOAuthAuthorizeLogin(AuthorizeRequest request, string status, string failureReason)
+    private void LogOAuthAuthorizeLogin(
+        AuthorizeRequest request,
+        string status,
+        string failureReason,
+        bool includeIssuerInResponse = false)
     {
         logger.LogInformation(
-            "ChatGPT OAuth authorize login. event={Event} clientKind={ClientKind} redirectHost={RedirectHost} scope={Scope} resourcePresent={ResourcePresent} status={Status} failureReason={FailureReason}",
+            "ChatGPT OAuth authorize login. event={Event} clientKind={ClientKind} redirectHost={RedirectHost} scope={Scope} resourcePresent={ResourcePresent} includeIssuerInResponse={IncludeIssuerInResponse} status={Status} failureReason={FailureReason}",
             "chatgpt_oauth_authorize_login",
             GetClientKind(request.ClientId),
             GetHost(request.RedirectUri),
             request.Scope,
             !string.IsNullOrWhiteSpace(request.Resource),
+            includeIssuerInResponse,
             status,
             failureReason);
     }

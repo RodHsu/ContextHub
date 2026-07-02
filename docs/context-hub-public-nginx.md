@@ -247,9 +247,23 @@ scopes to:
 openid profile email offline_access
 ```
 
+Prefer ChatGPT default registration, Dynamic Client Registration, or CIMD. If the
+UI is configured with a user-defined OAuth client instead, use:
+
+```text
+OAuth client ID: contexthub-chatgpt-gateway
+OAuth client secret: leave empty
+Token endpoint authentication method: none
+```
+
 Click `Scan Tools`, complete OAuth, wait for the scan to finish, then click
 `Create`. The app must then be selected from the tools menu in a new chat, unless
 it has been published and connected for the workspace. If using an external OIDC
 provider, add the ChatGPT-provided OAuth callback URL to the configured OIDC
 client allowlist, then rerun the authorized smoke check with a token from the same
 OIDC client.
+
+Expected OAuth access sequence for the user-defined client mode is
+`GET /oauth/chat/authorize`, `POST /oauth/chat/authorize`,
+`POST /oauth/chat/token`, then `POST /mcp-chat`. Dynamic Client Registration adds
+`POST /oauth/chat/register` before the authorize request.

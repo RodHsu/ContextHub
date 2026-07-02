@@ -54,6 +54,13 @@ refresh token。建立 app 時需完成 OAuth 授權、等待 `Scan Tools` 完�
 workspace 後讓使用者 connect。若改接外部 OIDC provider，則把 ChatGPT 顯示的
 OAuth callback URL 加到該 OIDC client allowlist，然後用 `/mcp-chat` 重新連線。
 
+ChatGPT Developer Mode 優先使用 ChatGPT 預設註冊方式、Dynamic Client
+Registration，或 CIMD。若 UI 改用「使用者定義的 OAuth 用戶端」手動模式，
+OAuth 用戶端 ID 填 `contexthub-chatgpt-gateway`，用戶端密碼留空，權杖身份
+驗證方法選 `none`。成功連線時 log 應依序出現 `GET /oauth/chat/authorize`、
+`POST /oauth/chat/authorize`、`POST /oauth/chat/token`、`POST /mcp-chat`；
+DCR 模式會在最前面多一筆 `POST /oauth/chat/register`。
+
 完成接入前必須通過三項驗證：
 
 - Codex 既有 `/mcp` 正常，`codex mcp get contexthub` 仍為 `streamable_http` 指向 `/mcp`。

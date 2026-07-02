@@ -18,8 +18,10 @@ param(
     [string]$TokenEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_TOKEN",
     [string]$OAuthUsernameEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_USERNAME",
     [string]$OAuthPasswordEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_PASSWORD",
+    [string]$PredefinedClientId = "contexthub-chatgpt-gateway",
     [switch]$RequireAuthorizationToken,
     [switch]$RunDynamicClientRegistrationSmoke,
+    [switch]$RunPredefinedClientSmoke,
     [switch]$RunProposalSmoke
 )
 
@@ -339,6 +341,106 @@ function Get-OAuthAccessTokenViaDcr {
     return [string]$tokenJson.access_token
 }
 
+function Get-OAuthAccessTokenViaPredefinedClient {
+    param(
+        [string]$AuthorizationMetadataUrl,
+        [string]$Resource,
+        [string]$ClientId,
+        [string]$Username,
+        [string]$Password
+    )
+
+    $metadataResponse = Invoke-WebRequestAllowError -Uri $AuthorizationMetadataUrl -Method Get -TimeoutSec 15
+    if ([int]$metadataResponse.StatusCode -ne 200) {
+        throw "Expected 200 from OAuth authorization metadata before predefined-client smoke, got $($metadataResponse.StatusCode)."
+    }
+
+    $metadata = $metadataResponse.Content | ConvertFrom-Json
+    if (-not $metadata.authorization_endpoint -or -not $metadata.token_endpoint) {
+        throw "OAuth metadata must include authorization_endpoint and token_endpoint."
+    }
+
+    if (@($metadata.token_endpoint_auth_methods_supported) -notcontains "none") {
+        throw "Predefined public client smoke requires token_endpoint_auth_methods_supported to include none."
+    }
+
+    $redirectUri = "https://chatgpt.com/connector/oauth/contexthub-predefined-smoke-" + [Guid]::NewGuid().ToString("N")
+    $verifier = New-CodeVerifier
+    $challenge = New-CodeChallenge -Verifier $verifier
+    $authorizeUri = [string]$metadata.authorization_endpoint + "?" + (New-QueryString -Values @{
+        response_type = "code"
+        client_id = $ClientId
+        redirect_uri = $redirectUri
+        scope = "openid profile email offline_access"
+        state = "mcp-chat-predefined-smoke"
+        code_challenge = $challenge
+        code_challenge_method = "S256"
+        resource = $Resource
+    })
+
+    $authorizePageResponse = Invoke-WebRequestAllowError -Uri $authorizeUri -Method Get -TimeoutSec 15
+    if ([int]$authorizePageResponse.StatusCode -ne 200) {
+        throw "Expected 200 from OAuth authorize page during predefined-client smoke, got $($authorizePageResponse.StatusCode)."
+    }
+
+    $formBody = New-QueryString -Values @{
+        username = $Username
+        password = $Password
+    }
+    $authorizeResponse = Invoke-WebRequestAllowError `
+        -Uri $authorizeUri `
+        -Method Post `
+        -Headers @{ "Content-Type" = "application/x-www-form-urlencoded" } `
+        -Body $formBody `
+        -NoRedirect `
+        -TimeoutSec 15
+    if ([int]$authorizeResponse.StatusCode -ne 303) {
+        throw "Expected 303 from OAuth authorize submit during predefined-client smoke, got $($authorizeResponse.StatusCode): $($authorizeResponse.Content)"
+    }
+
+    $location = [string]$authorizeResponse.Headers["Location"]
+    if (-not $location) {
+        throw "OAuth authorize response did not include Location."
+    }
+
+    $callback = [Uri]$location
+    $code = Read-QueryParameter -Query $callback.Query -Name "code"
+    if (-not $code) {
+        throw "OAuth callback did not include authorization code."
+    }
+
+    $issuer = Read-QueryParameter -Query $callback.Query -Name "iss"
+    if ($issuer) {
+        throw "OAuth callback included iss during predefined-client smoke; ChatGPT-compatible default should only return code and state."
+    }
+
+    $tokenBody = New-QueryString -Values @{
+        grant_type = "authorization_code"
+        client_id = $ClientId
+        code = $code
+        redirect_uri = $redirectUri
+        code_verifier = $verifier
+        resource = $Resource
+    }
+    $tokenResponse = Invoke-WebRequestAllowError `
+        -Uri ([string]$metadata.token_endpoint) `
+        -Method Post `
+        -Headers @{ "Content-Type" = "application/x-www-form-urlencoded"; Accept = "application/json" } `
+        -Body $tokenBody `
+        -TimeoutSec 15
+    if ([int]$tokenResponse.StatusCode -ne 200) {
+        throw "Expected 200 from OAuth token endpoint during predefined-client smoke, got $($tokenResponse.StatusCode): $($tokenResponse.Content)"
+    }
+
+    $tokenJson = $tokenResponse.Content | ConvertFrom-Json
+    if (-not $tokenJson.access_token) {
+        throw "OAuth token endpoint did not return access_token."
+    }
+
+    Write-Host "Predefined public client OAuth token exchange completed."
+    return [string]$tokenJson.access_token
+}
+
 function Invoke-McpJsonRpc {
     param(
         [string]$Endpoint,
@@ -561,6 +663,10 @@ if ([string]$rootOidcMetadata.userinfo_endpoint -ne [string]$oidcMetadata.userin
 }
 
 $token = Get-OptionalBearerToken -Name $TokenEnvironmentVariable
+if ($RunDynamicClientRegistrationSmoke -and $RunPredefinedClientSmoke) {
+    throw "Use only one OAuth smoke mode at a time: -RunDynamicClientRegistrationSmoke or -RunPredefinedClientSmoke."
+}
+
 if ($RunDynamicClientRegistrationSmoke) {
     $oauthUsername = Get-OptionalBearerToken -Name $OAuthUsernameEnvironmentVariable
     $oauthPassword = Get-OptionalBearerToken -Name $OAuthPasswordEnvironmentVariable
@@ -571,6 +677,20 @@ if ($RunDynamicClientRegistrationSmoke) {
     $token = Get-OAuthAccessTokenViaDcr `
         -AuthorizationMetadataUrl $AuthorizationServerMetadataUrl `
         -Resource $Endpoint `
+        -Username $oauthUsername `
+        -Password $oauthPassword
+}
+elseif ($RunPredefinedClientSmoke) {
+    $oauthUsername = Get-OptionalBearerToken -Name $OAuthUsernameEnvironmentVariable
+    $oauthPassword = Get-OptionalBearerToken -Name $OAuthPasswordEnvironmentVariable
+    if ([string]::IsNullOrWhiteSpace($oauthUsername) -or [string]::IsNullOrWhiteSpace($oauthPassword)) {
+        throw "$OAuthUsernameEnvironmentVariable and $OAuthPasswordEnvironmentVariable are required when -RunPredefinedClientSmoke is set."
+    }
+
+    $token = Get-OAuthAccessTokenViaPredefinedClient `
+        -AuthorizationMetadataUrl $AuthorizationServerMetadataUrl `
+        -Resource $Endpoint `
+        -ClientId $PredefinedClientId `
         -Username $oauthUsername `
         -Password $oauthPassword
 }
