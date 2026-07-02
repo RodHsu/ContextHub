@@ -102,6 +102,23 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task OAuth_Public_Endpoints_Should_Allow_ChatGpt_Cors_Preflight()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Options, "/oauth/chat/register");
+        request.Headers.TryAddWithoutValidation("Origin", "https://chatgpt.com");
+        request.Headers.TryAddWithoutValidation("Access-Control-Request-Method", "POST");
+        request.Headers.TryAddWithoutValidation("Access-Control-Request-Headers", "content-type");
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.NoContent);
+        response.Headers.GetValues("Access-Control-Allow-Origin").Should().Contain("https://chatgpt.com");
+        response.Headers.GetValues("Access-Control-Allow-Methods").Should().ContainSingle(x => x.Contains("POST", StringComparison.Ordinal));
+        response.Headers.GetValues("Access-Control-Allow-Headers").Should().ContainSingle(x => x.Contains("content-type", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [DockerRequiredFact]
     public async Task SelfHosted_OAuth_Authorization_Code_Should_Issue_Mcp_Bearer_Token()
     {
         await using var factory = new ChatGptGatewayApplicationFactory(
@@ -402,6 +419,24 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             });
 
         registerResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+    }
+
+    [DockerRequiredFact]
+    public async Task SelfHosted_OAuth_Dynamic_Client_Registration_Should_Reject_Invalid_Json_As_Client_Metadata_Error()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true);
+        using var client = factory.CreateClient();
+
+        using var registerResponse = await client.PostAsync(
+            "/oauth/chat/register",
+            new StringContent("{", Encoding.UTF8, "application/json"));
+
+        registerResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        var error = await registerResponse.Content.ReadFromJsonAsync<JsonElement>();
+        error.GetProperty("error").GetString().Should().Be("invalid_client_metadata");
     }
 
     [DockerRequiredFact]

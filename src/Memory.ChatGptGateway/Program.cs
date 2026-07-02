@@ -111,6 +111,20 @@ builder.Services.AddMcpServer()
 var app = builder.Build();
 
 app.UseForwardedHeaders();
+app.Use(async (context, next) =>
+{
+    if (IsChatGptOAuthCorsPath(context.Request.Path))
+    {
+        ApplyChatGptOAuthCorsHeaders(context);
+        if (HttpMethods.IsOptions(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return;
+        }
+    }
+
+    await next();
+});
 app.UseExceptionHandler();
 app.Use(async (context, next) =>
 {
@@ -246,7 +260,18 @@ app.MapPost("/oauth/chat/register", async (
     HttpContext context,
     SelfHostedOAuthService oauth) =>
 {
-    var request = await context.Request.ReadFromJsonAsync<OAuthClientRegistrationRequest>(context.RequestAborted);
+    OAuthClientRegistrationRequest? request;
+    try
+    {
+        request = await context.Request.ReadFromJsonAsync<OAuthClientRegistrationRequest>(context.RequestAborted);
+    }
+    catch (Exception ex) when (ex is BadHttpRequestException or System.Text.Json.JsonException)
+    {
+        return Results.Json(
+            new OAuthError("invalid_client_metadata", "Registration payload must be valid JSON."),
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
     if (request is null)
     {
         return Results.Json(new OAuthError("invalid_client_metadata", "Registration payload is required."), statusCode: StatusCodes.Status400BadRequest);
@@ -322,6 +347,38 @@ static bool IsPublicPath(PathString path)
            value.StartsWith("/oauth/chat/authorize", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/oauth/chat/register", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/oauth/chat/token", StringComparison.OrdinalIgnoreCase);
+}
+
+static bool IsChatGptOAuthCorsPath(PathString path)
+    => IsProtectedResourceMetadataPath(path) ||
+       IsAuthorizationServerMetadataPath(path) ||
+       IsOpenIdConfigurationPath(path) ||
+       (path.Value ?? string.Empty).StartsWith("/oauth/chat/", StringComparison.OrdinalIgnoreCase);
+
+static void ApplyChatGptOAuthCorsHeaders(HttpContext context)
+{
+    var origin = context.Request.Headers.Origin.ToString();
+    if (IsAllowedChatGptOrigin(origin))
+    {
+        context.Response.Headers["Access-Control-Allow-Origin"] = origin;
+        context.Response.Headers.Append("Vary", "Origin");
+    }
+
+    context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
+    context.Response.Headers["Access-Control-Allow-Headers"] = "authorization, content-type, accept, mcp-session-id, mcp-protocol-version";
+    context.Response.Headers["Access-Control-Max-Age"] = "600";
+}
+
+static bool IsAllowedChatGptOrigin(string origin)
+{
+    if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri) ||
+        uri.Scheme != Uri.UriSchemeHttps)
+    {
+        return false;
+    }
+
+    return string.Equals(uri.Host, "chatgpt.com", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(uri.Host, "chat.openai.com", StringComparison.OrdinalIgnoreCase);
 }
 
 static bool IsProtectedResourceMetadataPath(PathString path)
