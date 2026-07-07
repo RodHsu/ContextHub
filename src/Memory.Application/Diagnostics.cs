@@ -203,7 +203,7 @@ public sealed class PerformanceProbeService(
             for (var offset = 0; offset < chunks.Result.Count; offset += batchSize)
             {
                 var batch = chunks.Result.Skip(offset).Take(batchSize)
-                    .Select(chunk => new BatchEmbeddingItem(chunk.Text, EmbeddingPurpose.Document))
+                    .Select(chunk => new BatchEmbeddingItem(chunk.Text, EmbeddingPurpose.Document, "performance-probe-document"))
                     .ToArray();
                 await embeddingProvider.EmbedBatchAsync(batch, cancellationToken);
             }

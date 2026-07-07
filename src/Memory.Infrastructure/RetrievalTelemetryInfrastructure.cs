@@ -54,7 +54,8 @@ public sealed class DatabaseRetrievalTelemetryService(
                 SourceRef = hit.SourceRef?.Trim() ?? string.Empty,
                 Score = hit.Score,
                 Excerpt = hit.Excerpt?.Trim() ?? string.Empty,
-                ProjectId = ProjectContext.Normalize(hit.ProjectId)
+                ProjectId = ProjectContext.Normalize(hit.ProjectId),
+                CreatedAt = entity.CreatedAt
             })
             .ToList();
 

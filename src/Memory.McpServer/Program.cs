@@ -1507,9 +1507,24 @@ maintenance.MapPost("/retrieval-telemetry-retention/run", async (
 maintenance.MapPost("/vacuum-full-reclaim/run", async (
     VacuumFullReclaimRunRequest request,
     IVacuumFullReclaimService service,
+    IMaintenanceCoordinator coordinator,
     IRequestActorAccessor actorAccessor,
     IHostApplicationLifetime applicationLifetime) =>
 {
+    var maintenanceStatus = await coordinator.GetStatusAsync(applicationLifetime.ApplicationStopping);
+    if (maintenanceStatus.Phase != MaintenancePhase.Running)
+    {
+        return Results.Problem(
+            title: "ContextHub maintenance mode is required.",
+            detail: "Run /api/maintenance/windows/current/start or /api/maintenance/mode before starting VACUUM FULL reclaim.",
+            statusCode: StatusCodes.Status409Conflict,
+            extensions: new Dictionary<string, object?>
+            {
+                ["phase"] = maintenanceStatus.Phase.ToString(),
+                ["runId"] = maintenanceStatus.RunId
+            });
+    }
+
     var result = await service.RunAsync(
         string.IsNullOrWhiteSpace(request.TriggeredBy) ? MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor) : request.TriggeredBy,
         applicationLifetime.ApplicationStopping);

@@ -22,22 +22,23 @@ x-dashboard-config: &dashboard-config
 x-telemetry-retention-config: &telemetry-retention-config
   TelemetryRetention__Enabled: ${TELEMETRY_RETENTION_ENABLED:-true}
   TelemetryRetention__HitsRetentionDays: ${TELEMETRY_RETENTION_HITS_DAYS:-3}
-  TelemetryRetention__EventsRetentionDays: ${TELEMETRY_RETENTION_EVENTS_DAYS:-30}
+  TelemetryRetention__EventsRetentionDays: ${TELEMETRY_RETENTION_EVENTS_DAYS:-7}
   TelemetryRetention__SummaryRetentionDays: ${TELEMETRY_RETENTION_SUMMARY_DAYS:-30}
   TelemetryRetention__SecurityAuditRetentionDays: ${TELEMETRY_RETENTION_SECURITY_AUDIT_DAYS:-180}
   TelemetryRetention__RuntimeLogRetentionDays: ${TELEMETRY_RETENTION_RUNTIME_LOG_DAYS:-30}
   TelemetryRetention__MaintenanceRunRetentionDays: ${TELEMETRY_RETENTION_MAINTENANCE_RUN_DAYS:-180}
   TelemetryRetention__HitSummaryTopPerBucket: ${TELEMETRY_RETENTION_HIT_SUMMARY_TOP_PER_BUCKET:-100}
-  TelemetryRetention__RunAtLocalTime: ${TELEMETRY_RETENTION_RUN_AT_LOCAL_TIME:-03:30}
+  TelemetryRetention__MaxSummaryDaysPerRun: ${TELEMETRY_RETENTION_MAX_SUMMARY_DAYS_PER_RUN:-3}
+  TelemetryRetention__RunAtLocalTime: ${TELEMETRY_RETENTION_RUN_AT_LOCAL_TIME:-03:00}
   TelemetryRetention__TimeZone: ${TELEMETRY_RETENTION_TIME_ZONE:-Asia/Taipei}
   TelemetryRetention__BatchSize: ${TELEMETRY_RETENTION_BATCH_SIZE:-5000}
   TelemetryRetention__EventBatchSize: ${TELEMETRY_RETENTION_EVENT_BATCH_SIZE:-1000}
   TelemetryRetention__TimeWindowDays: ${TELEMETRY_RETENTION_TIME_WINDOW_DAYS:-3}
   TelemetryRetention__DelayBetweenBatchesMs: ${TELEMETRY_RETENTION_DELAY_BETWEEN_BATCHES_MS:-250}
   TelemetryRetention__CommandTimeoutSeconds: ${TELEMETRY_RETENTION_COMMAND_TIMEOUT_SECONDS:-300}
-  TelemetryRetention__MaxDurationMinutes: ${TELEMETRY_RETENTION_MAX_DURATION_MINUTES:-15}
+  TelemetryRetention__MaxDurationMinutes: ${TELEMETRY_RETENTION_MAX_DURATION_MINUTES:-120}
   TelemetryRetention__RunVacuumAnalyzeAfterRetention: ${TELEMETRY_RETENTION_RUN_VACUUM_ANALYZE_AFTER_RETENTION:-true}
-  TelemetryRetention__RunVacuumFullAutomatically: ${TELEMETRY_RETENTION_RUN_VACUUM_FULL_AUTOMATICALLY:-true}
+  TelemetryRetention__RunVacuumFullAutomatically: ${TELEMETRY_RETENTION_RUN_VACUUM_FULL_AUTOMATICALLY:-false}
 
 x-chatgpt-gateway-config: &chatgpt-gateway-config
   ChatGptGateway__OAuth__Authority: ${CHATGPT_GATEWAY_OAUTH_AUTHORITY:-}

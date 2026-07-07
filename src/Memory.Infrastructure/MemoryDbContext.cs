@@ -36,6 +36,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<RetrievalHit> RetrievalHits => Set<RetrievalHit>();
     public DbSet<RetrievalTelemetryDailySummary> RetrievalTelemetryDailySummaries => Set<RetrievalTelemetryDailySummary>();
     public DbSet<RetrievalTelemetryDailyHitSummary> RetrievalTelemetryDailyHitSummaries => Set<RetrievalTelemetryDailyHitSummary>();
+    public DbSet<EmbeddingUsageHourly> EmbeddingUsageHourly => Set<EmbeddingUsageHourly>();
     public DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints => Set<LogIngestionCheckpoint>();
     public DbSet<SourceConnection> SourceConnections => Set<SourceConnection>();
     public DbSet<SourceSyncRun> SourceSyncRuns => Set<SourceSyncRun>();
@@ -355,6 +356,9 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Score).HasColumnName("score");
             entity.Property(x => x.Excerpt).HasColumnName("excerpt");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.CreatedAt, x.RetrievalEventId })
+                .HasDatabaseName("ix_retrieval_hits_created_at_event_id");
         });
 
         modelBuilder.Entity<RetrievalTelemetryDailySummary>(entity =>
@@ -408,6 +412,33 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => x.SummaryDate);
             entity.HasIndex(x => new { x.ProjectId, x.EntryPoint, x.SummaryDate, x.HitCount });
+        });
+
+        modelBuilder.Entity<EmbeddingUsageHourly>(entity =>
+        {
+            entity.ToTable("embedding_usage_hourly");
+            entity.HasKey(x => new { x.BucketStartUtc, x.ServiceName, x.Provider, x.Profile, x.Purpose, x.SourceKind, x.MaxTokens });
+            entity.Property(x => x.BucketStartUtc).HasColumnName("bucket_start_utc");
+            entity.Property(x => x.ServiceName).HasColumnName("service_name");
+            entity.Property(x => x.Provider).HasColumnName("provider");
+            entity.Property(x => x.Profile).HasColumnName("profile");
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.SourceKind).HasColumnName("source_kind");
+            entity.Property(x => x.MaxTokens).HasColumnName("max_tokens");
+            entity.Property(x => x.TotalInputs).HasColumnName("total_inputs");
+            entity.Property(x => x.TruncatedInputs).HasColumnName("truncated_inputs");
+            entity.Property(x => x.TotalTokenCount).HasColumnName("total_token_count");
+            entity.Property(x => x.TotalTruncatedTokens).HasColumnName("total_truncated_tokens");
+            entity.Property(x => x.MaxTokenCount).HasColumnName("max_token_count");
+            entity.Property(x => x.HistogramJson)
+                .HasColumnName("histogram_json")
+                .HasColumnType("jsonb")
+                .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.FirstSeenAt).HasColumnName("first_seen_at");
+            entity.Property(x => x.LastSeenAt).HasColumnName("last_seen_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => x.BucketStartUtc);
+            entity.HasIndex(x => new { x.ServiceName, x.Profile, x.Purpose, x.SourceKind, x.BucketStartUtc });
         });
 
         modelBuilder.Entity<LogIngestionCheckpoint>(entity =>

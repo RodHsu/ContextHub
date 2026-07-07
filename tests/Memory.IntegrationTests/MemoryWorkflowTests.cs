@@ -366,6 +366,65 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
 
         telemetryHits.Should().NotBeEmpty();
         telemetryHits.Should().Contain(x => x.MemoryId == created.Id);
+        telemetryHits.Should().OnlyContain(x => x.CreatedAt.HasValue);
+    }
+
+    [DockerRequiredFact]
+    public async Task Search_With_SummaryOnly_Telemetry_Should_Write_Event_Without_Raw_Hits()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var query = $"retrieval-telemetry-summary-only-{Guid.NewGuid():N}";
+
+        await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: $"repo:telemetry-summary-only:{Guid.NewGuid():N}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: "Summary-only telemetry fixture",
+                Content: $"This fixture should be found for query {query}.",
+                Summary: "Summary-only telemetry fixture",
+                SourceType: "document",
+                SourceRef: "tests",
+                Tags: ["telemetry", "summary-only"],
+                Importance: 0.8m,
+                Confidence: 0.9m),
+            CancellationToken.None);
+
+        await processor.ProcessNextAsync(CancellationToken.None);
+
+        var hits = await memoryService.SearchAsync(
+            new MemorySearchRequest(
+                query,
+                5,
+                false,
+                ProjectContext.DefaultProjectId,
+                null,
+                MemoryQueryMode.CurrentOnly,
+                false,
+                new RetrievalTelemetryContext(
+                    "tests.search.summary-only",
+                    "test",
+                    "integration summary-only telemetry",
+                    DetailLevel: RetrievalTelemetryDetailLevel.SummaryOnly)),
+            CancellationToken.None);
+
+        hits.Should().NotBeEmpty();
+
+        var telemetryEvent = await dbContext.RetrievalEvents
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync(x => x.EntryPoint == "tests.search.summary-only" && x.QueryText == query, CancellationToken.None);
+
+        telemetryEvent.Should().NotBeNull();
+        telemetryEvent!.ResultCount.Should().BeGreaterThan(0);
+
+        var telemetryHits = await dbContext.RetrievalHits
+            .Where(x => x.RetrievalEventId == telemetryEvent.Id)
+            .ToListAsync(CancellationToken.None);
+        telemetryHits.Should().BeEmpty();
     }
 
     [DockerRequiredFact]

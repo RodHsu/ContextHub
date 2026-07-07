@@ -260,7 +260,8 @@ public sealed record DashboardMonitoringResult(
     DashboardDockerHostResult? DockerHost = null,
     DashboardDependencyResourcesResult? DependencyResources = null,
     IReadOnlyList<DashboardResourceSampleResult>? ResourceSamples = null,
-    DashboardContextSavingsResult? ContextSavings = null);
+    DashboardContextSavingsResult? ContextSavings = null,
+    IReadOnlyList<EmbeddingUsageWindowResult>? EmbeddingUsage = null);
 
 public sealed record RuntimeConfigurationResult(
     string Namespace,

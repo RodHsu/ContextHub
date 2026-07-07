@@ -358,7 +358,8 @@ textarea {
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
     scrollbar-width: thin;
@@ -626,7 +627,7 @@ textarea {
 
 .security-layout > .panel.security-my-token-panel > .table-scroll-shell.security-my-token-table-shell {
     min-height: 0;
-    max-height: 118px;
+    max-height: none;
 }
 
 .security-token-table {
@@ -743,12 +744,15 @@ textarea {
 .security-layout > .panel {
     display: flex;
     flex-direction: column;
-    min-height: clamp(360px, 44vh, 520px);
+    align-items: stretch;
+    gap: 0.75rem;
+    min-height: auto;
+    overflow: visible;
 }
 
 .security-layout > .panel > .table-scroll-shell {
-    flex: 1 1 auto;
-    min-height: 180px;
+    flex: 0 0 auto;
+    min-height: fit-content;
     max-height: none;
 }
 
@@ -1083,11 +1087,20 @@ textarea {
 .split-page-body > .split-layout,
 .memories-page-body > .split-layout,
 .jobs-page-body > .split-layout,
-.jobs-page-body > .panel,
 .storage-page-body > .storage-layout {
     min-width: 0;
     min-height: 0;
     overflow: auto;
+}
+
+.split-page-body > .split-layout,
+.storage-page-body > .storage-layout,
+.jobs-page-body > .panel,
+.jobs-page-body > .split-layout {
+    min-width: 0;
+    min-height: 0;
+    align-items: start;
+    overflow: visible;
 }
 
 .page-scroll-host {
@@ -2713,26 +2726,39 @@ textarea {
 
 .jobs-workspace-layout {
     grid-template-columns: minmax(0, 1.36fr) minmax(340px, 0.64fr);
-    align-items: stretch;
+    align-items: start;
     grid-row: 2;
+    min-height: 0;
+    overflow: visible;
 }
 
 .jobs-retention-panel {
     grid-row: 3;
+    position: relative;
+    z-index: 0;
 }
 
 .jobs-list-panel {
-    min-height: clamp(420px, calc(var(--dashboard-viewport-height) - 310px), 760px);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
 }
 
 .jobs-list-panel .panel-scroll-body {
+    flex: 1 1 auto;
+    min-height: 0;
     max-height: none;
+    overflow: visible;
     padding-right: 0;
 }
 
 .jobs-table-shell {
-    min-height: clamp(320px, calc(var(--dashboard-viewport-height) - 420px), 620px);
+    min-height: 18rem;
     max-height: none;
+    overflow-x: auto;
+    overflow-y: visible;
 }
 
 .jobs-table {
@@ -2815,7 +2841,7 @@ textarea {
 }
 
 .jobs-retention-panel .table-scroll-shell {
-    max-height: 260px;
+    max-height: none;
 }
 
 .jobs-retention-summary-grid {
@@ -3162,6 +3188,11 @@ textarea {
     min-height: 0;
 }
 
+.panel-scroll:has(> .table-scroll-shell) {
+    grid-template-rows: auto auto;
+    align-content: start;
+}
+
 .panel-scroll-body {
     min-height: 0;
     max-height: var(--panel-scroll-max-height);
@@ -3227,18 +3258,27 @@ textarea {
 }
 
 .storage-table-panel {
-    position: sticky;
-    top: calc(72px + 1.4rem);
-    max-height: var(--storage-panel-max-height);
-    grid-template-rows: auto auto minmax(0, 1fr);
+    display: grid;
+    gap: 0.75rem;
+    position: static;
+    top: auto;
+    width: 100%;
+    max-width: 100%;
+    max-height: none;
+    height: auto;
+    grid-template-rows: auto auto auto;
+    align-content: start;
+    margin-bottom: var(--dashboard-grid-gap);
+    overflow: visible;
 }
 
 .storage-table-list {
+    display: grid;
+    gap: 0.65rem;
+    height: auto;
+    min-height: 0;
     max-height: none;
-    padding-right: 0.2rem;
-    scrollbar-gutter: stable;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(74, 141, 255, 0.92) rgba(255, 255, 255, 0.05);
+    overflow: visible;
 }
 
 .page-scroll-host::-webkit-scrollbar,
@@ -3280,14 +3320,54 @@ textarea {
 }
 
 .storage-detail-panel {
-    display: grid;
-    gap: 1rem;
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+}
+
+.storage-detail-panel > * + *,
+.storage-detail-body > * + *,
+.storage-content-stack > * + * {
+    margin-top: 1rem;
+}
+
+.storage-layout > .panel {
+    flex: 0 0 auto;
+}
+
+.storage-layout,
+.storage-detail-body,
+.storage-content-stack,
+.storage-detail-body > *,
+.storage-content-stack > * {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+.storage-detail-body {
+    display: block;
+    min-width: 0;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
 }
 
 .storage-content-stack {
-    display: grid;
-    gap: 0.9rem;
-    align-content: start;
+    display: block;
+    min-width: 0;
+    min-height: 0;
+    overflow: visible;
+}
+
+.storage-detail-panel .table-scroll-shell {
+    display: flow-root;
 }
 
 .memories-scope-hint-panel {
@@ -3386,19 +3466,24 @@ textarea {
 }
 
 .table-scroll-shell {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    height: auto;
     overflow-x: auto;
-    overflow-y: auto;
-    max-height: var(--panel-scroll-max-height);
-    border-radius: 14px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    background: rgba(255, 255, 255, 0.015);
+    overflow-y: visible;
+    max-height: none;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-panel) 72%, transparent);
     scrollbar-gutter: stable both-edges;
     scrollbar-width: thin;
     scrollbar-color: rgba(74, 141, 255, 0.92) rgba(255, 255, 255, 0.05);
 }
 
 .table-scroll-shell-tall {
-    max-height: var(--panel-scroll-max-height-tall);
+    max-height: none;
 }
 
 .page-scroll-host::-webkit-scrollbar-corner,
@@ -3413,7 +3498,7 @@ textarea {
     position: sticky;
     top: 0;
     z-index: 1;
-    background: #101724;
+    background: var(--surface-muted);
 }
 
 .storage-row-table {
@@ -3751,6 +3836,7 @@ textarea {
 
 @media (max-width: 1360px) {
     .split-layout,
+    .chatgpt-proposals-split-layout,
     .runtime-top-grid,
     .storage-layout {
         grid-template-columns: 1fr;
@@ -6592,6 +6678,7 @@ textarea:focus {
     }
 
     .split-layout,
+    .chatgpt-proposals-split-layout,
     .sources-split-layout,
     .evaluation-split-layout,
     .storage-layout,
@@ -6741,9 +6828,13 @@ textarea:focus {
 .split-page-body > .split-layout,
 .memories-page-body > .split-layout,
 .jobs-page-body > .split-layout,
-.jobs-page-body > .panel,
 .storage-page-body > .storage-layout {
-    overflow: auto;
+    overflow: visible;
+}
+
+.jobs-page-body > .split-layout,
+.jobs-page-body > .panel {
+    overflow: visible;
 }
 
 .settings-form-grid {
@@ -6773,8 +6864,21 @@ textarea:focus {
 }
 
 @media (max-width: 1360px) and (min-width: 961px) {
+    .storage-layout {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: var(--dashboard-grid-gap);
+        overflow: visible;
+    }
+
+    .storage-table-panel {
+        margin-bottom: 0;
+    }
+
     .jobs-workspace-layout,
     .split-layout,
+    .chatgpt-proposals-split-layout,
     .sources-split-layout,
     .evaluation-split-layout,
     .governance-split-layout,
@@ -6874,6 +6978,7 @@ button:disabled,
 .filter-panel,
 .detail-panel,
 .split-layout,
+.chatgpt-proposals-split-layout,
 .sources-split-layout,
 .evaluation-split-layout,
 .governance-split-layout,
@@ -6914,6 +7019,12 @@ button:disabled,
     align-content: start;
 }
 
+.chatgpt-proposals-page-stack {
+    display: grid;
+    gap: var(--dashboard-page-gap);
+    min-width: 0;
+}
+
 .chatgpt-proposals-filter .filter-grid {
     grid-template-columns: minmax(12rem, 1fr) minmax(10rem, 0.7fr) auto;
     align-items: end;
@@ -6929,13 +7040,137 @@ button:disabled,
     width: 100%;
 }
 
+.chatgpt-proposals-summary {
+    margin-bottom: 0;
+}
+
+.chatgpt-proposals-workspace,
 .chatgpt-proposals-panel,
 .boundary-panel {
     min-width: 0;
 }
 
-.chatgpt-proposals-table {
-    min-width: 920px;
+.chatgpt-proposals-split-layout {
+    grid-template-columns: minmax(22rem, 0.82fr) minmax(0, 1.18fr);
+    min-height: clamp(34rem, calc(var(--dashboard-viewport-height) - 22rem), 48rem);
+}
+
+.chatgpt-proposals-list-panel,
+.chatgpt-proposals-detail-panel {
+    min-height: 0;
+}
+
+.chatgpt-proposals-queue-scroll,
+.chatgpt-proposals-detail-scroll {
+    max-height: clamp(28rem, calc(var(--dashboard-viewport-height) - 24rem), 42rem);
+}
+
+.chatgpt-proposals-list {
+    display: grid;
+    gap: 0.58rem;
+}
+
+.chatgpt-proposal-card {
+    display: grid;
+    gap: 0.42rem;
+}
+
+.chatgpt-proposal-card-header,
+.chatgpt-proposal-card-meta,
+.chatgpt-proposals-result,
+.chatgpt-proposals-decision-zone {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+}
+
+.chatgpt-proposal-card-header {
+    justify-content: space-between;
+}
+
+.chatgpt-proposal-card-header code,
+.chatgpt-proposals-definition-grid code,
+.chatgpt-proposals-result code {
+    overflow-wrap: anywhere;
+}
+
+.chatgpt-proposal-card-meta {
+    flex-wrap: wrap;
+    color: var(--text-subtle);
+    font-size: 0.78rem;
+    line-height: 1.35;
+}
+
+.chatgpt-proposal-card-meta span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.chatgpt-proposal-card-error {
+    color: color-mix(in srgb, var(--bad) 76%, white 24%);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+}
+
+.chatgpt-proposals-safety-notice {
+    display: grid;
+    gap: 0.24rem;
+    margin-bottom: 0.85rem;
+    padding: 0.72rem 0.78rem;
+    border: 1px solid color-mix(in srgb, var(--warn) 34%, transparent);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--warn) 12%, transparent);
+    color: color-mix(in srgb, var(--warn) 82%, white 18%);
+}
+
+.chatgpt-proposals-safety-notice span {
+    color: var(--text-muted);
+    font-size: 0.86rem;
+}
+
+.chatgpt-proposals-detail-title {
+    margin-bottom: 0.3rem;
+    font-size: 1.02rem;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.chatgpt-proposals-definition-grid {
+    margin-block: 0.85rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.chatgpt-proposals-payload {
+    max-height: clamp(14rem, 34vh, 28rem);
+    margin-bottom: 0.85rem;
+}
+
+.chatgpt-proposals-result {
+    flex-wrap: wrap;
+    margin-block: 0.85rem;
+    padding: 0.58rem 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--ok) 28%, transparent);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--ok) 9%, transparent);
+}
+
+.chatgpt-proposals-decision-zone {
+    justify-content: space-between;
+    flex-wrap: wrap;
+    margin-top: 0.9rem;
+    padding-top: 0.82rem;
+    border-top: 1px solid var(--border);
+}
+
+.chatgpt-proposals-decision-zone .inline-actions {
+    margin-top: 0;
+    flex-wrap: wrap;
+}
+
+.chatgpt-proposals-reject-button {
+    color: color-mix(in srgb, var(--bad) 75%, white 25%);
+    border-color: color-mix(in srgb, var(--bad) 28%, transparent);
 }
 
 .payload-details {
@@ -7064,6 +7299,7 @@ button:disabled,
     .security-layout,
     .storage-layout,
     .split-layout,
+    .chatgpt-proposals-split-layout,
     .sources-split-layout,
     .evaluation-split-layout,
     .governance-split-layout,
@@ -7247,6 +7483,7 @@ button:disabled,
     .page-viewport,
     .page-viewport-body,
     .split-layout,
+    .chatgpt-proposals-split-layout,
     .sources-split-layout,
     .evaluation-split-layout,
     .governance-split-layout,
@@ -7487,6 +7724,145 @@ textarea {
 
     .monitoring-context-savings-grid {
         grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (min-width: 641px) and (max-width: 1024px) {
+    :root,
+    :root[data-theme="dark"],
+    :root[data-theme="light"] {
+        --sidebar-width: 64px;
+    }
+
+    html,
+    body {
+        height: var(--dashboard-viewport-height);
+        min-height: var(--dashboard-viewport-height);
+        max-height: var(--dashboard-viewport-height);
+        overflow: hidden;
+    }
+
+    .dashboard-shell {
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+        width: 100%;
+        max-width: var(--dashboard-viewport-width);
+        height: var(--dashboard-viewport-height);
+        max-height: var(--dashboard-viewport-height);
+        overflow: hidden;
+    }
+
+    .sidebar {
+        position: sticky;
+        top: 0;
+        width: var(--sidebar-width);
+        max-width: var(--sidebar-width);
+        height: var(--dashboard-viewport-height);
+        max-height: var(--dashboard-viewport-height);
+        padding: 0.58rem 0.42rem;
+        overflow-y: auto;
+        overflow-x: hidden;
+        border-right: 1px solid var(--border);
+        border-bottom: 0;
+    }
+
+    .sidebar-inner {
+        align-items: center;
+        min-height: min-content;
+        gap: 0.46rem;
+    }
+
+    .brand {
+        justify-content: center;
+        padding: 0.12rem 0 0.42rem;
+    }
+
+    .brand > div:not(.brand-mark),
+    .brand-title,
+    .brand-subtitle,
+    .sidebar-section-label,
+    .nav-label,
+    .sidebar-bottom {
+        display: none;
+    }
+
+    .sidebar-nav {
+        width: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0.26rem;
+    }
+
+    .nav-item {
+        width: 100%;
+        min-height: 2.35rem;
+        justify-content: center;
+        padding: 0.58rem 0;
+        gap: 0;
+    }
+
+    .nav-icon {
+        width: 1.08rem;
+        height: 1.08rem;
+    }
+
+    .main-shell {
+        width: auto;
+        max-width: none;
+        height: var(--dashboard-viewport-height);
+        max-height: var(--dashboard-viewport-height);
+        overflow: hidden;
+    }
+
+    .topbar {
+        position: sticky;
+        top: 0;
+        width: auto;
+        max-width: 100%;
+        min-height: 56px;
+        height: auto;
+        flex-direction: row;
+        align-items: center;
+        padding: 0.52rem 0.72rem;
+    }
+
+    .topbar-context,
+    .topbar-actions {
+        width: auto;
+    }
+
+    .content {
+        width: auto;
+        max-width: 100%;
+        min-height: 0;
+        height: auto;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: var(--dashboard-content-padding);
+        overscroll-behavior: contain;
+    }
+
+    .page-viewport,
+    .page-viewport-body {
+        min-height: 0;
+        max-height: none;
+        overflow: visible;
+    }
+
+    .table-scroll-shell {
+        max-height: none;
+        overflow-x: auto !important;
+        overflow-y: visible !important;
+        overscroll-behavior-x: contain;
+    }
+
+    .jobs-table-shell {
+        min-height: 16rem;
+        max-height: none;
+    }
+
+    .jobs-retention-panel .table-scroll-shell {
+        max-height: none;
     }
 }
 

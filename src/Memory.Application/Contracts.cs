@@ -202,11 +202,18 @@ public sealed record WorkingContextRequest(
     bool UseSummaryLayer = false,
     RetrievalTelemetryContext? Telemetry = null);
 
+public enum RetrievalTelemetryDetailLevel
+{
+    Full,
+    SummaryOnly
+}
+
 public sealed record RetrievalTelemetryContext(
     string EntryPoint,
     string Channel,
     string? Purpose = null,
-    bool Enabled = true);
+    bool Enabled = true,
+    RetrievalTelemetryDetailLevel DetailLevel = RetrievalTelemetryDetailLevel.Full);
 
 public sealed record RetrievalTelemetryHitWriteRequest(
     int Rank,
@@ -671,7 +678,42 @@ public enum EmbeddingPurpose
 
 public sealed record EmbeddingVector(string ModelKey, int Dimensions, float[] Values);
 
-public sealed record BatchEmbeddingItem(string Text, EmbeddingPurpose Purpose);
+public sealed record BatchEmbeddingItem(string Text, EmbeddingPurpose Purpose, string SourceKind = "unknown");
+
+public sealed record EmbeddingUsageTelemetryItem(
+    DateTimeOffset CreatedAtUtc,
+    string Provider,
+    string Profile,
+    EmbeddingPurpose Purpose,
+    string SourceKind,
+    int MaxTokens,
+    int TokenCount,
+    bool Truncated);
+
+public sealed record EmbeddingUsageWindowResult(
+    string Key,
+    string Label,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset EndedAtUtc,
+    long TotalInputs,
+    long TruncatedInputs,
+    double TruncationRatePercent,
+    int ApproxP95TokenCount,
+    int MaxTokenCount,
+    IReadOnlyList<EmbeddingUsageGroupResult> TopGroups);
+
+public sealed record EmbeddingUsageGroupResult(
+    string ServiceName,
+    string Provider,
+    string Profile,
+    string Purpose,
+    string SourceKind,
+    int MaxTokens,
+    long TotalInputs,
+    long TruncatedInputs,
+    double TruncationRatePercent,
+    int ApproxP95TokenCount,
+    int MaxTokenCount);
 
 public sealed record SystemStatusResult(
     string Service,
@@ -1190,6 +1232,7 @@ public interface IApplicationDbContext
     DbSet<RetrievalHit> RetrievalHits { get; }
     DbSet<RetrievalTelemetryDailySummary> RetrievalTelemetryDailySummaries { get; }
     DbSet<RetrievalTelemetryDailyHitSummary> RetrievalTelemetryDailyHitSummaries { get; }
+    DbSet<EmbeddingUsageHourly> EmbeddingUsageHourly { get; }
     DbSet<RuntimeLogEntry> RuntimeLogEntries { get; }
     DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints { get; }
     DbSet<SourceConnection> SourceConnections { get; }
@@ -1215,6 +1258,12 @@ public interface IChunkingService
 public interface IRetrievalTelemetryService
 {
     Task RecordAsync(RetrievalTelemetryWriteRequest request, CancellationToken cancellationToken);
+}
+
+public interface IEmbeddingUsageTelemetry
+{
+    Task RecordAsync(IReadOnlyList<EmbeddingUsageTelemetryItem> items, CancellationToken cancellationToken);
+    Task<IReadOnlyList<EmbeddingUsageWindowResult>> GetWindowsAsync(DateTimeOffset observedAtUtc, CancellationToken cancellationToken);
 }
 
 public interface IHybridSearchStore

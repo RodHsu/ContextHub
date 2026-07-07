@@ -1338,6 +1338,9 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         monitoring.Redis.Should().NotBeNull();
         monitoring.Postgres.Should().NotBeNull();
         monitoring.DependencyResources.Should().NotBeNull();
+        monitoring.EmbeddingUsage.Should().NotBeNull();
+        monitoring.EmbeddingUsage!.Select(x => x.Key).Should().Contain(["24h", "3d", "7d"]);
+        monitoring.EmbeddingUsage.Should().OnlyContain(x => x.TruncationRatePercent >= 0);
         monitoring.ContextSavings.Should().NotBeNull();
         monitoring.ContextSavings!.WindowLabel.Should().NotBeNullOrWhiteSpace();
         monitoring.ContextSavings.Windows.Should().NotBeNull();
@@ -1534,6 +1537,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var oldEventId = Guid.Parse("93000000-0000-0000-0000-000000000001");
         var middleEventId = Guid.Parse("93000000-0000-0000-0000-000000000002");
         var recentEventId = Guid.Parse("93000000-0000-0000-0000-000000000003");
+        var cascadeOnlyEventId = Guid.Parse("93000000-0000-0000-0000-000000000006");
         var oldAuditEventId = Guid.Parse("93000000-0000-0000-0000-000000000004");
         var oldMaintenanceRunId = Guid.Parse("93000000-0000-0000-0000-000000000005");
         var now = DateTimeOffset.UtcNow;
@@ -1545,10 +1549,12 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             dbContext.RetrievalEvents.AddRange(
                 CreateRetentionEvent(oldEventId, now.AddDays(-10), "retention-old"),
                 CreateRetentionEvent(middleEventId, now.AddDays(-5), "retention-middle"),
-                CreateRetentionEvent(recentEventId, now.AddDays(-1), "retention-recent"));
-            dbContext.RetrievalHits.AddRange(Enumerable.Range(1, 3).Select(index => CreateRetentionHit(oldEventId, $"old hit {index}")));
-            dbContext.RetrievalHits.AddRange(Enumerable.Range(1, 4).Select(index => CreateRetentionHit(middleEventId, $"middle hit {index}")));
-            dbContext.RetrievalHits.Add(CreateRetentionHit(recentEventId, "recent hit"));
+                CreateRetentionEvent(recentEventId, now.AddDays(-1), "retention-recent"),
+                CreateRetentionEvent(cascadeOnlyEventId, now.AddDays(-10), "retention-cascade-only"));
+            dbContext.RetrievalHits.AddRange(Enumerable.Range(1, 3).Select(index => CreateRetentionHit(oldEventId, $"old hit {index}", now.AddDays(-10))));
+            dbContext.RetrievalHits.AddRange(Enumerable.Range(1, 4).Select(index => CreateRetentionHit(middleEventId, $"middle hit {index}", now.AddDays(-5))));
+            dbContext.RetrievalHits.Add(CreateRetentionHit(recentEventId, "recent hit", now.AddDays(-1)));
+            dbContext.RetrievalHits.AddRange(Enumerable.Range(1, 2).Select(index => CreateRetentionHit(cascadeOnlyEventId, $"cascade hit {index}", null)));
             dbContext.SecurityAuditEvents.Add(new SecurityAuditEvent
             {
                 Id = oldAuditEventId,
@@ -1587,7 +1593,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 "api-contract-test",
                 CancellationToken.None);
 
-            result.DeletedHits.Should().BeGreaterThanOrEqualTo(7);
+            result.DeletedHits.Should().BeGreaterThanOrEqualTo(9);
             result.DeletedEvents.Should().BeGreaterThanOrEqualTo(1);
         }
 
@@ -1597,6 +1603,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             (await dbContext.RetrievalEvents.AnyAsync(x => x.Id == oldEventId)).Should().BeFalse();
             (await dbContext.RetrievalHits.AnyAsync(x => x.RetrievalEventId == oldEventId)).Should().BeFalse();
+            (await dbContext.RetrievalEvents.AnyAsync(x => x.Id == cascadeOnlyEventId)).Should().BeFalse();
+            (await dbContext.RetrievalHits.AnyAsync(x => x.RetrievalEventId == cascadeOnlyEventId)).Should().BeFalse();
 
             (await dbContext.RetrievalEvents.AnyAsync(x => x.Id == middleEventId)).Should().BeTrue();
             (await dbContext.RetrievalHits.AnyAsync(x => x.RetrievalEventId == middleEventId)).Should().BeFalse();
@@ -1618,9 +1626,11 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             run.PolicyJson.Should().Contain("3");
             run.PolicyJson.Should().Contain("7");
             run.PolicyJson.Should().Contain("eventBatchSize");
+            run.PolicyJson.Should().Contain("maxSummaryDaysPerRun");
             run.PolicyJson.Should().Contain("timeWindowDays");
             run.PolicyJson.Should().Contain("runVacuumAnalyzeAfterRetention");
             run.ResultJson.Should().Contain("deletedHits");
+            run.ResultJson.Should().Contain("deletedHitsViaEventCascade");
             run.ResultJson.Should().Contain("upsertedEventSummaryRows");
             run.ResultJson.Should().Contain("upsertedHitSummaryRows");
             run.ResultJson.Should().Contain("otherTableRetention");
@@ -1628,6 +1638,18 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             run.ResultJson.Should().Contain("eventsWindowStartUtc");
             run.ResultJson.Should().Contain("processedHitsWindows");
             run.ResultJson.Should().Contain("processedEventsWindows");
+            run.ResultJson.Should().Contain("droppedHitPartitions");
+            run.ResultJson.Should().Contain("droppedEventPartitions");
+            run.ResultJson.Should().Contain("summaryBackfillError");
+            run.ResultJson.Should().Contain("summaryBackfillErrorKind");
+            run.ResultJson.Should().Contain("summaryBackfillFailedDay");
+            run.ResultJson.Should().Contain("summaryBackfillFailureCount");
+            run.ResultJson.Should().Contain("summaryBackfillLastExceptionType");
+            run.ResultJson.Should().Contain("summaryEventBackfillError");
+            run.ResultJson.Should().Contain("summaryHitBackfillError");
+            run.ResultJson.Should().Contain("deletedEmbeddingUsageBuckets");
+            run.ResultJson.Should().Contain("hitRetentionSkippedReason");
+            run.ResultJson.Should().Contain("hitRetentionError");
             run.ResultJson.Should().Contain("vacuumAnalyzeRequested");
         }
     }
@@ -1645,7 +1667,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 TimeWindowDays: 1,
                 DelayBetweenBatchesMs: 0,
                 CommandTimeoutSeconds: 30,
-                MaxDurationMinutes: 30,
+                MaxDurationMinutes: 120,
                 RunVacuumAnalyzeAfterRetention: false));
 
         response.EnsureSuccessStatusCode();
@@ -1663,9 +1685,10 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         policy.GetProperty("timeWindowDays").GetInt32().Should().Be(1);
         policy.GetProperty("delayBetweenBatchesMs").GetInt32().Should().Be(0);
         policy.GetProperty("commandTimeoutSeconds").GetInt32().Should().Be(30);
-        policy.GetProperty("maxDurationMinutes").GetInt32().Should().Be(30);
+        policy.GetProperty("maxDurationMinutes").GetInt32().Should().Be(120);
         policy.GetProperty("runVacuumAnalyzeAfterRetention").GetBoolean().Should().BeFalse();
         policy.GetProperty("summaryRetentionDays").GetInt32().Should().Be(30);
+        policy.GetProperty("maxSummaryDaysPerRun").GetInt32().Should().Be(3);
         policy.GetProperty("securityAuditRetentionDays").GetInt32().Should().Be(180);
         policy.GetProperty("runtimeLogRetentionDays").GetInt32().Should().Be(30);
         policy.GetProperty("maintenanceRunRetentionDays").GetInt32().Should().Be(180);
@@ -2562,7 +2585,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             IsAuthenticated: true);
     }
 
-    private static RetrievalHit CreateRetentionHit(Guid retrievalEventId, string title)
+    private static RetrievalHit CreateRetentionHit(Guid retrievalEventId, string title, DateTimeOffset? createdAt)
         => new()
         {
             RetrievalEventId = retrievalEventId,
@@ -2574,6 +2597,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             SourceRef = "api-contract",
             Score = 0.5m,
             Excerpt = title,
-            ProjectId = ProjectContext.DefaultProjectId
+            ProjectId = ProjectContext.DefaultProjectId,
+            CreatedAt = createdAt
         };
 }

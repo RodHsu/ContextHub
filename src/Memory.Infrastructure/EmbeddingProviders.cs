@@ -104,6 +104,7 @@ public sealed class LocalOnnxEmbeddingProvider(IOptions<EmbeddingOptions> option
 public sealed class HttpEmbeddingProvider(
     IHttpClientFactory httpClientFactory,
     IOptions<EmbeddingOptions> options,
+    IEmbeddingUsageTelemetry embeddingUsageTelemetry,
     ILogger<HttpEmbeddingProvider> logger) : IEmbeddingProvider
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
@@ -128,7 +129,7 @@ public sealed class HttpEmbeddingProvider(
 
     public async Task<EmbeddingVector> EmbedAsync(string text, EmbeddingPurpose purpose, CancellationToken cancellationToken)
     {
-        var results = await EmbedBatchAsync([new BatchEmbeddingItem(text, purpose)], cancellationToken);
+        var results = await EmbedBatchAsync([new BatchEmbeddingItem(text, purpose, ResolveDefaultSourceKind(purpose))], cancellationToken);
         return results[0];
     }
 
@@ -172,6 +173,20 @@ public sealed class HttpEmbeddingProvider(
                     _options.Profile);
             }
 
+            await RecordUsageAsync(
+                [
+                    new EmbeddingUsageTelemetryItem(
+                        DateTimeOffset.UtcNow,
+                        ProviderName,
+                        _options.Profile,
+                        items[0].Purpose,
+                        items[0].SourceKind,
+                        singlePayload.MaxTokens,
+                        singlePayload.TokenCount,
+                        singlePayload.Truncated)
+                ],
+                cancellationToken);
+
             return [new EmbeddingVector(singlePayload.ModelKey, singlePayload.Dimensions, singlePayload.Values)];
         }
 
@@ -200,6 +215,20 @@ public sealed class HttpEmbeddingProvider(
                 _options.Profile);
         }
 
+        await RecordUsageAsync(
+            batchPayload.Results
+                .Select((result, index) => new EmbeddingUsageTelemetryItem(
+                    DateTimeOffset.UtcNow,
+                    ProviderName,
+                    _options.Profile,
+                    items[index].Purpose,
+                    items[index].SourceKind,
+                    batchPayload.MaxTokens,
+                    result.TokenCount,
+                    result.Truncated))
+                .ToArray(),
+            cancellationToken);
+
         return batchPayload.Results
             .Select(result =>
             {
@@ -212,6 +241,27 @@ public sealed class HttpEmbeddingProvider(
             })
             .ToArray();
     }
+
+    private async Task RecordUsageAsync(IReadOnlyList<EmbeddingUsageTelemetryItem> items, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var telemetryCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            telemetryCts.CancelAfter(TimeSpan.FromSeconds(1));
+            await embeddingUsageTelemetry.RecordAsync(items, telemetryCts.Token);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Embedding usage telemetry failed after embedding response.");
+        }
+    }
+
+    private static string ResolveDefaultSourceKind(EmbeddingPurpose purpose)
+        => purpose == EmbeddingPurpose.Query ? "query" : "document";
 }
 
 public static class HttpEmbeddingProviderClient

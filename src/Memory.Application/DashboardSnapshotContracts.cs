@@ -79,7 +79,8 @@ public sealed record DashboardResourceChartSnapshotPayload(
 
 public sealed record DashboardMonitoringSnapshotPayload(
     DashboardRedisTelemetryResult Redis,
-    DashboardPostgresTelemetryResult Postgres);
+    DashboardPostgresTelemetryResult Postgres,
+    IReadOnlyList<EmbeddingUsageWindowResult>? EmbeddingUsage = null);
 
 public sealed record DashboardMemoryGraphIndexSnapshotPayload(
     MemoryGraphResult Graph);

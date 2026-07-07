@@ -899,19 +899,21 @@ public sealed class MemoryService(
 
         var context = request.Telemetry ?? new RetrievalTelemetryContext("memory.search", "internal", "memory search");
         var purpose = string.IsNullOrWhiteSpace(context.Purpose) ? "memory search" : context.Purpose!;
-        var hitSnapshots = hits
-            .Take(Math.Min(request.Limit, 10))
-            .Select((hit, index) => new RetrievalTelemetryHitWriteRequest(
-                index + 1,
-                hit.MemoryId,
-                hit.Title,
-                hit.MemoryType.ToString(),
-                hit.SourceType,
-                hit.SourceRef,
-                hit.Score,
-                hit.Excerpt,
-                hit.ProjectId))
-            .ToArray();
+        var hitSnapshots = context.DetailLevel == RetrievalTelemetryDetailLevel.SummaryOnly
+            ? Array.Empty<RetrievalTelemetryHitWriteRequest>()
+            : hits
+                .Take(Math.Min(request.Limit, 10))
+                .Select((hit, index) => new RetrievalTelemetryHitWriteRequest(
+                    index + 1,
+                    hit.MemoryId,
+                    hit.Title,
+                    hit.MemoryType.ToString(),
+                    hit.SourceType,
+                    hit.SourceRef,
+                    hit.Score,
+                    hit.Excerpt,
+                    hit.ProjectId))
+                .ToArray();
 
         await TryRecordTelemetryAsync(
             new RetrievalTelemetryWriteRequest(
@@ -961,6 +963,7 @@ public sealed class MemoryService(
         {
             request.RecentLogLimit,
             usedFallback,
+            detailLevel = context.DetailLevel.ToString(),
             facts = result.Facts.Count,
             decisions = result.Decisions.Count,
             episodes = result.Episodes.Count,
@@ -973,19 +976,21 @@ public sealed class MemoryService(
             cacheKeyKind,
             versionStamp
         }, JsonOptions);
-        var hitSnapshots = hits
-            .Take(Math.Min(request.Limit * 2, 10))
-            .Select((hit, index) => new RetrievalTelemetryHitWriteRequest(
-                index + 1,
-                hit.MemoryId,
-                hit.Title,
-                hit.MemoryType.ToString(),
-                hit.SourceType,
-                hit.SourceRef,
-                hit.Score,
-                hit.Excerpt,
-                hit.ProjectId))
-            .ToArray();
+        var hitSnapshots = context.DetailLevel == RetrievalTelemetryDetailLevel.SummaryOnly
+            ? Array.Empty<RetrievalTelemetryHitWriteRequest>()
+            : hits
+                .Take(Math.Min(request.Limit * 2, 10))
+                .Select((hit, index) => new RetrievalTelemetryHitWriteRequest(
+                    index + 1,
+                    hit.MemoryId,
+                    hit.Title,
+                    hit.MemoryType.ToString(),
+                    hit.SourceType,
+                    hit.SourceRef,
+                    hit.Score,
+                    hit.Excerpt,
+                    hit.ProjectId))
+                .ToArray();
 
         await TryRecordTelemetryAsync(
             new RetrievalTelemetryWriteRequest(
@@ -1928,7 +1933,7 @@ public sealed class BackgroundJobProcessor(
         {
             var batch = list.Skip(offset).Take(batchSize).ToArray();
             var embeddings = await embeddingProvider.EmbedBatchAsync(
-                batch.Select(chunk => new BatchEmbeddingItem(chunk.ChunkText, EmbeddingPurpose.Document)).ToArray(),
+                batch.Select(chunk => new BatchEmbeddingItem(chunk.ChunkText, EmbeddingPurpose.Document, "reindex-chunk")).ToArray(),
                 cancellationToken);
 
             for (var index = 0; index < batch.Length; index++)

@@ -110,7 +110,8 @@ public sealed class DashboardMemoryGraphIndexBuilder(
                     Telemetry: new RetrievalTelemetryContext(
                         "dashboard.memory_graph_index",
                         "dashboard",
-                        "background graph index refresh")),
+                        "background graph index refresh",
+                        DetailLevel: RetrievalTelemetryDetailLevel.SummaryOnly)),
                 cancellationToken);
             var searchCandidates = hits
                 .Where(hit => byId.ContainsKey(hit.MemoryId))

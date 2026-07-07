@@ -32,7 +32,8 @@
 - 全站 route 對應 Stitch 設計稿：
   - Auth / boundary pages：`projects/952128967416801377/screens/d8431ed48c0d4b2a9af1bd9650481541`，對應 `/login`、`/forbidden`、`/not-found`、`/Error`。
   - Operations Monitoring：`projects/952128967416801377/screens/1916647a3e6e48cfa2c4e85007dc6e75`，對應 `/`、`/monitoring`、`/runtime`、`/logs`、`/jobs`、`/performance`。
-  - Knowledge Work / Review：`projects/952128967416801377/screens/301434fd263547918f18a6e772217a53`，對應 `/graph`、`/memories`、`/retention`、`/sources`、`/inbox`、`/governance`、`/evaluation`、`/chatgpt-proposals`。
+  - Knowledge Work / Review：`projects/952128967416801377/screens/301434fd263547918f18a6e772217a53`，對應 `/graph`、`/memories`、`/retention`、`/sources`、`/inbox`、`/governance`、`/evaluation`。
+  - ChatGPT Proposal Review：`projects/952128967416801377/screens/25e969df68fe4e31b1b97ecbadbecd9c`，對應 `/chatgpt-proposals`；採審核工作台而非表格主導版型，左側 proposal queue、右側 pending safety notice、payload preview、result/error 與 approve/reject decision zone。
   - Admin Settings / Personal Account：`projects/952128967416801377/screens/ce85635f0d76482d8cd249835acfecbf`，對應 `/preferences`、`/storage`、`/security`、`/settings`、`/account/tokens`。
 - `Memory Graph` 相關畫面以 Stitch 專案 `ContextHub Memory Graph` 為主基準。
 - `Graph` refined explorer screen 是目前已確認可對照的主要設計稿。

@@ -24,10 +24,10 @@
     }
 
     <div class="storage-layout">
-    <section class="panel panel-scroll storage-table-panel">
+    <section class="panel storage-table-panel">
         <div class="panel-title">資料表 (Tables)</div>
         <div class="table-subtitle">只開放白名單資料表，避免變成任意 SQL console。</div>
-        <div class="panel-scroll-body storage-table-list">
+        <div class="storage-table-list">
             <div class="stack-list">
                 @foreach (var table in _tables)
                 {
@@ -41,9 +41,9 @@
         </div>
     </section>
 
-    <section class="panel detail-panel storage-detail-panel panel-scroll">
+    <section class="panel detail-panel storage-detail-panel">
         <div class="panel-title">資料列 (Rows)</div>
-        <div class="panel-scroll-body">
+        <div class="storage-detail-body">
             @if (_rows is null)
             {
                 <div class="empty-inline">選取左側資料表後，使用關鍵字或欄位過濾目前資料庫內容。</div>

@@ -77,6 +77,7 @@ public static class DependencyInjection
         services.AddScoped<IVectorStore, NpgsqlSearchStore>();
         services.AddScoped<IStorageExplorerStore, NpgsqlStorageExplorerStore>();
         services.AddScoped<IRetrievalTelemetryService, DatabaseRetrievalTelemetryService>();
+        services.AddSingleton<IEmbeddingUsageTelemetry, DatabaseEmbeddingUsageTelemetry>();
         services.AddSingleton<IProjectArtifactObjectStore, S3CompatibleProjectArtifactObjectStore>();
         services.AddScoped<ITokenCountingService, TokenCountingService>();
         services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
@@ -137,6 +138,7 @@ public static class DependencyInjection
                 return new HttpEmbeddingProvider(
                     sp.GetRequiredService<IHttpClientFactory>(),
                     sp.GetRequiredService<IOptions<EmbeddingOptions>>(),
+                    sp.GetRequiredService<IEmbeddingUsageTelemetry>(),
                     sp.GetRequiredService<ILogger<HttpEmbeddingProvider>>());
             }
 

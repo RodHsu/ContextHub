@@ -479,6 +479,7 @@ public sealed class RetrievalHit
     public decimal? Score { get; set; }
     public string Excerpt { get; set; } = string.Empty;
     public string ProjectId { get; set; } = "default";
+    public DateTimeOffset? CreatedAt { get; set; }
     public RetrievalEvent? RetrievalEvent { get; set; }
 }
 
@@ -522,6 +523,26 @@ public sealed class RetrievalTelemetryDailyHitSummary
     public int BestRank { get; set; }
     public decimal? BestScore { get; set; }
     public decimal? AverageScore { get; set; }
+    public DateTimeOffset FirstSeenAt { get; set; }
+    public DateTimeOffset LastSeenAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class EmbeddingUsageHourly
+{
+    public DateTimeOffset BucketStartUtc { get; set; }
+    public string ServiceName { get; set; } = string.Empty;
+    public string Provider { get; set; } = string.Empty;
+    public string Profile { get; set; } = string.Empty;
+    public string Purpose { get; set; } = string.Empty;
+    public string SourceKind { get; set; } = "unknown";
+    public int MaxTokens { get; set; }
+    public long TotalInputs { get; set; }
+    public long TruncatedInputs { get; set; }
+    public long TotalTokenCount { get; set; }
+    public long TotalTruncatedTokens { get; set; }
+    public int MaxTokenCount { get; set; }
+    public string HistogramJson { get; set; } = "{}";
     public DateTimeOffset FirstSeenAt { get; set; }
     public DateTimeOffset LastSeenAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }

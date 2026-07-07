@@ -170,6 +170,9 @@ public sealed class DashboardQueryServiceTests
 
         monitoring.Redis.Status.Should().Be("Unavailable");
         monitoring.Postgres.Status.Should().Be("Unavailable");
+        monitoring.EmbeddingUsage.Should().NotBeNull();
+        monitoring.EmbeddingUsage!.Select(x => x.Key).Should().ContainInOrder(["24h", "3d", "7d"]);
+        monitoring.EmbeddingUsage.Should().OnlyContain(x => x.TotalInputs == 0 && x.TruncatedInputs == 0);
         monitoring.ContextSavings.Should().NotBeNull();
         monitoring.ContextSavings!.HasData.Should().BeFalse();
         monitoring.SnapshotStatus.Should().NotBeNull();
@@ -243,7 +246,20 @@ public sealed class DashboardQueryServiceTests
                     "postgres-data",
                     2048,
                     200,
-                    90))));
+                    90),
+                [
+                    new EmbeddingUsageWindowResult(
+                        "24h",
+                        "24H",
+                        now.AddHours(-24),
+                        now,
+                        10,
+                        2,
+                        20,
+                        512,
+                        706,
+                        [])
+                ])));
 
         var service = new DashboardQueryService(
             new UnusedApplicationDbContext(),
@@ -263,6 +279,7 @@ public sealed class DashboardQueryServiceTests
         monitoring.Redis.CacheHitPercent.Should().Be(90);
         monitoring.Postgres.BlockAccesses.Should().Be(200);
         monitoring.Postgres.BlockCacheHitPercent.Should().Be(90);
+        monitoring.EmbeddingUsage.Should().ContainSingle(x => x.Key == "24h" && x.TruncatedInputs == 2);
     }
 
     [Fact]
@@ -846,6 +863,7 @@ public sealed class DashboardQueryServiceTests
         public DbSet<RetrievalHit> RetrievalHits => throw new NotSupportedException();
         public DbSet<RetrievalTelemetryDailySummary> RetrievalTelemetryDailySummaries => throw new NotSupportedException();
         public DbSet<RetrievalTelemetryDailyHitSummary> RetrievalTelemetryDailyHitSummaries => throw new NotSupportedException();
+        public DbSet<EmbeddingUsageHourly> EmbeddingUsageHourly => throw new NotSupportedException();
         public DbSet<RuntimeLogEntry> RuntimeLogEntries => throw new NotSupportedException();
         public DbSet<LogIngestionCheckpoint> LogIngestionCheckpoints => throw new NotSupportedException();
         public DbSet<SourceConnection> SourceConnections => throw new NotSupportedException();

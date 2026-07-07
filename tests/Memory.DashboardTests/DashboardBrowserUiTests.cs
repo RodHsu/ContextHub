@@ -57,7 +57,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("governance", "/governance", "治理檢查", [".governance-page-stack", ".metric-grid", ".governance-workspace-section"], [".page-header", ".metric-grid", ".governance-workspace-section"], [".content", ".governance-page-stack", ".panel-scroll-body"]),
         new("evaluation", "/evaluation", "評估驗證", [".evaluation-page-stack", ".filter-panel", ".evaluation-workspace-section"], [".page-header", ".filter-panel", ".evaluation-workspace-section"], [".content", ".evaluation-page-stack", ".panel-scroll-body"]),
         new("inbox", "/inbox", "收件匣", [".inbox-page-stack", ".metric-grid", ".inbox-workspace-section"], [".page-header", ".metric-grid", ".inbox-workspace-section"], [".content", ".inbox-page-stack", ".panel-scroll-body"]),
-        new("chatgpt-proposals", "/chatgpt-proposals", "ChatGPT 寫入審核", [".chatgpt-proposals-filter", ".chatgpt-proposals-panel", ".table-scroll-shell"], [".page-header", ".chatgpt-proposals-filter", ".chatgpt-proposals-panel"], [".content", ".table-scroll-shell"]),
+        new("chatgpt-proposals", "/chatgpt-proposals", "ChatGPT 寫入審核", [".chatgpt-proposals-filter", ".chatgpt-proposals-summary", ".chatgpt-proposals-workspace", ".chatgpt-proposals-list-panel", ".chatgpt-proposals-detail-panel"], [".page-header", ".chatgpt-proposals-filter", ".chatgpt-proposals-workspace"], [".content", ".panel-scroll-body"]),
         new("preferences", "/preferences", "使用者偏好", [".split-layout", ".preferences-list-panel"], [".page-header", ".split-layout"], [".content", ".preferences-list-panel"]),
         new("account-tokens", "/account/tokens", "我的 Token", [".settings-form-grid", ".security-token-table", ".table-scroll-shell"], [".page-header", ".panel"], [".content", ".table-scroll-shell"]),
         new("logs", "/logs", "日誌", [".logs-filter-grid", ".split-layout", ".table-scroll-shell"], [".filter-panel", ".split-layout"], [".content", ".table-scroll-shell"]),
@@ -171,6 +171,59 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }
 
         failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task ChatGpt_Proposals_Should_Render_As_Review_Workbench()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/chatgpt-proposals?uiProfile=dense");
+
+        await page.Locator(".chatgpt-proposals-workspace").WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        await page.Locator(".chatgpt-proposal-card").First.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var detailText = await page.Locator(".chatgpt-proposals-detail-panel").InnerTextAsync();
+        detailText.Should().Contain("尚未寫入 ContextHub");
+        detailText.Should().Contain("Payload JSON");
+        detailText.Should().Contain("批准寫入");
+        detailText.Should().Contain("拒絕");
+
+        (await page.Locator(".chatgpt-proposals-table").CountAsync()).Should().Be(0);
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const payload = document.querySelector('.chatgpt-proposals-payload');
+                const workspace = document.querySelector('.chatgpt-proposals-split-layout');
+                return JSON.stringify({
+                    viewportWidth: window.innerWidth,
+                    bodyScrollWidth: document.body.scrollWidth,
+                    documentScrollWidth: document.documentElement.scrollWidth,
+                    workspaceScrollWidth: workspace?.scrollWidth ?? 0,
+                    workspaceClientWidth: workspace?.clientWidth ?? 0,
+                    payloadUserSelect: payload ? getComputedStyle(payload).userSelect : '',
+                    payloadText: payload?.textContent ?? ''
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var root = document.RootElement;
+        root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, layoutJson);
+        root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, layoutJson);
+        root.GetProperty("workspaceScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("workspaceClientWidth").GetInt32() + 1, layoutJson);
+        root.GetProperty("payloadUserSelect").GetString().Should().NotBe("none", layoutJson);
+        root.GetProperty("payloadText").GetString().Should().Contain("externalKey", layoutJson);
     }
 
     [Fact]
@@ -294,6 +347,272 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         await page.WaitForFunctionAsync("() => document.documentElement.dataset.theme === 'light'");
         var toggleText = await themeToggle.InnerTextAsync();
         toggleText.Should().Contain("淺色");
+    }
+
+    [Fact]
+    public async Task Tablet_Width_Should_Use_Compact_Sidebar_And_Content_Scroll_Host()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("narrow-desktop", 1000, 768));
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/jobs?uiProfile=dense");
+        await page.Locator(".jobs-page-body").WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => {
+                const sidebar = document.querySelector('.sidebar');
+                const content = document.querySelector('.content');
+                const navLabel = document.querySelector('.nav-label');
+                const sidebarRect = sidebar?.getBoundingClientRect();
+                const contentBefore = content?.scrollTop ?? 0;
+                if (content) {
+                    content.scrollTop = 240;
+                }
+
+                return JSON.stringify({
+                    viewportWidth: window.innerWidth,
+                    viewportHeight: window.innerHeight,
+                    documentScrollWidth: document.documentElement.scrollWidth,
+                    bodyScrollWidth: document.body.scrollWidth,
+                    documentScrollHeight: document.documentElement.scrollHeight,
+                    sidebarWidth: Math.round(sidebarRect?.width ?? 0),
+                    sidebarRight: Math.round(sidebarRect?.right ?? 0),
+                    sidebarHeight: Math.round(sidebarRect?.height ?? 0),
+                    sidebarOverflowY: sidebar ? getComputedStyle(sidebar).overflowY : '',
+                    navLabelDisplay: navLabel ? getComputedStyle(navLabel).display : '',
+                    contentOverflowY: content ? getComputedStyle(content).overflowY : '',
+                    contentOverflowX: content ? getComputedStyle(content).overflowX : '',
+                    contentClientWidth: content?.clientWidth ?? 0,
+                    contentScrollWidth: content?.scrollWidth ?? 0,
+                    contentClientHeight: content?.clientHeight ?? 0,
+                    contentScrollHeight: content?.scrollHeight ?? 0,
+                    contentScrollTopBefore: contentBefore,
+                    contentScrollTopAfter: content?.scrollTop ?? 0
+                });
+            }");
+
+        using var document = JsonDocument.Parse(layoutJson);
+        var root = document.RootElement;
+        root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, layoutJson);
+        root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, layoutJson);
+        root.GetProperty("documentScrollHeight").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportHeight").GetInt32() + 1, layoutJson);
+        root.GetProperty("sidebarWidth").GetInt32().Should().BeInRange(56, 72, layoutJson);
+        root.GetProperty("sidebarRight").GetInt32().Should().BeLessThanOrEqualTo(76, layoutJson);
+        root.GetProperty("sidebarHeight").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportHeight").GetInt32(), layoutJson);
+        root.GetProperty("navLabelDisplay").GetString().Should().Be("none", layoutJson);
+        root.GetProperty("contentOverflowX").GetString().Should().Be("hidden", layoutJson);
+        root.GetProperty("contentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("contentClientWidth").GetInt32() + 1, layoutJson);
+        root.GetProperty("contentOverflowY").GetString().Should().Be("auto", layoutJson);
+        root.GetProperty("contentScrollHeight").GetInt32().Should().BeGreaterThan(root.GetProperty("contentClientHeight").GetInt32(), layoutJson);
+        root.GetProperty("contentScrollTopAfter").GetInt32().Should().BeGreaterThan(root.GetProperty("contentScrollTopBefore").GetInt32(), layoutJson);
+    }
+
+    [Fact]
+    public async Task Storage_Should_Stack_Table_And_Detail_Without_Page_Horizontal_Scroll_On_Tablet()
+    {
+        var failures = new List<string>();
+        var viewports = new[]
+        {
+            new DashboardViewport("tab-s7-landscape", 1280, 800),
+            new DashboardViewport("tab-s7-portrait", 800, 1280),
+            new DashboardViewport("narrow-desktop", 1000, 768)
+        };
+
+        foreach (var viewport in viewports)
+        {
+            try
+            {
+                await _fixture.EnsureDashboardRunningAsync();
+                await using var context = await _fixture.CreateContextAsync(viewport);
+                var page = await context.NewPageAsync();
+
+                await LoginAndOpenAsync(page, "/storage?uiProfile=dense");
+                await page.Locator(".storage-table-panel").WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 15000
+                });
+
+                var screenshotPath = await CaptureScreenshotAsync(page, "storage-stack", DashboardUiProfile.Dense, viewport, DashboardTheme.Dark);
+                var layoutJson = await page.EvaluateAsync<string>(
+                    @"() => {
+                        const tablePanel = document.querySelector('.storage-table-panel');
+                        const detailPanel = document.querySelector('.storage-detail-panel');
+                        const tableList = document.querySelector('.storage-table-list');
+                        const content = document.querySelector('.content');
+                        const tableRect = tablePanel?.getBoundingClientRect();
+                        const detailRect = detailPanel?.getBoundingClientRect();
+                        const listRect = tableList?.getBoundingClientRect();
+                        const shellMetrics = Array.from(document.querySelectorAll('.storage-detail-panel .table-scroll-shell')).map(shell => ({
+                            clientWidth: shell.clientWidth,
+                            scrollWidth: shell.scrollWidth,
+                            overflowX: getComputedStyle(shell).overflowX
+                        }));
+
+                        return JSON.stringify({
+                            viewportWidth: window.innerWidth,
+                            documentScrollWidth: document.documentElement.scrollWidth,
+                            bodyScrollWidth: document.body.scrollWidth,
+                            contentClientWidth: content?.clientWidth ?? 0,
+                            contentScrollWidth: content?.scrollWidth ?? 0,
+                            tableBottom: Math.round(tableRect?.bottom ?? 0),
+                            detailTop: Math.round(detailRect?.top ?? 0),
+                            listBottom: Math.round(listRect?.bottom ?? 0),
+                            shellMetrics
+                        });
+                    }");
+
+                using var document = JsonDocument.Parse(layoutJson);
+                var root = document.RootElement;
+                root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                root.GetProperty("contentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("contentClientWidth").GetInt32() + 1, $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                root.GetProperty("detailTop").GetInt32().Should().BeGreaterThanOrEqualTo(root.GetProperty("tableBottom").GetInt32() - 1, $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                root.GetProperty("detailTop").GetInt32().Should().BeGreaterThanOrEqualTo(root.GetProperty("listBottom").GetInt32() - 1, $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+
+                foreach (var shell in root.GetProperty("shellMetrics").EnumerateArray())
+                {
+                    shell.GetProperty("overflowX").GetString().Should().Be("auto", $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                    shell.GetProperty("scrollWidth").GetInt32().Should().BeGreaterThanOrEqualTo(shell.GetProperty("clientWidth").GetInt32(), $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                }
+            }
+            catch (Exception ex)
+            {
+                failures.Add($"{viewport.Name}: {ex}");
+            }
+        }
+
+        failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task Table_Frames_Should_Not_Create_Nested_Vertical_Scrollbars_Or_Overflow_Panels()
+    {
+        var failures = new List<string>();
+        var tableRoutes = Routes
+            .Where(route => route.RequiredSelectors.Concat(route.ScrollSelectors).Any(selector => selector.Contains("table", StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+        var viewports = new[]
+        {
+            new DashboardViewport("desktop", 1366, 768),
+            new DashboardViewport("narrow-desktop", 1000, 768),
+            new DashboardViewport("tab-s7-portrait", 800, 1280),
+            new DashboardViewport("mobile", 390, 844)
+        };
+
+        foreach (var route in tableRoutes)
+        {
+            foreach (var viewport in viewports)
+            {
+                try
+                {
+                    await _fixture.EnsureDashboardRunningAsync();
+                    await using var context = await _fixture.CreateContextAsync(viewport);
+                    await context.AddInitScriptAsync(
+                        @"(() => {
+                            localStorage.setItem('contextHub.dashboard.theme', 'dark');
+                            document.documentElement.dataset.themePreference = 'dark';
+                            document.documentElement.dataset.theme = 'dark';
+                            document.documentElement.style.colorScheme = 'dark';
+                        })();");
+                    var page = await context.NewPageAsync();
+
+                    await LoginAndOpenAsync(page, BuildRouteUrl(route.Route, DashboardUiProfile.Dense));
+                    await page.GetByRole(AriaRole.Heading, new() { Name = route.Title })
+                        .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+
+                    if (route.Name == "jobs")
+                    {
+                        await page.Locator(".jobs-table tbody tr").First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+                    }
+                    else if (route.Name == "storage")
+                    {
+                        await page.Locator(".storage-row-table tbody tr").First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+                        await page.WaitForFunctionAsync(
+                            "() => (document.querySelector('.storage-detail-panel .table-scroll-shell')?.clientHeight ?? 0) > 120",
+                            new PageWaitForFunctionOptions { Timeout = 15000 });
+                    }
+
+                    var screenshotPath = await CaptureScreenshotAsync(page, $"{route.Name}-table-frame", DashboardUiProfile.Dense, viewport, DashboardTheme.Dark);
+                    var layoutJson = await page.EvaluateAsync<string>(
+                        @"() => {
+                            const warnings = [];
+                            const visibleVerticalScrollbars = [];
+                            const shellMetrics = Array.from(document.querySelectorAll('.table-scroll-shell')).map((shell, index) => {
+                                const rect = shell.getBoundingClientRect();
+                                const owner = shell.closest('.panel, .detail-panel, .filter-panel, .storage-table-panel, .storage-detail-panel');
+                                const ownerRect = owner?.getBoundingClientRect();
+                                const style = getComputedStyle(shell);
+                                const hasVerticalScrollbar =
+                                    shell.scrollHeight > shell.clientHeight + 2 &&
+                                    ['auto', 'scroll', 'overlay'].includes(style.overflowY) &&
+                                    shell.offsetWidth > shell.clientWidth + 2 &&
+                                    style.scrollbarWidth !== 'none';
+
+                                if (hasVerticalScrollbar) {
+                                    visibleVerticalScrollbars.push(`table-scroll-shell[${index}]`);
+                                }
+
+                                if (ownerRect && rect.bottom > ownerRect.bottom + 2) {
+                                    warnings.push(`table-scroll-shell[${index}] escapes owner panel by ${Math.round(rect.bottom - ownerRect.bottom)}px`);
+                                }
+
+                                return {
+                                    index,
+                                    width: Math.round(rect.width),
+                                    height: Math.round(rect.height),
+                                    scrollWidth: shell.scrollWidth,
+                                    clientWidth: shell.clientWidth,
+                                    scrollHeight: shell.scrollHeight,
+                                    clientHeight: shell.clientHeight,
+                                    overflowX: style.overflowX,
+                                    overflowY: style.overflowY,
+                                    hasVerticalScrollbar
+                                };
+                            });
+
+                            const workspace = document.querySelector('.jobs-workspace-layout');
+                            const retention = document.querySelector('.jobs-retention-panel');
+                            if (workspace && retention) {
+                                const workspaceRect = workspace.getBoundingClientRect();
+                                const retentionRect = retention.getBoundingClientRect();
+                                if (retentionRect.top < workspaceRect.bottom - 2) {
+                                    warnings.push(`jobs retention overlaps workspace by ${Math.round(workspaceRect.bottom - retentionRect.top)}px`);
+                                }
+                            }
+
+                            return JSON.stringify({
+                                viewportWidth: window.innerWidth,
+                                bodyScrollWidth: document.body.scrollWidth,
+                                documentScrollWidth: document.documentElement.scrollWidth,
+                                shellCount: shellMetrics.length,
+                                warnings,
+                                visibleVerticalScrollbars,
+                                shellMetrics
+                            });
+                        }");
+
+                    using var document = JsonDocument.Parse(layoutJson);
+                    var root = document.RootElement;
+                    root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                    root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                    root.GetProperty("shellCount").GetInt32().Should().BeGreaterThan(0, $"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                    root.GetProperty("warnings").EnumerateArray().Should().BeEmpty($"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                    root.GetProperty("visibleVerticalScrollbars").EnumerateArray().Should().BeEmpty($"screenshot: {screenshotPath}; snapshot: {layoutJson}");
+                }
+                catch (Exception ex)
+                {
+                    failures.Add($"{route.Name} / {viewport.Name}: {ex}");
+                }
+            }
+        }
+
+        failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
     }
 
     [Fact]
@@ -2332,13 +2651,50 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
     private async Task LoginAndOpenAsync(IPage page, string relativeUrlWithProfile)
     {
-        var loginUrl = new Uri(_fixture.BaseUri, $"/login?returnUrl={Uri.EscapeDataString(relativeUrlWithProfile)}");
-        await page.GotoAsync(loginUrl.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await page.WaitForTimeoutAsync(600);
-        await page.Locator("input[name='Username']").FillAsync("admin");
-        await page.Locator("input[name='Password']").FillAsync("ContextHub!123");
-        await page.GetByRole(AriaRole.Button, new() { Name = "登入" }).ClickAsync();
-        await page.WaitForURLAsync($"**{relativeUrlWithProfile}*", new PageWaitForURLOptions { Timeout = 15000 });
+        var targetUrl = new Uri(_fixture.BaseUri, relativeUrlWithProfile).ToString();
+        for (var loginAttempt = 0; loginAttempt < 2; loginAttempt++)
+        {
+            var loginUrl = new Uri(_fixture.BaseUri, $"/login?returnUrl={Uri.EscapeDataString(relativeUrlWithProfile)}");
+            await page.GotoAsync(loginUrl.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await page.WaitForTimeoutAsync(350);
+            await page.Locator("input[name='Username']").FillAsync("admin");
+            await page.Locator("input[name='Password']").FillAsync("ContextHub!123");
+            await page.Locator("form").EvaluateAsync("form => form.requestSubmit()");
+
+            try
+            {
+                await page.WaitForURLAsync(url => !url.Contains("/login", StringComparison.OrdinalIgnoreCase), new PageWaitForURLOptions
+                {
+                    Timeout = 5000,
+                    WaitUntil = WaitUntilState.DOMContentLoaded
+                });
+            }
+            catch (TimeoutException)
+            {
+                await page.WaitForTimeoutAsync(500);
+            }
+
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                    break;
+                }
+                catch (PlaywrightException ex) when (attempt < 2 && ex.Message.Contains("is interrupted by another navigation", StringComparison.OrdinalIgnoreCase))
+                {
+                    await page.WaitForTimeoutAsync(300);
+                }
+            }
+
+            await page.WaitForTimeoutAsync(400);
+            if (!page.Url.Contains("/login", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+
+        await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.WaitForTimeoutAsync(400);
     }
 

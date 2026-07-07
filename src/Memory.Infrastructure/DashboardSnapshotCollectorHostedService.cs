@@ -25,6 +25,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
     IRedisCacheTelemetry redisCacheTelemetry,
     HealthCheckService healthCheckService,
     DockerRuntimeMetricsService dockerMetricsService,
+    IEmbeddingUsageTelemetry embeddingUsageTelemetry,
     TimeProvider timeProvider,
     ILogger<DashboardSnapshotCollectorHostedService> logger) : BackgroundService
 {
@@ -33,9 +34,12 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private const int MaxContextSavingsTelemetryEvents = 50_000;
     private const int ContextSavingsMinimumIntervalSeconds = 60;
     private const int ContextSavingsQueryTimeoutSeconds = 20;
+    private const int StorageLargeTablePreviewQueryTimeoutSeconds = 20;
     private static readonly TimeSpan ContextSavingsMaxWindow = TimeSpan.FromDays(30);
     private static readonly TimeSpan StartupDependencyFailureGrace = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan FailureLogThrottle = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan TimeoutCooldown = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan TimeoutSummaryLogThrottle = TimeSpan.FromMinutes(15);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly ConcurrentDictionary<string, SnapshotFailureState> _failureStates = new(StringComparer.Ordinal);
     private readonly DateTimeOffset _startedAtUtc = timeProvider.GetUtcNow();
@@ -123,6 +127,15 @@ public sealed class DashboardSnapshotCollectorHostedService(
         Func<int, CancellationToken, Task> collectAsync,
         CancellationToken cancellationToken)
     {
+        if (TryGetActiveCooldown(key, out var cooldownUntilUtc))
+        {
+            logger.LogDebug(
+                "Dashboard snapshot collector skipped {SnapshotKey} during timeout cooldown until {CooldownUntilUtc}.",
+                key,
+                cooldownUntilUtc);
+            return;
+        }
+
         try
         {
             await collectAsync(intervalSeconds, cancellationToken);
@@ -142,16 +155,51 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private void LogCollectorFailure(string key, Exception exception)
     {
         var now = timeProvider.GetUtcNow();
+        var isTimeoutProtected = IsTimeoutProtectedSnapshot(key) && IsDatabaseReadTimeout(exception);
         var state = _failureStates.AddOrUpdate(
             key,
-            _ => new SnapshotFailureState(1, now, now),
+            _ => new SnapshotFailureState(
+                1,
+                now,
+                now,
+                null,
+                null,
+                isTimeoutProtected ? "databaseReadTimeout" : "unclassified"),
             (_, current) => current with
             {
                 Count = current.Count + 1,
                 LastFailureLoggedAtUtc = ShouldLogFailure(current.LastFailureLoggedAtUtc, now)
                     ? now
-                    : current.LastFailureLoggedAtUtc
+                    : current.LastFailureLoggedAtUtc,
+                CooldownUntilUtc = isTimeoutProtected && current.Count + 1 >= 3
+                    ? Max(current.CooldownUntilUtc, now.Add(TimeoutCooldown))
+                    : current.CooldownUntilUtc,
+                FailureKind = isTimeoutProtected ? "databaseReadTimeout" : current.FailureKind
             });
+
+        if (isTimeoutProtected && state.Count >= 3)
+        {
+            if (ShouldLogTimeoutSummary(state.LastSummaryLoggedAtUtc, now))
+            {
+                MarkTimeoutSummaryLogged(key, now);
+                logger.LogWarning(
+                    exception,
+                    "Dashboard snapshot collector database timeout cooldown active for {SnapshotKey}. ConsecutiveFailures={FailureCount}; LastExceptionType={ExceptionType}; CooldownUntilUtc={CooldownUntilUtc}",
+                    key,
+                    state.Count,
+                    exception.GetType().Name,
+                    state.CooldownUntilUtc);
+                return;
+            }
+
+            logger.LogDebug(
+                exception,
+                "Dashboard snapshot collector database timeout suppressed for {SnapshotKey}. ConsecutiveFailures={FailureCount}; CooldownUntilUtc={CooldownUntilUtc}",
+                key,
+                state.Count,
+                state.CooldownUntilUtc);
+            return;
+        }
 
         var firstFailure = state.Count == 1;
         var throttledRepeat = !firstFailure && state.LastFailureLoggedAtUtc != now;
@@ -200,6 +248,53 @@ public sealed class DashboardSnapshotCollectorHostedService(
 
     private static bool ShouldLogFailure(DateTimeOffset lastLoggedAtUtc, DateTimeOffset now)
         => now - lastLoggedAtUtc >= FailureLogThrottle;
+
+    private bool TryGetActiveCooldown(string key, out DateTimeOffset cooldownUntilUtc)
+    {
+        cooldownUntilUtc = default;
+        if (!_failureStates.TryGetValue(key, out var state) || state.CooldownUntilUtc is not { } cooldown)
+        {
+            return false;
+        }
+
+        var now = timeProvider.GetUtcNow();
+        if (cooldown <= now)
+        {
+            return false;
+        }
+
+        cooldownUntilUtc = cooldown;
+        return true;
+    }
+
+    private static bool ShouldLogTimeoutSummary(DateTimeOffset? lastSummaryLoggedAtUtc, DateTimeOffset now)
+        => !lastSummaryLoggedAtUtc.HasValue || now - lastSummaryLoggedAtUtc.Value >= TimeoutSummaryLogThrottle;
+
+    private void MarkTimeoutSummaryLogged(string key, DateTimeOffset now)
+    {
+        _failureStates.AddOrUpdate(
+            key,
+            _ => new SnapshotFailureState(1, now, now, now.Add(TimeoutCooldown), now, "databaseReadTimeout"),
+            (_, current) => current with { LastSummaryLoggedAtUtc = now });
+    }
+
+    private static DateTimeOffset? Max(DateTimeOffset? left, DateTimeOffset right)
+        => left.HasValue && left.Value >= right ? left : right;
+
+    private static bool IsTimeoutProtectedSnapshot(string key)
+        => string.Equals(key, DashboardSnapshotKeys.ContextSavings, StringComparison.Ordinal) ||
+           string.Equals(key, DashboardSnapshotKeys.StorageLargeTablePreview, StringComparison.Ordinal);
+
+    private static bool IsDatabaseReadTimeout(Exception exception)
+    {
+        var message = exception.ToString();
+        return exception is OperationCanceledException ||
+               ContainsException<TimeoutException>(exception) ||
+               ContainsException<NpgsqlException>(exception) &&
+               (message.Contains("Timeout during reading attempt", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("Exception while reading from stream", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("reading", StringComparison.OrdinalIgnoreCase));
+    }
 
     private static bool IsTransientDependencyFailure(Exception exception)
         => ContainsException<NpgsqlException>(exception) ||
@@ -347,11 +442,12 @@ public sealed class DashboardSnapshotCollectorHostedService(
         var dockerSnapshot = await dockerMetricsService.GetSnapshotAsync(cancellationToken);
         var redisTelemetry = await CollectRedisTelemetryAsync(dockerSnapshot, cancellationToken);
         var postgresTelemetry = await CollectPostgresTelemetryAsync(dockerSnapshot, cancellationToken);
+        var embeddingUsage = await embeddingUsageTelemetry.GetWindowsAsync(timeProvider.GetUtcNow(), cancellationToken);
 
         await WriteSnapshotAsync(
             DashboardSnapshotKeys.MonitoringStats,
             intervalSeconds,
-            new DashboardMonitoringSnapshotPayload(redisTelemetry, postgresTelemetry),
+            new DashboardMonitoringSnapshotPayload(redisTelemetry, postgresTelemetry, embeddingUsage),
             cancellationToken);
     }
 
@@ -834,6 +930,9 @@ public sealed class DashboardSnapshotCollectorHostedService(
             return;
         }
 
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(StorageLargeTablePreviewQueryTimeoutSeconds));
+        var timeoutToken = timeoutCts.Token;
         var storageExplorerStore = scope.ServiceProvider.GetRequiredService<IStorageExplorerStore>();
         var tables = new List<StorageTableRowsResult>();
         foreach (var table in DashboardStoragePolicy.LargeTableNames)
@@ -843,7 +942,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
                     table,
                     Page: 1,
                     PageSize: DashboardStoragePolicy.LargeTablePreviewPageSize),
-                cancellationToken);
+                timeoutToken);
             tables.Add(preview with { DataSource = "redis" });
         }
 
@@ -1015,7 +1114,10 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private sealed record SnapshotFailureState(
         int Count,
         DateTimeOffset FirstFailureAtUtc,
-        DateTimeOffset LastFailureLoggedAtUtc);
+        DateTimeOffset LastFailureLoggedAtUtc,
+        DateTimeOffset? CooldownUntilUtc,
+        DateTimeOffset? LastSummaryLoggedAtUtc,
+        string FailureKind);
 
     private async Task<DashboardRedisTelemetryResult> CollectRedisTelemetryAsync(
         DockerRuntimeSnapshot dockerSnapshot,

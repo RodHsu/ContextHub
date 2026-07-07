@@ -6,112 +6,225 @@
 <PageTitle>ChatGPT 寫入審核</PageTitle>
 
 <PageViewport Title="ChatGPT 寫入審核"
-              Subtitle="檢視 ChatGPT 送出的 durable memory 與 preference 變更 proposal，批准後才會寫入 ContextHub。"
-              BodyClass="page-viewport-body page-grid-body chatgpt-proposals-page-body">
+              Subtitle="在 ChatGPT proposal 寫入 durable memory 或 preference 前，先完成 payload、來源與狀態檢查。"
+              BodyClass="page-viewport-body chatgpt-proposals-page-body">
     <Actions>
-        <button type="button" class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-primary">
+            <button type="button" class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+        </div>
     </Actions>
     <ChildContent>
-        <section class="filter-panel chatgpt-proposals-filter">
-            <div class="filter-grid">
-                <label>
-                    <span>Project</span>
-                    <input @bind="_projectId" placeholder="ContextHub" />
-                </label>
-                <label>
-                    <span>Status</span>
-                    <select @bind="_status">
-                        <option value="">全部</option>
-                        <option value="Pending">Pending</option>
-                        <option value="Applied">Applied</option>
-                        <option value="Rejected">Rejected</option>
-                        <option value="Failed">Failed</option>
-                    </select>
-                </label>
-                <div class="filter-action-cell">
-                    <button type="button" class="ghost-button" @onclick="LoadAsync" disabled="@_loading">套用</button>
-                </div>
-            </div>
-        </section>
-
-        @if (!string.IsNullOrWhiteSpace(_error))
-        {
-            <div class="inline-error">@_error</div>
-        }
-        else if (_loading)
-        {
-            <div class="empty-inline">讀取中...</div>
-        }
-        else if (_proposals.Count == 0)
-        {
-            <div class="empty-state">目前沒有符合條件的 ChatGPT proposal。</div>
-        }
-        else
-        {
-            <section class="panel chatgpt-proposals-panel">
-                <div class="panel-heading-row">
-                    <div>
-                        <div class="panel-title">Proposal Queue</div>
-                        <div class="table-subtitle">Payload 可選取與複製；一般 UI 文字保持不可選取。</div>
+        <div class="chatgpt-proposals-page-stack">
+            <section class="filter-panel chatgpt-proposals-filter">
+                <div class="filter-grid">
+                    <label>
+                        <span>Project</span>
+                        <input @bind="_projectId" placeholder="ContextHub" />
+                    </label>
+                    <label>
+                        <span>Status</span>
+                        <select @bind="_status">
+                            <option value="">全部</option>
+                            <option value="Pending">Pending</option>
+                            <option value="Applied">Applied</option>
+                            <option value="Rejected">Rejected</option>
+                            <option value="Failed">Failed</option>
+                        </select>
+                    </label>
+                    <div class="filter-action-cell">
+                        <button type="button" class="ghost-button" @onclick="LoadAsync" disabled="@_loading">套用</button>
                     </div>
                 </div>
-                <div class="table-scroll-shell">
-                    <table class="data-table chatgpt-proposals-table">
-                        <thead>
-                            <tr>
-                                <th>狀態</th>
-                                <th>Tool</th>
-                                <th>Project</th>
-                                <th>Title</th>
-                                <th>來源</th>
-                                <th>更新時間</th>
-                                <th></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @foreach (var item in _proposals)
-                            {
-                                <tr>
-                                    <td><span class="status-badge @StatusClass(item.Status)">@item.Status</span></td>
-                                    <td><code>@item.ToolName</code></td>
-                                    <td>@item.ProjectId</td>
-                                    <td>
-                                        <strong>@item.Title</strong>
-                                        <div class="table-subtitle">@item.Summary</div>
-                                        @if (!string.IsNullOrWhiteSpace(item.Error))
-                                        {
-                                            <div class="inline-error">@item.Error</div>
-                                        }
-                                        <details class="payload-details">
-                                            <summary>Payload</summary>
-                                            <pre class="payload-preview code-block">@item.PayloadJson</pre>
-                                        </details>
-                                    </td>
-                                    <td>@DisplayUser(item)</td>
-                                    <td><ClientLocalTime Value="item.UpdatedAt" /></td>
-                                    <td class="actions-cell">
-                                        @if (item.Status == ChatGptProposalStatus.Pending)
-                                        {
-                                            <button type="button" class="primary-button compact" @onclick="() => ApproveAsync(item.Id)">批准</button>
-                                            <button type="button" class="ghost-button compact" @onclick="() => RejectAsync(item.Id)">拒絕</button>
-                                        }
-                                    </td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
             </section>
-        }
+
+            @if (!string.IsNullOrWhiteSpace(_error))
+            {
+                <div class="inline-error">@_error</div>
+            }
+
+            <div class="metric-grid chatgpt-proposals-summary">
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">目前清單：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(_proposals.Count)</span>
+                        <span class="metric-meta-inline">proposals</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">待審核：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(PendingCount)</span>
+                        <span class="metric-meta-inline">pending</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">已處理：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(ResolvedCount)</span>
+                        <span class="metric-meta-inline">resolved</span>
+                    </div>
+                </section>
+                <section class="panel metric-card metric-card-inline">
+                    <div class="metric-inline-line">
+                        <span class="metric-label-inline">異常：</span>
+                        <span class="metric-value-inline">@DashboardFormatting.Integer(FailedCount)</span>
+                        <span class="metric-meta-inline">failed</span>
+                    </div>
+                </section>
+            </div>
+
+            @if (_loading && _proposals.Count == 0)
+            {
+                <div class="empty-inline">讀取中...</div>
+            }
+            else if (_proposals.Count == 0)
+            {
+                <div class="empty-state">目前沒有符合條件的 ChatGPT proposal。</div>
+            }
+            else
+            {
+                <section class="chatgpt-proposals-workspace">
+                    <div class="split-layout chatgpt-proposals-split-layout">
+                        <section class="panel panel-scroll chatgpt-proposals-list-panel">
+                            <div class="panel-heading-row">
+                                <div>
+                                    <div class="panel-title">Proposal Queue</div>
+                                    <div class="panel-heading-meta">先選擇左側項目，再在右側檢查 payload 與寫入結果。</div>
+                                </div>
+                                <span class="status-badge neutral">@DashboardFormatting.Integer(_proposals.Count)</span>
+                            </div>
+
+                            <div class="panel-scroll-body chatgpt-proposals-queue-scroll">
+                                <div class="stack-list chatgpt-proposals-list">
+                                    @foreach (var item in _proposals)
+                                    {
+                                        <article class="@ProposalItemCss(item.Id)" @onclick="() => SelectProposal(item.Id)">
+                                            <div class="chatgpt-proposal-card-header">
+                                                <span class="status-badge @StatusClass(item.Status)">@StatusLabel(item.Status)</span>
+                                                <code>@item.ToolName</code>
+                                            </div>
+                                            <div class="stack-item-title">@item.Title</div>
+                                            <div class="stack-item-copy">@item.Summary</div>
+                                            <div class="chatgpt-proposal-card-meta">
+                                                <span>@item.ProjectId</span>
+                                                <span>@DisplayUser(item)</span>
+                                                <span><ClientLocalTime Value="item.UpdatedAt" /></span>
+                                            </div>
+                                            @if (!string.IsNullOrWhiteSpace(item.Error))
+                                            {
+                                                <div class="chatgpt-proposal-card-error">@item.Error</div>
+                                            }
+                                        </article>
+                                    }
+                                </div>
+                            </div>
+                        </section>
+
+                        <section class="panel detail-panel panel-scroll chatgpt-proposals-detail-panel">
+                            <div class="panel-heading-row">
+                                <div>
+                                    <div class="panel-title">審核細節</div>
+                                    <div class="panel-heading-meta">@DecisionStateText(SelectedProposal)</div>
+                                </div>
+                                @if (SelectedProposal is not null)
+                                {
+                                    <span class="status-badge @StatusClass(SelectedProposal.Status)">@StatusLabel(SelectedProposal.Status)</span>
+                                }
+                            </div>
+
+                            <div class="panel-scroll-body detail-scroll-shell chatgpt-proposals-detail-scroll">
+                                @if (SelectedProposal is null)
+                                {
+                                    <div class="empty-inline">
+                                        <div class="empty-inline-title">尚未選擇 proposal</div>
+                                        <div class="empty-inline-copy">點選左側 proposal 後，這裡會顯示來源、payload、錯誤與可執行的批准或拒絕動作。</div>
+                                    </div>
+                                }
+                                else
+                                {
+                                    var selected = SelectedProposal;
+
+                                    @if (selected.Status == ChatGptProposalStatus.Pending)
+                                    {
+                                        <div class="chatgpt-proposals-safety-notice">
+                                            <strong>尚未寫入 ContextHub</strong>
+                                            <span>批准後才會產生 durable memory 或 preference 變更；拒絕會保留審核紀錄但不寫入。</span>
+                                        </div>
+                                    }
+
+                                    <div class="chatgpt-proposals-detail-title">@selected.Title</div>
+                                    <div class="stack-item-copy">@selected.Summary</div>
+
+                                    <dl class="definition-grid chatgpt-proposals-definition-grid">
+                                        <div><dt>Project</dt><dd>@selected.ProjectId</dd></div>
+                                        <div><dt>Tool</dt><dd><code>@selected.ToolName</code></dd></div>
+                                        <div><dt>來源</dt><dd>@DisplayUser(selected)</dd></div>
+                                        <div><dt>OAuth Subject</dt><dd class="stack-item-copy">@selected.OAuthSubject</dd></div>
+                                        <div><dt>建立時間</dt><dd><ClientLocalTime Value="selected.CreatedAt" /></dd></div>
+                                        <div><dt>更新時間</dt><dd><ClientLocalTime Value="selected.UpdatedAt" /></dd></div>
+                                    </dl>
+
+                                    <div class="subpanel-title">Payload JSON</div>
+                                    <pre class="payload-preview code-block chatgpt-proposals-payload">@selected.PayloadJson</pre>
+
+                                    @if (!string.IsNullOrWhiteSpace(selected.Error))
+                                    {
+                                        <div class="subpanel-title">錯誤訊息</div>
+                                        <div class="code-block inline-error">@selected.Error</div>
+                                    }
+                                    else if (selected.AppliedResourceId.HasValue)
+                                    {
+                                        <div class="chatgpt-proposals-result">
+                                            <span class="status-badge ok">已寫入</span>
+                                            <code>@selected.AppliedResourceId</code>
+                                        </div>
+                                    }
+
+                                    <div class="chatgpt-proposals-decision-zone">
+                                        <div>
+                                            <div class="subpanel-title">決策</div>
+                                            <div class="panel-heading-meta">@DecisionStateText(selected)</div>
+                                        </div>
+                                        @if (selected.Status == ChatGptProposalStatus.Pending)
+                                        {
+                                            <div class="inline-actions">
+                                                <button type="button" class="primary-button" @onclick="() => ApproveAsync(selected.Id)" disabled="@_loading">批准寫入</button>
+                                                <button type="button" class="ghost-button chatgpt-proposals-reject-button" @onclick="() => RejectAsync(selected.Id)" disabled="@_loading">拒絕</button>
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        </section>
+                    </div>
+                </section>
+            }
+        </div>
     </ChildContent>
 </PageViewport>
 
 @code {
     private List<ChatGptProposalResult> _proposals = [];
+    private Guid? _selectedProposalId;
     private string _projectId = "ContextHub";
     private string _status = "Pending";
     private bool _loading;
     private string _error = string.Empty;
+    private DateTimeOffset? _lastUpdatedAt;
+
+    private ChatGptProposalResult? SelectedProposal
+        => _selectedProposalId.HasValue
+            ? _proposals.FirstOrDefault(item => item.Id == _selectedProposalId.Value)
+            : _proposals.FirstOrDefault();
+
+    private int PendingCount => _proposals.Count(item => item.Status == ChatGptProposalStatus.Pending);
+
+    private int ResolvedCount => _proposals.Count(item => item.Status is ChatGptProposalStatus.Applied or ChatGptProposalStatus.Rejected);
+
+    private int FailedCount => _proposals.Count(item => item.Status == ChatGptProposalStatus.Failed);
 
     protected override async Task OnInitializedAsync()
         => await LoadAsync();
@@ -132,16 +245,27 @@
                     100),
                 CancellationToken.None);
             _proposals = result.ToList();
+            _selectedProposalId = ResolveSelectedProposalId();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
         }
         catch (Exception ex)
         {
             _error = DashboardUiErrorFormatter.BuildLoadError("ChatGPT proposal", ex, _proposals.Count > 0);
+            _selectedProposalId = ResolveSelectedProposalId();
         }
         finally
         {
             _loading = false;
         }
     }
+
+    private void SelectProposal(Guid id)
+        => _selectedProposalId = id;
+
+    private Guid? ResolveSelectedProposalId()
+        => _selectedProposalId.HasValue && _proposals.Any(item => item.Id == _selectedProposalId.Value)
+            ? _selectedProposalId
+            : _proposals.FirstOrDefault()?.Id;
 
     private async Task ApproveAsync(Guid id)
     {
@@ -155,10 +279,37 @@
         await LoadAsync();
     }
 
+    private string ProposalItemCss(Guid id)
+        => id == SelectedProposal?.Id
+            ? "stack-item stack-item-selectable stack-item-selected chatgpt-proposal-card"
+            : "stack-item stack-item-selectable chatgpt-proposal-card";
+
     private static string DisplayUser(ChatGptProposalResult item)
-        => string.IsNullOrWhiteSpace(item.OAuthEmail)
-            ? item.OAuthSubject
-            : item.OAuthEmail;
+    {
+        if (!string.IsNullOrWhiteSpace(item.OAuthName) && !string.IsNullOrWhiteSpace(item.OAuthEmail))
+        {
+            return $"{item.OAuthName} · {item.OAuthEmail}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(item.OAuthEmail))
+        {
+            return item.OAuthEmail;
+        }
+
+        return string.IsNullOrWhiteSpace(item.OAuthSubject)
+            ? "未知使用者"
+            : item.OAuthSubject;
+    }
+
+    private static string StatusLabel(ChatGptProposalStatus status)
+        => status switch
+        {
+            ChatGptProposalStatus.Pending => "待審核",
+            ChatGptProposalStatus.Applied => "已寫入",
+            ChatGptProposalStatus.Rejected => "已拒絕",
+            ChatGptProposalStatus.Failed => "失敗",
+            _ => status.ToString()
+        };
 
     private static string StatusClass(ChatGptProposalStatus status)
         => status switch
@@ -167,6 +318,16 @@
             ChatGptProposalStatus.Applied => "ok",
             ChatGptProposalStatus.Rejected => "bad",
             ChatGptProposalStatus.Failed => "bad",
-            _ => string.Empty
+            _ => "neutral"
+        };
+
+    private static string DecisionStateText(ChatGptProposalResult? item)
+        => item?.Status switch
+        {
+            ChatGptProposalStatus.Pending => "等待人工審核；目前不會寫入 ContextHub。",
+            ChatGptProposalStatus.Applied => "此 proposal 已批准並寫入 ContextHub。",
+            ChatGptProposalStatus.Rejected => "此 proposal 已拒絕，不會寫入 ContextHub。",
+            ChatGptProposalStatus.Failed => "此 proposal 執行失敗，請檢查錯誤與 payload。",
+            _ => "選擇 proposal 以檢查詳細內容。"
         };
 }

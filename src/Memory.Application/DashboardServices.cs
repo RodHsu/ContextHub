@@ -171,8 +171,34 @@ public sealed class DashboardQueryService(
             dockerHost?.Payload ?? CreateUnavailableDockerHost(now),
             dependencyResources?.Payload ?? CreateUnavailableDependencyResources(),
             resourceChart?.Payload.Samples ?? [],
-            contextSavings?.Payload.Savings ?? CreateEmptyContextSavings(now));
+            contextSavings?.Payload.Savings ?? CreateEmptyContextSavings(now),
+            monitoringPayload?.EmbeddingUsage ?? CreateEmptyEmbeddingUsage(now));
     }
+
+    private static IReadOnlyList<EmbeddingUsageWindowResult> CreateEmptyEmbeddingUsage(DateTimeOffset now)
+        =>
+        [
+            CreateEmptyEmbeddingUsageWindow("24h", "24H", now.AddHours(-24), now),
+            CreateEmptyEmbeddingUsageWindow("3d", "3D", now.AddDays(-3), now),
+            CreateEmptyEmbeddingUsageWindow("7d", "7D", now.AddDays(-7), now)
+        ];
+
+    private static EmbeddingUsageWindowResult CreateEmptyEmbeddingUsageWindow(
+        string key,
+        string label,
+        DateTimeOffset startedAt,
+        DateTimeOffset endedAt)
+        => new(
+            key,
+            label,
+            startedAt,
+            endedAt,
+            0,
+            0,
+            0d,
+            0,
+            0,
+            []);
 
     private static DashboardSnapshotSectionStatusResult BuildSectionStatus<TPayload>(
         string key,

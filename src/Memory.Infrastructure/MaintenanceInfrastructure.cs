@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Memory.Application;
 using Memory.Domain;
@@ -553,6 +554,7 @@ public sealed record RetrievalTelemetryRetentionPolicy(
     int RuntimeLogRetentionDays,
     int MaintenanceRunRetentionDays,
     int HitSummaryTopPerBucket,
+    int MaxSummaryDaysPerRun,
     int BatchSize,
     int EventBatchSize,
     int TimeWindowDays,
@@ -573,12 +575,13 @@ public sealed record RetrievalTelemetryRetentionPolicy(
             Math.Max(1, options.RuntimeLogRetentionDays),
             Math.Max(1, options.MaintenanceRunRetentionDays),
             Math.Clamp(options.HitSummaryTopPerBucket, 1, 1_000),
+            Math.Clamp(options.MaxSummaryDaysPerRun, 0, 31),
             Math.Clamp(request.BatchSize ?? options.BatchSize, 1, 100_000),
             Math.Clamp(request.EventBatchSize ?? options.EventBatchSize, 1, 100_000),
             Math.Clamp(request.TimeWindowDays ?? options.TimeWindowDays, 1, 3),
             Math.Clamp(request.DelayBetweenBatchesMs ?? options.DelayBetweenBatchesMs, 0, 60_000),
             Math.Clamp(request.CommandTimeoutSeconds ?? options.CommandTimeoutSeconds, 1, 3600),
-            TimeSpan.FromMinutes(Math.Clamp(request.MaxDurationMinutes ?? options.MaxDurationMinutes, 1, 30)),
+            TimeSpan.FromMinutes(Math.Clamp(request.MaxDurationMinutes ?? options.MaxDurationMinutes, 1, 120)),
             request.RunVacuumAnalyzeAfterRetention ?? options.RunVacuumAnalyzeAfterRetention,
             request.RunVacuumFullAutomatically ?? options.RunVacuumFullAutomatically);
 }
@@ -598,6 +601,7 @@ public sealed class RetrievalTelemetryRetentionService(
         "retrieval_events",
         "retrieval_telemetry_daily_summaries",
         "retrieval_telemetry_daily_hit_summaries",
+        "embedding_usage_hourly",
         "security_audit_events",
         "runtime_log_entries",
         "maintenance_runs"
@@ -630,6 +634,7 @@ public sealed class RetrievalTelemetryRetentionService(
                 runtimeLogRetentionDays = policy.RuntimeLogRetentionDays,
                 maintenanceRunRetentionDays = policy.MaintenanceRunRetentionDays,
                 hitSummaryTopPerBucket = policy.HitSummaryTopPerBucket,
+                maxSummaryDaysPerRun = policy.MaxSummaryDaysPerRun,
                 hitsCutoffUtc = hitsCutoff,
                 eventsCutoffUtc = eventsCutoff,
                 batchSize = policy.BatchSize,
@@ -684,25 +689,73 @@ public sealed class RetrievalTelemetryRetentionService(
         string? vacuumAnalyzeError = null;
         var vacuumFullCompleted = false;
         string? vacuumFullError = null;
+        string? summaryBackfillError = null;
+        string? summaryBackfillErrorKind = null;
+        DateOnly? summaryBackfillFailedDay = null;
+        var summaryBackfillFailureCount = 0;
+        string? summaryBackfillLastExceptionType = null;
+        string? hitRetentionSkippedReason = null;
+        string? hitRetentionError = null;
 
         try
         {
             sizeBefore = await ReadTableSizesAsync(connection, policy, cancellationToken);
             progress = new RetentionProgress(run.Id, startedAt, policy, sizeBefore);
 
-            await UpsertDailySummariesAsync(connection, progress, cancellationToken);
-
-            while (!ShouldStopForMaxDuration(startedAt, policy, out _))
+            progress.DroppedHitPartitions += await DropExpiredMonthlyPartitionsAsync(
+                connection,
+                "retrieval_hits",
+                hitsCutoff,
+                run.TriggeredBy,
+                policy,
+                cancellationToken);
+            progress.DroppedEventPartitions += await DropExpiredMonthlyPartitionsAsync(
+                connection,
+                "retrieval_events",
+                eventsCutoff,
+                run.TriggeredBy,
+                policy,
+                cancellationToken);
+            if (progress.DroppedHitPartitions > 0 || progress.DroppedEventPartitions > 0)
             {
-                hitsWindow = await ResolveRetentionWindowAsync(connection, hitsCutoff, policy, requiresHits: true, cancellationToken);
-                if (hitsWindow is null)
-                {
-                    break;
-                }
+                await UpdateProgressAsync(progress, cancellationToken);
+            }
 
-                progress.CurrentHitsWindow = hitsWindow;
-                await DeleteHitsAsync(connection, progress, hitsCutoff, hitsWindow, cancellationToken);
-                progress.ProcessedHitsWindows++;
+            if (await CanRunDirectHitRetentionAsync(connection, policy, cancellationToken))
+            {
+                try
+                {
+                    while (!ShouldStopForMaxDuration(startedAt, policy, out _))
+                    {
+                        hitsWindow = await ResolveRetentionWindowAsync(connection, hitsCutoff, policy, requiresHits: true, cancellationToken);
+                        if (hitsWindow is null)
+                        {
+                            break;
+                        }
+
+                        progress.CurrentHitsWindow = hitsWindow;
+                        var deletedInWindow = await DeleteHitsAsync(connection, progress, hitsCutoff, hitsWindow, cancellationToken);
+                        progress.ProcessedHitsWindows++;
+                        if (deletedInWindow == 0)
+                        {
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    hitRetentionError = ex.Message;
+                    progress.HitRetentionError = hitRetentionError;
+                    logger.LogWarning(ex, "Retrieval hit retention failed; event retention will continue for run {MaintenanceRunId}.", run.Id);
+                    await UpdateProgressAsync(progress, cancellationToken);
+                }
+            }
+            else
+            {
+                hitRetentionSkippedReason = "retrieval_hits_created_at_retention_index_missing";
+                progress.HitRetentionSkippedReason = hitRetentionSkippedReason;
+                logger.LogWarning("Skipping direct retrieval hit retention because the created_at retention index is missing; event retention will continue for run {MaintenanceRunId}.", run.Id);
+                await UpdateProgressAsync(progress, cancellationToken);
             }
 
             deletedHits = progress.DeletedHits;
@@ -721,11 +774,34 @@ public sealed class RetrievalTelemetryRetentionService(
             }
 
             deletedEvents = progress.DeletedEvents;
+            deletedHits = progress.DeletedHits;
 
             if (!ShouldStopForMaxDuration(startedAt, policy, out _))
             {
                 await DeleteOtherRetentionTablesAsync(connection, progress, run.Id, cancellationToken);
                 await DeleteExpiredSummariesAsync(connection, progress, cancellationToken);
+                try
+                {
+                    await UpsertDailySummariesAsync(connection, progress, cancellationToken);
+                    summaryBackfillError = progress.SummaryBackfillError;
+                    summaryBackfillErrorKind = progress.SummaryBackfillErrorKind;
+                    summaryBackfillFailedDay = progress.SummaryBackfillFailedDay;
+                    summaryBackfillFailureCount = progress.SummaryBackfillFailureCount;
+                    summaryBackfillLastExceptionType = progress.SummaryBackfillLastExceptionType;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    summaryBackfillError = ex.Message;
+                    summaryBackfillErrorKind = ClassifyRetentionError(ex);
+                    summaryBackfillFailureCount++;
+                    summaryBackfillLastExceptionType = ex.GetType().Name;
+                    progress.SummaryBackfillError = summaryBackfillError;
+                    progress.SummaryBackfillErrorKind = summaryBackfillErrorKind;
+                    progress.SummaryBackfillFailureCount = summaryBackfillFailureCount;
+                    progress.SummaryBackfillLastExceptionType = summaryBackfillLastExceptionType;
+                    logger.LogWarning(ex, "Retrieval telemetry summary backfill failed; raw retention completed before summary failure for run {MaintenanceRunId}.", run.Id);
+                    await UpdateProgressAsync(progress, cancellationToken);
+                }
             }
 
             if (ShouldStopForMaxDuration(startedAt, policy, out var stoppedReason))
@@ -757,7 +833,20 @@ public sealed class RetrievalTelemetryRetentionService(
                     deletedHitSummaryRows: progress.DeletedHitSummaryRows,
                     deletedSecurityAuditEvents: progress.DeletedSecurityAuditEvents,
                     deletedRuntimeLogEntries: progress.DeletedRuntimeLogEntries,
-                    deletedMaintenanceRuns: progress.DeletedMaintenanceRuns);
+                    deletedMaintenanceRuns: progress.DeletedMaintenanceRuns,
+                    deletedEmbeddingUsageBuckets: progress.DeletedEmbeddingUsageBuckets,
+                    droppedHitPartitions: progress.DroppedHitPartitions,
+                    droppedEventPartitions: progress.DroppedEventPartitions,
+                    deletedHitsViaEventCascade: progress.DeletedHitsViaEventCascade,
+                    summaryBackfillError: summaryBackfillError,
+                    summaryBackfillErrorKind: summaryBackfillErrorKind,
+                    summaryBackfillFailedDay: summaryBackfillFailedDay,
+                    summaryBackfillFailureCount: summaryBackfillFailureCount,
+                    summaryBackfillLastExceptionType: summaryBackfillLastExceptionType,
+                    summaryEventBackfillError: progress.SummaryEventBackfillError,
+                    summaryHitBackfillError: progress.SummaryHitBackfillError,
+                    hitRetentionSkippedReason: hitRetentionSkippedReason,
+                    hitRetentionError: hitRetentionError);
                 await UpdateRunAsync(run.Id, MaintenanceRunStatus.Completed, stoppedAt, stoppedJson, string.Empty, cancellationToken);
                 return new RetrievalTelemetryRetentionRunResult(run.Id, hitsCutoff, eventsCutoff, deletedHits, deletedEvents, startedAt, stoppedAt, stoppedJson);
             }
@@ -817,7 +906,20 @@ public sealed class RetrievalTelemetryRetentionService(
                 deletedHitSummaryRows: progress.DeletedHitSummaryRows,
                 deletedSecurityAuditEvents: progress.DeletedSecurityAuditEvents,
                 deletedRuntimeLogEntries: progress.DeletedRuntimeLogEntries,
-                deletedMaintenanceRuns: progress.DeletedMaintenanceRuns);
+                deletedMaintenanceRuns: progress.DeletedMaintenanceRuns,
+                deletedEmbeddingUsageBuckets: progress.DeletedEmbeddingUsageBuckets,
+                droppedHitPartitions: progress.DroppedHitPartitions,
+                droppedEventPartitions: progress.DroppedEventPartitions,
+                deletedHitsViaEventCascade: progress.DeletedHitsViaEventCascade,
+                summaryBackfillError: summaryBackfillError,
+                summaryBackfillErrorKind: summaryBackfillErrorKind,
+                summaryBackfillFailedDay: summaryBackfillFailedDay,
+                summaryBackfillFailureCount: summaryBackfillFailureCount,
+                summaryBackfillLastExceptionType: summaryBackfillLastExceptionType,
+                summaryEventBackfillError: progress.SummaryEventBackfillError,
+                summaryHitBackfillError: progress.SummaryHitBackfillError,
+                hitRetentionSkippedReason: hitRetentionSkippedReason,
+                hitRetentionError: hitRetentionError);
             await UpdateRunAsync(run.Id, MaintenanceRunStatus.Completed, completedAt, resultJson, string.Empty, cancellationToken);
             return new RetrievalTelemetryRetentionRunResult(run.Id, hitsCutoff, eventsCutoff, deletedHits, deletedEvents, startedAt, completedAt, resultJson);
         }
@@ -850,7 +952,20 @@ public sealed class RetrievalTelemetryRetentionService(
                 deletedHitSummaryRows: progress?.DeletedHitSummaryRows ?? 0,
                 deletedSecurityAuditEvents: progress?.DeletedSecurityAuditEvents ?? 0,
                 deletedRuntimeLogEntries: progress?.DeletedRuntimeLogEntries ?? 0,
-                deletedMaintenanceRuns: progress?.DeletedMaintenanceRuns ?? 0);
+                deletedMaintenanceRuns: progress?.DeletedMaintenanceRuns ?? 0,
+                deletedEmbeddingUsageBuckets: progress?.DeletedEmbeddingUsageBuckets ?? 0,
+                droppedHitPartitions: progress?.DroppedHitPartitions ?? 0,
+                droppedEventPartitions: progress?.DroppedEventPartitions ?? 0,
+                deletedHitsViaEventCascade: progress?.DeletedHitsViaEventCascade ?? 0,
+                summaryBackfillError: summaryBackfillError,
+                summaryBackfillErrorKind: summaryBackfillErrorKind,
+                summaryBackfillFailedDay: summaryBackfillFailedDay,
+                summaryBackfillFailureCount: summaryBackfillFailureCount,
+                summaryBackfillLastExceptionType: summaryBackfillLastExceptionType,
+                summaryEventBackfillError: progress?.SummaryEventBackfillError,
+                summaryHitBackfillError: progress?.SummaryHitBackfillError,
+                hitRetentionSkippedReason: hitRetentionSkippedReason,
+                hitRetentionError: hitRetentionError);
             await UpdateRunAsync(run.Id, MaintenanceRunStatus.Failed, completedAt, failedJson, ex.Message, CancellationToken.None);
             throw;
         }
@@ -863,6 +978,122 @@ public sealed class RetrievalTelemetryRetentionService(
             await unlockCommand.ExecuteNonQueryAsync(CancellationToken.None);
         }
     }
+
+    private static async Task<int> DropExpiredMonthlyPartitionsAsync(
+        NpgsqlConnection connection,
+        string parentTable,
+        DateTimeOffset cutoff,
+        string triggeredBy,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        var childTables = await ReadMonthlyPartitionChildrenAsync(connection, parentTable, policy, cancellationToken);
+        var dropped = 0;
+        foreach (var childTable in childTables)
+        {
+            if (!TryResolveMonthlyPartitionWindow(parentTable, childTable, out var start, out var end) || end > DateOnly.FromDateTime(cutoff.UtcDateTime.Date))
+            {
+                continue;
+            }
+
+            await using var dropCommand = connection.CreateCommand();
+            dropCommand.CommandTimeout = policy.CommandTimeoutSeconds;
+            dropCommand.CommandText = $"DROP TABLE IF EXISTS {QuoteIdentifier(childTable)};";
+            await dropCommand.ExecuteNonQueryAsync(cancellationToken);
+
+            await using var auditCommand = connection.CreateCommand();
+            auditCommand.CommandTimeout = policy.CommandTimeoutSeconds;
+            auditCommand.CommandText = """
+                INSERT INTO retrieval_telemetry_partition_runs (
+                    id,
+                    parent_table,
+                    partition_name,
+                    partition_start,
+                    partition_end,
+                    action,
+                    triggered_by)
+                VALUES (
+                    @id,
+                    @parent_table,
+                    @partition_name,
+                    @partition_start,
+                    @partition_end,
+                    'drop_expired_partition',
+                    @triggered_by);
+                """;
+            auditCommand.Parameters.Add(new NpgsqlParameter<Guid>("id", Guid.NewGuid()));
+            auditCommand.Parameters.Add(new NpgsqlParameter<string>("parent_table", parentTable));
+            auditCommand.Parameters.Add(new NpgsqlParameter<string>("partition_name", childTable));
+            auditCommand.Parameters.Add(new NpgsqlParameter<DateOnly>("partition_start", start));
+            auditCommand.Parameters.Add(new NpgsqlParameter<DateOnly>("partition_end", end));
+            auditCommand.Parameters.Add(new NpgsqlParameter<string>("triggered_by", triggeredBy));
+            await auditCommand.ExecuteNonQueryAsync(cancellationToken);
+
+            dropped++;
+        }
+
+        return dropped;
+    }
+
+    private static async Task<IReadOnlyList<string>> ReadMonthlyPartitionChildrenAsync(
+        NpgsqlConnection connection,
+        string parentTable,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            SELECT child.relname
+            FROM pg_inherits i
+            INNER JOIN pg_class parent ON parent.oid = i.inhparent
+            INNER JOIN pg_class child ON child.oid = i.inhrelid
+            INNER JOIN pg_namespace ns ON ns.oid = child.relnamespace
+            WHERE parent.relname = @parent_table
+              AND pg_table_is_visible(parent.oid)
+              AND ns.nspname = current_schema()
+            ORDER BY child.relname ASC;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<string>("parent_table", parentTable));
+        var children = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            children.Add(reader.GetString(0));
+        }
+
+        return children;
+    }
+
+    private static bool TryResolveMonthlyPartitionWindow(string parentTable, string childTable, out DateOnly start, out DateOnly end)
+    {
+        start = default;
+        end = default;
+        var prefix = parentTable + "_";
+        if (!childTable.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var suffix = childTable[prefix.Length..];
+        var parts = suffix.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length < 2 ||
+            parts[0].Length != 4 ||
+            parts[1].Length != 2 ||
+            !int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var year) ||
+            !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var month) ||
+            month is < 1 or > 12)
+        {
+            return false;
+        }
+
+        start = new DateOnly(year, month, 1);
+        end = start.AddMonths(1);
+        return true;
+    }
+
+    private static string QuoteIdentifier(string identifier)
+        => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
     private async Task<long> DeleteHitsAsync(
         NpgsqlConnection connection,
@@ -877,8 +1108,6 @@ public sealed class RetrievalTelemetryRetentionService(
         }
 
         long total = 0;
-        DateTimeOffset? afterCreatedAt = null;
-        Guid? afterId = null;
         while (true)
         {
             if (ShouldStopForMaxDuration(progress.StartedAt, progress.Policy, out _))
@@ -886,27 +1115,13 @@ public sealed class RetrievalTelemetryRetentionService(
                 return total;
             }
 
-            var eventWindow = await ReadEventWindowAsync(connection, cutoff, window, afterCreatedAt, afterId, progress.Policy, cancellationToken);
-            if (eventWindow.EventIds.Count == 0)
-            {
-                return total;
-            }
-
-            var deleted = await DeleteHitBatchAsync(connection, eventWindow.EventIds, progress.Policy, cancellationToken);
+            var deleted = await DeleteHitBatchAsync(connection, cutoff, window, progress.Policy, cancellationToken);
             total += deleted;
             progress.DeletedHits += deleted;
             await UpdateProgressAsync(progress, cancellationToken);
             if (deleted == 0)
             {
-                afterCreatedAt = eventWindow.LastCreatedAt;
-                afterId = eventWindow.LastId;
-                continue;
-            }
-
-            if (deleted < progress.Policy.BatchSize)
-            {
-                afterCreatedAt = eventWindow.LastCreatedAt;
-                afterId = eventWindow.LastId;
+                return total;
             }
 
             await DelayBetweenBatchesAsync(progress.Policy, cancellationToken);
@@ -945,21 +1160,39 @@ public sealed class RetrievalTelemetryRetentionService(
                     ORDER BY created_at ASC, id ASC
                     LIMIT @batch_size
                 ),
+                affected_hits AS (
+                    SELECT COUNT(*)::bigint AS count
+                    FROM retrieval_hits h
+                    INNER JOIN target ON target.id = h.retrieval_event_id
+                ),
                 deleted AS (
                     DELETE FROM retrieval_events e
                     USING target
                     WHERE e.id = target.id
                     RETURNING 1
                 )
-                SELECT COUNT(*)::bigint FROM deleted;
+                SELECT
+                    COUNT(*)::bigint AS deleted_events,
+                    COALESCE((SELECT count FROM affected_hits), 0)::bigint AS cascade_deleted_hits
+                FROM deleted;
                 """;
             command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoff));
             command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("window_start", window.Start));
             command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("window_end", window.End));
             command.Parameters.Add(new NpgsqlParameter<int>("batch_size", progress.Policy.EventBatchSize));
-            var deleted = (long)(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var deleted = 0L;
+            var cascadeDeletedHits = 0L;
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                deleted = reader.GetInt64(0);
+                cascadeDeletedHits = reader.GetInt64(1);
+            }
+
             total += deleted;
             progress.DeletedEvents += deleted;
+            progress.DeletedHits += cascadeDeletedHits;
+            progress.DeletedHitsViaEventCascade += cascadeDeletedHits;
             await UpdateProgressAsync(progress, cancellationToken);
             if (deleted == 0)
             {
@@ -976,6 +1209,11 @@ public sealed class RetrievalTelemetryRetentionService(
         CancellationToken cancellationToken)
     {
         var summaryCutoffDate = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime.Date);
+        if (progress.Policy.MaxSummaryDaysPerRun <= 0)
+        {
+            return;
+        }
+
         var earliestBackfillDate = summaryCutoffDate.AddDays(-progress.Policy.EventsRetentionDays);
         var currentDate = await ResolveNextUnsummarizedDateAsync(
             connection,
@@ -984,7 +1222,9 @@ public sealed class RetrievalTelemetryRetentionService(
             progress.Policy,
             cancellationToken);
 
-        while (currentDate.HasValue && currentDate.Value < summaryCutoffDate)
+        while (currentDate.HasValue &&
+               currentDate.Value < summaryCutoffDate &&
+               progress.ProcessedSummaryDays < progress.Policy.MaxSummaryDaysPerRun)
         {
             if (ShouldStopForMaxDuration(progress.StartedAt, progress.Policy, out _))
             {
@@ -992,8 +1232,33 @@ public sealed class RetrievalTelemetryRetentionService(
             }
 
             var day = currentDate.Value;
-            progress.UpsertedEventSummaryRows += await UpsertDailyEventSummaryAsync(connection, day, progress.Policy, cancellationToken);
-            progress.UpsertedHitSummaryRows += await UpsertDailyHitSummaryAsync(connection, day, progress.Policy, cancellationToken);
+            var eventSummaryCompleted = false;
+            try
+            {
+                progress.UpsertedEventSummaryRows += await UpsertDailyEventSummaryAsync(connection, day, progress.Policy, cancellationToken);
+                eventSummaryCompleted = true;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                RecordSummaryBackfillFailure(progress, day, ex);
+                progress.SummaryEventBackfillError = ex.Message;
+                logger.LogWarning(ex, "Retrieval telemetry event summary backfill failed for {SummaryDate}; raw retention will continue.", day);
+            }
+
+            if (eventSummaryCompleted)
+            {
+                try
+                {
+                    await UpsertDailyHitSummaryAsync(connection, progress, day, cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    RecordSummaryBackfillFailure(progress, day, ex);
+                    progress.SummaryHitBackfillError = ex.Message;
+                    logger.LogWarning(ex, "Retrieval telemetry hit summary backfill failed for {SummaryDate}; event summary retention will continue.", day);
+                }
+            }
+
             progress.ProcessedSummaryDays++;
             await UpdateProgressAsync(progress, cancellationToken);
             currentDate = await ResolveNextUnsummarizedDateAsync(
@@ -1012,44 +1277,75 @@ public sealed class RetrievalTelemetryRetentionService(
         RetrievalTelemetryRetentionPolicy policy,
         CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
-        command.CommandTimeout = policy.CommandTimeoutSeconds;
-        command.CommandText = """
-            WITH candidate_days AS (
-                SELECT DISTINCT (created_at AT TIME ZONE 'UTC')::date AS summary_date
-                FROM retrieval_events
-                WHERE created_at >= @from_date
-                  AND created_at < @summary_cutoff
-            )
-            SELECT candidate_days.summary_date
-            FROM candidate_days
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM retrieval_telemetry_daily_summaries existing
-                WHERE existing.summary_date = candidate_days.summary_date
-            )
-            ORDER BY candidate_days.summary_date ASC
-            LIMIT 1;
-            """;
-        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>(
-            "from_date",
-            new DateTimeOffset(fromDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)));
-        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>(
-            "summary_cutoff",
-            new DateTimeOffset(summaryCutoffDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)));
-
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        if (value is null || value is DBNull)
+        for (var date = fromDate; date < summaryCutoffDate; date = date.AddDays(1))
         {
-            return null;
+            await using var command = connection.CreateCommand();
+            command.CommandTimeout = policy.CommandTimeoutSeconds;
+            command.CommandText = """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM retrieval_events
+                    WHERE created_at >= @day_start
+                      AND created_at < @day_end
+                    LIMIT 1
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM retrieval_telemetry_daily_summaries existing
+                    WHERE existing.summary_date = @summary_date
+                    LIMIT 1
+                );
+                """;
+            var dayStart = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("day_start", dayStart));
+            command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("day_end", dayStart.AddDays(1)));
+            command.Parameters.Add(new NpgsqlParameter<DateOnly>("summary_date", date));
+            if ((bool)(await command.ExecuteScalarAsync(cancellationToken) ?? false))
+            {
+                return date;
+            }
         }
 
-        return value switch
+        return null;
+    }
+
+    private static void RecordSummaryBackfillFailure(RetentionProgress progress, DateOnly summaryDate, Exception exception)
+    {
+        progress.SummaryBackfillError = exception.Message;
+        progress.SummaryBackfillErrorKind = ClassifyRetentionError(exception);
+        progress.SummaryBackfillFailedDay = summaryDate;
+        progress.SummaryBackfillFailureCount++;
+        progress.SummaryBackfillLastExceptionType = exception.GetType().Name;
+    }
+
+    private static string ClassifyRetentionError(Exception exception)
+    {
+        if (ContainsException<TimeoutException>(exception) ||
+            exception.ToString().Contains("Timeout during reading attempt", StringComparison.OrdinalIgnoreCase))
         {
-            DateOnly dateOnly => dateOnly,
-            DateTime dateTime => DateOnly.FromDateTime(dateTime),
-            _ => throw new InvalidOperationException($"Unexpected summary date type '{value.GetType()}'.")
-        };
+            return "databaseReadTimeout";
+        }
+
+        if (ContainsException<NpgsqlException>(exception))
+        {
+            return "database";
+        }
+
+        return exception.GetType().Name;
+    }
+
+    private static bool ContainsException<TException>(Exception exception)
+        where TException : Exception
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is TException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static async Task<long> UpsertDailyEventSummaryAsync(
@@ -1126,12 +1422,18 @@ public sealed class RetrievalTelemetryRetentionService(
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task<long> UpsertDailyHitSummaryAsync(
+    private async Task UpsertDailyHitSummaryAsync(
         NpgsqlConnection connection,
+        RetentionProgress progress,
         DateOnly summaryDate,
-        RetrievalTelemetryRetentionPolicy policy,
         CancellationToken cancellationToken)
     {
+        var policy = progress.Policy;
+        if (ShouldStopForMaxDuration(progress.StartedAt, policy, out _))
+        {
+            return;
+        }
+
         await DeleteSummaryRowsForDayAsync(
             connection,
             "retrieval_telemetry_daily_hit_summaries",
@@ -1139,30 +1441,69 @@ public sealed class RetrievalTelemetryRetentionService(
             policy,
             cancellationToken);
 
-        long total = 0;
         DateTimeOffset? afterCreatedAt = null;
         Guid? afterId = null;
-        while (true)
+        try
         {
-            var eventWindow = await ReadSummaryEventWindowAsync(
-                connection,
-                summaryDate,
-                afterCreatedAt,
-                afterId,
-                policy,
-                cancellationToken);
-            if (eventWindow.EventIds.Count == 0)
+            while (true)
             {
-                break;
+                if (ShouldStopForMaxDuration(progress.StartedAt, policy, out _))
+                {
+                    progress.SummaryHitBackfillError = "maxDuration";
+                    await DeleteSummaryRowsForDayAsync(
+                        connection,
+                        "retrieval_telemetry_daily_hit_summaries",
+                        summaryDate,
+                        policy,
+                        cancellationToken);
+                    await UpdateProgressAsync(progress, cancellationToken);
+                    return;
+                }
+
+                var eventWindow = await ReadSummaryEventWindowAsync(
+                    connection,
+                    summaryDate,
+                    afterCreatedAt,
+                    afterId,
+                    policy,
+                    cancellationToken);
+                if (eventWindow.EventIds.Count == 0)
+                {
+                    break;
+                }
+
+                progress.UpsertedHitSummaryRows += await UpsertDailyHitSummaryBatchAsync(connection, summaryDate, eventWindow.EventIds, policy, cancellationToken);
+                afterCreatedAt = eventWindow.LastCreatedAt;
+                afterId = eventWindow.LastId;
+                await UpdateProgressAsync(progress, cancellationToken);
+                await DelayBetweenBatchesAsync(policy, cancellationToken);
             }
 
-            total += await UpsertDailyHitSummaryBatchAsync(connection, summaryDate, eventWindow.EventIds, policy, cancellationToken);
-            afterCreatedAt = eventWindow.LastCreatedAt;
-            afterId = eventWindow.LastId;
-        }
+            if (ShouldStopForMaxDuration(progress.StartedAt, policy, out _))
+            {
+                progress.SummaryHitBackfillError = "maxDuration";
+                await DeleteSummaryRowsForDayAsync(
+                    connection,
+                    "retrieval_telemetry_daily_hit_summaries",
+                    summaryDate,
+                    policy,
+                    cancellationToken);
+                await UpdateProgressAsync(progress, cancellationToken);
+                return;
+            }
 
-        await PruneDailyHitSummaryAsync(connection, summaryDate, policy, cancellationToken);
-        return total;
+            await PruneDailyHitSummaryAsync(connection, summaryDate, policy, cancellationToken);
+        }
+        catch
+        {
+            await DeleteSummaryRowsForDayAsync(
+                connection,
+                "retrieval_telemetry_daily_hit_summaries",
+                summaryDate,
+                policy,
+                cancellationToken);
+            throw;
+        }
     }
 
     private static async Task<EventWindow> ReadSummaryEventWindowAsync(
@@ -1394,6 +1735,13 @@ public sealed class RetrievalTelemetryRetentionService(
             timeProvider.GetUtcNow().AddDays(-progress.Policy.RuntimeLogRetentionDays),
             progress.Policy,
             cancellationToken);
+        progress.DeletedEmbeddingUsageBuckets += await DeleteOlderThanAsync(
+            connection,
+            "embedding_usage_hourly",
+            "bucket_start_utc",
+            timeProvider.GetUtcNow().AddDays(-progress.Policy.SummaryRetentionDays),
+            progress.Policy,
+            cancellationToken);
         progress.DeletedMaintenanceRuns += await DeleteOldMaintenanceRunsAsync(
             connection,
             currentRunId,
@@ -1473,6 +1821,31 @@ public sealed class RetrievalTelemetryRetentionService(
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    private static async Task<bool> CanRunDirectHitRetentionAsync(
+        NpgsqlConnection connection,
+        RetrievalTelemetryRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM pg_indexes
+                    WHERE schemaname = current_schema()
+                      AND tablename = 'retrieval_hits'
+                      AND indexname = 'ix_retrieval_hits_created_at_event_id'
+                )
+                OR COALESCE((
+                    SELECT reltuples
+                    FROM pg_class
+                    WHERE oid = 'retrieval_hits'::regclass
+                ), 0) < 100000;
+            """;
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken) ?? false);
+    }
+
     private static async Task<RetentionWindow?> ResolveRetentionWindowAsync(
         NpgsqlConnection connection,
         DateTimeOffset cutoff,
@@ -1484,14 +1857,10 @@ public sealed class RetrievalTelemetryRetentionService(
         command.CommandTimeout = policy.CommandTimeoutSeconds;
         command.CommandText = requiresHits
             ? """
-                SELECT MIN(e.created_at)
-                FROM retrieval_events e
-                WHERE e.created_at < @cutoff
-                  AND EXISTS (
-                      SELECT 1
-                      FROM retrieval_hits h
-                      WHERE h.retrieval_event_id = e.id
-                  );
+                SELECT MIN(h.created_at)
+                FROM retrieval_hits h
+                WHERE h.created_at IS NOT NULL
+                  AND h.created_at < @cutoff;
                 """
             : """
                 SELECT MIN(e.created_at)
@@ -1582,7 +1951,8 @@ public sealed class RetrievalTelemetryRetentionService(
 
     private static async Task<long> DeleteHitBatchAsync(
         NpgsqlConnection connection,
-        IReadOnlyList<Guid> eventIds,
+        DateTimeOffset cutoff,
+        RetentionWindow window,
         RetrievalTelemetryRetentionPolicy policy,
         CancellationToken cancellationToken)
     {
@@ -1592,8 +1962,11 @@ public sealed class RetrievalTelemetryRetentionService(
             WITH target AS (
                 SELECT h.id
                 FROM retrieval_hits h
-                WHERE h.retrieval_event_id = ANY(@event_ids)
-                ORDER BY h.retrieval_event_id ASC, h.rank ASC, h.id ASC
+                WHERE h.created_at IS NOT NULL
+                  AND h.created_at < @cutoff
+                  AND h.created_at >= @window_start
+                  AND h.created_at < @window_end
+                ORDER BY h.created_at ASC, h.retrieval_event_id ASC, h.rank ASC, h.id ASC
                 LIMIT @batch_size
             ),
             deleted AS (
@@ -1604,7 +1977,9 @@ public sealed class RetrievalTelemetryRetentionService(
             )
             SELECT COUNT(*)::bigint FROM deleted;
             """;
-        command.Parameters.Add(new NpgsqlParameter<Guid[]>("event_ids", eventIds.ToArray()));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoff));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("window_start", window.Start));
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("window_end", window.End));
         command.Parameters.Add(new NpgsqlParameter<int>("batch_size", policy.BatchSize));
         return (long)(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
     }
@@ -1643,6 +2018,7 @@ public sealed class RetrievalTelemetryRetentionService(
                 'retrieval_hits',
                 'retrieval_telemetry_daily_summaries',
                 'retrieval_telemetry_daily_hit_summaries',
+                'embedding_usage_hourly',
                 'security_audit_events',
                 'runtime_log_entries',
                 'maintenance_runs')
@@ -1680,7 +2056,20 @@ public sealed class RetrievalTelemetryRetentionService(
             deletedHitSummaryRows: progress.DeletedHitSummaryRows,
             deletedSecurityAuditEvents: progress.DeletedSecurityAuditEvents,
             deletedRuntimeLogEntries: progress.DeletedRuntimeLogEntries,
-            deletedMaintenanceRuns: progress.DeletedMaintenanceRuns);
+            deletedMaintenanceRuns: progress.DeletedMaintenanceRuns,
+            deletedEmbeddingUsageBuckets: progress.DeletedEmbeddingUsageBuckets,
+            droppedHitPartitions: progress.DroppedHitPartitions,
+            droppedEventPartitions: progress.DroppedEventPartitions,
+            deletedHitsViaEventCascade: progress.DeletedHitsViaEventCascade,
+            summaryBackfillError: progress.SummaryBackfillError,
+            summaryBackfillErrorKind: progress.SummaryBackfillErrorKind,
+            summaryBackfillFailedDay: progress.SummaryBackfillFailedDay,
+            summaryBackfillFailureCount: progress.SummaryBackfillFailureCount,
+            summaryBackfillLastExceptionType: progress.SummaryBackfillLastExceptionType,
+            summaryEventBackfillError: progress.SummaryEventBackfillError,
+            summaryHitBackfillError: progress.SummaryHitBackfillError,
+            hitRetentionSkippedReason: progress.HitRetentionSkippedReason,
+            hitRetentionError: progress.HitRetentionError);
         await UpdateRunAsync(progress.RunId, MaintenanceRunStatus.Running, null, resultJson, string.Empty, cancellationToken);
     }
 
@@ -1734,21 +2123,47 @@ public sealed class RetrievalTelemetryRetentionService(
         long deletedHitSummaryRows = 0,
         long deletedSecurityAuditEvents = 0,
         long deletedRuntimeLogEntries = 0,
-        long deletedMaintenanceRuns = 0)
+        long deletedMaintenanceRuns = 0,
+        long deletedEmbeddingUsageBuckets = 0,
+        int droppedHitPartitions = 0,
+        int droppedEventPartitions = 0,
+        long deletedHitsViaEventCascade = 0,
+        string? summaryBackfillError = null,
+        string? summaryBackfillErrorKind = null,
+        DateOnly? summaryBackfillFailedDay = null,
+        int summaryBackfillFailureCount = 0,
+        string? summaryBackfillLastExceptionType = null,
+        string? summaryEventBackfillError = null,
+        string? summaryHitBackfillError = null,
+        string? hitRetentionSkippedReason = null,
+        string? hitRetentionError = null)
         => JsonSerializer.Serialize(new
         {
             deletedHits,
+            deletedHitsViaEventCascade,
             deletedEvents,
+            droppedHitPartitions,
+            droppedEventPartitions,
+            hitRetentionSkippedReason,
+            hitRetentionError,
             upsertedEventSummaryRows,
             upsertedHitSummaryRows,
             processedSummaryDays,
+            summaryBackfillError,
+            summaryBackfillErrorKind,
+            summaryBackfillFailedDay,
+            summaryBackfillFailureCount,
+            summaryBackfillLastExceptionType,
+            summaryEventBackfillError,
+            summaryHitBackfillError,
             deletedEventSummaryRows,
             deletedHitSummaryRows,
             otherTableRetention = new
             {
                 deletedSecurityAuditEvents,
                 deletedRuntimeLogEntries,
-                deletedMaintenanceRuns
+                deletedMaintenanceRuns,
+                deletedEmbeddingUsageBuckets
             },
             startedAtUtc = startedAt,
             observedAtUtc = observedAt,
@@ -1764,7 +2179,8 @@ public sealed class RetrievalTelemetryRetentionService(
                 securityAuditRetentionDays = policy.SecurityAuditRetentionDays,
                 runtimeLogRetentionDays = policy.RuntimeLogRetentionDays,
                 maintenanceRunRetentionDays = policy.MaintenanceRunRetentionDays,
-                hitSummaryTopPerBucket = policy.HitSummaryTopPerBucket
+                hitSummaryTopPerBucket = policy.HitSummaryTopPerBucket,
+                maxSummaryDaysPerRun = policy.MaxSummaryDaysPerRun
             },
             timeWindowDays = policy.TimeWindowDays,
             hitsWindowStartUtc = hitsWindow?.Start,
@@ -1803,6 +2219,7 @@ public sealed class RetrievalTelemetryRetentionService(
         IReadOnlyDictionary<string, long> SizeBefore)
     {
         public long DeletedHits { get; set; }
+        public long DeletedHitsViaEventCascade { get; set; }
         public long DeletedEvents { get; set; }
         public long UpsertedEventSummaryRows { get; set; }
         public long UpsertedHitSummaryRows { get; set; }
@@ -1812,6 +2229,18 @@ public sealed class RetrievalTelemetryRetentionService(
         public long DeletedSecurityAuditEvents { get; set; }
         public long DeletedRuntimeLogEntries { get; set; }
         public long DeletedMaintenanceRuns { get; set; }
+        public long DeletedEmbeddingUsageBuckets { get; set; }
+        public int DroppedHitPartitions { get; set; }
+        public int DroppedEventPartitions { get; set; }
+        public string? SummaryBackfillError { get; set; }
+        public string? SummaryBackfillErrorKind { get; set; }
+        public DateOnly? SummaryBackfillFailedDay { get; set; }
+        public int SummaryBackfillFailureCount { get; set; }
+        public string? SummaryBackfillLastExceptionType { get; set; }
+        public string? SummaryEventBackfillError { get; set; }
+        public string? SummaryHitBackfillError { get; set; }
+        public string? HitRetentionSkippedReason { get; set; }
+        public string? HitRetentionError { get; set; }
         public int ProcessedHitsWindows { get; set; }
         public int ProcessedEventsWindows { get; set; }
         public RetentionWindow? CurrentHitsWindow { get; set; }

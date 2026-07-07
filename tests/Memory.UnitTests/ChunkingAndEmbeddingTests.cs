@@ -185,6 +185,7 @@ public sealed class ChunkingAndEmbeddingTests
         {
             BaseAddress = new Uri("http://embedding-service")
         });
+        var telemetry = new RecordingEmbeddingUsageTelemetry();
         var provider = new HttpEmbeddingProvider(factory, Options.Create(new EmbeddingOptions
         {
             Provider = "Http",
@@ -195,7 +196,7 @@ public sealed class ChunkingAndEmbeddingTests
             MaxTokens = 512,
             BatchSize = 8,
             InferenceThreads = 4
-        }), NullLogger<HttpEmbeddingProvider>.Instance);
+        }), telemetry, NullLogger<HttpEmbeddingProvider>.Instance);
 
         var results = await provider.EmbedBatchAsync(
         [
@@ -206,6 +207,16 @@ public sealed class ChunkingAndEmbeddingTests
         Assert.Equal(2, results.Count);
         Assert.Equal([1f, 0f], results[0].Values);
         Assert.Equal([0f, 1f], results[1].Values);
+        Assert.Equal(2, telemetry.Items.Count);
+        Assert.All(telemetry.Items, item =>
+        {
+            Assert.Equal("Http", item.Provider);
+            Assert.Equal("compact", item.Profile);
+            Assert.Equal(EmbeddingPurpose.Document, item.Purpose);
+            Assert.Equal("unknown", item.SourceKind);
+            Assert.Equal(512, item.MaxTokens);
+            Assert.False(item.Truncated);
+        });
     }
 
     [Fact]
@@ -225,6 +236,20 @@ public sealed class ChunkingAndEmbeddingTests
     private sealed class StubHttpClientFactory(HttpClient client) : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => client;
+    }
+
+    private sealed class RecordingEmbeddingUsageTelemetry : IEmbeddingUsageTelemetry
+    {
+        public List<EmbeddingUsageTelemetryItem> Items { get; } = [];
+
+        public Task RecordAsync(IReadOnlyList<EmbeddingUsageTelemetryItem> items, CancellationToken cancellationToken)
+        {
+            Items.AddRange(items);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<EmbeddingUsageWindowResult>> GetWindowsAsync(DateTimeOffset observedAtUtc, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<EmbeddingUsageWindowResult>>([]);
     }
 
     private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler

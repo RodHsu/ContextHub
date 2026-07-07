@@ -7,23 +7,81 @@ namespace Memory.UnitTests;
 public sealed class TelemetryRetentionPolicyTests
 {
     [Fact]
+    public void EmbeddingUsageWindow_Should_Calculate_Rate_And_Approximate_P95_From_Histogram()
+    {
+        var now = new DateTimeOffset(2026, 7, 7, 8, 0, 0, TimeSpan.Zero);
+        var rows = new[]
+        {
+            new DatabaseEmbeddingUsageTelemetry.EmbeddingUsageAggregateRow(
+                now.AddHours(-1),
+                "mcp-server",
+                "Http",
+                "compact",
+                "Query",
+                "query",
+                512,
+                100,
+                5,
+                30_000,
+                700,
+                706,
+                new Dictionary<string, long>
+                {
+                    ["lte128"] = 10,
+                    ["lte256"] = 40,
+                    ["lte384"] = 20,
+                    ["lte512"] = 20,
+                    ["lte768"] = 10,
+                    ["lte1024"] = 0,
+                    ["lte1536"] = 0,
+                    ["gt1536"] = 0
+                })
+        };
+
+        var result = DatabaseEmbeddingUsageTelemetry.BuildWindow("24h", "24H", now.AddHours(-24), now, rows);
+
+        result.TotalInputs.Should().Be(100);
+        result.TruncatedInputs.Should().Be(5);
+        result.TruncationRatePercent.Should().Be(5);
+        result.ApproxP95TokenCount.Should().Be(768);
+        result.MaxTokenCount.Should().Be(706);
+        result.TopGroups.Should().ContainSingle();
+        result.TopGroups[0].SourceKind.Should().Be("query");
+    }
+
+    [Fact]
+    public void EmbeddingUsageWindow_Should_Return_Zeroes_When_Empty()
+    {
+        var now = new DateTimeOffset(2026, 7, 7, 8, 0, 0, TimeSpan.Zero);
+
+        var result = DatabaseEmbeddingUsageTelemetry.BuildWindow("24h", "24H", now.AddHours(-24), now, []);
+
+        result.TotalInputs.Should().Be(0);
+        result.TruncatedInputs.Should().Be(0);
+        result.TruncationRatePercent.Should().Be(0);
+        result.ApproxP95TokenCount.Should().Be(0);
+        result.TopGroups.Should().BeEmpty();
+    }
+
+    [Fact]
     public void Create_Should_Use_Low_Impact_Defaults()
     {
         var policy = RetrievalTelemetryRetentionPolicy.Create(new TelemetryRetentionOptions(), new RetrievalTelemetryRetentionRunRequest());
 
         policy.HitsRetentionDays.Should().Be(3);
-        policy.EventsRetentionDays.Should().Be(30);
+        policy.EventsRetentionDays.Should().Be(7);
         policy.SummaryRetentionDays.Should().Be(30);
         policy.SecurityAuditRetentionDays.Should().Be(180);
         policy.RuntimeLogRetentionDays.Should().Be(30);
         policy.MaintenanceRunRetentionDays.Should().Be(180);
         policy.HitSummaryTopPerBucket.Should().Be(100);
+        policy.MaxSummaryDaysPerRun.Should().Be(3);
         policy.BatchSize.Should().Be(5_000);
         policy.EventBatchSize.Should().Be(1_000);
         policy.TimeWindowDays.Should().Be(3);
         policy.DelayBetweenBatchesMs.Should().Be(250);
         policy.CommandTimeoutSeconds.Should().Be(300);
-        policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(15));
+        policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(120));
         policy.RunVacuumAnalyzeAfterRetention.Should().BeTrue();
         policy.RunVacuumFullAutomatically.Should().BeFalse();
     }
@@ -38,7 +96,7 @@ public sealed class TelemetryRetentionPolicyTests
             TimeWindowDays: 1,
             DelayBetweenBatchesMs: 0,
             CommandTimeoutSeconds: 45,
-            MaxDurationMinutes: 30,
+            MaxDurationMinutes: 120,
             RunVacuumAnalyzeAfterRetention: false,
             RunVacuumFullAutomatically: true);
 
@@ -49,7 +107,7 @@ public sealed class TelemetryRetentionPolicyTests
         policy.TimeWindowDays.Should().Be(1);
         policy.DelayBetweenBatchesMs.Should().Be(0);
         policy.CommandTimeoutSeconds.Should().Be(45);
-        policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(30));
+        policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(120));
         policy.RunVacuumAnalyzeAfterRetention.Should().BeFalse();
         policy.RunVacuumFullAutomatically.Should().BeTrue();
     }
@@ -79,6 +137,7 @@ public sealed class TelemetryRetentionPolicyTests
             RuntimeLogRetentionDays = 0,
             MaintenanceRunRetentionDays = 0,
             HitSummaryTopPerBucket = 5_000,
+            MaxSummaryDaysPerRun = -1,
             BatchSize = 0,
             EventBatchSize = 250_000,
             TimeWindowDays = 0,
@@ -103,12 +162,13 @@ public sealed class TelemetryRetentionPolicyTests
         policy.RuntimeLogRetentionDays.Should().Be(1);
         policy.MaintenanceRunRetentionDays.Should().Be(1);
         policy.HitSummaryTopPerBucket.Should().Be(1_000);
+        policy.MaxSummaryDaysPerRun.Should().Be(0);
         policy.BatchSize.Should().Be(100_000);
         policy.EventBatchSize.Should().Be(1);
         policy.TimeWindowDays.Should().Be(3);
         policy.DelayBetweenBatchesMs.Should().Be(60_000);
         policy.CommandTimeoutSeconds.Should().Be(3600);
-        policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(30));
+        policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(120));
     }
 }
 
