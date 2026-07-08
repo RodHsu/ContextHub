@@ -19,6 +19,7 @@
 .graph-canvas-panel,
 .graph-detail-panel {
     min-width: 0;
+    max-width: 100%;
     min-height: 0;
 }
 
@@ -38,6 +39,7 @@
 
 .graph-detail-panel {
     grid-area: detail;
+    overflow-x: clip;
 }
 
 .graph-filter-stack {
@@ -1223,12 +1225,12 @@
     }
 
     .graph-view-legend-section {
-        grid-template-columns: max-content repeat(3, minmax(max-content, auto));
-        justify-content: start;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        justify-content: stretch;
     }
 
     .graph-view-legend-section .graph-view-section-title {
-        grid-column: auto;
+        grid-column: 1 / -1;
     }
 }
 
@@ -1297,18 +1299,20 @@
     }
 
     .graph-view-legend-section {
-        grid-template-columns: max-content repeat(3, minmax(max-content, auto));
-        justify-content: start;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        justify-content: stretch;
     }
 
     .graph-view-legend-section .graph-view-section-title {
-        grid-column: auto;
+        grid-column: 1 / -1;
     }
 }
 
 @container graph-page (max-width: 760px) {
     .graph-detail-scroll {
-        overflow: auto;
+        overflow-x: clip;
+        overflow-y: visible;
+        max-width: 100%;
     }
 
     .graph-overview-section {
@@ -1325,7 +1329,7 @@
     }
 
     .graph-view-legend-section {
-        grid-template-columns: max-content minmax(0, 1fr);
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .graph-view-legend-section .graph-view-section-title {
@@ -1352,11 +1356,52 @@
         min-height: 22rem;
         height: 28rem;
     }
+
+    .graph-view-metrics,
+    .graph-view-legend-section,
+    .graph-view-category-section,
+    .graph-neighbor-list,
+    .graph-detail-stack,
+    .graph-overview-section {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .graph-view-metrics,
+    .graph-view-legend-section {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .graph-view-legend-row,
+    .graph-view-category-row,
+    .graph-neighbor-item,
+    .graph-detail-summary,
+    .graph-detail-content {
+        min-width: 0;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+    }
+
+    .graph-view-legend-row {
+        flex-wrap: wrap;
+        gap: 0.32rem;
+    }
+
+    .graph-view-legend-line {
+        width: 1.65rem;
+        flex: 0 1 1.65rem;
+    }
+
+    .graph-view-legend-row > span:last-child {
+        min-width: 0;
+        flex: 1 1 4.5rem;
+    }
 }
 
 @media (max-width: 720px) {
     .graph-detail-scroll {
-        overflow: auto;
+        overflow-x: clip;
+        overflow-y: visible;
     }
 
     .graph-panel-header {

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="960" viewBox="0 0 1440 960" role="img" aria-labelledby="title desc">
+  <title id="title">ContextHub Feature Design Atlas</title>
+  <desc id="desc">Product Design and Stitch summary board mapping every dashboard route to page, function, state, guardrail, loading, refresh, motion and responsive rules.</desc>
+  <style>.bg{fill:#0c1322}.panel{fill:#151c28;stroke:#2a3545}.sub{fill:#1b2432;stroke:#2a3545}.txt{fill:#f8fafc;font-family:Inter,Segoe UI,Arial,sans-serif}.muted{fill:#9aa7b8;font-family:Inter,Segoe UI,Arial,sans-serif}.h1{font-size:34px;font-weight:700}.h2{font-size:21px;font-weight:650}.body{font-size:16px}.small{font-size:13px}.blue{fill:#0b63ce}.green{fill:#0e9f6e}.amber{fill:#b7791f}.red{fill:#c81e1e}</style>
+  <rect class="bg" width="1440" height="960"/>
+  <rect x="48" y="44" width="1344" height="116" rx="8" class="panel"/>
+  <text x="76" y="92" class="txt h1">Feature Design Atlas: Page and Function Map</text>
+  <text x="76" y="128" class="muted body">Stitch: projects/4533056430393435785/screens/450468dcfc354e9b9e706085e4cf86b2</text>
+  <rect x="76" y="200" width="300" height="584" rx="8" class="panel"/>
+  <text x="108" y="244" class="txt h2">IA Groups</text>
+  <circle cx="110" cy="296" r="6" class="blue"/><text x="130" y="302" class="muted body">Operations Monitoring</text>
+  <circle cx="110" cy="338" r="6" class="green"/><text x="130" y="344" class="muted body">Knowledge Work</text>
+  <circle cx="110" cy="380" r="6" class="amber"/><text x="130" y="386" class="muted body">Review and Governance</text>
+  <circle cx="110" cy="422" r="6" class="blue"/><text x="130" y="428" class="muted body">Admin Settings</text>
+  <circle cx="110" cy="464" r="6" class="green"/><text x="130" y="470" class="muted body">Personal Account</text>
+  <circle cx="110" cy="506" r="6" class="red"/><text x="130" y="512" class="muted body">Boundary Pages</text>
+  <text x="108" y="582" class="txt h2">Coverage Tags</text>
+  <text x="108" y="626" class="muted body">Page, Function, State</text>
+  <text x="108" y="666" class="muted body">Guardrail, Loading, Refresh</text>
+  <text x="108" y="706" class="muted body">Motion, RWD</text>
+  <rect x="420" y="200" width="520" height="584" rx="8" class="panel"/>
+  <text x="452" y="244" class="txt h2">Route Matrix</text>
+  <text x="452" y="294" class="muted body">/, /monitoring, /runtime, /logs, /jobs, /performance</text>
+  <text x="452" y="338" class="muted body">/graph, /memories, /retention, /sources, /inbox</text>
+  <text x="452" y="382" class="muted body">/governance, /evaluation, /chatgpt-proposals</text>
+  <text x="452" y="426" class="muted body">/preferences, /storage, /security, /settings</text>
+  <text x="452" y="470" class="muted body">/account/tokens, /login, /forbidden, /not-found, /Error</text>
+  <rect x="452" y="534" width="430" height="68" rx="8" class="sub"/><text x="480" y="576" class="txt body">Each route tile maps page functions to states and guardrails.</text>
+  <rect x="984" y="200" width="380" height="584" rx="8" class="panel"/>
+  <text x="1016" y="244" class="txt h2">Global Contracts</text>
+  <text x="1016" y="294" class="muted body">Body: no horizontal scroll</text>
+  <text x="1016" y="338" class="muted body">Table/code/JSON: local scroll</text>
+  <text x="1016" y="382" class="muted body">641-1024px: 64px sidebar rail</text>
+  <text x="1016" y="426" class="muted body">Under 640px: overlay drawer</text>
+  <text x="1016" y="470" class="muted body">No clipping for menus/tooltips</text>
+  <text x="1016" y="514" class="muted body">Client-local time by default</text>
+  <text x="1016" y="558" class="muted body">Skeletons over full-screen spinners</text>
+  <text x="1016" y="602" class="muted body">Reduced motion snap/fade fallback</text>
+</svg>

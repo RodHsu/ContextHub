@@ -71,6 +71,11 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("error", "/Error", "主控台發生錯誤", [".boundary-panel", ".empty-inline"], [".page-header", ".boundary-panel"], [".content", ".boundary-panel"])
     ];
 
+    private static readonly DashboardPublicRouteSpec[] PublicRoutes =
+    [
+        new("login", "/login", "登入 Dashboard", [".login-scene", ".login-card", ".login-brand-panel"], [".login-brand-panel", ".login-card"])
+    ];
+
     private static readonly DashboardRouteSpec[] DenseRoutes =
     [
         Routes.Single(route => route.Name == "overview"),
@@ -167,6 +172,32 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             catch (Exception ex)
             {
                 failures.Add($"empty / {route.Name}: {ex}");
+            }
+        }
+
+        failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task Public_Boundary_Pages_Should_Render_Cleanly_Across_Key_Viewports()
+    {
+        var failures = new List<string>();
+
+        foreach (var theme in Themes)
+        {
+            foreach (var viewport in ThemeSmokeViewports)
+            {
+                foreach (var route in PublicRoutes)
+                {
+                    try
+                    {
+                        await ValidatePublicRouteAsync(route, viewport, theme);
+                    }
+                    catch (Exception ex)
+                    {
+                        failures.Add($"{theme.Name} / {viewport.Name} / {route.Name}: {ex}");
+                    }
+                }
             }
         }
 
@@ -2649,6 +2680,48 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }
     }
 
+    private async Task ValidatePublicRouteAsync(DashboardPublicRouteSpec route, DashboardViewport viewport, DashboardTheme theme)
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(viewport);
+        await context.AddInitScriptAsync(
+            $@"(() => {{
+                localStorage.setItem('contextHub.dashboard.theme', '{theme.PreferenceValue}');
+                document.documentElement.dataset.themePreference = '{theme.PreferenceValue}';
+                document.documentElement.dataset.theme = '{theme.PreferenceValue}';
+                document.documentElement.style.colorScheme = '{theme.PreferenceValue}';
+            }})();");
+        var page = await context.NewPageAsync();
+
+        await page.GotoAsync(new Uri(_fixture.BaseUri, route.Route).ToString(), new PageGotoOptions
+        {
+            WaitUntil = WaitUntilState.NetworkIdle,
+            Timeout = 15000
+        });
+
+        await page.GetByRole(AriaRole.Heading, new() { Name = route.Title })
+            .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+
+        foreach (var selector in route.RequiredSelectors)
+        {
+            await page.Locator(selector).First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 15000
+            });
+        }
+
+        var screenshotPath = await CaptureScreenshotAsync(page, route.Name, DashboardUiProfile.Normal, viewport, theme);
+        var snapshot = await AnalyzePublicLayoutAsync(page, route.OverlapSelectors);
+
+        snapshot.DocumentScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+            $"unexpected horizontal overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+        snapshot.BodyScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+            $"body width overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+        snapshot.MissingSelectors.Should().BeEmpty($"missing expected selectors on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+        snapshot.OverlapWarnings.Should().BeEmpty($"detected overlapping panels on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+    }
+
     private async Task LoginAndOpenAsync(IPage page, string relativeUrlWithProfile)
     {
         var targetUrl = new Uri(_fixture.BaseUri, relativeUrlWithProfile).ToString();
@@ -2833,6 +2906,64 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         return snapshot;
     }
 
+    private static async Task<LayoutSnapshot> AnalyzePublicLayoutAsync(IPage page, IReadOnlyList<string> overlapSelectors)
+    {
+        var snapshotJson = await page.EvaluateAsync<string>(
+            @"({ overlapSelectors }) => {
+                const root = document.documentElement;
+                const body = document.body;
+                const overlaps = [];
+                const missingSelectors = [];
+                const rects = overlapSelectors.map(selector => {
+                    const element = document.querySelector(selector);
+                    if (!element) {
+                        missingSelectors.push(selector);
+                        return null;
+                    }
+
+                    const rect = element.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) {
+                        return { selector, visible: false, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+                    }
+
+                    return { selector, visible: true, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+                }).filter(Boolean);
+
+                for (let i = 0; i < rects.length; i++) {
+                    for (let j = i + 1; j < rects.length; j++) {
+                        const a = rects[i];
+                        const b = rects[j];
+                        if (!a.visible || !b.visible) {
+                            continue;
+                        }
+
+                        const intersectionWidth = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+                        const intersectionHeight = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+                        if (intersectionWidth > 2 && intersectionHeight > 2) {
+                            overlaps.push(`${a.selector} overlaps ${b.selector}`);
+                        }
+                    }
+                }
+
+                return JSON.stringify({
+                    viewportWidth: window.innerWidth,
+                    documentScrollWidth: root.scrollWidth,
+                    bodyScrollWidth: body.scrollWidth,
+                    overlapWarnings: overlaps,
+                    missingSelectors
+                });
+            }",
+            new { overlapSelectors });
+
+        var snapshot = JsonSerializer.Deserialize<LayoutSnapshot>(snapshotJson, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        }) ?? new LayoutSnapshot();
+        snapshot.OverlapWarnings ??= [];
+        snapshot.MissingSelectors ??= [];
+        return snapshot;
+    }
+
     private static async Task<RwdUsabilitySnapshot> AnalyzeRwdUsabilityAsync(IPage page, IReadOnlyList<string> routeScrollSelectors)
     {
         var snapshotJson = await page.EvaluateAsync<string>(
@@ -2915,6 +3046,26 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     (contentNeedsY && isScrollableOverflow(getComputedStyle(content).overflowY)) ||
                     (documentNeedsY && (isScrollableOverflow(bodyStyle.overflowY) || isScrollableOverflow(rootStyle.overflowY)));
 
+                const overflowRightDiagnostics = content
+                    ? Array.from(content.querySelectorAll('*'))
+                        .map((element) => {
+                            const rect = element.getBoundingClientRect();
+                            const parent = element.parentElement?.getBoundingClientRect();
+                            return {
+                                tag: element.tagName.toLowerCase(),
+                                className: typeof element.className === 'string' ? element.className : '',
+                                left: Math.round(rect.left),
+                                right: Math.round(rect.right),
+                                width: Math.round(rect.width),
+                                parentWidth: parent ? Math.round(parent.width) : 0,
+                                delta: Math.round(rect.right - content.getBoundingClientRect().right)
+                            };
+                        })
+                        .filter(item => item.width > 0 && item.delta > 2)
+                        .sort((left, right) => right.delta - left.delta)
+                        .slice(0, 12)
+                    : [];
+
                 if (documentNeedsY && !hasUsablePageScroll && bodyStyle.overflowY !== 'visible' && rootStyle.overflowY !== 'visible') {
                     scrollTrapWarnings.push(`document needs vertical scroll but html/body/content do not expose a usable scroll host`);
                 }
@@ -2942,6 +3093,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     scrollTrapWarnings,
                     badScrollbarWarnings,
                     doubleScrollbarWarnings,
+                    overflowRightDiagnostics,
                     targets
                 });
             }",
@@ -3007,6 +3159,13 @@ internal sealed record DashboardRouteSpec(
     string[] RequiredSelectors,
     string[] OverlapSelectors,
     string[] ScrollSelectors);
+
+internal sealed record DashboardPublicRouteSpec(
+    string Name,
+    string Route,
+    string Title,
+    string[] RequiredSelectors,
+    string[] OverlapSelectors);
 
 internal sealed record DashboardViewport(string Name, int Width, int Height);
 

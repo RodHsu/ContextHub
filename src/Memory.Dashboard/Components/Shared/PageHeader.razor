@@ -1,5 +1,9 @@
 <div class="page-header">
     <div class="page-header-copy">
+        @if (!string.IsNullOrWhiteSpace(Breadcrumb))
+        {
+            <div class="page-breadcrumb">@Breadcrumb</div>
+        }
         <h1>@Title</h1>
         @if (!string.IsNullOrWhiteSpace(Subtitle))
         {

@@ -13,44 +13,44 @@
 
 ## 2. 設計來源
 
-### 2.1 Stitch baseline
+### 2.1 Active Product Design + Stitch baseline
 
-- `Scroll shell dashboard refresh` 以 Stitch 專案 `ContextHub Scroll Shell Dashboard Refresh` 作為 2026-06-30 起的捲軸與現代化 layout 修正基準：
-  - project：`projects/8445492905770989666`
-  - design system：`assets/1987d0d5ee564b3d8bfe881294353ee2` (`Precision Operations`)
-  - Desktop operations screen：`projects/8445492905770989666/screens/9e627253621e48aeaa1f22ce02d0480b`
-  - Tab S7 portrait screen：`projects/8445492905770989666/screens/9de66a570f8247619bca3adacac243b0`
-  - 使用範圍：全站 app shell、sidebar、topbar、panel、table scroll shell、RWD scroll ownership。
-  - 設計方向：參考 shadcn-admin / Tabler / Grafana 類型 dashboard 的 app-shell 密度與 panel grid；desktop 僅 `.content` 擁有主要垂直捲動，sidebar 隱藏自身 scrollbar，表格只負責水平 overflow，避免 body / content / panel 同時出現垂直 scrollbar。
-  - 視覺方向：near-black neutral surfaces、7px 控制元件 radius、低陰影 tonal layer、blue / teal / amber / red functional accents；避免單一藍紫色系、marketing hero、gradient orb 或 oversized cards。
-- `Full-site UI/UX refresh` 以 Stitch 專案 `ContextHub Full Site UI UX Refresh` 作為 2026-06-29 起的全站基準：
-  - project：`projects/952128967416801377`
-  - design system：`assets/c68e3953f5af4004b3e2e7e72e91568c` (`ContextHub Admin`)
-  - 使用範圍：所有 dashboard 可達 route，包含主導覽頁、管理頁、Token 頁、ChatGPT 寫入審核、Login、Forbidden、NotFound、Error。
-  - 設計方向：dark dense admin console、短導覽 label、任務分組 sidebar、共用 page header / panel / table / form / empty state / detail panel / scroll shell；不做 landing page、decorative gradient/orb 或大型 marketing whitespace。
-  - RWD 驗收：以 `1920x1080`、`1366x768`、`1280x800`、`1024x768`、`800x1280`、`390x844` 為主要 viewport；連續 resize `1920 -> 1600 -> 1366 -> 1280 -> 1024 -> 800 -> 768 -> 390` 不得出現 body horizontal overflow、panel overlap、scroll trap 或 tooltip/menu clipping。
-- 全站 route 對應 Stitch 設計稿：
-  - Auth / boundary pages：`projects/952128967416801377/screens/d8431ed48c0d4b2a9af1bd9650481541`，對應 `/login`、`/forbidden`、`/not-found`、`/Error`。
-  - Operations Monitoring：`projects/952128967416801377/screens/1916647a3e6e48cfa2c4e85007dc6e75`，對應 `/`、`/monitoring`、`/runtime`、`/logs`、`/jobs`、`/performance`。
-  - Knowledge Work / Review：`projects/952128967416801377/screens/301434fd263547918f18a6e772217a53`，對應 `/graph`、`/memories`、`/retention`、`/sources`、`/inbox`、`/governance`、`/evaluation`。
-  - ChatGPT Proposal Review：`projects/952128967416801377/screens/25e969df68fe4e31b1b97ecbadbecd9c`，對應 `/chatgpt-proposals`；採審核工作台而非表格主導版型，左側 proposal queue、右側 pending safety notice、payload preview、result/error 與 approve/reject decision zone。
-  - Admin Settings / Personal Account：`projects/952128967416801377/screens/ce85635f0d76482d8cd249835acfecbf`，對應 `/preferences`、`/storage`、`/security`、`/settings`、`/account/tokens`。
-- `Memory Graph` 相關畫面以 Stitch 專案 `ContextHub Memory Graph` 為主基準。
-- `Graph` refined explorer screen 是目前已確認可對照的主要設計稿。
-- `Token 節省量` compact dashboard baseline 已補 Stitch artifact：
-  - project：`projects/2525745562578529015` (`ContextHub Context Savings Compact Dashboard`)
-  - screen：`projects/2525745562578529015/screens/6ae43256689f4181876132939a41b4d5`
-  - design system：`assets/96724f4c496e4ceba84d3765d600da5d`
-  - 使用範圍：首頁 `Token 節省量` compact insight strip、`/monitoring` Token 節省量 card；維持 dark dense admin console，不做大型 landing-style panel。
-  - 指標語彙：以 token 為計算單位，標題與欄位使用 `Token 節省量`，各視窗合併呈現 `24H/3D/7D/30D 節省量 / 樣本量`，避免使用容易誤解為一般對話數量的 `對話節省量`。
-  - token 口徑：卡片主畫面保持 compact，只顯示節省率、節省 token 與樣本量；`精準 token` / `估算 token` / exact coverage 放在 tooltip，避免 8 欄視窗在 app-browser 寬度下被文字撐高。
-- 2026-06-21 browser feedback pass 期間，Codex 可用工具沒有 Stitch connector；該輪只依既有 baseline 修正。2026-06-29 已補 full-site Stitch project，後續 UI 變更應優先對照上述全站 screens。
+- `ContextHub Product Design + Stitch UI/UX Design Language` 是 2026-07-08 起全站 UI/UX 的唯一 active 設計稿來源。舊版 full-site / scroll-shell / early operations-console 設計稿已退休，不再作為新 UI 決策依據。
+  - project：`projects/4533056430393435785`
+  - active design system：`assets/33c0c23e5fc4475e8852b7906cfe6bc6` (`ContextHub Operations`)
+  - 設計語言文件：[context-hub-operations-console-design-language.md](/w:/Repositories/WJCY/ContextHub/docs/design/context-hub-operations-console-design-language.md)
+  - SVG 保存版設計稿目錄：[/docs/design/svg/](/w:/Repositories/WJCY/ContextHub/docs/design/svg/)
+  - 使用範圍：全站 dashboard route、共用 app shell、sidebar/topbar、command palette、page header、panel、table/code/diff scroll shell、detail drawer、modal、popover、toast、empty/loading/error state、refresh state、disabled reason、confirmation modal、token one-time reveal、RWD、animation 與 reduced-motion 行為。
+  - 設計方向：現代 SaaS operations console；高資訊密度但不厚重，使用 tonal layering、hairline、refined dot chips、短導覽文字、清楚狀態語彙與防呆卡控。避免老派 enterprise admin、NOC wall、滿版 menu、巢狀卡片、裝飾性 gradient/blob、body horizontal scroll 與雙重垂直 scrollbar。
+  - 參考來源轉譯：採 shadcn-admin 的 command search / grouped sidebar、Tabler 的 responsive dashboard hierarchy、TailAdmin / Flowbite Admin Dashboard 的 CRUD/forms/tables/drawers/auth surfaces，以及 Grafana / OpenObserve 類 observability workflow；只作為 UX pattern reference，不複製其 branding。
+  - RWD 合約：`body` 不得出現水平捲軸；表格、JSON、code、diff、log cells 只能在自身 frame 內水平捲動；`641px-1024px` sidebar 自動收折到 `64px` icon rail；`<640px` 使用 overlay drawer；content area 擁有主要垂直捲動；sidebar、panel、table 不得產生雙重垂直捲軸；popover/menu/tooltip 不得被 overflow clipping；detail panel 在 tablet 疊到主內容下方，不遮蓋 table frame。
+  - motion / loading / refresh：hover/focus 120ms、menu/popover 180ms、drawer 220ms、route transition 240ms、live-tail row fade 700ms；loading 使用 app top progress、panel/table/code skeleton；refresh 使用 live pulse、paused chip、stale banner、retry flow 與 request/correlation id。
+  - 全站 route 對應：
+    - Product Design strategy：`projects/4533056430393435785/screens/27112231d8494e448ad6e7fdf42eed86`，保存版 `docs/design/svg/00-product-design-strategy.svg`。
+    - Modern visual direction：`projects/4533056430393435785/screens/d14425b3d81c4f299ed15f5b901628a7`，保存版 `docs/design/svg/00-modern-visual-direction.svg`。
+    - UI system / states / motion：`projects/4533056430393435785/screens/d6284134138544659d04b026954d010f`，保存版 `docs/design/svg/01-ui-system-states-motion.svg`。
+    - App shell / navigation / command：`projects/4533056430393435785/screens/116b0b12c50d4a31b8aa4025c10f7d9a`，保存版 `docs/design/svg/02-app-shell-navigation-command.svg`。
+    - Auth / boundary pages：`projects/4533056430393435785/screens/11e2b475d8b541db953b6fd6b2b710ce`，對應 `/login`、`/forbidden`、`/not-found`、`/Error`，保存版 `docs/design/svg/03-auth-boundary-pages.svg`。
+    - Operations overview / monitoring：`projects/4533056430393435785/screens/454b419a89264cc29d07e005029bda83`，對應 `/`、`/monitoring`，保存版 `docs/design/svg/04-operations-overview-monitoring.svg`。
+    - Runtime / logs / jobs / performance：`projects/4533056430393435785/screens/80b6642ae1b249b3ab921d3ab67129e8`，對應 `/runtime`、`/logs`、`/jobs`、`/performance`，保存版 `docs/design/svg/05-runtime-logs-jobs-performance.svg`。
+    - Knowledge graph / memories：`projects/4533056430393435785/screens/baa8629daf8741ef8469d0939d3fc0d8`，對應 `/graph`、`/memories`，保存版 `docs/design/svg/06-knowledge-graph-memory.svg`。
+    - Sources / inbox / retention：`projects/4533056430393435785/screens/6d5ffa8ae48748ff8832e8a3f8d312fb`，對應 `/sources`、`/inbox`、`/retention`，保存版 `docs/design/svg/07-sources-inbox-retention.svg`。
+    - Review / governance / evaluation：`projects/4533056430393435785/screens/8b98c7ea4f0645b2b8da732e7c6fa89a`，對應 `/chatgpt-proposals`、`/governance`、`/evaluation`，保存版 `docs/design/svg/08-review-governance-evaluation.svg`。
+    - Admin / account：`projects/4533056430393435785/screens/992f81554dc64034807a9753b0523024`，對應 `/preferences`、`/storage`、`/security`、`/settings`、`/account/tokens`，保存版 `docs/design/svg/09-admin-settings-account-tokens.svg`。
+    - RWD / loading / refresh / motion validation：`projects/4533056430393435785/screens/17e2fea5a4b347b9bbd3a8e485b73fe1`，對應全站 viewport 與 motion/loading/refresh 驗收，保存版 `docs/design/svg/10-rwd-loading-refresh-motion.svg`。
+    - Feature Design Atlas：`projects/4533056430393435785/screens/450468dcfc354e9b9e706085e4cf86b2`，逐頁逐功能 route matrix，保存版 `docs/design/svg/11-feature-design-atlas.svg`。
+    - Operations Feature Atlas：`projects/4533056430393435785/screens/8950c9e0f9a14b93ac4bf5b7283e6f90`，對應 `/`、`/monitoring`、`/runtime`、`/logs`、`/jobs`、`/performance`，保存版 `docs/design/svg/12-operations-feature-atlas.svg`。
+    - Knowledge Feature Atlas：`projects/4533056430393435785/screens/79ba882411d44e13b94cfc6d1de72013`，對應 `/graph`、`/memories`、`/retention`、`/sources`，保存版 `docs/design/svg/13-knowledge-feature-atlas.svg`。
+    - Review and Governance Feature Atlas：`projects/4533056430393435785/screens/f296315d38f5483b8845d1352d75d3c5`，對應 `/inbox`、`/governance`、`/evaluation`、`/chatgpt-proposals`，保存版 `docs/design/svg/14-review-governance-feature-atlas.svg`。
+    - Admin, Account and Boundary Feature Atlas：`projects/4533056430393435785/screens/b80a7c7dbf8f4c2f91151dde97db5a38`，對應 `/preferences`、`/storage`、`/security`、`/settings`、`/account/tokens`、`/login`、`/forbidden`、`/not-found`、`/Error`，保存版 `docs/design/svg/15-admin-boundary-feature-atlas.svg`。
+  - 注意：目前 Stitch MCP 提供 screen/design generation 與讀取工具，但沒有 expose 原生 SVG export；`docs/design/svg/` 中的 SVG 是依 Product Design + Stitch screens 與設計合約製作的 repo 保存版 summary board，不宣稱為 Stitch 原生匯出。
 
 ### 2.2 Repo 內文件角色
 
 - 架構與服務邊界：看 [architecture.md](/w:/Repositories/WJCY/ContextHub/docs/architecture.md)
 - MCP 操作方式：看 [mcp-usage-guide.md](/w:/Repositories/WJCY/ContextHub/docs/mcp-usage-guide.md)
 - UI / 驗證 / 部署檢查基準：看本文件
+- 全站功能盤點與頁面/功能層級：看 [context-hub-feature-inventory.md](/w:/Repositories/WJCY/ContextHub/docs/design/context-hub-feature-inventory.md)
 
 ## 3. Dashboard UI 基準
 

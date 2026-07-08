@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="960" viewBox="0 0 1440 960" role="img" aria-labelledby="title desc">
+  <title id="title">ContextHub Sources, Inbox and Retention Workspace</title>
+  <desc id="desc">Product Design and Stitch summary board for sources, inbox and retention routes.</desc>
+  <style>.bg{fill:#0c1322}.panel{fill:#151c28;stroke:#2a3545}.txt{fill:#f8fafc;font-family:Inter,Segoe UI,Arial,sans-serif}.muted{fill:#9aa7b8;font-family:Inter,Segoe UI,Arial,sans-serif}.h1{font-size:34px;font-weight:700}.h2{font-size:21px;font-weight:650}.body{font-size:16px}</style>
+  <rect class="bg" width="1440" height="960"/><rect x="48" y="44" width="1344" height="112" rx="8" class="panel"/>
+  <text x="76" y="92" class="txt h1">Sources, Inbox and Retention Workspace</text><text x="76" y="128" class="muted body">Stitch: projects/4533056430393435785/screens/6d5ffa8ae48748ff8832e8a3f8d312fb</text>
+  <rect x="72" y="210" width="390" height="470" rx="8" class="panel"/><text x="104" y="254" class="txt h2">/sources</text><text x="104" y="304" class="muted body">Provider, scope, last sync, health, actions</text><text x="104" y="346" class="muted body">Connection status drawer and sync history</text><text x="104" y="388" class="muted body">Syncing, paused, failed, stale states</text>
+  <rect x="524" y="210" width="390" height="470" rx="8" class="panel"/><text x="556" y="254" class="txt h2">/inbox</text><text x="556" y="304" class="muted body">Triage queue, filters, batch actions, preview pane</text><text x="556" y="346" class="muted body">Batch progress, empty inbox, undo toast</text><text x="556" y="388" class="muted body">Pending never appears applied</text>
+  <rect x="976" y="210" width="390" height="470" rx="8" class="panel"/><text x="1008" y="254" class="txt h2">/retention</text><text x="1008" y="304" class="muted body">Cleanup schedule, candidate list, risk score</text><text x="1008" y="346" class="muted body">Manual run requires typed confirmation</text><text x="1008" y="388" class="muted body">Audit trail and irreversible warning</text>
+  <rect x="72" y="738" width="1294" height="110" rx="8" class="panel"/><text x="104" y="798" class="muted body">RWD: tables scroll locally, preview stacks below list, no body horizontal scroll, drawers become stacked panels on Tab S7.</text>
+</svg>

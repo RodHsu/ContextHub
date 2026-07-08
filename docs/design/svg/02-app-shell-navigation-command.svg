@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="960" viewBox="0 0 1440 960" role="img" aria-labelledby="title desc">
+  <title id="title">ContextHub App Shell, Navigation and Command Search</title>
+  <desc id="desc">Product Design and Stitch summary board for shared shell, navigation and account chrome.</desc>
+  <style>.bg{fill:#0c1322}.panel{fill:#151c28;stroke:#2a3545}.sub{fill:#1b2432;stroke:#2a3545}.txt{fill:#f8fafc;font-family:Inter,Segoe UI,Arial,sans-serif}.muted{fill:#9aa7b8;font-family:Inter,Segoe UI,Arial,sans-serif}.h1{font-size:34px;font-weight:700}.h2{font-size:21px;font-weight:650}.body{font-size:16px}.small{font-size:13px}.blue{fill:#0b63ce}.line{stroke:#2a3545;stroke-width:1}</style>
+  <rect class="bg" width="1440" height="960"/><rect x="48" y="44" width="1344" height="112" rx="8" class="panel"/>
+  <text x="76" y="92" class="txt h1">App Shell, Navigation, Command Search and Account Chrome</text>
+  <text x="76" y="128" class="muted body">Stitch: projects/4533056430393435785/screens/116b0b12c50d4a31b8aa4025c10f7d9a</text>
+  <rect x="68" y="200" width="230" height="620" rx="8" class="sub"/><text x="94" y="242" class="txt h2">Sidebar</text>
+  <text x="94" y="292" class="muted body">Operations Monitoring</text><text x="94" y="332" class="muted body">Knowledge Work</text><text x="94" y="372" class="muted body">Review and Governance</text><text x="94" y="412" class="muted body">Admin Settings</text><text x="94" y="452" class="muted body">Personal Account</text>
+  <rect x="330" y="200" width="1000" height="64" rx="8" class="panel"/><text x="362" y="240" class="muted body">Breadcrumbs / command search / PROD badge / client-local clock / refresh / theme / account</text>
+  <rect x="330" y="306" width="470" height="300" rx="8" class="panel"/><text x="360" y="350" class="txt h2">Command Palette</text><text x="360" y="394" class="muted body">Route jump, memory lookup, job id, logs, proposals</text><text x="360" y="434" class="muted body">Keyboard first; grouped results; no modal clipping</text><text x="360" y="474" class="muted body">180ms overlay entrance; reduced-motion fade</text>
+  <rect x="840" y="306" width="490" height="300" rx="8" class="panel"/><text x="870" y="350" class="txt h2">Responsive Shell</text><text x="870" y="394" class="muted body">Desktop: 240px expanded sidebar</text><text x="870" y="434" class="muted body">641-1024px: 64px icon rail + tooltips</text><text x="870" y="474" class="muted body">Under 640px: overlay drawer</text><text x="870" y="514" class="muted body">No full-width menu at tablet size</text>
+  <rect x="330" y="650" width="1000" height="170" rx="8" class="panel"/><text x="360" y="694" class="txt h2">Regression Rules</text><text x="360" y="738" class="muted body">No scroll trap, no body horizontal overflow, sidebar never owns visible main vertical scroll, menus escape clipping.</text>
+</svg>

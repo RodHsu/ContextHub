@@ -7,6 +7,14 @@
             var isAdmin = IsDashboardAdmin(auth.User);
         }
         <div class="dashboard-shell">
+            <div class="shell-progress-strip" aria-hidden="true"></div>
+            <input id="dashboard-mobile-nav-toggle" class="mobile-nav-toggle" type="checkbox" aria-hidden="true" tabindex="-1" />
+            <label class="mobile-nav-button" for="dashboard-mobile-nav-toggle" aria-label="切換主選單">
+                <span class="mobile-nav-button-line"></span>
+                <span class="mobile-nav-button-line"></span>
+                <span class="mobile-nav-button-line"></span>
+            </label>
+            <label class="mobile-nav-backdrop" for="dashboard-mobile-nav-toggle" aria-hidden="true"></label>
             <aside class="sidebar">
                 <div class="sidebar-inner">
                     <div class="brand">
@@ -271,6 +279,20 @@
                     </div>
 
                     <div class="topbar-actions">
+                        <button type="button"
+                                class="command-button"
+                                aria-haspopup="dialog"
+                                aria-expanded="@_commandPaletteOpen"
+                                @onclick="OpenCommandPalette">
+                            <span class="command-button-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="11" cy="11" r="6" />
+                                    <path d="m16 16 4 4" />
+                                </svg>
+                            </span>
+                            <span class="command-button-label">搜尋功能</span>
+                            <span class="command-button-kbd">⌘K</span>
+                        </button>
                         <ThemeSwitcher />
                         <span class="topbar-user">@auth.User.Identity?.Name</span>
                         <form method="post" action="/account/logout">
@@ -284,13 +306,91 @@
                     @Body
                 </main>
             </div>
+
+            @if (_commandPaletteOpen)
+            {
+                <div class="command-overlay" role="presentation" @onclick="CloseCommandPalette">
+                    <section class="command-palette" role="dialog" aria-modal="true" aria-label="快速切換功能" @onclick:stopPropagation="true">
+                        <div class="command-palette-header">
+                            <div>
+                                <div class="command-palette-eyebrow">Command surface</div>
+                                <h2>快速切換功能</h2>
+                            </div>
+                            <button type="button" class="icon-button" aria-label="關閉快速切換功能" @onclick="CloseCommandPalette">×</button>
+                        </div>
+
+                        <div class="command-palette-body">
+                            @foreach (var group in GetVisibleRoutes(isAdmin).GroupBy(route => route.Group))
+                            {
+                                <div class="command-group">
+                                    <div class="command-group-title">@group.Key</div>
+                                    <div class="command-route-grid">
+                                        @foreach (var route in group)
+                                        {
+                                            <NavLink class="command-route" href="@route.Href" Match="@route.Match" @onclick="CloseCommandPalette">
+                                                <span class="command-route-mark" aria-hidden="true">@route.Mark</span>
+                                                <span class="command-route-copy">
+                                                    <span class="command-route-title">@route.Label</span>
+                                                    <span class="command-route-path">@route.Href</span>
+                                                </span>
+                                            </NavLink>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    </section>
+                </div>
+            }
         </div>
     </Authorized>
 </AuthorizeView>
 
 @code {
+    private bool _commandPaletteOpen;
+
+    private static readonly IReadOnlyList<DashboardRouteItem> Routes =
+    [
+        new("維運監控", "O", "總覽", "/", NavLinkMatch.All, true),
+        new("維運監控", "M", "狀態監控", "/monitoring", NavLinkMatch.Prefix, true),
+        new("維運監控", "R", "執行參數", "/runtime", NavLinkMatch.Prefix, true),
+        new("維運監控", "L", "日誌", "/logs", NavLinkMatch.Prefix, true),
+        new("維運監控", "J", "工作佇列", "/jobs", NavLinkMatch.Prefix, true),
+        new("維運監控", "P", "效能", "/performance", NavLinkMatch.Prefix, true),
+        new("知識工作", "G", "記憶圖譜", "/graph", NavLinkMatch.Prefix, false),
+        new("知識工作", "K", "記憶資料", "/memories", NavLinkMatch.Prefix, false),
+        new("知識工作", "T", "記憶整理", "/retention", NavLinkMatch.Prefix, true),
+        new("知識工作", "S", "資料來源", "/sources", NavLinkMatch.Prefix, true),
+        new("審核治理", "I", "收件匣", "/inbox", NavLinkMatch.Prefix, true),
+        new("審核治理", "V", "治理", "/governance", NavLinkMatch.Prefix, true),
+        new("審核治理", "E", "評估", "/evaluation", NavLinkMatch.Prefix, true),
+        new("審核治理", "C", "ChatGPT", "/chatgpt-proposals", NavLinkMatch.Prefix, true),
+        new("管理設定", "U", "偏好", "/preferences", NavLinkMatch.Prefix, false),
+        new("管理設定", "D", "資料庫檢視", "/storage", NavLinkMatch.Prefix, true),
+        new("管理設定", "A", "安全管理", "/security", NavLinkMatch.Prefix, true),
+        new("管理設定", "Y", "系統設定", "/settings", NavLinkMatch.Prefix, true),
+        new("個人帳號", "N", "Token", "/account/tokens", NavLinkMatch.Prefix, false)
+    ];
+
     private static bool IsDashboardAdmin(System.Security.Claims.ClaimsPrincipal user)
         => user.IsInRole(TenantUserRole.Owner.ToString()) ||
            user.IsInRole(TenantUserRole.Admin.ToString()) ||
            user.IsInRole("DashboardAdmin");
+
+    private static IEnumerable<DashboardRouteItem> GetVisibleRoutes(bool isAdmin)
+        => Routes.Where(route => isAdmin || !route.RequiresAdmin);
+
+    private void OpenCommandPalette()
+        => _commandPaletteOpen = true;
+
+    private void CloseCommandPalette()
+        => _commandPaletteOpen = false;
+
+    private sealed record DashboardRouteItem(
+        string Group,
+        string Mark,
+        string Label,
+        string Href,
+        NavLinkMatch Match,
+        bool RequiresAdmin);
 }
