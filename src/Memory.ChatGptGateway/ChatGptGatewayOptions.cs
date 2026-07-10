@@ -22,6 +22,7 @@ public sealed class OAuthOptions
     public bool SelfHosted { get; set; }
     public string SelfHostedIssuer { get; set; } = string.Empty;
     public string SelfHostedSigningKey { get; set; } = string.Empty;
+    public string SelfHostedRsaPrivateKey { get; set; } = string.Empty;
     public string[] AllowedRedirectUris { get; set; } = [];
     public string[] AllowedRedirectUriPrefixes { get; set; } = [];
     public int AuthorizationCodeLifetimeMinutes { get; set; } = 5;

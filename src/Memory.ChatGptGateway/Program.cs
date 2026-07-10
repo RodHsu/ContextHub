@@ -28,15 +28,20 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 
 builder.Services.AddProblemDetails();
 builder.Services.AddHttpContextAccessor();
-builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IPasswordHasher<object>, PasswordHasher<object>>();
 builder.Services.AddSingleton<IChatGptOAuthClientMetadataFetcher, HttpChatGptOAuthClientMetadataFetcher>();
 builder.Services.AddMemoryApplication();
 builder.Services.AddMemoryInfrastructure(builder.Configuration, "chatgpt-gateway");
 builder.Services.AddScoped<SelfHostedOAuthService>();
+builder.Services.AddSingleton<RedisOAuthStateStore>();
+builder.Services.AddSingleton<PostgresOAuthClientStore>();
 
 var gatewayOptions = builder.Configuration.GetSection("ChatGptGateway").Get<ChatGptGatewayOptions>() ?? new ChatGptGatewayOptions();
+var rsaSigningCredentials = gatewayOptions.OAuth.SelfHosted && !string.IsNullOrWhiteSpace(gatewayOptions.OAuth.SelfHostedRsaPrivateKey)
+    ? new SelfHostedOAuthSigningCredentials(builder.Configuration)
+    : null;
+if (rsaSigningCredentials is not null) builder.Services.AddSingleton(rsaSigningCredentials);
 if (gatewayOptions.OAuth.TestMode)
 {
     builder.Services.AddAuthentication(GatewayAuthentication.TestScheme)
@@ -57,7 +62,7 @@ else if (gatewayOptions.OAuth.SelfHosted)
                 ValidAudiences = ResolveSelfHostedAudiences(gatewayOptions),
                 ValidateLifetime = true,
                 ValidateIssuerSigningKey = true,
-                IssuerSigningKey = SelfHostedOAuthService.BuildSigningKey(
+                IssuerSigningKey = (SecurityKey?)rsaSigningCredentials?.Key ?? SelfHostedOAuthService.BuildSigningKey(
                     Required(gatewayOptions.OAuth.SelfHostedSigningKey, "ChatGptGateway:OAuth:SelfHostedSigningKey")),
                 NameClaimType = gatewayOptions.OAuth.NameClaim
             };
@@ -172,6 +177,13 @@ app.Use(async (context, next) =>
         return;
     }
 
+    if (string.Equals(context.Request.Path.Value, "/.well-known/jwks.json", StringComparison.OrdinalIgnoreCase))
+    {
+        var signing = context.RequestServices.GetService<SelfHostedOAuthSigningCredentials>();
+        await (signing is null ? Results.NotFound() : Results.Json(signing.Jwks)).ExecuteAsync(context);
+        return;
+    }
+
     await next();
 });
 app.UseAuthentication();
@@ -218,6 +230,11 @@ app.MapGet("/.well-known/oauth-protected-resource/{resource?}", CreateProtectedR
 app.MapGet("/.well-known/oauth-authorization-server/{resource?}", CreateAuthorizationServerMetadata).AllowAnonymous();
 
 app.MapGet("/.well-known/openid-configuration/{resource?}", CreateOpenIdConfiguration).AllowAnonymous();
+app.MapGet("/.well-known/jwks.json", (IServiceProvider services) =>
+{
+    var signing = services.GetService<SelfHostedOAuthSigningCredentials>();
+    return signing is null ? Results.NotFound() : Results.Json(signing.Jwks);
+}).AllowAnonymous();
 
 app.MapGet("/oauth/chat/authorize", async (
     HttpContext context,
@@ -277,7 +294,7 @@ app.MapPost("/oauth/chat/register", async (
         return Results.Json(new OAuthError("invalid_client_metadata", "Registration payload is required."), statusCode: StatusCodes.Status400BadRequest);
     }
 
-    var result = oauth.RegisterClient(request);
+    var result = await oauth.RegisterClientAsync(request, context.RequestAborted);
     if (!result.Success || result.Registration is null)
     {
         return Results.Json(new OAuthError("invalid_client_metadata", result.Error), statusCode: StatusCodes.Status400BadRequest);
@@ -297,14 +314,14 @@ app.MapPost("/oauth/chat/token", async (
     var grantType = form["grant_type"].ToString();
     var result = grantType switch
     {
-        "authorization_code" => oauth.ExchangeCode(
+        "authorization_code" => await oauth.ExchangeCodeAsync(
             form["code"].ToString(),
             form["redirect_uri"].ToString(),
             clientId,
             clientSecret,
             form["code_verifier"].ToString(),
             form["resource"].ToString()),
-        "refresh_token" => oauth.RefreshAccessToken(
+        "refresh_token" => await oauth.RefreshAccessTokenAsync(
             form["refresh_token"].ToString(),
             clientId,
             clientSecret),
@@ -344,6 +361,7 @@ static bool IsPublicPath(PathString path)
            IsProtectedResourceMetadataPath(path) ||
            IsAuthorizationServerMetadataPath(path) ||
            IsOpenIdConfigurationPath(path) ||
+           string.Equals(path.Value, "/.well-known/jwks.json", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/oauth/chat/authorize", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/oauth/chat/register", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/oauth/chat/token", StringComparison.OrdinalIgnoreCase);
@@ -353,6 +371,7 @@ static bool IsChatGptOAuthCorsPath(PathString path)
     => IsProtectedResourceMetadataPath(path) ||
        IsAuthorizationServerMetadataPath(path) ||
        IsOpenIdConfigurationPath(path) ||
+       string.Equals(path.Value, "/.well-known/jwks.json", StringComparison.OrdinalIgnoreCase) ||
        (path.Value ?? string.Empty).StartsWith("/oauth/chat/", StringComparison.OrdinalIgnoreCase);
 
 static void ApplyChatGptOAuthCorsHeaders(HttpContext context)
@@ -495,6 +514,7 @@ static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGa
         $"{issuer}/oauth/chat/token",
         $"{issuer}/oauth/chat/register",
         $"{issuer}/userinfo",
+        $"{issuer}/.well-known/jwks.json",
         ["code"],
         ["authorization_code", "refresh_token"],
         ["S256"],
@@ -503,7 +523,7 @@ static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGa
             : ["client_secret_basic", "client_secret_post"],
         true,
         ["public"],
-        ["HS256"],
+        [string.IsNullOrWhiteSpace(value.OAuth.SelfHostedRsaPrivateKey) ? "HS256" : "RS256"],
         NormalizeScopes(value.OAuth.Scopes),
         ["sub", "name", "email", "tenant_id", "tenant_user_id"]);
 
@@ -632,6 +652,7 @@ internal sealed record OpenIdConfigurationMetadata(
     [property: JsonPropertyName("token_endpoint")] string TokenEndpoint,
     [property: JsonPropertyName("registration_endpoint")] string RegistrationEndpoint,
     [property: JsonPropertyName("userinfo_endpoint")] string UserInfoEndpoint,
+    [property: JsonPropertyName("jwks_uri")] string JwksUri,
     [property: JsonPropertyName("response_types_supported")] IReadOnlyList<string> ResponseTypesSupported,
     [property: JsonPropertyName("grant_types_supported")] IReadOnlyList<string> GrantTypesSupported,
     [property: JsonPropertyName("code_challenge_methods_supported")] IReadOnlyList<string> CodeChallengeMethodsSupported,

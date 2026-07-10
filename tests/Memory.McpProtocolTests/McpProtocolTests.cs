@@ -191,11 +191,18 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         var bootstrapProject = bootstrap.GetProperty("project");
         var bootstrapWithProject = ExtractToolJson(bootstrapWithProjectPayload);
         var bootstrapWithProjectInfo = bootstrapWithProject.GetProperty("project");
+        var listedTools = ExtractSseJson(toolsPayload).GetProperty("result").GetProperty("tools");
+        var bootstrapTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "describe_context_hub");
+        var bootstrapResult = ExtractSseJson(bootstrapPayload).GetProperty("result");
 
         toolsPayload.Should().Contain("describe_context_hub");
         toolsPayload.Should().Contain("memory_search");
         toolsPayload.Should().Contain("log_search");
         toolsPayload.Should().Contain("user_preference_upsert");
+        bootstrapTool.GetProperty("outputSchema").GetProperty("type").GetString().Should().Be("object");
+        bootstrapResult.TryGetProperty("structuredContent", out var bootstrapStructuredContent).Should().BeTrue();
+        bootstrapStructuredContent.GetProperty("service").GetProperty("name").GetString().Should().Be("ContextHub");
         bootstrap.GetProperty("service").GetProperty("name").GetString().Should().Be("ContextHub");
         bootstrapProject.GetProperty("projectIdProvided").GetBoolean().Should().BeFalse();
         if (bootstrapProject.TryGetProperty("projectId", out var bootstrapProjectId))

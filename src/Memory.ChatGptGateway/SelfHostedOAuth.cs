@@ -8,7 +8,6 @@ using Memory.Application;
 using Memory.Domain;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
@@ -17,14 +16,13 @@ namespace Memory.ChatGptGateway;
 internal sealed class SelfHostedOAuthService(
     IApplicationDbContext dbContext,
     IPasswordHasher<object> passwordHasher,
-    IMemoryCache cache,
+    RedisOAuthStateStore stateStore,
+    PostgresOAuthClientStore clientStore,
     IOptions<ChatGptGatewayOptions> gatewayOptions,
     IChatGptOAuthClientMetadataFetcher clientMetadataFetcher,
-    ILogger<SelfHostedOAuthService> logger)
+    ILogger<SelfHostedOAuthService> logger,
+    SelfHostedOAuthSigningCredentials? rsaSigningCredentials = null)
 {
-    private const string CodeCachePrefix = "chatgpt-oauth-code:";
-    private const string RefreshTokenCachePrefix = "chatgpt-oauth-refresh:";
-    private const string RegisteredClientCachePrefix = "chatgpt-oauth-registered-client:";
     private static readonly JwtSecurityTokenHandler TokenHandler = new();
 
     public async Task<AuthorizeValidationResult> ValidateAuthorizeRequestAsync(
@@ -84,7 +82,9 @@ internal sealed class SelfHostedOAuthService(
             resource));
     }
 
-    public OAuthClientRegistrationResult RegisterClient(OAuthClientRegistrationRequest request)
+    public async Task<OAuthClientRegistrationResult> RegisterClientAsync(
+        OAuthClientRegistrationRequest request,
+        CancellationToken cancellationToken)
     {
         var options = gatewayOptions.Value.OAuth;
         if (!options.SelfHosted)
@@ -142,10 +142,10 @@ internal sealed class SelfHostedOAuthService(
             grantTypes,
             responseTypes,
             DateTimeOffset.UtcNow);
-        cache.Set(
-            RegisteredClientCachePrefix + clientId,
+        await clientStore.UpsertAsync(
             registered,
-            TimeSpan.FromDays(Math.Max(30, options.RegisteredClientLifetimeDays)));
+            DateTimeOffset.UtcNow.AddDays(Math.Max(30, options.RegisteredClientLifetimeDays)),
+            cancellationToken);
 
         LogOAuthRegister(GetHost(redirectUris[0]), clientId, "success", string.Empty);
         return OAuthClientRegistrationResult.Ok(new OAuthClientRegistrationResponse(
@@ -202,8 +202,8 @@ internal sealed class SelfHostedOAuthService(
             user.Username,
             user.Email,
             user.DisplayName);
-        cache.Set(
-            CodeCachePrefix + code,
+        await stateStore.SetAuthorizationCodeAsync(
+            code,
             payload,
             TimeSpan.FromMinutes(Math.Max(1, options.AuthorizationCodeLifetimeMinutes)));
 
@@ -223,7 +223,7 @@ internal sealed class SelfHostedOAuthService(
         return AuthorizeResult.Ok(request.RedirectUri + redirect);
     }
 
-    public OAuthTokenResult ExchangeCode(
+    public async Task<OAuthTokenResult> ExchangeCodeAsync(
         string code,
         string redirectUri,
         string clientId,
@@ -238,15 +238,14 @@ internal sealed class SelfHostedOAuthService(
             return OAuthTokenResult.Fail("Self-hosted OAuth is not enabled.");
         }
 
-        if (string.IsNullOrWhiteSpace(code) ||
-            !cache.TryGetValue<AuthorizationCodePayload>(CodeCachePrefix + code, out var payload) ||
-            payload is null)
+        var payload = string.IsNullOrWhiteSpace(code)
+            ? null
+            : await stateStore.TakeAuthorizationCodeAsync(code);
+        if (payload is null)
         {
             LogOAuthToken(clientId, "authorization_code", resource, "failed", "invalid_code");
             return OAuthTokenResult.Fail("Invalid authorization code.");
         }
-
-        cache.Remove(CodeCachePrefix + code);
 
         if (!string.Equals(payload.RedirectUri, redirectUri, StringComparison.Ordinal) ||
             !string.Equals(payload.ClientId, clientId, StringComparison.Ordinal))
@@ -284,10 +283,10 @@ internal sealed class SelfHostedOAuthService(
         }
 
         LogOAuthToken(clientId, "authorization_code", resource, "success", string.Empty);
-        return CreateTokenResult(payload, options);
+        return await CreateTokenResultAsync(payload, options);
     }
 
-    public OAuthTokenResult RefreshAccessToken(
+    public async Task<OAuthTokenResult> RefreshAccessTokenAsync(
         string refreshToken,
         string clientId,
         string? clientSecret)
@@ -305,9 +304,10 @@ internal sealed class SelfHostedOAuthService(
             return OAuthTokenResult.Fail("Invalid OAuth client.");
         }
 
-        if (string.IsNullOrWhiteSpace(refreshToken) ||
-            !cache.TryGetValue<AuthorizationCodePayload>(RefreshTokenCachePrefix + refreshToken, out var payload) ||
-            payload is null)
+        var payload = string.IsNullOrWhiteSpace(refreshToken)
+            ? null
+            : await stateStore.TakeRefreshTokenAsync(refreshToken);
+        if (payload is null)
         {
             LogOAuthToken(clientId, "refresh_token", null, "failed", "invalid_refresh_token");
             return OAuthTokenResult.Fail("Invalid refresh token.");
@@ -319,9 +319,8 @@ internal sealed class SelfHostedOAuthService(
             return OAuthTokenResult.Fail("Refresh token binding mismatch.");
         }
 
-        cache.Remove(RefreshTokenCachePrefix + refreshToken);
         LogOAuthToken(clientId, "refresh_token", payload.Resource, "success", string.Empty);
-        return CreateTokenResult(payload, options);
+        return await CreateTokenResultAsync(payload, options);
     }
 
     public static string ResolveIssuer(HttpContext context, ChatGptGatewayOptions options)
@@ -356,7 +355,7 @@ internal sealed class SelfHostedOAuthService(
         return new SymmetricSecurityKey(bytes);
     }
 
-    private OAuthTokenResult CreateTokenResult(AuthorizationCodePayload payload, OAuthOptions options)
+    private async Task<OAuthTokenResult> CreateTokenResultAsync(AuthorizationCodePayload payload, OAuthOptions options)
     {
         var token = CreateAccessToken(payload, options);
         var requestedScopes = payload.Scope
@@ -365,7 +364,7 @@ internal sealed class SelfHostedOAuthService(
             ? CreateIdToken(payload, options)
             : string.Empty;
         var refreshToken = requestedScopes.Contains("offline_access", StringComparer.Ordinal)
-            ? CreateRefreshToken(payload, options)
+            ? await CreateRefreshTokenAsync(payload, options)
             : string.Empty;
         return OAuthTokenResult.Ok(
             token,
@@ -397,7 +396,7 @@ internal sealed class SelfHostedOAuthService(
             claims,
             now,
             now.AddMinutes(Math.Max(1, options.AccessTokenLifetimeMinutes)),
-            new SigningCredentials(BuildSigningKey(options.SelfHostedSigningKey), SecurityAlgorithms.HmacSha256));
+            rsaSigningCredentials?.Credentials ?? new SigningCredentials(BuildSigningKey(options.SelfHostedSigningKey), SecurityAlgorithms.HmacSha256));
         return TokenHandler.WriteToken(token);
     }
 
@@ -418,19 +417,19 @@ internal sealed class SelfHostedOAuthService(
         };
         var token = new JwtSecurityToken(
             issuer,
-            options.ClientId,
+            payload.ClientId,
             claims,
             now,
             now.AddMinutes(Math.Max(1, options.AccessTokenLifetimeMinutes)),
-            new SigningCredentials(BuildSigningKey(options.SelfHostedSigningKey), SecurityAlgorithms.HmacSha256));
+            rsaSigningCredentials?.Credentials ?? new SigningCredentials(BuildSigningKey(options.SelfHostedSigningKey), SecurityAlgorithms.HmacSha256));
         return TokenHandler.WriteToken(token);
     }
 
-    private string CreateRefreshToken(AuthorizationCodePayload payload, OAuthOptions options)
+    private async Task<string> CreateRefreshTokenAsync(AuthorizationCodePayload payload, OAuthOptions options)
     {
         var refreshToken = CreateTokenValue(32);
-        cache.Set(
-            RefreshTokenCachePrefix + refreshToken,
+        await stateStore.SetRefreshTokenAsync(
+            refreshToken,
             payload,
             TimeSpan.FromDays(Math.Max(1, options.RefreshTokenLifetimeDays)));
         return refreshToken;
@@ -470,8 +469,8 @@ internal sealed class SelfHostedOAuthService(
             return ClientValidationResult.Ok();
         }
 
-        if (cache.TryGetValue<RegisteredOAuthClient>(RegisteredClientCachePrefix + clientId, out var registered) &&
-            registered is not null)
+        var registered = await clientStore.GetAsync(clientId, cancellationToken);
+        if (registered is not null)
         {
             return registered.RedirectUris.Contains(redirectUri, StringComparer.Ordinal)
                 ? ClientValidationResult.Ok()
