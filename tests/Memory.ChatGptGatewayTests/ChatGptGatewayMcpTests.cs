@@ -752,7 +752,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         readResult.TryGetProperty("structuredContent", out var readStructuredContent).Should().BeTrue();
         readStructuredContent.GetRawText().Should().Contain("Gateway read fixture");
 
-        var unauthorizedProjectPayload = await SendMcpAsync(client, sessionId!, 4, "tools/call", new
+        var crossProjectPayload = await SendMcpAsync(client, sessionId!, 4, "tools/call", new
         {
             name = "memory_search",
             arguments = new
@@ -762,7 +762,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 limit = 5
             }
         });
-        ExtractToolText(unauthorizedProjectPayload).Should().Contain("An error occurred invoking 'memory_search'.");
+        ExtractToolText(crossProjectPayload).Should().NotContain("An error occurred invoking 'memory_search'.");
 
         var proposalPayload = await SendMcpAsync(client, sessionId!, 5, "tools/call", new
         {
@@ -1388,7 +1388,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 SecurityScopes.PreferencesWrite,
                 SecurityScopes.LogsRead
             ],
-            [ProjectId],
+            [],
             IsAuthenticated: true);
     }
 
@@ -1566,7 +1566,6 @@ public sealed class ChatGptGatewayApplicationFactory(
         builder.UseSetting("ChatGptGateway:OAuth:TestName", "ChatGPT Gateway Test User");
         builder.UseSetting("ChatGptGateway:PublicMcpUrl", ChatGptGatewayMcpTests.PublicMcpUrl);
         builder.UseSetting("ChatGptGateway:PublicResourceMetadataUrl", ChatGptGatewayMcpTests.PublicResourceMetadataUrl);
-        builder.UseSetting("ChatGptGateway:AllowedProjectIds:0", ChatGptGatewayTestConstants.ProjectId);
         builder.ConfigureAppConfiguration((_, config) =>
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
@@ -1600,8 +1599,7 @@ public sealed class ChatGptGatewayApplicationFactory(
                 ["ChatGptGateway:OAuth:TestEmail"] = "chatgpt-gateway@example.test",
                 ["ChatGptGateway:OAuth:TestName"] = "ChatGPT Gateway Test User",
                 ["ChatGptGateway:PublicMcpUrl"] = ChatGptGatewayMcpTests.PublicMcpUrl,
-                ["ChatGptGateway:PublicResourceMetadataUrl"] = ChatGptGatewayMcpTests.PublicResourceMetadataUrl,
-                ["ChatGptGateway:AllowedProjectIds:0"] = ChatGptGatewayTestConstants.ProjectId
+                ["ChatGptGateway:PublicResourceMetadataUrl"] = ChatGptGatewayMcpTests.PublicResourceMetadataUrl
             });
         });
         builder.ConfigureTestServices(services =>

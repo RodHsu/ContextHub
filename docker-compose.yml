@@ -60,7 +60,6 @@ x-chatgpt-gateway-config: &chatgpt-gateway-config
   ChatGptGateway__ContextHub__ServiceToken: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN}
   ChatGptGateway__PublicMcpUrl: ${CHATGPT_GATEWAY_PUBLIC_MCP_URL:-}
   ChatGptGateway__PublicResourceMetadataUrl: ${CHATGPT_GATEWAY_PUBLIC_RESOURCE_METADATA_URL:-}
-  ChatGptGateway__AllowedProjectIds__0: ${CHATGPT_GATEWAY_ALLOWED_PROJECT_ID:-ContextHub}
 
 x-project-artifact-object-storage-config: &project-artifact-object-storage-config
   ProjectArtifacts__ObjectStorage__Enabled: ${PROJECT_ARTIFACT_OBJECT_STORAGE_ENABLED:-false}

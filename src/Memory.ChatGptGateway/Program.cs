@@ -219,7 +219,6 @@ app.MapGet("/api/status", (IOptions<ChatGptGatewayOptions> options) => Results.O
     oauthSelfHosted = options.Value.OAuth.SelfHosted,
     publicMcpUrl = options.Value.PublicMcpUrl,
     publicResourceMetadataUrl = options.Value.PublicResourceMetadataUrl,
-    allowedProjectIds = options.Value.AllowedProjectIds,
     readTools = options.Value.ReadTools,
     directWriteTools = options.Value.DirectWriteTools,
     proposalWriteTools = options.Value.ProposalWriteTools

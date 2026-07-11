@@ -74,28 +74,41 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
             return;
         }
 
-        var username = NormalizeUsername(contextHubOptions.Value.Security.BootstrapUsername);
-        var serviceUser = await dbContext.TenantUsers
-            .Include(x => x.Tenant)
-            .FirstOrDefaultAsync(
-                x => x.Username == username &&
-                     x.Status == TenantUserStatus.Active &&
-                     x.Tenant != null &&
-                     x.Tenant.Status == TenantStatus.Active,
-                context.RequestAborted);
-        if (serviceUser is null)
+        var tenantId = ReadGuidClaim(context.User, "tenant_id");
+        var userId = ReadGuidClaim(context.User, "tenant_user_id");
+        var contextHubUser = tenantId.HasValue && userId.HasValue
+            ? await dbContext.TenantUsers
+                .Include(x => x.Tenant)
+                .FirstOrDefaultAsync(
+                    x => x.Id == userId.Value &&
+                         x.TenantId == tenantId.Value &&
+                         x.Status == TenantUserStatus.Active &&
+                         x.Tenant != null &&
+                         x.Tenant.Status == TenantStatus.Active,
+                    context.RequestAborted)
+            : null;
+
+        if (contextHubUser is null && gatewayOptions.Value.OAuth.TestMode)
         {
-            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            await context.Response.WriteAsync("ChatGPT gateway service actor is not initialized.", context.RequestAborted);
+            contextHubUser = await ResolveTestServiceUserAsync(
+                dbContext,
+                contextHubOptions.Value.Security.BootstrapUsername,
+                context.RequestAborted);
+        }
+
+        if (contextHubUser is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsync("ChatGPT OAuth identity is not linked to an active ContextHub user.", context.RequestAborted);
             return;
         }
 
         var previous = actorAccessor.Current;
         actorAccessor.Current = new ContextHubRequestActor(
-            serviceUser.TenantId,
-            serviceUser.Id,
-            $"chatgpt:{subject}",
-            serviceUser.Role,
+            contextHubUser.TenantId,
+            contextHubUser.Id,
+            contextHubUser.Username,
+            contextHubUser.Role,
             [
                 SecurityScopes.MemoryRead,
                 SecurityScopes.MemoryWrite,
@@ -103,13 +116,9 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
                 SecurityScopes.PreferencesWrite,
                 SecurityScopes.LogsRead
             ],
-            gatewayOptions.Value.AllowedProjectIds
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(x => ProjectContext.Normalize(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray(),
+            [],
             IsAuthenticated: true,
-            IsServiceActor: true);
+            IsServiceActor: false);
         try
         {
             await next(context);
@@ -118,6 +127,22 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
         {
             actorAccessor.Current = previous;
         }
+    }
+
+    private static async Task<TenantUser?> ResolveTestServiceUserAsync(
+        IApplicationDbContext dbContext,
+        string bootstrapUsername,
+        CancellationToken cancellationToken)
+    {
+        var username = NormalizeUsername(bootstrapUsername);
+        return await dbContext.TenantUsers
+            .Include(x => x.Tenant)
+            .FirstOrDefaultAsync(
+                x => x.Username == username &&
+                     x.Status == TenantUserStatus.Active &&
+                     x.Tenant != null &&
+                     x.Tenant.Status == TenantStatus.Active,
+                cancellationToken);
     }
 
     private static string NormalizeUsername(string value)
@@ -136,6 +161,9 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
 
         return null;
     }
+
+    private static Guid? ReadGuidClaim(ClaimsPrincipal principal, string type)
+        => Guid.TryParse(principal.FindFirstValue(type), out var value) ? value : null;
 
     private static bool IsHealthCheck(PathString path)
         => path.StartsWithSegments("/health/live", StringComparison.OrdinalIgnoreCase) ||
