@@ -491,10 +491,12 @@ internal sealed class SelfHostedOAuthService(
                 return ClientValidationResult.Fail("cimd_redirect_mismatch");
             }
 
-            var tokenMethod = string.IsNullOrWhiteSpace(metadata.TokenEndpointAuthMethod)
-                ? "none"
-                : metadata.TokenEndpointAuthMethod.Trim();
-            if (!string.Equals(tokenMethod, "none", StringComparison.Ordinal))
+            var advertisedTokenMethods = metadata.TokenEndpointAuthMethodsSupported;
+            var supportsPublicClient = advertisedTokenMethods is { Count: > 0 }
+                ? advertisedTokenMethods.Any(method => string.Equals(method?.Trim(), "none", StringComparison.Ordinal))
+                : string.IsNullOrWhiteSpace(metadata.TokenEndpointAuthMethod) ||
+                  string.Equals(metadata.TokenEndpointAuthMethod.Trim(), "none", StringComparison.Ordinal);
+            if (!supportsPublicClient)
             {
                 return ClientValidationResult.Fail("cimd_token_auth_method_unsupported");
             }

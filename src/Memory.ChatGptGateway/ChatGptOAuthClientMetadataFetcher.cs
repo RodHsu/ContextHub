@@ -24,4 +24,6 @@ public sealed record ChatGptOAuthClientMetadata(
     [property: JsonPropertyName("token_endpoint_auth_method")] string? TokenEndpointAuthMethod,
     [property: JsonPropertyName("grant_types")] IReadOnlyList<string>? GrantTypes,
     [property: JsonPropertyName("response_types")] IReadOnlyList<string>? ResponseTypes,
-    [property: JsonPropertyName("scope")] string? Scope);
+    [property: JsonPropertyName("scope")] string? Scope,
+    [property: JsonPropertyName("token_endpoint_auth_methods_supported")]
+    IReadOnlyList<string>? TokenEndpointAuthMethodsSupported = null);

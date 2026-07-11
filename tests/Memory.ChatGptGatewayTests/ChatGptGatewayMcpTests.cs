@@ -576,10 +576,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             selfHostedOAuth: true,
             clientMetadataFetcher: new FakeClientMetadataFetcher(new ChatGptOAuthClientMetadata(
                 [redirectUri],
-                "none",
+                null,
                 ["authorization_code", "refresh_token"],
                 ["code"],
-                "openid profile email offline_access")));
+                "openid profile email offline_access",
+                ["none", "private_key_jwt"])));
         await ConfigureSelfHostedUserAsync(factory);
 
         using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
