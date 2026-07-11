@@ -270,7 +270,7 @@ app.MapPost("/oauth/chat/authorize", async (
         return Results.Content(RenderOAuthLogin(validation.Request, result.Error), "text/html", Encoding.UTF8, StatusCodes.Status401Unauthorized);
     }
 
-    return new SeeOtherRedirectResult(result.RedirectUri);
+    return Results.Redirect(result.RedirectUri, permanent: false, preserveMethod: false);
 }).AllowAnonymous();
 
 app.MapPost("/oauth/chat/register", async (
@@ -495,9 +495,7 @@ static IResult CreateAuthorizationServerMetadata(HttpContext context, IOptions<C
         ["code"],
         ["authorization_code", "refresh_token"],
         ["S256"],
-        string.IsNullOrWhiteSpace(value.OAuth.ClientSecret)
-            ? ["none"]
-            : ["client_secret_basic", "client_secret_post"],
+        GetTokenEndpointAuthenticationMethods(value.OAuth),
         true,
         NormalizeScopes(value.OAuth.Scopes));
 
@@ -518,9 +516,7 @@ static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGa
         ["code"],
         ["authorization_code", "refresh_token"],
         ["S256"],
-        string.IsNullOrWhiteSpace(value.OAuth.ClientSecret)
-            ? ["none"]
-            : ["client_secret_basic", "client_secret_post"],
+        GetTokenEndpointAuthenticationMethods(value.OAuth),
         true,
         ["public"],
         [string.IsNullOrWhiteSpace(value.OAuth.SelfHostedRsaPrivateKey) ? "HS256" : "RS256"],
@@ -557,6 +553,11 @@ static string[] NormalizeScopes(IEnumerable<string> scopes)
         .Select(scope => scope.Trim())
         .Distinct(StringComparer.Ordinal)
         .ToArray();
+
+static string[] GetTokenEndpointAuthenticationMethods(OAuthOptions options)
+    => string.IsNullOrWhiteSpace(options.ClientSecret)
+        ? ["none"]
+        : ["none", "client_secret_basic", "client_secret_post"];
 
 static (string ClientId, string ClientSecret) ReadBasicClientCredentials(string authorization)
 {
@@ -689,16 +690,6 @@ internal sealed record OpenIdUserInfo(
 internal sealed record OAuthError(
     [property: JsonPropertyName("error")] string Error,
     [property: JsonPropertyName("error_description")] string ErrorDescription);
-
-internal sealed class SeeOtherRedirectResult(string location) : IResult
-{
-    public Task ExecuteAsync(HttpContext httpContext)
-    {
-        httpContext.Response.StatusCode = StatusCodes.Status303SeeOther;
-        httpContext.Response.Headers.Location = location;
-        return Task.CompletedTask;
-    }
-}
 
 internal static class CloudflareCacheHeaders
 {

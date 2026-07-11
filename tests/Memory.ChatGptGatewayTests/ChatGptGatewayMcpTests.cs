@@ -209,6 +209,12 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         metadata.GetProperty("token_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/token");
         metadata.GetProperty("registration_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/register");
         metadata.GetProperty("client_id_metadata_document_supported").GetBoolean().Should().BeTrue();
+        metadata.GetProperty("token_endpoint_auth_methods_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().Contain("none");
+        oidcMetadata.GetProperty("token_endpoint_auth_methods_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().Contain("none");
         oidcMetadata.GetProperty("userinfo_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/userinfo");
         metadata.GetProperty("grant_types_supported").EnumerateArray()
             .Select(x => x.GetString())
@@ -228,7 +234,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 ["username"] = "gateway-test-admin",
                 ["password"] = "oauth-password"
             }));
-        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.SeeOther);
+        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Found);
         var location = authorizeResponse.Headers.Location;
         location.Should().NotBeNull();
         location!.ToString().Should().StartWith(redirectUri);
@@ -347,7 +353,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 ["password"] = "oauth-password"
             }));
 
-        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.SeeOther);
+        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Found);
         var callbackQuery = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(authorizeResponse.Headers.Location!.Query);
         callbackQuery["code"].ToString().Should().NotBeNullOrWhiteSpace();
         callbackQuery["state"].ToString().Should().Be("state-123");
@@ -379,7 +385,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 ["username"] = "gateway-test-admin",
                 ["password"] = "oauth-password"
             }));
-        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.SeeOther);
+        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Found);
         var code = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(authorizeResponse.Headers.Location!.Query)["code"].ToString();
 
         using var tokenResponse = await client.PostAsync(
@@ -473,7 +479,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                     ["username"] = "gateway-test-admin",
                     ["password"] = "oauth-password"
                 }));
-            authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.SeeOther);
+            authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Found);
             authorizationCode = Microsoft.AspNetCore.WebUtilities.QueryHelpers
                 .ParseQuery(authorizeResponse.Headers.Location!.Query)["code"].ToString();
             authorizationCode.Should().NotBeNullOrWhiteSpace();
@@ -640,7 +646,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 ["username"] = "gateway-test-admin",
                 ["password"] = "oauth-password"
             }));
-        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.SeeOther);
+        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Found);
         var code = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(authorizeResponse.Headers.Location!.Query)["code"].ToString();
 
         using var tokenResponse = await client.PostAsync(
@@ -1294,7 +1300,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 ["username"] = "gateway-test-admin",
                 ["password"] = "oauth-password"
             }));
-        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.SeeOther);
+        authorizeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Found);
         var code = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(authorizeResponse.Headers.Location!.Query)["code"].ToString();
         code.Should().NotBeNullOrWhiteSpace();
 

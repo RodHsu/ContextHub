@@ -111,7 +111,14 @@ function New-HttpResponseRecord {
             $content = $Response.Content
         }
         elseif ($Response.Content.ReadAsStringAsync) {
-            $content = $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            try {
+                $content = $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            }
+            catch [System.ObjectDisposedException] {
+                # PowerShell 7 may dispose HttpResponseMessage content before exposing
+                # a non-success response through the terminating-error exception.
+                $content = ""
+            }
         }
     }
     elseif ($Response.GetResponseStream) {
@@ -299,8 +306,8 @@ function Get-OAuthAccessTokenViaDcr {
         -Body $formBody `
         -NoRedirect `
         -TimeoutSec 15
-    if ([int]$authorizeResponse.StatusCode -ne 303) {
-        throw "Expected 303 from OAuth authorize submit during DCR smoke, got $($authorizeResponse.StatusCode): $($authorizeResponse.Content)"
+    if ([int]$authorizeResponse.StatusCode -ne 302) {
+        throw "Expected 302 from OAuth authorize submit during DCR smoke, got $($authorizeResponse.StatusCode): $($authorizeResponse.Content)"
     }
 
     $location = [string]$authorizeResponse.Headers["Location"]
@@ -394,8 +401,8 @@ function Get-OAuthAccessTokenViaPredefinedClient {
         -Body $formBody `
         -NoRedirect `
         -TimeoutSec 15
-    if ([int]$authorizeResponse.StatusCode -ne 303) {
-        throw "Expected 303 from OAuth authorize submit during predefined-client smoke, got $($authorizeResponse.StatusCode): $($authorizeResponse.Content)"
+    if ([int]$authorizeResponse.StatusCode -ne 302) {
+        throw "Expected 302 from OAuth authorize submit during predefined-client smoke, got $($authorizeResponse.StatusCode): $($authorizeResponse.Content)"
     }
 
     $location = [string]$authorizeResponse.Headers["Location"]
@@ -638,8 +645,12 @@ if (@($oidcMetadata.grant_types_supported) -notcontains "refresh_token") {
     throw "OpenID Connect metadata must include refresh_token grant support."
 }
 
-if (@($oidcMetadata.id_token_signing_alg_values_supported) -notcontains "HS256") {
-    throw "OpenID Connect metadata must include HS256 id_token support."
+if (@($oidcMetadata.id_token_signing_alg_values_supported) -notcontains "RS256") {
+    throw "OpenID Connect metadata must include RS256 id_token support."
+}
+
+if ([string]$oidcMetadata.jwks_uri -notmatch "/\.well-known/jwks\.json$") {
+    throw "OpenID Connect metadata must expose the public JWKS endpoint."
 }
 
 if (@($oidcMetadata.scopes_supported) -notcontains "offline_access") {
