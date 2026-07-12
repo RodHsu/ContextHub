@@ -233,7 +233,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         using var overviewResponse = await client.GetAsync("/");
         overviewResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var overviewHtml = WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync());
-        overviewHtml.Should().Contain("ContextHub 管理主控台");
+        overviewHtml.Should().Contain("Quiet Signal");
+        overviewHtml.Should().Contain("Operations and knowledge governance");
         overviewHtml.Should().Contain("記憶條目");
         overviewHtml.Should().Contain("預設專案記憶");
         overviewHtml.Should().Contain("Docker 主機");

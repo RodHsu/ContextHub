@@ -1,6 +1,7 @@
 @page "/memories"
 @inject IContextHubApiClient ApiClient
 @inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+@inject IJSRuntime JsRuntime
 
 <PageTitle>Context Hub | 記憶資料</PageTitle>
 
@@ -267,37 +268,65 @@
                             </section>
                         }
 
-                        <div class="code-block memory-detail-content-block">@_selected.Document.Content</div>
+                        <section class="detail-reader memory-detail-content-reader" aria-label="Memory content reader">
+                            <div class="detail-reader-header">
+                                <div>
+                                    <div class="detail-reader-title">內容</div>
+                                    <div class="detail-reader-meta">Markdown / source text</div>
+                                </div>
+                                <button class="ghost-button detail-reader-copy-button"
+                                        type="button"
+                                        @onclick="@(() => CopyTextAsync(_selected.Document.Content, "已複製 memory 內容。"))">
+                                    複製內容
+                                </button>
+                            </div>
+                            <pre class="detail-reader-body memory-detail-content-block">@_selected.Document.Content</pre>
+                        </section>
 
                         <section class="memory-detail-section">
-                            <div class="subpanel-title">Revisions</div>
-                            <div class="stack-scroll-shell">
-                                <div class="stack-list">
-                                    @foreach (var revision in _selected.Revisions.Take(5))
-                                    {
-                                        <article class="stack-item">
-                                            <div class="stack-item-title">v@revision.Version / @ChangedByText(revision.ChangedBy)</div>
-                                            <div class="stack-item-copy">@revision.Title - @revision.Summary</div>
-                                            <div class="stack-item-meta"><ClientLocalTime Value="revision.CreatedAt" /></div>
-                                        </article>
-                                    }
+                            <div class="section-heading-row">
+                                <div>
+                                    <div class="subpanel-title">Revisions</div>
+                                    <div class="section-heading-meta">@DashboardFormatting.Integer(_selected.Revisions.Count) 筆版本紀錄</div>
                                 </div>
+                            </div>
+                            <div class="stack-list memory-revision-list">
+                                @foreach (var revision in _selected.Revisions.Take(5))
+                                {
+                                    <article class="stack-item memory-revision-card">
+                                        <div class="stack-item-title">v@revision.Version / @ChangedByText(revision.ChangedBy)</div>
+                                        <div class="stack-item-copy memory-revision-summary">@revision.Title - @revision.Summary</div>
+                                        <div class="stack-item-meta"><ClientLocalTime Value="revision.CreatedAt" /></div>
+                                    </article>
+                                }
                             </div>
                         </section>
 
                         <section class="memory-detail-section">
-                            <div class="subpanel-title">Chunks</div>
-                            <div class="stack-scroll-shell">
-                                <div class="stack-list">
-                                    @foreach (var chunk in _selected.Chunks)
-                                    {
-                                        <article class="stack-item">
-                                            <div class="stack-item-title">@DashboardText.Label(chunk.ChunkKind) / #@chunk.ChunkIndex</div>
-                                            <div class="stack-item-copy">@chunk.ChunkText</div>
-                                            <div class="stack-item-meta">@DashboardFormatting.Integer(chunk.Vectors.Count) 筆向量</div>
-                                        </article>
-                                    }
+                            <div class="section-heading-row">
+                                <div>
+                                    <div class="subpanel-title">Chunks</div>
+                                    <div class="section-heading-meta">@DashboardFormatting.Integer(_selected.Chunks.Count) 個內容片段</div>
                                 </div>
+                            </div>
+                            <div class="stack-list memory-chunk-list">
+                                @foreach (var chunk in _selected.Chunks)
+                                {
+                                    <article class="chunk-reader memory-chunk-card">
+                                        <div class="chunk-reader-header">
+                                            <div>
+                                                <div class="chunk-reader-title">@DashboardText.Label(chunk.ChunkKind) / #@chunk.ChunkIndex</div>
+                                                <div class="chunk-reader-meta">@DashboardFormatting.Integer(chunk.Vectors.Count) 筆向量</div>
+                                            </div>
+                                            <button class="ghost-button detail-reader-copy-button"
+                                                    type="button"
+                                                    @onclick="@(() => CopyTextAsync(chunk.ChunkText, $"已複製 chunk #{chunk.ChunkIndex}。"))">
+                                                複製
+                                            </button>
+                                        </div>
+                                        <pre class="chunk-reader-body">@chunk.ChunkText</pre>
+                                    </article>
+                                }
                             </div>
                         </section>
 
@@ -495,6 +524,17 @@
 
     private void ClearMessage()
         => _message = null;
+
+    private async Task CopyTextAsync(string? text, string message)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", text);
+        ShowMessage(message);
+    }
 
     private async Task HandleProjectIdInputAsync()
     {

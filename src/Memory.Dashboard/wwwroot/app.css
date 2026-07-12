@@ -2918,12 +2918,22 @@ textarea {
 }
 
 .retention-list-panel {
-    min-height: clamp(440px, calc(var(--dashboard-viewport-height) - 320px), 760px);
+    min-height: clamp(420px, calc(var(--dashboard-viewport-height) - 330px), 760px);
+    overflow: hidden;
+}
+
+.retention-list-body {
+    display: grid;
+    min-width: 0;
+    min-height: 0;
+    align-content: start;
 }
 
 .retention-table-shell {
-    min-height: clamp(340px, calc(var(--dashboard-viewport-height) - 420px), 640px);
-    max-height: none;
+    min-height: clamp(300px, calc(var(--dashboard-viewport-height) - 430px), 620px);
+    max-height: clamp(300px, calc(var(--dashboard-viewport-height) - 430px), 620px);
+    overflow: auto !important;
+    scrollbar-gutter: stable both-edges;
 }
 
 .retention-table {
@@ -2933,6 +2943,11 @@ textarea {
 
 .retention-table tbody tr {
     cursor: pointer;
+}
+
+.retention-table th,
+.retention-table td {
+    max-width: none;
 }
 
 .retention-table-col-kind {
@@ -2977,7 +2992,14 @@ textarea {
 }
 
 .retention-detail-panel {
-    min-height: clamp(440px, calc(var(--dashboard-viewport-height) - 320px), 760px);
+    min-height: clamp(420px, calc(var(--dashboard-viewport-height) - 330px), 760px);
+    overflow: hidden;
+}
+
+.retention-detail-scroll-shell {
+    max-height: clamp(300px, calc(var(--dashboard-viewport-height) - 410px), 650px);
+    overflow: auto;
+    scrollbar-gutter: stable both-edges;
 }
 
 .retention-detail-grid {
@@ -2994,7 +3016,17 @@ textarea {
 }
 
 .retention-decision-grid textarea {
-    min-height: 112px;
+    min-height: 7rem;
+    max-height: 12rem;
+    resize: vertical;
+}
+
+.retention-note-field {
+    min-width: 0;
+}
+
+.retention-note-field textarea {
+    overflow: auto;
 }
 
 .stack-list {
@@ -3239,6 +3271,10 @@ textarea {
     min-width: 0;
 }
 
+.memory-detail-body {
+    align-content: start;
+}
+
 .memory-detail-definition-grid dd {
     min-height: calc(1.45em * 2);
     line-height: 1.45;
@@ -3246,14 +3282,140 @@ textarea {
     align-items: flex-start;
 }
 
-.memory-detail-content-block {
-    max-height: min(220px, var(--code-block-max-height));
-    overflow-wrap: anywhere;
-    word-break: break-word;
+.section-heading-row {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-width: 0;
 }
 
-.memory-detail-section .stack-scroll-shell {
-    max-height: 220px;
+.section-heading-row .subpanel-title {
+    margin-bottom: 0.1rem;
+}
+
+.section-heading-meta,
+.detail-reader-meta,
+.chunk-reader-meta {
+    color: var(--text-subtle);
+    font-size: 0.78rem;
+    line-height: 1.35;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.detail-reader,
+.chunk-reader {
+    min-width: 0;
+    max-width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 94%, white 6%), var(--bg-panel));
+    overflow: hidden;
+    box-shadow: none;
+}
+
+.detail-reader-header,
+.chunk-reader-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-width: 0;
+    padding: 0.72rem 0.82rem;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface-alt) 82%, black 18%);
+}
+
+.detail-reader-title,
+.chunk-reader-title {
+    color: var(--text);
+    font-size: 0.88rem;
+    font-weight: 700;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.detail-reader-copy-button {
+    flex: 0 0 auto;
+    min-height: 2rem;
+    padding: 0.42rem 0.68rem;
+    border-radius: 8px;
+    font-size: 0.78rem;
+}
+
+.detail-reader-body,
+.chunk-reader-body {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    margin: 0;
+    padding: 0.86rem 0.92rem;
+    overflow: auto;
+    scrollbar-gutter: stable both-edges;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(74, 141, 255, 0.92) rgba(255, 255, 255, 0.05);
+    color: var(--text);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.84rem;
+    line-height: 1.55;
+    white-space: pre;
+    overflow-wrap: normal;
+    word-break: normal;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+.detail-reader-body {
+    max-height: clamp(14rem, 34vh, 28rem);
+}
+
+.chunk-reader-body {
+    max-height: clamp(7.5rem, 18vh, 12.5rem);
+}
+
+.detail-reader-body::-webkit-scrollbar,
+.chunk-reader-body::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+}
+
+.detail-reader-body::-webkit-scrollbar-track,
+.chunk-reader-body::-webkit-scrollbar-track {
+    border-radius: var(--scrollbar-radius);
+    background: var(--scrollbar-track);
+    border: 1px solid var(--scrollbar-track-border);
+}
+
+.detail-reader-body::-webkit-scrollbar-thumb,
+.chunk-reader-body::-webkit-scrollbar-thumb {
+    border-radius: var(--scrollbar-radius);
+    background: var(--scrollbar-thumb);
+    border: 2px solid rgba(9, 13, 20, 0.88);
+    box-shadow: inset 0 0 0 1px var(--scrollbar-thumb-border);
+}
+
+.memory-revision-list,
+.memory-chunk-list {
+    display: grid;
+    gap: 0.7rem;
+    min-width: 0;
+}
+
+.memory-revision-card {
+    gap: 0.28rem;
+}
+
+.memory-revision-summary {
+    display: -webkit-box;
+    max-height: calc(1.48em * 3);
+    overflow: hidden;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
 }
 
 .detail-actions {
@@ -3542,13 +3704,32 @@ textarea {
     overflow: auto;
     overflow-wrap: anywhere;
     word-break: break-word;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
+    scrollbar-gutter: stable both-edges;
+    scrollbar-color: rgba(96, 165, 250, 0.78) rgba(15, 23, 42, 0.9);
+    scrollbar-width: thin;
+    -ms-overflow-style: auto;
+    user-select: text;
+    -webkit-user-select: text;
 }
 
-.code-block::-webkit-scrollbar {
-    width: 0;
-    height: 0;
+.code-block::-webkit-scrollbar,
+.payload-preview::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+}
+
+.code-block::-webkit-scrollbar-track,
+.payload-preview::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.88);
+    border-radius: 999px;
+}
+
+.code-block::-webkit-scrollbar-thumb,
+.payload-preview::-webkit-scrollbar-thumb {
+    min-height: 2.5rem;
+    border: 2px solid rgba(15, 23, 42, 0.88);
+    border-radius: 999px;
+    background: linear-gradient(180deg, rgba(96, 165, 250, 0.9), rgba(59, 130, 246, 0.72));
 }
 
 .truncate-cell {
@@ -6822,6 +7003,22 @@ textarea:focus {
     }
 }
 
+@media (max-width: 1360px) {
+    .retention-workspace-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .retention-list-panel,
+    .retention-detail-panel {
+        min-height: auto;
+    }
+
+    .retention-table-shell,
+    .retention-detail-scroll-shell {
+        max-height: none;
+    }
+}
+
 @media (max-width: 960px) {
     .home-page-body .data-table td:nth-child(3) .status-badge {
         margin-inline: 0.04rem;
@@ -7212,6 +7409,9 @@ button:disabled,
     max-height: clamp(10rem, 28vh, 24rem);
     overflow: auto;
     white-space: pre-wrap;
+    scrollbar-gutter: stable both-edges;
+    scrollbar-color: rgba(96, 165, 250, 0.78) rgba(15, 23, 42, 0.9);
+    scrollbar-width: thin;
 }
 
 .boundary-panel {
@@ -7885,6 +8085,26 @@ textarea {
 
     .jobs-retention-panel .table-scroll-shell {
         max-height: none;
+    }
+}
+
+.retention-page-body .retention-table-shell {
+    overflow: auto !important;
+    scrollbar-gutter: stable both-edges;
+}
+
+.retention-page-body .retention-detail-scroll-shell {
+    overflow: auto !important;
+    scrollbar-gutter: stable both-edges;
+}
+
+@media (min-width: 1025px) {
+    .retention-page-body .retention-table-shell {
+        max-height: clamp(300px, calc(var(--dashboard-viewport-height) - 430px), 620px);
+    }
+
+    .retention-page-body .retention-detail-scroll-shell {
+        max-height: clamp(300px, calc(var(--dashboard-viewport-height) - 410px), 650px);
     }
 }
 

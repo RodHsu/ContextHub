@@ -15,35 +15,15 @@
 
 ### 2.1 Active Product Design + Stitch baseline
 
-- `ContextHub Product Design + Stitch UI/UX Design Language` 是 2026-07-08 起全站 UI/UX 的唯一 active 設計稿來源。舊版 full-site / scroll-shell / early operations-console 設計稿已退休，不再作為新 UI 決策依據。
-  - project：`projects/4533056430393435785`
-  - active design system：`assets/33c0c23e5fc4475e8852b7906cfe6bc6` (`ContextHub Operations`)
-  - 設計語言文件：[context-hub-operations-console-design-language.md](/w:/Repositories/WJCY/ContextHub/docs/design/context-hub-operations-console-design-language.md)
-  - SVG 保存版設計稿目錄：[/docs/design/svg/](/w:/Repositories/WJCY/ContextHub/docs/design/svg/)
-  - 使用範圍：全站 dashboard route、共用 app shell、sidebar/topbar、command palette、page header、panel、table/code/diff scroll shell、detail drawer、modal、popover、toast、empty/loading/error state、refresh state、disabled reason、confirmation modal、token one-time reveal、RWD、animation 與 reduced-motion 行為。
-  - 設計方向：現代 SaaS operations console；高資訊密度但不厚重，使用 tonal layering、hairline、refined dot chips、短導覽文字、清楚狀態語彙與防呆卡控。避免老派 enterprise admin、NOC wall、滿版 menu、巢狀卡片、裝飾性 gradient/blob、body horizontal scroll 與雙重垂直 scrollbar。
-  - 參考來源轉譯：採 shadcn-admin 的 command search / grouped sidebar、Tabler 的 responsive dashboard hierarchy、TailAdmin / Flowbite Admin Dashboard 的 CRUD/forms/tables/drawers/auth surfaces，以及 Grafana / OpenObserve 類 observability workflow；只作為 UX pattern reference，不複製其 branding。
-  - RWD 合約：`body` 不得出現水平捲軸；表格、JSON、code、diff、log cells 只能在自身 frame 內水平捲動；`641px-1024px` sidebar 自動收折到 `64px` icon rail；`<640px` 使用 overlay drawer；content area 擁有主要垂直捲動；sidebar、panel、table 不得產生雙重垂直捲軸；popover/menu/tooltip 不得被 overflow clipping；detail panel 在 tablet 疊到主內容下方，不遮蓋 table frame。
-  - motion / loading / refresh：hover/focus 120ms、menu/popover 180ms、drawer 220ms、route transition 240ms、live-tail row fade 700ms；loading 使用 app top progress、panel/table/code skeleton；refresh 使用 live pulse、paused chip、stale banner、retry flow 與 request/correlation id。
-  - 全站 route 對應：
-    - Product Design strategy：`projects/4533056430393435785/screens/27112231d8494e448ad6e7fdf42eed86`，保存版 `docs/design/svg/00-product-design-strategy.svg`。
-    - Modern visual direction：`projects/4533056430393435785/screens/d14425b3d81c4f299ed15f5b901628a7`，保存版 `docs/design/svg/00-modern-visual-direction.svg`。
-    - UI system / states / motion：`projects/4533056430393435785/screens/d6284134138544659d04b026954d010f`，保存版 `docs/design/svg/01-ui-system-states-motion.svg`。
-    - App shell / navigation / command：`projects/4533056430393435785/screens/116b0b12c50d4a31b8aa4025c10f7d9a`，保存版 `docs/design/svg/02-app-shell-navigation-command.svg`。
-    - Auth / boundary pages：`projects/4533056430393435785/screens/11e2b475d8b541db953b6fd6b2b710ce`，對應 `/login`、`/forbidden`、`/not-found`、`/Error`，保存版 `docs/design/svg/03-auth-boundary-pages.svg`。
-    - Operations overview / monitoring：`projects/4533056430393435785/screens/454b419a89264cc29d07e005029bda83`，對應 `/`、`/monitoring`，保存版 `docs/design/svg/04-operations-overview-monitoring.svg`。
-    - Runtime / logs / jobs / performance：`projects/4533056430393435785/screens/80b6642ae1b249b3ab921d3ab67129e8`，對應 `/runtime`、`/logs`、`/jobs`、`/performance`，保存版 `docs/design/svg/05-runtime-logs-jobs-performance.svg`。
-    - Knowledge graph / memories：`projects/4533056430393435785/screens/baa8629daf8741ef8469d0939d3fc0d8`，對應 `/graph`、`/memories`，保存版 `docs/design/svg/06-knowledge-graph-memory.svg`。
-    - Sources / inbox / retention：`projects/4533056430393435785/screens/6d5ffa8ae48748ff8832e8a3f8d312fb`，對應 `/sources`、`/inbox`、`/retention`，保存版 `docs/design/svg/07-sources-inbox-retention.svg`。
-    - Review / governance / evaluation：`projects/4533056430393435785/screens/8b98c7ea4f0645b2b8da732e7c6fa89a`，對應 `/chatgpt-proposals`、`/governance`、`/evaluation`，保存版 `docs/design/svg/08-review-governance-evaluation.svg`。
-    - Admin / account：`projects/4533056430393435785/screens/992f81554dc64034807a9753b0523024`，對應 `/preferences`、`/storage`、`/security`、`/settings`、`/account/tokens`，保存版 `docs/design/svg/09-admin-settings-account-tokens.svg`。
-    - RWD / loading / refresh / motion validation：`projects/4533056430393435785/screens/17e2fea5a4b347b9bbd3a8e485b73fe1`，對應全站 viewport 與 motion/loading/refresh 驗收，保存版 `docs/design/svg/10-rwd-loading-refresh-motion.svg`。
-    - Feature Design Atlas：`projects/4533056430393435785/screens/450468dcfc354e9b9e706085e4cf86b2`，逐頁逐功能 route matrix，保存版 `docs/design/svg/11-feature-design-atlas.svg`。
-    - Operations Feature Atlas：`projects/4533056430393435785/screens/8950c9e0f9a14b93ac4bf5b7283e6f90`，對應 `/`、`/monitoring`、`/runtime`、`/logs`、`/jobs`、`/performance`，保存版 `docs/design/svg/12-operations-feature-atlas.svg`。
-    - Knowledge Feature Atlas：`projects/4533056430393435785/screens/79ba882411d44e13b94cfc6d1de72013`，對應 `/graph`、`/memories`、`/retention`、`/sources`，保存版 `docs/design/svg/13-knowledge-feature-atlas.svg`。
-    - Review and Governance Feature Atlas：`projects/4533056430393435785/screens/f296315d38f5483b8845d1352d75d3c5`，對應 `/inbox`、`/governance`、`/evaluation`、`/chatgpt-proposals`，保存版 `docs/design/svg/14-review-governance-feature-atlas.svg`。
-    - Admin, Account and Boundary Feature Atlas：`projects/4533056430393435785/screens/b80a7c7dbf8f4c2f91151dde97db5a38`，對應 `/preferences`、`/storage`、`/security`、`/settings`、`/account/tokens`、`/login`、`/forbidden`、`/not-found`、`/Error`，保存版 `docs/design/svg/15-admin-boundary-feature-atlas.svg`。
-  - 注意：目前 Stitch MCP 提供 screen/design generation 與讀取工具，但沒有 expose 原生 SVG export；`docs/design/svg/` 中的 SVG 是依 Product Design + Stitch screens 與設計合約製作的 repo 保存版 summary board，不宣稱為 Stitch 原生匯出。
+- `Quiet Signal vNext` 是全站唯一 active UI/UX 設計來源；2026-07-08 的 Operations Console、Feature Atlas 與 SVG summary boards 已移除。
+  - Stitch project：`projects/952128967416801377`
+  - active design system：`assets/afb02499c2fe4a4ebfc0f224d9d7f67a` (`Quiet Signal`)
+  - 設計規格與完整 route matrix：[context-hub-quiet-signal-vnext.md](/w:/Repositories/WJCY/ContextHub/docs/design/context-hub-quiet-signal-vnext.md)
+  - 本機關鍵 mockups：[/docs/design/mockups/quiet-signal/](/w:/Repositories/WJCY/ContextHub/docs/design/mockups/quiet-signal/)
+  - 使用範圍：全站 23 條 dashboard route、CIS、app shell、sidebar/rail/drawer、table、reader、master-detail、form guard、async state、refresh、RWD、animation 與 reduced-motion。
+  - RWD 基準：`>=1440` 使用 248px sidebar；`1025-1365` 使用 72px icon rail；`768-1024` 使用 64px rail 或 overlay drawer；`<768` 使用 top app bar 與 overlay navigation。
+  - Scroll 基準：document 與 page body 不得水平捲動；table、JSON、code、diff、payload 與 log 只能在自己的 named frame 內捲動；一個 component 最多擁有一個 scroll axis。
+  - 狀態與防呆：loading、stale、empty、error、retry、disabled、focus、dirty、destructive confirmation 與 client-local timestamp 必須依 vNext contract 實作。
 
 ### 2.2 Repo 內文件角色
 

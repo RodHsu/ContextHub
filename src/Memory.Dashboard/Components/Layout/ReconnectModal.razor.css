@@ -47,18 +47,14 @@
     padding: 0;
     border: 1px solid var(--border-strong);
     border-radius: 8px;
-    background:
-        linear-gradient(180deg, color-mix(in srgb, var(--bg-elevated) 88%, transparent), color-mix(in srgb, var(--bg-panel) 96%, transparent));
+    background: var(--bg-panel);
     color: var(--text);
-    box-shadow: var(--shadow);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.38);
     overflow: hidden;
-    backdrop-filter: blur(16px);
 }
 
 #components-reconnect-modal::backdrop {
-    background:
-        linear-gradient(180deg, color-mix(in srgb, var(--bg) 72%, transparent), color-mix(in srgb, var(--bg) 84%, transparent));
-    backdrop-filter: blur(8px);
+    background: color-mix(in srgb, var(--bg) 78%, transparent);
 }
 
 .components-reconnect-shell {
@@ -163,13 +159,13 @@
     min-width: 6.75rem;
     border: 1px solid transparent;
     border-radius: 8px;
-    background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 90%, white 10%), color-mix(in srgb, var(--accent) 86%, black 14%));
-    color: white;
+    background: var(--accent);
+    color: #06211d;
     padding: 0.65rem 1rem;
     font-weight: 600;
     cursor: pointer;
     transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
-    box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 26%, transparent);
+    box-shadow: none;
 }
 
 #components-reconnect-modal button:hover {
@@ -186,14 +182,6 @@
     width: 4rem;
     height: 4rem;
     flex: 0 0 auto;
-}
-
-.components-rejoining-animation::before {
-    content: "";
-    position: absolute;
-    inset: 0.4rem;
-    border-radius: 50%;
-    background: radial-gradient(circle, color-mix(in srgb, var(--accent) 24%, transparent) 0%, transparent 72%);
 }
 
 .components-rejoining-animation div {

@@ -76,6 +76,62 @@
             }
         </div>
 
+        <div class="home-signal-grid">
+            <section class="panel home-signal-chart-panel">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">系統效能</div>
+                        <div class="panel-heading-meta">CPU 使用率 / 最近 @DashboardFormatting.Integer(ResourceSampleCount) 筆樣本</div>
+                    </div>
+                    <div class="home-signal-value">
+                        <strong>@DashboardFormatting.Percent(AverageCpuPercent())</strong>
+                        <span>近期平均</span>
+                    </div>
+                </div>
+                <svg class="home-signal-chart" viewBox="0 0 720 180" preserveAspectRatio="none" role="img" aria-label="System CPU performance trend">
+                    @foreach (var guide in new[] { 24, 68, 112, 156 })
+                    {
+                        <line class="resource-line-guide" x1="0" y1="@guide" x2="720" y2="@guide"></line>
+                    }
+                    <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), MaxCpuPercent(), 720d, 180d)"></polyline>
+                </svg>
+                <div class="home-signal-footer">
+                    <span>目前 @DashboardFormatting.Percent(CurrentCpuPercent())</span>
+                    <span>每 @DashboardFormatting.Integer(PollingIntervalSeconds) 秒更新</span>
+                </div>
+            </section>
+
+            <section class="panel home-alert-panel">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">異常佇列</div>
+                        <div class="panel-heading-meta">Error / Critical</div>
+                    </div>
+                    <span class="status-badge @(_overview.RecentErrors.Count == 0 ? "status-success" : "status-error")">@DashboardFormatting.Integer(_overview.RecentErrors.Count)</span>
+                </div>
+                <div class="home-alert-list">
+                    @if (_overview.RecentErrors.Count == 0)
+                    {
+                        <div class="empty-inline">目前沒有待檢視異常。</div>
+                    }
+                    else
+                    {
+                        @foreach (var error in RecentErrorsPreview())
+                        {
+                            <article class="home-alert-item">
+                                <div>
+                                    <strong>@error.ServiceName</strong>
+                                    <span>@error.Message</span>
+                                </div>
+                                <ClientRelativeTime Value="error.CreatedAt" />
+                            </article>
+                        }
+                    }
+                </div>
+                <a class="ghost-button home-alert-link" href="/logs">檢視全部日誌</a>
+            </section>
+        </div>
+
         @if ((_overview.ContextSavings ?? CreateEmptyContextSavings(_overview.SnapshotAtUtc)) is { } contextSavings)
         {
             <section class="panel context-savings-strip @(contextSavings.HasRecentData ? string.Empty : "context-savings-strip-empty")">
@@ -980,10 +1036,12 @@
     private static IEnumerable<int> ChartGuideLines()
         => [12, 36, 60, 84];
 
-    private static string BuildLinePoints(IEnumerable<double> values, double? fixedMax = null)
+    private static string BuildLinePoints(
+        IEnumerable<double> values,
+        double? fixedMax = null,
+        double width = 240d,
+        double height = 96d)
     {
-        const double width = 240d;
-        const double height = 96d;
         const double paddingX = 6d;
         const double paddingY = 8d;
 

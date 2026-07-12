@@ -1,8 +1,8 @@
 # ContextHub Feature Inventory
 
-> 2026-07-08 baseline. Purpose: expand the dashboard site information architecture into page/function levels and mark each item as a page or function.
+> 2026-07-12 Quiet Signal vNext baseline. Purpose: expand the dashboard site information architecture into page/function levels and mark each item as a page or function.
 >
-> Design source: [context-hub-operations-console-design-language.md](/w:/Repositories/WJCY/ContextHub/docs/design/context-hub-operations-console-design-language.md).
+> Design source: [context-hub-quiet-signal-vnext.md](/w:/Repositories/WJCY/ContextHub/docs/design/context-hub-quiet-signal-vnext.md).
 
 ## 1. 標註規則
 
@@ -154,7 +154,10 @@ ContextHub Dashboard
 | 1 | Page | 記憶資料 | 查詢、篩選、檢視 memory items | loading、empty、no results、conflict | `06-knowledge-graph-memory.svg` |
 | 2 | Function | Search and filter row | Project、type、status、tag、source、query | filter chips and reset | `06-knowledge-graph-memory.svg` |
 | 2 | Function | Memories table | ID、project、type/status、tags/source、timestamps | local horizontal scroll | `06-knowledge-graph-memory.svg` |
-| 2 | Function | Memory detail drawer | Payload JSON、metadata、links、chunks | JSON/code selectable | `06-knowledge-graph-memory.svg` |
+| 2 | Function | Memory detail drawer | Metadata、source context、links、findings、revisions、chunks | tablet stacked panel；no overlap | `06-knowledge-graph-memory.svg` |
+| 3 | Function | Detail content reader | Markdown/source text/value body | framed reader；local x/y scroll；copy action；selectable text | `06-knowledge-graph-memory.svg` |
+| 3 | Function | Revision summary cards | Version、actor、title、summary、created time | preview clamped；must not overlap chunks | `06-knowledge-graph-memory.svg` |
+| 3 | Function | Chunk/log readers | Chunk text、log text、vector count、metadata | framed reader；visible scrollbar gutter；copy action；selectable text | `06-knowledge-graph-memory.svg` |
 | 2 | Function | Merge memory | 合併或連結相關 memory | disabled reason, conflict state | `06-knowledge-graph-memory.svg` |
 | 2 | Function | Delete/archive memory | 刪除或封存 | destructive confirmation | `06-knowledge-graph-memory.svg` |
 
@@ -297,14 +300,6 @@ ContextHub Dashboard
 | RWD / scroll | 已列出全站 scroll ownership 與 Tab S7 行為 | 需由 browser tests 覆蓋所有 route matrix |
 | Loading / refresh / motion | 已列出 loading、refresh、stale、retry 與 motion token | 需在 app CSS/component 實作時對照 `10-rwd-loading-refresh-motion.svg` |
 
-## 11. 逐頁逐功能設計 Atlas
+## 11. 逐頁逐功能設計對照
 
-這一層是 Product Design + Stitch 對功能清單的 implementation handoff。原本 `03` 到 `10` 的 SVG 是區域設計稿；`11` 到 `15` 則是逐頁逐功能設計規格，必須在實作或重構對應 route 前同步對照。
-
-| Atlas | 覆蓋 route | Stitch screen | Repo SVG | 實作時必核對 |
-| --- | --- | --- | --- | --- |
-| Feature Design Atlas | 全站 route matrix | `projects/4533056430393435785/screens/450468dcfc354e9b9e706085e4cf86b2` | `docs/design/svg/11-feature-design-atlas.svg` | 每個 route 是否標到 Page、Function、State、Guardrail、Loading、Refresh、Motion、RWD |
-| Operations Feature Atlas | `/`, `/monitoring`, `/runtime`, `/logs`, `/jobs`, `/performance` | `projects/4533056430393435785/screens/8950c9e0f9a14b93ac4bf5b7283e6f90` | `docs/design/svg/12-operations-feature-atlas.svg` | stale blocking、local scroll、live tail、job retry/cancel、performance probe validation |
-| Knowledge Feature Atlas | `/graph`, `/memories`, `/retention`, `/sources` | `projects/4533056430393435785/screens/79ba882411d44e13b94cfc6d1de72013` | `docs/design/svg/13-knowledge-feature-atlas.svg` | graph/table/detail 對齊、drawer 不重疊、reindex/retention 卡控、secret redaction |
-| Review and Governance Feature Atlas | `/inbox`, `/governance`, `/evaluation`, `/chatgpt-proposals` | `projects/4533056430393435785/screens/f296315d38f5483b8845d1352d75d3c5` | `docs/design/svg/14-review-governance-feature-atlas.svg` | proof-before-action、審核狀態區分、audit trail、decision rail、JSON/diff local scroll |
-| Admin, Account and Boundary Feature Atlas | `/preferences`, `/storage`, `/security`, `/settings`, `/account/tokens`, `/login`, `/forbidden`, `/not-found`, `/Error` | `projects/4533056430393435785/screens/b80a7c7dbf8f4c2f91151dde97db5a38` | `docs/design/svg/15-admin-boundary-feature-atlas.svg` | dirty save bar、typed confirmation、token one-time reveal、diagnostic redaction、boundary recovery |
+Product Design + Stitch 的 active implementation handoff 統一收斂到 [Quiet Signal vNext](context-hub-quiet-signal-vnext.md)。該文件包含 23 條 route matrix、Stitch project/design-system/session、共用 component contract、desktop/Tab S7/mobile RWD 與實作 gate；舊 Feature Atlas 與 repo SVG summary boards 已退休並移除。
