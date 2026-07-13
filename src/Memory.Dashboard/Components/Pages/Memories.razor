@@ -167,7 +167,8 @@
                     }
                 </div>
             }
-            <div class="table-scroll-shell table-scroll-shell-tall">
+            <div class="table-scroll-shell table-scroll-shell-tall memories-table-scroll-shell"
+                 data-scroll-viewport="true">
                 <table class="data-table data-table-clickable memories-table">
                     <colgroup>
                         <col class="memories-table-col-title" />
@@ -290,7 +291,7 @@
                                     <div class="section-heading-meta">@DashboardFormatting.Integer(_selected.Revisions.Count) 筆版本紀錄</div>
                                 </div>
                             </div>
-                            <div class="stack-list memory-revision-list">
+                            <div class="stack-list memory-revision-list memory-detail-list-scroll-shell">
                                 @foreach (var revision in _selected.Revisions.Take(5))
                                 {
                                     <article class="stack-item memory-revision-card">
@@ -309,7 +310,7 @@
                                     <div class="section-heading-meta">@DashboardFormatting.Integer(_selected.Chunks.Count) 個內容片段</div>
                                 </div>
                             </div>
-                            <div class="stack-list memory-chunk-list">
+                            <div class="stack-list memory-chunk-list memory-detail-list-scroll-shell memory-chunk-scroll-shell">
                                 @foreach (var chunk in _selected.Chunks)
                                 {
                                     <article class="chunk-reader memory-chunk-card">

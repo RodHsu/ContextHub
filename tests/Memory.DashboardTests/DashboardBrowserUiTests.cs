@@ -73,7 +73,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
     private static readonly DashboardPublicRouteSpec[] PublicRoutes =
     [
-        new("login", "/login", "登入 Dashboard", [".login-scene", ".login-card", ".login-brand-panel"], [".login-brand-panel", ".login-card"])
+        new("login", "/login", "登入 ContextHub", [".login-scene", ".login-card", ".login-brand-panel"], [".login-brand-panel", ".login-card"])
     ];
 
     private static readonly DashboardRouteSpec[] DenseRoutes =
@@ -335,12 +335,14 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 @"() => {
                     const columns = selector => getComputedStyle(document.querySelector(selector)).gridTemplateColumns
                         .split(' ').filter(Boolean).length;
-                    const info = document.querySelector('.metric-label-with-info .info-popover-trigger')?.getBoundingClientRect();
+                    const infoElement = document.querySelector('.metric-label-with-info .info-popover');
+                    const info = infoElement?.getBoundingClientRect();
                     return JSON.stringify({
                         trendColumns: columns('.monitoring-page-body .resource-chart-grid'),
                         kpiColumns: columns('.monitoring-telemetry-panel .runtime-dependency-kpi-grid'),
                         infoWidth: info?.width ?? 0,
-                        infoHeight: info?.height ?? 0
+                        infoHeight: info?.height ?? 0,
+                        infoRadius: infoElement ? getComputedStyle(infoElement).borderRadius : ''
                     });
                 }");
             using var monitoringDocument = JsonDocument.Parse(monitoringJson);
@@ -349,6 +351,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             monitoring.GetProperty("kpiColumns").GetInt32().Should().BeGreaterThanOrEqualTo(2);
             monitoring.GetProperty("infoWidth").GetDouble().Should().BeApproximately(
                 monitoring.GetProperty("infoHeight").GetDouble(), 0.5);
+            monitoring.GetProperty("infoRadius").GetString().Should().Be("50%");
 
             await LoginAndOpenAsync(page, "/jobs?uiProfile=dense");
             var table = page.Locator(".jobs-list-panel .jobs-table-shell");
@@ -378,6 +381,49 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             var page = await context.NewPageAsync();
             await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
             await page.Locator(".memories-workspace-layout").WaitForAsync();
+            var memoryTable = page.Locator(".memories-table-scroll-shell");
+            var memoryTableMetrics = await memoryTable.EvaluateAsync<string>(
+                @"element => JSON.stringify({
+                    clientHeight: element.clientHeight,
+                    scrollHeight: element.scrollHeight,
+                    overflowY: getComputedStyle(element).overflowY
+                })");
+            using var memoryTableDocument = JsonDocument.Parse(memoryTableMetrics);
+            memoryTableDocument.RootElement.GetProperty("clientHeight").GetDouble().Should().BeGreaterThan(400);
+            memoryTableDocument.RootElement.GetProperty("scrollHeight").GetDouble().Should().BeGreaterThan(
+                memoryTableDocument.RootElement.GetProperty("clientHeight").GetDouble());
+            memoryTableDocument.RootElement.GetProperty("overflowY").GetString().Should().Be("auto");
+
+            await memoryTable.EvaluateAsync("element => element.scrollTop = element.scrollHeight");
+            await memoryTable.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 80, Y = 180 } });
+            var pageScrollBefore = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+            await page.Mouse.WheelAsync(0, 600);
+            await page.WaitForTimeoutAsync(150);
+            var pageScrollAfter = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+            pageScrollAfter.Should().BeGreaterThan(pageScrollBefore,
+                "wheel input at the end of the memory table must chain to the page scroll owner");
+
+            await page.Locator(".memories-table tbody tr").First.ClickAsync();
+            await page.Locator(".memory-detail-list-scroll-shell").First.WaitForAsync();
+            var detailShells = page.Locator(".memory-detail-list-scroll-shell");
+            (await detailShells.CountAsync()).Should().BeGreaterThanOrEqualTo(2);
+            foreach (var index in Enumerable.Range(0, await detailShells.CountAsync()))
+            {
+                var height = await detailShells.Nth(index).EvaluateAsync<double>("element => element.clientHeight");
+                height.Should().BeGreaterThanOrEqualTo(220, "revision and chunk collections need stable reader frames");
+            }
+
+            var chunkShell = page.Locator(".memory-chunk-scroll-shell");
+            await chunkShell.ScrollIntoViewIfNeededAsync();
+            await chunkShell.EvaluateAsync("element => element.scrollTop = 0");
+            await chunkShell.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 80, Y = 160 } });
+            var detailPageScrollBefore = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+            await page.Mouse.WheelAsync(0, -600);
+            await page.WaitForTimeoutAsync(150);
+            var detailPageScrollAfter = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+            detailPageScrollAfter.Should().BeLessThan(detailPageScrollBefore,
+                "wheel input at the start of the chunk reader must chain to the page scroll owner");
+
             var overlap = await page.Locator(".memories-workspace-layout").EvaluateAsync<bool>(
                 @"element => {
                     const panels = Array.from(element.children).filter(child => child.getBoundingClientRect().height > 0);
@@ -3611,7 +3657,11 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                         }
 
                         if (visibleVerticalScrollbar) {
-                            visibleVerticalScrollbars.push({ selector, identity });
+                            visibleVerticalScrollbars.push({
+                                selector,
+                                identity,
+                                intentional: element.matches('[data-scroll-viewport=""true""]')
+                            });
                         }
                     });
                 }
@@ -3653,7 +3703,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 const desktopShell = window.innerWidth >= 1025;
                 if (desktopShell) {
                     const unexpected = visibleVerticalScrollbars
-                        .filter(item => !allowedDesktopVerticalScrollbarSelectors.has(item.selector))
+                        .filter(item => !item.intentional && !allowedDesktopVerticalScrollbarSelectors.has(item.selector))
                         .map(item => item.identity);
                     if (unexpected.length > 0) {
                         doubleScrollbarWarnings.push(`desktop shell exposes nested vertical scrollbars: ${unexpected.join(', ')}`);

@@ -1066,15 +1066,80 @@ textarea:disabled {
 
 /* Reported-width regressions: keep one page scroll owner and let dense data
    surfaces adapt independently from the shell. */
+.info-popover {
+    display: inline-grid;
+    place-items: center;
+    inline-size: 1.5rem;
+    block-size: 1.5rem;
+    flex: 0 0 1.5rem;
+    border-radius: 50%;
+}
+
+.info-popover-trigger,
 .metric-label-with-info .info-popover-trigger {
-    inline-size: 1.25rem !important;
-    block-size: 1.25rem !important;
-    min-inline-size: 1.25rem !important;
-    min-block-size: 1.25rem !important;
+    inline-size: 1.5rem !important;
+    block-size: 1.5rem !important;
+    min-inline-size: 1.5rem !important;
+    min-block-size: 1.5rem !important;
     padding: 0 !important;
     aspect-ratio: 1;
-    border-radius: 50%;
+    border-radius: 50% !important;
     line-height: 1;
+}
+
+.table-scroll-shell {
+    overscroll-behavior-x: contain;
+    overscroll-behavior-y: auto;
+}
+
+.panel-scroll-body,
+.stack-scroll-shell,
+.detail-reader-body,
+.chunk-reader-body {
+    overscroll-behavior-y: auto;
+}
+
+.memories-list-panel .memories-table-scroll-shell {
+    height: clamp(28rem, 62vh, 48rem);
+    min-height: 28rem;
+    max-height: 48rem;
+    overflow: auto !important;
+    overscroll-behavior-x: contain;
+    overscroll-behavior-y: auto;
+    scrollbar-gutter: stable both-edges;
+}
+
+.memory-detail-list-scroll-shell {
+    height: clamp(14rem, 30vh, 22rem);
+    min-height: 14rem;
+    max-height: 22rem;
+    padding-right: 0.35rem;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: auto;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+.memory-chunk-scroll-shell {
+    height: clamp(20rem, 44vh, 34rem);
+    min-height: 20rem;
+    max-height: 34rem;
+}
+
+.memory-detail-list-scroll-shell::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+}
+
+.memory-detail-list-scroll-shell::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+}
+
+.memory-detail-list-scroll-shell::-webkit-scrollbar-thumb {
+    border: 2px solid var(--scrollbar-track);
+    border-radius: var(--scrollbar-radius);
+    background: var(--scrollbar-thumb);
 }
 
 .jobs-list-panel .jobs-table-shell {

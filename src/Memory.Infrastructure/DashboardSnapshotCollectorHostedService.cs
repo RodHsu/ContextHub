@@ -454,6 +454,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private async Task CollectRecentOperationsAsync(int intervalSeconds, CancellationToken cancellationToken)
     {
         await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var recentErrorCutoff = timeProvider.GetUtcNow().AddHours(-24);
 
         var memoryItemCount = await dbContext.MemoryItems.CountAsync(cancellationToken);
         var defaultProjectMemoryItemCount = await dbContext.MemoryItems.CountAsync(
@@ -466,7 +467,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
             x => x.Status == MemoryJobStatus.Pending || x.Status == MemoryJobStatus.Running,
             cancellationToken);
         var errorLogCount = await dbContext.RuntimeLogEntries.CountAsync(
-            x => x.Level == "Error" || x.Level == "Critical",
+            x => x.CreatedAt >= recentErrorCutoff && (x.Level == "Error" || x.Level == "Critical"),
             cancellationToken);
 
         var activeJobs = await dbContext.MemoryJobs
@@ -486,7 +487,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
             .ToListAsync(cancellationToken);
 
         var recentErrors = await dbContext.RuntimeLogEntries
-            .Where(x => x.Level == "Error" || x.Level == "Critical")
+            .Where(x => x.CreatedAt >= recentErrorCutoff && (x.Level == "Error" || x.Level == "Critical"))
             .OrderByDescending(x => x.CreatedAt)
             .Take(8)
             .Select(x => new LogEntryResult(
@@ -509,7 +510,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", defaultProjectMemoryItemCount, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", preferenceCount, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", activeJobCount, "jobs"),
-                new DashboardOverviewMetricResult("errorLogs", "錯誤日誌", errorLogCount, "logs")
+                new DashboardOverviewMetricResult("errorLogs", "近 24 小時錯誤", errorLogCount, "logs")
             ],
             activeJobs,
             recentErrors);

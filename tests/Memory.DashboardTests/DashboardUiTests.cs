@@ -40,7 +40,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         AssertNoStoreHeaders(response);
 
         var html = await response.Content.ReadAsStringAsync();
-        html.Should().Contain("Context Hub");
+        html.Should().Contain("ContextHub");
+        html.Should().Contain("登入 ContextHub");
         html.Should().Contain("login-card");
         html.Should().Contain("登入");
         html.Should().Contain("UI v");
@@ -1069,7 +1070,7 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", 4, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", 3, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", 4, "jobs"),
-                new DashboardOverviewMetricResult("errorLogs", "錯誤日誌", 4, "logs")
+                new DashboardOverviewMetricResult("errorLogs", "近 24 小時錯誤", 4, "logs")
             ],
             traffic,
             BuildOverviewJobs(),
