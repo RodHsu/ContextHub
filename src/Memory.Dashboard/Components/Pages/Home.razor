@@ -611,6 +611,7 @@
 
 @code {
     private const int MaxResourceSamples = 15;
+    private static readonly TimeSpan AgentConnectivityDashboardWindow = TimeSpan.FromMinutes(30);
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly List<ResourceSample> _resourceSamples = [];
@@ -761,7 +762,7 @@
         {
             var to = DateTimeOffset.UtcNow;
             _agentConnectivitySummaries = await ApiClient.GetAgentConnectivitySummariesAsync(
-                new AgentConnectivitySummaryQuery("ContextHub", null, null, to.AddHours(-6), to, 120),
+                new AgentConnectivitySummaryQuery("ContextHub", null, null, to.Subtract(AgentConnectivityDashboardWindow), to, 120),
                 _cts.Token);
             _agentConnectivityError = null;
         }
@@ -1091,8 +1092,12 @@
 
     private IReadOnlyList<AgentConnectivitySummaryResult> AgentSummaries()
         => _agentConnectivitySummaries
+            .Where(IsOperationalAgentSummary)
             .OrderBy(x => x.BucketStartUtc)
             .ToArray();
+
+    private static bool IsOperationalAgentSummary(AgentConnectivitySummaryResult summary)
+        => !summary.AgentId.Contains("smoke", StringComparison.OrdinalIgnoreCase);
 
     private IEnumerable<double> AgentP95LatencyValues()
         => AgentSummaries().Select(x => x.P95ClientElapsedMs);
