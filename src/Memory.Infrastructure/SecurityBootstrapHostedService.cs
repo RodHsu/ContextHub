@@ -21,7 +21,8 @@ public sealed class SecurityBootstrapHostedService(
         SecurityScopes.PreferencesWrite,
         SecurityScopes.TokenManage,
         SecurityScopes.SecurityManage,
-        SecurityScopes.DashboardActAs
+        SecurityScopes.DashboardActAs,
+        SecurityScopes.AgentConnectivityWrite
     ];
 
     public async Task StartAsync(CancellationToken cancellationToken)

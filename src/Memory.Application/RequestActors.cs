@@ -41,6 +41,7 @@ public static class SecurityScopes
     public const string SecurityManage = "security:manage";
     public const string DashboardActAs = "dashboard:act-as";
     public const string LogsRead = "logs:read";
+    public const string AgentConnectivityWrite = "agent-connectivity:write";
 }
 
 public static class ActorAuthorization

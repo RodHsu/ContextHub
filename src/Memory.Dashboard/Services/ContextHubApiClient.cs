@@ -77,6 +77,10 @@ public interface IContextHubApiClient
     Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken);
     Task<StorageTableRowsResult> GetStorageRowsAsync(StorageRowsRequest request, CancellationToken cancellationToken);
     Task<PerformanceMeasureResult> MeasurePerformanceAsync(PerformanceMeasureRequest request, CancellationToken cancellationToken);
+    Task<AgentConnectivitySettingsResult> GetAgentConnectivitySettingsAsync(CancellationToken cancellationToken);
+    Task<AgentConnectivityStatusResult> GetAgentConnectivityStatusAsync(string? projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<AgentConnectivitySummaryResult>> GetAgentConnectivitySummariesAsync(AgentConnectivitySummaryQuery request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<AgentConnectivityRecentObservationResult>> GetRecentAgentConnectivityObservationsAsync(string? projectId, string? agentId, int limit, CancellationToken cancellationToken);
 }
 
 public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiClient
@@ -542,6 +546,36 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         return await ReadRequiredAsync<PerformanceMeasureResult>(response, cancellationToken);
     }
 
+    public Task<AgentConnectivitySettingsResult> GetAgentConnectivitySettingsAsync(CancellationToken cancellationToken)
+        => GetRequiredAsync<AgentConnectivitySettingsResult>("/api/agent-connectivity/settings", cancellationToken);
+
+    public Task<AgentConnectivityStatusResult> GetAgentConnectivityStatusAsync(string? projectId, CancellationToken cancellationToken)
+        => GetRequiredAsync<AgentConnectivityStatusResult>(
+            QueryHelpers.AddQueryString("/api/agent-connectivity/status", new Dictionary<string, string?>
+            {
+                ["projectId"] = projectId
+            }),
+            cancellationToken);
+
+    public Task<IReadOnlyList<AgentConnectivitySummaryResult>> GetAgentConnectivitySummariesAsync(
+        AgentConnectivitySummaryQuery request,
+        CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<AgentConnectivitySummaryResult>>(BuildAgentConnectivitySummariesUrl(request), cancellationToken);
+
+    public Task<IReadOnlyList<AgentConnectivityRecentObservationResult>> GetRecentAgentConnectivityObservationsAsync(
+        string? projectId,
+        string? agentId,
+        int limit,
+        CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<AgentConnectivityRecentObservationResult>>(
+            QueryHelpers.AddQueryString("/api/agent-connectivity/recent", new Dictionary<string, string?>
+            {
+                ["projectId"] = projectId,
+                ["agentId"] = agentId,
+                ["limit"] = limit.ToString()
+            }),
+            cancellationToken);
+
     private Task<T> GetRequiredAsync<T>(string url, CancellationToken cancellationToken)
         => GetAndReadAsync<T>(url, cancellationToken);
 
@@ -776,6 +810,21 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         };
 
         return QueryHelpers.AddQueryString($"/api/storage/{request.Table}", query);
+    }
+
+    private static string BuildAgentConnectivitySummariesUrl(AgentConnectivitySummaryQuery request)
+    {
+        var query = new Dictionary<string, string?>
+        {
+            ["projectId"] = request.ProjectId,
+            ["agentId"] = request.AgentId,
+            ["mcpMethod"] = request.McpMethod,
+            ["fromUtc"] = request.FromUtc?.ToString("O"),
+            ["toUtc"] = request.ToUtc?.ToString("O"),
+            ["limit"] = request.Limit.ToString()
+        };
+
+        return QueryHelpers.AddQueryString("/api/agent-connectivity/summaries", query);
     }
 
     private static string BuildSourcesUrl(SourceListRequest request)

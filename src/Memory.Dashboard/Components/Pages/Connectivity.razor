@@ -1,0 +1,221 @@
+@page "/connectivity"
+@using Memory.Domain
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>Context Hub | Agent 連線延遲</PageTitle>
+
+<PageViewport Title="Agent 連線延遲"
+              Subtitle="觀察 agent 對 ContextHub MCP 的連線延遲與失敗狀況。"
+              BodyClass="page-viewport-body">
+    <Actions>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           IsRefreshing="_loading" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        <section class="panel">
+            <div class="form-grid">
+                <label>
+                    <span>ProjectId</span>
+                    <input @bind="_projectId" />
+                </label>
+                <label>
+                    <span>AgentId</span>
+                    <input @bind="_agentId" />
+                </label>
+                <label>
+                    <span>MCP Method</span>
+                    <input @bind="_method" />
+                </label>
+                <label>
+                    <span>時間窗</span>
+                    <select @bind="_windowHours">
+                        <option value="1">1 小時</option>
+                        <option value="6">6 小時</option>
+                        <option value="24">24 小時</option>
+                    </select>
+                </label>
+            </div>
+        </section>
+
+        @if (_settings is not null && _status is not null)
+        {
+            <section class="panel">
+                <div class="performance-kpi-grid">
+                    <article class="performance-kpi-card">
+                        <div class="metric-label">狀態</div>
+                        <div class="performance-kpi-value">@StatusLabel(_status.Status)</div>
+                        <div class="performance-kpi-meta">@_status.Message</div>
+                    </article>
+                    <article class="performance-kpi-card">
+                        <div class="metric-label">近期 P95</div>
+                        <div class="performance-kpi-value">@FormatMs(_status.RecentP95ClientElapsedMs)</div>
+                        <div class="performance-kpi-meta">近 10 分鐘 client observed latency</div>
+                    </article>
+                    <article class="performance-kpi-card">
+                        <div class="metric-label">失敗率</div>
+                        <div class="performance-kpi-value">@FormatPercent(_status.RecentFailureRate)</div>
+                        <div class="performance-kpi-meta">@DashboardFormatting.Integer(_status.RecentFailureCount) / @DashboardFormatting.Integer(_status.RecentSampleCount) samples</div>
+                    </article>
+                    <article class="performance-kpi-card">
+                        <div class="metric-label">收集設定</div>
+                        <div class="performance-kpi-value">@_settings.Profile</div>
+                        <div class="performance-kpi-meta">Raw @_settings.RawRetentionDays 天 / Summary @_settings.SummaryRetentionDays 天</div>
+                    </article>
+                </div>
+            </section>
+        }
+
+        <section class="panel">
+            <div class="panel-title">摘要趨勢</div>
+            @if (_summaries.Count == 0)
+            {
+                <div class="empty-inline">目前查詢條件沒有連線摘要。</div>
+            }
+            else
+            {
+                <div class="table-scroll-shell">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Bucket</th>
+                                <th>Agent</th>
+                                <th>Method</th>
+                                <th>Tool</th>
+                                <th>Samples</th>
+                                <th>Fail</th>
+                                <th>P95</th>
+                                <th>Max</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var row in _summaries)
+                            {
+                                <tr>
+                                    <td>@FormatTime(row.BucketStartUtc)</td>
+                                    <td>@row.AgentId</td>
+                                    <td>@row.McpMethod</td>
+                                    <td>@EmptyDash(row.ToolName)</td>
+                                    <td>@DashboardFormatting.Integer(row.SampleCount)</td>
+                                    <td>@DashboardFormatting.Integer(row.FailureCount)</td>
+                                    <td>@FormatMs(row.P95ClientElapsedMs)</td>
+                                    <td>@FormatMs(row.MaxClientElapsedMs)</td>
+                                    <td>@StatusLabel(row.Status)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <section class="panel">
+            <div class="panel-title">最近觀測</div>
+            @if (_recent.Count == 0)
+            {
+                <div class="empty-inline">目前查詢條件沒有最近觀測資料。</div>
+            }
+            else
+            {
+                <div class="table-scroll-shell">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Agent</th>
+                                <th>Endpoint</th>
+                                <th>Method</th>
+                                <th>Success</th>
+                                <th>Latency</th>
+                                <th>Error</th>
+                                <th>Correlation</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var row in _recent)
+                            {
+                                <tr>
+                                    <td>@FormatTime(row.ObservedAtUtc)</td>
+                                    <td>@row.AgentId</td>
+                                    <td>@row.EndpointHost</td>
+                                    <td>@row.McpMethod</td>
+                                    <td>@(row.Success ? "Yes" : "No")</td>
+                                    <td>@FormatMs(row.ClientElapsedMs)</td>
+                                    <td>@EmptyDash(row.ErrorKind)</td>
+                                    <td>@EmptyDash(row.CorrelationId)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private string _projectId = "ContextHub";
+    private string _agentId = string.Empty;
+    private string _method = string.Empty;
+    private int _windowHours = 6;
+    private bool _loading;
+    private DateTimeOffset? _lastUpdatedAt;
+    private AgentConnectivitySettingsResult? _settings;
+    private AgentConnectivityStatusResult? _status;
+    private IReadOnlyList<AgentConnectivitySummaryResult> _summaries = [];
+    private IReadOnlyList<AgentConnectivityRecentObservationResult> _recent = [];
+
+    protected override async Task OnInitializedAsync()
+        => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            var projectId = string.IsNullOrWhiteSpace(_projectId) ? "ContextHub" : _projectId.Trim();
+            var agentId = string.IsNullOrWhiteSpace(_agentId) ? null : _agentId.Trim();
+            var method = string.IsNullOrWhiteSpace(_method) ? null : _method.Trim();
+            var to = DateTimeOffset.UtcNow;
+            var from = to.AddHours(-Math.Clamp(_windowHours, 1, 24));
+
+            _settings = await ApiClient.GetAgentConnectivitySettingsAsync(CancellationToken.None);
+            _status = await ApiClient.GetAgentConnectivityStatusAsync(projectId, CancellationToken.None);
+            _summaries = await ApiClient.GetAgentConnectivitySummariesAsync(
+                new AgentConnectivitySummaryQuery(projectId, agentId, method, from, to, 200),
+                CancellationToken.None);
+            _recent = await ApiClient.GetRecentAgentConnectivityObservationsAsync(projectId, agentId, 100, CancellationToken.None);
+            _lastUpdatedAt = to;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private static string StatusLabel(AgentConnectivityStatus status)
+        => status switch
+        {
+            AgentConnectivityStatus.Healthy => "Healthy",
+            AgentConnectivityStatus.Degraded => "Degraded",
+            AgentConnectivityStatus.Unavailable => "Unavailable",
+            _ => "Unknown"
+        };
+
+    private static string FormatPercent(double? value)
+        => value.HasValue ? $"{value.Value:P1}" : "-";
+
+    private static string FormatMs(double? value)
+        => value.HasValue ? $"{DashboardFormatting.Decimal(value.Value)} ms" : "-";
+
+    private static string FormatTime(DateTimeOffset value)
+        => value.ToLocalTime().ToString("MM/dd HH:mm:ss");
+
+    private static string EmptyDash(string? value)
+        => string.IsNullOrWhiteSpace(value) ? "-" : value;
+}

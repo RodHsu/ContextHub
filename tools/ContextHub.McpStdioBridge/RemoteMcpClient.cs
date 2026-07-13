@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -15,14 +16,20 @@ public sealed class RemoteMcpClient
     private readonly HttpClient httpClient;
     private readonly BridgeOptions options;
     private readonly BridgeLogger logger;
+    private readonly IAgentConnectivityTelemetrySink telemetry;
     private string? remoteSessionId;
     private long nextRemoteRequestId = 1;
 
-    public RemoteMcpClient(HttpClient httpClient, BridgeOptions options, BridgeLogger logger)
+    public RemoteMcpClient(
+        HttpClient httpClient,
+        BridgeOptions options,
+        BridgeLogger logger,
+        IAgentConnectivityTelemetrySink? telemetry = null)
     {
         this.httpClient = httpClient;
         this.options = options;
         this.logger = logger;
+        this.telemetry = telemetry ?? NoOpAgentConnectivityTelemetrySink.Instance;
     }
 
     public async Task<JsonDocument> ForwardAsync(
@@ -36,24 +43,140 @@ public sealed class RemoteMcpClient
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
+            var stopwatch = Stopwatch.StartNew();
+            var sessionWasInitialized = string.IsNullOrWhiteSpace(remoteSessionId);
             try
             {
                 logger.Log($"forwarding {method} to {options.Endpoint}; attempt {attempt}");
                 await EnsureRemoteSessionAsync(cancellationToken);
                 var response = await SendRemoteJsonRpcAsync(payload, requireSession: true, cancellationToken);
                 logger.Log($"completed {method}");
+                await RecordTelemetryAsync(
+                    method,
+                    localMessage,
+                    attempt,
+                    success: true,
+                    statusCode: null,
+                    errorKind: null,
+                    stopwatch.Elapsed.TotalMilliseconds,
+                    sessionWasInitialized,
+                    reconnectAttempted: attempt > 1,
+                    cancellationToken);
                 return response;
             }
             catch (RemoteMcpRequestException ex) when (attempt < maxAttempts && ex.CanReconnectRetry)
             {
+                await RecordTelemetryAsync(
+                    method,
+                    localMessage,
+                    attempt,
+                    success: false,
+                    ex.StatusCode,
+                    ClassifyError(ex),
+                    stopwatch.Elapsed.TotalMilliseconds,
+                    sessionWasInitialized,
+                    reconnectAttempted: true,
+                    cancellationToken);
                 logger.Log($"remote {method} failed with reconnectable error: {ex.Message}; rebuilding remote MCP session");
                 ClearRemoteSession();
                 await Task.Delay(options.RetryDelay, cancellationToken);
+            }
+            catch (RemoteMcpRequestException ex)
+            {
+                await RecordTelemetryAsync(
+                    method,
+                    localMessage,
+                    attempt,
+                    success: false,
+                    ex.StatusCode,
+                    ClassifyError(ex),
+                    stopwatch.Elapsed.TotalMilliseconds,
+                    sessionWasInitialized,
+                    reconnectAttempted: attempt > 1,
+                    cancellationToken);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                await RecordTelemetryAsync(
+                    method,
+                    localMessage,
+                    attempt,
+                    success: false,
+                    statusCode: null,
+                    ex is OperationCanceledException ? "timeout" : "unknown",
+                    stopwatch.Elapsed.TotalMilliseconds,
+                    sessionWasInitialized,
+                    reconnectAttempted: attempt > 1,
+                    cancellationToken);
+                throw;
             }
         }
 
         throw new InvalidOperationException("Remote ContextHub MCP request failed without producing a response.");
     }
+
+    private async ValueTask RecordTelemetryAsync(
+        string method,
+        JsonElement localMessage,
+        int attempt,
+        bool success,
+        int? statusCode,
+        string? errorKind,
+        double clientElapsedMs,
+        bool sessionWasInitialized,
+        bool reconnectAttempted,
+        CancellationToken cancellationToken)
+    {
+        var observation = new AgentConnectivityObservation(
+            options.AgentId,
+            options.AgentName,
+            options.AgentVersion,
+            BridgeOptions.BridgeVersion,
+            options.Endpoint.Host,
+            "mcp-streamable-http",
+            method,
+            ExtractToolName(method, localMessage),
+            attempt,
+            success,
+            statusCode,
+            errorKind,
+            clientElapsedMs,
+            null,
+            sessionWasInitialized,
+            reconnectAttempted,
+            Guid.NewGuid().ToString("N"),
+            "stdio-bridge",
+            DateTimeOffset.UtcNow);
+        await telemetry.RecordAsync(observation, cancellationToken);
+    }
+
+    private static string? ExtractToolName(string method, JsonElement localMessage)
+    {
+        if (!string.Equals(method, "tools/call", StringComparison.Ordinal) ||
+            !localMessage.TryGetProperty("params", out var parameters) ||
+            !parameters.TryGetProperty("name", out var name) ||
+            name.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return name.GetString();
+    }
+
+    private static string ClassifyError(RemoteMcpRequestException exception)
+        => exception.StatusCode switch
+        {
+            401 or 403 => "auth",
+            408 or 504 => "timeout",
+            409 or 410 => "session",
+            429 => "rate-limit",
+            >= 500 => "server",
+            _ when exception.InnerException is TaskCanceledException => "timeout",
+            _ when exception.InnerException is HttpRequestException => "http",
+            _ when exception.InnerException is JsonException => "parse",
+            _ => "remote"
+        };
 
     private JsonObject CreateForwardPayload(string method, JsonElement localMessage)
     {

@@ -58,7 +58,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("evaluation", "/evaluation", "評估驗證", [".evaluation-page-stack", ".filter-panel", ".evaluation-workspace-section"], [".page-header", ".filter-panel", ".evaluation-workspace-section"], [".content", ".evaluation-page-stack", ".panel-scroll-body"]),
         new("inbox", "/inbox", "收件匣", [".inbox-page-stack", ".metric-grid", ".inbox-workspace-section"], [".page-header", ".metric-grid", ".inbox-workspace-section"], [".content", ".inbox-page-stack", ".panel-scroll-body"]),
         new("chatgpt-proposals", "/chatgpt-proposals", "ChatGPT 寫入審核", [".chatgpt-proposals-filter", ".chatgpt-proposals-summary", ".chatgpt-proposals-workspace", ".chatgpt-proposals-list-panel", ".chatgpt-proposals-detail-panel"], [".page-header", ".chatgpt-proposals-filter", ".chatgpt-proposals-workspace"], [".content", ".panel-scroll-body"]),
-        new("preferences", "/preferences", "使用者偏好", [".split-layout", ".preferences-list-panel"], [".page-header", ".split-layout"], [".content", ".preferences-list-panel"]),
+        new("preferences", "/preferences", "使用者偏好", [".split-layout", ".preferences-list-panel"], [".page-header", ".split-layout"], [".content", ".preferences-list-scroll-shell"]),
         new("account-tokens", "/account/tokens", "我的 Token", [".settings-form-grid", ".security-token-table", ".table-scroll-shell"], [".page-header", ".panel"], [".content", ".table-scroll-shell"]),
         new("logs", "/logs", "日誌", [".logs-filter-grid", ".split-layout", ".table-scroll-shell"], [".filter-panel", ".split-layout"], [".content", ".table-scroll-shell"]),
         new("jobs", "/jobs", "工作佇列", [".jobs-operations-panel", ".jobs-list-panel", ".jobs-table", ".detail-panel"], [".page-header", ".jobs-operations-panel", ".jobs-page-body > .split-layout"], [".content", ".jobs-table-shell", ".panel-scroll-body"]),
@@ -414,6 +414,30 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             }
 
             var chunkShell = page.Locator(".memory-chunk-scroll-shell");
+            var chunkLayoutJson = await chunkShell.EvaluateAsync<string>(
+                @"element => {
+                    const cards = Array.from(element.querySelectorAll('.memory-chunk-card'));
+                    const firstCard = cards[0];
+                    const firstHeader = firstCard?.querySelector('.chunk-reader-header');
+                    const firstBody = firstCard?.querySelector('.chunk-reader-body');
+                    return JSON.stringify({
+                        cardCount: cards.length,
+                        clientHeight: element.clientHeight,
+                        scrollHeight: element.scrollHeight,
+                        firstCardHeight: firstCard?.getBoundingClientRect().height ?? 0,
+                        firstHeaderHeight: firstHeader?.getBoundingClientRect().height ?? 0,
+                        firstBodyHeight: firstBody?.getBoundingClientRect().height ?? 0
+                    });
+                }");
+            using var chunkLayoutDocument = JsonDocument.Parse(chunkLayoutJson);
+            var chunkLayout = chunkLayoutDocument.RootElement;
+            chunkLayout.GetProperty("cardCount").GetInt32().Should().BeGreaterThan(3, chunkLayoutJson);
+            chunkLayout.GetProperty("scrollHeight").GetDouble().Should().BeGreaterThan(
+                chunkLayout.GetProperty("clientHeight").GetDouble(), chunkLayoutJson);
+            chunkLayout.GetProperty("firstCardHeight").GetDouble().Should().BeGreaterThan(120, chunkLayoutJson);
+            chunkLayout.GetProperty("firstHeaderHeight").GetDouble().Should().BeGreaterThan(40, chunkLayoutJson);
+            chunkLayout.GetProperty("firstBodyHeight").GetDouble().Should().BeGreaterThan(60, chunkLayoutJson);
+
             await chunkShell.ScrollIntoViewIfNeededAsync();
             await chunkShell.EvaluateAsync("element => element.scrollTop = 0");
             await chunkShell.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 80, Y = 160 } });
@@ -436,6 +460,74 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 }");
             overlap.Should().BeFalse("memory list and detail panels must stack without overlap at the reported width");
         }
+    }
+
+    [Fact]
+    public async Task Preferences_Should_Keep_Editor_And_Dense_List_In_Bounded_Scroll_Workspaces()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        var viewports = new[]
+        {
+            new DashboardViewport("1080p", 1920, 1080),
+            new DashboardViewport("tab-s7-landscape", 1280, 800),
+            new DashboardViewport("tab-s7-portrait", 800, 1280)
+        };
+
+        await using var context = await _fixture.CreateContextAsync(viewports[0]);
+        var page = await context.NewPageAsync();
+        await LoginAndOpenAsync(page, "/preferences?uiProfile=dense");
+        await page.Locator(".preferences-list-scroll-shell").WaitForAsync();
+
+        foreach (var viewport in viewports)
+        {
+            await page.SetViewportSizeAsync(viewport.Width, viewport.Height);
+            await page.WaitForTimeoutAsync(250);
+
+            var metricsJson = await page.EvaluateAsync<string>(
+                @"() => {
+                    const root = document.documentElement;
+                    const workspace = document.querySelector('.preferences-workspace-layout');
+                    const panel = document.querySelector('.preferences-list-panel');
+                    const list = document.querySelector('.preferences-list-scroll-shell');
+                    const cards = Array.from(document.querySelectorAll('.preferences-list-scroll-shell .stack-item'));
+                    const firstCard = cards[0]?.getBoundingClientRect();
+                    const columns = workspace ? getComputedStyle(workspace).gridTemplateColumns.split(' ').filter(Boolean).length : 0;
+                    return JSON.stringify({
+                        viewportWidth: window.innerWidth,
+                        documentScrollWidth: root.scrollWidth,
+                        columns,
+                        panelHeight: panel?.getBoundingClientRect().height ?? 0,
+                        listClientHeight: list?.clientHeight ?? 0,
+                        listScrollHeight: list?.scrollHeight ?? 0,
+                        listOverflowY: list ? getComputedStyle(list).overflowY : '',
+                        cardCount: cards.length,
+                        firstCardHeight: firstCard?.height ?? 0
+                    });
+                }");
+
+            using var metricsDocument = JsonDocument.Parse(metricsJson);
+            var metrics = metricsDocument.RootElement;
+            metrics.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(
+                metrics.GetProperty("viewportWidth").GetInt32() + 1, metricsJson);
+            metrics.GetProperty("columns").GetInt32().Should().Be(viewport.Width > 1360 ? 2 : 1, metricsJson);
+            metrics.GetProperty("panelHeight").GetDouble().Should().BeLessThanOrEqualTo(840, metricsJson);
+            metrics.GetProperty("listScrollHeight").GetDouble().Should().BeGreaterThan(
+                metrics.GetProperty("listClientHeight").GetDouble(), metricsJson);
+            metrics.GetProperty("listOverflowY").GetString().Should().Be("auto", metricsJson);
+            metrics.GetProperty("cardCount").GetInt32().Should().Be(50, metricsJson);
+            metrics.GetProperty("firstCardHeight").GetDouble().Should().BeGreaterThan(80, metricsJson);
+        }
+
+        var listShell = page.Locator(".preferences-list-scroll-shell");
+        await listShell.ScrollIntoViewIfNeededAsync();
+        await listShell.EvaluateAsync("element => element.scrollTop = element.scrollHeight");
+        await listShell.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 80, Y = 180 } });
+        var pageScrollBefore = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+        await page.Mouse.WheelAsync(0, 700);
+        await page.WaitForTimeoutAsync(150);
+        var pageScrollAfter = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+        pageScrollAfter.Should().BeGreaterThan(pageScrollBefore,
+            "wheel input at the end of the preference list must chain to the page scroll owner");
     }
 
     [Fact]

@@ -27,6 +27,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\..\tools\ContextHub.McpStdioBridge\AgentConnectivityTelemetry.cs" Link="McpStdioBridge\AgentConnectivityTelemetry.cs" />
     <Compile Include="..\..\tools\ContextHub.McpStdioBridge\BridgeLogger.cs" Link="McpStdioBridge\BridgeLogger.cs" />
     <Compile Include="..\..\tools\ContextHub.McpStdioBridge\BridgeOptions.cs" Link="McpStdioBridge\BridgeOptions.cs" />
     <Compile Include="..\..\tools\ContextHub.McpStdioBridge\BridgeRetryPolicy.cs" Link="McpStdioBridge\BridgeRetryPolicy.cs" />

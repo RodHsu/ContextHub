@@ -9,6 +9,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$testOutputRoot = Join-Path $repoRoot ".agent\local\stdio-bridge-test"
+$runOutputRoot = Join-Path $testOutputRoot ([System.Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $runOutputRoot | Out-Null
 
 function Get-ContextHubToken {
     if ($env:CONTEXTHUB_MCP_TOKEN) {
@@ -37,8 +41,11 @@ function Invoke-StdioBridge {
     )
 
     $env:CONTEXTHUB_MCP_ENDPOINT = $Endpoint
-    $inputPath = [System.IO.Path]::GetTempFileName()
-    $outputPath = [System.IO.Path]::GetTempFileName()
+    $ioRoot = Join-Path $runOutputRoot "stdio"
+    New-Item -ItemType Directory -Force -Path $ioRoot | Out-Null
+    $ioId = [System.Guid]::NewGuid().ToString("N")
+    $inputPath = Join-Path $ioRoot "$ioId.input.jsonl"
+    $outputPath = Join-Path $ioRoot "$ioId.output.jsonl"
     try {
         [System.IO.File]::WriteAllLines($inputPath, $Messages, [System.Text.UTF8Encoding]::new($false))
         $command = 'type "{0}" | dotnet "{1}" > "{2}"' -f $inputPath, $BridgeDllPath, $outputPath
@@ -63,7 +70,7 @@ function Invoke-StdioBridge {
 
 $null = Get-ContextHubToken
 
-$buildOutputPath = Join-Path ([System.IO.Path]::GetTempPath()) ("contexthub-stdio-bridge-" + [System.Guid]::NewGuid().ToString("N"))
+$buildOutputPath = Join-Path $runOutputRoot "build"
 $bridgeDllPath = Join-Path $buildOutputPath "ContextHub.McpStdioBridge.dll"
 
 Write-Host "1/6 build stdio bridge"
@@ -174,7 +181,7 @@ try {
     }
 }
 finally {
-    Remove-Item -LiteralPath $buildOutputPath -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $runOutputRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "ContextHub stdio bridge diagnostics passed."

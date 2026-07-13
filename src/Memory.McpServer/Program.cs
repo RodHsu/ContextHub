@@ -1662,6 +1662,59 @@ app.MapPost("/api/performance/measure", async (PerformanceMeasureRequest request
     return Results.Ok(result);
 }).RequireAuthIfEnabled(requireAuthentication);
 
+var agentConnectivity = app.MapGroup("/api/agent-connectivity");
+agentConnectivity.RequireAuthIfEnabled(requireAuthentication);
+
+agentConnectivity.MapGet("/settings", (IAgentConnectivityService service) =>
+{
+    return Results.Ok(service.GetSettings());
+}).RequireAdminIfEnabled(requireAuthentication);
+
+agentConnectivity.MapGet("/status", async (
+    string? projectId,
+    IAgentConnectivityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.GetStatusAsync(projectId, cancellationToken);
+    return Results.Ok(result);
+}).RequireAdminIfEnabled(requireAuthentication);
+
+agentConnectivity.MapGet("/summaries", async (
+    string? projectId,
+    string? agentId,
+    string? mcpMethod,
+    DateTimeOffset? fromUtc,
+    DateTimeOffset? toUtc,
+    int? limit,
+    IAgentConnectivityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.GetSummariesAsync(
+        new AgentConnectivitySummaryQuery(projectId, agentId, mcpMethod, fromUtc, toUtc, limit ?? 200),
+        cancellationToken);
+    return Results.Ok(result);
+}).RequireAdminIfEnabled(requireAuthentication);
+
+agentConnectivity.MapGet("/recent", async (
+    string? projectId,
+    string? agentId,
+    int? limit,
+    IAgentConnectivityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.GetRecentAsync(projectId, agentId, limit ?? 100, cancellationToken);
+    return Results.Ok(result);
+}).RequireAdminIfEnabled(requireAuthentication);
+
+agentConnectivity.MapPost("/observations", async (
+    AgentConnectivityObservationBatchRequest request,
+    IAgentConnectivityService service,
+    CancellationToken cancellationToken) =>
+{
+    var result = await service.IngestAsync(request, cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentConnectivityWrite);
+
 app.MapMcp("/mcp").RequireAuthIfEnabled(requireAuthentication);
 
 app.Run();

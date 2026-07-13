@@ -241,6 +241,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("Docker 主機");
         overviewHtml.Should().Contain("評估摘要");
         overviewHtml.Should().Contain("資源狀態圖表");
+        overviewHtml.Should().Contain("Agent MCP 延遲");
+        overviewHtml.Should().Contain("Agent P95");
         overviewHtml.Should().Contain("近期呼叫趨勢");
         overviewHtml.Should().Contain("Redis 狀態監控");
         overviewHtml.Should().Contain("resource-redis-chart");
@@ -341,6 +343,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("Buffer Hit Rate");
         monitoringHtml.Should().Contain("block accesses");
         monitoringHtml.Should().Contain("資源趨勢");
+        monitoringHtml.Should().Contain("Agent MCP 延遲");
+        monitoringHtml.Should().Contain("Agent 最近");
         monitoringHtml.Should().Contain("Compose 服務資源");
         monitoringHtml.Should().Contain("Docker 主機");
         monitoringHtml.Should().Contain("命令總量");
@@ -556,6 +560,28 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         preferencesHtml.Should().Contain("溝通風格 (1)");
         preferencesHtml.Should().Contain("stack-scroll-shell");
         preferencesHtml.Should().Contain("stack-item-split");
+    }
+
+    [Fact]
+    public async Task Connectivity_Page_Should_Show_Agent_Latency_Entry_And_Title()
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        await LoginAsync(client);
+
+        using var response = await client.GetAsync("/connectivity");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var html = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync());
+        html.Should().Contain("Agent 延遲");
+        html.Should().Contain("Agent 連線延遲");
+        html.Should().Contain("觀察 agent 對 ContextHub MCP 的連線延遲與失敗狀況。");
+        html.Should().Contain("近期 P95");
+        html.Should().Contain("最近觀測");
     }
 
     [Fact]
@@ -1801,6 +1827,77 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             new PerformanceMetricResult("ms", request.MeasurementIterations, 5, 5, 5, 5, 1),
             new PerformanceMetricResult("ms", request.MeasurementIterations, 6, 6, 6, 6, 1),
             DateTimeOffset.UtcNow));
+
+    public Task<AgentConnectivitySettingsResult> GetAgentConnectivitySettingsAsync(CancellationToken cancellationToken)
+        => Task.FromResult(new AgentConnectivitySettingsResult(true, AgentConnectivityTelemetryProfile.Balanced, 0.2, 1.0, 60, 15, 100, 60, 7, 14));
+
+    public Task<AgentConnectivityStatusResult> GetAgentConnectivityStatusAsync(string? projectId, CancellationToken cancellationToken)
+        => Task.FromResult(new AgentConnectivityStatusResult(
+            string.IsNullOrWhiteSpace(projectId) ? "ContextHub" : projectId,
+            AgentConnectivityStatus.Healthy,
+            DateTimeOffset.UtcNow.AddSeconds(-15),
+            24,
+            1,
+            0.04,
+            180,
+            "Recent agent connectivity telemetry is healthy."));
+
+    public Task<IReadOnlyList<AgentConnectivitySummaryResult>> GetAgentConnectivitySummariesAsync(
+        AgentConnectivitySummaryQuery request,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        IReadOnlyList<AgentConnectivitySummaryResult> rows =
+        [
+            new(
+                now.AddMinutes(-1),
+                1,
+                string.IsNullOrWhiteSpace(request.ProjectId) ? "ContextHub" : request.ProjectId,
+                "stdio-bridge",
+                "context-hub.local",
+                "mcp-streamable-http",
+                "tools/call",
+                "memory_search",
+                12,
+                11,
+                1,
+                0,
+                0,
+                1,
+                120,
+                180,
+                260,
+                now.AddSeconds(-20),
+                AgentConnectivityStatus.Degraded)
+        ];
+        return Task.FromResult(rows);
+    }
+
+    public Task<IReadOnlyList<AgentConnectivityRecentObservationResult>> GetRecentAgentConnectivityObservationsAsync(
+        string? projectId,
+        string? agentId,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<AgentConnectivityRecentObservationResult> rows =
+        [
+            new(
+                Guid.Parse("aaaaaaaa-1111-2222-3333-000000000001"),
+                string.IsNullOrWhiteSpace(projectId) ? "ContextHub" : projectId,
+                string.IsNullOrWhiteSpace(agentId) ? "stdio-bridge" : agentId,
+                "context-hub.local",
+                "tools/call",
+                "memory_search",
+                true,
+                null,
+                string.Empty,
+                132,
+                false,
+                "dashboard-test",
+                DateTimeOffset.UtcNow.AddSeconds(-30))
+        ];
+        return Task.FromResult(rows);
+    }
 }
 
 internal sealed class FakeDockerMetricsService : IDockerMetricsService

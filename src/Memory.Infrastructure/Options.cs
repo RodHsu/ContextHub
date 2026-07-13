@@ -1,3 +1,4 @@
+using Memory.Application;
 using Microsoft.Extensions.Logging;
 
 namespace Memory.Infrastructure;
@@ -80,6 +81,50 @@ public sealed class TelemetryRetentionOptions
     public int MaxDurationMinutes { get; set; } = 120;
     public bool RunVacuumAnalyzeAfterRetention { get; set; } = true;
     public bool RunVacuumFullAutomatically { get; set; }
+}
+
+public sealed class AgentConnectivityTelemetryOptions
+{
+    public const string SectionName = "AgentConnectivityTelemetry";
+    public bool Enabled { get; set; } = true;
+    public string Profile { get; set; } = "Balanced";
+    public double SuccessSampleRate { get; set; } = 0.2;
+    public double FailureSampleRate { get; set; } = 1.0;
+    public int ProbeIntervalSeconds { get; set; } = 60;
+    public int UploadIntervalSeconds { get; set; } = 15;
+    public int MaxBatchSize { get; set; } = 100;
+    public int MaxSamplesPerAgentMethodPerMinute { get; set; } = 60;
+    public int RawRetentionDays { get; set; } = 7;
+    public int SummaryRetentionDays { get; set; } = 14;
+
+    public AgentConnectivityTelemetryProfile ResolvedProfile
+        => Enum.TryParse<AgentConnectivityTelemetryProfile>(Profile, ignoreCase: true, out var parsed)
+            ? parsed
+            : AgentConnectivityTelemetryProfile.Balanced;
+
+    public double NormalizedSuccessSampleRate
+        => Math.Clamp(SuccessSampleRate, 0, 1);
+
+    public double NormalizedFailureSampleRate
+        => Math.Clamp(FailureSampleRate, 0, 1);
+
+    public int NormalizedProbeIntervalSeconds
+        => Math.Clamp(ProbeIntervalSeconds, 10, 86_400);
+
+    public int NormalizedUploadIntervalSeconds
+        => Math.Clamp(UploadIntervalSeconds, 1, 3_600);
+
+    public int NormalizedMaxBatchSize
+        => Math.Clamp(MaxBatchSize, 1, 1_000);
+
+    public int NormalizedMaxSamplesPerAgentMethodPerMinute
+        => Math.Clamp(MaxSamplesPerAgentMethodPerMinute, 1, 10_000);
+
+    public int NormalizedRawRetentionDays
+        => Math.Clamp(RawRetentionDays, 1, 31);
+
+    public int NormalizedSummaryRetentionDays
+        => Math.Clamp(SummaryRetentionDays, NormalizedRawRetentionDays, 90);
 }
 
 public sealed class MemoryDataRetentionOptions

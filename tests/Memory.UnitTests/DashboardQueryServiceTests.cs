@@ -847,6 +847,8 @@ public sealed class DashboardQueryServiceTests
     private sealed class UnusedApplicationDbContext : IApplicationDbContext
     {
         public DbSet<InstanceSetting> InstanceSettings => throw new NotSupportedException();
+        public DbSet<AgentConnectivityObservation> AgentConnectivityObservations => throw new NotSupportedException();
+        public DbSet<AgentConnectivitySummary> AgentConnectivitySummaries => throw new NotSupportedException();
         public DbSet<Tenant> Tenants => throw new NotSupportedException();
         public DbSet<TenantUser> TenantUsers => throw new NotSupportedException();
         public DbSet<TenantProjectGrant> TenantProjectGrants => throw new NotSupportedException();

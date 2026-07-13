@@ -8,6 +8,7 @@ x-embedding-config: &embedding-config
   Embeddings__ModelCachePath: /models
 
 x-dashboard-config: &dashboard-config
+  Dashboard__SecretKey: ${DASHBOARD_SECRET_KEY:-${CONTEXTHUB_SECRET_KEY:-}}
   Dashboard__AdminUsername: ${DASHBOARD_ADMIN_USERNAME}
   Dashboard__AdminPasswordHash: ${DASHBOARD_ADMIN_PASSWORD_HASH}
   Dashboard__SessionTimeoutMinutes: ${DASHBOARD_SESSION_TIMEOUT_MINUTES:-480}
@@ -151,6 +152,7 @@ services:
     restart: always
     environment:
       ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
+      ContextHub__SecretKey: ${CONTEXTHUB_SECRET_KEY:-${DASHBOARD_SECRET_KEY:-}}
       ContextHub__Security__RequireAuthentication: ${CONTEXTHUB_SECURITY_REQUIREAUTHENTICATION:-true}
       CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN}
       ContextHub__Security__BootstrapToken: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN}
@@ -201,6 +203,7 @@ services:
     restart: always
     environment:
       ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
+      ContextHub__SecretKey: ${CONTEXTHUB_SECRET_KEY:-${DASHBOARD_SECRET_KEY:-}}
       ContextHub__Security__BootstrapTenantSlug: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TENANT_SLUG:-context-team}
       ContextHub__Security__BootstrapUsername: ${CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME:-dashboard-service}
       <<: [*embedding-config, *telemetry-retention-config, *chatgpt-gateway-config, *project-artifact-object-storage-config]
@@ -239,6 +242,7 @@ services:
     restart: always
     environment:
       ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
+      ContextHub__SecretKey: ${CONTEXTHUB_SECRET_KEY:-${DASHBOARD_SECRET_KEY:-}}
       <<: [*embedding-config, *telemetry-retention-config, *project-artifact-object-storage-config]
       ASPNETCORE_URLS: http://0.0.0.0:8082
       Embeddings__Provider: Http

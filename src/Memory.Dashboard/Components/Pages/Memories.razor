@@ -291,7 +291,8 @@
                                     <div class="section-heading-meta">@DashboardFormatting.Integer(_selected.Revisions.Count) 筆版本紀錄</div>
                                 </div>
                             </div>
-                            <div class="stack-list memory-revision-list memory-detail-list-scroll-shell">
+                            <div class="stack-list memory-revision-list memory-detail-list-scroll-shell"
+                                 data-scroll-viewport="true">
                                 @foreach (var revision in _selected.Revisions.Take(5))
                                 {
                                     <article class="stack-item memory-revision-card">
@@ -310,7 +311,8 @@
                                     <div class="section-heading-meta">@DashboardFormatting.Integer(_selected.Chunks.Count) 個內容片段</div>
                                 </div>
                             </div>
-                            <div class="stack-list memory-chunk-list memory-detail-list-scroll-shell memory-chunk-scroll-shell">
+                            <div class="stack-list memory-chunk-list memory-detail-list-scroll-shell memory-chunk-scroll-shell"
+                                 data-scroll-viewport="true">
                                 @foreach (var chunk in _selected.Chunks)
                                 {
                                     <article class="chunk-reader memory-chunk-card">

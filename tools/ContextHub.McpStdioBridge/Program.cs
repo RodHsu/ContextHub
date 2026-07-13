@@ -7,7 +7,8 @@ using var httpClient = new HttpClient
 };
 
 var logger = BridgeLogger.FromPath(options.LogPath);
-var remoteClient = new RemoteMcpClient(httpClient, options, logger);
+await using var telemetry = new AgentConnectivityTelemetryUploader(httpClient, options, logger);
+var remoteClient = new RemoteMcpClient(httpClient, options, logger, telemetry);
 var bridge = new StdioBridge(remoteClient, BridgeRetryPolicy.Default, logger);
 
 await bridge.RunAsync(Console.In, Console.Out);

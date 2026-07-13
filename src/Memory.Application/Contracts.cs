@@ -1213,9 +1213,116 @@ public sealed record DashboardAuthenticationSettings(
     string AdminPasswordHash,
     int SessionTimeoutMinutes);
 
+public enum AgentConnectivityTelemetryProfile
+{
+    Off,
+    Minimal,
+    Balanced,
+    Aggressive,
+    Custom
+}
+
+public sealed record AgentConnectivityObservationWriteRequest(
+    string AgentId,
+    string AgentName,
+    string AgentVersion,
+    string BridgeVersion,
+    string EndpointHost,
+    string Transport,
+    string McpMethod,
+    string? ToolName,
+    int Attempt,
+    bool Success,
+    int? StatusCode,
+    string? ErrorKind,
+    double ClientElapsedMs,
+    double? ServerElapsedMs,
+    bool SessionWasInitialized,
+    bool ReconnectAttempted,
+    string? CorrelationId,
+    string? Source,
+    DateTimeOffset ObservedAtUtc);
+
+public sealed record AgentConnectivityObservationBatchRequest(
+    string ProjectId,
+    IReadOnlyList<AgentConnectivityObservationWriteRequest> Observations);
+
+public sealed record AgentConnectivityIngestResult(
+    int Accepted,
+    int Rejected,
+    DateTimeOffset RecordedAtUtc);
+
+public sealed record AgentConnectivitySettingsResult(
+    bool Enabled,
+    AgentConnectivityTelemetryProfile Profile,
+    double SuccessSampleRate,
+    double FailureSampleRate,
+    int ProbeIntervalSeconds,
+    int UploadIntervalSeconds,
+    int MaxBatchSize,
+    int MaxSamplesPerAgentMethodPerMinute,
+    int RawRetentionDays,
+    int SummaryRetentionDays);
+
+public sealed record AgentConnectivityStatusResult(
+    string ProjectId,
+    AgentConnectivityStatus Status,
+    DateTimeOffset? LastObservedAtUtc,
+    int RecentSampleCount,
+    int RecentFailureCount,
+    double? RecentFailureRate,
+    double? RecentP95ClientElapsedMs,
+    string Message);
+
+public sealed record AgentConnectivitySummaryQuery(
+    string? ProjectId = null,
+    string? AgentId = null,
+    string? McpMethod = null,
+    DateTimeOffset? FromUtc = null,
+    DateTimeOffset? ToUtc = null,
+    int Limit = 200);
+
+public sealed record AgentConnectivitySummaryResult(
+    DateTimeOffset BucketStartUtc,
+    int BucketMinutes,
+    string ProjectId,
+    string AgentId,
+    string EndpointHost,
+    string Transport,
+    string McpMethod,
+    string ToolName,
+    int SampleCount,
+    int SuccessCount,
+    int FailureCount,
+    int TimeoutCount,
+    int AuthFailureCount,
+    int ReconnectCount,
+    double AvgClientElapsedMs,
+    double P95ClientElapsedMs,
+    double MaxClientElapsedMs,
+    DateTimeOffset LastObservedAtUtc,
+    AgentConnectivityStatus Status);
+
+public sealed record AgentConnectivityRecentObservationResult(
+    Guid Id,
+    string ProjectId,
+    string AgentId,
+    string EndpointHost,
+    string McpMethod,
+    string ToolName,
+    bool Success,
+    int? StatusCode,
+    string ErrorKind,
+    double ClientElapsedMs,
+    bool ReconnectAttempted,
+    string CorrelationId,
+    DateTimeOffset ObservedAtUtc);
+
 public interface IApplicationDbContext
 {
     DbSet<InstanceSetting> InstanceSettings { get; }
+    DbSet<AgentConnectivityObservation> AgentConnectivityObservations { get; }
+    DbSet<AgentConnectivitySummary> AgentConnectivitySummaries { get; }
     DbSet<Tenant> Tenants { get; }
     DbSet<TenantUser> TenantUsers { get; }
     DbSet<TenantProjectGrant> TenantProjectGrants { get; }
@@ -1264,6 +1371,15 @@ public interface IEmbeddingUsageTelemetry
 {
     Task RecordAsync(IReadOnlyList<EmbeddingUsageTelemetryItem> items, CancellationToken cancellationToken);
     Task<IReadOnlyList<EmbeddingUsageWindowResult>> GetWindowsAsync(DateTimeOffset observedAtUtc, CancellationToken cancellationToken);
+}
+
+public interface IAgentConnectivityService
+{
+    Task<AgentConnectivityIngestResult> IngestAsync(AgentConnectivityObservationBatchRequest request, CancellationToken cancellationToken);
+    AgentConnectivitySettingsResult GetSettings();
+    Task<AgentConnectivityStatusResult> GetStatusAsync(string? projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<AgentConnectivitySummaryResult>> GetSummariesAsync(AgentConnectivitySummaryQuery query, CancellationToken cancellationToken);
+    Task<IReadOnlyList<AgentConnectivityRecentObservationResult>> GetRecentAsync(string? projectId, string? agentId, int limit, CancellationToken cancellationToken);
 }
 
 public interface IHybridSearchStore

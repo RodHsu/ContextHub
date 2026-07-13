@@ -102,7 +102,12 @@ function New-HttpResponseRecord {
             $content = $Response.Content
         }
         elseif ($Response.Content.ReadAsStringAsync) {
-            $content = $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            try {
+                $content = $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            }
+            catch [System.ObjectDisposedException] {
+                $content = ""
+            }
         }
     }
     elseif ($Response.GetResponseStream) {

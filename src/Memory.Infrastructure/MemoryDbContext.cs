@@ -19,6 +19,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
         value => value);
 
     public DbSet<InstanceSetting> InstanceSettings => Set<InstanceSetting>();
+    public DbSet<AgentConnectivityObservation> AgentConnectivityObservations => Set<AgentConnectivityObservation>();
+    public DbSet<AgentConnectivitySummary> AgentConnectivitySummaries => Set<AgentConnectivitySummary>();
     public DbSet<Tenant> Tenants => Set<Tenant>();
     public DbSet<TenantUser> TenantUsers => Set<TenantUser>();
     public DbSet<TenantProjectGrant> TenantProjectGrants => Set<TenantProjectGrant>();
@@ -68,6 +70,66 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Revision).HasColumnName("revision");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.Property(x => x.UpdatedBy).HasColumnName("updated_by");
+        });
+
+        modelBuilder.Entity<AgentConnectivityObservation>(entity =>
+        {
+            entity.ToTable("agent_connectivity_observations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.AgentId).HasColumnName("agent_id");
+            entity.Property(x => x.AgentName).HasColumnName("agent_name");
+            entity.Property(x => x.AgentVersion).HasColumnName("agent_version");
+            entity.Property(x => x.BridgeVersion).HasColumnName("bridge_version");
+            entity.Property(x => x.EndpointHost).HasColumnName("endpoint_host");
+            entity.Property(x => x.Transport).HasColumnName("transport");
+            entity.Property(x => x.McpMethod).HasColumnName("mcp_method");
+            entity.Property(x => x.ToolName).HasColumnName("tool_name");
+            entity.Property(x => x.Attempt).HasColumnName("attempt");
+            entity.Property(x => x.Success).HasColumnName("success");
+            entity.Property(x => x.StatusCode).HasColumnName("status_code");
+            entity.Property(x => x.ErrorKind).HasColumnName("error_kind");
+            entity.Property(x => x.ClientElapsedMs).HasColumnName("client_elapsed_ms");
+            entity.Property(x => x.ServerElapsedMs).HasColumnName("server_elapsed_ms");
+            entity.Property(x => x.NetworkOverheadMs).HasColumnName("network_overhead_ms");
+            entity.Property(x => x.SessionWasInitialized).HasColumnName("session_was_initialized");
+            entity.Property(x => x.ReconnectAttempted).HasColumnName("reconnect_attempted");
+            entity.Property(x => x.CorrelationId).HasColumnName("correlation_id");
+            entity.Property(x => x.Source).HasColumnName("source");
+            entity.Property(x => x.ObservedAtUtc).HasColumnName("observed_at_utc");
+            entity.Property(x => x.CreatedAtUtc).HasColumnName("created_at_utc");
+            entity.HasIndex(x => new { x.ProjectId, x.ObservedAtUtc });
+            entity.HasIndex(x => new { x.AgentId, x.ObservedAtUtc });
+            entity.HasIndex(x => new { x.Success, x.ObservedAtUtc });
+        });
+
+        modelBuilder.Entity<AgentConnectivitySummary>(entity =>
+        {
+            entity.ToTable("agent_connectivity_summaries");
+            entity.HasKey(x => new { x.BucketStartUtc, x.BucketMinutes, x.ProjectId, x.AgentId, x.EndpointHost, x.Transport, x.McpMethod, x.ToolName });
+            entity.Property(x => x.BucketStartUtc).HasColumnName("bucket_start_utc");
+            entity.Property(x => x.BucketMinutes).HasColumnName("bucket_minutes");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.AgentId).HasColumnName("agent_id");
+            entity.Property(x => x.EndpointHost).HasColumnName("endpoint_host");
+            entity.Property(x => x.Transport).HasColumnName("transport");
+            entity.Property(x => x.McpMethod).HasColumnName("mcp_method");
+            entity.Property(x => x.ToolName).HasColumnName("tool_name");
+            entity.Property(x => x.SampleCount).HasColumnName("sample_count");
+            entity.Property(x => x.SuccessCount).HasColumnName("success_count");
+            entity.Property(x => x.FailureCount).HasColumnName("failure_count");
+            entity.Property(x => x.TimeoutCount).HasColumnName("timeout_count");
+            entity.Property(x => x.AuthFailureCount).HasColumnName("auth_failure_count");
+            entity.Property(x => x.ReconnectCount).HasColumnName("reconnect_count");
+            entity.Property(x => x.AvgClientElapsedMs).HasColumnName("avg_client_elapsed_ms");
+            entity.Property(x => x.P95ClientElapsedMs).HasColumnName("p95_client_elapsed_ms");
+            entity.Property(x => x.MaxClientElapsedMs).HasColumnName("max_client_elapsed_ms");
+            entity.Property(x => x.LastObservedAtUtc).HasColumnName("last_observed_at_utc");
+            entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.UpdatedAtUtc).HasColumnName("updated_at_utc");
+            entity.HasIndex(x => new { x.ProjectId, x.BucketStartUtc });
+            entity.HasIndex(x => new { x.AgentId, x.BucketStartUtc });
         });
 
         modelBuilder.Entity<Tenant>(entity =>

@@ -940,6 +940,100 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             DateTimeOffset.UtcNow));
     }
 
+    public Task<AgentConnectivitySettingsResult> GetAgentConnectivitySettingsAsync(CancellationToken cancellationToken)
+        => Task.FromResult(new AgentConnectivitySettingsResult(
+            true,
+            AgentConnectivityTelemetryProfile.Balanced,
+            0.2,
+            1.0,
+            60,
+            15,
+            100,
+            60,
+            7,
+            14));
+
+    public Task<AgentConnectivityStatusResult> GetAgentConnectivityStatusAsync(string? projectId, CancellationToken cancellationToken)
+        => Task.FromResult(new AgentConnectivityStatusResult(
+            string.IsNullOrWhiteSpace(projectId) ? "ContextHub" : projectId,
+            Profile == DashboardBrowserTestProfile.Empty ? AgentConnectivityStatus.Unknown : AgentConnectivityStatus.Healthy,
+            Profile == DashboardBrowserTestProfile.Empty ? null : DateTimeOffset.UtcNow.AddSeconds(-18),
+            Profile == DashboardBrowserTestProfile.Empty ? 0 : 24,
+            Profile == DashboardBrowserTestProfile.Empty ? 0 : 1,
+            Profile == DashboardBrowserTestProfile.Empty ? null : 0.04,
+            Profile == DashboardBrowserTestProfile.Empty ? null : 184.2,
+            Profile == DashboardBrowserTestProfile.Empty
+                ? "No agent connectivity telemetry has been received."
+                : "Recent agent connectivity telemetry is healthy."));
+
+    public Task<IReadOnlyList<AgentConnectivitySummaryResult>> GetAgentConnectivitySummariesAsync(
+        AgentConnectivitySummaryQuery request,
+        CancellationToken cancellationToken)
+    {
+        if (Profile == DashboardBrowserTestProfile.Empty)
+        {
+            return Task.FromResult<IReadOnlyList<AgentConnectivitySummaryResult>>([]);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var rows = Enumerable.Range(0, 8)
+            .Select(index => new AgentConnectivitySummaryResult(
+                now.AddMinutes(-index),
+                1,
+                string.IsNullOrWhiteSpace(request.ProjectId) ? "ContextHub" : request.ProjectId,
+                "stdio-bridge",
+                "context-hub.local",
+                "mcp-streamable-http",
+                index % 3 == 0 ? "tools/call" : "tools/list",
+                index % 3 == 0 ? "memory_search" : string.Empty,
+                12 + index,
+                11 + index,
+                index == 2 ? 1 : 0,
+                0,
+                0,
+                index == 2 ? 1 : 0,
+                110 + (index * 7),
+                180 + (index * 9),
+                260 + (index * 10),
+                now.AddMinutes(-index).AddSeconds(10),
+                index == 2 ? AgentConnectivityStatus.Degraded : AgentConnectivityStatus.Healthy))
+            .ToArray();
+
+        return Task.FromResult<IReadOnlyList<AgentConnectivitySummaryResult>>(rows);
+    }
+
+    public Task<IReadOnlyList<AgentConnectivityRecentObservationResult>> GetRecentAgentConnectivityObservationsAsync(
+        string? projectId,
+        string? agentId,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        if (Profile == DashboardBrowserTestProfile.Empty)
+        {
+            return Task.FromResult<IReadOnlyList<AgentConnectivityRecentObservationResult>>([]);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var rows = Enumerable.Range(0, Math.Min(limit, 10))
+            .Select(index => new AgentConnectivityRecentObservationResult(
+                Guid.Parse($"aaaaaaaa-1111-2222-3333-{index + 1:000000000000}"),
+                string.IsNullOrWhiteSpace(projectId) ? "ContextHub" : projectId,
+                string.IsNullOrWhiteSpace(agentId) ? "stdio-bridge" : agentId,
+                "context-hub.local",
+                index % 3 == 0 ? "tools/call" : "tools/list",
+                index % 3 == 0 ? "memory_search" : string.Empty,
+                index != 4,
+                index == 4 ? 503 : null,
+                index == 4 ? "server" : string.Empty,
+                120 + (index * 12),
+                index == 4,
+                $"browser-test-{index + 1}",
+                now.AddSeconds(-index * 30)))
+            .ToArray();
+
+        return Task.FromResult<IReadOnlyList<AgentConnectivityRecentObservationResult>>(rows);
+    }
+
     private static TenantResult DemoTenant()
         => new(Guid.Parse("72000000-0000-0000-0000-000000000001"), "context-team", "Context Team", TenantStatus.Active, DateTimeOffset.UtcNow.AddDays(-8), DateTimeOffset.UtcNow.AddHours(-1));
 
@@ -1626,7 +1720,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
         if (Profile == DashboardBrowserTestProfile.Dense)
         {
-            return Enumerable.Range(1, 8)
+            return Enumerable.Range(1, 50)
                 .Select(index => new UserPreferenceResult(
                     Guid.NewGuid(),
                     $"preference-key-{index:00}",

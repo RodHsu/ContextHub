@@ -227,6 +227,14 @@ public enum SecurityAuditEventType
     ApiTokenProjectDenied
 }
 
+public enum AgentConnectivityStatus
+{
+    Unknown,
+    Healthy,
+    Degraded,
+    Unavailable
+}
+
 public sealed class InstanceSetting
 {
     public string InstanceId { get; set; } = string.Empty;
@@ -235,6 +243,57 @@ public sealed class InstanceSetting
     public int Revision { get; set; } = 1;
     public DateTimeOffset UpdatedAt { get; set; }
     public string UpdatedBy { get; set; } = "system";
+}
+
+public sealed class AgentConnectivityObservation
+{
+    public Guid Id { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public string AgentId { get; set; } = string.Empty;
+    public string AgentName { get; set; } = string.Empty;
+    public string AgentVersion { get; set; } = string.Empty;
+    public string BridgeVersion { get; set; } = string.Empty;
+    public string EndpointHost { get; set; } = string.Empty;
+    public string Transport { get; set; } = "mcp-streamable-http";
+    public string McpMethod { get; set; } = string.Empty;
+    public string ToolName { get; set; } = string.Empty;
+    public int Attempt { get; set; }
+    public bool Success { get; set; }
+    public int? StatusCode { get; set; }
+    public string ErrorKind { get; set; } = string.Empty;
+    public double ClientElapsedMs { get; set; }
+    public double? ServerElapsedMs { get; set; }
+    public double? NetworkOverheadMs { get; set; }
+    public bool SessionWasInitialized { get; set; }
+    public bool ReconnectAttempted { get; set; }
+    public string CorrelationId { get; set; } = string.Empty;
+    public string Source { get; set; } = "stdio-bridge";
+    public DateTimeOffset ObservedAtUtc { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; }
+}
+
+public sealed class AgentConnectivitySummary
+{
+    public DateTimeOffset BucketStartUtc { get; set; }
+    public int BucketMinutes { get; set; } = 1;
+    public string ProjectId { get; set; } = string.Empty;
+    public string AgentId { get; set; } = string.Empty;
+    public string EndpointHost { get; set; } = string.Empty;
+    public string Transport { get; set; } = "mcp-streamable-http";
+    public string McpMethod { get; set; } = string.Empty;
+    public string ToolName { get; set; } = string.Empty;
+    public int SampleCount { get; set; }
+    public int SuccessCount { get; set; }
+    public int FailureCount { get; set; }
+    public int TimeoutCount { get; set; }
+    public int AuthFailureCount { get; set; }
+    public int ReconnectCount { get; set; }
+    public double AvgClientElapsedMs { get; set; }
+    public double P95ClientElapsedMs { get; set; }
+    public double MaxClientElapsedMs { get; set; }
+    public DateTimeOffset LastObservedAtUtc { get; set; }
+    public AgentConnectivityStatus Status { get; set; } = AgentConnectivityStatus.Unknown;
+    public DateTimeOffset UpdatedAtUtc { get; set; }
 }
 
 public sealed class Tenant

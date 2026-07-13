@@ -5,7 +5,7 @@
 
 <PageViewport Title="使用者偏好"
               Subtitle="維護會跨 session 與專案沿用的明確偏好。"
-              BodyClass="page-viewport-body split-page-body">
+              BodyClass="page-viewport-body split-page-body preferences-page-body">
     <Actions>
         <div class="page-actions-status">
             <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
@@ -20,8 +20,8 @@
     </Actions>
     <ChildContent>
 
-    <div class="split-layout">
-    <section class="panel panel-scroll">
+    <div class="split-layout preferences-workspace-layout">
+    <section class="panel panel-scroll preferences-editor-panel">
         <div class="panel-title">偏好編輯</div>
         <div class="panel-scroll-body detail-scroll-shell">
             <div class="stack-item-meta preference-editor-meta">
@@ -70,15 +70,19 @@
 
     <section class="panel detail-panel preferences-list-panel">
         <div class="panel-title">已儲存偏好</div>
-        <div class="badge-strip">
+        <div class="badge-strip preference-filter-strip" aria-label="偏好類別篩選">
             @foreach (var kind in Enum.GetValues<UserPreferenceKind>())
             {
-                <button class="ghost-button" @onclick="@(() => FilterAsync(kind))">@DashboardText.Label(kind) (@DashboardFormatting.Integer(CountByKind(kind)))</button>
+                <button class="ghost-button preference-filter-button @(_filterKind == kind ? "is-active" : string.Empty)"
+                        aria-pressed="@(_filterKind == kind)"
+                        @onclick="@(() => FilterAsync(kind))">@DashboardText.Label(kind) (@DashboardFormatting.Integer(CountByKind(kind)))</button>
             }
-            <button class="ghost-button" @onclick="@(() => FilterAsync(null))">全部 (@DashboardFormatting.Integer(_allPreferences.Count))</button>
+            <button class="ghost-button preference-filter-button @(!_filterKind.HasValue ? "is-active" : string.Empty)"
+                    aria-pressed="@(!_filterKind.HasValue)"
+                    @onclick="@(() => FilterAsync(null))">全部 (@DashboardFormatting.Integer(_allPreferences.Count))</button>
         </div>
 
-        <div class="stack-scroll-shell">
+        <div class="stack-scroll-shell preferences-list-scroll-shell" data-scroll-viewport="true">
             <div class="stack-list">
                 @foreach (var item in _preferences)
                 {

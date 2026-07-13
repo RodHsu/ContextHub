@@ -39,6 +39,7 @@ public static class DependencyInjection
         services.Configure<DatabaseLoggingOptions>(configuration.GetSection(DatabaseLoggingOptions.SectionName));
         services.PostConfigure<DatabaseLoggingOptions>(options => options.ServiceName = serviceName);
         services.Configure<TelemetryRetentionOptions>(configuration.GetSection(TelemetryRetentionOptions.SectionName));
+        services.Configure<AgentConnectivityTelemetryOptions>(configuration.GetSection(AgentConnectivityTelemetryOptions.SectionName));
         services.Configure<MemoryDataRetentionOptions>(configuration.GetSection(MemoryDataRetentionOptions.SectionName));
         services.Configure<ProjectArtifactObjectStorageOptions>(configuration.GetSection(ProjectArtifactObjectStorageOptions.SectionName));
         services.AddOptions<DockerRuntimeOptions>()
@@ -77,6 +78,7 @@ public static class DependencyInjection
         services.AddScoped<IVectorStore, NpgsqlSearchStore>();
         services.AddScoped<IStorageExplorerStore, NpgsqlStorageExplorerStore>();
         services.AddScoped<IRetrievalTelemetryService, DatabaseRetrievalTelemetryService>();
+        services.AddScoped<IAgentConnectivityService, AgentConnectivityService>();
         services.AddSingleton<IEmbeddingUsageTelemetry, DatabaseEmbeddingUsageTelemetry>();
         services.AddSingleton<IProjectArtifactObjectStore, S3CompatibleProjectArtifactObjectStore>();
         services.AddScoped<ITokenCountingService, TokenCountingService>();

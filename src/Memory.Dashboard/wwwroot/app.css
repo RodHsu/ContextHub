@@ -1981,6 +1981,19 @@ textarea {
     filter: drop-shadow(0 0 8px rgba(245, 196, 92, 0.18));
 }
 
+.resource-line.latency {
+    stroke: #d989ff;
+    stroke-width: 2.2;
+    filter: drop-shadow(0 0 8px rgba(217, 137, 255, 0.16));
+}
+
+.resource-line.latency-max {
+    stroke: #ff8fb3;
+    stroke-width: 2;
+    stroke-dasharray: 5 4;
+    filter: drop-shadow(0 0 8px rgba(255, 143, 179, 0.16));
+}
+
 .resource-chart-legend {
     display: flex;
     align-items: center;
@@ -2025,6 +2038,18 @@ textarea {
 
 .legend-swatch.outbound {
     background: #f5c45c;
+}
+
+.legend-swatch.cpu {
+    background: #4f9dff;
+}
+
+.legend-swatch.latency {
+    background: #d989ff;
+}
+
+.legend-swatch.latency-max {
+    background: #ff8fb3;
 }
 
 .filter-panel,
