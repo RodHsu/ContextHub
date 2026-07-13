@@ -1,170 +1,183 @@
-# ContextHub Design Notes
+# ContextHub Design Baseline
 
-## 1. 目的
+This document defines the public product design baseline for ContextHub. It covers the dashboard experience, responsive behavior, UI states, local QA expectations, and release verification principles.
 
-本文件定義 `ContextHub` 目前 dashboard / graph explorer 的設計基準、測試資料落點規則，以及遠端部署後的最小驗證標準。
+For service boundaries and data flow, see [docs/architecture.md](docs/architecture.md). For the route and feature inventory, see [docs/design/context-hub-feature-inventory.md](docs/design/context-hub-feature-inventory.md).
 
-它不是取代 [architecture.md](/w:/Repositories/WJCY/ContextHub/docs/architecture.md)，而是補足：
+## Product Positioning
 
-- UI / UX 基準要看哪裡
-- 新頁面要怎麼同步確認
-- 測試產物應該放哪裡
-- 遠端升級後怎麼判斷系統真的正常
+ContextHub is an operations and knowledge console for coding-agent memory systems. It should feel quiet, dense, precise, and production-focused.
 
-## 2. 設計來源
+It is not a marketing landing page. The first screen after login should help an operator answer:
 
-### 2.1 Active Product Design + Stitch baseline
+- Is the system healthy?
+- Are memories, logs, jobs, and telemetry current?
+- Is any queue, proposal, or governance item waiting for review?
+- Can I inspect or act without losing context?
 
-- `Quiet Signal vNext` 是全站唯一 active UI/UX 設計來源；2026-07-08 的 Operations Console、Feature Atlas 與 SVG summary boards 已移除。
-  - Stitch project：`projects/952128967416801377`
-  - active design system：`assets/afb02499c2fe4a4ebfc0f224d9d7f67a` (`Quiet Signal`)
-  - 設計規格與完整 route matrix：[context-hub-quiet-signal-vnext.md](/w:/Repositories/WJCY/ContextHub/docs/design/context-hub-quiet-signal-vnext.md)
-  - 本機關鍵 mockups：[/docs/design/mockups/quiet-signal/](/w:/Repositories/WJCY/ContextHub/docs/design/mockups/quiet-signal/)
-  - 使用範圍：全站 23 條 dashboard route、CIS、app shell、sidebar/rail/drawer、table、reader、master-detail、form guard、async state、refresh、RWD、animation 與 reduced-motion。
-  - RWD 基準：`>=1440` 使用 248px sidebar；`1025-1365` 使用 72px icon rail；`768-1024` 使用 64px rail 或 overlay drawer；`<768` 使用 top app bar 與 overlay navigation。
-  - Scroll 基準：document 與 page body 不得水平捲動；table、JSON、code、diff、payload 與 log 只能在自己的 named frame 內捲動；一個 component 最多擁有一個 scroll axis。
-  - 狀態與防呆：loading、stale、empty、error、retry、disabled、focus、dirty、destructive confirmation 與 client-local timestamp 必須依 vNext contract 實作。
+## Design Source
 
-### 2.2 Repo 內文件角色
+The active public design baseline is `Quiet Signal`.
 
-- 架構與服務邊界：看 [architecture.md](/w:/Repositories/WJCY/ContextHub/docs/architecture.md)
-- MCP 操作方式：看 [mcp-usage-guide.md](/w:/Repositories/WJCY/ContextHub/docs/mcp-usage-guide.md)
-- UI / 驗證 / 部署檢查基準：看本文件
-- 全站功能盤點與頁面/功能層級：看 [context-hub-feature-inventory.md](/w:/Repositories/WJCY/ContextHub/docs/design/context-hub-feature-inventory.md)
+Related files:
 
-## 3. Dashboard UI 基準
+- [Quiet Signal UI baseline](docs/design/context-hub-quiet-signal-vnext.md)
+- [Feature inventory](docs/design/context-hub-feature-inventory.md)
+- [Mockups](docs/design/mockups/quiet-signal/)
 
-### 3.1 基本原則
+Internal design-tool sessions, private project IDs, and one-off implementation QA notes should stay outside tracked public documentation.
 
-- 維持 dashboard 作為內網 admin console 的高資訊密度，不做行銷型 landing page。
-- 新頁面必須延續既有 page header、section wrapper、panel spacing 與 dense table/card 語言，不要自行長出另一套 layout。
-- 能用現有 page section pattern 解決的問題，不新增特例樣式。
+## Visual System
 
-### 3.2 Graph explorer 基準
+- Personality: quiet, precise, trustworthy, fast
+- Avoid: neon cyberpunk, terminal-heavy decoration, marketing hero layouts, decorative card walls
+- Canvas: deep neutral background
+- Surfaces: restrained graphite-like panels
+- Primary accent: teal, reserved for primary actions, selected state, and focus
+- Status colors: success, warning, danger, and info must be paired with text or icons
+- Typography: sans-serif UI font for product text; monospace only for IDs, JSON, logs, timestamps, code, and tokens
+- Radius: keep containers at 8px or less unless a component requires otherwise
+- Shadows: use only for overlays such as menus, drawers, and dialogs
 
-- 三欄布局要以中間 graph explorer 為重心，左右欄只保留輔助資訊與控制。
-- 初始 render 必須先追求可讀性，再追求一次塞進全部空白邊界。
-- 小型圖譜不應被過大的 baseline canvas 壓到過度縮放。
-- fullscreen 與 normal view 都必須維持節點、連線與側欄的可讀性。
-- 空狀態要明確說明是「沒有可繪製節點、篩選無交集、或 graph index 尚未刷新」這類資料狀態；不要只顯示空白 canvas 或模糊錯誤文字。
-- 記憶圖譜的定位是脈絡檢視與關聯探索，不是 memory list 的替代品。若使用者需要逐筆檢索與欄位比對，應回到 `Memories` 頁；Graph 頁只承擔 hub、鄰域、explicit link 與 similarity layer 的視覺化。
-
-### 3.3 Dense admin data layout
-
-- 表格欄位過多時，優先合併同類資訊，而不是縮小字級或讓內容硬換行。例如 `Memories` 將 scope 併入 project、status 併入 type、tags 併入 source；`Jobs` 明確保留 job id 並避免換行。
-- 工具性 form 不應佔用大型空白 panel；只保留必要欄位、直接 action 與一行操作說明。
-- 所有可疑或容易誤解的 runtime / telemetry 指標都應有 `InfoPopover`，同一頁內不能只有部分 KPI 有說明、部分明細沒有說明。
-- `InfoPopover` 必須能越過 panel 邊界顯示；新增 scroll shell 或 overflow clipping 時，要同步檢查 tooltip z-index 與 clipping。
-
-### 3.4 新頁面同步確認
-
-新開發頁面至少要做三件事：
-
-1. 對照既有 design language，確認 header、section、action row、table/card 密度一致。
-2. 跑 browser / screenshot 驗證，確認 desktop 與較窄 viewport 沒有 overlap、unexpected overflow、失衡留白。
-3. 若頁面已穩定且會持續演進，應補對應 Stitch artifact，避免之後只能拿實作互相比對。
-
-## 4. 測試資料與產物規則
-
-### 4.1 允許的落點
-
-測試資料、browser artifacts、暫存輸出只允許放在以下兩類位置：
-
-- 對應 repo 內明確約定的目錄
-- 系統暫存目錄，例如 `Path.GetTempPath()`
-
-### 4.2 不允許的做法
-
-- 測試時把暫存檔散落在 repo root
-- 把一次性驗證產物寫進不受控的工作資料夾
-- 讓測試自己在未知路徑留下 screenshot、db、cache 或 export 檔
-
-### 4.3 目前專案慣例
-
-- Dashboard browser test artifacts 與 Data Protection test path 走系統暫存。
-- 若需要保留可追蹤的 repo 內產物，應放進有明確用途的目錄，例如 `docs/`、`deploy/`、`.agent/local/`，不能臨時發明新散落路徑。
-- `deploy/release-*` 只用於明確的 release artifacts，不視為一般測試暫存空間。
-
-## 5. 遠端部署驗證基準
-
-### 5.1 目標
-
-遠端部署完成不代表系統可用；至少要確認：
-
-- dashboard UI 可登入
-- `mcp-server` 回應正常
-- snapshot collector 真的有在寫資料
-- dashboard 與 `mcp-server` 沒有版本落差到造成功能表面可開、實際不可用
-
-### 5.2 最小檢查清單
+## App Shell
 
 ```text
-Remote deploy completed
-  -> GET /health/ready (dashboard / mcp-server)
-  -> GET /api/status
-  -> GET /api/dashboard/monitoring
-  -> 檢查 Docker / resource / monitoring sections 是否有真正 snapshot
-  -> 再做 UI 頁面檢查
+Desktop >= 1440
+  expanded sidebar
+  dense content grid
+  master-detail allowed
+
+Medium desktop 1025-1365
+  icon rail or compact sidebar
+  secondary columns collapse into drawers
+
+Tablet 768-1024
+  icon rail or overlay navigation
+  tables become priority-column lists or master-detail route transitions
+
+Mobile < 768
+  top app bar
+  overlay navigation
+  single-column workflows
 ```
 
-至少要確認：
+Rules:
 
-- `GET /health/ready`
-- `GET /api/status`
-- `GET /api/dashboard/monitoring`
-- dashboard `/login`
+- The document and page body must not horizontally scroll.
+- Tables, JSON, code, payloads, diffs, and log readers may scroll only inside named frames.
+- A component should own at most one scroll axis unless it is a dedicated reader.
+- Technical values must be selectable and copyable.
+- Sticky actions must not cover content without safe-area spacing.
+- Navigation must compress predictably; it must not become a full-width desktop sidebar on narrow screens.
 
-### 5.3 判定正常的條件
+## Common Component Contracts
 
-`/api/dashboard/monitoring` 中以下 sections 不應長期停在：
+| Component | Contract |
+| --- | --- |
+| `AppShell` | Shared navigation model across sidebar, rail, and drawer states |
+| `PageHeader` | Title, context, freshness, and primary action; no hero treatment |
+| `MetricStrip` | Compact grouped metrics with dividers, not large KPI card walls |
+| `DataGrid` | Sticky header, predictable row height, column priority, local overflow |
+| `MasterDetail` | Desktop split view; tablet/mobile drawer or full-width detail |
+| `ContentReader` | Selectable text, copy action, wrap toggle, visible scrollbar, bounded height |
+| `FormSection` | Label above control, inline validation, dirty state, disabled explanation |
+| `RefreshState` | Preserve current data while refresh is running; update client-local timestamp on success |
+| `DestructiveDialog` | Object name, impact preview, consequence, and typed confirmation for high-risk actions |
+| `AsyncState` | Loading, stale, empty, error, retry, disabled, and success states preserve layout shape |
 
-- `refreshIntervalSeconds = 0`
-- `lastError = "Snapshot unavailable."`
-- `warning = "尚未收到背景快照。"`
+## Dashboard Route Baseline
 
-至少以下 key 應該有有效背景快照：
+| Area | Routes |
+| --- | --- |
+| Operations | `/`, `/monitoring`, `/runtime`, `/logs`, `/jobs`, `/performance` |
+| Knowledge work | `/graph`, `/memories`, `/retention`, `/sources` |
+| Governance | `/inbox`, `/governance`, `/evaluation`, `/chatgpt-proposals` |
+| Administration | `/preferences`, `/storage`, `/security`, `/settings`, `/account/tokens` |
+| Boundaries | `/login`, `/forbidden`, `/not-found`, `/Error` |
 
-- `dockerHost`
-- `dependencyResources`
-- `resourceChart`
-- `monitoringStats`
+Every route should have:
 
-若這些 section 全部是 unavailable，而 `statusCore` / `dependenciesHealth` 正常，優先懷疑：
+- loading state
+- empty or no-results state where applicable
+- stale or refresh state where applicable
+- error state with actionable recovery
+- keyboard focus visibility
+- copy affordance for technical values
+- no body-level horizontal overflow
 
-- 只更新了 dashboard，`mcp-server` 沒有一起更新
-- 遠端 `mcp-server` 仍在跑舊 image / 舊 collector
-- 部署後實際 compose 沒有完成對應服務替換
+## Dense Admin Layout
 
-### 5.4 2026-04-23 實際觀察
+- Preserve high information density, but do not make panels visually compete for attention.
+- Merge related columns before shrinking text or forcing unreadable wrapping.
+- Keep forms compact and action-oriented.
+- Give ambiguous runtime and telemetry metrics an `InfoPopover`.
+- Ensure popovers, menus, drawers, and dialogs are not clipped by panel overflow.
 
-2026-04-23 檢查 `developer02.local` 時：
+## Graph Explorer
 
-- `http://developer02.local:8091/health/ready` 正常
-- `http://developer02.local:8092/health/ready` 正常
-- `http://developer02.local:8092/api/status` 顯示 `buildTimestampUtc = 2026-04-12T08:30:00+08:00`
-- `http://developer02.local:8092/api/dashboard/monitoring` 中 `dockerHost`、`dependencyResources`、`resourceChart`、`monitoringStats` 全為 unavailable，且 `refreshIntervalSeconds = 0`
-- `deploy/release-20260423/contexthub-images_20260423-0919.manifest.json` 只包含 `dashboard` image
+- The graph canvas is the primary surface; side panels are support surfaces.
+- Initial render should optimize readability before trying to fill all whitespace.
+- Small graphs should not be over-zoomed because the baseline canvas is large.
+- Empty states must distinguish no data, no matching filters, stale index, and load failure.
+- The graph is for relationship exploration, not a replacement for the memories table.
 
-這組訊號代表：
+## Test Artifacts
 
-- 本次遠端更新至少沒有完整覆蓋 `mcp-server`
-- `Docker host snapshot unavailable.` 目前不能當成單一 docker socket 權限問題來看
-- 要先把部署完整性與 image/version 對齊查清楚，再去追 collector / runtime 細節
+Allowed locations:
 
-## 6. 實務決策
+- System temporary directories
+- Existing repo paths explicitly intended for artifacts
+- `.agent/local/` for local-only evidence and notes
+- `docs/` only for curated public assets such as approved mockups
 
-### 6.1 目前值不值得拆服務
+Do not scatter screenshots, databases, caches, exports, or one-off QA files in the repo root.
 
-以目前問題來看，不值得先把 dashboard monitoring 再拆成獨立服務。
+## Browser QA
 
-原因：
+For UI changes, use screenshot or browser tests across representative viewports:
 
-- 現在的主要風險在 observability 與 deployment consistency，不在服務邊界
-- 先拆服務只會增加部署與驗證矩陣
-- 現階段更需要的是確保同一批 release 的 image、compose 與 post-deploy checks 一致
+- Desktop wide
+- Desktop compact
+- Tablet landscape and portrait
+- Mobile narrow
+- App-browser constrained width where relevant
 
-### 6.2 現在應優先做什麼
+Check:
 
-1. 讓每次遠端升級後都有固定 post-deploy verification。
-2. 確認 release manifest 與實際更新服務一致，不要只看其中一個 image tar。
-3. 補齊新頁面的 Stitch artifacts，降低 UI 回歸只能靠肉眼比對的風險。
+- no overlapping text or controls
+- no unexpected horizontal page scroll
+- readers and tables scroll inside their own frames
+- dialogs and drawers fit the viewport
+- loading, empty, error, stale, disabled, and focus states are usable
+- reduced-motion behavior remains acceptable
+
+## Deployment Verification
+
+A deployment is not verified just because containers are running. At minimum, verify:
+
+```text
+GET /health/ready for dashboard and mcp-server
+GET /api/status
+GET /api/dashboard/monitoring
+Dashboard /login
+MCP initialize and tools/list
+```
+
+Monitoring data should not remain indefinitely in unavailable or zero-refresh states after a healthy deployment. If the dashboard loads but monitoring sections remain unavailable, verify that all services were updated together and that the dashboard and `mcp-server` versions are compatible.
+
+## Current Priorities
+
+Worth doing now:
+
+- Keep public docs product-oriented and generic.
+- Keep deployment examples provider-agnostic unless a provider-specific doc is explicitly scoped.
+- Preserve design contracts in browser tests.
+- Keep chat-agent writes proposal-gated.
+- Keep runtime and telemetry values explainable in the UI.
+
+Usually defer:
+
+- Marketing-first website treatment inside the dashboard.
+- One-off private incident notes in public docs.
+- Tool-specific project/session IDs in public design docs.
+- New services that duplicate existing application use cases.

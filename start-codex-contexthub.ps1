@@ -5,7 +5,7 @@ param(
 )
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$mcpUrl = "https://context-hub.wjcy.org/mcp"
+$mcpUrl = if ($env:CONTEXTHUB_MCP_ENDPOINT) { $env:CONTEXTHUB_MCP_ENDPOINT } else { "http://localhost:8092/mcp" }
 $bridgeProject = Join-Path $repoRoot "tools\ContextHub.McpStdioBridge\ContextHub.McpStdioBridge.csproj"
 $bridgeExe = Join-Path $repoRoot "tools\ContextHub.McpStdioBridge\bin\Debug\net10.0\ContextHub.McpStdioBridge.exe"
 $toolApprovalConfig = "tools = { memory_search = { approval_mode = 'approve' }, build_working_context = { approval_mode = 'approve' }, conversation_ingest = { approval_mode = 'approve' }, memory_upsert = { approval_mode = 'approve' }, memory_update = { approval_mode = 'approve' }, user_preference_upsert = { approval_mode = 'approve' }, maintenance_status = { approval_mode = 'approve' } }"

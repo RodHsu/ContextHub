@@ -1,33 +1,34 @@
-# ContextHub Cloudflare Rules
+# Cloudflare Edge Rules
 
-This document defines the Cloudflare edge policy for ContextHub MCP traffic.
-The `context-hub.wjcy.org` DNS record must stay Proxied. Do not switch it to
-DNS-only to debug MCP, because that exposes the origin IP.
+This guide describes Cloudflare policy for a public ContextHub deployment. It uses `context-hub.example.com` as a placeholder. Replace it with your hostname.
 
-Public MCP endpoints:
+ContextHub MCP clients are non-browser HTTP clients. They expect raw Streamable HTTP/SSE-compatible behavior and must not receive cached responses, transformed content, or browser challenge pages.
+
+## Public Dynamic Routes
 
 ```text
-/mcp       Codex/full ContextHub MCP
-/mcp-chat  restricted chat-agent MCP gateway for ChatGPT and future chat agents
+/mcp
+/mcp-chat
 /.well-known/oauth-protected-resource/mcp-chat
-          OAuth protected resource metadata for ChatGPT MCP OAuth discovery
 /.well-known/oauth-authorization-server/mcp-chat
-          OAuth authorization server metadata for ContextHub self-hosted OAuth
 /.well-known/openid-configuration/mcp-chat
-          OpenID Connect discovery metadata for ChatGPT MCP OAuth discovery
-/userinfo
-          OpenID Connect userinfo endpoint for ChatGPT MCP OAuth identity
 /oauth/chat/*
-          ContextHub self-hosted OAuth authorization code flow
+/userinfo
+/api/*
+/_blazor*
+/health*
+/login*
+/account*
 ```
 
-## Match expression
+## Match Expression
 
-Use the same expression for MCP-specific Cache, Configuration, and WAF rules:
+For MCP and chat-agent gateway traffic:
 
 ```text
-(http.host eq "context-hub.wjcy.org" and (
-  starts_with(http.request.uri.path, "/mcp") or
+(http.host eq "context-hub.example.com" and (
+  http.request.uri.path eq "/mcp" or
+  http.request.uri.path eq "/mcp-chat" or
   http.request.uri.path eq "/.well-known/oauth-protected-resource/mcp-chat" or
   http.request.uri.path eq "/.well-known/oauth-authorization-server/mcp-chat" or
   http.request.uri.path eq "/.well-known/openid-configuration/mcp-chat" or
@@ -36,17 +37,10 @@ Use the same expression for MCP-specific Cache, Configuration, and WAF rules:
 ))
 ```
 
-This intentionally includes `/mcp-chat`. If a Cloudflare UI rule uses explicit
-path equality instead of `starts_with`, include `/mcp`, `/mcp-chat`, and
-`/.well-known/oauth-protected-resource/mcp-chat`,
-`/.well-known/oauth-authorization-server/mcp-chat`,
-`/.well-known/openid-configuration/mcp-chat`, `/userinfo`,
-`/oauth/chat/authorize`, and `/oauth/chat/token`.
-
-For dynamic REST/API traffic, use:
+For dynamic dashboard and REST traffic:
 
 ```text
-(http.host eq "context-hub.wjcy.org" and (
+(http.host eq "context-hub.example.com" and (
   starts_with(http.request.uri.path, "/api/") or
   starts_with(http.request.uri.path, "/_blazor") or
   starts_with(http.request.uri.path, "/health") or
@@ -57,31 +51,28 @@ For dynamic REST/API traffic, use:
 
 ## Cache Rules
 
-Create a Cache Rule for `/mcp*`, including `/mcp-chat`, both OAuth metadata
-paths, and `/oauth/chat/*`:
+Create cache bypass rules for:
 
-```text
-Action:
-  Bypass cache
+- `/mcp`
+- `/mcp-chat`
+- OAuth/OIDC metadata paths
+- `/oauth/chat/*`
+- `/userinfo`
+- `/api/*`
+- `/_blazor*`
+- `/health*`
+- `/login*`
+- `/account*`
 
 Do not:
-  Override origin Cache-Control
-  Override Cloudflare-CDN-Cache-Control
-  Cache POST responses
-```
 
-Create or keep a dynamic traffic Cache Rule for `/api/*`, `/_blazor*`,
-`/health*`, `/login*`, and `/account*`:
+- cache POST responses
+- override origin `Cache-Control: no-store`
+- override `CDN-Cache-Control: no-store`
 
-```text
-Action:
-  Bypass cache
-```
+Static dashboard assets may still use edge caching.
 
-Static assets may still be cached by extension or immutable asset path. Do not
-turn the whole hostname into bypass mode unless a broader incident requires it.
-
-Expected MCP response headers:
+Expected MCP response behavior:
 
 ```text
 Cache-Control: no-store, no-cache, max-age=0, must-revalidate, no-transform
@@ -90,131 +81,83 @@ CF-Cache-Status: DYNAMIC or BYPASS
 
 ## Configuration Rules
 
-Create a Configuration Rule for `/mcp*`, including `/mcp-chat`, both OAuth
-metadata paths, and `/oauth/chat/*`, that disables browser-facing features:
+Disable browser-facing transforms for MCP and OAuth/OIDC routes:
 
-```text
-Disable:
-  Rocket Loader
-  Auto Minify
-  Polish
-  Mirage
-  Zaraz
-  Email Obfuscation
-  Browser Integrity Check
-```
+- Rocket Loader
+- Auto Minify
+- Polish
+- Mirage
+- Zaraz
+- Email Obfuscation
+- Browser Integrity Check
 
-If the plan exposes a request or response buffering setting, set buffering to
-`none` for `/mcp*` and `/mcp-chat*`. MCP Streamable HTTP/SSE clients expect raw
-protocol responses and should not receive transformed HTML, JavaScript
-injection, or buffered event streams.
+If the plan exposes request or response buffering controls, disable buffering for `/mcp` and `/mcp-chat`.
 
-## WAF and bot rules
+## WAF And Bot Rules
 
-Create a WAF exception for `/mcp*`, including `/mcp-chat`, both OAuth metadata
-paths, and `/oauth/chat/*`:
+MCP routes should skip interactive challenges:
 
-```text
-Skip:
-  Managed Challenge
-  JavaScript Challenge
-  Interactive challenge pages
+- Managed Challenge
+- JavaScript Challenge
+- browser challenge pages
 
 Keep:
-  DDoS protection
-  Bearer token authentication at origin
-  Rate limiting
-  Explicit allow/block rules
-```
 
-MCP clients are non-browser clients. Any rule that returns a Cloudflare HTML
-challenge page will break Codex MCP worker initialization even when the origin
-server is healthy.
+- DDoS protection
+- explicit allow/block rules
+- rate limiting
+- bearer token or OAuth validation at the origin
 
-## TLS client certificates / mTLS
+Any Cloudflare HTML challenge response will break MCP client initialization even when the origin server is healthy.
 
-Do not enable Cloudflare mTLS client certificate requirements on the hostname
-used by public MCP clients. MCP clients such as Codex use non-browser HTTP
-stacks and may fail during TLS setup when Cloudflare requests client
-certificate renegotiation, even if PowerShell or browser-style clients appear
-to continue successfully.
+## TLS Client Certificates
 
-Because TLS client certificate negotiation happens before an HTTP path is
-processed, do not rely on a `/mcp*` path rule to fix hostname-level mTLS
-behavior. If dashboard or admin routes require mTLS in the future, put MCP on a
-dedicated still-Proxied hostname that does not request client certificates:
+Do not require Cloudflare mTLS client certificates on a hostname used by public MCP clients unless every supported client is known to handle it.
+
+Because TLS client certificate negotiation happens before HTTP path routing, a path rule cannot reliably exempt `/mcp` if the hostname itself requests client certificates.
+
+If the dashboard requires mTLS, prefer a separate still-proxied hostname for public MCP:
 
 ```text
-mcp.context-hub.wjcy.org
+mcp.context-hub.example.com
 ```
 
-Bearer token authentication at the ContextHub origin remains mandatory for
-MCP. Do not replace bearer tokens with Cloudflare mTLS for public agent access.
-
-## Optional dedicated MCP hostname
-
-If Codex MCP worker still fails after the `/mcp*` rules above, add a dedicated
-hostname:
+Then point agents to:
 
 ```text
-mcp.context-hub.wjcy.org
+https://mcp.context-hub.example.com/mcp
 ```
 
-The new hostname must also stay Proxied. Apply only the minimal MCP rules above
-to that hostname and point Codex config to:
-
-```text
-https://mcp.context-hub.wjcy.org/mcp
-```
-
-Do not create a DNS-only MCP hostname without explicit approval.
+Do not create a DNS-only MCP hostname unless you explicitly accept origin exposure risk.
 
 ## Verification
 
-Run the local diagnostic script:
+Run raw MCP diagnostics:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1 -Endpoint https://context-hub.example.com/mcp
 ```
 
-Run the chat-agent gateway diagnostic script:
+Run chat-agent gateway diagnostics:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -Endpoint https://context-hub.example.com/mcp-chat
 ```
 
-For authorized ChatGPT simulation, set `CONTEXTHUB_MCP_CHAT_TOKEN` to a valid
-OAuth access token for the chat-agent client and require the authorized checks:
+Manual unauthenticated checks:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -RequireAuthorizationToken
-```
-
-To include Codex tool-injection verification:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1 -RunCodexExec
-```
-
-Manual checks:
-
-```powershell
-Resolve-DnsName context-hub.wjcy.org
+Resolve-DnsName context-hub.example.com
 
 Invoke-WebRequest `
-  -Uri https://context-hub.wjcy.org/mcp `
+  -Uri https://context-hub.example.com/mcp `
   -Method Get `
   -UseBasicParsing
 ```
 
-The unauthenticated MCP request should return `401`, include a `CF-RAY` header,
-and must not return a browser challenge HTML page.
+Expected result:
 
-The unauthenticated `/mcp-chat` request has the same expectations. It must not
-be routed to `/mcp`; it must proxy to `chatgpt-gateway:8083/mcp` so ChatGPT and
-future chat agents only see restricted gateway tools and proposal-gated writes.
-
-The diagnostic script also probes `curl.exe -sv --http1.1` output. If it sees
-TLS renegotiation/client-certificate negotiation, Cloudflare mTLS or a related
-edge TLS setting must be removed from the MCP hostname before Codex HTTP MCP
-worker can be considered supported.
+- status is `401`
+- response is not an HTML challenge page
+- dynamic routes are not cached
+- `/mcp-chat` routes to the restricted gateway, not the full `/mcp` server

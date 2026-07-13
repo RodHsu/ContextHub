@@ -1,99 +1,62 @@
-# ContextHub Public Nginx Proxy
+# Public Nginx Proxy
 
-`context-hub.wjcy.org` should stay behind Cloudflare Proxied DNS and route
-through Nginx on the shared Docker network instead of exposing ContextHub
-service ports publicly.
+This guide shows a generic HTTPS reverse-proxy setup for a public ContextHub deployment. Replace all example hostnames, certificate paths, and upstream names with your own deployment values.
 
-Expected Docker network:
+## Recommended Topology
 
 ```text
-host_share
+Public HTTPS hostname
+  -> reverse proxy
+  -> dashboard:8088
+  -> mcp-server:8080
+  -> chatgpt-gateway:8083
 ```
 
-Expected upstream aliases from `docker-compose.release.yml`:
+Keep PostgreSQL, Redis, `embedding-service`, and `worker` on private networks.
+
+## Public Routes
+
+| Route | Upstream | Purpose |
+| --- | --- | --- |
+| `/` | `dashboard:8088` | Dashboard UI |
+| `/_blazor*` | `dashboard:8088` | Blazor transport |
+| `/health*` | dashboard or MCP server, depending on route policy | Readiness checks |
+| `/api/*` | `mcp-server:8080` | REST APIs |
+| `/mcp` | `mcp-server:8080` | Full ContextHub MCP endpoint |
+| `/mcp-chat` | `chatgpt-gateway:8083/mcp` | Restricted chat-agent MCP gateway |
+| `/.well-known/*/mcp-chat` | `chatgpt-gateway:8083` | OAuth/OIDC metadata for chat-agent gateway |
+| `/oauth/chat/*` | `chatgpt-gateway:8083` | OAuth authorization code flow |
+| `/userinfo` | `chatgpt-gateway:8083` | OIDC userinfo |
+
+`/mcp-chat` must stay separate from `/mcp`. Chat agents should see only the gateway allowlist, project allowlist, OAuth/OIDC checks, rate limits, audit trails, and proposal-gated durable writes.
+
+## Cache Policy
+
+Dynamic routes must not be cached:
 
 ```text
-context-hub-dashboard:8088
-context-hub-mcp-server-a:8080
-context-hub-mcp-server-b:8080
-context-hub-chatgpt-gateway:8083
+/api/*
+/mcp
+/mcp-chat
+/.well-known/*
+/oauth/chat/*
+/userinfo
+/_blazor*
+/health*
+/login*
+/account*
 ```
 
-Origin cache header policy:
+Recommended dynamic response headers:
 
 ```text
-Dashboard static assets:
-  Cache-Control: public, max-age=31536000, immutable
-  Cloudflare-CDN-Cache-Control: public, max-age=31536000
-  CDN-Cache-Control: public, max-age=31536000
-
-Dashboard HTML, health checks, Blazor transport, API, MCP:
-  Cache-Control: no-store, no-cache, max-age=0, must-revalidate
-  Cloudflare-CDN-Cache-Control: no-store
-  CDN-Cache-Control: no-store
+Cache-Control: no-store, no-cache, max-age=0, must-revalidate, no-transform
+CDN-Cache-Control: no-store
 ```
 
-Cloudflare Cache Rules should not override the origin `no-store` policy for
-`/api/*`, `/mcp*`, `/mcp-chat*`, `/_blazor*`, `/health*`, `/login*`, or
-`/account*`.
-Only static asset file extensions should be eligible for edge cache.
+Static dashboard assets may be cached with immutable asset headers.
 
-Apply the Cloudflare edge rules in
-[`context-hub-cloudflare-rules.md`](context-hub-cloudflare-rules.md) before
-treating MCP failures as origin or application failures.
-
-Release deploys run two fixed full MCP backends (`mcp-server-a` and
-`mcp-server-b`). Nginx should route `/mcp` and `/api/` through the
-`contexthub_mcp` upstream so one backend can be recreated while the other
-continues serving existing agents. The deployment script performs public MCP
-smoke checks between backend updates; do not collapse the upstream back to a
-single `context-hub-mcp-server` target.
-
-Public MCP routes:
-
-```text
-/mcp       -> Codex/full ContextHub MCP, via mcp-server-a/b
-/mcp-chat  -> restricted chat-agent MCP gateway, via chatgpt-gateway:8083/mcp
-/.well-known/oauth-protected-resource/mcp-chat
-          -> OAuth protected resource metadata for /mcp-chat
-/.well-known/oauth-authorization-server/mcp-chat
-          -> OAuth authorization server metadata for ContextHub self-hosted OAuth
-/oauth/chat/authorize
-/oauth/chat/token
-          -> ContextHub self-hosted OAuth authorization code flow for chat agents
-```
-
-`/mcp-chat` is the public endpoint for ChatGPT custom MCP apps and future chat
-agents. It must stay separate from `/mcp`: chat agents only see the gateway
-allowlist, project allowlist, OIDC/OAuth checks, rate limit, audit, and
-proposal-gated durable writes.
-
-After any release that recreates `dashboard`, `mcp-server-a/b`, or
-`chatgpt-gateway`, reload Nginx after `nginx -t`. The current Nginx deployment
-resolves Docker DNS at config load time, so a reload is required to avoid stale
-upstream container IPs after Docker recreates containers.
-
-Cloudflare rules for `/mcp*` and `/mcp-chat*`:
-
-```text
-DNS:
-  Keep the record Proxied (orange-cloud). Do not switch to DNS-only just to fix MCP.
-
-Cache:
-  Bypass cache for /mcp* and /mcp-chat*
-  Do not override origin Cache-Control / CDN-Cache-Control no-store
-
-Transform / challenges:
-  Do not apply response transformation, Rocket Loader, JS challenge, or managed challenge
-  to /mcp* or /mcp-chat*. MCP clients are non-browser clients and expect raw
-  Streamable HTTP/SSE.
-
-Security:
-  Enforce access with bearer tokens, WAF allow/block rules, and rate limits.
-  If origin hiding needs to be stronger later, prefer Cloudflare Tunnel over DNS-only.
-```
-
-Example Nginx server:
+## Nginx Example
 
 ```nginx
 map $http_upgrade $connection_upgrade {
@@ -102,18 +65,26 @@ map $http_upgrade $connection_upgrade {
 }
 
 upstream contexthub_mcp {
-    ip_hash;
-    server context-hub-mcp-server-a:8080 max_fails=2 fail_timeout=10s;
-    server context-hub-mcp-server-b:8080 max_fails=2 fail_timeout=10s;
+    server context-hub-mcp-server:8080 max_fails=2 fail_timeout=10s;
     keepalive 32;
+}
+
+upstream contexthub_dashboard {
+    server context-hub-dashboard:8088 max_fails=2 fail_timeout=10s;
+    keepalive 16;
+}
+
+upstream contexthub_chat_gateway {
+    server context-hub-chatgpt-gateway:8083 max_fails=2 fail_timeout=10s;
+    keepalive 16;
 }
 
 server {
     listen 443 ssl http2;
-    server_name context-hub.wjcy.org;
+    server_name context-hub.example.com;
 
-    ssl_certificate /etc/nginx/certs/context-hub.wjcy.org/fullchain.pem;
-    ssl_certificate_key /etc/nginx/certs/context-hub.wjcy.org/privkey.pem;
+    ssl_certificate /etc/nginx/certs/context-hub.example.com/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/context-hub.example.com/privkey.pem;
 
     client_max_body_size 25m;
 
@@ -127,7 +98,6 @@ server {
 
     location = /mcp {
         add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
-        add_header Cloudflare-CDN-Cache-Control "no-store" always;
         add_header CDN-Cache-Control "no-store" always;
         add_header X-Accel-Buffering "no" always;
         gzip off;
@@ -141,7 +111,6 @@ server {
 
     location = /mcp-chat {
         add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
-        add_header Cloudflare-CDN-Cache-Control "no-store" always;
         add_header CDN-Cache-Control "no-store" always;
         add_header X-Accel-Buffering "no" always;
         gzip off;
@@ -154,116 +123,95 @@ server {
         proxy_set_header Accept $http_accept;
         proxy_set_header Mcp-Session-Id $http_mcp_session_id;
         proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
-        proxy_pass http://context-hub-chatgpt-gateway:8083/mcp;
+        proxy_pass http://contexthub_chat_gateway/mcp;
     }
 
-    location = /.well-known/oauth-protected-resource/mcp-chat {
+    location ~ ^/\.well-known/(oauth-protected-resource|oauth-authorization-server|openid-configuration)/mcp-chat$ {
         add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
-        add_header Cloudflare-CDN-Cache-Control "no-store" always;
         add_header CDN-Cache-Control "no-store" always;
         add_header X-Accel-Buffering "no" always;
         proxy_cache off;
         proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_pass http://context-hub-chatgpt-gateway:8083/.well-known/oauth-protected-resource/mcp-chat;
-    }
-
-    location = /.well-known/oauth-authorization-server/mcp-chat {
-        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
-        add_header Cloudflare-CDN-Cache-Control "no-store" always;
-        add_header CDN-Cache-Control "no-store" always;
-        add_header X-Accel-Buffering "no" always;
-        proxy_cache off;
-        proxy_buffering off;
-        proxy_pass http://context-hub-chatgpt-gateway:8083/.well-known/oauth-authorization-server/mcp-chat;
+        proxy_pass http://contexthub_chat_gateway;
     }
 
     location /oauth/chat/ {
         add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
-        add_header Cloudflare-CDN-Cache-Control "no-store" always;
         add_header CDN-Cache-Control "no-store" always;
         add_header X-Accel-Buffering "no" always;
         proxy_cache off;
         proxy_buffering off;
         proxy_request_buffering off;
-        proxy_pass http://context-hub-chatgpt-gateway:8083;
+        proxy_pass http://contexthub_chat_gateway;
+    }
+
+    location = /userinfo {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
+        add_header CDN-Cache-Control "no-store" always;
+        proxy_cache off;
+        proxy_pass http://contexthub_chat_gateway;
     }
 
     location /api/ {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
+        add_header CDN-Cache-Control "no-store" always;
+        proxy_cache off;
         proxy_pass http://contexthub_mcp;
     }
 
     location /_blazor {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 3600s;
-        proxy_pass http://context-hub-dashboard:8088;
+        proxy_pass http://contexthub_dashboard;
     }
 
     location / {
-        proxy_pass http://context-hub-dashboard:8088;
+        proxy_pass http://contexthub_dashboard;
     }
 }
 
 server {
     listen 80;
-    server_name context-hub.wjcy.org;
+    server_name context-hub.example.com;
     return 301 https://$host$request_uri;
 }
 ```
 
-Post-deploy smoke checks:
+## Load-Balanced MCP Backends
+
+If you run multiple `mcp-server` containers for rolling updates, route `/mcp` and `/api/` through a shared upstream:
+
+```nginx
+upstream contexthub_mcp {
+    ip_hash;
+    server context-hub-mcp-server-a:8080 max_fails=2 fail_timeout=10s;
+    server context-hub-mcp-server-b:8080 max_fails=2 fail_timeout=10s;
+    keepalive 32;
+}
+```
+
+Reload Nginx after containers are recreated if your proxy resolves Docker DNS only at config load time.
+
+## Smoke Checks
+
+After deployment:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1 -RunCodexExec
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp.ps1 -Endpoint https://context-hub.example.com/mcp
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -Endpoint https://context-hub.example.com/mcp-chat
 ```
 
-For full ChatGPT simulation, set `CONTEXTHUB_MCP_CHAT_TOKEN` to a valid OAuth
-access token for the ChatGPT/custom chat-agent client and rerun:
+For authorized chat-agent simulation, provide a valid OAuth access token through `CONTEXTHUB_MCP_CHAT_TOKEN` and run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -RequireAuthorizationToken
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -Endpoint https://context-hub.example.com/mcp-chat -RequireAuthorizationToken
 ```
 
-For ChatGPT Developer Mode, create the custom MCP app with this MCP URL:
+Expected unauthenticated behavior:
 
-```text
-https://context-hub.wjcy.org/mcp-chat
-```
-
-The gateway returns `WWW-Authenticate` with:
-
-```text
-resource_metadata="https://context-hub.wjcy.org/.well-known/oauth-protected-resource/mcp-chat"
-```
-
-If using ContextHub self-hosted OAuth, the authorization server metadata endpoint
-must expose `/oauth/chat/authorize`, `/oauth/chat/token`, and `/userinfo`, while
-OpenID discovery must advertise `offline_access`. In ChatGPT Developer Mode, set
-scopes to:
-
-```text
-openid profile email offline_access
-```
-
-Prefer ChatGPT default registration, Dynamic Client Registration, or CIMD. If the
-UI is configured with a user-defined OAuth client instead, use:
-
-```text
-OAuth client ID: contexthub-chatgpt-gateway
-OAuth client secret: leave empty
-Token endpoint authentication method: none
-```
-
-Click `Scan Tools`, complete OAuth, wait for the scan to finish, then click
-`Create`. The app must then be selected from the tools menu in a new chat, unless
-it has been published and connected for the workspace. If using an external OIDC
-provider, add the ChatGPT-provided OAuth callback URL to the configured OIDC
-client allowlist, then rerun the authorized smoke check with a token from the same
-OIDC client.
-
-Expected OAuth access sequence for the user-defined client mode is
-`GET /oauth/chat/authorize`, `POST /oauth/chat/authorize`,
-`POST /oauth/chat/token`, then `POST /mcp-chat`. Dynamic Client Registration adds
-`POST /oauth/chat/register` before the authorize request.
+- `/mcp` returns `401`
+- `/mcp-chat` returns `401`
+- neither endpoint returns HTML challenge pages
+- both endpoints keep dynamic `no-store` behavior

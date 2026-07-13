@@ -1,6 +1,6 @@
 param(
     [string]$ProjectPath = "tools\ContextHub.McpStdioBridge\ContextHub.McpStdioBridge.csproj",
-    [string]$Endpoint = "https://context-hub.wjcy.org/mcp",
+    [string]$Endpoint = "http://localhost:8092/mcp",
     [string]$ProjectId = "ContextHub",
     [string]$Query = "ContextHub MCP stdio bridge diagnostics",
     [switch]$RunReconnectRegression,

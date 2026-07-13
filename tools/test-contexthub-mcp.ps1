@@ -1,5 +1,5 @@
 param(
-    [string]$Endpoint = "https://context-hub.wjcy.org/mcp",
+    [string]$Endpoint = "http://localhost:8092/mcp",
     [string]$ProjectId = "ContextHub",
     [string]$Query = "ContextHub MCP connectivity diagnostics",
     [string]$CodexModel = "gpt-5.5",
@@ -313,7 +313,7 @@ if ($RunCodexExec) {
         throw "codex exec failed with exit code $codexExitCode."
     }
 
-    if ($codexText -match "https://context-hub\.wjcy\.org/mcp" -and $codexText -match "http/request failed|rmcp::transport::worker|MCP startup failed") {
+    if ($codexText -match [regex]::Escape($Endpoint) -and $codexText -match "http/request failed|rmcp::transport::worker|MCP startup failed") {
         throw "codex exec reported ContextHub MCP worker transport failure."
     }
 

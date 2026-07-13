@@ -4,7 +4,7 @@
     Justification = "The codex CLI requires positional subcommands."
 )]
 param(
-    [string]$Endpoint = "https://context-hub.wjcy.org/mcp",
+    [string]$Endpoint = "http://localhost:8092/mcp",
     [string]$ProjectId = "ContextHub",
     [string]$Query = "ContextHub Codex native remote MCP diagnostics",
     [string]$CodexModel = "gpt-5.5",

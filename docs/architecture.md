@@ -165,7 +165,7 @@ Memory.Dashboard
 
 職責：
 
-- 提供 NginxUI 風格 dark dashboard
+- 提供高資訊密度的 operations dashboard
 - 以 cookie auth 提供單一 admin 登入
 - 顯示 runtime 參數、Docker / Compose 資源、memory/log/job/storage explorer
 - 透過 `mcp-server` 的 REST API 讀取業務資料
@@ -535,7 +535,7 @@ chunk 命中後再 regroup 成 item，避免同一份 memory 因多個 chunk 重
 
 - 存活檢查
 - 黑箱測試
-- Portainer / probe / external automation
+- probes and external automation
 - 人工查詢與除錯
 
 主要 endpoints：
