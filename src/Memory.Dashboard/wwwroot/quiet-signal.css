@@ -1063,3 +1063,103 @@ textarea:disabled {
         grid-template-columns: minmax(0, 1fr);
     }
 }
+
+/* Reported-width regressions: keep one page scroll owner and let dense data
+   surfaces adapt independently from the shell. */
+.metric-label-with-info .info-popover-trigger {
+    inline-size: 1.25rem !important;
+    block-size: 1.25rem !important;
+    min-inline-size: 1.25rem !important;
+    min-block-size: 1.25rem !important;
+    padding: 0 !important;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    line-height: 1;
+}
+
+.jobs-list-panel .jobs-table-shell {
+    overflow-x: auto !important;
+    overflow-y: clip !important;
+    overscroll-behavior-x: contain;
+    overscroll-behavior-y: auto;
+}
+
+@media (min-width: 768px) and (max-width: 1100px) {
+    .monitoring-page-body .resource-chart-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .monitoring-telemetry-panel .runtime-dependency-kpi-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 768px) and (max-width: 899px) {
+    .monitoring-telemetry-panel .runtime-dependency-kpi-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 768px) and (max-width: 1248px) {
+    .memories-workspace-layout {
+        grid-template-columns: minmax(0, 1fr) !important;
+        grid-auto-rows: max-content;
+        align-items: start;
+    }
+
+    .memories-workspace-layout > * {
+        grid-column: 1;
+        position: relative;
+        min-width: 0;
+    }
+}
+
+@media (min-width: 768px) and (max-width: 1365px) {
+    .dashboard-shell,
+    .main-shell,
+    .content {
+        isolation: auto;
+    }
+
+    .main-shell,
+    .content {
+        position: relative;
+        z-index: 1;
+    }
+
+    .sidebar {
+        position: relative;
+        z-index: 180;
+        overflow: visible;
+    }
+
+    .sidebar-inner,
+    .sidebar-nav,
+    .nav-item {
+        overflow: visible;
+    }
+
+    .nav-item {
+        position: relative;
+    }
+
+    .nav-item:hover .nav-label,
+    .nav-item:focus-visible .nav-label,
+    .nav-item:focus-within .nav-label {
+        position: absolute;
+        z-index: 220;
+        left: calc(100% + 0.65rem);
+        top: 50%;
+        display: block;
+        width: max-content;
+        max-width: 13rem;
+        padding: 0.45rem 0.6rem;
+        transform: translateY(-50%);
+        border: 1px solid var(--border-strong);
+        border-radius: 6px;
+        color: var(--text);
+        background: var(--surface);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.32);
+        white-space: nowrap;
+    }
+}

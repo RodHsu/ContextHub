@@ -295,7 +295,10 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             new DashboardViewport("desktop-fluid", 1600, 900),
             new DashboardViewport("desktop", 1366, 768),
             new DashboardViewport("tab-s7-landscape", 1280, 800),
+            new DashboardViewport("reported-1205", 1205, 1216),
             new DashboardViewport("compact-browser", 1024, 768),
+            new DashboardViewport("reported-1011", 1011, 1216),
+            new DashboardViewport("reported-950", 950, 1216),
             new DashboardViewport("tab-s7-portrait", 800, 1280),
             new DashboardViewport("narrow-tablet", 768, 1024),
             new DashboardViewport("mobile", 390, 844)
@@ -315,6 +318,78 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }
 
         failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task Reported_Tablet_Widths_Should_Preserve_Grids_Scroll_And_Navigation_Flyouts()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+
+        await using (var context = await _fixture.CreateContextAsync(new DashboardViewport("reported-1011", 1011, 1216)))
+        {
+            var page = await context.NewPageAsync();
+            await LoginAndOpenAsync(page, "/monitoring?uiProfile=dense");
+            await page.Locator(".monitoring-page-stack").WaitForAsync();
+
+            var monitoringJson = await page.EvaluateAsync<string>(
+                @"() => {
+                    const columns = selector => getComputedStyle(document.querySelector(selector)).gridTemplateColumns
+                        .split(' ').filter(Boolean).length;
+                    const info = document.querySelector('.metric-label-with-info .info-popover-trigger')?.getBoundingClientRect();
+                    return JSON.stringify({
+                        trendColumns: columns('.monitoring-page-body .resource-chart-grid'),
+                        kpiColumns: columns('.monitoring-telemetry-panel .runtime-dependency-kpi-grid'),
+                        infoWidth: info?.width ?? 0,
+                        infoHeight: info?.height ?? 0
+                    });
+                }");
+            using var monitoringDocument = JsonDocument.Parse(monitoringJson);
+            var monitoring = monitoringDocument.RootElement;
+            monitoring.GetProperty("trendColumns").GetInt32().Should().Be(2);
+            monitoring.GetProperty("kpiColumns").GetInt32().Should().BeGreaterThanOrEqualTo(2);
+            monitoring.GetProperty("infoWidth").GetDouble().Should().BeApproximately(
+                monitoring.GetProperty("infoHeight").GetDouble(), 0.5);
+
+            await LoginAndOpenAsync(page, "/jobs?uiProfile=dense");
+            var table = page.Locator(".jobs-list-panel .jobs-table-shell");
+            await table.ScrollIntoViewIfNeededAsync();
+            await table.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 40, Y = 80 } });
+            var before = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+            await page.Mouse.WheelAsync(0, 600);
+            await page.WaitForTimeoutAsync(150);
+            var after = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+            after.Should().BeGreaterThan(before, "vertical wheel input over the jobs table must reach the page scroll owner");
+
+            var settingsLink = page.Locator(".nav-item[href='/settings']");
+            await settingsLink.HoverAsync();
+            var flyoutHit = await settingsLink.EvaluateAsync<bool>(
+                @"element => {
+                    const label = element.querySelector('.nav-label');
+                    const rect = label?.getBoundingClientRect();
+                    if (!label || !rect || getComputedStyle(label).display === 'none') return false;
+                    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+                    return hit === label || !!hit?.closest('.nav-label');
+                }");
+            flyoutHit.Should().BeTrue("compact navigation labels must render above the page content");
+        }
+
+        await using (var context = await _fixture.CreateContextAsync(new DashboardViewport("reported-1205", 1205, 1216)))
+        {
+            var page = await context.NewPageAsync();
+            await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
+            await page.Locator(".memories-workspace-layout").WaitForAsync();
+            var overlap = await page.Locator(".memories-workspace-layout").EvaluateAsync<bool>(
+                @"element => {
+                    const panels = Array.from(element.children).filter(child => child.getBoundingClientRect().height > 0);
+                    return panels.some((panel, index) => {
+                        if (index === 0) return false;
+                        const previous = panels[index - 1].getBoundingClientRect();
+                        const current = panel.getBoundingClientRect();
+                        return current.top < previous.bottom - 1;
+                    });
+                }");
+            overlap.Should().BeFalse("memory list and detail panels must stack without overlap at the reported width");
+        }
     }
 
     [Fact]

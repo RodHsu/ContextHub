@@ -580,6 +580,9 @@
     private long _messageSequence;
     private string? _loadError;
     private InstanceSettingsSnapshot? _settingsSnapshot;
+    private RedisCounterSnapshot? _previousRedisCounters;
+    private double _redisNetworkBytesPerSecond;
+    private double _redisDiskBytesPerSecond;
     private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.ResourceChartSeconds ?? 5;
 
     protected override async Task OnInitializedAsync()
@@ -963,30 +966,17 @@
         var memoryPercent = container.MemoryLimitBytes <= 0
             ? 0d
             : ((double)container.MemoryUsageBytes / container.MemoryLimitBytes) * 100d;
-        var redisNetworkBytes = container.NetworkRxBytes + container.NetworkTxBytes;
-        var redisDiskBytes = container.DiskReadBytes + container.DiskWriteBytes;
-
         return
         [
             new("CPU", DashboardFormatting.Percent(container.CpuPercent), "cpu", container.CpuPercent),
             new("Mem", DashboardFormatting.Percent(memoryPercent), "memory", memoryPercent),
-            new("Net", $"{DashboardFormatting.Bytes(redisNetworkBytes)}", "rx", RedisRelativePercent(redisNetworkBytes, MaxContainerNetworkBytes())),
-            new("Disk", $"{DashboardFormatting.Bytes(redisDiskBytes)}", "read", RedisRelativePercent(redisDiskBytes, MaxContainerDiskBytes()))
+            new("Net", FormatRate(_redisNetworkBytesPerSecond), "rx", RedisRatePercent(_redisNetworkBytesPerSecond)),
+            new("Disk", FormatRate(_redisDiskBytesPerSecond), "read", RedisRatePercent(_redisDiskBytesPerSecond))
         ];
     }
 
-    private double MaxContainerNetworkBytes()
-        => Math.Max(
-            _docker?.Containers.Select(container => (double)(container.NetworkRxBytes + container.NetworkTxBytes)).DefaultIfEmpty(0d).Max() ?? 0d,
-            1d);
-
-    private double MaxContainerDiskBytes()
-        => Math.Max(
-            _docker?.Containers.Select(container => (double)(container.DiskReadBytes + container.DiskWriteBytes)).DefaultIfEmpty(0d).Max() ?? 0d,
-            1d);
-
-    private static double RedisRelativePercent(double value, double max)
-        => max <= 0d ? 0d : (value / max) * 100d;
+    private static double RedisRatePercent(double value)
+        => Math.Clamp(Math.Log10(Math.Max(value, 0d) + 1d) * 18d, 0d, 100d);
 
     private static string RedisBarWidth(double percent)
         => $"{Math.Clamp(percent, 0d, 100d):0.##}%";
@@ -1152,7 +1142,45 @@
             _overview.DependencyResources.Volumes
                 .Select(x => new Memory.Dashboard.Services.DockerVolumeSummaryResult(x.Name, x.Driver, x.SizeBytes, x.Mountpoint))
                 .ToArray());
+
+        UpdateRedisRates(_docker.Containers, _docker.Host.CapturedAtUtc);
     }
+
+    private void UpdateRedisRates(
+        IReadOnlyList<Memory.Dashboard.Services.DockerContainerMetricResult> containers,
+        DateTimeOffset capturedAtUtc)
+    {
+        var redis = containers.FirstOrDefault(container =>
+            string.Equals(container.Service, "redis", StringComparison.OrdinalIgnoreCase)
+            || container.Name.Contains("redis", StringComparison.OrdinalIgnoreCase)
+            || container.Image.Contains("redis", StringComparison.OrdinalIgnoreCase));
+        if (redis is null)
+        {
+            _previousRedisCounters = null;
+            _redisNetworkBytesPerSecond = 0d;
+            _redisDiskBytesPerSecond = 0d;
+            return;
+        }
+
+        var current = new RedisCounterSnapshot(
+            capturedAtUtc,
+            redis.NetworkRxBytes + redis.NetworkTxBytes,
+            redis.DiskReadBytes + redis.DiskWriteBytes);
+        if (_previousRedisCounters is { } previous)
+        {
+            var elapsedSeconds = (current.CapturedAtUtc - previous.CapturedAtUtc).TotalSeconds;
+            if (elapsedSeconds > 0d)
+            {
+                _redisNetworkBytesPerSecond = RateFromCounters(current.NetworkBytes, previous.NetworkBytes, elapsedSeconds);
+                _redisDiskBytesPerSecond = RateFromCounters(current.DiskBytes, previous.DiskBytes, elapsedSeconds);
+            }
+        }
+
+        _previousRedisCounters = current;
+    }
+
+    private static double RateFromCounters(long current, long previous, double elapsedSeconds)
+        => current >= previous && elapsedSeconds > 0d ? (current - previous) / elapsedSeconds : 0d;
 
     private void ApplyResourceSamples()
     {
@@ -1226,4 +1254,6 @@
         double DiskWriteBytesPerSecond);
 
     private sealed record RedisChartBar(string Label, string Value, string CssClass, double Percent);
+
+    private sealed record RedisCounterSnapshot(DateTimeOffset CapturedAtUtc, long NetworkBytes, long DiskBytes);
 }
