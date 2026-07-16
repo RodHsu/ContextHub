@@ -691,9 +691,18 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "log_search",
             "log_read",
             "conversation_ingest",
+            "projects_list",
+            "daily_memory_review",
+            "user_preferences_list",
+            "conversation_insights_list",
+            "suggested_actions_list",
+            "memory_retention_preview",
             "memory_upsert",
             "memory_update",
             "user_preference_upsert",
+            "user_preference_archive",
+            "suggested_action_accept",
+            "suggested_action_dismiss",
             "promote_log_slice_to_memory",
             "project_artifact_publish",
             "project_artifact_upload_object",
@@ -736,6 +745,38 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .Single(tool => tool.GetProperty("name").GetString() == "memory_search");
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
+
+        var projectsPayload = await SendMcpAsync(client, sessionId!, 21, "tools/call", new
+        {
+            name = "projects_list",
+            arguments = new { limit = 20 }
+        });
+        var projects = ExtractToolJson(projectsPayload);
+        projects.ValueKind.Should().Be(JsonValueKind.Array);
+        projects.EnumerateArray().Should().NotContain(project =>
+            string.Equals(project.GetProperty("projectId").GetString(), ProjectContext.DefaultProjectId, StringComparison.OrdinalIgnoreCase));
+        projects.EnumerateArray().Should().Contain(project =>
+            string.Equals(project.GetProperty("projectId").GetString(), ProjectId, StringComparison.OrdinalIgnoreCase));
+
+        var retentionPreviewPayload = await SendMcpAsync(client, sessionId!, 22, "tools/call", new
+        {
+            name = "memory_retention_preview",
+            arguments = new { }
+        });
+        var retentionPreview = ExtractToolJson(retentionPreviewPayload);
+        retentionPreview.GetProperty("mode").GetString().Should().Be("Classify");
+        retentionPreview.GetProperty("deletedMemoryItems").GetInt64().Should().Be(0);
+
+        var dailyReviewPayload = await SendMcpAsync(client, sessionId!, 23, "tools/call", new
+        {
+            name = "daily_memory_review",
+            arguments = new { }
+        });
+        var dailyReview = ExtractToolJson(dailyReviewPayload);
+        dailyReview.GetProperty("projects").EnumerateArray().Should().Contain(project =>
+            string.Equals(project.GetProperty("projectId").GetString(), ProjectId, StringComparison.OrdinalIgnoreCase));
+        dailyReview.GetProperty("retention").GetProperty("mode").GetString().Should().Be("Classify");
+        dailyReview.GetProperty("retention").GetProperty("deletedMemoryItems").GetInt64().Should().Be(0);
 
         var readPayload = await SendMcpAsync(client, sessionId!, 3, "tools/call", new
         {

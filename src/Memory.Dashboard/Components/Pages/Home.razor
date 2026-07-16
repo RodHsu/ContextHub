@@ -88,13 +88,20 @@
                         <span>近期平均</span>
                     </div>
                 </div>
-                <svg class="home-signal-chart" viewBox="0 0 720 180" preserveAspectRatio="none" role="img" aria-label="System CPU performance trend">
-                    @foreach (var guide in new[] { 24, 68, 112, 156 })
+                <svg class="home-signal-chart" viewBox="0 0 720 180" preserveAspectRatio="none" role="img" aria-label="System CPU and Agent P95 performance trend">
+                    @foreach (var guide in new[] { 24, 52, 128, 156 })
                     {
                         <line class="resource-line-guide" x1="0" y1="@guide" x2="720" y2="@guide"></line>
                     }
-                    <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), MaxCpuPercent(), 720d, 180d)"></polyline>
-                    <polyline class="resource-line latency" points="@BuildLinePoints(AgentP95LatencyValues(), MaxAgentLatencyMs(), 720d, 180d)"></polyline>
+                    <line class="resource-line-guide home-signal-lane-divider" x1="0" y1="90" x2="720" y2="90"></line>
+                    <text class="home-signal-lane-label" x="12" y="20">CPU</text>
+                    <text class="home-signal-lane-label" x="12" y="112">Agent P95</text>
+                    <g transform="translate(0 8)">
+                        <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), MaxCpuPercent(), 720d, 72d)"></polyline>
+                    </g>
+                    <g transform="translate(0 100)">
+                        <polyline class="resource-line latency" points="@BuildLinePoints(AgentP95LatencyValues(), MaxAgentLatencyMs(), 720d, 72d)"></polyline>
+                    </g>
                 </svg>
                 <div class="resource-chart-legend">
                     <span class="resource-legend-item"><i class="legend-swatch cpu"></i>CPU</span>
@@ -285,7 +292,7 @@
                 {
                     <dl class="definition-grid">
                         <div><dt>評估組</dt><dd>@_overview.EvaluationSummary.SuiteName</dd></div>
-                        <div><dt>狀態</dt><dd>@_overview.EvaluationSummary.Status</dd></div>
+                        <div><dt>狀態</dt><dd>@EvaluationStatusText(_overview.EvaluationSummary.Status)</dd></div>
                         <div><dt>Hit@K</dt><dd>@_overview.EvaluationSummary.HitRate</dd></div>
                         <div><dt>Recall@K</dt><dd>@_overview.EvaluationSummary.RecallAtK</dd></div>
                         <div><dt>MRR</dt><dd>@_overview.EvaluationSummary.MeanReciprocalRank</dd></div>
@@ -784,6 +791,15 @@
 
     private static string StatusText(string status)
         => DashboardText.Status(status);
+
+    private static string EvaluationStatusText(EvaluationRunStatus status)
+        => status switch
+        {
+            EvaluationRunStatus.Completed => "已完成",
+            EvaluationRunStatus.Running => "執行中",
+            EvaluationRunStatus.Failed => "失敗",
+            _ => status.ToString()
+        };
 
     private static string ServiceDisplayName(string name)
         => DashboardText.Service(name);

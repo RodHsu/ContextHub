@@ -8,6 +8,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using NpgsqlTypes;
 using StackExchange.Redis;
 
 namespace Memory.Infrastructure;
@@ -2944,8 +2945,12 @@ public sealed class MemoryDataRetentionService(
             LEFT JOIN recent_hits rh ON rh.memory_id = mi.id
             LEFT JOIN link_degrees ld ON ld.memory_id = mi.id
             WHERE
-                (mi.status = 'Archived' AND mi.updated_at < @cutoff)
-                OR (
+                (cardinality(@project_ids) = 0 OR mi.project_id = ANY(@project_ids))
+                AND (@tenant_id IS NULL OR mi.tenant_id = @tenant_id)
+                AND
+                (
+                    (mi.status = 'Archived' AND mi.updated_at < @cutoff)
+                    OR (
                     mi.status = 'Active'
                     AND (
                         (
@@ -2968,6 +2973,7 @@ public sealed class MemoryDataRetentionService(
                         OR mi.metadata_json::text ILIKE '%"supersededByMemoryId"%'
                         OR mi.metadata_json::text ILIKE '%"replacedByMemoryId"%'
                     )
+                    )
                 )
         )
         """;
@@ -2980,6 +2986,11 @@ public sealed class MemoryDataRetentionService(
     {
         var policy = MemoryDataRetentionPolicy.Create(_options, request);
         var mode = ResolveMode(request, policy);
+        if (request.ProjectIds is { Count: > 0 } && mode != MemoryDataRetentionRunMode.Classify)
+        {
+            throw new InvalidOperationException("ProjectIds is only supported for Classify retention runs.");
+        }
+
         var now = timeProvider.GetUtcNow();
         var startedAt = now;
         var cutoff = now.AddDays(-policy.ArchivedItemsRetentionDays);
@@ -3042,8 +3053,9 @@ public sealed class MemoryDataRetentionService(
 
         try
         {
-            classification = await ClassifyAsync(connection, cutoff, hitWindowStart, policy, request.IncludeCandidateDetails, cancellationToken);
-            affectedProjectIds = await ReadAffectedProjectIdsAsync(connection, cutoff, hitWindowStart, policy, cancellationToken);
+            var projectIds = (request.ProjectIds ?? []).Select(projectId => ProjectContext.Normalize(projectId)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            classification = await ClassifyAsync(connection, cutoff, hitWindowStart, policy, request.IncludeCandidateDetails, projectIds, request.TenantId, cancellationToken);
+            affectedProjectIds = await ReadAffectedProjectIdsAsync(connection, cutoff, hitWindowStart, policy, projectIds, request.TenantId, cancellationToken);
 
             if (mode == MemoryDataRetentionRunMode.PreviewDelete)
             {
@@ -3354,6 +3366,8 @@ public sealed class MemoryDataRetentionService(
         DateTimeOffset cutoffUtc,
         DateOnly hitWindowStart,
         MemoryDataRetentionPolicy policy,
+        IReadOnlyList<string> projectIds,
+        Guid? tenantId,
         CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
@@ -3379,6 +3393,8 @@ public sealed class MemoryDataRetentionService(
             LEFT JOIN recent_hits rh ON rh.memory_id = mi.id
             LEFT JOIN link_degrees ld ON ld.memory_id = mi.id
             WHERE mi.status = @status
+              AND (cardinality(@project_ids) = 0 OR mi.project_id = ANY(@project_ids))
+              AND (@tenant_id IS NULL OR mi.tenant_id = @tenant_id)
               AND mi.updated_at < @cutoff
               AND mi.importance <= @max_importance
               AND mi.confidence <= @max_confidence
@@ -3396,15 +3412,17 @@ public sealed class MemoryDataRetentionService(
         command.Parameters.Add(new NpgsqlParameter<string>("status", MemoryStatusArchived));
         command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoffUtc));
         AddPolicyParameters(command, policy, hitWindowStart);
+        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", projectIds.ToArray()));
+        command.Parameters.Add(new NpgsqlParameter("tenant_id", NpgsqlDbType.Uuid) { Value = tenantId ?? (object)DBNull.Value });
 
-        var projectIds = new List<string>();
+        var affectedProjectIds = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            projectIds.Add(ProjectContext.Normalize(reader.GetString(0)));
+            affectedProjectIds.Add(ProjectContext.Normalize(reader.GetString(0)));
         }
 
-        return projectIds;
+        return affectedProjectIds;
     }
 
     private async Task<MemoryDataRetentionClassification> ClassifyAsync(
@@ -3413,6 +3431,8 @@ public sealed class MemoryDataRetentionService(
         DateOnly hitWindowStart,
         MemoryDataRetentionPolicy policy,
         bool includeCandidateDetails,
+        IReadOnlyList<string> projectIds,
+        Guid? tenantId,
         CancellationToken cancellationToken)
     {
         long autoDeleteCount;
@@ -3428,7 +3448,7 @@ public sealed class MemoryDataRetentionService(
                     COUNT(*) FILTER (WHERE NOT is_auto_delete)::bigint AS review_count
                 FROM classified;
                 """;
-            AddClassificationParameters(countCommand, cutoffUtc, hitWindowStart, policy);
+            AddClassificationParameters(countCommand, cutoffUtc, hitWindowStart, policy, projectIds, tenantId);
 
             await using var reader = await countCommand.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
@@ -3441,10 +3461,10 @@ public sealed class MemoryDataRetentionService(
         }
 
         var autoDeleteCandidates = includeCandidateDetails
-            ? await ReadCandidatesAsync(connection, cutoffUtc, hitWindowStart, policy, true, cancellationToken)
+            ? await ReadCandidatesAsync(connection, cutoffUtc, hitWindowStart, policy, true, projectIds, tenantId, cancellationToken)
             : [];
         var reviewCandidates = includeCandidateDetails
-            ? await ReadCandidatesAsync(connection, cutoffUtc, hitWindowStart, policy, false, cancellationToken)
+            ? await ReadCandidatesAsync(connection, cutoffUtc, hitWindowStart, policy, false, projectIds, tenantId, cancellationToken)
             : [];
 
         var reasonCodes = autoDeleteCandidates
@@ -3475,6 +3495,8 @@ public sealed class MemoryDataRetentionService(
         DateOnly hitWindowStart,
         MemoryDataRetentionPolicy policy,
         bool autoDelete,
+        IReadOnlyList<string> projectIds,
+        Guid? tenantId,
         CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
@@ -3505,7 +3527,7 @@ public sealed class MemoryDataRetentionService(
             ORDER BY updated_at ASC, id ASC
             LIMIT @preview_limit;
             """;
-        AddClassificationParameters(command, cutoffUtc, hitWindowStart, policy);
+        AddClassificationParameters(command, cutoffUtc, hitWindowStart, policy, projectIds, tenantId);
         command.Parameters.Add(new NpgsqlParameter<bool>("is_auto_delete", autoDelete));
         command.Parameters.Add(new NpgsqlParameter<int>("preview_limit", policy.PreviewLimit));
 
@@ -3641,12 +3663,16 @@ public sealed class MemoryDataRetentionService(
         NpgsqlCommand command,
         DateTimeOffset cutoffUtc,
         DateOnly hitWindowStart,
-        MemoryDataRetentionPolicy policy)
+        MemoryDataRetentionPolicy policy,
+        IReadOnlyList<string> projectIds,
+        Guid? tenantId)
     {
         command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoffUtc));
         command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("stale_cutoff", cutoffUtc.AddDays(policy.ArchivedItemsRetentionDays - 60)));
         command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("episode_cutoff", cutoffUtc.AddDays(policy.ArchivedItemsRetentionDays - 30)));
         AddPolicyParameters(command, policy, hitWindowStart);
+        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", projectIds.ToArray()));
+        command.Parameters.Add(new NpgsqlParameter("tenant_id", NpgsqlDbType.Uuid) { Value = tenantId ?? (object)DBNull.Value });
     }
 
     private static MemoryDataRetentionCandidateResult MapCandidate(MemoryDataRetentionCandidateRow row, MemoryDataRetentionPolicy policy)

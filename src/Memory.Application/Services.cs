@@ -2163,6 +2163,8 @@ public static class DependencyInjection
         services.AddScoped<IRequestActorAccessor, RequestActorAccessor>();
         services.AddScoped<IChunkingService, ChunkingService>();
         services.AddScoped<IContextHubBootstrapService, ContextHubBootstrapService>();
+        services.AddScoped<IAccessibleProjectService, AccessibleProjectService>();
+        services.AddScoped<IDailyMemoryReviewService, DailyMemoryReviewService>();
         services.AddScoped<IMemoryService, MemoryService>();
         services.AddSingleton<IProjectArtifactObjectStore, DisabledProjectArtifactObjectStore>();
         services.AddScoped<IProjectArtifactExchangeService, ProjectArtifactExchangeService>();

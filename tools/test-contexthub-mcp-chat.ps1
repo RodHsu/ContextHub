@@ -22,7 +22,8 @@ param(
     [switch]$RequireAuthorizationToken,
     [switch]$RunDynamicClientRegistrationSmoke,
     [switch]$RunPredefinedClientSmoke,
-    [switch]$RunProposalSmoke
+    [switch]$RunProposalSmoke,
+    [switch]$SkipUnauthorizedProjectCheck
 )
 
 $ErrorActionPreference = "Stop"
@@ -766,9 +767,18 @@ $requiredTools = @(
     "log_search",
     "log_read",
     "conversation_ingest",
+    "projects_list",
+    "daily_memory_review",
+    "user_preferences_list",
+    "conversation_insights_list",
+    "suggested_actions_list",
+    "memory_retention_preview",
     "memory_upsert",
     "memory_update",
     "user_preference_upsert",
+    "user_preference_archive",
+    "suggested_action_accept",
+    "suggested_action_dismiss",
     "promote_log_slice_to_memory",
     "chatgpt_proposals_list",
     "chatgpt_proposal_approve",
@@ -829,24 +839,41 @@ $searchResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders
 }
 $searchJson = Read-SseDataJson -Content $searchResponse.Content
 Assert-ToolCallSucceeded -Json $searchJson -ToolName "memory_search"
+
+$dailyReviewResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+    jsonrpc = "2.0"
+    id = 10
+    method = "tools/call"
+    params = @{
+        name = "daily_memory_review"
+        arguments = @{}
+    }
+}
+$dailyReviewJson = Read-SseDataJson -Content $dailyReviewResponse.Content
+Assert-ToolCallSucceeded -Json $dailyReviewJson -ToolName "daily_memory_review"
 Write-Host "Allowed project read tools completed."
 
 Write-Host "12/12 unauthorized project and unknown tool should be rejected"
-$deniedProjectResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
-    jsonrpc = "2.0"
-    id = 5
-    method = "tools/call"
-    params = @{
-        name = "memory_search"
-        arguments = @{
-            projectId = $UnauthorizedProjectId
-            query = "should be rejected"
-            limit = 1
+if ($SkipUnauthorizedProjectCheck) {
+    Write-Warning "Unauthorized-project check skipped because this OAuth token has unrestricted project access."
+}
+else {
+    $deniedProjectResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+        jsonrpc = "2.0"
+        id = 5
+        method = "tools/call"
+        params = @{
+            name = "memory_search"
+            arguments = @{
+                projectId = $UnauthorizedProjectId
+                query = "should be rejected"
+                limit = 1
+            }
         }
     }
+    $deniedProjectJson = Read-SseDataJson -Content $deniedProjectResponse.Content
+    Assert-ToolCallRejected -Json $deniedProjectJson -Scenario "unauthorized project '$UnauthorizedProjectId'"
 }
-$deniedProjectJson = Read-SseDataJson -Content $deniedProjectResponse.Content
-Assert-ToolCallRejected -Json $deniedProjectJson -Scenario "unauthorized project '$UnauthorizedProjectId'"
 
 $unknownToolResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
     jsonrpc = "2.0"

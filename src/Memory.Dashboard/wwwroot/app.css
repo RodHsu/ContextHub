@@ -1925,6 +1925,19 @@ textarea {
     stroke-width: 1;
 }
 
+.home-signal-lane-divider {
+    stroke: rgba(255, 255, 255, 0.14);
+    stroke-dasharray: 6 8;
+}
+
+.home-signal-lane-label {
+    fill: var(--text-subtle);
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0;
+    text-transform: uppercase;
+}
+
 .resource-line {
     fill: none;
     stroke-width: 3;
@@ -5290,6 +5303,44 @@ textarea:focus {
     z-index: 5000;
 }
 
+@media (max-width: 640px) {
+    .info-popover-panel,
+    .metric-label-with-info .info-popover-panel {
+        position: fixed;
+        inset-inline: 1rem;
+        top: auto;
+        bottom: max(1rem, env(safe-area-inset-bottom));
+        width: auto;
+        max-width: none;
+        max-height: calc(100dvh - 2rem - env(safe-area-inset-bottom));
+        overflow-y: auto;
+    }
+}
+
+@media (max-width: 1360px) {
+    .split-page-body > .split-layout {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        min-height: auto;
+    }
+
+    .split-page-body > .split-layout > .panel {
+        width: 100%;
+        max-width: 100%;
+    }
+
+    .preferences-page-body > .preferences-workspace-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        grid-auto-rows: max-content;
+    }
+
+    .preferences-editor-panel {
+        position: static;
+    }
+}
+
 .theme-switcher {
     display: inline-flex;
     align-items: center;
@@ -6282,6 +6333,19 @@ textarea:focus {
 .logs-table {
     width: 100%;
     table-layout: fixed;
+}
+
+.logs-page-body .logs-table-shell {
+    height: auto;
+    max-height: none;
+    overflow-x: auto !important;
+    overflow-y: clip !important;
+    overscroll-behavior: auto;
+}
+
+.logs-page-body .panel-scroll:has(> .logs-table-shell) {
+    display: block;
+    min-height: max-content;
 }
 
 .monitoring-service-col,

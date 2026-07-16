@@ -44,6 +44,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         html.Should().Contain("登入 ContextHub");
         html.Should().Contain("login-card");
         html.Should().Contain("登入");
+        html.Should().Contain("name=\"Username\" autocomplete=\"username\" placeholder=\"admin\" autofocus");
         html.Should().Contain("UI v");
         html.Should().Contain("favicon.svg");
         html.Should().Contain("dashboard-viewport.js");
@@ -240,9 +241,13 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("預設專案記憶");
         overviewHtml.Should().Contain("Docker 主機");
         overviewHtml.Should().Contain("評估摘要");
+        overviewHtml.Should().Contain("<dt>狀態</dt><dd>失敗</dd>");
+        overviewHtml.Should().NotContain("<dt>狀態</dt><dd>Failed</dd>");
         overviewHtml.Should().Contain("資源狀態圖表");
         overviewHtml.Should().Contain("Agent MCP 延遲");
         overviewHtml.Should().Contain("Agent P95");
+        overviewHtml.Should().Contain("home-signal-lane-divider");
+        overviewHtml.Should().Contain("<text class=\"home-signal-lane-label\" x=\"12\" y=\"112\">Agent P95</text>");
         overviewHtml.Should().Contain("近期呼叫趨勢");
         overviewHtml.Should().Contain("Redis 狀態監控");
         overviewHtml.Should().Contain("resource-redis-chart");
@@ -340,23 +345,31 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("應用快取命中率");
         monitoringHtml.Should().Contain("Redis 命中 / 未命中");
         monitoringHtml.Should().Contain("快取略過 / 錯誤");
-        monitoringHtml.Should().Contain("Buffer Hit Rate");
-        monitoringHtml.Should().Contain("block accesses");
+        monitoringHtml.Should().Contain("緩衝命中率");
+        monitoringHtml.Should().Contain("次資料區塊存取");
         monitoringHtml.Should().Contain("資源趨勢");
         monitoringHtml.Should().Contain("Agent MCP 延遲");
         monitoringHtml.Should().Contain("Agent 最近");
         monitoringHtml.Should().Contain("Compose 服務資源");
         monitoringHtml.Should().Contain("Docker 主機");
         monitoringHtml.Should().Contain("命令總量");
-        monitoringHtml.Should().Contain("Connections");
-        monitoringHtml.Should().Contain("顯示 DB Size 說明");
-        monitoringHtml.Should().Contain("目前 ContextHub PostgreSQL database 的實際資料大小");
-        monitoringHtml.Should().Contain("顯示 Temp Files / Bytes 說明");
+        monitoringHtml.Should().Contain("連線數");
+        monitoringHtml.Should().Contain("交易已提交");
+        monitoringHtml.Should().Contain("交易已回滾");
+        monitoringHtml.Should().Contain("掃描列數");
+        monitoringHtml.Should().Contain("顯示資料庫大小說明");
+        monitoringHtml.Should().Contain("目前 ContextHub PostgreSQL 資料庫的實際資料大小");
+        monitoringHtml.Should().Contain("顯示暫存檔說明");
         monitoringHtml.Should().Contain("查詢排序、hash join 或中間結果超出記憶體");
+        monitoringHtml.Should().Contain("儲存目標");
+        monitoringHtml.Should().Contain("容器磁碟 I/O");
         monitoringHtml.Should().Contain("monitoring-page-stack");
         monitoringHtml.Should().Contain("monitoring-telemetry-grid");
         monitoringHtml.Should().NotContain("未配置 Redis 專屬 volume");
         monitoringHtml.Should().NotContain("未偵測 PostgreSQL 專屬 volume");
+        monitoringHtml.Should().NotContain("Docker volume 使用量不可用");
+        monitoringHtml.Should().NotContain("儲存量暫以 Redis used_memory 顯示邏輯使用量");
+        monitoringHtml.Should().NotContain("儲存量暫以目前資料庫大小顯示邏輯使用量");
 
         using var jobsResponse = await client.GetAsync("/jobs");
         jobsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -1106,6 +1119,17 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             BuildDockerHost(now),
             BuildDependencyResources(),
             BuildResourceSamples(traffic),
+            new DashboardEvaluationSummaryResult(
+                Guid.Parse("7a000000-0000-0000-0000-000000000001"),
+                Guid.Parse("7a000000-0000-0000-0000-000000000002"),
+                "Dashboard regression",
+                EvaluationRunStatus.Failed,
+                0.5m,
+                0.6m,
+                0.4m,
+                42d,
+                now.AddMinutes(-10),
+                now.AddMinutes(-9)),
             ContextSavings: BuildContextSavings(now)));
     }
 

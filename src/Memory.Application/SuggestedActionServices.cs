@@ -9,13 +9,17 @@ public sealed class SuggestedActionService(
     IMemoryService memoryService,
     IGovernanceService governanceService,
     IBackgroundJobQueue jobQueue,
+    IRequestActorAccessor actorAccessor,
     IClock clock) : ISuggestedActionService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<IReadOnlyList<SuggestedActionResult>> ListAsync(SuggestedActionListRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var projectId = ProjectContext.Normalize(request.ProjectId);
+        ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
         var query = dbContext.SuggestedActions.AsNoTracking().Where(x => x.ProjectId == projectId);
 
         if (request.Status.HasValue)
@@ -37,9 +41,12 @@ public sealed class SuggestedActionService(
 
     public async Task<SuggestedActionMutationResult> AcceptAsync(Guid id, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var entity = await dbContext.SuggestedActions
             .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new InvalidOperationException($"Suggested action '{id}' was not found.");
+        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
 
         entity.Status = SuggestedActionStatus.Accepted;
         entity.UpdatedAt = clock.UtcNow;
@@ -109,9 +116,12 @@ public sealed class SuggestedActionService(
 
     public async Task<SuggestedActionResult> DismissAsync(Guid id, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var entity = await dbContext.SuggestedActions
             .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new InvalidOperationException($"Suggested action '{id}' was not found.");
+        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
         entity.Status = SuggestedActionStatus.Dismissed;
         entity.UpdatedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);

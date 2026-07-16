@@ -10,7 +10,7 @@
 
 <PageViewport Title="日誌"
               Subtitle="依 service、level、trace 與時間範圍查詢 runtime logs。"
-              BodyClass="page-viewport-body split-page-body">
+              BodyClass="page-viewport-body split-page-body logs-page-body">
     <Actions>
         <div class="page-actions-status">
             <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
@@ -82,7 +82,7 @@
     <div class="split-layout">
         <section class="panel panel-scroll">
         <div class="panel-title panel-title-nowrap">日誌條目 (@DashboardFormatting.Integer(_logs.Count))</div>
-        <div class="table-scroll-shell table-scroll-shell-tall">
+        <div class="table-scroll-shell table-scroll-shell-tall logs-table-shell">
             <table class="data-table data-table-clickable logs-table">
                 <thead>
                     <tr>

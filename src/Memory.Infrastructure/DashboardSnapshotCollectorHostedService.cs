@@ -1142,11 +1142,17 @@ public sealed class DashboardSnapshotCollectorHostedService(
             var keyspaceMisses = GetRedisInfoLong(infoMap, "keyspace_misses");
             var keyspaceLookups = SumNonNegative(keyspaceHits, keyspaceMisses);
             var cacheLookups = SumNonNegative(cacheSnapshot.Hits, cacheSnapshot.Misses);
+            var usedMemoryBytes = GetRedisInfoLong(infoMap, "used_memory");
 
             var container = dockerSnapshot.Containers.FirstOrDefault(x => string.Equals(x.Metric.Service, "redis", StringComparison.OrdinalIgnoreCase));
-            var storage = DashboardPersistentStorageResolver.Resolve(dockerSnapshot, container, "/data");
+            var storage = DashboardPersistentStorageResolver.Resolve(
+                dockerSnapshot,
+                container,
+                "/data",
+                usedMemoryBytes,
+                "Redis 邏輯使用量");
             var warning = storage is null
-                ? "未配置 Redis 專屬 volume；磁碟空間僅能回報容器 I/O。"
+                ? "未偵測 Redis 持久化掛載；儲存量無法估算。"
                 : string.Empty;
             var status = string.Equals(dockerSnapshot.Status, "Healthy", StringComparison.OrdinalIgnoreCase)
                 ? "Healthy"
@@ -1155,7 +1161,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
             return new DashboardRedisTelemetryResult(
                 status,
                 warning,
-                GetRedisInfoLong(infoMap, "used_memory"),
+                usedMemoryBytes,
                 GetRedisInfoLong(infoMap, "maxmemory"),
                 keyCount,
                 GetRedisInfoLong(infoMap, "total_commands_processed"),
@@ -1255,10 +1261,16 @@ public sealed class DashboardSnapshotCollectorHostedService(
             var blocksRead = reader.GetInt64(3);
             var blocksHit = reader.GetInt64(4);
             var blockAccesses = SumNonNegative(blocksRead, blocksHit);
+            var databaseSizeBytes = reader.GetInt64(13);
             var container = dockerSnapshot.Containers.FirstOrDefault(x => string.Equals(x.Metric.Service, "postgres", StringComparison.OrdinalIgnoreCase));
-            var storage = DashboardPersistentStorageResolver.Resolve(dockerSnapshot, container, "/var/lib/postgresql/data");
+            var storage = DashboardPersistentStorageResolver.Resolve(
+                dockerSnapshot,
+                container,
+                "/var/lib/postgresql/data",
+                databaseSizeBytes,
+                "資料庫邏輯大小");
             var warning = storage is null
-                ? "未偵測 PostgreSQL 專屬 volume；磁碟空間僅回報資料庫大小。"
+                ? "未偵測 PostgreSQL 持久化掛載；儲存量無法估算。"
                 : string.Empty;
             var status = string.Equals(dockerSnapshot.Status, "Healthy", StringComparison.OrdinalIgnoreCase)
                 ? "Healthy"
@@ -1286,7 +1298,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 container?.Metric.DiskWriteBytes ?? 0,
                 storage?.SizeBytes ?? 0,
                 storage?.DisplayName ?? "未配置",
-                reader.GetInt64(13),
+                databaseSizeBytes,
                 blockAccesses,
                 CalculateHitPercent(blocksHit, blocksRead));
         }

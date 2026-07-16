@@ -503,7 +503,9 @@ public sealed record MemoryDataRetentionRunRequest(
     decimal? MaxImportance = null,
     decimal? MaxConfidence = null,
     int? PreviewLimit = null,
-    bool IncludeCandidateDetails = true);
+    bool IncludeCandidateDetails = true,
+    IReadOnlyList<string>? ProjectIds = null,
+    Guid? TenantId = null);
 
 public sealed record MemoryDataRetentionPolicyThresholds(
     int ArchivedItemsRetentionDays,
@@ -1041,6 +1043,19 @@ public sealed record ConversationInsightResult(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
 
+public sealed record AccessibleProjectResult(
+    string ProjectId,
+    bool CanRead,
+    bool CanWrite);
+
+public sealed record DailyMemoryReviewResult(
+    IReadOnlyList<AccessibleProjectResult> Projects,
+    MemoryDataRetentionRunResult Retention,
+    IReadOnlyList<ConversationInsightResult> HighSignalConversationInsights,
+    IReadOnlyList<SuggestedActionResult> PendingSuggestedActions,
+    IReadOnlyList<UserPreferenceResult> UserPreferences,
+    IReadOnlyList<ChatGptProposalResult> PendingProposals);
+
 public sealed record ConversationCheckpointSearchRequest(
     string? Query = null,
     string? ProjectId = null,
@@ -1501,6 +1516,16 @@ public interface IMemoryService
     Task<UserPreferenceResult> UpsertUserPreferenceAsync(UserPreferenceUpsertRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<UserPreferenceResult>> ListUserPreferencesAsync(UserPreferenceListRequest request, CancellationToken cancellationToken);
     Task<UserPreferenceResult> ArchiveUserPreferenceAsync(UserPreferenceArchiveRequest request, CancellationToken cancellationToken);
+}
+
+public interface IAccessibleProjectService
+{
+    Task<IReadOnlyList<AccessibleProjectResult>> ListAsync(int limit, CancellationToken cancellationToken);
+}
+
+public interface IDailyMemoryReviewService
+{
+    Task<DailyMemoryReviewResult> ReviewAsync(CancellationToken cancellationToken);
 }
 
 public interface IProjectArtifactExchangeService

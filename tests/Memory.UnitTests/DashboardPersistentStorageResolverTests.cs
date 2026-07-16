@@ -27,6 +27,7 @@ public sealed class DashboardPersistentStorageResolverTests
         resolved.Should().NotBeNull();
         resolved!.DisplayName.Should().Be("redis-data");
         resolved.SizeBytes.Should().Be(123456);
+        resolved.IsLogicalFallback.Should().BeFalse();
     }
 
     [Fact]
@@ -48,6 +49,7 @@ public sealed class DashboardPersistentStorageResolverTests
         resolved.Should().NotBeNull();
         resolved!.DisplayName.Should().Be("T:/Docker/ContextHub/Data/postgres");
         resolved.SizeBytes.Should().Be(0);
+        resolved.IsLogicalFallback.Should().BeFalse();
     }
 
     [Fact]
@@ -69,6 +71,30 @@ public sealed class DashboardPersistentStorageResolverTests
             "/data");
 
         resolved.Should().BeNull();
+    }
+
+    [Fact]
+    public void Resolve_Should_Use_Logical_Fallback_When_Docker_Does_Not_Report_Storage_Usage()
+    {
+        var snapshot = CreateSnapshot(
+            new DockerContainerRuntimeSnapshot(
+                new DockerContainerMetricResult("redis-1", "redis", "redis:7", "running", "healthy", 0, 0, 0, 0, 0, 0, 0, 0),
+                [
+                    new DockerContainerMountSnapshot("bind", string.Empty, "E:/Docker/ContextHub/Data/redis", "/data", true)
+                ]),
+            []);
+
+        var resolved = DashboardPersistentStorageResolver.Resolve(
+            snapshot,
+            snapshot.Containers.Single(),
+            "/data",
+            654321,
+            "Redis logical usage");
+
+        resolved.Should().NotBeNull();
+        resolved!.DisplayName.Should().Be("E:/Docker/ContextHub/Data/redis (Redis logical usage)");
+        resolved.SizeBytes.Should().Be(654321);
+        resolved.IsLogicalFallback.Should().BeTrue();
     }
 
     private static DockerRuntimeSnapshot CreateSnapshot(

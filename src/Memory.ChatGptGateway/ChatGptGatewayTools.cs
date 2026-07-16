@@ -12,8 +12,13 @@ public sealed class ChatGptGatewayTools(
     IMemoryService memoryService,
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
+    IAccessibleProjectService accessibleProjectService,
+    IDailyMemoryReviewService dailyMemoryReviewService,
+    ISuggestedActionService suggestedActionService,
+    IMemoryDataRetentionService retentionService,
     IProjectArtifactExchangeService artifactExchangeService,
     IChatGptProposalService proposalService,
+    IRequestActorAccessor actorAccessor,
     IHttpContextAccessor httpContextAccessor)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -21,6 +26,50 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Describe ContextHub purpose, capabilities, startup flow, and projectId guidance.")]
     public ContextHubBootstrapResult describe_context_hub(string? projectId = null)
         => bootstrapService.Describe(new ContextHubBootstrapRequest(projectId));
+
+    [McpServerTool(UseStructuredContent = true), Description("List remote ContextHub ProjectIds accessible to the current actor. The default ProjectId is never returned.")]
+    public Task<IReadOnlyList<AccessibleProjectResult>> projects_list(int limit = 100, CancellationToken cancellationToken = default)
+        => accessibleProjectService.ListAsync(limit, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Return the current authorized account's daily remote memory review. This single read-only tool performs server-side project scoping and does not change memories, preferences, proposals, or actions.")]
+    public Task<DailyMemoryReviewResult> daily_memory_review(CancellationToken cancellationToken = default)
+        => dailyMemoryReviewService.ReviewAsync(cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List persisted global user preferences for remote knowledge-governance review.")]
+    public Task<IReadOnlyList<UserPreferenceResult>> user_preferences_list(UserPreferenceListRequest request, CancellationToken cancellationToken = default)
+        => memoryService.ListUserPreferencesAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List staged conversation insights for the current actor's authorized projects.")]
+    public Task<IReadOnlyList<ConversationInsightResult>> conversation_insights_list(ConversationInsightListRequest request, CancellationToken cancellationToken = default)
+        => conversationAutomationService.ListInsightsAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List pending or historical governance suggested actions for one explicitly authorized ProjectId.")]
+    public Task<IReadOnlyList<SuggestedActionResult>> suggested_actions_list(SuggestedActionListRequest request, CancellationToken cancellationToken = default)
+        => suggestedActionService.ListAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Classify remote memory-retention candidates for the current actor's accessible ProjectIds. This is read-only and never deletes or archives memory.")]
+    public async Task<MemoryDataRetentionRunResult> memory_retention_preview(CancellationToken cancellationToken = default)
+    {
+        var projects = await accessibleProjectService.ListAsync(200, cancellationToken);
+        var projectIds = projects.Where(project => project.CanRead).Select(project => project.ProjectId).ToArray();
+        if (projectIds.Length == 0)
+        {
+            throw new InvalidOperationException("No readable ProjectId is available for retention preview.");
+        }
+
+        var tenantId = actorAccessor.Current.TenantId
+            ?? throw new InvalidOperationException("Retention preview requires an authenticated tenant actor.");
+
+        return await retentionService.RunAsync(
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "chatgpt-mcp-gateway:retention-preview",
+                Mode: MemoryDataRetentionRunMode.Classify,
+                PreviewOnly: false,
+                ProjectIds: projectIds,
+                TenantId: tenantId),
+            "chatgpt-mcp-gateway:retention-preview",
+            cancellationToken);
+    }
 
     [McpServerTool(UseStructuredContent = true), Description("Build a structured ContextHub working context for the current task.")]
     public Task<WorkingContextResult> build_working_context(WorkingContextRequest request, CancellationToken cancellationToken = default)
@@ -99,6 +148,18 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to create or update a durable ContextHub user preference. Approval is required before the preference is changed.")]
     public Task<ChatGptProposalResult> user_preference_upsert(UserPreferenceUpsertRequest request, CancellationToken cancellationToken = default)
         => CreateProposalAsync("user_preference_upsert", ProjectContext.UserProjectId, request.Title, request.Rationale, request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to archive or restore a global user preference. Approval is required before it is changed.")]
+    public Task<ChatGptProposalResult> user_preference_archive(UserPreferenceArchiveRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("user_preference_archive", ProjectContext.UserProjectId, "Archive user preference", $"Change archive state for preference {request.Id:D}.", request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to accept a governance suggested action. Approval is required before it is executed.")]
+    public Task<ChatGptProposalResult> suggested_action_accept(HubActionRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("suggested_action_accept", ProjectContext.SharedProjectId, "Accept suggested action", $"Accept suggested action {request.Id:D}.", request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to dismiss a governance suggested action. Approval is required before it is changed.")]
+    public Task<ChatGptProposalResult> suggested_action_dismiss(HubActionRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("suggested_action_dismiss", ProjectContext.SharedProjectId, "Dismiss suggested action", $"Dismiss suggested action {request.Id:D}.", request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to promote a selected log slice into durable memory. Approval is required before memory is changed.")]
     public Task<ChatGptProposalResult> promote_log_slice_to_memory(PromoteLogSliceRequest request, CancellationToken cancellationToken = default)

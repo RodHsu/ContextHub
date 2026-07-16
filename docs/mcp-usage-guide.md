@@ -150,6 +150,12 @@ https://context-hub.example.com/mcp-chat
 
 The gateway should expose a restricted tool set and should not allow direct durable writes without proposal review.
 
+For remote knowledge-governance automation, `/mcp-chat` provides actor-scoped `projects_list`,
+retention classification, conversation-insight and suggested-action reads, and global preference
+reads. It never returns `default` from project discovery. Archive, suggested-action accept/dismiss,
+and other durable changes create a pending proposal; the existing approval path rechecks scope and
+project access before applying it.
+
 OAuth/OIDC discovery endpoints:
 
 ```text

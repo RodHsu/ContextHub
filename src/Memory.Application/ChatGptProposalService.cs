@@ -10,6 +10,7 @@ public sealed class ChatGptProposalService(
     IApplicationDbContext dbContext,
     IMemoryService memoryService,
     IProjectArtifactExchangeService artifactExchangeService,
+    ISuggestedActionService suggestedActionService,
     IRequestActorAccessor actorAccessor,
     IClock clock) : IChatGptProposalService
 {
@@ -21,6 +22,9 @@ public sealed class ChatGptProposalService(
         "memory_upsert",
         "memory_update",
         "user_preference_upsert",
+        "user_preference_archive",
+        "suggested_action_accept",
+        "suggested_action_dismiss",
         "promote_log_slice_to_memory",
         "project_artifact_publish",
         "project_artifact_upload_object"
@@ -142,6 +146,11 @@ public sealed class ChatGptProposalService(
         var query = dbContext.ConversationInsights.AsNoTracking()
             .Where(x => x.SourceSystem == SourceSystem && x.Tags.Contains(ProposalTag));
 
+        if (actor.HasUser)
+        {
+            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        }
+
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
@@ -221,6 +230,9 @@ public sealed class ChatGptProposalService(
             "memory_upsert" => (await memoryService.UpsertAsync(Deserialize<MemoryUpsertRequest>(payloadJson), cancellationToken)).Id,
             "memory_update" => (await memoryService.UpdateAsync(Deserialize<MemoryUpdateRequest>(payloadJson), cancellationToken)).Id,
             "user_preference_upsert" => (await memoryService.UpsertUserPreferenceAsync(Deserialize<UserPreferenceUpsertRequest>(payloadJson), cancellationToken)).Id,
+            "user_preference_archive" => (await memoryService.ArchiveUserPreferenceAsync(Deserialize<UserPreferenceArchiveRequest>(payloadJson), cancellationToken)).Id,
+            "suggested_action_accept" => (await suggestedActionService.AcceptAsync(Deserialize<HubActionRequest>(payloadJson).Id, cancellationToken)).Action.Id,
+            "suggested_action_dismiss" => (await suggestedActionService.DismissAsync(Deserialize<HubActionRequest>(payloadJson).Id, cancellationToken)).Id,
             "promote_log_slice_to_memory" => (await memoryService.PromoteLogSliceAsync(Deserialize<PromoteLogSliceRequest>(payloadJson), cancellationToken)).Id,
             "project_artifact_publish" => (await artifactExchangeService.PublishAsync(Deserialize<ProjectArtifactPublishRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_artifact_upload_object" => (await artifactExchangeService.UploadManagedObjectAsync(Deserialize<ProjectArtifactManagedObjectPublishRequest>(payloadJson), cancellationToken)).MemoryId,
