@@ -77,14 +77,37 @@ Do not write:
 | `memory_get` | Reading one known memory item in full |
 | `memory_upsert` | Creating or replacing stable durable knowledge |
 | `memory_update` | Correcting or extending existing durable knowledge |
+| `memory_archive` | Archiving or restoring one memory item while preserving the item |
+| `memory_restore` | Restoring one archived memory item |
+| `memory_move` | Moving one memory item to another ProjectId after access and duplicate-key checks |
+| `memory_delete` | Permanently deleting one confirmed low-value or already-migrated memory item |
+| `project_cleanup_preview` | Previewing safe cleanup candidates for one ProjectId before bulk cleanup |
+| `project_cleanup_apply` | Archiving or deleting selected safe cleanup candidates after preview |
 | `conversation_ingest` | Saving a concise checkpoint for future task continuity |
+| `conversation_sessions_list` | Auditing staged conversation sessions |
+| `conversation_insights_list` | Reviewing staged conversation insights and promotion state |
 | `log_search` | Searching recent runtime events |
 | `log_read` | Reading a specific log slice or event |
 | `promote_log_slice_to_memory` | Turning a verified incident into durable knowledge |
 | `user_preference_list` | Inspecting explicit long-term preferences |
 | `user_preference_upsert` | Saving a confirmed preference |
 | `user_preference_archive` | Retiring a stale preference |
+| `project_artifact_publish` | Publishing a project-scoped artifact summary, snippet, file reference, or external object pointer |
+| `project_artifact_upload_object` | Uploading managed artifact content and publishing only the expiring object pointer |
+| `project_artifacts_list` | Listing project-scoped artifact exchange records |
+| `project_artifacts_search` | Searching project-scoped artifact exchange records |
+| `project_artifact_get` | Reading one project-scoped artifact exchange record by memory id |
+| `project_artifacts_prune_expired_objects` | Pruning expired managed artifact objects and archiving their exchange records |
 | `enqueue_reindex` | Rebuilding vectors after embedding model/profile changes |
+| `enqueue_summary_refresh` | Rebuilding the read-only shared summary layer |
+| `maintenance_status` | Checking maintenance state before long-running work |
+| `maintenance_lease_heartbeat` | Reporting active agent work so maintenance can wait |
+| `maintenance_lease_complete` | Completing an agent maintenance lease |
+| `chatgpt_proposals_list` | Listing ChatGPT gateway write proposals |
+| `chatgpt_proposal_approve` | Approving and applying a pending ChatGPT write proposal |
+| `chatgpt_proposal_reject` | Rejecting a pending ChatGPT write proposal |
+
+The Dashboard also exposes this catalog in Traditional Chinese at `/mcp-tools`.
 
 ## Standard Task Lifecycle
 

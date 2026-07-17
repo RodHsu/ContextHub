@@ -76,6 +76,30 @@ public sealed class MemoryMcpTools(
     public Task<MemoryDocument> memory_update(MemoryUpdateRequest request, CancellationToken cancellationToken = default)
         => memoryService.UpdateAsync(request, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Archive or restore an existing memory item by id.")]
+    public Task<MemoryDocument> memory_archive(MemoryArchiveRequest request, CancellationToken cancellationToken = default)
+        => memoryService.ArchiveAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Restore an archived memory item by id.")]
+    public Task<MemoryDocument> memory_restore(Guid id, string? projectId = null, string? reason = null, CancellationToken cancellationToken = default)
+        => memoryService.ArchiveAsync(new MemoryArchiveRequest(id, projectId, Archived: false, reason), cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Move a memory item to another ProjectId after validating access and duplicate external keys.")]
+    public Task<MemoryDocument> memory_move(MemoryMoveRequest request, CancellationToken cancellationToken = default)
+        => memoryService.MoveAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Permanently delete one memory item by id. Use project_cleanup_preview first for bulk cleanup.")]
+    public Task<MemoryDeleteResult> memory_delete(MemoryDeleteRequest request, CancellationToken cancellationToken = default)
+        => memoryService.DeleteAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Preview safe cleanup candidates for one ProjectId, such as migrated tombstones, removed markers, archived items, or low-value remnants.")]
+    public Task<ProjectCleanupPreviewResult> project_cleanup_preview(ProjectCleanupPreviewRequest request, CancellationToken cancellationToken = default)
+        => memoryService.PreviewProjectCleanupAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Archive or delete selected safe cleanup candidates in one ProjectId. Unsafe active memories are skipped.")]
+    public Task<ProjectCleanupApplyResult> project_cleanup_apply(ProjectCleanupApplyRequest request, CancellationToken cancellationToken = default)
+        => memoryService.ApplyProjectCleanupAsync(request, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Build a structured working context for the current task.")]
     public Task<WorkingContextResult> build_working_context(WorkingContextRequest request, CancellationToken cancellationToken = default)
         => memoryService.BuildWorkingContextAsync(

@@ -524,6 +524,193 @@ public sealed class MemoryService(
         return Map(entity);
     }
 
+    public async Task<MemoryDocument> ArchiveAsync(MemoryArchiveRequest request, CancellationToken cancellationToken)
+    {
+        await EnsureWriteAllowedUnlessServiceAsync("memory_archive", cancellationToken);
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        var entity = await LoadMemoryForWriteAsync(request.Id, request.ProjectId, actor, cancellationToken);
+        EnsureMemoryWritable(entity);
+
+        entity.Status = request.Archived ? MemoryStatus.Archived : MemoryStatus.Active;
+        entity.Version += 1;
+        entity.UpdatedAt = clock.UtcNow;
+
+        await AddRevisionAsync(entity, request.Archived ? "archive" : "restore", cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateMemoryCachesAsync(entity.ProjectId, actor, cancellationToken);
+        if (entity.Status == MemoryStatus.Active)
+        {
+            await EnqueueReindexAsync(new EnqueueReindexRequest(MemoryItemId: entity.Id, ProjectId: entity.ProjectId), cancellationToken);
+        }
+
+        return Map(entity);
+    }
+
+    public async Task<MemoryDocument> MoveAsync(MemoryMoveRequest request, CancellationToken cancellationToken)
+    {
+        await EnsureWriteAllowedUnlessServiceAsync("memory_move", cancellationToken);
+        var targetProjectId = ProjectContext.Normalize(request.TargetProjectId);
+        EnsureWritableProject(targetProjectId, allowSharedLayer: false);
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        EnsureProjectAllowed(actor, targetProjectId, write: true);
+
+        var entity = await LoadMemoryForWriteAsync(request.Id, request.SourceProjectId, actor, cancellationToken);
+        EnsureMemoryWritable(entity);
+        var sourceProjectId = entity.ProjectId;
+        if (string.Equals(sourceProjectId, targetProjectId, StringComparison.OrdinalIgnoreCase))
+        {
+            return Map(entity);
+        }
+
+        var duplicateExists = await dbContext.MemoryItems.AnyAsync(
+            x => x.Id != entity.Id &&
+                 x.ProjectId == targetProjectId &&
+                 x.OwnerUserId == entity.OwnerUserId &&
+                 x.ExternalKey == entity.ExternalKey,
+            cancellationToken);
+        if (duplicateExists)
+        {
+            throw new InvalidOperationException(
+                $"Project '{targetProjectId}' already contains a memory item with external key '{entity.ExternalKey}'.");
+        }
+
+        entity.ProjectId = targetProjectId;
+        entity.IsReadOnly = false;
+        entity.Version += 1;
+        entity.UpdatedAt = clock.UtcNow;
+
+        await AddRevisionAsync(entity, "move", cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateMemoryCachesAsync(sourceProjectId, actor, cancellationToken);
+        await InvalidateMemoryCachesAsync(targetProjectId, actor, cancellationToken);
+        if (entity.Status == MemoryStatus.Active)
+        {
+            await EnqueueReindexAsync(new EnqueueReindexRequest(MemoryItemId: entity.Id, ProjectId: targetProjectId), cancellationToken);
+        }
+
+        return Map(entity);
+    }
+
+    public async Task<MemoryDeleteResult> DeleteAsync(MemoryDeleteRequest request, CancellationToken cancellationToken)
+    {
+        await EnsureWriteAllowedUnlessServiceAsync("memory_delete", cancellationToken);
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        var entity = await LoadMemoryForWriteAsync(request.Id, request.ProjectId, actor, cancellationToken);
+        EnsureMemoryWritable(entity);
+        var projectId = entity.ProjectId;
+
+        var links = await dbContext.MemoryLinks
+            .Where(x => x.FromId == entity.Id || x.ToId == entity.Id)
+            .ToListAsync(cancellationToken);
+        if (links.Count > 0)
+        {
+            dbContext.MemoryLinks.RemoveRange(links);
+        }
+
+        dbContext.MemoryItems.Remove(entity);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateMemoryCachesAsync(projectId, actor, cancellationToken);
+        return new MemoryDeleteResult(request.Id, projectId, Deleted: true);
+    }
+
+    public async Task<ProjectCleanupPreviewResult> PreviewProjectCleanupAsync(ProjectCleanupPreviewRequest request, CancellationToken cancellationToken)
+    {
+        var projectId = ProjectContext.Normalize(request.ProjectId);
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        EnsureProjectAllowed(actor, projectId, write: false);
+        var limit = Math.Clamp(request.Limit, 1, 500);
+
+        var query = dbContext.MemoryItems
+            .AsNoTracking()
+            .Where(x => x.ProjectId == projectId)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId));
+        if (!request.IncludeArchived)
+        {
+            query = query.Where(x => x.Status == MemoryStatus.Active);
+        }
+
+        var items = await query
+            .OrderByDescending(x => x.UpdatedAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        var candidates = items
+            .Select(BuildProjectCleanupCandidate)
+            .Where(x => x.IsSafeToApply)
+            .ToArray();
+        return new ProjectCleanupPreviewResult(projectId, items.Count, candidates);
+    }
+
+    public async Task<ProjectCleanupApplyResult> ApplyProjectCleanupAsync(ProjectCleanupApplyRequest request, CancellationToken cancellationToken)
+    {
+        await EnsureWriteAllowedUnlessServiceAsync("project_cleanup_apply", cancellationToken);
+        var projectId = ProjectContext.Normalize(request.ProjectId);
+        var actor = actorAccessor.Current;
+        EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        EnsureProjectAllowed(actor, projectId, write: true);
+        var requestedIds = (request.MemoryIds ?? []).Distinct().ToArray();
+        if (requestedIds.Length == 0)
+        {
+            throw new InvalidOperationException("At least one memory id is required.");
+        }
+
+        var items = await dbContext.MemoryItems
+            .Where(x => requestedIds.Contains(x.Id) && x.ProjectId == projectId)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+            .ToListAsync(cancellationToken);
+        var itemMap = items.ToDictionary(x => x.Id);
+        var applied = new List<Guid>();
+        var skipped = new List<Guid>();
+        var archivedCount = 0;
+        var deletedCount = 0;
+
+        foreach (var id in requestedIds)
+        {
+            if (!itemMap.TryGetValue(id, out var entity) ||
+                entity.IsReadOnly ||
+                !BuildProjectCleanupCandidate(entity).IsSafeToApply)
+            {
+                skipped.Add(id);
+                continue;
+            }
+
+            if (request.Action == ProjectCleanupAction.Archive)
+            {
+                if (entity.Status != MemoryStatus.Archived)
+                {
+                    entity.Status = MemoryStatus.Archived;
+                    entity.Version += 1;
+                    entity.UpdatedAt = clock.UtcNow;
+                    await AddRevisionAsync(entity, "project-cleanup-archive", cancellationToken);
+                    archivedCount++;
+                }
+
+                applied.Add(id);
+                continue;
+            }
+
+            var links = await dbContext.MemoryLinks
+                .Where(x => x.FromId == entity.Id || x.ToId == entity.Id)
+                .ToListAsync(cancellationToken);
+            if (links.Count > 0)
+            {
+                dbContext.MemoryLinks.RemoveRange(links);
+            }
+
+            dbContext.MemoryItems.Remove(entity);
+            deletedCount++;
+            applied.Add(id);
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await InvalidateMemoryCachesAsync(projectId, actor, cancellationToken);
+        return new ProjectCleanupApplyResult(projectId, request.Action, applied, skipped, archivedCount, deletedCount);
+    }
+
     public async Task<MemoryDocument?> GetAsync(Guid id, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
@@ -1402,6 +1589,126 @@ public sealed class MemoryService(
         }
 
         await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
+    }
+
+    private async Task<MemoryItem> LoadMemoryForWriteAsync(
+        Guid id,
+        string? projectId,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        var normalizedProjectId = projectId == null ? null : ProjectContext.Normalize(projectId);
+        var entity = await dbContext.MemoryItems
+            .Where(x => x.Id == id && (normalizedProjectId == null || x.ProjectId == normalizedProjectId))
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+            .FirstOrDefaultAsync(cancellationToken)
+            ?? throw new InvalidOperationException($"Memory item '{id}' was not found.");
+
+        EnsureProjectAllowed(actor, entity.ProjectId, write: true);
+        return entity;
+    }
+
+    private static ProjectCleanupCandidate BuildProjectCleanupCandidate(MemoryItem entity)
+    {
+        var isTombstone = IsTombstoneMemory(entity);
+        var isArchived = entity.Status == MemoryStatus.Archived;
+        var isLowValue = entity.Importance <= 0.1m && entity.Confidence <= 0.3m;
+        var safe = !entity.IsReadOnly && (isArchived || isTombstone || isLowValue);
+        var recommendedAction = isTombstone || isArchived ? "delete" : "archive";
+        var rationale = isTombstone
+            ? "Memory is marked as migrated or removed tombstone."
+            : isArchived
+                ? "Memory is already archived."
+                : "Memory has low importance and confidence scores.";
+
+        return new ProjectCleanupCandidate(
+            entity.Id,
+            entity.Title,
+            entity.MemoryType,
+            entity.Status,
+            entity.Tags,
+            entity.Importance,
+            entity.Confidence,
+            recommendedAction,
+            rationale,
+            safe);
+    }
+
+    private static bool IsTombstoneMemory(MemoryItem entity)
+    {
+        if (entity.Title.StartsWith("MIGRATED", StringComparison.OrdinalIgnoreCase) ||
+            entity.Title.StartsWith("REMOVED", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (entity.Tags.Any(tag =>
+                string.Equals(tag, "source-cleared", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(tag, "cleanup", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(tag, "migrated", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(tag, "removed", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        return MetadataContainsTombstoneMarker(entity.MetadataJson);
+    }
+
+    private static bool MetadataContainsTombstoneMarker(string metadataJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(metadataJson) ? "{}" : metadataJson);
+            return JsonContainsTombstoneMarker(document.RootElement);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool JsonContainsTombstoneMarker(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var property in element.EnumerateObject())
+                {
+                    if (IsTombstoneText(property.Name) || JsonContainsTombstoneMarker(property.Value))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    if (JsonContainsTombstoneMarker(item))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            case JsonValueKind.String:
+                return IsTombstoneText(element.GetString());
+            default:
+                return false;
+        }
+    }
+
+    private static bool IsTombstoneText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return value.Contains("source-cleared", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("migrated", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("removed", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("cleanup", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<UserPreferenceSearchResult> SearchUserPreferencesAsync(string query, int limit, CancellationToken cancellationToken)

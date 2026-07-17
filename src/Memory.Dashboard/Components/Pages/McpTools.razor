@@ -1,0 +1,206 @@
+@page "/mcp-tools"
+
+<PageTitle>Context Hub | MCP / API 工具說明</PageTitle>
+
+<PageViewport Title="MCP / API 工具說明"
+              Subtitle="用中文整理目前 ContextHub 對 agent、ChatGPT gateway 與 Dashboard REST 提供的工具面。"
+              BodyClass="page-viewport-body mcp-tools-page-body">
+    <ChildContent>
+        <div class="mcp-tools-page-stack page-scroll-host">
+            <section class="panel mcp-tools-overview-panel">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">連線面總覽</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">`/mcp` 是可信 agent 的完整工具面；`/mcp-chat` 是外部聊天代理的受控 gateway；REST API 供 Dashboard、維運與自動化使用。</div>
+                    </div>
+                    <span class="status-badge ok">中文說明</span>
+                </div>
+
+                <div class="mcp-endpoint-grid">
+                    @foreach (var endpoint in Endpoints)
+                    {
+                        <article class="mcp-endpoint-card">
+                            <div class="mcp-endpoint-header">
+                                <code>@endpoint.Path</code>
+                                <span class="status-badge @endpoint.BadgeClass">@endpoint.Badge</span>
+                            </div>
+                            <div class="stack-item-title">@endpoint.Audience</div>
+                            <p>@endpoint.Description</p>
+                        </article>
+                    }
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">Direct MCP 工具</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">供 Codex 或內部自動化使用。寫入工具會直接改變 ContextHub durable knowledge，需帶明確 ProjectId 並遵守 repo 規則。</div>
+                    </div>
+                    <span class="status-badge warn">/mcp</span>
+                </div>
+                <div class="table-scroll-shell mcp-tools-table-shell">
+                    <table class="data-table mcp-tools-table">
+                        <thead>
+                            <tr>
+                                <th>工具</th>
+                                <th>用途</th>
+                                <th>風險與使用時機</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var tool in DirectTools)
+                            {
+                                <tr>
+                                    <td><code>@tool.Name</code></td>
+                                    <td>@tool.Description</td>
+                                    <td><span class="status-badge @tool.RiskClass">@tool.Risk</span> @tool.Note</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">ChatGPT Gateway 工具</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">`/mcp-chat` 會依 OAuth actor 與 Project 授權收斂可見範圍；大多數寫入只建立 proposal，由 Dashboard 或 direct MCP 核准後才套用。</div>
+                    </div>
+                    <span class="status-badge neutral">/mcp-chat</span>
+                </div>
+                <div class="table-scroll-shell mcp-tools-table-shell">
+                    <table class="data-table mcp-tools-table">
+                        <thead>
+                            <tr>
+                                <th>工具</th>
+                                <th>用途</th>
+                                <th>寫入治理</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var tool in ChatGatewayTools)
+                            {
+                                <tr>
+                                    <td><code>@tool.Name</code></td>
+                                    <td>@tool.Description</td>
+                                    <td><span class="status-badge @tool.RiskClass">@tool.Risk</span> @tool.Note</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">REST API 摘要</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">Dashboard 與維運腳本使用同一組 Application use cases，不另建平行的 memory API service。</div>
+                    </div>
+                    <span class="status-badge neutral">/api/*</span>
+                </div>
+                <div class="table-scroll-shell mcp-tools-table-shell">
+                    <table class="data-table mcp-tools-table">
+                        <thead>
+                            <tr>
+                                <th>API 群組</th>
+                                <th>代表端點</th>
+                                <th>用途</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var api in RestApis)
+                            {
+                                <tr>
+                                    <td>@api.Group</td>
+                                    <td><code>@api.Paths</code></td>
+                                    <td>@api.Description</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel mcp-tools-guidance-panel">
+                <div class="panel-title">建議操作順序</div>
+                <ol class="mcp-tools-flow-list">
+                    <li>新任務先用 <code>build_working_context(projectId, query)</code> 建立工作上下文，不要寫入 `default`。</li>
+                    <li>需要整理專案殘留時，先跑 <code>project_cleanup_preview</code>，確認候選內容與原因後再套用 <code>project_cleanup_apply</code>。</li>
+                    <li>ChatGPT gateway 的寫入應先形成 proposal，透過 <code>chatgpt_proposals_list</code> 檢查，再由有權限的使用者核准。</li>
+                    <li>若要永久刪除記憶，優先保留 preview、搬移、封存與核准紀錄；只有確認無保留價值時才用 <code>memory_delete</code>。</li>
+                </ol>
+            </section>
+        </div>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private static readonly IReadOnlyList<EndpointDoc> Endpoints =
+    [
+        new("/mcp", "可信 coding agent / 內部自動化", "完整工具面", "warn", "提供讀取、寫入、搬移、封存、刪除、維運 lease、reindex、summary refresh、artifact exchange、log promotion 與 proposal 審核工具。"),
+        new("/mcp-chat", "ChatGPT / custom assistant", "受控 gateway", "neutral", "透過 OAuth/OIDC 驗證 actor，依 Project 授權限制讀取範圍；寫入以 pending proposal 為主，避免聊天代理直接改 durable memory。"),
+        new("/api/*", "Dashboard / 維運腳本", "REST", "ok", "提供 Dashboard 狀態、記憶查詢、治理、整理、維運、security、jobs、storage 與 performance probe 等 HTTP API。")
+    ];
+
+    private static readonly IReadOnlyList<ToolDoc> DirectTools =
+    [
+        new("describe_context_hub", "說明 ContextHub 的用途、啟動流程與 ProjectId 使用方式。", "讀取", "neutral", "適合 agent 第一次連線時使用。"),
+        new("build_working_context", "依 task query 組合專案 working context、相關記憶與最近訊號。", "讀取", "neutral", "新任務、切換 repo、恢復壓縮後都應先呼叫。"),
+        new("memory_search / memory_get", "搜尋或讀取既有 facts、decisions、artifacts、episodes。", "讀取", "neutral", "支援 explicit ProjectId、includedProjectIds、summary layer 與 archived filter。"),
+        new("memory_upsert / memory_update", "建立、替換或修正 durable memory。", "直接寫入", "warn", "只寫穩定可重用的結論、規則、部署結果或決策。"),
+        new("memory_archive / memory_restore", "封存或還原單筆記憶。", "直接寫入", "warn", "適合保留審計軌跡但不再預設檢索的資料。"),
+        new("memory_move", "將記憶搬移到另一個 ProjectId，並檢查授權與 external key 衝突。", "直接寫入", "warn", "用於修正 ProjectId 分裂或殘留資料歸位。"),
+        new("memory_delete", "永久刪除單筆記憶。", "高風險", "bad", "只在確認無保留價值、已搬移或已有 tombstone 證據後使用。"),
+        new("project_cleanup_preview", "預覽 ProjectId 底下可安全整理的 migrated tombstone、removed marker、archived 或低價值殘留。", "讀取", "neutral", "bulk cleanup 前置步驟。"),
+        new("project_cleanup_apply", "對 preview 後選定的安全候選執行封存或刪除；不安全 active memory 會略過。", "直接寫入", "warn", "適合完成 ProjectId 清理收尾。"),
+        new("conversation_ingest", "寫入對話 checkpoint 到 staging layer，供後續自動 promotion 或人工整理。", "直接寫入", "warn", "收尾、交接或壓縮前使用。"),
+        new("conversation_sessions_list / conversation_insights_list", "檢視對話 staging session、insight 與 promotion 狀態。", "讀取", "neutral", "用於每日整理與稽核。"),
+        new("log_search / log_read / promote_log_slice_to_memory", "查詢 runtime logs，或將已驗證的 log slice 升級為 durable memory。", "混合", "warn", "promotion 屬寫入，應避免保存大型原始 log。"),
+        new("user_preference_list / user_preference_upsert / user_preference_archive", "管理長期使用者偏好。", "混合", "warn", "只保存明確、可重用且已確認的偏好。"),
+        new("project_artifact_*", "發佈、上傳、搜尋、讀取或清理 project-scoped artifact exchange records。", "混合", "warn", "大型內容應走 managed object pointer，不直接塞進 memory。"),
+        new("enqueue_reindex / enqueue_summary_refresh", "排入向量重建或共用綜合層刷新工作。", "維運", "warn", "模型、維度、profile 或 summary 資料需要重建時使用。"),
+        new("maintenance_status / maintenance_lease_*", "檢查維護狀態並讓 agent 宣告工作 lease。", "維運", "neutral", "排程維護前後用於降低衝突。"),
+        new("chatgpt_proposals_list / chatgpt_proposal_approve / chatgpt_proposal_reject", "檢視、核准或拒絕 ChatGPT gateway 建立的寫入 proposal。", "審核寫入", "warn", "核准時會重新檢查 scope 與權限。")
+    ];
+
+    private static readonly IReadOnlyList<ToolDoc> ChatGatewayTools =
+    [
+        new("projects_list", "列出目前 OAuth actor 可讀取的 ProjectId。", "讀取", "neutral", "不回傳 default，降低誤用預設專案的機率。"),
+        new("daily_memory_review", "回傳每日遠端記憶治理檢查摘要。", "讀取", "neutral", "server-side scoping，不改記憶、偏好或 action。"),
+        new("memory_retention_preview / project_cleanup_preview", "分類 retention 或 project cleanup 候選。", "讀取", "neutral", "預覽不刪除、不封存。"),
+        new("build_working_context / memory_search / memory_get", "讓 ChatGPT 取得授權範圍內的 working context 與記憶內容。", "讀取", "neutral", "適合查詢、彙整、規劃。"),
+        new("user_preferences_list / conversation_insights_list / suggested_actions_list", "檢視全域偏好、conversation insights 與 suggested actions。", "讀取", "neutral", "用於整理排程與人工審核前分析。"),
+        new("project_artifacts_list / project_artifacts_search / project_artifact_get", "讀取同 ProjectId agent 共享的 artifact exchange records。", "讀取", "neutral", "不直接暴露未授權專案內容。"),
+        new("log_search / log_read", "查詢 actor 授權範圍內的 runtime logs。", "讀取", "neutral", "避免把大型 raw log 直接升級為記憶。"),
+        new("conversation_ingest", "補送 ChatGPT 對話 checkpoint 到 staging layer。", "直接寫入", "warn", "來源會標記為 ChatGPT gateway。"),
+        new("memory_upsert / memory_update / memory_archive / memory_move / memory_delete", "建立記憶寫入、更新、封存、搬移或刪除 proposal。", "需核准", "warn", "ChatGPT 不直接改 durable memory。"),
+        new("project_cleanup_apply", "建立 project cleanup apply proposal。", "需核准", "warn", "核准後才封存或刪除候選記憶。"),
+        new("user_preference_upsert / user_preference_archive", "建立偏好新增、更新、封存或還原 proposal。", "需核准", "warn", "避免聊天代理自行改長期偏好。"),
+        new("suggested_action_accept / suggested_action_dismiss", "建立 suggested action 接受或忽略 proposal。", "需核准", "warn", "維持治理決策可追溯。"),
+        new("promote_log_slice_to_memory / project_artifact_publish / project_artifact_upload_object", "建立 log promotion 或 artifact publish proposal。", "需核准", "warn", "避免未審核內容直接進入共享知識庫。"),
+        new("chatgpt_proposals_list / chatgpt_proposal_approve / chatgpt_proposal_reject", "讀取、核准或拒絕 pending proposal。", "審核寫入", "warn", "核准時套用真正的 Application write use case。")
+    ];
+
+    private static readonly IReadOnlyList<ApiDoc> RestApis =
+    [
+        new("狀態與健康", "/health/live, /health/ready, /api/status, /api/dashboard/*", "提供 service health、build/version、overview、runtime 與 monitoring snapshot。"),
+        new("記憶資料", "/api/memories, /api/memories/search, /api/memories/{id}, /api/memories/{id}/archive|restore|move|delete", "查詢、讀取、封存、還原、搬移與刪除記憶資料。"),
+        new("專案清理", "/api/memories/project-cleanup/preview, /api/memories/project-cleanup/apply", "支援 ProjectId 殘留資料 preview 與 apply。"),
+        new("工作上下文", "/api/context/build, /api/context/bootstrap", "建立 working context 或取得 ContextHub bootstrap 說明。"),
+        new("來源、治理、評估", "/api/sources/*, /api/governance/*, /api/evaluation/*", "管理來源同步、治理 findings 與 retrieval evaluation。"),
+        new("對話與 ChatGPT", "/api/conversations/*, /api/chatgpt/proposals/*, /api/actions/*", "處理 conversation staging、proposal 審核與 suggested actions。"),
+        new("使用者與安全", "/api/user-preferences, /api/me/*, /api/security/*", "管理偏好、個人 token、tenant、project grant、audit events。"),
+        new("維運工作", "/api/jobs/*, /api/maintenance/*, /api/performance/measure", "排入 reindex/summary refresh、維護模式、retention、repair、performance probe。"),
+        new("資料庫檢視", "/api/storage/tables, /api/storage/{table}", "供 Dashboard storage explorer 檢視資料表與分頁資料。"),
+        new("ChatGPT OAuth", "/.well-known/*, /oauth/chat/*, /userinfo", "提供 `/mcp-chat` 所需的 OAuth/OIDC metadata、DCR、authorize、token 與 userinfo。")
+    ];
+
+    private sealed record EndpointDoc(string Path, string Audience, string Badge, string BadgeClass, string Description);
+
+    private sealed record ToolDoc(string Name, string Description, string Risk, string RiskClass, string Note);
+
+    private sealed record ApiDoc(string Group, string Paths, string Description);
+}

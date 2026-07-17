@@ -813,6 +813,21 @@ public sealed class DashboardQueryServiceTests
         public Task<MemoryDocument> UpdateAsync(MemoryUpdateRequest request, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
+        public Task<MemoryDocument> ArchiveAsync(MemoryArchiveRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<MemoryDocument> MoveAsync(MemoryMoveRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<MemoryDeleteResult> DeleteAsync(MemoryDeleteRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<ProjectCleanupPreviewResult> PreviewProjectCleanupAsync(ProjectCleanupPreviewRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<ProjectCleanupApplyResult> ApplyProjectCleanupAsync(ProjectCleanupApplyRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
         public Task<MemoryDocument?> GetAsync(Guid id, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 

@@ -233,6 +233,17 @@
                             </span>
                             <span class="nav-label">安全管理</span>
                         </NavLink>
+                        <NavLink class="nav-item" href="/mcp-tools">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M5 5h14v14H5z" />
+                                    <path d="M8 9h8" />
+                                    <path d="M8 13h5" />
+                                    <path d="M15 13h1" />
+                                </svg>
+                            </span>
+                            <span class="nav-label">MCP 說明</span>
+                        </NavLink>
                         <NavLink class="nav-item" href="/settings">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -368,6 +379,7 @@
         new("管理設定", "U", "偏好", "/preferences", NavLinkMatch.Prefix, false),
         new("管理設定", "D", "資料庫檢視", "/storage", NavLinkMatch.Prefix, true),
         new("管理設定", "A", "安全管理", "/security", NavLinkMatch.Prefix, true),
+        new("管理設定", "Q", "MCP 說明", "/mcp-tools", NavLinkMatch.Prefix, true),
         new("管理設定", "Y", "系統設定", "/settings", NavLinkMatch.Prefix, true),
         new("個人帳號", "N", "Token", "/account/tokens", NavLinkMatch.Prefix, false)
     ];

@@ -9236,3 +9236,86 @@ a.button-like {
         max-width: 76vw;
     }
 }
+
+.mcp-tools-page-stack {
+    display: grid;
+    gap: var(--dashboard-page-gap);
+}
+
+.mcp-tools-overview-panel,
+.mcp-tools-guidance-panel {
+    min-width: 0;
+}
+
+.mcp-endpoint-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+}
+
+.mcp-endpoint-card {
+    display: grid;
+    gap: 0.5rem;
+    min-width: 0;
+    padding: 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--surface-alt) 62%, transparent);
+}
+
+.mcp-endpoint-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    min-width: 0;
+}
+
+.mcp-endpoint-card p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    line-height: 1.55;
+}
+
+.mcp-tools-table-shell {
+    max-height: none;
+}
+
+.mcp-tools-table th:first-child,
+.mcp-tools-table td:first-child {
+    min-width: 16rem;
+}
+
+.mcp-tools-table th:nth-child(2),
+.mcp-tools-table td:nth-child(2) {
+    min-width: 24rem;
+}
+
+.mcp-tools-table th:nth-child(3),
+.mcp-tools-table td:nth-child(3) {
+    min-width: 24rem;
+}
+
+.mcp-tools-table code,
+.mcp-tools-flow-list code,
+.mcp-endpoint-card code {
+    overflow-wrap: anywhere;
+}
+
+.mcp-tools-flow-list {
+    margin: 0;
+    padding-left: 1.35rem;
+    color: var(--text-muted);
+    line-height: 1.65;
+}
+
+.mcp-tools-flow-list li + li {
+    margin-top: 0.45rem;
+}
+
+@media (max-width: 1024px) {
+    .mcp-endpoint-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}

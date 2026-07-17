@@ -29,6 +29,70 @@ public sealed record MemoryUpdateRequest(
     string? MetadataJson = null,
     string? ProjectId = null);
 
+public sealed record MemoryArchiveRequest(
+    Guid Id,
+    string? ProjectId = null,
+    bool Archived = true,
+    string? Reason = null);
+
+public sealed record MemoryMoveRequest(
+    Guid Id,
+    string TargetProjectId,
+    string? SourceProjectId = null,
+    string? Reason = null);
+
+public sealed record MemoryDeleteRequest(
+    Guid Id,
+    string? ProjectId = null,
+    string? Reason = null);
+
+public enum ProjectCleanupAction
+{
+    Archive,
+    Delete
+}
+
+public sealed record ProjectCleanupPreviewRequest(
+    string ProjectId,
+    int Limit = 200,
+    bool IncludeArchived = true);
+
+public sealed record ProjectCleanupApplyRequest(
+    string ProjectId,
+    IReadOnlyList<Guid> MemoryIds,
+    ProjectCleanupAction Action = ProjectCleanupAction.Delete,
+    string? Reason = null);
+
+public sealed record MemoryDeleteResult(
+    Guid Id,
+    string ProjectId,
+    bool Deleted);
+
+public sealed record ProjectCleanupCandidate(
+    Guid Id,
+    string Title,
+    MemoryType MemoryType,
+    MemoryStatus Status,
+    IReadOnlyList<string> Tags,
+    decimal Importance,
+    decimal Confidence,
+    string RecommendedAction,
+    string Rationale,
+    bool IsSafeToApply);
+
+public sealed record ProjectCleanupPreviewResult(
+    string ProjectId,
+    int TotalScanned,
+    IReadOnlyList<ProjectCleanupCandidate> Candidates);
+
+public sealed record ProjectCleanupApplyResult(
+    string ProjectId,
+    ProjectCleanupAction Action,
+    IReadOnlyList<Guid> AppliedMemoryIds,
+    IReadOnlyList<Guid> SkippedMemoryIds,
+    int ArchivedCount,
+    int DeletedCount);
+
 public sealed record MemorySearchRequest(
     string Query,
     int Limit = 10,
@@ -1524,6 +1588,11 @@ public interface IMemoryService
 {
     Task<MemoryDocument> UpsertAsync(MemoryUpsertRequest request, CancellationToken cancellationToken);
     Task<MemoryDocument> UpdateAsync(MemoryUpdateRequest request, CancellationToken cancellationToken);
+    Task<MemoryDocument> ArchiveAsync(MemoryArchiveRequest request, CancellationToken cancellationToken);
+    Task<MemoryDocument> MoveAsync(MemoryMoveRequest request, CancellationToken cancellationToken);
+    Task<MemoryDeleteResult> DeleteAsync(MemoryDeleteRequest request, CancellationToken cancellationToken);
+    Task<ProjectCleanupPreviewResult> PreviewProjectCleanupAsync(ProjectCleanupPreviewRequest request, CancellationToken cancellationToken);
+    Task<ProjectCleanupApplyResult> ApplyProjectCleanupAsync(ProjectCleanupApplyRequest request, CancellationToken cancellationToken);
     Task<MemoryDocument?> GetAsync(Guid id, CancellationToken cancellationToken);
     Task<IReadOnlyList<MemorySearchHit>> SearchAsync(MemorySearchRequest request, CancellationToken cancellationToken);
     Task<WorkingContextResult> BuildWorkingContextAsync(WorkingContextRequest request, CancellationToken cancellationToken);

@@ -48,6 +48,84 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     }
 
     [DockerRequiredFact]
+    public async Task Memory_Lifecycle_Should_Move_Archive_Restore_Delete_And_Cleanup_Tombstones()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var suffix = Guid.NewGuid().ToString("N");
+        var sourceProjectId = $"Lifecycle_Source_{suffix[..8]}";
+        var targetProjectId = $"Lifecycle_Target_{suffix[..8]}";
+
+        var created = await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: $"lifecycle:{suffix}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: "Lifecycle memory",
+                Content: "Lifecycle memory validates move, archive, restore, and delete.",
+                Summary: "Lifecycle memory",
+                SourceType: "test",
+                SourceRef: "integration/lifecycle",
+                Tags: ["lifecycle"],
+                Importance: 0.8m,
+                Confidence: 0.9m,
+                ProjectId: sourceProjectId),
+            CancellationToken.None);
+
+        var moved = await memoryService.MoveAsync(
+            new MemoryMoveRequest(created.Id, targetProjectId, sourceProjectId, "integration test move"),
+            CancellationToken.None);
+        moved.ProjectId.Should().Be(targetProjectId);
+
+        var archived = await memoryService.ArchiveAsync(
+            new MemoryArchiveRequest(created.Id, targetProjectId, Archived: true, "integration test archive"),
+            CancellationToken.None);
+        archived.Status.Should().Be(MemoryStatus.Archived);
+
+        var restored = await memoryService.ArchiveAsync(
+            new MemoryArchiveRequest(created.Id, targetProjectId, Archived: false, "integration test restore"),
+            CancellationToken.None);
+        restored.Status.Should().Be(MemoryStatus.Active);
+
+        var deleted = await memoryService.DeleteAsync(
+            new MemoryDeleteRequest(created.Id, targetProjectId, "integration test delete"),
+            CancellationToken.None);
+        deleted.Deleted.Should().BeTrue();
+        (await dbContext.MemoryItems.AnyAsync(x => x.Id == created.Id, CancellationToken.None)).Should().BeFalse();
+
+        var tombstone = await memoryService.UpsertAsync(
+            new MemoryUpsertRequest(
+                ExternalKey: $"lifecycle:tombstone:{suffix}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: "MIGRATED lifecycle tombstone",
+                Content: "Moved to Lifecycle_Target.",
+                Summary: "Moved to Lifecycle_Target.",
+                SourceType: "manual-cleanup",
+                SourceRef: "integration/lifecycle",
+                Tags: ["source-cleared", "cleanup"],
+                Importance: 0.01m,
+                Confidence: 0.01m,
+                MetadataJson: """{"cleanupState":"source-cleared","migratedTo":"Lifecycle_Target"}""",
+                ProjectId: sourceProjectId),
+            CancellationToken.None);
+
+        var preview = await memoryService.PreviewProjectCleanupAsync(
+            new ProjectCleanupPreviewRequest(sourceProjectId),
+            CancellationToken.None);
+        preview.Candidates.Should().ContainSingle(x => x.Id == tombstone.Id && x.IsSafeToApply);
+
+        var cleanup = await memoryService.ApplyProjectCleanupAsync(
+            new ProjectCleanupApplyRequest(sourceProjectId, [tombstone.Id], ProjectCleanupAction.Delete, "integration test cleanup"),
+            CancellationToken.None);
+        cleanup.DeletedCount.Should().Be(1);
+        cleanup.AppliedMemoryIds.Should().Contain(tombstone.Id);
+        (await dbContext.MemoryItems.AnyAsync(x => x.Id == tombstone.Id, CancellationToken.None)).Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
     public async Task ProcessJob_WithOwnerActor_Should_Refresh_MemoryGraphIndex_Without_Scope_Warning()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

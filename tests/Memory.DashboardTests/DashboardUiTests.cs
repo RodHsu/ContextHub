@@ -303,6 +303,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.IndexOf("日誌", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
         overviewHtml.IndexOf("收件匣", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("偏好", StringComparison.Ordinal));
         overviewHtml.IndexOf("資料庫檢視", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("安全管理", StringComparison.Ordinal));
+        overviewHtml.IndexOf("安全管理", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("MCP 說明", StringComparison.Ordinal));
+        overviewHtml.IndexOf("MCP 說明", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("系統設定", StringComparison.Ordinal));
 
         using var runtimeResponse = await client.GetAsync("/runtime");
         runtimeResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -438,6 +440,21 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         settingsHtml.Should().Contain("記憶資料");
         settingsHtml.Should().Contain("使用者偏好");
         settingsHtml.Should().Contain("重啟 app 容器");
+
+        using var mcpToolsResponse = await client.GetAsync("/mcp-tools");
+        mcpToolsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var mcpToolsHtml = WebUtility.HtmlDecode(await mcpToolsResponse.Content.ReadAsStringAsync());
+        mcpToolsHtml.Should().Contain("MCP / API 工具說明");
+        mcpToolsHtml.Should().Contain("連線面總覽");
+        mcpToolsHtml.Should().Contain("Direct MCP 工具");
+        mcpToolsHtml.Should().Contain("ChatGPT Gateway 工具");
+        mcpToolsHtml.Should().Contain("REST API 摘要");
+        mcpToolsHtml.Should().Contain("project_cleanup_preview");
+        mcpToolsHtml.Should().Contain("project_cleanup_apply");
+        mcpToolsHtml.Should().Contain("memory_delete");
+        mcpToolsHtml.Should().Contain("需核准");
+        mcpToolsHtml.Should().Contain("中文說明");
+        mcpToolsHtml.Should().Contain("mcp-tools-page-stack");
 
         using var memoriesResponse = await client.GetAsync("/memories");
         memoriesResponse.StatusCode.Should().Be(HttpStatusCode.OK);

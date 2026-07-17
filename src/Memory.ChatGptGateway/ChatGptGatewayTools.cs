@@ -71,6 +71,10 @@ public sealed class ChatGptGatewayTools(
             cancellationToken);
     }
 
+    [McpServerTool(UseStructuredContent = true), Description("Preview safe project cleanup candidates for one explicitly authorized ProjectId. This is read-only and never deletes or archives memory.")]
+    public Task<ProjectCleanupPreviewResult> project_cleanup_preview(ProjectCleanupPreviewRequest request, CancellationToken cancellationToken = default)
+        => memoryService.PreviewProjectCleanupAsync(request, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Build a structured ContextHub working context for the current task.")]
     public Task<WorkingContextResult> build_working_context(WorkingContextRequest request, CancellationToken cancellationToken = default)
         => memoryService.BuildWorkingContextAsync(
@@ -144,6 +148,22 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to update a durable ContextHub memory item. Approval is required before the memory is changed.")]
     public Task<ChatGptProposalResult> memory_update(MemoryUpdateRequest request, CancellationToken cancellationToken = default)
         => CreateProposalAsync("memory_update", request.ProjectId ?? ProjectContext.DefaultProjectId, "Update memory item", $"Update memory item {request.Id:D}.", request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to archive or restore a durable ContextHub memory item. Approval is required before the memory is changed.")]
+    public Task<ChatGptProposalResult> memory_archive(MemoryArchiveRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("memory_archive", request.ProjectId ?? ProjectContext.DefaultProjectId, "Archive memory item", $"Change archive state for memory item {request.Id:D}.", request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to move a durable ContextHub memory item to another ProjectId. Approval is required before the memory is changed.")]
+    public Task<ChatGptProposalResult> memory_move(MemoryMoveRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("memory_move", request.SourceProjectId ?? request.TargetProjectId, "Move memory item", $"Move memory item {request.Id:D} to {request.TargetProjectId}.", request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to permanently delete one durable ContextHub memory item. Approval is required before the memory is changed.")]
+    public Task<ChatGptProposalResult> memory_delete(MemoryDeleteRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("memory_delete", request.ProjectId ?? ProjectContext.DefaultProjectId, "Delete memory item", $"Delete memory item {request.Id:D}.", request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to archive or delete selected safe cleanup candidates in one ProjectId. Approval is required before memory is changed.")]
+    public Task<ChatGptProposalResult> project_cleanup_apply(ProjectCleanupApplyRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("project_cleanup_apply", request.ProjectId, "Apply project cleanup", $"Apply {request.Action} cleanup to {request.MemoryIds?.Count ?? 0} memory item(s) in {request.ProjectId}.", request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to create or update a durable ContextHub user preference. Approval is required before the preference is changed.")]
     public Task<ChatGptProposalResult> user_preference_upsert(UserPreferenceUpsertRequest request, CancellationToken cancellationToken = default)

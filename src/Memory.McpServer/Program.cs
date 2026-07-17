@@ -396,6 +396,42 @@ memories.MapGet("/{id:guid}/details", async (Guid id, IDashboardQueryService ser
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
 
+memories.MapPost("/{id:guid}/archive", async (Guid id, MemoryArchiveBody request, IMemoryService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.ArchiveAsync(new MemoryArchiveRequest(id, request.ProjectId, request.Archived, request.Reason), cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
+memories.MapPost("/{id:guid}/restore", async (Guid id, MemoryArchiveBody request, IMemoryService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.ArchiveAsync(new MemoryArchiveRequest(id, request.ProjectId, Archived: false, request.Reason), cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
+memories.MapPost("/{id:guid}/move", async (Guid id, MemoryMoveBody request, IMemoryService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.MoveAsync(new MemoryMoveRequest(id, request.TargetProjectId, request.SourceProjectId, request.Reason), cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
+memories.MapPost("/{id:guid}/delete", async (Guid id, MemoryDeleteBody request, IMemoryService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.DeleteAsync(new MemoryDeleteRequest(id, request.ProjectId, request.Reason), cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
+memories.MapPost("/project-cleanup/preview", async (ProjectCleanupPreviewRequest request, IMemoryService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.PreviewProjectCleanupAsync(request, cancellationToken);
+    return Results.Ok(result);
+});
+
+memories.MapPost("/project-cleanup/apply", async (ProjectCleanupApplyRequest request, IMemoryService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.ApplyProjectCleanupAsync(request, cancellationToken);
+    return Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
 memories.MapPost("/export", async (MemoryExportRequest request, IMemoryTransferService service, CancellationToken cancellationToken) =>
 {
     var result = await service.ExportAsync(request, cancellationToken);
@@ -1802,6 +1838,9 @@ internal static class ApiValidation
 }
 
 internal sealed record UserPreferenceArchiveBody(bool Archived = true);
+internal sealed record MemoryArchiveBody(bool Archived = true, string? ProjectId = null, string? Reason = null);
+internal sealed record MemoryMoveBody(string TargetProjectId, string? SourceProjectId = null, string? Reason = null);
+internal sealed record MemoryDeleteBody(string? ProjectId = null, string? Reason = null);
 internal sealed record ChatGptProposalDecisionBody(string? Note = null);
 internal sealed record TenantUserCreateBody(
     string Username,

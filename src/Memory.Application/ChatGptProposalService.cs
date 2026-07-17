@@ -23,6 +23,10 @@ public sealed class ChatGptProposalService(
     {
         "memory_upsert",
         "memory_update",
+        "memory_archive",
+        "memory_move",
+        "memory_delete",
+        "project_cleanup_apply",
         "user_preference_upsert",
         "user_preference_archive",
         "suggested_action_accept",
@@ -239,6 +243,10 @@ public sealed class ChatGptProposalService(
         {
             "memory_upsert" => (await memoryService.UpsertAsync(Deserialize<MemoryUpsertRequest>(payloadJson), cancellationToken)).Id,
             "memory_update" => (await memoryService.UpdateAsync(Deserialize<MemoryUpdateRequest>(payloadJson), cancellationToken)).Id,
+            "memory_archive" => (await memoryService.ArchiveAsync(Deserialize<MemoryArchiveRequest>(payloadJson), cancellationToken)).Id,
+            "memory_move" => (await memoryService.MoveAsync(Deserialize<MemoryMoveRequest>(payloadJson), cancellationToken)).Id,
+            "memory_delete" => (await memoryService.DeleteAsync(Deserialize<MemoryDeleteRequest>(payloadJson), cancellationToken)).Id,
+            "project_cleanup_apply" => (await memoryService.ApplyProjectCleanupAsync(Deserialize<ProjectCleanupApplyRequest>(payloadJson), cancellationToken)).AppliedMemoryIds.FirstOrDefault(),
             "user_preference_upsert" => (await memoryService.UpsertUserPreferenceAsync(Deserialize<UserPreferenceUpsertRequest>(payloadJson), cancellationToken)).Id,
             "user_preference_archive" => (await memoryService.ArchiveUserPreferenceAsync(Deserialize<UserPreferenceArchiveRequest>(payloadJson), cancellationToken)).Id,
             "suggested_action_accept" => (await suggestedActionService.AcceptAsync(Deserialize<HubActionRequest>(payloadJson).Id, cancellationToken)).Action.Id,
