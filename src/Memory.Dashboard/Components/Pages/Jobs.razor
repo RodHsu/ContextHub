@@ -339,7 +339,7 @@
     private bool CanApplyRetentionDelete => !RetentionActionDisabled &&
         _retentionResult?.Mode == MemoryDataRetentionRunMode.PreviewDelete &&
         _retentionResult.AutoDeleteCandidateCount > 0;
-    private string RetentionModeText => _retentionResult?.Mode.ToString() ?? "Classification";
+    private string RetentionModeText => _retentionResult is null ? "分類" : FormatRetentionMode(_retentionResult.Mode);
     private long LastRetentionAutoDeleteCount => _retentionResult?.AutoDeleteCandidateCount ?? ReadRetentionCount(_lastRetentionRun, "autoDeleteCandidateCount");
     private long LastRetentionReviewCount => _retentionResult?.ReviewCandidateCount ?? ReadRetentionCount(_lastRetentionRun, "reviewCandidateCount");
 
@@ -624,6 +624,16 @@
 
     private static string CandidateSignalText(MemoryDataRetentionCandidateResult candidate)
         => $"hit {DashboardFormatting.Integer(candidate.RecentHitCount)}、link {DashboardFormatting.Integer(candidate.LinkDegree)}、I {candidate.Importance:0.##}、C {candidate.Confidence:0.##}";
+
+    private static string FormatRetentionMode(MemoryDataRetentionRunMode mode)
+        => mode switch
+        {
+            MemoryDataRetentionRunMode.Classify => "分類",
+            MemoryDataRetentionRunMode.PreviewDelete => "預覽刪除",
+            MemoryDataRetentionRunMode.ApplyAutoDelete => "套用自動刪除",
+            MemoryDataRetentionRunMode.ApplyMaintenanceCleanup => "結構清理",
+            _ => mode.ToString()
+        };
 
     private static long ReadRetentionCount(MaintenanceRunResult? run, string propertyName)
     {

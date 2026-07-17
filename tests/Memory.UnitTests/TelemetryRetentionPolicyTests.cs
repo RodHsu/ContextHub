@@ -189,6 +189,9 @@ public sealed class MemoryDataRetentionPolicyTests
         policy.AutoApplyEnabled.Should().BeFalse();
         policy.BatchSize.Should().Be(1_000);
         policy.DelayBetweenBatchesMs.Should().Be(150);
+        policy.RevisionRetentionDays.Should().Be(90);
+        policy.MinRevisionsToKeep.Should().Be(20);
+        policy.MaxChunksPerMemoryItem.Should().Be(5_000);
         policy.CommandTimeoutSeconds.Should().Be(300);
         policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(20));
     }
@@ -209,7 +212,10 @@ public sealed class MemoryDataRetentionPolicyTests
             DelayBetweenBatchesMs: 0,
             CommandTimeoutSeconds: 45,
             MaxDurationMinutes: 10,
-            PreviewOnly: true);
+            PreviewOnly: true,
+            RevisionRetentionDays: 45,
+            MinRevisionsToKeep: 7,
+            MaxChunksPerMemoryItem: 250);
 
         var policy = MemoryDataRetentionPolicy.Create(new MemoryDataRetentionOptions(), request);
 
@@ -222,6 +228,9 @@ public sealed class MemoryDataRetentionPolicyTests
         policy.PreviewLimit.Should().Be(20);
         policy.BatchSize.Should().Be(5);
         policy.DelayBetweenBatchesMs.Should().Be(0);
+        policy.RevisionRetentionDays.Should().Be(45);
+        policy.MinRevisionsToKeep.Should().Be(7);
+        policy.MaxChunksPerMemoryItem.Should().Be(250);
         policy.CommandTimeoutSeconds.Should().Be(45);
         policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(10));
     }
@@ -240,6 +249,9 @@ public sealed class MemoryDataRetentionPolicyTests
             PreviewLimit = 0,
             BatchSize = 0,
             DelayBetweenBatchesMs = -1,
+            RevisionRetentionDays = 0,
+            MinRevisionsToKeep = 0,
+            MaxChunksPerMemoryItem = 0,
             CommandTimeoutSeconds = 0,
             MaxDurationMinutes = 0
         };
@@ -254,7 +266,10 @@ public sealed class MemoryDataRetentionPolicyTests
             BatchSize: 250_000,
             DelayBetweenBatchesMs: 120_000,
             CommandTimeoutSeconds: 10_000,
-            MaxDurationMinutes: 10_000);
+            MaxDurationMinutes: 10_000,
+            RevisionRetentionDays: 10_000,
+            MinRevisionsToKeep: 10_000,
+            MaxChunksPerMemoryItem: 250_000);
 
         var policy = MemoryDataRetentionPolicy.Create(options, request);
 
@@ -267,6 +282,9 @@ public sealed class MemoryDataRetentionPolicyTests
         policy.PreviewLimit.Should().Be(500);
         policy.BatchSize.Should().Be(100_000);
         policy.DelayBetweenBatchesMs.Should().Be(60_000);
+        policy.RevisionRetentionDays.Should().Be(3650);
+        policy.MinRevisionsToKeep.Should().Be(1_000);
+        policy.MaxChunksPerMemoryItem.Should().Be(100_000);
         policy.CommandTimeoutSeconds.Should().Be(3600);
         policy.MaxDuration.Should().Be(TimeSpan.FromMinutes(30));
     }

@@ -6,7 +6,7 @@
 <PageTitle>Context Hub | 記憶資料</PageTitle>
 
 <PageViewport Title="記憶資料"
-              Subtitle="查詢 memory items，展開 revisions、chunks 與 vectors。"
+              Subtitle="查詢記憶條目，展開版本紀錄、內容片段與向量。"
               BodyClass="page-viewport-body memories-page-body">
     <Actions>
         <div class="page-actions-status">
@@ -199,7 +199,7 @@
                                     <div class="table-subtitle">@DashboardText.Label(item.Scope)</div>
                                     @if (item.IsReadOnly)
                                     {
-                                        <div class="table-subtitle">summary / readonly</div>
+                                        <div class="table-subtitle">綜合摘要 / 唯讀</div>
                                     }
                                 </td>
                                 <td>
@@ -223,7 +223,7 @@
             <div class="panel-scroll-body detail-scroll-shell memory-detail-shell">
                 @if (_selected is null)
                 {
-                    <div class="empty-inline">點選左側 memory item 後顯示 revisions、chunks 與 vectors。</div>
+                    <div class="empty-inline">點選左側記憶條目後顯示版本紀錄、內容片段與向量。</div>
                 }
                 else
                 {
@@ -243,13 +243,13 @@
                         @if (_selected.SourceContext is not null)
                         {
                             <section class="memory-detail-section">
-                                <div class="subpanel-title">Source Context</div>
+                                <div class="subpanel-title">來源脈絡</div>
                                 <dl class="definition-grid">
-                                    <div><dt>Connector</dt><dd>@(_selected.SourceContext.ConnectorName ?? "n/a")</dd></div>
-                                    <div><dt>Connector Id</dt><dd>@(_selected.SourceContext.SourceConnectionId?.ToString() ?? "n/a")</dd></div>
-                                    <div><dt>Source Version</dt><dd>@(_selected.SourceContext.SourceVersion ?? "n/a")</dd></div>
+                                    <div><dt>連接器</dt><dd>@(_selected.SourceContext.ConnectorName ?? "n/a")</dd></div>
+                                    <div><dt>連接器 ID</dt><dd>@(_selected.SourceContext.SourceConnectionId?.ToString() ?? "n/a")</dd></div>
+                                    <div><dt>來源版本</dt><dd>@(_selected.SourceContext.SourceVersion ?? "n/a")</dd></div>
                                     <div>
-                                        <dt>Last Sync</dt>
+                                        <dt>最近同步</dt>
                                         <dd>
                                             @if (_selected.SourceContext.LastSuccessfulSyncAt.HasValue)
                                             {
@@ -269,11 +269,11 @@
                             </section>
                         }
 
-                        <section class="detail-reader memory-detail-content-reader" aria-label="Memory content reader">
+                        <section class="detail-reader memory-detail-content-reader" aria-label="記憶內容閱讀區">
                             <div class="detail-reader-header">
                                 <div>
                                     <div class="detail-reader-title">內容</div>
-                                    <div class="detail-reader-meta">Markdown / source text</div>
+                                    <div class="detail-reader-meta">Markdown / 來源文字</div>
                                 </div>
                                 <button class="ghost-button detail-reader-copy-button"
                                         type="button"
@@ -287,7 +287,7 @@
                         <section class="memory-detail-section">
                             <div class="section-heading-row">
                                 <div>
-                                    <div class="subpanel-title">Revisions</div>
+                                    <div class="subpanel-title">版本紀錄</div>
                                     <div class="section-heading-meta">@DashboardFormatting.Integer(_selected.Revisions.Count) 筆版本紀錄</div>
                                 </div>
                             </div>
@@ -307,7 +307,7 @@
                         <section class="memory-detail-section">
                             <div class="section-heading-row">
                                 <div>
-                                    <div class="subpanel-title">Chunks</div>
+                                    <div class="subpanel-title">內容片段</div>
                                     <div class="section-heading-meta">@DashboardFormatting.Integer(_selected.Chunks.Count) 個內容片段</div>
                                 </div>
                             </div>
@@ -323,7 +323,7 @@
                                             </div>
                                             <button class="ghost-button detail-reader-copy-button"
                                                     type="button"
-                                                    @onclick="@(() => CopyTextAsync(chunk.ChunkText, $"已複製 chunk #{chunk.ChunkIndex}。"))">
+                                                    @onclick="@(() => CopyTextAsync(chunk.ChunkText, $"已複製內容片段 #{chunk.ChunkIndex}。"))">
                                                 複製
                                             </button>
                                         </div>
@@ -336,7 +336,7 @@
                         @if (_selected.Findings?.Count > 0)
                         {
                             <section class="memory-detail-section">
-                                <div class="subpanel-title">Findings</div>
+                                <div class="subpanel-title">治理發現</div>
                                 <div class="stack-list">
                                     @foreach (var finding in _selected.Findings)
                                     {
@@ -353,7 +353,7 @@
                         @if (_selected.Links?.Count > 0)
                         {
                             <section class="memory-detail-section">
-                                <div class="subpanel-title">Links</div>
+                                <div class="subpanel-title">關聯連結</div>
                                 <div class="stack-list">
                                     @foreach (var link in _selected.Links)
                                     {

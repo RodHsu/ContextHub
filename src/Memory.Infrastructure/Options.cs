@@ -141,6 +141,9 @@ public sealed class MemoryDataRetentionOptions
     public int PreviewLimit { get; set; } = 50;
     public int BatchSize { get; set; } = 1_000;
     public int DelayBetweenBatchesMs { get; set; } = 150;
+    public int RevisionRetentionDays { get; set; } = 90;
+    public int MinRevisionsToKeep { get; set; } = 20;
+    public int MaxChunksPerMemoryItem { get; set; } = 5_000;
     public string RunAtLocalTime { get; set; } = "04:00";
     public string TimeZone { get; set; } = "Asia/Taipei";
     public int CommandTimeoutSeconds { get; set; } = 300;

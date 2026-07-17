@@ -2008,6 +2008,121 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Memory_Data_Retention_Cleanup_Should_Prune_Old_Revisions_And_Overflow_Chunks()
+    {
+        var memoryId = Guid.Parse("96000000-0000-0000-0000-000000000001");
+        var projectId = "retention-cleanup-project";
+        var now = DateTimeOffset.UtcNow;
+        var chunkIds = Enumerable.Range(0, 5)
+            .Select(index => Guid.Parse($"96000000-0000-0000-0001-{index + 1:000000000000}"))
+            .ToArray();
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            dbContext.MemoryItems.Add(new MemoryItem
+            {
+                Id = memoryId,
+                ProjectId = projectId,
+                ExternalKey = "retention-cleanup-memory",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Fact,
+                Title = "Retention cleanup memory",
+                Content = "Retention cleanup keeps the memory item while trimming maintenance data.",
+                Summary = "Retention cleanup memory",
+                Tags = ["retention-cleanup"],
+                SourceType = "test",
+                SourceRef = "api-contract",
+                Importance = 0.8m,
+                Confidence = 0.9m,
+                Version = 5,
+                Status = MemoryStatus.Active,
+                MetadataJson = "{}",
+                CreatedAt = now.AddDays(-40),
+                UpdatedAt = now.AddDays(-1)
+            });
+
+            dbContext.MemoryItemRevisions.AddRange(Enumerable.Range(1, 5).Select(version => new MemoryItemRevision
+            {
+                MemoryItemId = memoryId,
+                Version = version,
+                Title = $"Revision {version}",
+                Content = $"Revision content {version}",
+                Summary = $"Revision summary {version}",
+                MetadataJson = "{}",
+                ChangedBy = "test",
+                CreatedAt = now.AddDays(-40 + version)
+            }));
+
+            var chunks = chunkIds.Select((id, index) => new MemoryItemChunk
+            {
+                Id = id,
+                MemoryItemId = memoryId,
+                ChunkKind = ChunkKind.Document,
+                ChunkIndex = index,
+                ChunkText = $"chunk {index}",
+                MetadataJson = "{}",
+                CreatedAt = now.AddDays(-1)
+            }).ToArray();
+            dbContext.MemoryItemChunks.AddRange(chunks);
+
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+            foreach (var chunk in chunks)
+            {
+                await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+                    INSERT INTO memory_chunk_vectors (id, chunk_id, model_key, dimension, status, embedding, created_at)
+                    VALUES ({Guid.NewGuid()}, {chunk.Id}, {"test-model"}, {3}, {VectorStatus.Active.ToString()}, {"[0,0,0]"}::vector, {now.AddDays(-1)});
+                    """);
+            }
+        }
+
+        using var client = environment.GetFactory().CreateClient();
+        using var response = await client.PostAsJsonAsync(
+            "/api/maintenance/memory-data-retention/run",
+            new MemoryDataRetentionRunRequest(
+                TriggeredBy: "memory-retention-cleanup-test",
+                Mode: MemoryDataRetentionRunMode.ApplyMaintenanceCleanup,
+                BatchSize: 100,
+                DelayBetweenBatchesMs: 0,
+                CommandTimeoutSeconds: 30,
+                MaxDurationMinutes: 5,
+                IncludeCandidateDetails: false,
+                RevisionRetentionDays: 10,
+                MinRevisionsToKeep: 2,
+                MaxChunksPerMemoryItem: 3));
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<MemoryDataRetentionRunResult>();
+        result.Should().NotBeNull();
+        result!.Mode.Should().Be(MemoryDataRetentionRunMode.ApplyMaintenanceCleanup);
+        result.DeletedMemoryItems.Should().Be(0);
+        result.DeletedRevisions.Should().Be(3);
+        result.DeletedChunks.Should().Be(2);
+        result.DeletedVectors.Should().Be(2);
+        result.AffectedProjectIds.Should().Contain(projectId);
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            (await dbContext.MemoryItems.AnyAsync(x => x.Id == memoryId)).Should().BeTrue();
+            (await dbContext.MemoryItemRevisions.Where(x => x.MemoryItemId == memoryId).Select(x => x.Version).OrderBy(x => x).ToListAsync())
+                .Should().Equal([4, 5]);
+            (await dbContext.MemoryItemChunks.Where(x => x.MemoryItemId == memoryId).Select(x => x.ChunkIndex).OrderBy(x => x).ToListAsync())
+                .Should().Equal([0, 1, 2]);
+            (await dbContext.MemoryChunkVectors.CountAsync(x => chunkIds.Contains(x.ChunkId))).Should().Be(3);
+
+            var run = await dbContext.MaintenanceRuns.SingleAsync(x => x.Id == result.RunId);
+            using var resultDocument = JsonDocument.Parse(run.ResultJson);
+            resultDocument.RootElement.GetProperty("prunedRevisions").GetInt64().Should().Be(3);
+            resultDocument.RootElement.GetProperty("prunedChunks").GetInt64().Should().Be(2);
+            resultDocument.RootElement.GetProperty("prunedVectors").GetInt64().Should().Be(2);
+            resultDocument.RootElement.GetProperty("maxChunksPerMemoryItem").GetInt32().Should().Be(3);
+            resultDocument.RootElement.GetProperty("minRevisionsToKeep").GetInt32().Should().Be(2);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Memories_Endpoint_Should_Allow_Querying_By_ProjectId_Without_Project_Filter()
     {
         using (var scope = environment.GetFactory().Services.CreateScope())

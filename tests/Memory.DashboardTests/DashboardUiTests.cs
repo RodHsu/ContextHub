@@ -453,6 +453,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         memoriesHtml.Should().Contain("專案與範圍");
         memoriesHtml.Should().Contain("類型與狀態");
         memoriesHtml.Should().Contain("來源與標籤");
+        memoriesHtml.Should().Contain("查詢記憶條目，展開版本紀錄、內容片段與向量。");
+        memoriesHtml.Should().Contain("點選左側記憶條目後顯示版本紀錄、內容片段與向量。");
+        memoriesHtml.Should().NotContain("展開 revisions、chunks 與 vectors");
+        memoriesHtml.Should().NotContain("點選左側 memory item 後顯示 revisions、chunks 與 vectors");
 
         using var graphResponse = await client.GetAsync("/graph");
         graphResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -1581,7 +1585,7 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
     private static MemoryDataRetentionRunResult BuildRetentionResult(MemoryDataRetentionRunMode mode)
     {
         var now = DateTimeOffset.UtcNow;
-        var thresholds = new MemoryDataRetentionPolicyThresholds(365, 180, 0, 0, 0.55m, 0.70m, 50);
+        var thresholds = new MemoryDataRetentionPolicyThresholds(365, 180, 0, 0, 0.55m, 0.70m, 50, 90, 20, 5000);
         var autoDeleteCandidates = new[]
         {
             new MemoryDataRetentionCandidateResult(

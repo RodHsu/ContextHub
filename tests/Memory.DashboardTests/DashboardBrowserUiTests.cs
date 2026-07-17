@@ -405,6 +405,11 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
             await page.Locator(".memories-table tbody tr").First.ClickAsync();
             await page.Locator(".memory-detail-list-scroll-shell").First.WaitForAsync();
+            await page.Locator(".memory-detail-body .subpanel-title", new() { HasTextString = "來源脈絡" }).WaitForAsync();
+            await page.Locator(".memory-detail-body .subpanel-title", new() { HasTextString = "版本紀錄" }).WaitForAsync();
+            await page.Locator(".memory-detail-body .subpanel-title", new() { HasTextString = "內容片段" }).WaitForAsync();
+            (await page.GetByText("Revisions").CountAsync()).Should().Be(0);
+            (await page.GetByText("Chunks").CountAsync()).Should().Be(0);
             var detailShells = page.Locator(".memory-detail-list-scroll-shell");
             (await detailShells.CountAsync()).Should().BeGreaterThanOrEqualTo(2);
             foreach (var index in Enumerable.Range(0, await detailShells.CountAsync()))
@@ -1762,9 +1767,9 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     const contentReader = document.querySelector('.memory-detail-content-reader .detail-reader-body');
                     const chunkReader = document.querySelector('.memory-chunk-card .chunk-reader-body');
                     const revisionSection = Array.from(document.querySelectorAll('.memory-detail-section'))
-                        .find(section => section.textContent?.includes('Revisions'));
+                        .find(section => section.textContent?.includes('版本紀錄'));
                     const chunkSection = Array.from(document.querySelectorAll('.memory-detail-section'))
-                        .find(section => section.textContent?.includes('Chunks'));
+                        .find(section => section.textContent?.includes('內容片段'));
                     const rectOf = element => {
                         const rect = element?.getBoundingClientRect();
                         return rect ? {

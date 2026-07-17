@@ -475,7 +475,8 @@ public enum MemoryDataRetentionRunMode
 {
     Classify,
     PreviewDelete,
-    ApplyAutoDelete
+    ApplyAutoDelete,
+    ApplyMaintenanceCleanup
 }
 
 public enum MemoryRetentionRecommendedAction
@@ -505,7 +506,10 @@ public sealed record MemoryDataRetentionRunRequest(
     int? PreviewLimit = null,
     bool IncludeCandidateDetails = true,
     IReadOnlyList<string>? ProjectIds = null,
-    Guid? TenantId = null);
+    Guid? TenantId = null,
+    int? RevisionRetentionDays = null,
+    int? MinRevisionsToKeep = null,
+    int? MaxChunksPerMemoryItem = null);
 
 public sealed record MemoryDataRetentionPolicyThresholds(
     int ArchivedItemsRetentionDays,
@@ -514,7 +518,10 @@ public sealed record MemoryDataRetentionPolicyThresholds(
     int MaxLinkDegree,
     decimal MaxImportance,
     decimal MaxConfidence,
-    int PreviewLimit);
+    int PreviewLimit,
+    int RevisionRetentionDays,
+    int MinRevisionsToKeep,
+    int MaxChunksPerMemoryItem);
 
 public sealed record MemoryDataRetentionCandidateResult(
     Guid MemoryId,

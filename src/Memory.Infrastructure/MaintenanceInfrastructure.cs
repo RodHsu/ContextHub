@@ -2817,6 +2817,9 @@ public sealed record MemoryDataRetentionPolicy(
     int PreviewLimit,
     int BatchSize,
     int DelayBetweenBatchesMs,
+    int RevisionRetentionDays,
+    int MinRevisionsToKeep,
+    int MaxChunksPerMemoryItem,
     int CommandTimeoutSeconds,
     TimeSpan MaxDuration,
     bool AutoApplyEnabled)
@@ -2834,6 +2837,9 @@ public sealed record MemoryDataRetentionPolicy(
             Math.Clamp(request.PreviewLimit ?? options.PreviewLimit, 1, 500),
             Math.Clamp(request.BatchSize ?? options.BatchSize, 1, 100_000),
             Math.Clamp(request.DelayBetweenBatchesMs ?? options.DelayBetweenBatchesMs, 0, 60_000),
+            Math.Clamp(request.RevisionRetentionDays ?? options.RevisionRetentionDays, 1, 3650),
+            Math.Clamp(request.MinRevisionsToKeep ?? options.MinRevisionsToKeep, 1, 1_000),
+            Math.Clamp(request.MaxChunksPerMemoryItem ?? options.MaxChunksPerMemoryItem, 1, 100_000),
             Math.Clamp(request.CommandTimeoutSeconds ?? options.CommandTimeoutSeconds, 1, 3600),
             TimeSpan.FromMinutes(Math.Clamp(request.MaxDurationMinutes ?? options.MaxDurationMinutes, 1, 30)),
             options.AutoApplyEnabled);
@@ -2846,7 +2852,10 @@ public sealed record MemoryDataRetentionPolicy(
             MaxLinkDegree,
             MaxImportance,
             MaxConfidence,
-            PreviewLimit);
+            PreviewLimit,
+            RevisionRetentionDays,
+            MinRevisionsToKeep,
+            MaxChunksPerMemoryItem);
 }
 
 public sealed class MemoryDataRetentionService(
@@ -3013,6 +3022,9 @@ public sealed class MemoryDataRetentionService(
                 previewLimit = policy.PreviewLimit,
                 batchSize = policy.BatchSize,
                 delayBetweenBatchesMs = policy.DelayBetweenBatchesMs,
+                revisionRetentionDays = policy.RevisionRetentionDays,
+                minRevisionsToKeep = policy.MinRevisionsToKeep,
+                maxChunksPerMemoryItem = policy.MaxChunksPerMemoryItem,
                 commandTimeoutSeconds = policy.CommandTimeoutSeconds,
                 maxDurationMinutes = policy.MaxDuration.TotalMinutes,
                 cutoffUtc = cutoff,
@@ -3047,15 +3059,20 @@ public sealed class MemoryDataRetentionService(
         long deletedRevisions = 0;
         long deletedChunks = 0;
         long deletedVectors = 0;
+        long prunedRevisions = 0;
+        long prunedChunks = 0;
+        long prunedVectors = 0;
         string? stoppedReason = null;
         MemoryDataRetentionClassification classification = MemoryDataRetentionClassification.Empty(policy);
         IReadOnlyList<string> affectedProjectIds = [];
+        var affectedProjectSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         try
         {
             var projectIds = (request.ProjectIds ?? []).Select(projectId => ProjectContext.Normalize(projectId)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             classification = await ClassifyAsync(connection, cutoff, hitWindowStart, policy, request.IncludeCandidateDetails, projectIds, request.TenantId, cancellationToken);
             affectedProjectIds = await ReadAffectedProjectIdsAsync(connection, cutoff, hitWindowStart, policy, projectIds, request.TenantId, cancellationToken);
+            affectedProjectSet.UnionWith(affectedProjectIds);
 
             if (mode == MemoryDataRetentionRunMode.PreviewDelete)
             {
@@ -3116,8 +3133,21 @@ public sealed class MemoryDataRetentionService(
                         await Task.Delay(TimeSpan.FromMilliseconds(policy.DelayBetweenBatchesMs), cancellationToken);
                     }
                 }
+            }
 
-                if (deletedItems > 0)
+            if (mode is MemoryDataRetentionRunMode.ApplyAutoDelete or MemoryDataRetentionRunMode.ApplyMaintenanceCleanup)
+            {
+                var cleanup = await PruneMaintenanceDataAsync(connection, startedAt, policy, cancellationToken);
+                prunedRevisions = cleanup.DeletedRevisions;
+                prunedChunks = cleanup.DeletedChunks;
+                prunedVectors = cleanup.DeletedVectors;
+                deletedRevisions += prunedRevisions;
+                deletedChunks += prunedChunks;
+                deletedVectors += prunedVectors;
+                affectedProjectSet.UnionWith(cleanup.AffectedProjectIds);
+                affectedProjectIds = affectedProjectSet.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+
+                if (deletedItems > 0 || prunedChunks > 0)
                 {
                     await BumpCacheVersionsAsync(affectedProjectIds, cancellationToken);
                 }
@@ -3140,6 +3170,9 @@ public sealed class MemoryDataRetentionService(
                 policy,
                 false,
                 stoppedReason,
+                prunedRevisions,
+                prunedChunks,
+                prunedVectors,
                 completed: true);
             await UpdateRunAsync(run.Id, MaintenanceRunStatus.Completed, completedAt, completedJson, string.Empty, cancellationToken);
             return BuildRunResult(run.Id, cutoff, deletedItems, deletedLinks, deletedRevisions, deletedChunks, deletedVectors, affectedProjectIds, request.PreviewOnly, mode, classification, startedAt, completedAt, completedJson);
@@ -3164,6 +3197,9 @@ public sealed class MemoryDataRetentionService(
                 policy,
                 false,
                 stoppedReason,
+                prunedRevisions,
+                prunedChunks,
+                prunedVectors,
                 completed: true,
                 error: ex.Message);
             await UpdateRunAsync(run.Id, MaintenanceRunStatus.Failed, completedAt, failedJson, ex.Message, CancellationToken.None);
@@ -3359,6 +3395,170 @@ public sealed class MemoryDataRetentionService(
             reader.GetInt64(2),
             reader.GetInt64(3),
             reader.GetInt64(4));
+    }
+
+    private async Task<MemoryDataRetentionCleanupResult> PruneMaintenanceDataAsync(
+        NpgsqlConnection connection,
+        DateTimeOffset startedAt,
+        MemoryDataRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        var deletedRevisions = 0L;
+        var deletedChunks = 0L;
+        var deletedVectors = 0L;
+        var affectedProjects = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var revisionCutoff = timeProvider.GetUtcNow().AddDays(-policy.RevisionRetentionDays);
+
+        while (true)
+        {
+            if (ShouldStopForMaxDuration(startedAt, timeProvider, policy, out _))
+            {
+                break;
+            }
+
+            var batch = await PruneRevisionBatchAsync(connection, revisionCutoff, policy, cancellationToken);
+            deletedRevisions += batch;
+            if (batch == 0)
+            {
+                break;
+            }
+
+            if (policy.DelayBetweenBatchesMs > 0)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(policy.DelayBetweenBatchesMs), cancellationToken);
+            }
+        }
+
+        while (true)
+        {
+            if (ShouldStopForMaxDuration(startedAt, timeProvider, policy, out _))
+            {
+                break;
+            }
+
+            var batch = await PruneChunkOverflowBatchAsync(connection, policy, cancellationToken);
+            deletedChunks += batch.DeletedChunks;
+            deletedVectors += batch.DeletedVectors;
+            affectedProjects.UnionWith(batch.AffectedProjectIds);
+            if (batch.DeletedChunks == 0)
+            {
+                break;
+            }
+
+            if (policy.DelayBetweenBatchesMs > 0)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(policy.DelayBetweenBatchesMs), cancellationToken);
+            }
+        }
+
+        return new MemoryDataRetentionCleanupResult(
+            deletedRevisions,
+            deletedChunks,
+            deletedVectors,
+            affectedProjects.Order(StringComparer.OrdinalIgnoreCase).ToArray());
+    }
+
+    private static async Task<long> PruneRevisionBatchAsync(
+        NpgsqlConnection connection,
+        DateTimeOffset cutoffUtc,
+        MemoryDataRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            WITH ranked AS (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY memory_item_id
+                        ORDER BY created_at DESC, version DESC, id DESC
+                    ) AS revision_rank
+                FROM memory_item_revisions
+                WHERE created_at < @revision_cutoff
+            ),
+            target AS (
+                SELECT id
+                FROM ranked
+                WHERE revision_rank > @min_revisions_to_keep
+                ORDER BY revision_rank DESC, id
+                LIMIT @batch_size
+            ),
+            deleted AS (
+                DELETE FROM memory_item_revisions mir
+                USING target
+                WHERE mir.id = target.id
+                RETURNING 1
+            )
+            SELECT COUNT(*)::bigint FROM deleted;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("revision_cutoff", cutoffUtc));
+        command.Parameters.Add(new NpgsqlParameter<int>("min_revisions_to_keep", policy.MinRevisionsToKeep));
+        command.Parameters.Add(new NpgsqlParameter<int>("batch_size", policy.BatchSize));
+        return (long)(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
+    }
+
+    private static async Task<MemoryDataRetentionCleanupResult> PruneChunkOverflowBatchAsync(
+        NpgsqlConnection connection,
+        MemoryDataRetentionPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = policy.CommandTimeoutSeconds;
+        command.CommandText = """
+            WITH ranked AS (
+                SELECT
+                    mic.id,
+                    mic.memory_item_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY mic.memory_item_id
+                        ORDER BY mic.chunk_index ASC, mic.id ASC
+                    ) AS chunk_rank
+                FROM memory_item_chunks mic
+            ),
+            target_chunks AS (
+                SELECT id, memory_item_id
+                FROM ranked
+                WHERE chunk_rank > @max_chunks_per_memory_item
+                ORDER BY memory_item_id, chunk_rank ASC, id
+                LIMIT @batch_size
+            ),
+            affected_projects AS (
+                SELECT DISTINCT mi.project_id
+                FROM memory_items mi
+                JOIN target_chunks target ON target.memory_item_id = mi.id
+            ),
+            deleted_vectors AS (
+                DELETE FROM memory_chunk_vectors mcv
+                USING target_chunks target
+                WHERE mcv.chunk_id = target.id
+                RETURNING 1
+            ),
+            deleted_chunks AS (
+                DELETE FROM memory_item_chunks mic
+                USING target_chunks target
+                WHERE mic.id = target.id
+                RETURNING 1
+            )
+            SELECT
+                (SELECT COUNT(*)::bigint FROM deleted_chunks) AS deleted_chunks,
+                (SELECT COUNT(*)::bigint FROM deleted_vectors) AS deleted_vectors,
+                COALESCE((SELECT array_agg(project_id ORDER BY project_id) FROM affected_projects), ARRAY[]::text[]) AS affected_project_ids;
+            """;
+        command.Parameters.Add(new NpgsqlParameter<int>("max_chunks_per_memory_item", policy.MaxChunksPerMemoryItem));
+        command.Parameters.Add(new NpgsqlParameter<int>("batch_size", policy.BatchSize));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new MemoryDataRetentionCleanupResult(0, 0, 0, []);
+        }
+
+        return new MemoryDataRetentionCleanupResult(
+            DeletedRevisions: 0,
+            DeletedChunks: reader.GetInt64(0),
+            DeletedVectors: reader.GetInt64(1),
+            AffectedProjectIds: reader.GetFieldValue<string[]>(2).Select(projectId => ProjectContext.Normalize(projectId)).ToArray());
     }
 
     private async Task<IReadOnlyList<string>> ReadAffectedProjectIdsAsync(
@@ -3585,6 +3785,9 @@ public sealed class MemoryDataRetentionService(
         MemoryDataRetentionPolicy policy,
         bool skipped,
         string? stoppedReason,
+        long prunedRevisions = 0,
+        long prunedChunks = 0,
+        long prunedVectors = 0,
         bool completed = true,
         string error = "")
         => JsonSerializer.Serialize(new
@@ -3597,6 +3800,9 @@ public sealed class MemoryDataRetentionService(
             maxImportance = policy.MaxImportance,
             maxConfidence = policy.MaxConfidence,
             previewLimit = policy.PreviewLimit,
+            revisionRetentionDays = policy.RevisionRetentionDays,
+            minRevisionsToKeep = policy.MinRevisionsToKeep,
+            maxChunksPerMemoryItem = policy.MaxChunksPerMemoryItem,
             cutoffUtc,
             skipped,
             completed,
@@ -3609,6 +3815,9 @@ public sealed class MemoryDataRetentionService(
             deletedRevisions,
             deletedChunks,
             deletedVectors,
+            prunedRevisions,
+            prunedChunks,
+            prunedVectors,
             affectedProjectIds,
             previewOnly,
             autoDeleteCandidateCount = classification.AutoDeleteCandidateCount,
@@ -3633,6 +3842,11 @@ public sealed class MemoryDataRetentionService(
         if (request.PreviewOnly)
         {
             return MemoryDataRetentionRunMode.PreviewDelete;
+        }
+
+        if (request.Mode == MemoryDataRetentionRunMode.ApplyMaintenanceCleanup)
+        {
+            return MemoryDataRetentionRunMode.ApplyMaintenanceCleanup;
         }
 
         if (request.Mode == MemoryDataRetentionRunMode.ApplyAutoDelete)
@@ -3920,6 +4134,12 @@ public sealed class MemoryDataRetentionService(
         long DeletedRevisions,
         long DeletedChunks,
         long DeletedVectors);
+
+    private sealed record MemoryDataRetentionCleanupResult(
+        long DeletedRevisions,
+        long DeletedChunks,
+        long DeletedVectors,
+        IReadOnlyList<string> AffectedProjectIds);
 }
 
 public sealed class TelemetryRetentionHostedService(
@@ -4022,7 +4242,13 @@ public sealed class MemoryDataRetentionHostedService(
             {
                 using var scope = serviceProvider.CreateScope();
                 var service = scope.ServiceProvider.GetRequiredService<IMemoryDataRetentionService>();
-                await service.RunAsync("scheduled", stoppingToken);
+                await service.RunAsync(
+                    new MemoryDataRetentionRunRequest(
+                        TriggeredBy: "scheduled",
+                        Mode: MemoryDataRetentionRunMode.ApplyMaintenanceCleanup,
+                        IncludeCandidateDetails: false),
+                    "scheduled",
+                    stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

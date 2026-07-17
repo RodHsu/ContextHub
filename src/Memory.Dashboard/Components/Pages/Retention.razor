@@ -260,7 +260,7 @@
         CurrentResult?.Mode == MemoryDataRetentionRunMode.PreviewDelete &&
         CurrentResult.AutoDeleteCandidateCount > 0;
     private MemoryDataRetentionRunResult? CurrentResult => _retentionResult ?? _latestRunResult;
-    private string RetentionModeText => CurrentResult?.Mode.ToString() ?? "No result";
+    private string RetentionModeText => CurrentResult is null ? "尚無結果" : FormatRetentionMode(CurrentResult.Mode);
     private long LastRetentionAutoDeleteCount => CurrentResult?.AutoDeleteCandidateCount ?? ReadRetentionCount(_lastRetentionRun, "autoDeleteCandidateCount");
     private long LastRetentionReviewCount => CurrentResult?.ReviewCandidateCount ?? ReadRetentionCount(_lastRetentionRun, "reviewCandidateCount");
     private IReadOnlyList<string> CurrentBlockedReasons => CurrentResult?.BlockedReasons ?? [];
@@ -546,6 +546,16 @@
         }
     }
 
+    private static string FormatRetentionMode(MemoryDataRetentionRunMode mode)
+        => mode switch
+        {
+            MemoryDataRetentionRunMode.Classify => "分類",
+            MemoryDataRetentionRunMode.PreviewDelete => "預覽刪除",
+            MemoryDataRetentionRunMode.ApplyAutoDelete => "套用自動刪除",
+            MemoryDataRetentionRunMode.ApplyMaintenanceCleanup => "結構清理",
+            _ => mode.ToString()
+        };
+
     private static MemoryDataRetentionRunResult? TryReadRetentionResult(MaintenanceRunResult? run)
     {
         if (run is null || string.IsNullOrWhiteSpace(run.ResultJson))
@@ -612,7 +622,10 @@
                 (int)ReadLong(thresholds, "maxLinkDegree", 0),
                 ReadDecimal(thresholds, "maxImportance", 0.55m),
                 ReadDecimal(thresholds, "maxConfidence", 0.70m),
-                (int)ReadLong(thresholds, "previewLimit", 50));
+                (int)ReadLong(thresholds, "previewLimit", 50),
+                (int)ReadLong(thresholds, "revisionRetentionDays", 90),
+                (int)ReadLong(thresholds, "minRevisionsToKeep", 20),
+                (int)ReadLong(thresholds, "maxChunksPerMemoryItem", 5000));
         }
 
         return new MemoryDataRetentionPolicyThresholds(
@@ -622,7 +635,10 @@
             (int)ReadLong(root, "maxLinkDegree", 0),
             ReadDecimal(root, "maxImportance", 0.55m),
             ReadDecimal(root, "maxConfidence", 0.70m),
-            50);
+            50,
+            (int)ReadLong(root, "revisionRetentionDays", 90),
+            (int)ReadLong(root, "minRevisionsToKeep", 20),
+            (int)ReadLong(root, "maxChunksPerMemoryItem", 5000));
     }
 
     private static IReadOnlyList<MemoryDataRetentionCandidateResult> ReadCandidates(JsonElement root, string propertyName)

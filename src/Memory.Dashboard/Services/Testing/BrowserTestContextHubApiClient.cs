@@ -632,7 +632,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     private static MemoryDataRetentionRunResult BuildRetentionResult(MemoryDataRetentionRunMode mode)
     {
         var now = DateTimeOffset.UtcNow;
-        var thresholds = new MemoryDataRetentionPolicyThresholds(365, 180, 0, 0, 0.55m, 0.70m, 50);
+        var thresholds = new MemoryDataRetentionPolicyThresholds(365, 180, 0, 0, 0.55m, 0.70m, 50, 90, 20, 5000);
         var autoDeleteCandidates = new[]
         {
             new MemoryDataRetentionCandidateResult(

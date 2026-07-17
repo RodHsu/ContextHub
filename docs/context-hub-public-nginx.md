@@ -86,7 +86,7 @@ server {
     ssl_certificate /etc/nginx/certs/context-hub.example.com/fullchain.pem;
     ssl_certificate_key /etc/nginx/certs/context-hub.example.com/privkey.pem;
 
-    client_max_body_size 25m;
+    client_max_body_size 100m;
 
     proxy_http_version 1.1;
     proxy_set_header Host $host;
