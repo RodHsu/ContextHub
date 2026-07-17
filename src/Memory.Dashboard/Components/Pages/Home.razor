@@ -81,35 +81,26 @@
                 <div class="panel-heading-row">
                     <div>
                         <div class="panel-title">系統效能</div>
-                        <div class="panel-heading-meta">CPU 使用率 + Agent MCP P95 / 最近 @DashboardFormatting.Integer(ResourceSampleCount) 筆資源樣本 / @DashboardFormatting.Integer(AgentConnectivitySampleCount) 筆延遲樣本</div>
+                        <div class="panel-heading-meta">CPU 使用率 / 最近 @DashboardFormatting.Integer(ResourceSampleCount) 筆資源樣本</div>
                     </div>
                     <div class="home-signal-value">
                         <strong>@DashboardFormatting.Percent(AverageCpuPercent())</strong>
                         <span>近期平均</span>
                     </div>
                 </div>
-                <svg class="home-signal-chart" viewBox="0 0 720 180" preserveAspectRatio="none" role="img" aria-label="System CPU and Agent P95 performance trend">
-                    @foreach (var guide in new[] { 24, 52, 128, 156 })
+                <svg class="home-signal-chart" viewBox="0 0 720 96" preserveAspectRatio="none" role="img" aria-label="System CPU performance trend">
+                    @foreach (var guide in ChartGuideLines())
                     {
                         <line class="resource-line-guide" x1="0" y1="@guide" x2="720" y2="@guide"></line>
                     }
-                    <line class="resource-line-guide home-signal-lane-divider" x1="0" y1="90" x2="720" y2="90"></line>
                     <text class="home-signal-lane-label" x="12" y="20">CPU</text>
-                    <text class="home-signal-lane-label" x="12" y="112">Agent P95</text>
-                    <g transform="translate(0 8)">
-                        <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), PercentChartMax, 720d, 72d)"></polyline>
-                    </g>
-                    <g transform="translate(0 100)">
-                        <polyline class="resource-line latency" points="@BuildLinePoints(AgentP95LatencyValues(), MaxAgentLatencyMs(), 720d, 72d)"></polyline>
-                    </g>
+                    <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), PercentChartMax, 720d, 96d)"></polyline>
                 </svg>
                 <div class="resource-chart-legend">
                     <span class="resource-legend-item"><i class="legend-swatch cpu"></i>CPU</span>
-                    <span class="resource-legend-item"><i class="legend-swatch latency"></i>Agent P95</span>
                 </div>
                 <div class="home-signal-footer">
                     <span>目前 @DashboardFormatting.Percent(CurrentCpuPercent())</span>
-                    <span>Agent P95 @FormatLatencyMs(CurrentAgentP95LatencyMs())</span>
                     <span>每 @DashboardFormatting.Integer(PollingIntervalSeconds) 秒更新</span>
                 </div>
             </section>
@@ -418,43 +409,6 @@
                 <article class="resource-chart-card">
                     <div class="resource-chart-header">
                         <div>
-                            <div class="resource-chart-title">Agent MCP 延遲 (Agent MCP Latency)</div>
-                            <div class="resource-chart-stats">
-                                <div class="resource-inline-stat">
-                                    <span>P95</span>
-                                    <div class="resource-inline-stat-value">
-                                        <strong>@FormatLatencyMs(CurrentAgentP95LatencyMs())</strong>
-                                        <small>平均 @FormatLatencyMs(AverageAgentP95LatencyMs())</small>
-                                    </div>
-                                </div>
-                                <div class="resource-inline-stat">
-                                    <span>失敗率</span>
-                                    <div class="resource-inline-stat-value">
-                                        <strong>@DashboardFormatting.Percent(CurrentAgentFailureRate())</strong>
-                                        <small>@DashboardFormatting.Integer(AgentConnectivitySampleCount) samples</small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Agent MCP latency trend">
-                        @foreach (var guide in ChartGuideLines())
-                        {
-                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
-                        }
-                        <polyline class="resource-line latency" points="@BuildLinePoints(AgentP95LatencyValues(), MaxAgentLatencyMs())"></polyline>
-                        <polyline class="resource-line latency-max" points="@BuildLinePoints(AgentMaxLatencyValues(), MaxAgentLatencyMs())"></polyline>
-                    </svg>
-                    <div class="resource-chart-legend">
-                        <span class="resource-legend-item"><i class="legend-swatch latency"></i>P95</span>
-                        <span class="resource-legend-item"><i class="legend-swatch latency-max"></i>Max</span>
-                    </div>
-                    <div class="resource-chart-meta">@AgentConnectivitySummaryText()</div>
-                </article>
-
-                <article class="resource-chart-card">
-                    <div class="resource-chart-header">
-                        <div>
                             <div class="resource-chart-title">磁碟吞吐量 (Disk Throughput)</div>
                             <div class="resource-chart-stats">
                                 <div class="resource-inline-stat">
@@ -619,15 +573,12 @@
 @code {
     private const int MaxResourceSamples = 15;
     private const double PercentChartMax = 100d;
-    private static readonly TimeSpan AgentConnectivityDashboardWindow = TimeSpan.FromMinutes(30);
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly List<ResourceSample> _resourceSamples = [];
     private Task? _monitoringTask;
     private DashboardOverviewResult? _overview;
     private DockerStackSnapshotResult? _docker;
-    private IReadOnlyList<AgentConnectivitySummaryResult> _agentConnectivitySummaries = [];
-    private string? _agentConnectivityError;
     private bool _loading;
     private DateTimeOffset? _lastUpdatedAt;
     private string? _message;
@@ -760,25 +711,7 @@
         _overview = await ApiClient.GetOverviewAsync(_cts.Token);
         HydrateDockerSnapshot();
         ApplyResourceSamples();
-        await LoadAgentConnectivityAsync();
         _loadError = null;
-    }
-
-    private async Task LoadAgentConnectivityAsync()
-    {
-        try
-        {
-            var to = DateTimeOffset.UtcNow;
-            _agentConnectivitySummaries = await ApiClient.GetAgentConnectivitySummariesAsync(
-                new AgentConnectivitySummaryQuery("ContextHub", null, null, to.Subtract(AgentConnectivityDashboardWindow), to, 120),
-                _cts.Token);
-            _agentConnectivityError = null;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _agentConnectivitySummaries = [];
-            _agentConnectivityError = DashboardUiErrorFormatter.BuildLoadError("Agent 延遲", ex, false);
-        }
     }
 
     private static string StatusClass(string status)
@@ -1068,9 +1001,6 @@
     private int RequestTrafficSampleCount
         => _overview?.RequestTraffic.Count ?? 0;
 
-    private int AgentConnectivitySampleCount
-        => AgentSummaries().Sum(x => x.SampleCount);
-
     private IEnumerable<LogEntryResult> RecentErrorsPreview()
         => _overview?.RecentErrors
             .OrderByDescending(x => x.CreatedAt)
@@ -1084,7 +1014,7 @@
             ?? [];
 
     private string ResourceChartPanelNote()
-        => $"每 {DashboardFormatting.Integer(PollingIntervalSeconds)} 秒刷新 / 資源最近 {DashboardFormatting.Integer(ResourceSampleCount)} 筆 / 呼叫最近 {DashboardFormatting.Integer(RequestTrafficSampleCount)} 筆 / Agent 最近 {DashboardFormatting.Integer(AgentSummaries().Count)} buckets";
+        => $"每 {DashboardFormatting.Integer(PollingIntervalSeconds)} 秒刷新 / 資源最近 {DashboardFormatting.Integer(ResourceSampleCount)} 筆 / 呼叫最近 {DashboardFormatting.Integer(RequestTrafficSampleCount)} 筆";
 
     private double MaxNetworkRate()
         => Math.Max(
@@ -1100,64 +1030,6 @@
         => Math.Max(
             _overview?.RequestTraffic.SelectMany(x => new[] { (double)x.InboundRequests, x.OutboundRequests }).DefaultIfEmpty(0d).Max() ?? 0d,
             1d);
-
-    private IReadOnlyList<AgentConnectivitySummaryResult> AgentSummaries()
-        => _agentConnectivitySummaries
-            .Where(IsOperationalAgentSummary)
-            .OrderBy(x => x.BucketStartUtc)
-            .ToArray();
-
-    private static bool IsOperationalAgentSummary(AgentConnectivitySummaryResult summary)
-        => !summary.AgentId.Contains("smoke", StringComparison.OrdinalIgnoreCase);
-
-    private IEnumerable<double> AgentP95LatencyValues()
-        => AgentSummaries().Select(x => x.P95ClientElapsedMs);
-
-    private IEnumerable<double> AgentMaxLatencyValues()
-        => AgentSummaries().Select(x => x.MaxClientElapsedMs);
-
-    private double CurrentAgentP95LatencyMs()
-        => AgentSummaries().LastOrDefault()?.P95ClientElapsedMs ?? 0d;
-
-    private double AverageAgentP95LatencyMs()
-    {
-        var values = AgentSummaries()
-            .Select(x => x.P95ClientElapsedMs)
-            .ToArray();
-        return values.Length == 0 ? 0d : values.Average();
-    }
-
-    private double CurrentAgentFailureRate()
-    {
-        var latest = AgentSummaries().LastOrDefault();
-        return latest is null || latest.SampleCount <= 0
-            ? 0d
-            : (double)latest.FailureCount / latest.SampleCount;
-    }
-
-    private double MaxAgentLatencyMs()
-        => Math.Max(
-            AgentSummaries()
-                .SelectMany(x => new[] { x.P95ClientElapsedMs, x.MaxClientElapsedMs })
-                .DefaultIfEmpty(0d)
-                .Max(),
-            1d);
-
-    private string AgentConnectivitySummaryText()
-    {
-        if (!string.IsNullOrWhiteSpace(_agentConnectivityError))
-        {
-            return _agentConnectivityError;
-        }
-
-        var latest = AgentSummaries().LastOrDefault();
-        return latest is null
-            ? "等待 agent connectivity telemetry。"
-            : $"最近 bucket {latest.AgentId} / {latest.McpMethod} / {DashboardFormatting.Integer(latest.SampleCount)} samples";
-    }
-
-    private static string FormatLatencyMs(double value)
-        => value <= 0d ? "-" : $"{DashboardFormatting.Decimal(value)} ms";
 
     private static string PercentRange(IEnumerable<double> values)
     {

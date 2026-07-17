@@ -258,42 +258,6 @@
                         </div>
                     </article>
 
-                    <article class="resource-chart-card">
-                        <div class="resource-chart-header">
-                            <div>
-                                <div class="resource-chart-title">Agent MCP 延遲 (Agent MCP Latency)</div>
-                                <div class="resource-chart-stats">
-                                    <div class="resource-inline-stat">
-                                        <span>P95</span>
-                                        <div class="resource-inline-stat-value">
-                                            <strong>@FormatLatencyMs(CurrentAgentP95LatencyMs())</strong>
-                                            <small>平均 @FormatLatencyMs(AverageAgentP95LatencyMs())</small>
-                                        </div>
-                                    </div>
-                                    <div class="resource-inline-stat">
-                                        <span>失敗率</span>
-                                        <div class="resource-inline-stat-value">
-                                            <strong>@DashboardFormatting.Percent(CurrentAgentFailureRate())</strong>
-                                            <small>@DashboardFormatting.Integer(AgentConnectivitySampleCount) samples</small>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Agent MCP latency trend">
-                            @foreach (var guide in ChartGuideLines())
-                            {
-                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
-                            }
-                            <polyline class="resource-line latency" points="@BuildLinePoints(AgentP95LatencyValues(), MaxAgentLatencyMs())"></polyline>
-                            <polyline class="resource-line latency-max" points="@BuildLinePoints(AgentMaxLatencyValues(), MaxAgentLatencyMs())"></polyline>
-                        </svg>
-                        <div class="resource-chart-legend">
-                            <span class="resource-legend-item"><i class="legend-swatch latency"></i>P95</span>
-                            <span class="resource-legend-item"><i class="legend-swatch latency-max"></i>Max</span>
-                        </div>
-                        <div class="resource-chart-meta">@AgentConnectivitySummaryText()</div>
-                    </article>
                 </div>
             </section>
 
@@ -509,13 +473,10 @@
 </PageViewport>
 
 @code {
-    private static readonly TimeSpan AgentConnectivityDashboardWindow = TimeSpan.FromMinutes(30);
     private readonly CancellationTokenSource _cts = new();
     private const double PercentChartMax = 100d;
     private Task? _pollingTask;
     private DashboardMonitoringResult? _monitoring;
-    private IReadOnlyList<AgentConnectivitySummaryResult> _agentConnectivitySummaries = [];
-    private string? _agentConnectivityError;
     private string? _loadError;
     private bool _loading;
     private DateTimeOffset? _lastUpdatedAt;
@@ -541,25 +502,7 @@
     private async Task LoadAsync()
     {
         _monitoring = await ApiClient.GetMonitoringAsync(_cts.Token);
-        await LoadAgentConnectivityAsync();
         _loadError = null;
-    }
-
-    private async Task LoadAgentConnectivityAsync()
-    {
-        try
-        {
-            var to = DateTimeOffset.UtcNow;
-            _agentConnectivitySummaries = await ApiClient.GetAgentConnectivitySummariesAsync(
-                new AgentConnectivitySummaryQuery("ContextHub", null, null, to.Subtract(AgentConnectivityDashboardWindow), to, 120),
-                _cts.Token);
-            _agentConnectivityError = null;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _agentConnectivitySummaries = [];
-            _agentConnectivityError = DashboardUiErrorFormatter.BuildLoadError("Agent 延遲", ex, false);
-        }
     }
 
     private async Task RefreshAsync()
@@ -756,7 +699,7 @@
         };
 
     private string ResourceChartPanelNote()
-        => $"每 {DashboardFormatting.Integer(PollingIntervalSeconds)} 秒刷新 / 最近 {DashboardFormatting.Integer(_monitoring?.ResourceSamples?.Count ?? 0)} 筆資源樣本 / Agent 最近 {DashboardFormatting.Integer(AgentSummaries().Count)} buckets";
+        => $"每 {DashboardFormatting.Integer(PollingIntervalSeconds)} 秒刷新 / 最近 {DashboardFormatting.Integer(_monitoring?.ResourceSamples?.Count ?? 0)} 筆資源樣本";
 
     private double CurrentCpuPercent()
         => _monitoring?.ResourceSamples?.LastOrDefault()?.CpuPercent ?? 0d;
@@ -839,67 +782,6 @@
         => Math.Max(
             _monitoring?.ResourceSamples?.SelectMany(x => new[] { (double)x.InboundRequests, (double)x.OutboundRequests }).DefaultIfEmpty(0d).Max() ?? 0d,
             1d);
-
-    private int AgentConnectivitySampleCount
-        => AgentSummaries().Sum(x => x.SampleCount);
-
-    private IReadOnlyList<AgentConnectivitySummaryResult> AgentSummaries()
-        => _agentConnectivitySummaries
-            .Where(IsOperationalAgentSummary)
-            .OrderBy(x => x.BucketStartUtc)
-            .ToArray();
-
-    private static bool IsOperationalAgentSummary(AgentConnectivitySummaryResult summary)
-        => !summary.AgentId.Contains("smoke", StringComparison.OrdinalIgnoreCase);
-
-    private IEnumerable<double> AgentP95LatencyValues()
-        => AgentSummaries().Select(x => x.P95ClientElapsedMs);
-
-    private IEnumerable<double> AgentMaxLatencyValues()
-        => AgentSummaries().Select(x => x.MaxClientElapsedMs);
-
-    private double CurrentAgentP95LatencyMs()
-        => AgentSummaries().LastOrDefault()?.P95ClientElapsedMs ?? 0d;
-
-    private double AverageAgentP95LatencyMs()
-    {
-        var values = AgentSummaries()
-            .Select(x => x.P95ClientElapsedMs)
-            .ToArray();
-        return values.Length == 0 ? 0d : values.Average();
-    }
-
-    private double CurrentAgentFailureRate()
-    {
-        var latest = AgentSummaries().LastOrDefault();
-        return latest is null || latest.SampleCount <= 0
-            ? 0d
-            : (double)latest.FailureCount / latest.SampleCount;
-    }
-
-    private double MaxAgentLatencyMs()
-        => Math.Max(
-            AgentSummaries()
-                .SelectMany(x => new[] { x.P95ClientElapsedMs, x.MaxClientElapsedMs })
-                .DefaultIfEmpty(0d)
-                .Max(),
-            1d);
-
-    private string AgentConnectivitySummaryText()
-    {
-        if (!string.IsNullOrWhiteSpace(_agentConnectivityError))
-        {
-            return _agentConnectivityError;
-        }
-
-        var latest = AgentSummaries().LastOrDefault();
-        return latest is null
-            ? "等待 agent connectivity telemetry。"
-            : $"最近 bucket {latest.AgentId} / {latest.McpMethod} / {DashboardFormatting.Integer(latest.SampleCount)} samples";
-    }
-
-    private static string FormatLatencyMs(double value)
-        => value <= 0d ? "-" : $"{DashboardFormatting.Decimal(value)} ms";
 
     private static string PercentRange(IEnumerable<double> values)
     {

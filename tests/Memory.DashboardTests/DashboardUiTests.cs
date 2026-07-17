@@ -244,10 +244,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("<dt>狀態</dt><dd>失敗</dd>");
         overviewHtml.Should().NotContain("<dt>狀態</dt><dd>Failed</dd>");
         overviewHtml.Should().Contain("資源狀態圖表");
-        overviewHtml.Should().Contain("Agent MCP 延遲");
-        overviewHtml.Should().Contain("Agent P95");
-        overviewHtml.Should().Contain("home-signal-lane-divider");
-        overviewHtml.Should().Contain("<text class=\"home-signal-lane-label\" x=\"12\" y=\"112\">Agent P95</text>");
+        overviewHtml.Should().NotContain("Agent MCP 延遲");
+        overviewHtml.Should().NotContain("Agent P95");
+        overviewHtml.Should().NotContain("home-signal-lane-divider");
+        overviewHtml.Should().NotContain("<text class=\"home-signal-lane-label\" x=\"12\" y=\"112\">Agent P95</text>");
         overviewHtml.Should().Contain("近期呼叫趨勢");
         overviewHtml.Should().Contain("Redis 狀態監控");
         overviewHtml.Should().Contain("resource-redis-chart");
@@ -349,8 +349,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("緩衝命中率");
         monitoringHtml.Should().Contain("次資料區塊存取");
         monitoringHtml.Should().Contain("資源趨勢");
-        monitoringHtml.Should().Contain("Agent MCP 延遲");
-        monitoringHtml.Should().Contain("Agent 最近");
+        monitoringHtml.Should().NotContain("Agent MCP 延遲");
+        monitoringHtml.Should().NotContain("Agent 最近");
         monitoringHtml.Should().Contain("Compose 服務資源");
         monitoringHtml.Should().Contain("Docker 主機");
         monitoringHtml.Should().Contain("命令總量");
@@ -581,7 +581,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
     }
 
     [Fact]
-    public async Task Connectivity_Page_Should_Show_Agent_Latency_Entry_And_Title()
+    public async Task Main_Navigation_Should_Hide_Agent_Latency_Entry()
     {
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
         {
@@ -591,15 +591,12 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
 
         await LoginAsync(client);
 
-        using var response = await client.GetAsync("/connectivity");
+        using var response = await client.GetAsync("/");
         response.StatusCode.Should().Be(HttpStatusCode.OK);
 
         var html = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync());
-        html.Should().Contain("Agent 延遲");
-        html.Should().Contain("Agent 連線延遲");
-        html.Should().Contain("觀察 agent 對 ContextHub MCP 的連線延遲與失敗狀況。");
-        html.Should().Contain("近期 P95");
-        html.Should().Contain("最近觀測");
+        html.Should().NotContain("href=\"/connectivity\"");
+        html.Should().NotContain("Agent 延遲");
     }
 
     [Fact]
