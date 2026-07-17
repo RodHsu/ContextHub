@@ -97,7 +97,7 @@
                     <text class="home-signal-lane-label" x="12" y="20">CPU</text>
                     <text class="home-signal-lane-label" x="12" y="112">Agent P95</text>
                     <g transform="translate(0 8)">
-                        <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), MaxCpuPercent(), 720d, 72d)"></polyline>
+                        <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), PercentChartMax, 720d, 72d)"></polyline>
                     </g>
                     <g transform="translate(0 100)">
                         <polyline class="resource-line latency" points="@BuildLinePoints(AgentP95LatencyValues(), MaxAgentLatencyMs(), 720d, 72d)"></polyline>
@@ -312,7 +312,7 @@
                         <div>
                             <div class="resource-chart-title">CPU 使用率 (CPU Usage)</div>
                             <div class="resource-chart-value">@DashboardFormatting.Percent(CurrentCpuPercent())</div>
-                            <div class="resource-chart-summary">近期平均 @DashboardFormatting.Percent(AverageCpuPercent())</div>
+                            <div class="resource-chart-summary">近期平均 @DashboardFormatting.Percent(AverageCpuPercent()) / 範圍 @PercentRange(_resourceSamples.Select(x => x.CpuPercent))</div>
                         </div>
                     </div>
                     <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="CPU usage trend">
@@ -320,9 +320,9 @@
                         {
                             <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
                         }
-                        <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), MaxCpuPercent())"></polyline>
+                        <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), PercentChartMax)"></polyline>
                     </svg>
-                    <div class="resource-chart-meta">依 `docker stats` 聚合目前服務群組原始 CPU 使用率 / 主機 @DashboardFormatting.Integer(_docker.Host.CpuCount) 核</div>
+                    <div class="resource-chart-meta">依 `docker stats` 聚合目前服務群組原始 CPU 使用率 / 0-100% 固定軸 / 主機 @DashboardFormatting.Integer(_docker.Host.CpuCount) 核</div>
                 </article>
 
                 <article class="resource-chart-card">
@@ -330,7 +330,7 @@
                         <div>
                             <div class="resource-chart-title">記憶體使用率 (Memory Usage)</div>
                             <div class="resource-chart-value">@DashboardFormatting.Bytes(CurrentMemoryUsageBytes())</div>
-                            <div class="resource-chart-summary">近期平均 @DashboardFormatting.Bytes(AverageMemoryUsageBytes())</div>
+                            <div class="resource-chart-summary">近期平均 @DashboardFormatting.Bytes(AverageMemoryUsageBytes()) / 範圍 @PercentRange(_resourceSamples.Select(x => x.MemoryPercent))</div>
                         </div>
                     </div>
                     <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Memory usage trend">
@@ -338,9 +338,9 @@
                         {
                             <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
                         }
-                        <polyline class="resource-line memory" points="@BuildLinePoints(_resourceSamples.Select(x => (double)x.MemoryUsageBytes), MaxMemoryUsageChartValue())"></polyline>
+                        <polyline class="resource-line memory" points="@BuildLinePoints(_resourceSamples.Select(x => x.MemoryPercent), PercentChartMax)"></polyline>
                     </svg>
-                    <div class="resource-chart-meta">@DashboardFormatting.Bytes(CurrentMemoryUsageBytes()) / @DashboardFormatting.Bytes(_docker.Host.TotalMemoryBytes) (占主機 @DashboardFormatting.Percent(CurrentMemoryPercent()))</div>
+                    <div class="resource-chart-meta">@DashboardFormatting.Bytes(CurrentMemoryUsageBytes()) / @DashboardFormatting.Bytes(_docker.Host.TotalMemoryBytes) (占主機 @DashboardFormatting.Percent(CurrentMemoryPercent())) / 0-100% 固定軸</div>
                 </article>
 
                 <article class="resource-chart-card">
@@ -618,6 +618,7 @@
 
 @code {
     private const int MaxResourceSamples = 15;
+    private const double PercentChartMax = 100d;
     private static readonly TimeSpan AgentConnectivityDashboardWindow = TimeSpan.FromMinutes(30);
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
@@ -1085,12 +1086,6 @@
     private string ResourceChartPanelNote()
         => $"每 {DashboardFormatting.Integer(PollingIntervalSeconds)} 秒刷新 / 資源最近 {DashboardFormatting.Integer(ResourceSampleCount)} 筆 / 呼叫最近 {DashboardFormatting.Integer(RequestTrafficSampleCount)} 筆 / Agent 最近 {DashboardFormatting.Integer(AgentSummaries().Count)} buckets";
 
-    private double MaxCpuPercent()
-        => Math.Max(_resourceSamples.Select(x => x.CpuPercent).DefaultIfEmpty(0d).Max(), 5d);
-
-    private double MaxMemoryUsageChartValue()
-        => Math.Max(_resourceSamples.Select(x => (double)x.MemoryUsageBytes).DefaultIfEmpty(0d).Max(), 1d);
-
     private double MaxNetworkRate()
         => Math.Max(
             _resourceSamples.SelectMany(x => new[] { x.NetworkRxBytesPerSecond, x.NetworkTxBytesPerSecond }).DefaultIfEmpty(0d).Max(),
@@ -1163,6 +1158,14 @@
 
     private static string FormatLatencyMs(double value)
         => value <= 0d ? "-" : $"{DashboardFormatting.Decimal(value)} ms";
+
+    private static string PercentRange(IEnumerable<double> values)
+    {
+        var points = values.ToArray();
+        return points.Length == 0
+            ? "-"
+            : $"{DashboardFormatting.Percent(points.Min())} - {DashboardFormatting.Percent(points.Max())}";
+    }
 
     private static IEnumerable<int> ChartGuideLines()
         => [12, 36, 60, 84];

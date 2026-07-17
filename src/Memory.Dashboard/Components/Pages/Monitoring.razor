@@ -119,7 +119,7 @@
                             <div>
                                 <div class="resource-chart-title">CPU 使用率 (CPU Usage)</div>
                                 <div class="resource-chart-value">@DashboardFormatting.Percent(CurrentCpuPercent())</div>
-                                <div class="resource-chart-summary">近期平均 @DashboardFormatting.Percent(AverageCpuPercent())</div>
+                                <div class="resource-chart-summary">近期平均 @DashboardFormatting.Percent(AverageCpuPercent()) / 範圍 @PercentRange(_monitoring.ResourceSamples?.Select(x => x.CpuPercent) ?? [])</div>
                             </div>
                         </div>
                         <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="CPU usage trend">
@@ -127,9 +127,9 @@
                             {
                                 <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
                             }
-                            <polyline class="resource-line cpu" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => x.CpuPercent) ?? [], MaxCpuPercent())"></polyline>
+                            <polyline class="resource-line cpu" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => x.CpuPercent) ?? [], PercentChartMax)"></polyline>
                         </svg>
-                        <div class="resource-chart-meta">Compose service 群組原始 CPU 聚合值</div>
+                        <div class="resource-chart-meta">Compose service 群組原始 CPU 聚合值 / 0-100% 固定軸</div>
                     </article>
 
                     <article class="resource-chart-card">
@@ -137,7 +137,7 @@
                             <div>
                                 <div class="resource-chart-title">記憶體使用量 (Memory Usage)</div>
                                 <div class="resource-chart-value">@DashboardFormatting.Bytes(CurrentMemoryUsageBytes())</div>
-                                <div class="resource-chart-summary">近期平均 @DashboardFormatting.Bytes(AverageMemoryUsageBytes())</div>
+                                <div class="resource-chart-summary">近期平均 @DashboardFormatting.Bytes(AverageMemoryUsageBytes()) / 範圍 @PercentRange(_monitoring.ResourceSamples?.Select(x => x.MemoryPercent) ?? [])</div>
                             </div>
                         </div>
                         <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Memory usage trend">
@@ -145,9 +145,9 @@
                             {
                                 <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
                             }
-                            <polyline class="resource-line memory" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => (double)x.MemoryUsageBytes) ?? [], MaxMemoryUsageChartValue())"></polyline>
+                            <polyline class="resource-line memory" points="@BuildLinePoints(_monitoring.ResourceSamples?.Select(x => x.MemoryPercent) ?? [], PercentChartMax)"></polyline>
                         </svg>
-                        <div class="resource-chart-meta">占主機 @DashboardFormatting.Percent(CurrentMemoryPercent())</div>
+                        <div class="resource-chart-meta">占主機 @DashboardFormatting.Percent(CurrentMemoryPercent()) / 0-100% 固定軸</div>
                     </article>
 
                     <article class="resource-chart-card">
@@ -511,6 +511,7 @@
 @code {
     private static readonly TimeSpan AgentConnectivityDashboardWindow = TimeSpan.FromMinutes(30);
     private readonly CancellationTokenSource _cts = new();
+    private const double PercentChartMax = 100d;
     private Task? _pollingTask;
     private DashboardMonitoringResult? _monitoring;
     private IReadOnlyList<AgentConnectivitySummaryResult> _agentConnectivitySummaries = [];
@@ -824,12 +825,6 @@
             ? (int)Math.Round(_monitoring.ResourceSamples.Average(x => x.OutboundRequests))
             : 0;
 
-    private double MaxCpuPercent()
-        => Math.Max(_monitoring?.ResourceSamples?.Select(x => x.CpuPercent).DefaultIfEmpty(0d).Max() ?? 0d, 5d);
-
-    private double MaxMemoryUsageChartValue()
-        => Math.Max(_monitoring?.ResourceSamples?.Select(x => (double)x.MemoryUsageBytes).DefaultIfEmpty(0d).Max() ?? 0d, 1d);
-
     private double MaxNetworkRate()
         => Math.Max(
             _monitoring?.ResourceSamples?.SelectMany(x => new[] { x.NetworkRxBytesPerSecond, x.NetworkTxBytesPerSecond }).DefaultIfEmpty(0d).Max() ?? 0d,
@@ -905,6 +900,14 @@
 
     private static string FormatLatencyMs(double value)
         => value <= 0d ? "-" : $"{DashboardFormatting.Decimal(value)} ms";
+
+    private static string PercentRange(IEnumerable<double> values)
+    {
+        var points = values.ToArray();
+        return points.Length == 0
+            ? "-"
+            : $"{DashboardFormatting.Percent(points.Min())} - {DashboardFormatting.Percent(points.Max())}";
+    }
 
     private string ContainerSummary(string serviceName)
     {

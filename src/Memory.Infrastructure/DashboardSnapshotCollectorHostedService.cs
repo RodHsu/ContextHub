@@ -1034,7 +1034,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
         var diskWriteBytes = snapshot.Containers.Sum(x => x.Metric.DiskWriteBytes);
 
         return new DashboardResourceSampleResult(
-            requestSample.TimestampUtc,
+            capturedAt,
             Math.Max(snapshot.Containers.Sum(x => x.Metric.CpuPercent), 0d),
             snapshot.Host.TotalMemoryBytes <= 0
                 ? 0d
