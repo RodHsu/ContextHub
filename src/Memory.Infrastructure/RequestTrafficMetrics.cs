@@ -37,6 +37,15 @@ public sealed class RequestTrafficMetricsCollector : IRequestTrafficSnapshotAcce
             .ToArray();
     }
 
+    public RequestTrafficSampleResult GetRecentSampleTotal(int seconds)
+    {
+        var samples = GetRecentSamples(seconds);
+        return new RequestTrafficSampleResult(
+            DateTimeOffset.UtcNow,
+            samples.Sum(x => x.InboundRequests),
+            samples.Sum(x => x.OutboundRequests));
+    }
+
     private TrafficBucket GetOrCreateBucket()
     {
         var second = DateTimeOffset.UtcNow.ToUnixTimeSeconds();

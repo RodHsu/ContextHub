@@ -956,8 +956,8 @@
     private static string FormatRate(double bytesPerSecond)
         => $"{DashboardFormatting.Bytes((long)Math.Round(bytesPerSecond))}/s";
 
-    private static string FormatCountRate(int value)
-        => $"{DashboardFormatting.Integer(value)}/s";
+    private string FormatCountRate(int value)
+        => $"{DashboardFormatting.Integer(value)}/{DashboardFormatting.Integer(PollingIntervalSeconds)}s";
 
     private DashboardPageSnapshotStatusResult? PageSnapshotStatus()
         => _monitoring?.SnapshotStatus;

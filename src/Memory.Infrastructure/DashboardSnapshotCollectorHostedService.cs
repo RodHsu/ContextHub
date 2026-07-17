@@ -972,8 +972,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private async Task CollectResourceChartAsync(int intervalSeconds, CancellationToken cancellationToken)
     {
         var snapshot = await dockerMetricsService.GetSnapshotAsync(cancellationToken);
-        var requestTraffic = requestTrafficSnapshotAccessor.GetRecentSamples(MaxResourceSamples);
-        var requestSample = requestTraffic.LastOrDefault() ?? new RequestTrafficSampleResult(timeProvider.GetUtcNow(), 0, 0);
+        var requestSample = requestTrafficSnapshotAccessor.GetRecentSampleTotal(intervalSeconds);
 
         await _resourceLock.WaitAsync(cancellationToken);
         try

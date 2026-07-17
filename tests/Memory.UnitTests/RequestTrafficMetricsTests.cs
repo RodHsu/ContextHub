@@ -41,6 +41,20 @@ public sealed class RequestTrafficMetricsTests
         Assert.Equal(0, collector.GetRecentSamples(1).Single().OutboundRequests);
     }
 
+    [Fact]
+    public void GetRecentSampleTotal_Should_Sum_The_Requested_Window()
+    {
+        var collector = new RequestTrafficMetricsCollector();
+        collector.RecordInbound();
+        collector.RecordInbound();
+        collector.RecordOutbound();
+
+        var total = collector.GetRecentSampleTotal(5);
+
+        Assert.Equal(2, total.InboundRequests);
+        Assert.Equal(1, total.OutboundRequests);
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

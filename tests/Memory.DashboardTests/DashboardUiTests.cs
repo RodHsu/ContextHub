@@ -272,6 +272,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("呼叫最近 15 筆");
         overviewHtml.Should().Contain("進站 (Inbound)");
         overviewHtml.Should().Contain("傳出 (Outbound)");
+        overviewHtml.Should().Contain("/5s");
         overviewHtml.Should().Contain("client-local-time");
         overviewHtml.Should().Contain("data-local-iso");
         overviewHtml.Should().Contain("建置版本");

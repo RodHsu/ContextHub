@@ -552,4 +552,5 @@ public interface IServiceHealthAccessor
 public interface IRequestTrafficSnapshotAccessor
 {
     IReadOnlyList<RequestTrafficSampleResult> GetRecentSamples(int limit);
+    RequestTrafficSampleResult GetRecentSampleTotal(int seconds);
 }
