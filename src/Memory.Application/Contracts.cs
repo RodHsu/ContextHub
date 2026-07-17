@@ -672,6 +672,17 @@ public sealed record ChunkDraft(ChunkKind Kind, int Index, string Text, string M
 
 public sealed record ChunkSearchHit(Guid MemoryId, Guid ChunkId, decimal Score, string Excerpt);
 
+public sealed record MemorySearchScope(IReadOnlyList<string>? ProjectIds = null)
+{
+    public static MemorySearchScope Unscoped { get; } = new();
+
+    public IReadOnlyList<string> NormalizedProjectIds { get; } = (ProjectIds ?? Array.Empty<string>())
+        .Select(projectId => ProjectContext.Normalize(projectId))
+        .Where(projectId => !string.IsNullOrWhiteSpace(projectId))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+}
+
 public enum EmbeddingPurpose
 {
     Document,
@@ -1399,8 +1410,8 @@ public interface IAgentConnectivityService
 
 public interface IHybridSearchStore
 {
-    Task<IReadOnlyList<ChunkSearchHit>> SearchKeywordChunksAsync(string query, int limit, CancellationToken cancellationToken);
-    Task<IReadOnlyList<ChunkSearchHit>> SearchVectorChunksAsync(EmbeddingVector vector, int limit, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ChunkSearchHit>> SearchKeywordChunksAsync(string query, int limit, MemorySearchScope scope, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ChunkSearchHit>> SearchVectorChunksAsync(EmbeddingVector vector, int limit, MemorySearchScope scope, CancellationToken cancellationToken);
 }
 
 public interface IVectorStore

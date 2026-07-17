@@ -211,10 +211,10 @@ public sealed class PerformanceProbeService(
             return true;
         });
 
-        var keywordMeasurement = await Measure(() => searchStore.SearchKeywordChunksAsync(request.Query, request.SearchLimit * 3, cancellationToken));
+        var keywordMeasurement = await Measure(() => searchStore.SearchKeywordChunksAsync(request.Query, request.SearchLimit * 3, MemorySearchScope.Unscoped, cancellationToken));
         var keywordHits = keywordMeasurement;
 
-        var vectorMeasurement = await Measure(() => searchStore.SearchVectorChunksAsync(queryVector.Result, request.SearchLimit * 3, cancellationToken));
+        var vectorMeasurement = await Measure(() => searchStore.SearchVectorChunksAsync(queryVector.Result, request.SearchLimit * 3, MemorySearchScope.Unscoped, cancellationToken));
         var vectorHits = vectorMeasurement;
 
         var hybridMeasurement = await Measure(async () =>
@@ -242,9 +242,9 @@ public sealed class PerformanceProbeService(
         bool includeArchived,
         CancellationToken cancellationToken)
     {
-        var keywordHits = await searchStore.SearchKeywordChunksAsync(query, limit * 3, cancellationToken);
+        var keywordHits = await searchStore.SearchKeywordChunksAsync(query, limit * 3, MemorySearchScope.Unscoped, cancellationToken);
         var queryVector = await embeddingProvider.EmbedAsync(query, EmbeddingPurpose.Query, cancellationToken);
-        var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, limit * 3, cancellationToken);
+        var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, limit * 3, MemorySearchScope.Unscoped, cancellationToken);
 
         var itemIds = keywordHits.Select(x => x.MemoryId).Concat(semanticHits.Select(x => x.MemoryId)).Distinct().ToArray();
         var items = await dbContext.MemoryItems

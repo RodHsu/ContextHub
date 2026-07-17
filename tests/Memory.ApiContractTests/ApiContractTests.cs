@@ -75,6 +75,76 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Search_Should_Scope_Hybrid_Candidates_To_Requested_Project_And_Record_Diagnostics()
+    {
+        var projectA = $"SearchScopeA-{Guid.NewGuid():N}";
+        var projectB = $"SearchScopeB-{Guid.NewGuid():N}";
+        var query = $"project scoped semantic needle {Guid.NewGuid():N}";
+
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+            var processor = scope.ServiceProvider.GetRequiredService<IBackgroundJobProcessor>();
+
+            await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    ExternalKey: $"search-scope:a:{Guid.NewGuid():N}",
+                    Scope: MemoryScope.Project,
+                    MemoryType: MemoryType.Fact,
+                    Title: "Project A scoped search fixture",
+                    Content: $"{query} belongs to the authorized target project.",
+                    Summary: "Project A search target",
+                    SourceType: "test",
+                    SourceRef: "api-contract",
+                    Tags: ["search", "scope"],
+                    Importance: 0.7m,
+                    Confidence: 0.9m,
+                    ProjectId: projectA),
+                CancellationToken.None);
+            await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    ExternalKey: $"search-scope:b:{Guid.NewGuid():N}",
+                    Scope: MemoryScope.Project,
+                    MemoryType: MemoryType.Fact,
+                    Title: "Project B scoped search distractor",
+                    Content: $"{query} belongs to another project and must not dilute scoped retrieval.",
+                    Summary: "Project B search distractor",
+                    SourceType: "test",
+                    SourceRef: "api-contract",
+                    Tags: ["search", "scope"],
+                    Importance: 0.99m,
+                    Confidence: 0.99m,
+                    ProjectId: projectB),
+                CancellationToken.None);
+
+            await processor.ProcessNextAsync(CancellationToken.None);
+            await processor.ProcessNextAsync(CancellationToken.None);
+        }
+
+        using var client = environment.GetFactory().CreateClient();
+        var encodedQuery = Uri.EscapeDataString(query);
+        var hits = await client.GetFromJsonAsync<List<MemorySearchHit>>(
+            $"/api/memories/search?query={encodedQuery}&projectId={Uri.EscapeDataString(projectA)}&limit=5");
+
+        hits.Should().NotBeNull();
+        hits!.Should().ContainSingle(x => x.Title == "Project A scoped search fixture");
+        hits.Should().NotContain(x => x.ProjectId == projectB);
+
+        using var verifyScope = environment.GetFactory().Services.CreateScope();
+        var dbContext = verifyScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var telemetry = await dbContext.RetrievalEvents
+            .Where(x => x.EntryPoint == "/api/memories/search" && x.ProjectId == projectA && x.QueryText == query)
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstAsync(CancellationToken.None);
+        using var metadata = JsonDocument.Parse(telemetry.MetadataJson);
+        var diagnostics = metadata.RootElement.GetProperty("diagnostics");
+        diagnostics.GetProperty("candidateMemoryCount").GetInt32().Should().BeGreaterThan(0);
+        diagnostics.GetProperty("authorizedMemoryCount").GetInt32().Should().BeGreaterThan(0);
+        diagnostics.GetProperty("keywordHitCount").GetInt32().Should().BeGreaterThan(0);
+    }
+
+    [DockerRequiredFact]
     public async Task Api_And_Health_Responses_Should_Not_Be_Cached_By_Cloudflare()
     {
         using var client = environment.GetFactory().CreateClient();

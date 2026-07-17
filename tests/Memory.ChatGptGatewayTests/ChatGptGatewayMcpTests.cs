@@ -879,6 +879,38 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         });
         ExtractToolText(gatewayReadAfterApproval).Should().Contain("Approved ChatGPT gateway proposal");
 
+        var failingProposalPayload = await SendMcpAsync(client, sessionId!, 80, "tools/call", new
+        {
+            name = "memory_update",
+            arguments = new
+            {
+                request = new
+                {
+                    id = Guid.NewGuid(),
+                    title = "Missing memory update should fail on approval",
+                    projectId = ProjectId
+                }
+            }
+        });
+        var failingProposal = ExtractToolJson(failingProposalPayload);
+        failingProposal.GetProperty("status").GetString().Should().Be("Pending");
+
+        var failedApprovalPayload = await SendMcpAsync(client, sessionId!, 81, "tools/call", new
+        {
+            name = "chatgpt_proposal_approve",
+            arguments = new
+            {
+                request = new
+                {
+                    proposalId = failingProposal.GetProperty("id").GetGuid(),
+                    note = "Approval should preserve apply failure details."
+                }
+            }
+        });
+        var failedApproval = ExtractToolJson(failedApprovalPayload);
+        failedApproval.GetProperty("status").GetString().Should().Be("Failed");
+        failedApproval.GetProperty("error").GetString().Should().Contain("was not found");
+
         var artifactProposalPayload = await SendMcpAsync(client, sessionId!, 8, "tools/call", new
         {
             name = "project_artifact_publish",

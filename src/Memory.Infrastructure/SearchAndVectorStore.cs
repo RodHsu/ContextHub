@@ -9,7 +9,7 @@ namespace Memory.Infrastructure;
 
 public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<NpgsqlSearchStore> logger) : IHybridSearchStore, IVectorStore
 {
-    public async Task<IReadOnlyList<ChunkSearchHit>> SearchKeywordChunksAsync(string query, int limit, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ChunkSearchHit>> SearchKeywordChunksAsync(string query, int limit, MemorySearchScope scope, CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT c.memory_item_id,
@@ -17,7 +17,9 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
                    ts_rank_cd(c.content_tsv, websearch_to_tsquery('simple', @query))::numeric AS score,
                    LEFT(c.chunk_text, 240) AS excerpt
             FROM memory_item_chunks c
+            JOIN memory_items i ON i.id = c.memory_item_id
             WHERE c.content_tsv @@ websearch_to_tsquery('simple', @query)
+              AND (cardinality(@project_ids) = 0 OR i.project_id = ANY(@project_ids))
             ORDER BY score DESC
             LIMIT @limit;
             """;
@@ -26,6 +28,7 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
         await using var command = dataSource.CreateCommand(sql);
         command.Parameters.Add(new NpgsqlParameter<string>("query", query));
         command.Parameters.Add(new NpgsqlParameter<int>("limit", limit));
+        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", scope.NormalizedProjectIds.ToArray()));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -40,7 +43,7 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
         return results;
     }
 
-    public async Task<IReadOnlyList<ChunkSearchHit>> SearchVectorChunksAsync(EmbeddingVector vector, int limit, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ChunkSearchHit>> SearchVectorChunksAsync(EmbeddingVector vector, int limit, MemorySearchScope scope, CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT c.memory_item_id,
@@ -49,8 +52,10 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
                    LEFT(c.chunk_text, 240) AS excerpt
             FROM memory_chunk_vectors v
             JOIN memory_item_chunks c ON c.id = v.chunk_id
+            JOIN memory_items i ON i.id = c.memory_item_id
             WHERE v.model_key = @model_key
               AND v.status = 'Active'
+              AND (cardinality(@project_ids) = 0 OR i.project_id = ANY(@project_ids))
             ORDER BY v.embedding <=> @embedding
             LIMIT @limit;
             """;
@@ -63,6 +68,7 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
         });
         command.Parameters.Add(new NpgsqlParameter<string>("model_key", vector.ModelKey));
         command.Parameters.Add(new NpgsqlParameter<int>("limit", limit));
+        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", scope.NormalizedProjectIds.ToArray()));
 
         try
         {

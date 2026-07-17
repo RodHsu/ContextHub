@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace Memory.Application;
 
@@ -12,7 +13,8 @@ public sealed class ChatGptProposalService(
     IProjectArtifactExchangeService artifactExchangeService,
     ISuggestedActionService suggestedActionService,
     IRequestActorAccessor actorAccessor,
-    IClock clock) : IChatGptProposalService
+    IClock clock,
+    ILogger<ChatGptProposalService> logger) : IChatGptProposalService
 {
     public const string SourceSystem = "chatgpt-mcp-gateway";
     private const string ProposalTag = "chatgpt-proposal";
@@ -186,9 +188,11 @@ public sealed class ChatGptProposalService(
             throw new InvalidOperationException($"Proposal '{request.ProposalId}' is not pending.");
         }
 
+        var toolName = string.Empty;
         try
         {
             var metadata = ParseMetadata(proposal.MetadataJson);
+            toolName = metadata.ToolName;
             var appliedId = await ApplyAsync(metadata.ToolName, metadata.PayloadJson, cancellationToken);
             proposal.PromotionStatus = ConversationPromotionStatus.Promoted;
             proposal.PromotedMemoryId = appliedId;
@@ -198,6 +202,12 @@ public sealed class ChatGptProposalService(
         {
             proposal.PromotionStatus = ConversationPromotionStatus.Failed;
             proposal.Error = ex.Message;
+            logger.LogWarning(
+                ex,
+                "ChatGPT proposal {ProposalId} approval failed while applying tool {ToolName} for project {ProjectId}.",
+                proposal.Id,
+                toolName,
+                proposal.ProjectId);
         }
 
         proposal.UpdatedAt = clock.UtcNow;

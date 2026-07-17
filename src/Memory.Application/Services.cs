@@ -553,14 +553,15 @@ public sealed class MemoryService(
         var cacheHit = cached.Hit;
         if (cached.Hit && cached.Value is not null)
         {
-            await TryRecordSearchTelemetryAsync(request, cached.Value, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "final", "search", version.Value, cancellationToken);
+            await TryRecordSearchTelemetryAsync(request, cached.Value, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "final", "search", version.Value, null, cancellationToken);
             return cached.Value;
         }
 
         try
         {
-            var keywordHits = await searchStore.SearchKeywordChunksAsync(request.Query, request.Limit * 4, cancellationToken);
-            var semanticHits = await SearchSemanticHitsAsync(request.Query, request.Limit * 4, version, actor, allowedProjects, cancellationToken);
+            var searchScope = new MemorySearchScope(allowedProjects);
+            var keywordHits = await searchStore.SearchKeywordChunksAsync(request.Query, request.Limit * 4, searchScope, cancellationToken);
+            var semanticHits = await SearchSemanticHitsAsync(request.Query, request.Limit * 4, version, actor, allowedProjects, searchScope, cancellationToken);
 
             var itemIds = keywordHits.Select(x => x.MemoryId).Concat(semanticHits.Select(x => x.MemoryId)).Distinct().ToArray();
             var items = await dbContext.MemoryItems
@@ -569,14 +570,15 @@ public sealed class MemoryService(
                 .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
                 .ToDictionaryAsync(x => x.Id, cancellationToken);
             var merged = HybridSearchComposer.Compose(keywordHits, semanticHits, items, request.Limit, request.IncludeArchived);
+            var diagnostics = SearchDiagnostics.From(keywordHits, semanticHits, itemIds.Length, items.Count);
 
             await objectCache.SetAsync(cacheKey, "search-final", merged, cachePolicy.SearchTtl, cancellationToken);
-            await TryRecordSearchTelemetryAsync(request, merged, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "origin", "search", version.Value, cancellationToken);
+            await TryRecordSearchTelemetryAsync(request, merged, cacheHit, stopwatch.Elapsed.TotalMilliseconds, true, string.Empty, "origin", "search", version.Value, diagnostics, cancellationToken);
             return merged;
         }
         catch (Exception ex)
         {
-            await TryRecordSearchTelemetryAsync(request, [], cacheHit, stopwatch.Elapsed.TotalMilliseconds, false, ex.Message, "origin", "search", version.Value, cancellationToken);
+            await TryRecordSearchTelemetryAsync(request, [], cacheHit, stopwatch.Elapsed.TotalMilliseconds, false, ex.Message, "origin", "search", version.Value, null, cancellationToken);
             throw;
         }
     }
@@ -851,6 +853,7 @@ public sealed class MemoryService(
         CacheVersionStamp version,
         ContextHubRequestActor actor,
         IReadOnlyList<string> allowedProjects,
+        MemorySearchScope searchScope,
         CancellationToken cancellationToken)
     {
         var cacheKey = RedisCacheKeyBuilder.SemanticHits(version, embeddingProvider.ModelKey, query, limit, actor, allowedProjects);
@@ -861,7 +864,7 @@ public sealed class MemoryService(
         }
 
         var queryVector = await EmbedQueryAsync(query, cancellationToken);
-        var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, limit, cancellationToken);
+        var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, limit, searchScope, cancellationToken);
         await objectCache.SetAsync(cacheKey, "semantic-hits", semanticHits.Select(x => x.ToCached()).ToArray(), cachePolicy.SemanticHitTtl, cancellationToken);
         return semanticHits;
     }
@@ -890,6 +893,7 @@ public sealed class MemoryService(
         string cacheLayer,
         string cacheKeyKind,
         string versionStamp,
+        SearchDiagnostics? diagnostics,
         CancellationToken cancellationToken)
     {
         if (request.Telemetry?.Enabled == false)
@@ -931,7 +935,7 @@ public sealed class MemoryService(
                 durationMs,
                 success,
                 error,
-                BuildCacheTelemetryMetadata(cacheLayer, cacheKeyKind, versionStamp),
+                BuildCacheTelemetryMetadata(cacheLayer, cacheKeyKind, versionStamp, diagnostics),
                 GetTraceId(),
                 GetRequestId(),
                 hitSnapshots),
@@ -1210,12 +1214,13 @@ public sealed class MemoryService(
         }
     }
 
-    private static string BuildCacheTelemetryMetadata(string cacheLayer, string cacheKeyKind, string versionStamp)
+    private static string BuildCacheTelemetryMetadata(string cacheLayer, string cacheKeyKind, string versionStamp, SearchDiagnostics? diagnostics = null)
         => JsonSerializer.Serialize(new
         {
             cacheLayer,
             cacheKeyKind,
-            versionStamp
+            versionStamp,
+            diagnostics
         }, JsonOptions);
 
     private static void EnsureProjectAllowed(ContextHubRequestActor actor, string projectId, bool write)
@@ -1403,9 +1408,10 @@ public sealed class MemoryService(
     {
         var actor = actorAccessor.Current;
         EnsureScopeAllowed(actor, SecurityScopes.PreferencesRead);
-        var keywordHits = await searchStore.SearchKeywordChunksAsync(query, limit * 4, cancellationToken);
+        var searchScope = new MemorySearchScope([ProjectContext.UserProjectId]);
+        var keywordHits = await searchStore.SearchKeywordChunksAsync(query, limit * 4, searchScope, cancellationToken);
         var queryVector = await EmbedQueryAsync(query, cancellationToken);
-        var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, limit * 4, cancellationToken);
+        var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, limit * 4, searchScope, cancellationToken);
 
         var itemIds = keywordHits.Select(x => x.MemoryId).Concat(semanticHits.Select(x => x.MemoryId)).Distinct().ToArray();
         var items = await dbContext.MemoryItems
@@ -1588,6 +1594,28 @@ public sealed class MemoryService(
     private sealed record UserPreferenceSearchResult(
         IReadOnlyList<UserPreferenceResult> Preferences,
         IReadOnlyList<WorkingContextCitation> Citations);
+
+    private sealed record SearchDiagnostics(
+        int KeywordHitCount,
+        int VectorHitCount,
+        int CandidateMemoryCount,
+        int AuthorizedMemoryCount,
+        int KeywordMemoryCount,
+        int VectorMemoryCount)
+    {
+        public static SearchDiagnostics From(
+            IReadOnlyList<ChunkSearchHit> keywordHits,
+            IReadOnlyList<ChunkSearchHit> semanticHits,
+            int candidateMemoryCount,
+            int authorizedMemoryCount)
+            => new(
+                keywordHits.Count,
+                semanticHits.Count,
+                candidateMemoryCount,
+                authorizedMemoryCount,
+                keywordHits.Select(x => x.MemoryId).Distinct().Count(),
+                semanticHits.Select(x => x.MemoryId).Distinct().Count());
+    }
 
     private sealed record ReindexJobPayload(string ModelKey, Guid? MemoryItemId, string ProjectId);
     private sealed record SummaryRefreshJobPayload(string? ProjectId, IReadOnlyList<string> IncludedProjectIds, bool RebuildAll);
