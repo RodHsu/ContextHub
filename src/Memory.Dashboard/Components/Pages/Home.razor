@@ -192,6 +192,55 @@
             </section>
         }
 
+        @if ((_overview.DiscussionActivity ?? CreateEmptyDiscussionActivity(_overview.SnapshotAtUtc)) is { } discussionActivity)
+        {
+            <section class="panel discussion-activity-strip">
+                <div class="discussion-activity-title">
+                    <div>
+                        <div class="panel-title">討論對話串</div>
+                        <div class="context-savings-note">跨專案溝通活動，與工具呼叫流量分開計算。</div>
+                    </div>
+                    <a class="ghost-button" href="/discussions">前往討論</a>
+                </div>
+                <div class="discussion-activity-metrics" aria-label="Discussion activity details">
+                    <div>
+                        <span>目前討論串</span>
+                        <strong>@DashboardFormatting.Integer(discussionActivity.ThreadCount)</strong>
+                        <small>@DashboardFormatting.Integer(discussionActivity.OpenThreadCount) 個開啟中</small>
+                    </div>
+                    <div>
+                        <span>近 24 小時溝通</span>
+                        <strong>@DashboardFormatting.Integer(discussionActivity.RecentMessageCount)</strong>
+                        <small>則訊息</small>
+                    </div>
+                    <div class="discussion-activity-hosts">
+                        <span>主要討論專案</span>
+                        @if (discussionActivity.HostProjectCounts.Count == 0)
+                        {
+                            <small>尚無近期溝通</small>
+                        }
+                        else
+                        {
+                            @foreach (var host in discussionActivity.HostProjectCounts)
+                            {
+                                <small>@host.HostProjectId <b>@DashboardFormatting.Integer(host.MessageCount)</b></small>
+                            }
+                        }
+                    </div>
+                    <div class="discussion-activity-trend">
+                        <span>溝通趨勢</span>
+                        <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Discussion messages trend over the last 24 hours">
+                            @foreach (var guide in new[] { 14, 28, 42 })
+                            {
+                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                            }
+                            <polyline class="resource-line discussion" points="@BuildLinePoints(discussionActivity.Trend.Select(x => (double)x.MessageCount))"></polyline>
+                        </svg>
+                    </div>
+                </div>
+            </section>
+        }
+
         <div class="dashboard-grid page-scroll-host">
             <section class="panel">
                 <div class="panel-title">服務健康</div>
@@ -779,6 +828,19 @@
             BuildEmptyContextSavingsWindows(now),
             0d,
             TokenCountingModes.Approximate);
+
+    private static DashboardDiscussionActivityResult CreateEmptyDiscussionActivity(DateTimeOffset now)
+        => new(
+            0,
+            0,
+            0,
+            now.AddHours(-24),
+            now,
+            null,
+            Enumerable.Range(0, 24)
+                .Select(hour => new DashboardDiscussionActivityTrendPointResult(now.AddHours(-24 + hour), 0))
+                .ToArray(),
+            []);
 
     private static IReadOnlyList<DashboardContextSavingsWindowResult> ContextSavingsWindows(DashboardContextSavingsResult savings)
         => savings.Windows is { Count: > 0 }

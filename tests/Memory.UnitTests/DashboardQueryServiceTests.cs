@@ -1,12 +1,40 @@
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
+using Memory.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 
 namespace Memory.UnitTests;
 
 public sealed class DashboardQueryServiceTests
 {
+    [Fact]
+    public void DiscussionActivity_Should_Keep_Communication_Trend_Separate_From_Request_Traffic()
+    {
+        var now = new DateTimeOffset(2026, 7, 18, 12, 0, 0, TimeSpan.Zero);
+        var startedAt = now.AddHours(-24);
+
+        var activity = DashboardSnapshotCollectorHostedService.BuildDiscussionActivity(
+            now,
+            startedAt,
+            threadCount: 3,
+            openThreadCount: 2,
+            [
+                new DashboardSnapshotCollectorHostedService.DiscussionActivityMessage("Vital_AirMeet", now.AddMinutes(-10)),
+                new DashboardSnapshotCollectorHostedService.DiscussionActivityMessage("Vital_AirMeet", now.AddMinutes(-5)),
+                new DashboardSnapshotCollectorHostedService.DiscussionActivityMessage("ContextHub", now.AddHours(-3))
+            ]);
+
+        activity.ThreadCount.Should().Be(3);
+        activity.OpenThreadCount.Should().Be(2);
+        activity.RecentMessageCount.Should().Be(3);
+        activity.Trend.Should().HaveCount(24);
+        activity.Trend.Sum(x => x.MessageCount).Should().Be(3);
+        activity.HostProjectCounts.Should().ContainInOrder(
+            new DashboardDiscussionHostCountResult("Vital_AirMeet", 2),
+            new DashboardDiscussionHostCountResult("ContextHub", 1));
+    }
+
     [Fact]
     public async Task MemoryGraph_Should_Read_Precomputed_Snapshot()
     {

@@ -116,7 +116,26 @@ public sealed record DashboardOverviewResult(
     DashboardDependencyResourcesResult? DependencyResources = null,
     IReadOnlyList<DashboardResourceSampleResult>? ResourceSamples = null,
     DashboardEvaluationSummaryResult? EvaluationSummary = null,
-    DashboardContextSavingsResult? ContextSavings = null);
+    DashboardContextSavingsResult? ContextSavings = null,
+    DashboardDiscussionActivityResult? DiscussionActivity = null);
+
+public sealed record DashboardDiscussionActivityResult(
+    long ThreadCount,
+    long OpenThreadCount,
+    long RecentMessageCount,
+    DateTimeOffset WindowStartedAtUtc,
+    DateTimeOffset WindowEndedAtUtc,
+    DateTimeOffset? LastMessageAtUtc,
+    IReadOnlyList<DashboardDiscussionActivityTrendPointResult> Trend,
+    IReadOnlyList<DashboardDiscussionHostCountResult> HostProjectCounts);
+
+public sealed record DashboardDiscussionActivityTrendPointResult(
+    DateTimeOffset TimestampUtc,
+    int MessageCount);
+
+public sealed record DashboardDiscussionHostCountResult(
+    string HostProjectId,
+    int MessageCount);
 
 public sealed record DashboardContextSavingsResult(
     bool HasData,

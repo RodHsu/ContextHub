@@ -1744,6 +1744,80 @@ textarea {
     max-width: 100%;
 }
 
+.discussion-activity-strip {
+    display: grid;
+    grid-template-columns: minmax(220px, 0.7fr) minmax(0, 2.3fr);
+    gap: 0.85rem;
+    align-items: stretch;
+    margin-bottom: calc(var(--dashboard-page-gap) * 0.45);
+}
+
+.discussion-activity-title {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    align-items: flex-start;
+}
+
+.discussion-activity-metrics {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(150px, 1.1fr) minmax(180px, 1.5fr);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-muted);
+    overflow: hidden;
+}
+
+.discussion-activity-metrics > div {
+    display: grid;
+    gap: 0.18rem;
+    align-content: center;
+    min-width: 0;
+    padding: 0.52rem 0.6rem;
+    border-right: 1px solid var(--border);
+}
+
+.discussion-activity-metrics > div:last-child {
+    border-right: 0;
+}
+
+.discussion-activity-metrics span,
+.discussion-activity-metrics small {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    line-height: 1.2;
+}
+
+.discussion-activity-metrics strong {
+    font-size: 1.08rem;
+    line-height: 1.05;
+}
+
+.discussion-activity-hosts small {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    overflow-wrap: anywhere;
+}
+
+.discussion-activity-hosts b {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.discussion-activity-trend {
+    grid-template-columns: 3.7rem minmax(0, 1fr);
+    align-items: center;
+}
+
+.resource-line.discussion {
+    fill: none;
+    stroke: #8b5cf6;
+    stroke-width: 2.1;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
 .resource-chart-card {
     padding: var(--dashboard-stack-item-padding);
     border-radius: 16px;

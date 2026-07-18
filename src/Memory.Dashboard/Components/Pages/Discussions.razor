@@ -8,7 +8,7 @@
         <div class="page-actions-secondary">
             <label class="discussion-project-picker"><span>我的專案</span><select @bind="_projectId" @bind:after="LoadAsync" disabled="@_loading">@foreach (var project in _projects) { <option value="@project.Information.ProjectId">@project.Information.DisplayName</option> }</select></label>
         </div>
-        <div class="page-actions-primary"><button class="primary-button" @onclick="ToggleComposer" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">建立討論</button></div>
+        <div class="page-actions-primary"><button class="primary-button" @onclick="ToggleComposer" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">建立跨專案討論</button></div>
     </Actions>
     <ChildContent>
         @if (!string.IsNullOrWhiteSpace(_error)) { <div class="inline-error">@_error</div> }
@@ -51,7 +51,7 @@
             <aside class="discussion-inspector panel">
                 <div class="panel-title">內容檢查器</div>
                 @if (_selected is not null) { <div class="inspector-section"><span>可見範圍</span><p>僅列出的參與專案可讀取與回覆此討論。</p></div><div class="inspector-section"><span>參與專案</span><ul>@foreach (var participant in _selected.ParticipantProjectIds) { <li class="@(string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase) ? "host" : string.Empty)"><code>@participant</code>@if (string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase)) { <small>主責</small> }</li> }</ul></div><div class="inspector-section"><span>最後更新</span><p><ClientLocalTime Value="_selected.UpdatedAt" /></p></div> }
-                else { <p class="panel-heading-meta">選取討論後顯示主責專案、參與者及可見範圍。</p> }
+                else { <p class="panel-heading-meta">選取討論後顯示主責專案、參與專案及可見範圍。</p> }
             </aside>
         </section>
     </ChildContent>

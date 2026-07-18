@@ -18,6 +18,7 @@ public static class DashboardSnapshotKeys
     public const string DashboardProjectSuggestions = "dashboardProjectSuggestions";
     public const string EvaluationSummary = "evaluationSummary";
     public const string ContextSavings = "contextSavings";
+    public const string DiscussionActivity = "discussionActivity";
 }
 
 public static class DashboardSnapshotStalenessPolicy
@@ -73,6 +74,9 @@ public sealed record DashboardRecentOperationsSnapshotPayload(
     IReadOnlyList<DashboardOverviewMetricResult> Metrics,
     IReadOnlyList<JobListItemResult> ActiveJobs,
     IReadOnlyList<LogEntryResult> RecentErrors);
+
+public sealed record DashboardDiscussionActivitySnapshotPayload(
+    DashboardDiscussionActivityResult Activity);
 
 public sealed record DashboardResourceChartSnapshotPayload(
     IReadOnlyList<DashboardResourceSampleResult> Samples);

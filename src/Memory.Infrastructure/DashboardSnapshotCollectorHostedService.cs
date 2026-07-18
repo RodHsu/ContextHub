@@ -31,6 +31,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
 {
     private const int MaxResourceSamples = 15;
     private const int MaxContextSavingsTrendPoints = 24;
+    private const int DiscussionActivityTrendHours = 24;
     private const int MaxContextSavingsTelemetryEvents = 50_000;
     private const int ContextSavingsMinimumIntervalSeconds = 60;
     private const int ContextSavingsQueryTimeoutSeconds = 20;
@@ -72,6 +73,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
             RunLoopAsync(DashboardSnapshotKeys.ResourceChart, behavior => behavior.ResourceChartSeconds, CollectResourceChartAsync, stoppingToken),
             RunLoopAsync(DashboardSnapshotKeys.EvaluationSummary, behavior => behavior.RecentOperationsSeconds, CollectEvaluationSummaryAsync, stoppingToken),
             RunLoopAsync(DashboardSnapshotKeys.ContextSavings, behavior => Math.Max(ContextSavingsMinimumIntervalSeconds, behavior.RecentOperationsSeconds), CollectContextSavingsAsync, stoppingToken),
+            RunLoopAsync(DashboardSnapshotKeys.DiscussionActivity, behavior => behavior.RecentOperationsSeconds, CollectDiscussionActivityAsync, stoppingToken),
             RunLoopAsync(DashboardSnapshotKeys.MemoryGraphIndex, behavior => behavior.MemoryGraphIndexSeconds, CollectMemoryGraphIndexAsync, stoppingToken)
         };
 
@@ -96,6 +98,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.ResourceChart, settings.ResourceChartSeconds, CollectResourceChartAsync, cancellationToken);
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.EvaluationSummary, settings.RecentOperationsSeconds, CollectEvaluationSummaryAsync, cancellationToken);
         await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.ContextSavings, Math.Max(ContextSavingsMinimumIntervalSeconds, settings.RecentOperationsSeconds), CollectContextSavingsAsync, cancellationToken);
+        await CollectWithErrorHandlingAsync(DashboardSnapshotKeys.DiscussionActivity, settings.RecentOperationsSeconds, CollectDiscussionActivityAsync, cancellationToken);
     }
 
     private async Task RunLoopAsync(
@@ -659,6 +662,71 @@ public sealed class DashboardSnapshotCollectorHostedService(
             intervalSeconds,
             new DashboardContextSavingsSnapshotPayload(savings),
             cancellationToken);
+    }
+
+    private async Task CollectDiscussionActivityAsync(int intervalSeconds, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow();
+        var windowStartedAt = now.AddHours(-DiscussionActivityTrendHours);
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+
+        var threadCount = await dbContext.DiscussionThreads.LongCountAsync(cancellationToken);
+        var openThreadCount = await dbContext.DiscussionThreads.LongCountAsync(
+            x => x.Status == "Open",
+            cancellationToken);
+        var messages = await (
+            from message in dbContext.DiscussionMessages.AsNoTracking()
+            join thread in dbContext.DiscussionThreads.AsNoTracking() on message.ThreadId equals thread.Id
+            where message.CreatedAt >= windowStartedAt && message.CreatedAt <= now
+            select new DiscussionActivityMessage(thread.HostProjectId, message.CreatedAt))
+            .ToListAsync(cancellationToken);
+
+        var activity = BuildDiscussionActivity(now, windowStartedAt, threadCount, openThreadCount, messages);
+        await WriteSnapshotAsync(
+            DashboardSnapshotKeys.DiscussionActivity,
+            intervalSeconds,
+            new DashboardDiscussionActivitySnapshotPayload(activity),
+            cancellationToken);
+    }
+
+    internal static DashboardDiscussionActivityResult BuildDiscussionActivity(
+        DateTimeOffset now,
+        DateTimeOffset windowStartedAt,
+        long threadCount,
+        long openThreadCount,
+        IEnumerable<DiscussionActivityMessage> messages)
+    {
+        var recentMessages = messages
+            .Where(x => x.CreatedAt >= windowStartedAt && x.CreatedAt <= now)
+            .OrderBy(x => x.CreatedAt)
+            .ToArray();
+        var trend = Enumerable.Range(0, DiscussionActivityTrendHours)
+            .Select(hour =>
+            {
+                var bucketStartedAt = windowStartedAt.AddHours(hour);
+                var bucketEndedAt = bucketStartedAt.AddHours(1);
+                return new DashboardDiscussionActivityTrendPointResult(
+                    bucketStartedAt,
+                    recentMessages.Count(x => x.CreatedAt >= bucketStartedAt && x.CreatedAt < bucketEndedAt));
+            })
+            .ToArray();
+        var hostProjectCounts = recentMessages
+            .GroupBy(x => x.HostProjectId, StringComparer.Ordinal)
+            .Select(group => new DashboardDiscussionHostCountResult(group.Key, group.Count()))
+            .OrderByDescending(x => x.MessageCount)
+            .ThenBy(x => x.HostProjectId, StringComparer.Ordinal)
+            .Take(5)
+            .ToArray();
+
+        return new DashboardDiscussionActivityResult(
+            threadCount,
+            openThreadCount,
+            recentMessages.Length,
+            windowStartedAt,
+            now,
+            recentMessages.LastOrDefault()?.CreatedAt,
+            trend,
+            hostProjectCounts);
     }
 
     internal static DashboardContextSavingsResult BuildContextSavings(
@@ -1385,6 +1453,10 @@ public sealed class DashboardSnapshotCollectorHostedService(
         DateTimeOffset CreatedAt,
         bool CacheHit,
         string MetadataJson);
+
+    internal sealed record DiscussionActivityMessage(
+        string HostProjectId,
+        DateTimeOffset CreatedAt);
 
     private sealed record ContextSavingsTelemetrySample(
         DateTimeOffset CreatedAt,

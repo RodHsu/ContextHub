@@ -32,6 +32,7 @@ public sealed class DashboardQueryService(
         var storageLargeTablePreview = await snapshotStore.GetAsync<DashboardStorageLargeTablePreviewSnapshotPayload>(DashboardSnapshotKeys.StorageLargeTablePreview, cancellationToken);
         var evaluationSummary = await snapshotStore.GetAsync<DashboardEvaluationSummarySnapshotPayload>(DashboardSnapshotKeys.EvaluationSummary, cancellationToken);
         var contextSavings = await snapshotStore.GetAsync<DashboardContextSavingsSnapshotPayload>(DashboardSnapshotKeys.ContextSavings, cancellationToken);
+        var discussionActivity = await snapshotStore.GetAsync<DashboardDiscussionActivitySnapshotPayload>(DashboardSnapshotKeys.DiscussionActivity, cancellationToken);
 
         var sectionStatuses = new[]
         {
@@ -74,7 +75,8 @@ public sealed class DashboardQueryService(
             dependencyResources?.Payload ?? CreateUnavailableDependencyResources(),
             resourceChart?.Payload.Samples ?? [],
             evaluationSummary?.Payload.Summary,
-            contextSavings?.Payload.Savings ?? CreateEmptyContextSavings(now));
+            contextSavings?.Payload.Savings ?? CreateEmptyContextSavings(now),
+            discussionActivity?.Payload.Activity);
     }
 
     public async Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken)
