@@ -287,6 +287,32 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
+    public async Task Dashboard_Pages_Should_Remain_Usable_At_High_Dpi_2k_Equivalent_Width()
+    {
+        var failures = new List<string>();
+        var viewport = new DashboardViewport("high-dpi-2k", 1205, 1216);
+
+        foreach (var route in Routes)
+        {
+            try
+            {
+                await ValidateRouteAsync(
+                    route,
+                    DashboardUiProfile.Dense,
+                    viewport,
+                    DashboardTheme.Dark,
+                    enableRwdUsabilityChecks: true);
+            }
+            catch (Exception ex)
+            {
+                failures.Add($"{route.Name}: {ex}");
+            }
+        }
+
+        failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
     public async Task Dense_Data_Pages_Should_Handle_Window_Resize_Without_Scroll_Traps()
     {
         var failures = new List<string>();
@@ -465,7 +491,64 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     });
                 }");
             overlap.Should().BeFalse("memory list and detail panels must stack without overlap at the reported width");
+
+            var workspaceLayoutJson = await page.Locator(".memories-workspace-layout").EvaluateAsync<string>(
+                @"element => {
+                    const [list, detail] = Array.from(element.children);
+                    const listRect = list.getBoundingClientRect();
+                    const detailRect = detail.getBoundingClientRect();
+                    return JSON.stringify({
+                        columns: getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length,
+                        detailTop: detailRect.top,
+                        listBottom: listRect.bottom
+                    });
+                }");
+            using var workspaceLayoutDocument = JsonDocument.Parse(workspaceLayoutJson);
+            var workspaceLayout = workspaceLayoutDocument.RootElement;
+            workspaceLayout.GetProperty("columns").GetInt32().Should().Be(1,
+                "a 2K display at 200% scaling uses this CSS-width range and needs a sequential reader layout");
+            workspaceLayout.GetProperty("detailTop").GetDouble().Should().BeGreaterThanOrEqualTo(
+                workspaceLayout.GetProperty("listBottom").GetDouble() - 1,
+                "the detail panel must begin after the bounded memory list");
         }
+    }
+
+    [Fact]
+    public async Task Memories_Should_Use_A_Sequential_Bounded_Workspace_On_High_Dpi_Desktop_Width()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("high-dpi-2k", 1205, 1216));
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
+        await page.Locator(".memories-workspace-layout").WaitForAsync();
+        await page.Locator(".memories-table tbody tr").First.ClickAsync();
+        await page.Locator(".memory-detail-body").WaitForAsync();
+
+        var layoutJson = await page.Locator(".memories-workspace-layout").EvaluateAsync<string>(
+            @"element => {
+                const [list, detail] = Array.from(element.children);
+                const listRect = list.getBoundingClientRect();
+                const detailRect = detail.getBoundingClientRect();
+                const table = element.querySelector('.memories-table-scroll-shell');
+                return JSON.stringify({
+                    columns: getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length,
+                    detailTop: detailRect.top,
+                    listBottom: listRect.bottom,
+                    tableClientHeight: table?.clientHeight ?? 0,
+                    tableScrollHeight: table?.scrollHeight ?? 0,
+                    tableOverflowY: table ? getComputedStyle(table).overflowY : ''
+                });
+            }");
+        using var layoutDocument = JsonDocument.Parse(layoutJson);
+        var layout = layoutDocument.RootElement;
+        layout.GetProperty("columns").GetInt32().Should().Be(1);
+        layout.GetProperty("detailTop").GetDouble().Should().BeGreaterThanOrEqualTo(
+            layout.GetProperty("listBottom").GetDouble() - 1);
+        layout.GetProperty("tableClientHeight").GetDouble().Should().BeGreaterThanOrEqualTo(320);
+        layout.GetProperty("tableScrollHeight").GetDouble().Should().BeGreaterThan(
+            layout.GetProperty("tableClientHeight").GetDouble());
+        layout.GetProperty("tableOverflowY").GetString().Should().Be("auto");
     }
 
     [Fact]

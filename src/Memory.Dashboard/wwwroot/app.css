@@ -8962,6 +8962,24 @@ a.button-like {
     overflow-y: clip !important;
 }
 
+/*
+ * A 2K display at 200% scaling exposes roughly a 1200–1366 CSS-pixel viewport.
+ * Keep the memory reader sequential in that range: two independently tall panels
+ * leave the detail panel partly hidden behind the list and make either panel hard
+ * to use.
+ */
+@media (max-width: 1366px) and (min-width: 1025px) {
+    .memories-workspace-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .memories-list-panel .memories-table-scroll-shell {
+        height: clamp(20rem, calc(100vh - 42.5rem), 35rem);
+        max-height: none;
+        overflow-y: auto !important;
+    }
+}
+
 .data-table th,
 .table-scroll-shell th {
     background: color-mix(in srgb, var(--surface-alt) 78%, black 22%);
