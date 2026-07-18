@@ -488,6 +488,16 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         projectInformationHtml.Should().Contain("背景注入");
         projectInformationHtml.Should().Contain("顯示範圍");
 
+        using var discussionsResponse = await client.GetAsync("/discussions");
+        discussionsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var discussionsHtml = WebUtility.HtmlDecode(await discussionsResponse.Content.ReadAsStringAsync());
+        discussionsHtml.Should().Contain("跨專案討論");
+        discussionsHtml.Should().Contain("建立跨專案討論");
+        discussionsHtml.Should().Contain("相關討論");
+        discussionsHtml.Should().Contain("內容檢查器");
+        discussionsHtml.Should().Contain("參與專案");
+        discussionsHtml.Should().Contain("discussions-workspace");
+
         using var graphResponse = await client.GetAsync("/graph");
         graphResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var graphHtml = WebUtility.HtmlDecode(await graphResponse.Content.ReadAsStringAsync());
@@ -1623,6 +1633,24 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             archivedAt,
             archivedAt?.AddDays(7)));
     }
+
+    public Task<ProjectHierarchyResult> GetProjectChildrenAsync(string parentProjectId, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectHierarchyResult(parentProjectId, [], DateTimeOffset.MinValue));
+
+    public Task<ProjectHierarchyResult> SetProjectChildrenAsync(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectHierarchyResult(request.ParentProjectId, request.ChildProjectIds, DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<DiscussionThreadResult>> GetDiscussionThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<DiscussionThreadResult>>([]);
+
+    public Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken)
+        => Task.FromResult<DiscussionThreadDetailResult?>(null);
+
+    public Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<DiscussionMessageResult> CreateDiscussionMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
 
     public Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
         => Task.FromResult(BuildRetentionResult(request.Mode));

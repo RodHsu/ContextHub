@@ -472,6 +472,15 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         await using var mcpClient = await McpClient.CreateAsync(transport);
         var tools = await mcpClient.ListToolsAsync();
         tools.Select(x => x.ProtocolTool.Name).Should().Contain("conversation_ingest");
+        tools.Select(x => x.ProtocolTool.Name).Should().Contain(new[]
+        {
+            "project_hierarchy_set_children",
+            "project_hierarchy_get_children",
+            "discussion_thread_create",
+            "discussion_threads_list",
+            "discussion_thread_get",
+            "discussion_message_create"
+        });
 
         var sessionId = captureHandler.SessionId;
         sessionId.Should().NotBeNullOrWhiteSpace();

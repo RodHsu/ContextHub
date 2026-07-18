@@ -1297,6 +1297,36 @@ conversations.MapGet("/checkpoints/search", async (
     return Results.Ok(result);
 }).RequireAdminIfEnabled(requireAuthentication);
 
+var discussions = app.MapGroup("/api/discussions");
+discussions.RequireAuthIfEnabled(requireAuthentication);
+discussions.MapPost("/threads", async (DiscussionThreadCreateRequest request, IProjectDiscussionService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Created($"/api/discussions/threads", await service.CreateThreadAsync(request, cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["discussion"] = [ex.Message] }); }
+});
+discussions.MapGet("/threads", async (string? projectId, string? hostProjectId, string? status, int? limit, IProjectDiscussionService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ListThreadsAsync(new DiscussionThreadListRequest(projectId, hostProjectId, status, limit ?? 50), cancellationToken)));
+discussions.MapGet("/threads/{threadId:guid}", async (Guid threadId, string readerProjectId, IProjectDiscussionService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.GetThreadAsync(threadId, readerProjectId, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+discussions.MapPost("/threads/{threadId:guid}/messages", async (Guid threadId, DiscussionMessageCreateBody body, IProjectDiscussionService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Created($"/api/discussions/threads/{threadId:D}/messages", await service.AddMessageAsync(new DiscussionMessageCreateRequest(threadId, body.SenderProjectId, body.Content), cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["discussion"] = [ex.Message] }); }
+});
+
+var projectHierarchy = app.MapGroup("/api/projects/hierarchy");
+projectHierarchy.RequireAuthIfEnabled(requireAuthentication);
+projectHierarchy.MapGet("/{parentProjectId}", async (string parentProjectId, IProjectDiscussionService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.GetChildrenAsync(parentProjectId, cancellationToken)));
+projectHierarchy.MapPut("/{parentProjectId}", async (string parentProjectId, ProjectHierarchySetChildrenBody body, IProjectDiscussionService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.SetChildrenAsync(new ProjectHierarchySetChildrenRequest(parentProjectId, body.ChildProjectIds ?? []), cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["projectHierarchy"] = [ex.Message] }); }
+});
+
 conversations.MapGet("/checkpoints/{checkpointId:guid}/pipeline", async (
     Guid checkpointId,
     IConversationAutomationService service,
@@ -1883,6 +1913,9 @@ internal sealed record TenantUserUpdateBody(
     TenantUserRole? Role = null,
     TenantUserStatus? Status = null,
     string? Password = null);
+internal sealed record DiscussionMessageCreateBody(string SenderProjectId, string Content);
+internal sealed record ProjectHierarchySetChildrenBody(IReadOnlyList<string>? ChildProjectIds);
+
 internal sealed record TenantProjectGrantUpsertBody(
     bool CanRead = true,
     bool CanWrite = false,

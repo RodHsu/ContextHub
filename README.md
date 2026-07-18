@@ -138,6 +138,8 @@ Primary tools:
 - `memory_upsert`
 - `memory_update`
 - `conversation_ingest`
+- `discussion_thread_create` / `discussion_threads_list` / `discussion_message_create`
+- `project_hierarchy_set_children`
 - `log_search`
 - `log_read`
 - `promote_log_slice_to_memory`

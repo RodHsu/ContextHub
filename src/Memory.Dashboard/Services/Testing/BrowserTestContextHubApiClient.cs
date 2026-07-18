@@ -642,6 +642,25 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         return Task.FromResult(_projectInformation);
     }
 
+    public Task<ProjectHierarchyResult> GetProjectChildrenAsync(string parentProjectId, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectHierarchyResult(parentProjectId, [], DateTimeOffset.MinValue));
+
+    public Task<ProjectHierarchyResult> SetProjectChildrenAsync(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectHierarchyResult(request.ParentProjectId, request.ChildProjectIds, DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<DiscussionThreadResult>> GetDiscussionThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<DiscussionThreadResult>>(
+        [new DiscussionThreadResult(Guid.Parse("77000000-0000-0000-0000-000000000001"), "Vital_AirMeet_BackEnd", "API contract alignment", "Open", ["Vital_AirMeet", "Vital_AirMeet_BackEnd"], 2, DateTimeOffset.UtcNow.AddHours(-3), DateTimeOffset.UtcNow.AddMinutes(-5))]);
+
+    public Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken)
+        => Task.FromResult<DiscussionThreadDetailResult?>(new DiscussionThreadDetailResult(threadId, "Vital_AirMeet_BackEnd", "API contract alignment", "Open", ["Vital_AirMeet", "Vital_AirMeet_BackEnd"], [new DiscussionMessageResult(Guid.NewGuid(), "Vital_AirMeet", "請確認 API contract 的部署順序。", DateTimeOffset.UtcNow.AddMinutes(-8))], DateTimeOffset.UtcNow.AddHours(-3), DateTimeOffset.UtcNow.AddMinutes(-5)));
+
+    public Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new DiscussionThreadDetailResult(Guid.NewGuid(), request.HostProjectId, request.Title, "Open", request.ParticipantProjectIds, [new DiscussionMessageResult(Guid.NewGuid(), request.SenderProjectId, request.InitialMessage, DateTimeOffset.UtcNow)], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+    public Task<DiscussionMessageResult> CreateDiscussionMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new DiscussionMessageResult(Guid.NewGuid(), request.SenderProjectId, request.Content, DateTimeOffset.UtcNow));
+
     public Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
         => Task.FromResult(BuildRetentionResult(request.Mode));
 

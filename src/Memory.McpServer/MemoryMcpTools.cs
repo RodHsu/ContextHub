@@ -10,6 +10,7 @@ public sealed class MemoryMcpTools(
     IMemoryService memoryService,
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
+    IProjectDiscussionService projectDiscussionService,
     IProjectInformationService projectInformationService,
     IProjectArtifactExchangeService artifactExchangeService,
     IChatGptProposalService chatGptProposalService,
@@ -145,6 +146,30 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("List staged conversation insights and their promotion state.")]
     public Task<IReadOnlyList<ConversationInsightResult>> conversation_insights_list(ConversationInsightListRequest request, CancellationToken cancellationToken = default)
         => conversationAutomationService.ListInsightsAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Set the child repositories managed by a parent ProjectId. This controls project structure only; it does not copy memories or grant token access.")]
+    public Task<ProjectHierarchyResult> project_hierarchy_set_children(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken = default)
+        => projectDiscussionService.SetChildrenAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List the explicitly configured child repositories for a parent ProjectId.")]
+    public Task<ProjectHierarchyResult> project_hierarchy_get_children(string parentProjectId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.GetChildrenAsync(parentProjectId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a persistent cross-project discussion hosted by HostProjectId. Only the listed participant projects can read or reply; discussion messages never become memories or knowledge.")]
+    public Task<DiscussionThreadDetailResult> discussion_thread_create(DiscussionThreadCreateRequest request, CancellationToken cancellationToken = default)
+        => projectDiscussionService.CreateThreadAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List cross-project discussion threads visible to one participant ProjectId, optionally filtered by host project or status.")]
+    public Task<IReadOnlyList<DiscussionThreadResult>> discussion_threads_list(DiscussionThreadListRequest request, CancellationToken cancellationToken = default)
+        => projectDiscussionService.ListThreadsAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Read one participant-scoped cross-project discussion and mark it read for readerProjectId.")]
+    public Task<DiscussionThreadDetailResult?> discussion_thread_get(Guid threadId, string readerProjectId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.GetThreadAsync(threadId, readerProjectId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Reply to a cross-project discussion as SenderProjectId. The sender must be a participant and writable for the current actor.")]
+    public Task<DiscussionMessageResult> discussion_message_create(DiscussionMessageCreateRequest request, CancellationToken cancellationToken = default)
+        => projectDiscussionService.AddMessageAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Enqueue a background reindex job for the current or target embedding model.")]
     public Task<EnqueueReindexResult> enqueue_reindex(EnqueueReindexRequest request, CancellationToken cancellationToken = default)

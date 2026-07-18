@@ -828,3 +828,46 @@ public sealed class ConversationInsight
     public ConversationSession? Session { get; set; }
     public ConversationCheckpoint? Checkpoint { get; set; }
 }
+
+public sealed class ProjectHierarchy
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
+    public string ParentProjectId { get; set; } = string.Empty;
+    public string ChildProjectId { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class DiscussionThread
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
+    public string HostProjectId { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string Status { get; set; } = "Open";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public List<DiscussionParticipant> Participants { get; set; } = [];
+    public List<DiscussionMessage> Messages { get; set; } = [];
+}
+
+public sealed class DiscussionParticipant
+{
+    public Guid ThreadId { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public DateTimeOffset LastReadAt { get; set; }
+    public DiscussionThread? Thread { get; set; }
+}
+
+public sealed class DiscussionMessage
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ThreadId { get; set; }
+    public string SenderProjectId { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DiscussionThread? Thread { get; set; }
+}

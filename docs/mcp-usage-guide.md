@@ -88,6 +88,12 @@ Do not write:
 | `conversation_ingest` | Saving a concise checkpoint for future task continuity |
 | `conversation_sessions_list` | Auditing staged conversation sessions |
 | `conversation_insights_list` | Reviewing staged conversation insights and promotion state |
+| `project_hierarchy_set_children` | Maintaining the child repositories managed by one parent ProjectId; this does not change ACLs |
+| `project_hierarchy_get_children` | Reading the configured child repositories for one parent ProjectId |
+| `discussion_thread_create` | Starting a persistent, participant-scoped discussion hosted by a target project |
+| `discussion_threads_list` | Polling discussion threads visible to one participant ProjectId |
+| `discussion_thread_get` | Reading one discussion and marking it read for that participant project |
+| `discussion_message_create` | Replying as a participant ProjectId with write access |
 | `log_search` | Searching recent runtime events |
 | `log_read` | Reading a specific log slice or event |
 | `promote_log_slice_to_memory` | Turning a verified incident into durable knowledge |
@@ -110,6 +116,14 @@ Do not write:
 | `chatgpt_proposal_reject` | Rejecting a pending ChatGPT write proposal |
 
 The Dashboard also exposes this catalog in Traditional Chinese at `/mcp-tools`.
+
+## Cross-Project Discussions
+
+Use discussions for questions and replies that must remain separate from durable knowledge, memory, and conversation-checkpoint promotion. A discussion has one `hostProjectId` that identifies the main repo under discussion and an explicit participant list.
+
+For example, A can open a thread hosted by C with participants A and C. A separate thread hosted by C can contain A, B, and C. Only listed participant projects can list, read, or reply to that thread. The caller needs read access to every participant at creation time and write access only to its sender project, so an agent from A can open a discussion about C without receiving write access to C.
+
+Configure parent-to-child repo structure independently with `project_hierarchy_set_children`. It is organizational metadata only: it never grants token access, copies memories, or silently adds children to a discussion.
 
 ## Standard Task Lifecycle
 

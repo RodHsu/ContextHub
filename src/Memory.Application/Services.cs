@@ -2511,6 +2511,7 @@ public static class DependencyInjection
         services.AddScoped<IAccessibleProjectService, AccessibleProjectService>();
         services.AddScoped<IDailyMemoryReviewService, DailyMemoryReviewService>();
         services.AddScoped<IProjectInformationService, ProjectInformationService>();
+        services.AddScoped<IProjectDiscussionService, ProjectDiscussionService>();
         services.AddScoped<IMemoryService, MemoryService>();
         services.AddSingleton<IProjectArtifactObjectStore, DisabledProjectArtifactObjectStore>();
         services.AddScoped<IProjectArtifactExchangeService, ProjectArtifactExchangeService>();

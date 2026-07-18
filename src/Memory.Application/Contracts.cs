@@ -1485,6 +1485,10 @@ public interface IApplicationDbContext
     DbSet<ConversationSession> ConversationSessions { get; }
     DbSet<ConversationCheckpoint> ConversationCheckpoints { get; }
     DbSet<ConversationInsight> ConversationInsights { get; }
+    DbSet<ProjectHierarchy> ProjectHierarchies { get; }
+    DbSet<DiscussionThread> DiscussionThreads { get; }
+    DbSet<DiscussionParticipant> DiscussionParticipants { get; }
+    DbSet<DiscussionMessage> DiscussionMessages { get; }
     void ClearTrackedChanges();
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
@@ -1652,6 +1656,26 @@ public interface IProjectInformationService
 public interface IAccessibleProjectService
 {
     Task<IReadOnlyList<AccessibleProjectResult>> ListAsync(int limit, CancellationToken cancellationToken);
+}
+
+public sealed record ProjectHierarchySetChildrenRequest(string ParentProjectId, IReadOnlyList<string> ChildProjectIds);
+public sealed record ProjectHierarchyResult(string ParentProjectId, IReadOnlyList<string> ChildProjectIds, DateTimeOffset UpdatedAt);
+
+public sealed record DiscussionThreadCreateRequest(string HostProjectId, string SenderProjectId, string Title, IReadOnlyList<string> ParticipantProjectIds, string InitialMessage);
+public sealed record DiscussionMessageCreateRequest(Guid ThreadId, string SenderProjectId, string Content);
+public sealed record DiscussionThreadListRequest(string? ProjectId = null, string? HostProjectId = null, string? Status = null, int Limit = 50);
+public sealed record DiscussionMessageResult(Guid Id, string SenderProjectId, string Content, DateTimeOffset CreatedAt);
+public sealed record DiscussionThreadResult(Guid Id, string HostProjectId, string Title, string Status, IReadOnlyList<string> ParticipantProjectIds, int UnreadCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+public sealed record DiscussionThreadDetailResult(Guid Id, string HostProjectId, string Title, string Status, IReadOnlyList<string> ParticipantProjectIds, IReadOnlyList<DiscussionMessageResult> Messages, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+
+public interface IProjectDiscussionService
+{
+    Task<ProjectHierarchyResult> SetChildrenAsync(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken);
+    Task<ProjectHierarchyResult> GetChildrenAsync(string parentProjectId, CancellationToken cancellationToken);
+    Task<DiscussionThreadDetailResult> CreateThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DiscussionThreadResult>> ListThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken);
+    Task<DiscussionThreadDetailResult?> GetThreadAsync(Guid threadId, string? readerProjectId, CancellationToken cancellationToken);
+    Task<DiscussionMessageResult> AddMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken);
 }
 
 public interface IDailyMemoryReviewService

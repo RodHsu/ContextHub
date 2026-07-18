@@ -42,6 +42,12 @@
                     <p><code>system:project-information</code></p>
                     <small>每次建立 working context 時，會先載入這份固定背景。</small>
                 </section>
+                <section class="project-context-contract">
+                    <span>下屬專案</span>
+                    <textarea class="child-projects-input" @bind="_childProjectIdsText" placeholder="每行一個 ProjectId"></textarea>
+                    <button class="lifecycle-action" @onclick="SaveChildrenAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">儲存下屬專案</button>
+                    <small>用於表示此專案管理哪些 repo；不會自動授權、共享記憶或加入討論。</small>
+                </section>
             </aside>
 
             <main class="project-editor">
@@ -94,6 +100,7 @@
     private bool _loading;
     private bool _editing;
     private bool _includeInactive;
+    private string _childProjectIdsText = string.Empty;
 
     protected override async Task OnInitializedAsync()
     {
@@ -116,6 +123,8 @@
             _displayName = result?.DisplayName ?? _projectId.Trim();
             _description = result?.Description ?? string.Empty;
             _information = result;
+            var hierarchy = await ApiClient.GetProjectChildrenAsync(_projectId.Trim(), CancellationToken.None);
+            _childProjectIdsText = string.Join(Environment.NewLine, hierarchy.ChildProjectIds);
             _editing = false;
             _message = result is null ? "尚未建立此專案的資訊。" : $"最後更新：{result.UpdatedAt.LocalDateTime:g}";
         }
@@ -188,6 +197,25 @@
                 _ => "專案已還原，預設搜尋與工作脈絡會重新讀取其記憶。"
             };
             await RefreshProjectsAsync();
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SaveChildrenAsync()
+    {
+        _loading = true;
+        try
+        {
+            var childProjectIds = _childProjectIdsText
+                .Split(["\r\n", "\n", ","], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var hierarchy = await ApiClient.SetProjectChildrenAsync(new ProjectHierarchySetChildrenRequest(_projectId.Trim(), childProjectIds), CancellationToken.None);
+            _childProjectIdsText = string.Join(Environment.NewLine, hierarchy.ChildProjectIds);
+            _message = "下屬專案設定已儲存；權限與資料範圍維持不變。";
         }
         finally
         {

@@ -139,6 +139,14 @@
     line-height: 1.45;
 }
 
+.child-projects-input {
+    min-height: 5.5rem;
+    resize: vertical;
+    border-radius: 6px;
+    font-family: "JetBrains Mono", Consolas, monospace;
+    font-size: 0.76rem;
+}
+
 .display-name-field {
     max-width: 35rem;
     margin-top: 1.35rem;

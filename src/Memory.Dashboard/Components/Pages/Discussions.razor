@@ -1,0 +1,107 @@
+@page "/discussions"
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>ContextHub | 跨專案討論</PageTitle>
+
+<PageViewport Title="跨專案討論" Subtitle="只顯示目前專案可參與的討論；主責專案與參與者會決定每一串的可見範圍。" BodyClass="page-viewport-body discussions-page-body">
+    <Actions>
+        <div class="page-actions-secondary">
+            <label class="discussion-project-picker"><span>我的專案</span><select @bind="_projectId" @bind:after="LoadAsync" disabled="@_loading">@foreach (var project in _projects) { <option value="@project.Information.ProjectId">@project.Information.DisplayName</option> }</select></label>
+        </div>
+        <div class="page-actions-primary"><button class="primary-button" @onclick="ToggleComposer" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">建立討論</button></div>
+    </Actions>
+    <ChildContent>
+        @if (!string.IsNullOrWhiteSpace(_error)) { <div class="inline-error">@_error</div> }
+        @if (_creating)
+        {
+            <section class="discussion-compose panel">
+                <div class="panel-heading-row"><div><div class="panel-title">建立跨專案討論</div><div class="panel-heading-meta">先選主責專案，再填入可見的參與專案。</div></div><button class="ghost-button" @onclick="ToggleComposer">取消</button></div>
+                <div class="discussion-compose-grid">
+                    <label><span>主責專案</span><select @bind="_newHostProjectId">@foreach (var project in _projects) { <option value="@project.Information.ProjectId">@project.Information.DisplayName</option> }</select></label>
+                    <label><span>討論標題</span><input @bind="_newTitle" placeholder="例如：API contract 對齊" /></label>
+                    <label class="discussion-compose-wide"><span>參與專案</span><input @bind="_newParticipants" placeholder="Vital_AirMeet, Vital_AirMeet_BackEnd" /><small>以逗號分隔；建立者與主責專案會自動加入。</small></label>
+                    <label class="discussion-compose-wide"><span>第一則訊息</span><textarea @bind="_newMessage" placeholder="說明要討論的決策、問題或交接事項。"></textarea></label>
+                </div>
+                <div class="discussion-compose-actions"><button class="primary-button" @onclick="CreateAsync" disabled="@_loading">建立並送出</button></div>
+            </section>
+        }
+        <section class="discussions-workspace">
+            <aside class="discussion-list-panel panel">
+                <div class="panel-heading-row"><div><div class="panel-title">相關討論</div><div class="panel-heading-meta">@_projectId</div></div><button class="ghost-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
+                <div class="discussion-list-scroll">
+                    @if (_threads.Count == 0) { <div class="empty-inline">目前沒有相關討論。</div> }
+                    @foreach (var thread in _threads)
+                    {
+                        <button class="discussion-list-item @(_selectedThreadId == thread.Id ? "selected" : string.Empty)" @onclick="() => SelectThreadAsync(thread.Id)">
+                            <span class="discussion-list-item-top"><code>@thread.HostProjectId</code>@if (thread.UnreadCount > 0) { <strong>@thread.UnreadCount</strong> }</span>
+                            <span class="discussion-list-title">@thread.Title</span><span class="discussion-list-participants">@string.Join(" · ", thread.ParticipantProjectIds)</span><span class="discussion-list-time"><ClientLocalTime Value="thread.UpdatedAt" /></span>
+                        </button>
+                    }
+                </div>
+            </aside>
+            <main class="discussion-thread-panel panel">
+                @if (_selected is null) { <div class="empty-state">從左側選擇一個討論串。</div> }
+                else
+                {
+                    <div class="discussion-thread-heading"><div><div class="studio-eyebrow">主責專案</div><h2>@_selected.Title</h2><p><code>@_selected.HostProjectId</code> 的跨專案討論</p></div><span class="status-badge success">@_selected.Status</span></div>
+                    <div class="discussion-message-stream">@foreach (var message in _selected.Messages) { <article class="discussion-message"><div><strong>@message.SenderProjectId</strong><span><ClientLocalTime Value="message.CreatedAt" /></span></div><p>@message.Content</p></article> }</div>
+                    <div class="discussion-reply"><textarea @bind="_reply" placeholder="回覆討論…"></textarea><button class="primary-button" @onclick="ReplyAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_reply))">送出</button></div>
+                }
+            </main>
+            <aside class="discussion-inspector panel">
+                <div class="panel-title">內容檢查器</div>
+                @if (_selected is not null) { <div class="inspector-section"><span>可見範圍</span><p>僅列出的參與專案可讀取與回覆此討論。</p></div><div class="inspector-section"><span>參與專案</span><ul>@foreach (var participant in _selected.ParticipantProjectIds) { <li class="@(string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase) ? "host" : string.Empty)"><code>@participant</code>@if (string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase)) { <small>主責</small> }</li> }</ul></div><div class="inspector-section"><span>最後更新</span><p><ClientLocalTime Value="_selected.UpdatedAt" /></p></div> }
+                else { <p class="panel-heading-meta">選取討論後顯示主責專案、參與者及可見範圍。</p> }
+            </aside>
+        </section>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private IReadOnlyList<ProjectInformationListItem> _projects = [];
+    private IReadOnlyList<DiscussionThreadResult> _threads = [];
+    private DiscussionThreadDetailResult? _selected;
+    private Guid? _selectedThreadId;
+    private string _projectId = string.Empty, _reply = string.Empty, _newHostProjectId = string.Empty, _newTitle = string.Empty, _newParticipants = string.Empty, _newMessage = string.Empty;
+    private string? _error;
+    private bool _loading, _creating;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _projects = await ApiClient.GetProjectInformationProjectsAsync(false, CancellationToken.None);
+        _projectId = _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty;
+        _newHostProjectId = _projectId;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_projectId)) return;
+        _loading = true; _error = null;
+        try { _threads = await ApiClient.GetDiscussionThreadsAsync(new DiscussionThreadListRequest(_projectId), CancellationToken.None); if (_threads.FirstOrDefault() is { } first) await SelectThreadAsync(first.Id); else { _selected = null; _selectedThreadId = null; } }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _loading = false; }
+    }
+
+    private async Task SelectThreadAsync(Guid id)
+    {
+        _selectedThreadId = id; _selected = await ApiClient.GetDiscussionThreadAsync(id, _projectId, CancellationToken.None); _reply = string.Empty;
+    }
+
+    private void ToggleComposer() { _creating = !_creating; _newHostProjectId = string.IsNullOrWhiteSpace(_newHostProjectId) ? _projectId : _newHostProjectId; }
+    private async Task CreateAsync()
+    {
+        _loading = true; _error = null;
+        try { var participants = _newParticipants.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries); var created = await ApiClient.CreateDiscussionThreadAsync(new DiscussionThreadCreateRequest(_newHostProjectId, _projectId, _newTitle, participants, _newMessage), CancellationToken.None); _creating = false; _selected = created; _selectedThreadId = created.Id; await LoadAsync(); }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _loading = false; }
+    }
+    private async Task ReplyAsync()
+    {
+        if (_selected is null) return;
+        _loading = true; _error = null;
+        try { await ApiClient.CreateDiscussionMessageAsync(new DiscussionMessageCreateRequest(_selected.Id, _projectId, _reply), CancellationToken.None); await SelectThreadAsync(_selected.Id); await LoadAsync(); }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _loading = false; }
+    }
+}

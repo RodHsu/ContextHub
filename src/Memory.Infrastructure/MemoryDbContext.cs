@@ -51,6 +51,10 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<ConversationSession> ConversationSessions => Set<ConversationSession>();
     public DbSet<ConversationCheckpoint> ConversationCheckpoints => Set<ConversationCheckpoint>();
     public DbSet<ConversationInsight> ConversationInsights => Set<ConversationInsight>();
+    public DbSet<ProjectHierarchy> ProjectHierarchies => Set<ProjectHierarchy>();
+    public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
+    public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
+    public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
 
     public void ClearTrackedChanges()
         => ChangeTracker.Clear();
@@ -762,6 +766,59 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => x.DedupKey).IsUnique();
+        });
+
+        modelBuilder.Entity<ProjectHierarchy>(entity =>
+        {
+            entity.ToTable("project_hierarchies");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ParentProjectId).HasColumnName("parent_project_id");
+            entity.Property(x => x.ChildProjectId).HasColumnName("child_project_id");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ParentProjectId, x.ChildProjectId }).IsUnique();
+        });
+
+        modelBuilder.Entity<DiscussionThread>(entity =>
+        {
+            entity.ToTable("discussion_threads");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.HostProjectId).HasColumnName("host_project_id");
+            entity.Property(x => x.Title).HasColumnName("title");
+            entity.Property(x => x.Status).HasColumnName("status");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.HostProjectId, x.UpdatedAt });
+            entity.HasMany(x => x.Participants).WithOne(x => x.Thread).HasForeignKey(x => x.ThreadId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasMany(x => x.Messages).WithOne(x => x.Thread).HasForeignKey(x => x.ThreadId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<DiscussionParticipant>(entity =>
+        {
+            entity.ToTable("discussion_participants");
+            entity.HasKey(x => new { x.ThreadId, x.ProjectId });
+            entity.Property(x => x.ThreadId).HasColumnName("thread_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.LastReadAt).HasColumnName("last_read_at");
+            entity.HasIndex(x => x.ProjectId);
+        });
+
+        modelBuilder.Entity<DiscussionMessage>(entity =>
+        {
+            entity.ToTable("discussion_messages");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.ThreadId).HasColumnName("thread_id");
+            entity.Property(x => x.SenderProjectId).HasColumnName("sender_project_id");
+            entity.Property(x => x.Content).HasColumnName("content");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.ThreadId, x.CreatedAt });
         });
     }
 

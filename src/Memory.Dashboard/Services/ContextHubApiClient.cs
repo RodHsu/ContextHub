@@ -24,6 +24,12 @@ public interface IContextHubApiClient
     Task<ProjectInformationResult?> GetProjectInformationAsync(string projectId, CancellationToken cancellationToken);
     Task<ProjectInformationResult> UpsertProjectInformationAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken);
     Task<ProjectInformationResult> UpdateProjectLifecycleAsync(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken);
+    Task<ProjectHierarchyResult> GetProjectChildrenAsync(string parentProjectId, CancellationToken cancellationToken);
+    Task<ProjectHierarchyResult> SetProjectChildrenAsync(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DiscussionThreadResult>> GetDiscussionThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken);
+    Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken);
+    Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken);
+    Task<DiscussionMessageResult> CreateDiscussionMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
     Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken);
     Task<MemoryImportPreviewResult> PreviewMemoryImportAsync(MemoryImportRequest request, CancellationToken cancellationToken);
@@ -190,6 +196,36 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
             request,
             cancellationToken);
         return await ReadRequiredAsync<ProjectInformationResult>(response, cancellationToken);
+    }
+
+    public Task<ProjectHierarchyResult> GetProjectChildrenAsync(string parentProjectId, CancellationToken cancellationToken)
+        => GetRequiredAsync<ProjectHierarchyResult>($"/api/projects/hierarchy/{Uri.EscapeDataString(parentProjectId)}", cancellationToken);
+
+    public async Task<ProjectHierarchyResult> SetProjectChildrenAsync(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PutAsJsonAsync($"/api/projects/hierarchy/{Uri.EscapeDataString(request.ParentProjectId)}", new { childProjectIds = request.ChildProjectIds }, cancellationToken);
+        return await ReadRequiredAsync<ProjectHierarchyResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<DiscussionThreadResult>> GetDiscussionThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken)
+    {
+        var query = new Dictionary<string, string?> { ["projectId"] = request.ProjectId, ["hostProjectId"] = request.HostProjectId, ["status"] = request.Status, ["limit"] = request.Limit.ToString() };
+        return GetRequiredAsync<IReadOnlyList<DiscussionThreadResult>>(QueryHelpers.AddQueryString("/api/discussions/threads", query), cancellationToken);
+    }
+
+    public Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken)
+        => GetRequiredAsync<DiscussionThreadDetailResult>($"/api/discussions/threads/{threadId:D}?readerProjectId={Uri.EscapeDataString(readerProjectId)}", cancellationToken)!;
+
+    public async Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/discussions/threads", request, cancellationToken);
+        return await ReadRequiredAsync<DiscussionThreadDetailResult>(response, cancellationToken);
+    }
+
+    public async Task<DiscussionMessageResult> CreateDiscussionMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/discussions/threads/{request.ThreadId:D}/messages", new { request.SenderProjectId, request.Content }, cancellationToken);
+        return await ReadRequiredAsync<DiscussionMessageResult>(response, cancellationToken);
     }
 
     public async Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)
