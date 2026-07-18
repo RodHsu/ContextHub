@@ -1,10 +1,9 @@
 .memories-workspace-layout {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto;
-    align-content: start;
-    align-items: start;
-    gap: 1rem;
-    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1.25rem;
+    min-height: max-content;
     overflow: visible;
 }
 
@@ -12,17 +11,10 @@
 .memories-detail-panel {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
+    flex: 0 0 auto;
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-}
-
-.memories-list-panel {
-    grid-row: 1;
-}
-
-.memories-detail-panel {
-    grid-row: 2;
 }
 
 .memories-list-panel .memories-table-scroll-shell {
@@ -68,9 +60,11 @@
 
 @media (min-width: 1441px) {
     .memories-workspace-layout {
+        display: grid;
         grid-template-columns: minmax(38rem, 1.35fr) minmax(24rem, 0.85fr);
         grid-template-rows: minmax(0, 1fr);
         align-items: stretch;
+        min-height: 0;
     }
 
     .memories-list-panel,

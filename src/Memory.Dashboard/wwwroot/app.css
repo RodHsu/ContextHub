@@ -415,7 +415,15 @@ textarea {
 }
 
 .memories-page-body {
-    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    align-content: stretch;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.memories-page-body > .memories-workspace-layout {
+    min-height: max-content;
 }
 
 .page-grid-body,
