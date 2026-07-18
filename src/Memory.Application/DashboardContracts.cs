@@ -280,7 +280,8 @@ public sealed record DashboardMonitoringResult(
     DashboardDependencyResourcesResult? DependencyResources = null,
     IReadOnlyList<DashboardResourceSampleResult>? ResourceSamples = null,
     DashboardContextSavingsResult? ContextSavings = null,
-    IReadOnlyList<EmbeddingUsageWindowResult>? EmbeddingUsage = null);
+    IReadOnlyList<EmbeddingUsageWindowResult>? EmbeddingUsage = null,
+    DashboardDiscussionActivityResult? DiscussionActivity = null);
 
 public sealed record RuntimeConfigurationResult(
     string Namespace,

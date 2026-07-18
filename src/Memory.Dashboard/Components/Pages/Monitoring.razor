@@ -258,6 +258,41 @@
                         </div>
                     </article>
 
+                    @if ((_monitoring.DiscussionActivity ?? CreateEmptyDiscussionActivity(_monitoring.SnapshotAtUtc)) is { } discussionActivity)
+                    {
+                        <article class="resource-chart-card discussion-activity-chart-card">
+                            <div class="resource-chart-header">
+                                <div>
+                                    <div class="resource-chart-title">近期對話串溝通 (Recent Discussion Messages)</div>
+                                    <div class="resource-chart-stats">
+                                        <div class="resource-inline-stat">
+                                            <span>近 24 小時</span>
+                                            <div class="resource-inline-stat-value">
+                                                <strong>@DashboardFormatting.Integer(discussionActivity.RecentMessageCount) 則</strong>
+                                                <small>@DashboardFormatting.Integer(discussionActivity.ThreadCount) 個討論串</small>
+                                            </div>
+                                        </div>
+                                        <div class="resource-inline-stat">
+                                            <span>開啟中</span>
+                                            <div class="resource-inline-stat-value">
+                                                <strong>@DashboardFormatting.Integer(discussionActivity.OpenThreadCount)</strong>
+                                                <small>與 API 呼叫獨立計數</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Recent discussion message trend">
+                                @foreach (var guide in ChartGuideLines())
+                                {
+                                    <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
+                                }
+                                <polyline class="resource-line discussion" points="@BuildLinePoints(discussionActivity.Trend.Select(x => (double)x.MessageCount))"></polyline>
+                            </svg>
+                            <div class="resource-chart-meta">最近 24 小時、每小時訊息數；不混入進站或傳出 API 呼叫。</div>
+                        </article>
+                    }
+
                 </div>
             </section>
 
@@ -609,6 +644,11 @@
             BuildEmptyContextSavingsWindows(now),
             0d,
             TokenCountingModes.Approximate);
+
+    private static DashboardDiscussionActivityResult CreateEmptyDiscussionActivity(DateTimeOffset now)
+        => new(0, 0, 0, now.AddHours(-24), now, null,
+            Enumerable.Range(0, 24).Select(hour => new DashboardDiscussionActivityTrendPointResult(now.AddHours(-24 + hour), 0)).ToArray(),
+            []);
 
     private static IReadOnlyList<DashboardContextSavingsWindowResult> ContextSavingsWindows(DashboardContextSavingsResult savings)
         => savings.Windows is { Count: > 0 }

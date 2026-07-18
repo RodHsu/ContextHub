@@ -142,6 +142,7 @@ public sealed class DashboardQueryService(
         var resourceChart = await snapshotStore.GetAsync<DashboardResourceChartSnapshotPayload>(DashboardSnapshotKeys.ResourceChart, cancellationToken);
         var monitoring = await snapshotStore.GetAsync<DashboardMonitoringSnapshotPayload>(DashboardSnapshotKeys.MonitoringStats, cancellationToken);
         var contextSavings = await snapshotStore.GetAsync<DashboardContextSavingsSnapshotPayload>(DashboardSnapshotKeys.ContextSavings, cancellationToken);
+        var discussionActivity = await snapshotStore.GetAsync<DashboardDiscussionActivitySnapshotPayload>(DashboardSnapshotKeys.DiscussionActivity, cancellationToken);
         var storageTableStats = await snapshotStore.GetAsync<DashboardStorageTableStatsSnapshotPayload>(DashboardSnapshotKeys.StorageTableStats, cancellationToken);
         var storageLargeTablePreview = await snapshotStore.GetAsync<DashboardStorageLargeTablePreviewSnapshotPayload>(DashboardSnapshotKeys.StorageLargeTablePreview, cancellationToken);
 
@@ -174,7 +175,8 @@ public sealed class DashboardQueryService(
             dependencyResources?.Payload ?? CreateUnavailableDependencyResources(),
             resourceChart?.Payload.Samples ?? [],
             contextSavings?.Payload.Savings ?? CreateEmptyContextSavings(now),
-            monitoringPayload?.EmbeddingUsage ?? CreateEmptyEmbeddingUsage(now));
+            monitoringPayload?.EmbeddingUsage ?? CreateEmptyEmbeddingUsage(now),
+            discussionActivity?.Payload.Activity);
     }
 
     private static IReadOnlyList<EmbeddingUsageWindowResult> CreateEmptyEmbeddingUsage(DateTimeOffset now)

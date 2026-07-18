@@ -64,7 +64,10 @@ public sealed class ProjectDiscussionService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var project = string.IsNullOrWhiteSpace(request.ProjectId) ? null : ProjectContext.Normalize(request.ProjectId);
         if (project is not null) ActorAuthorization.EnsureProjectAllowed(actor, project, write: false);
-        var query = dbContext.DiscussionThreads.AsNoTracking().Include(x => x.Participants).Include(x => x.Messages).Where(x => MatchesActor(x, actor));
+        var query = dbContext.DiscussionThreads.AsNoTracking()
+            .Include(x => x.Participants)
+            .Include(x => x.Messages)
+            .Where(x => MatchesActor(x, actor));
         if (project is not null) query = query.Where(x => x.Participants.Any(p => p.ProjectId == project));
         if (!string.IsNullOrWhiteSpace(request.HostProjectId)) { var host = ProjectContext.Normalize(request.HostProjectId); ActorAuthorization.EnsureProjectAllowed(actor, host, false); query = query.Where(x => x.HostProjectId == host); }
         if (!string.IsNullOrWhiteSpace(request.Status)) query = query.Where(x => x.Status == request.Status.Trim());
@@ -106,13 +109,22 @@ public sealed class ProjectDiscussionService(
     }
 
     private async Task<DiscussionThread?> LoadThreadAsync(Guid id, CancellationToken cancellationToken) => await dbContext.DiscussionThreads.Include(x => x.Participants).Include(x => x.Messages).Where(x => x.Id == id).Where(x => MatchesActor(x, actorAccessor.Current)).SingleOrDefaultAsync(cancellationToken);
-    private void EnsureCanReadThread(DiscussionThread thread, string? reader) { var actor = actorAccessor.Current; ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead); var project = reader ?? throw new InvalidOperationException("readerProjectId is required to read a discussion thread."); ActorAuthorization.EnsureProjectAllowed(actor, project, false); if (!thread.Participants.Any(x => x.ProjectId == project)) throw new UnauthorizedAccessException($"Project '{project}' is not a discussion participant."); }
+    private void EnsureCanReadThread(DiscussionThread thread, string? reader) { var actor = actorAccessor.Current; ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead); var project = reader ?? throw new InvalidOperationException("readerProjectId is required to read a discussion thread."); ActorAuthorization.EnsureProjectAllowed(actor, project, false); if (!thread.Participants.Any(x => string.Equals(x.ProjectId, project, StringComparison.OrdinalIgnoreCase))) throw new UnauthorizedAccessException($"Project '{project}' is not a discussion participant."); }
     private void EnsureActorCanReadParticipants(IReadOnlyList<string> projects) { var actor = actorAccessor.Current; ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead); ActorAuthorization.EnsureProjectsAllowed(actor, projects, false); }
     private static bool MatchesActor(DiscussionThread x, ContextHubRequestActor actor) => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId));
     private static bool MatchesActor(ProjectHierarchy x, ContextHubRequestActor actor) => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId));
     private static string[] NormalizeProjects(IReadOnlyList<string> projects) => projects.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => ProjectContext.Normalize(x)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
     private static void EnsureRegularProjects(IReadOnlyList<string> projects, int minimumCount = 2) { if (projects.Count < minimumCount || projects.Any(x => ProjectContext.IsShared(x) || ProjectContext.IsUser(x))) throw new InvalidOperationException("Discussions require at least two regular ProjectIds; project hierarchy requires regular ProjectIds."); }
     private static void ValidateText(string value, int maxLength, string field) { if (string.IsNullOrWhiteSpace(value) || value.Trim().Length > maxLength) throw new InvalidOperationException($"{field} is required and must not exceed {maxLength} characters."); }
-    private static DiscussionThreadResult MapSummary(DiscussionThread thread, string? reader) => new(thread.Id, thread.HostProjectId, thread.Title, thread.Status, thread.Participants.Select(x => x.ProjectId).OrderBy(x => x).ToArray(), reader is null ? 0 : thread.Messages.Count(x => x.CreatedAt > thread.Participants.Single(p => p.ProjectId == reader).LastReadAt && !string.Equals(x.SenderProjectId, reader, StringComparison.OrdinalIgnoreCase)), thread.CreatedAt, thread.UpdatedAt);
+    private static DiscussionThreadResult MapSummary(DiscussionThread thread, string? reader)
+    {
+        var participant = reader is null
+            ? null
+            : thread.Participants.SingleOrDefault(p => string.Equals(p.ProjectId, reader, StringComparison.OrdinalIgnoreCase));
+        var unreadCount = participant is null
+            ? 0
+            : thread.Messages.Count(x => x.CreatedAt > participant.LastReadAt && !string.Equals(x.SenderProjectId, reader, StringComparison.OrdinalIgnoreCase));
+        return new(thread.Id, thread.HostProjectId, thread.Title, thread.Status, thread.Participants.Select(x => x.ProjectId).OrderBy(x => x).ToArray(), unreadCount, thread.CreatedAt, thread.UpdatedAt);
+    }
     private static DiscussionThreadDetailResult MapDetail(DiscussionThread thread) => new(thread.Id, thread.HostProjectId, thread.Title, thread.Status, thread.Participants.Select(x => x.ProjectId).OrderBy(x => x).ToArray(), thread.Messages.OrderBy(x => x.CreatedAt).Select(x => new DiscussionMessageResult(x.Id, x.SenderProjectId, x.Content, x.CreatedAt)).ToArray(), thread.CreatedAt, thread.UpdatedAt);
 }
