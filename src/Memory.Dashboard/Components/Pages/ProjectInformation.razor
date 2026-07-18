@@ -37,6 +37,11 @@
                     <div><dt>Project ID</dt><dd>@_projectId</dd></div>
                     <div><dt>最後更新</dt><dd>@(_information?.UpdatedAt.LocalDateTime.ToString("yyyy/MM/dd HH:mm") ?? "尚未建立")</dd></div>
                 </dl>
+                <section class="project-context-contract">
+                    <span>Context contract</span>
+                    <p><code>system:project-information</code></p>
+                    <small>每次建立 working context 時，會先載入這份固定背景。</small>
+                </section>
             </aside>
 
             <main class="project-editor">
@@ -61,6 +66,10 @@
                 <div class="studio-eyebrow">專案生命週期</div>
                 <div class="lifecycle-status"><span class="status-dot"></span><span>@LifecycleStatusLabel</span></div>
                 <p>@LifecycleDescription</p>
+                <dl class="lifecycle-facts">
+                    <div><dt>背景注入</dt><dd>@ContextAvailabilityDescription</dd></div>
+                    <div><dt>顯示範圍</dt><dd>@VisibilityDescription</dd></div>
+                </dl>
                 <div class="lifecycle-rule">
                     <span>封存後規則</span>
                     <strong>7 天後符合安全刪除資格</strong>
@@ -210,6 +219,12 @@
         { IsHidden: true } => "已隱藏",
         _ => "使用中"
     };
+
+    private string ContextAvailabilityDescription
+        => _information?.IsArchived == true ? "暫停" : "啟用";
+
+    private string VisibilityDescription
+        => _information?.IsHidden == true ? "僅於進階選單顯示" : "一般專案選單顯示";
 
     private string SafeDeleteDescription => _information?.SafeDeleteEligibleAt is not { } eligibleAt
         ? "尚未封存"

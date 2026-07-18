@@ -109,6 +109,36 @@
     overflow-wrap: anywhere;
 }
 
+.project-context-contract {
+    display: grid;
+    gap: 0.35rem;
+    margin-top: 1.7rem;
+    padding-top: 1.1rem;
+    border-top: 1px solid var(--border);
+}
+
+.project-context-contract > span,
+.lifecycle-facts dt {
+    color: var(--text-subtle);
+    font-family: "JetBrains Mono", Consolas, monospace;
+    font-size: 0.7rem;
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.project-context-contract p {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.78rem;
+}
+
+.project-context-contract small {
+    color: var(--text-subtle);
+    font-size: 0.76rem;
+    line-height: 1.45;
+}
+
 .display-name-field {
     max-width: 35rem;
     margin-top: 1.35rem;
@@ -152,6 +182,24 @@
     color: var(--text-muted);
     font-size: 0.82rem;
     line-height: 1.6;
+}
+
+.lifecycle-facts {
+    display: grid;
+    gap: 0.7rem;
+    margin: 1.25rem 0 0;
+}
+
+.lifecycle-facts div {
+    display: grid;
+    gap: 0.2rem;
+}
+
+.lifecycle-facts dd {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    line-height: 1.45;
 }
 
 .lifecycle-rule {

@@ -137,7 +137,7 @@
     else
     {
         <div class="split-layout memories-workspace-layout">
-        <section class="panel panel-scroll memories-list-panel">
+        <section class="panel memories-list-panel">
             <div class="panel-title">記憶條目 (@DashboardFormatting.Integer(_page.TotalCount))</div>
             @if (_page.TotalCount == 0 && _checkpointStaging.Count > 0)
             {
@@ -218,7 +218,7 @@
             </div>
         </section>
 
-        <section class="panel detail-panel panel-scroll">
+        <section class="panel detail-panel memories-detail-panel">
             <div class="panel-title">細節</div>
             <div class="panel-scroll-body detail-scroll-shell memory-detail-shell">
                 @if (_selected is null)

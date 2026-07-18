@@ -1,0 +1,105 @@
+.memories-workspace-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-content: start;
+    align-items: start;
+    gap: 1rem;
+    min-height: 0;
+    overflow: visible;
+}
+
+.memories-list-panel,
+.memories-detail-panel {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.memories-list-panel {
+    grid-row: 1;
+}
+
+.memories-detail-panel {
+    grid-row: 2;
+}
+
+.memories-list-panel .memories-table-scroll-shell {
+    height: clamp(22rem, calc(100dvh - 31rem), 38rem);
+    min-height: 0;
+    max-height: none;
+    overflow: auto !important;
+    overscroll-behavior: contain;
+}
+
+.memories-detail-panel .memory-detail-shell {
+    min-height: 0;
+    max-height: min(48rem, calc(100dvh - 12rem));
+    overflow: auto;
+    overscroll-behavior: contain;
+}
+
+.memories-list-panel .data-table {
+    min-width: 62rem;
+}
+
+.memories-list-panel .memories-cell-title,
+.memories-list-panel .memories-cell-project,
+.memories-list-panel .memories-cell-clamp,
+.memories-list-panel .memories-cell-summary,
+.memories-list-panel .memories-cell-tags {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.memories-list-panel .memories-cell-title,
+.memories-list-panel .memories-cell-project,
+.memories-list-panel .memories-cell-clamp {
+    white-space: nowrap;
+}
+
+.memories-list-panel .memories-cell-summary,
+.memories-list-panel .memories-cell-tags {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+@media (min-width: 1441px) {
+    .memories-workspace-layout {
+        grid-template-columns: minmax(38rem, 1.35fr) minmax(24rem, 0.85fr);
+        grid-template-rows: minmax(0, 1fr);
+        align-items: stretch;
+    }
+
+    .memories-list-panel,
+    .memories-detail-panel {
+        grid-row: 1;
+        height: min(44rem, calc(100dvh - 19rem));
+    }
+
+    .memories-list-panel {
+        grid-column: 1;
+    }
+
+    .memories-detail-panel {
+        grid-column: 2;
+    }
+
+    .memories-list-panel .memories-table-scroll-shell,
+    .memories-detail-panel .memory-detail-shell {
+        height: auto;
+        max-height: none;
+    }
+}
+
+@media (max-width: 640px) {
+    .memories-list-panel .memories-table-scroll-shell {
+        height: clamp(19rem, calc(100dvh - 29rem), 28rem);
+    }
+
+    .memories-detail-panel .memory-detail-shell {
+        max-height: none;
+    }
+}

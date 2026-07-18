@@ -471,10 +471,22 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         memoriesHtml.Should().Contain("專案與範圍");
         memoriesHtml.Should().Contain("類型與狀態");
         memoriesHtml.Should().Contain("來源與標籤");
+        memoriesHtml.Should().Contain("memories-list-panel");
+        memoriesHtml.Should().Contain("memories-detail-panel");
+        memoriesHtml.Should().Contain("memories-table-scroll-shell");
         memoriesHtml.Should().Contain("查詢記憶條目，展開版本紀錄、內容片段與向量。");
         memoriesHtml.Should().Contain("點選左側記憶條目後顯示版本紀錄、內容片段與向量。");
         memoriesHtml.Should().NotContain("展開 revisions、chunks 與 vectors");
         memoriesHtml.Should().NotContain("點選左側 memory item 後顯示 revisions、chunks 與 vectors");
+
+        using var projectInformationResponse = await client.GetAsync("/project-information");
+        projectInformationResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var projectInformationHtml = WebUtility.HtmlDecode(await projectInformationResponse.Content.ReadAsStringAsync());
+        projectInformationHtml.Should().Contain("project-studio");
+        projectInformationHtml.Should().Contain("Context contract");
+        projectInformationHtml.Should().Contain("system:project-information");
+        projectInformationHtml.Should().Contain("背景注入");
+        projectInformationHtml.Should().Contain("顯示範圍");
 
         using var graphResponse = await client.GetAsync("/graph");
         graphResponse.StatusCode.Should().Be(HttpStatusCode.OK);
