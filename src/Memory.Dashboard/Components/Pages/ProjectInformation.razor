@@ -4,65 +4,73 @@
 <PageTitle>Context Hub | 專案資訊</PageTitle>
 
 <PageViewport Title="專案資訊"
-              Subtitle="維護每個 ProjectId 的固定背景；所有 build_working_context 結果都會先帶回這份資料。">
+              Subtitle="為協作與 build_working_context 維護專案的固定背景。">
     <Actions>
         <div class="page-actions-secondary">
-            <button class="ghost-button" @onclick="LoadAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">讀取專案資訊</button>
-            <button class="ghost-button" @onclick="EnableEditing" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">編輯</button>
+            <button class="ghost-button" @onclick="LoadAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">重新載入</button>
+            <button class="ghost-button" @onclick="EnableEditing" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">編輯內容</button>
         </div>
         <div class="page-actions-primary">
             <button class="primary-button" @onclick="SaveAsync" disabled="@(_loading || !_editing)">儲存變更</button>
         </div>
     </Actions>
     <ChildContent>
-        <section class="panel panel-scroll">
-            <div class="panel-title">專案背景</div>
-            <div class="panel-scroll-body detail-scroll-shell">
-                <div class="form-grid">
-                    <label>
-                        <span>專案</span>
-                        <select class="project-select" @bind="_projectId" @bind:after="LoadAsync" disabled="@_loading" aria-label="選擇專案">
+        <section class="project-studio">
+            <aside class="project-identity">
+                <div class="studio-eyebrow">目前專案</div>
+                <label class="project-picker-label">
+                    <span>專案</span>
+                    <select class="project-select" @bind="_projectId" @bind:after="LoadAsync" disabled="@_loading" aria-label="選擇專案">
                             <option value="">選擇專案</option>
                             @foreach (var project in _projects)
                             {
                                 <option value="@project.Information.ProjectId">@ProjectLabel(project.Information)</option>
                             }
-                        </select>
-                        <small>選擇專案 ▾</small>
-                        <span class="checkbox-label">
-                            <input type="checkbox" @bind="_includeInactive" @bind:after="RefreshProjectsAsync" disabled="@_loading" />
-                            顯示已隱藏或已封存的專案
-                        </span>
-                    </label>
-                    <label>
-                        <span>顯示名稱</span>
-                        <input @bind="_displayName" disabled="@(!_editing)" placeholder="ContextHub" />
-                    </label>
-                    <label class="span-2">
-                        <span>專案描述</span>
-                        <textarea @bind="_description" disabled="@(!_editing)" placeholder="產品目標、系統邊界、主要技術選擇與工作時必須遵守的固定背景。"></textarea>
-                    </label>
-                </div>
+                    </select>
+                    <small>從清單切換專案</small>
+                </label>
+                <label class="inactive-toggle">
+                    <input type="checkbox" @bind="_includeInactive" @bind:after="RefreshProjectsAsync" disabled="@_loading" />
+                    顯示已隱藏或封存項目
+                </label>
+                <dl class="project-facts">
+                    <div><dt>Project ID</dt><dd>@_projectId</dd></div>
+                    <div><dt>最後更新</dt><dd>@(_information?.UpdatedAt.LocalDateTime.ToString("yyyy/MM/dd HH:mm") ?? "尚未建立")</dd></div>
+                </dl>
+            </aside>
+
+            <main class="project-editor">
+                <div class="studio-eyebrow">專案概覽</div>
+                <label class="display-name-field">
+                    <span>顯示名稱</span>
+                    <input @bind="_displayName" disabled="@(!_editing)" placeholder="ContextHub" />
+                </label>
+                <div class="editor-divider"></div>
+                <label class="description-field">
+                    <span>專案描述</span>
+                    <small>這段資料會在每次建立 working context 時先提供給代理人。</small>
+                    <textarea @bind="_description" disabled="@(!_editing)" placeholder="產品目標、系統邊界、主要技術選擇與工作時必須遵守的固定背景。"></textarea>
+                </label>
                 @if (!string.IsNullOrWhiteSpace(_message))
                 {
-                    <p class="stack-item-meta">@_message</p>
+                    <p class="project-feedback">@_message</p>
                 }
-                @if (_information is not null)
-                {
-                    <section class="stack-item">
-                        <div class="stack-item-title">專案狀態</div>
-                        <p class="stack-item-meta">@LifecycleDescription</p>
-                        @if (_information.IsArchived)
-                        {
-                            <p class="stack-item-meta">安全刪除資格：@SafeDeleteDescription（本階段不提供刪除操作）</p>
-                        }
-                        <div class="page-actions-secondary">
-                            <button class="ghost-button" @onclick="ToggleHiddenAsync" disabled="@_loading">@(_information.IsHidden ? "取消隱藏" : "隱藏專案")</button>
-                            <button class="ghost-button" @onclick="ToggleArchivedAsync" disabled="@_loading">@(_information.IsArchived ? "還原專案" : "封存專案")</button>
-                        </div>
-                    </section>
-                }
-            </div>
+            </main>
+
+            <aside class="lifecycle-inspector">
+                <div class="studio-eyebrow">專案生命週期</div>
+                <div class="lifecycle-status"><span class="status-dot"></span><span>@LifecycleStatusLabel</span></div>
+                <p>@LifecycleDescription</p>
+                <div class="lifecycle-rule">
+                    <span>封存後規則</span>
+                    <strong>7 天後符合安全刪除資格</strong>
+                    <small>@SafeDeleteDescription（本階段不執行刪除）</small>
+                </div>
+                <div class="lifecycle-actions">
+                    <button class="lifecycle-action" @onclick="ToggleHiddenAsync" disabled="@_loading">@(_information?.IsHidden == true ? "取消隱藏專案" : "隱藏專案")</button>
+                    <button class="lifecycle-action" @onclick="ToggleArchivedAsync" disabled="@_loading">@(_information?.IsArchived == true ? "還原專案" : "封存專案")</button>
+                </div>
+            </aside>
         </section>
     </ChildContent>
 </PageViewport>
@@ -194,6 +202,13 @@
         { IsArchived: true } => "已封存：一般搜尋與工作脈絡不會讀取此專案記憶。",
         { IsHidden: true } => "已隱藏：資料保留，僅不顯示於一般專案選單。",
         _ => "使用中：資料會參與一般搜尋與工作脈絡。"
+    };
+
+    private string LifecycleStatusLabel => _information switch
+    {
+        { IsArchived: true } => "已封存",
+        { IsHidden: true } => "已隱藏",
+        _ => "使用中"
     };
 
     private string SafeDeleteDescription => _information?.SafeDeleteEligibleAt is not { } eligibleAt

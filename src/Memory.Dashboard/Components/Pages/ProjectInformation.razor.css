@@ -1,0 +1,234 @@
+.project-studio {
+    display: grid;
+    grid-template-columns: 14.5rem minmax(0, 1fr) 19.5rem;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--surface) 94%, black 6%);
+    box-shadow: var(--shadow-panel);
+}
+
+.project-identity,
+.lifecycle-inspector {
+    min-width: 0;
+    padding: 1.35rem;
+    background: color-mix(in srgb, var(--surface-alt) 72%, var(--surface) 28%);
+}
+
+.project-identity {
+    border-right: 1px solid var(--border);
+}
+
+.lifecycle-inspector {
+    border-left: 1px solid var(--border);
+}
+
+.project-editor {
+    min-width: 0;
+    padding: 1.9rem 2.25rem;
+}
+
+.studio-eyebrow,
+.project-facts dt,
+.lifecycle-rule > span {
+    color: var(--text-subtle);
+    font-family: "JetBrains Mono", Consolas, monospace;
+    font-size: 0.7rem;
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.project-picker-label,
+.display-name-field,
+.description-field {
+    display: grid;
+    gap: 0.48rem;
+    min-width: 0;
+}
+
+.project-picker-label {
+    margin-top: 1.35rem;
+}
+
+.project-picker-label > span,
+.display-name-field > span,
+.description-field > span {
+    color: var(--text);
+    font-size: 0.85rem;
+    font-weight: 650;
+}
+
+.project-picker-label small,
+.description-field small,
+.lifecycle-rule small {
+    color: var(--text-subtle);
+    font-size: 0.76rem;
+    line-height: 1.45;
+}
+
+.project-select {
+    border-radius: 6px;
+    font-size: 0.84rem;
+}
+
+.inactive-toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.55rem;
+    margin-top: 1.1rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.inactive-toggle input {
+    width: auto;
+    margin: 0.1rem 0 0;
+    accent-color: var(--accent);
+}
+
+.project-facts {
+    display: grid;
+    gap: 0.85rem;
+    margin: 2rem 0 0;
+}
+
+.project-facts div {
+    display: grid;
+    gap: 0.2rem;
+    min-width: 0;
+}
+
+.project-facts dd {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.display-name-field {
+    max-width: 35rem;
+    margin-top: 1.35rem;
+}
+
+.display-name-field input,
+.description-field textarea {
+    border-radius: 6px;
+}
+
+.editor-divider {
+    height: 1px;
+    margin: 1.7rem 0;
+    background: var(--border);
+}
+
+.description-field textarea {
+    min-height: 14rem;
+    line-height: 1.6;
+}
+
+.project-feedback {
+    margin: 1.2rem 0 0;
+    color: var(--accent);
+    font-size: 0.83rem;
+    line-height: 1.5;
+}
+
+.lifecycle-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1.35rem;
+    color: var(--text);
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.lifecycle-inspector > p {
+    margin: 0.85rem 0 0;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    line-height: 1.6;
+}
+
+.lifecycle-rule {
+    display: grid;
+    gap: 0.38rem;
+    margin-top: 1.55rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border);
+}
+
+.lifecycle-rule strong {
+    color: var(--text);
+    font-size: 0.83rem;
+    line-height: 1.45;
+}
+
+.lifecycle-actions {
+    display: grid;
+    gap: 0.55rem;
+    margin-top: 1.6rem;
+}
+
+.lifecycle-action {
+    width: 100%;
+    min-height: 2.5rem;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.82rem;
+    text-align: left;
+}
+
+.lifecycle-action:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--accent) 42%, var(--border) 58%);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.lifecycle-action:disabled {
+    cursor: default;
+    opacity: 0.55;
+}
+
+@media (max-width: 1100px) {
+    .project-studio {
+        grid-template-columns: 13.5rem minmax(0, 1fr);
+    }
+
+    .lifecycle-inspector {
+        grid-column: 1 / -1;
+        border-top: 1px solid var(--border);
+        border-left: 0;
+    }
+
+    .lifecycle-actions {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 720px) {
+    .project-studio {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .project-identity,
+    .lifecycle-inspector {
+        border: 0;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .project-editor {
+        padding: 1.35rem;
+    }
+
+    .lifecycle-actions {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
