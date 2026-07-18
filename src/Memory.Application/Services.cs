@@ -735,6 +735,9 @@ public sealed class MemoryService(
         EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var allowedProjects = ProjectContext.ResolveSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
         EnsureProjectsAllowed(actor, allowedProjects, write: false);
+        IReadOnlyList<string> archivedProjects = request.IncludeArchived
+            ? []
+            : await projectInformationService.GetArchivedProjectIdsAsync(allowedProjects, cancellationToken);
         var version = await cacheStore.GetVersionStampAsync(allowedProjects, actor, request.UseSummaryLayer, cancellationToken);
         var cacheKey = RedisCacheKeyBuilder.Search(version, request, actor, allowedProjects, embeddingProvider.ModelKey);
         var cached = await objectCache.GetAsync<IReadOnlyList<MemorySearchHit>>(cacheKey, "search-final", cancellationToken);
@@ -755,6 +758,7 @@ public sealed class MemoryService(
             var items = await dbContext.MemoryItems
                 .Where(x => itemIds.Contains(x.Id))
                 .Where(x => allowedProjects.Contains(x.ProjectId))
+                .Where(x => archivedProjects.Count == 0 || !archivedProjects.Contains(x.ProjectId))
                 .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
                 .ToDictionaryAsync(x => x.Id, cancellationToken);
             var merged = HybridSearchComposer.Compose(keywordHits, semanticHits, items, request.Limit, request.IncludeArchived);
@@ -819,7 +823,8 @@ public sealed class MemoryService(
                 cancellationToken);
             if (hits.Count == 0)
             {
-                hits = await LoadFallbackWorkingContextHitsAsync(actor, allowedProjects, request.Limit * 3, cancellationToken);
+                var archivedProjects = await projectInformationService.GetArchivedProjectIdsAsync(allowedProjects, cancellationToken);
+                hits = await LoadFallbackWorkingContextHitsAsync(actor, allowedProjects, archivedProjects, request.Limit * 3, cancellationToken);
                 usedFallback = hits.Count > 0;
             }
 
@@ -887,6 +892,7 @@ public sealed class MemoryService(
     private async Task<IReadOnlyList<MemorySearchHit>> LoadFallbackWorkingContextHitsAsync(
         ContextHubRequestActor actor,
         IReadOnlyList<string> allowedProjects,
+        IReadOnlyList<string> archivedProjects,
         int limit,
         CancellationToken cancellationToken)
     {
@@ -898,6 +904,7 @@ public sealed class MemoryService(
         var items = await dbContext.MemoryItems
             .AsNoTracking()
             .Where(x => allowedProjects.Contains(x.ProjectId))
+            .Where(x => archivedProjects.Count == 0 || !archivedProjects.Contains(x.ProjectId))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
             .Where(x => x.Status != MemoryStatus.Archived)
             .OrderByDescending(x => x.Importance)

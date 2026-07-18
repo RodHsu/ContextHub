@@ -119,6 +119,10 @@ public sealed class ChatGptGatewayTools(
     public Task<ChatGptProposalResult> project_information_upsert(ProjectInformationUpdateRequest request, CancellationToken cancellationToken = default)
         => CreateProposalAsync("project_information_upsert", request.ProjectId, request.DisplayName ?? request.ProjectId, "Update project information.", request, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Propose hiding, unhiding, archiving, or restoring a project. Archiving excludes its memories from default search and build_working_context after approval.")]
+    public Task<ChatGptProposalResult> project_information_update_lifecycle(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("project_information_update_lifecycle", request.ProjectId, request.Action.ToString(), "Update project lifecycle.", request, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("List project-scoped artifact exchange records shared by agents using the same ProjectId.")]
     public Task<IReadOnlyList<ProjectArtifactResult>> project_artifacts_list(ProjectArtifactListRequest request, CancellationToken cancellationToken = default)
         => artifactExchangeService.ListAsync(request, cancellationToken);

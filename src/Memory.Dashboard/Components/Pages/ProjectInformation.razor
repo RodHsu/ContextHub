@@ -20,14 +20,19 @@
             <div class="panel-scroll-body detail-scroll-shell">
                 <div class="form-grid">
                     <label>
-                        <span>ProjectId</span>
-                        <select @bind="_projectId" disabled="@_loading">
+                        <span>專案</span>
+                        <select class="project-select" @bind="_projectId" @bind:after="LoadAsync" disabled="@_loading" aria-label="選擇專案">
                             <option value="">選擇專案</option>
                             @foreach (var project in _projects)
                             {
-                                <option value="@project.ProjectId">@project.ProjectId (@project.ItemCount)</option>
+                                <option value="@project.Information.ProjectId">@ProjectLabel(project.Information)</option>
                             }
                         </select>
+                        <small>選擇專案 ▾</small>
+                        <span class="checkbox-label">
+                            <input type="checkbox" @bind="_includeInactive" @bind:after="RefreshProjectsAsync" disabled="@_loading" />
+                            顯示已隱藏或已封存的專案
+                        </span>
                     </label>
                     <label>
                         <span>顯示名稱</span>
@@ -42,6 +47,21 @@
                 {
                     <p class="stack-item-meta">@_message</p>
                 }
+                @if (_information is not null)
+                {
+                    <section class="stack-item">
+                        <div class="stack-item-title">專案狀態</div>
+                        <p class="stack-item-meta">@LifecycleDescription</p>
+                        @if (_information.IsArchived)
+                        {
+                            <p class="stack-item-meta">安全刪除資格：@SafeDeleteDescription（本階段不提供刪除操作）</p>
+                        }
+                        <div class="page-actions-secondary">
+                            <button class="ghost-button" @onclick="ToggleHiddenAsync" disabled="@_loading">@(_information.IsHidden ? "取消隱藏" : "隱藏專案")</button>
+                            <button class="ghost-button" @onclick="ToggleArchivedAsync" disabled="@_loading">@(_information.IsArchived ? "還原專案" : "封存專案")</button>
+                        </div>
+                    </section>
+                }
             </div>
         </section>
     </ChildContent>
@@ -51,15 +71,18 @@
     private string _projectId = string.Empty;
     private string _displayName = string.Empty;
     private string _description = string.Empty;
-    private IReadOnlyList<ProjectSuggestionResult> _projects = [];
+    private IReadOnlyList<ProjectInformationListItem> _projects = [];
+    private ProjectInformationResult? _information;
     private string? _message;
     private bool _loading;
     private bool _editing;
+    private bool _includeInactive;
 
     protected override async Task OnInitializedAsync()
     {
-        _projects = await ApiClient.GetMemoryProjectsAsync(null, 200, CancellationToken.None);
-        _projectId = _projects.FirstOrDefault()?.ProjectId ?? string.Empty;
+        await RefreshProjectsAsync();
+        _projectId = _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty;
+        await LoadAsync();
     }
 
     private async Task LoadAsync()
@@ -75,6 +98,7 @@
             var result = await ApiClient.GetProjectInformationAsync(_projectId.Trim(), CancellationToken.None);
             _displayName = result?.DisplayName ?? _projectId.Trim();
             _description = result?.Description ?? string.Empty;
+            _information = result;
             _editing = false;
             _message = result is null ? "尚未建立此專案的資訊。" : $"最後更新：{result.UpdatedAt.LocalDateTime:g}";
         }
@@ -100,6 +124,7 @@
                 CancellationToken.None);
             _displayName = result.DisplayName;
             _description = result.Description;
+            _information = result;
             _editing = false;
             _message = "專案資訊已儲存，後續工作上下文會自動帶入。";
         }
@@ -114,4 +139,66 @@
         _editing = true;
         _message = "已進入編輯模式。";
     }
+
+    private async Task ToggleHiddenAsync()
+    {
+        await UpdateLifecycleAsync(_information?.IsHidden == true ? ProjectLifecycleAction.Unhide : ProjectLifecycleAction.Hide);
+    }
+
+    private async Task ToggleArchivedAsync()
+    {
+        await UpdateLifecycleAsync(_information?.IsArchived == true ? ProjectLifecycleAction.Restore : ProjectLifecycleAction.Archive);
+    }
+
+    private async Task UpdateLifecycleAsync(ProjectLifecycleAction action)
+    {
+        if (string.IsNullOrWhiteSpace(_projectId))
+        {
+            return;
+        }
+
+        _loading = true;
+        try
+        {
+            _information = await ApiClient.UpdateProjectLifecycleAsync(new ProjectLifecycleUpdateRequest(_projectId.Trim(), action), CancellationToken.None);
+            _displayName = _information.DisplayName;
+            _description = _information.Description;
+            _message = action switch
+            {
+                ProjectLifecycleAction.Hide => "專案已從一般選單隱藏。",
+                ProjectLifecycleAction.Unhide => "專案已恢復顯示。",
+                ProjectLifecycleAction.Archive => "專案已封存，預設搜尋與工作脈絡不再讀取其記憶。",
+                _ => "專案已還原，預設搜尋與工作脈絡會重新讀取其記憶。"
+            };
+            await RefreshProjectsAsync();
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private Task RefreshProjectsAsync()
+        => RefreshProjectsCoreAsync();
+
+    private async Task RefreshProjectsCoreAsync()
+        => _projects = await ApiClient.GetProjectInformationProjectsAsync(_includeInactive, CancellationToken.None);
+
+    private static string ProjectLabel(ProjectInformationResult project)
+        => string.Equals(project.DisplayName, project.ProjectId, StringComparison.OrdinalIgnoreCase)
+            ? project.ProjectId
+            : $"{project.DisplayName} ({project.ProjectId})";
+
+    private string LifecycleDescription => _information switch
+    {
+        { IsArchived: true } => "已封存：一般搜尋與工作脈絡不會讀取此專案記憶。",
+        { IsHidden: true } => "已隱藏：資料保留，僅不顯示於一般專案選單。",
+        _ => "使用中：資料會參與一般搜尋與工作脈絡。"
+    };
+
+    private string SafeDeleteDescription => _information?.SafeDeleteEligibleAt is not { } eligibleAt
+        ? "尚未封存"
+        : eligibleAt <= DateTimeOffset.UtcNow
+            ? "已符合資格"
+            : $"{eligibleAt.LocalDateTime:g} 起可用";
 }

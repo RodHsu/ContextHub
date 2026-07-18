@@ -1578,16 +1578,39 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             Guid.Parse("cccccccc-0000-0000-0000-000000000001"),
             projectId,
             projectId,
-            "Dashboard UI test project information.",
-            DateTimeOffset.UtcNow));
+              "Dashboard UI test project information.",
+              DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<ProjectInformationListItem>> GetProjectInformationProjectsAsync(bool includeInactive, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<ProjectInformationListItem> projects =
+        [
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000001"), "dashboard-test", "Dashboard test", "Dashboard UI test project information.", DateTimeOffset.UtcNow), 3)
+        ];
+        return Task.FromResult(projects);
+    }
 
     public Task<ProjectInformationResult> UpsertProjectInformationAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectInformationResult(
             Guid.Parse("cccccccc-0000-0000-0000-000000000001"),
             request.ProjectId,
             string.IsNullOrWhiteSpace(request.DisplayName) ? request.ProjectId : request.DisplayName.Trim(),
-            request.Description,
-            DateTimeOffset.UtcNow));
+              request.Description,
+              DateTimeOffset.UtcNow));
+
+    public Task<ProjectInformationResult> UpdateProjectLifecycleAsync(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken)
+    {
+        DateTimeOffset? archivedAt = request.Action == ProjectLifecycleAction.Archive ? DateTimeOffset.UtcNow : null;
+        return Task.FromResult(new ProjectInformationResult(
+            Guid.Parse("cccccccc-0000-0000-0000-000000000001"),
+            request.ProjectId,
+            request.ProjectId,
+            "Dashboard UI test project information.",
+            DateTimeOffset.UtcNow,
+            request.Action == ProjectLifecycleAction.Hide,
+            archivedAt,
+            archivedAt?.AddDays(7)));
+    }
 
     public Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
         => Task.FromResult(BuildRetentionResult(request.Mode));

@@ -398,6 +398,9 @@ memories.MapGet("/{id:guid}/details", async (Guid id, IDashboardQueryService ser
 
 var projectInformation = app.MapGroup("/api/projects/information");
 projectInformation.RequireAuthIfEnabled(requireAuthentication);
+projectInformation.MapGet("/", async (bool? includeInactive, IProjectInformationService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.ListAsync(includeInactive ?? false, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 projectInformation.MapGet("/{projectId}", async (string projectId, IProjectInformationService service, CancellationToken cancellationToken) =>
 {
     var result = await service.GetAsync(projectId, cancellationToken);
@@ -411,6 +414,15 @@ projectInformation.MapPut("/{projectId}", async (string projectId, ProjectInform
     }
 
     return Results.Ok(await service.UpsertAsync(request, cancellationToken));
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+projectInformation.MapPost("/{projectId}/lifecycle", async (string projectId, ProjectLifecycleUpdateRequest request, IProjectInformationService service, CancellationToken cancellationToken) =>
+{
+    if (!string.Equals(ProjectContext.Normalize(projectId), ProjectContext.Normalize(request.ProjectId), StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["projectId"] = ["Route and request ProjectId must match."] });
+    }
+
+    return Results.Ok(await service.UpdateLifecycleAsync(request, cancellationToken));
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 
 memories.MapPost("/{id:guid}/archive", async (Guid id, MemoryArchiveBody request, IMemoryService service, CancellationToken cancellationToken) =>

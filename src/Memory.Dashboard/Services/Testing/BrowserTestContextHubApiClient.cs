@@ -608,6 +608,15 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             ? _projectInformation
             : null);
 
+    public Task<IReadOnlyList<ProjectInformationListItem>> GetProjectInformationProjectsAsync(bool includeInactive, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<ProjectInformationListItem> projects =
+        [
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000001"), "dashboard-test", "Dashboard test", "Dashboard UI test project information.", DateTimeOffset.UtcNow), 3)
+        ];
+        return Task.FromResult(projects);
+    }
+
     public Task<ProjectInformationResult> UpsertProjectInformationAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken)
     {
         _projectInformation = new ProjectInformationResult(
@@ -616,6 +625,20 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             string.IsNullOrWhiteSpace(request.DisplayName) ? request.ProjectId : request.DisplayName.Trim(),
             request.Description,
             DateTimeOffset.UtcNow);
+        return Task.FromResult(_projectInformation);
+    }
+
+    public Task<ProjectInformationResult> UpdateProjectLifecycleAsync(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken)
+    {
+        var current = _projectInformation ?? new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000001"), request.ProjectId, request.ProjectId, string.Empty, DateTimeOffset.UtcNow);
+        var archivedAt = request.Action == ProjectLifecycleAction.Archive ? DateTimeOffset.UtcNow : request.Action == ProjectLifecycleAction.Restore ? null : current.ArchivedAt;
+        _projectInformation = current with
+        {
+            IsHidden = request.Action == ProjectLifecycleAction.Hide ? true : request.Action == ProjectLifecycleAction.Unhide ? false : current.IsHidden,
+            ArchivedAt = archivedAt,
+            SafeDeleteEligibleAt = archivedAt?.AddDays(7),
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
         return Task.FromResult(_projectInformation);
     }
 

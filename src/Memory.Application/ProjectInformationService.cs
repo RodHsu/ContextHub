@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Memory.Domain;
+using System.Text.Json;
 
 namespace Memory.Application;
 
@@ -12,6 +13,7 @@ public sealed class ProjectInformationService(
 {
     private const string ExternalKey = "system:project-information";
     private const string SourceType = "project-information";
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<ProjectInformationResult?> GetAsync(string projectId, CancellationToken cancellationToken)
     {
@@ -90,7 +92,6 @@ public sealed class ProjectInformationService(
         item.Title = displayName;
         item.Content = description;
         item.Summary = description.Length <= 500 ? description : description[..500];
-        item.Status = MemoryStatus.Active;
         item.UpdatedAt = now;
         await dbContext.SaveChangesAsync(cancellationToken);
         await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
@@ -98,6 +99,143 @@ public sealed class ProjectInformationService(
         return Map(item);
     }
 
+    public async Task<ProjectInformationResult> UpdateLifecycleAsync(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken)
+    {
+        var normalizedProjectId = ProjectContext.Normalize(request.ProjectId);
+        if (ProjectContext.IsShared(normalizedProjectId) || ProjectContext.IsUser(normalizedProjectId))
+        {
+            throw new InvalidOperationException("Project lifecycle can only be managed for a regular ProjectId.");
+        }
+
+        if (!actorAccessor.Current.IsServiceActor)
+        {
+            await maintenanceCoordinator.EnsureWriteAllowedAsync("project_information_lifecycle", cancellationToken);
+        }
+
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: true);
+        var item = await dbContext.MemoryItems
+            .Where(x => x.ProjectId == normalizedProjectId && x.ExternalKey == ExternalKey)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+            .FirstOrDefaultAsync(cancellationToken);
+        var now = clock.UtcNow;
+
+        if (item is null)
+        {
+            item = new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = normalizedProjectId,
+                ExternalKey = ExternalKey,
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Artifact,
+                SourceType = SourceType,
+                SourceRef = normalizedProjectId,
+                Tags = ["project-information"],
+                Importance = 1m,
+                Confidence = 1m,
+                Title = normalizedProjectId,
+                CreatedAt = now
+            };
+            await dbContext.MemoryItems.AddAsync(item, cancellationToken);
+        }
+        else
+        {
+            item.Version++;
+        }
+
+        var lifecycle = ReadLifecycle(item.MetadataJson);
+        lifecycle = request.Action switch
+        {
+            ProjectLifecycleAction.Hide => lifecycle with { IsHidden = true },
+            ProjectLifecycleAction.Unhide => lifecycle with { IsHidden = false },
+            ProjectLifecycleAction.Archive => lifecycle with { ArchivedAt = lifecycle.ArchivedAt ?? now },
+            ProjectLifecycleAction.Restore => lifecycle with { ArchivedAt = null },
+            _ => throw new InvalidOperationException("Unsupported project lifecycle action.")
+        };
+
+        item.Status = lifecycle.ArchivedAt is null ? MemoryStatus.Active : MemoryStatus.Archived;
+        item.Tags = lifecycle.IsHidden
+            ? item.Tags.Append("project-hidden").Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+            : item.Tags.Where(tag => !string.Equals(tag, "project-hidden", StringComparison.OrdinalIgnoreCase)).ToArray();
+        item.MetadataJson = JsonSerializer.Serialize(lifecycle, JsonOptions);
+        item.UpdatedAt = now;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
+        return Map(item);
+    }
+
+    public async Task<IReadOnlyList<ProjectInformationListItem>> ListAsync(bool includeInactive, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        var items = await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => x.ProjectId != ProjectContext.SharedProjectId && x.ProjectId != ProjectContext.UserProjectId)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
+            .ToListAsync(cancellationToken);
+        var informationByProject = items
+            .Where(x => x.ExternalKey == ExternalKey)
+            .GroupBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(item => item.UpdatedAt).First(), StringComparer.OrdinalIgnoreCase);
+
+        return items.GroupBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                informationByProject.TryGetValue(group.Key, out var information);
+                var result = information is null
+                    ? new ProjectInformationResult(Guid.Empty, group.Key, group.Key, string.Empty, group.Max(item => item.UpdatedAt))
+                    : Map(information);
+                return new ProjectInformationListItem(result, group.Count());
+            })
+            .Where(item => includeInactive || (!item.Information.IsHidden && !item.Information.IsArchived))
+            .OrderBy(item => item.Information.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    public async Task<IReadOnlyList<string>> GetArchivedProjectIdsAsync(IReadOnlyList<string> projectIds, CancellationToken cancellationToken)
+    {
+        if (projectIds.Count == 0)
+        {
+            return [];
+        }
+
+        var actor = actorAccessor.Current;
+        return await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => projectIds.Contains(x.ProjectId) && x.ExternalKey == ExternalKey && x.Status == MemoryStatus.Archived)
+            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
+            .Select(x => x.ProjectId)
+            .ToArrayAsync(cancellationToken);
+    }
+
     private static ProjectInformationResult Map(MemoryItem item)
-        => new(item.Id, item.ProjectId, item.Title, item.Content, item.UpdatedAt);
+    {
+        var lifecycle = ReadLifecycle(item.MetadataJson);
+        return new(
+            item.Id,
+            item.ProjectId,
+            item.Title,
+            item.Content,
+            item.UpdatedAt,
+            lifecycle.IsHidden,
+            lifecycle.ArchivedAt,
+            lifecycle.ArchivedAt?.AddDays(7));
+    }
+
+    private static ProjectLifecycleMetadata ReadLifecycle(string? metadataJson)
+    {
+        try
+        {
+            return string.IsNullOrWhiteSpace(metadataJson)
+                ? new ProjectLifecycleMetadata()
+                : JsonSerializer.Deserialize<ProjectLifecycleMetadata>(metadataJson, JsonOptions) ?? new ProjectLifecycleMetadata();
+        }
+        catch (JsonException)
+        {
+            return new ProjectLifecycleMetadata();
+        }
+    }
+
+    private sealed record ProjectLifecycleMetadata(bool IsHidden = false, DateTimeOffset? ArchivedAt = null);
 }

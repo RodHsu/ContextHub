@@ -467,7 +467,7 @@ public sealed class DashboardQueryService(
             cancellationToken);
         if (snapshot is not null)
         {
-            var snapshotProjects = FilterProjectSuggestions(snapshot.Payload.Projects, query, normalizedLimit);
+            var snapshotProjects = await FilterActiveProjectSuggestionsAsync(FilterProjectSuggestions(snapshot.Payload.Projects, query, normalizedLimit), cancellationToken);
             if (snapshotProjects.Count >= normalizedLimit || string.IsNullOrWhiteSpace(query))
             {
                 return snapshotProjects;
@@ -482,7 +482,7 @@ public sealed class DashboardQueryService(
             .Select(group => new ProjectSuggestionResult(group.Key, group.Count()))
             .ToListAsync(cancellationToken);
 
-        return FilterProjectSuggestions(projects, query, normalizedLimit);
+        return await FilterActiveProjectSuggestionsAsync(FilterProjectSuggestions(projects, query, normalizedLimit), cancellationToken);
     }
 
     public async Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)
@@ -733,6 +733,26 @@ public sealed class DashboardQueryService(
             .ThenBy(project => project.ProjectId, StringComparer.OrdinalIgnoreCase)
             .Take(limit)
             .ToArray();
+    }
+
+    private async Task<IReadOnlyList<ProjectSuggestionResult>> FilterActiveProjectSuggestionsAsync(
+        IReadOnlyList<ProjectSuggestionResult> projects,
+        CancellationToken cancellationToken)
+    {
+        if (projects.Count == 0)
+        {
+            return projects;
+        }
+
+        var projectIds = projects.Select(project => project.ProjectId).ToArray();
+        var actor = actorAccessor.Current;
+        var inactiveProjectIds = await dbContext.MemoryItems.AsNoTracking()
+            .Where(item => projectIds.Contains(item.ProjectId) && item.ExternalKey == "system:project-information")
+            .Where(item => item.Status == MemoryStatus.Archived || item.Tags.Contains("project-hidden"))
+            .Where(item => !actor.HasUser || (item.TenantId == actor.TenantId && (actor.IsServiceActor || item.OwnerUserId == actor.UserId)))
+            .Select(item => item.ProjectId)
+            .ToListAsync(cancellationToken);
+        return projects.Where(project => !inactiveProjectIds.Contains(project.ProjectId, StringComparer.OrdinalIgnoreCase)).ToArray();
     }
 
     private static (int Page, int PageSize) Normalize(int page, int pageSize, int maxPageSize)

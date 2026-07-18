@@ -327,7 +327,29 @@ public sealed record ProjectInformationResult(
     string ProjectId,
     string DisplayName,
     string Description,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    bool IsHidden = false,
+    DateTimeOffset? ArchivedAt = null,
+    DateTimeOffset? SafeDeleteEligibleAt = null)
+{
+    public bool IsArchived => ArchivedAt is not null;
+}
+
+public enum ProjectLifecycleAction
+{
+    Hide,
+    Unhide,
+    Archive,
+    Restore
+}
+
+public sealed record ProjectLifecycleUpdateRequest(
+    string ProjectId,
+    ProjectLifecycleAction Action);
+
+public sealed record ProjectInformationListItem(
+    ProjectInformationResult Information,
+    int ItemCount);
 
 public sealed record WorkingContextCitation(
     Guid MemoryId,
@@ -1622,6 +1644,9 @@ public interface IProjectInformationService
 {
     Task<ProjectInformationResult?> GetAsync(string projectId, CancellationToken cancellationToken);
     Task<ProjectInformationResult> UpsertAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken);
+    Task<ProjectInformationResult> UpdateLifecycleAsync(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProjectInformationListItem>> ListAsync(bool includeInactive, CancellationToken cancellationToken);
+    Task<IReadOnlyList<string>> GetArchivedProjectIdsAsync(IReadOnlyList<string> projectIds, CancellationToken cancellationToken);
 }
 
 public interface IAccessibleProjectService

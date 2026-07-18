@@ -53,6 +53,10 @@ public sealed class MemoryMcpTools(
     public Task<ProjectInformationResult> project_information_upsert(ProjectInformationUpdateRequest request, CancellationToken cancellationToken = default)
         => projectInformationService.UpsertAsync(request, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Hide, unhide, archive, or restore a project. Archived projects are excluded from default memory search and build_working_context. Safe deletion is only eligible seven days after archival and is not performed by this tool.")]
+    public Task<ProjectInformationResult> project_information_update_lifecycle(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken = default)
+        => projectInformationService.UpdateLifecycleAsync(request, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Publish a project-scoped artifact summary, snippet, file reference, or external object pointer for other agents using the same ProjectId.")]
     public Task<ProjectArtifactResult> project_artifact_publish(ProjectArtifactPublishRequest request, CancellationToken cancellationToken = default)
         => artifactExchangeService.PublishAsync(request, cancellationToken);

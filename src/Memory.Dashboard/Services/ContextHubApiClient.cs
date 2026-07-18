@@ -20,8 +20,10 @@ public interface IContextHubApiClient
     Task<ChatGptProposalResult> RejectChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken);
     Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectSuggestionResult>> GetMemoryProjectsAsync(string? query, int limit, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProjectInformationListItem>> GetProjectInformationProjectsAsync(bool includeInactive, CancellationToken cancellationToken);
     Task<ProjectInformationResult?> GetProjectInformationAsync(string projectId, CancellationToken cancellationToken);
     Task<ProjectInformationResult> UpsertProjectInformationAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken);
+    Task<ProjectInformationResult> UpdateProjectLifecycleAsync(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
     Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken);
     Task<MemoryImportPreviewResult> PreviewMemoryImportAsync(MemoryImportRequest request, CancellationToken cancellationToken);
@@ -170,9 +172,23 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         return await ReadRequiredAsync<ProjectInformationResult>(response, cancellationToken);
     }
 
+    public Task<IReadOnlyList<ProjectInformationListItem>> GetProjectInformationProjectsAsync(bool includeInactive, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<ProjectInformationListItem>>(
+            QueryHelpers.AddQueryString("/api/projects/information/", "includeInactive", includeInactive.ToString()),
+            cancellationToken);
+
     public async Task<ProjectInformationResult> UpsertProjectInformationAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken)
     {
         using var response = await httpClient.PutAsJsonAsync($"/api/projects/information/{Uri.EscapeDataString(request.ProjectId)}", request, cancellationToken);
+        return await ReadRequiredAsync<ProjectInformationResult>(response, cancellationToken);
+    }
+
+    public async Task<ProjectInformationResult> UpdateProjectLifecycleAsync(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync(
+            $"/api/projects/information/{Uri.EscapeDataString(request.ProjectId)}/lifecycle",
+            request,
+            cancellationToken);
         return await ReadRequiredAsync<ProjectInformationResult>(response, cancellationToken);
     }
 
