@@ -10,6 +10,7 @@ public sealed class MemoryMcpTools(
     IMemoryService memoryService,
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
+    IProjectInformationService projectInformationService,
     IProjectArtifactExchangeService artifactExchangeService,
     IChatGptProposalService chatGptProposalService,
     IMaintenanceCoordinator maintenanceCoordinator)
@@ -43,6 +44,14 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("Get a single memory item by id.")]
     public Task<MemoryDocument?> memory_get(Guid id, CancellationToken cancellationToken = default)
         => memoryService.GetAsync(id, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Read the durable project information that agents must use as fixed background before task-specific memory retrieval.")]
+    public Task<ProjectInformationResult?> project_information_get(string projectId, CancellationToken cancellationToken = default)
+        => projectInformationService.GetAsync(projectId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create or update the durable name and description for one ProjectId. This information is included in build_working_context.")]
+    public Task<ProjectInformationResult> project_information_upsert(ProjectInformationUpdateRequest request, CancellationToken cancellationToken = default)
+        => projectInformationService.UpsertAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Publish a project-scoped artifact summary, snippet, file reference, or external object pointer for other agents using the same ProjectId.")]
     public Task<ProjectArtifactResult> project_artifact_publish(ProjectArtifactPublishRequest request, CancellationToken cancellationToken = default)

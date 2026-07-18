@@ -20,6 +20,8 @@ public interface IContextHubApiClient
     Task<ChatGptProposalResult> RejectChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken);
     Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectSuggestionResult>> GetMemoryProjectsAsync(string? query, int limit, CancellationToken cancellationToken);
+    Task<ProjectInformationResult?> GetProjectInformationAsync(string projectId, CancellationToken cancellationToken);
+    Task<ProjectInformationResult> UpsertProjectInformationAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
     Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken);
     Task<MemoryImportPreviewResult> PreviewMemoryImportAsync(MemoryImportRequest request, CancellationToken cancellationToken);
@@ -155,6 +157,23 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         };
 
         return GetRequiredAsync<IReadOnlyList<ProjectSuggestionResult>>(QueryHelpers.AddQueryString("/api/memories/projects", queryString), cancellationToken);
+    }
+
+    public async Task<ProjectInformationResult?> GetProjectInformationAsync(string projectId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.GetAsync($"/api/projects/information/{Uri.EscapeDataString(projectId)}", cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        return await ReadRequiredAsync<ProjectInformationResult>(response, cancellationToken);
+    }
+
+    public async Task<ProjectInformationResult> UpsertProjectInformationAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PutAsJsonAsync($"/api/projects/information/{Uri.EscapeDataString(request.ProjectId)}", request, cancellationToken);
+        return await ReadRequiredAsync<ProjectInformationResult>(response, cancellationToken);
     }
 
     public async Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)

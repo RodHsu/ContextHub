@@ -391,7 +391,8 @@ public sealed class MemoryService(
     IRetrievalTelemetryService retrievalTelemetryService,
     ITokenCountingService tokenCountingService,
     IRequestActorAccessor actorAccessor,
-    IMaintenanceCoordinator maintenanceCoordinator) : IMemoryService
+    IMaintenanceCoordinator maintenanceCoordinator,
+    IProjectInformationService projectInformationService) : IMemoryService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -832,6 +833,7 @@ public sealed class MemoryService(
             }
 
             var userPreferenceSearch = await SearchUserPreferencesAsync(request.Query, 3, cancellationToken);
+            var projectInformation = await projectInformationService.GetAsync(request.ProjectId, cancellationToken);
 
             var facts = MapContext(hits.Where(x => x.MemoryType == MemoryType.Fact).Take(request.Limit));
             var decisions = MapContext(hits.Where(x => x.MemoryType == MemoryType.Decision).Take(request.Limit));
@@ -855,7 +857,8 @@ public sealed class MemoryService(
                 recentLogs,
                 userPreferenceSearch.Preferences,
                 suggestedTests,
-                citations);
+                citations,
+                ProjectInformation: projectInformation);
             result = result with { SavingsEstimate = await BuildContextSavingsEstimateAsync(hits, result, cancellationToken) };
             await objectCache.SetAsync(cacheKey, "working-context-final", result, cachePolicy.WorkingContextTtl, cancellationToken);
             var resultWithMaintenance = result with { Maintenance = maintenance };
@@ -2500,6 +2503,7 @@ public static class DependencyInjection
         services.AddScoped<IContextHubBootstrapService, ContextHubBootstrapService>();
         services.AddScoped<IAccessibleProjectService, AccessibleProjectService>();
         services.AddScoped<IDailyMemoryReviewService, DailyMemoryReviewService>();
+        services.AddScoped<IProjectInformationService, ProjectInformationService>();
         services.AddScoped<IMemoryService, MemoryService>();
         services.AddSingleton<IProjectArtifactObjectStore, DisabledProjectArtifactObjectStore>();
         services.AddScoped<IProjectArtifactExchangeService, ProjectArtifactExchangeService>();

@@ -1573,6 +1573,22 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
         ]);
     }
 
+    public Task<ProjectInformationResult?> GetProjectInformationAsync(string projectId, CancellationToken cancellationToken)
+        => Task.FromResult<ProjectInformationResult?>(new ProjectInformationResult(
+            Guid.Parse("cccccccc-0000-0000-0000-000000000001"),
+            projectId,
+            projectId,
+            "Dashboard UI test project information.",
+            DateTimeOffset.UtcNow));
+
+    public Task<ProjectInformationResult> UpsertProjectInformationAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectInformationResult(
+            Guid.Parse("cccccccc-0000-0000-0000-000000000001"),
+            request.ProjectId,
+            string.IsNullOrWhiteSpace(request.DisplayName) ? request.ProjectId : request.DisplayName.Trim(),
+            request.Description,
+            DateTimeOffset.UtcNow));
+
     public Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
         => Task.FromResult(BuildRetentionResult(request.Mode));
 

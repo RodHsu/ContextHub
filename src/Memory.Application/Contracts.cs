@@ -317,6 +317,18 @@ public sealed record WorkingContextSection(
     string Excerpt,
     string ProjectId = ProjectContext.DefaultProjectId);
 
+public sealed record ProjectInformationUpdateRequest(
+    string ProjectId,
+    string? DisplayName,
+    string Description);
+
+public sealed record ProjectInformationResult(
+    Guid MemoryId,
+    string ProjectId,
+    string DisplayName,
+    string Description,
+    DateTimeOffset UpdatedAt);
+
 public sealed record WorkingContextCitation(
     Guid MemoryId,
     Guid? ChunkId,
@@ -334,7 +346,8 @@ public sealed record WorkingContextResult(
     IReadOnlyList<string> SuggestedTests,
     IReadOnlyList<WorkingContextCitation> Citations,
     ContextSavingsEstimateResult? SavingsEstimate = null,
-    MaintenanceStatusResult? Maintenance = null);
+    MaintenanceStatusResult? Maintenance = null,
+    ProjectInformationResult? ProjectInformation = null);
 
 public sealed record ContextHubBootstrapRequest(string? ProjectId = null);
 
@@ -1603,6 +1616,12 @@ public interface IMemoryService
     Task<UserPreferenceResult> UpsertUserPreferenceAsync(UserPreferenceUpsertRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<UserPreferenceResult>> ListUserPreferencesAsync(UserPreferenceListRequest request, CancellationToken cancellationToken);
     Task<UserPreferenceResult> ArchiveUserPreferenceAsync(UserPreferenceArchiveRequest request, CancellationToken cancellationToken);
+}
+
+public interface IProjectInformationService
+{
+    Task<ProjectInformationResult?> GetAsync(string projectId, CancellationToken cancellationToken);
+    Task<ProjectInformationResult> UpsertAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken);
 }
 
 public interface IAccessibleProjectService

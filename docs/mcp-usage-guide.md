@@ -24,6 +24,8 @@ https://context-hub.example.com/mcp-chat
 
 At the start of a new task, call `build_working_context` with an explicit `projectId` and a task-shaped query.
 
+Before a project has useful task history, create its durable description with `project_information_upsert`. The returned `projectInformation` section is always loaded by `build_working_context` before task-specific retrieval, so it provides stable project intent and boundaries without coupling unrelated discussion threads together. Read it directly with `project_information_get` when a client needs only the project background.
+
 Good query:
 
 ```text

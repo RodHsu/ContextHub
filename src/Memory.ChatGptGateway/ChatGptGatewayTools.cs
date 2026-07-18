@@ -12,6 +12,7 @@ public sealed class ChatGptGatewayTools(
     IMemoryService memoryService,
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
+    IProjectInformationService projectInformationService,
     IAccessibleProjectService accessibleProjectService,
     IDailyMemoryReviewService dailyMemoryReviewService,
     ISuggestedActionService suggestedActionService,
@@ -109,6 +110,14 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Get a single ContextHub memory item by id.")]
     public Task<MemoryDocument?> memory_get(Guid id, CancellationToken cancellationToken = default)
         => memoryService.GetAsync(id, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Read durable project information before starting work in a ProjectId.")]
+    public Task<ProjectInformationResult?> project_information_get(string projectId, CancellationToken cancellationToken = default)
+        => projectInformationService.GetAsync(projectId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Propose an update to durable project information. Approved data is included in build_working_context.")]
+    public Task<ChatGptProposalResult> project_information_upsert(ProjectInformationUpdateRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("project_information_upsert", request.ProjectId, request.DisplayName ?? request.ProjectId, "Update project information.", request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("List project-scoped artifact exchange records shared by agents using the same ProjectId.")]
     public Task<IReadOnlyList<ProjectArtifactResult>> project_artifacts_list(ProjectArtifactListRequest request, CancellationToken cancellationToken = default)

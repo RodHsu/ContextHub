@@ -10,6 +10,7 @@ namespace Memory.Application;
 public sealed class ChatGptProposalService(
     IApplicationDbContext dbContext,
     IMemoryService memoryService,
+    IProjectInformationService projectInformationService,
     IProjectArtifactExchangeService artifactExchangeService,
     ISuggestedActionService suggestedActionService,
     IRequestActorAccessor actorAccessor,
@@ -33,7 +34,8 @@ public sealed class ChatGptProposalService(
         "suggested_action_dismiss",
         "promote_log_slice_to_memory",
         "project_artifact_publish",
-        "project_artifact_upload_object"
+        "project_artifact_upload_object",
+        "project_information_upsert"
     };
 
     public async Task<ChatGptProposalResult> CreateAsync(ChatGptProposalCreateRequest request, CancellationToken cancellationToken)
@@ -254,6 +256,7 @@ public sealed class ChatGptProposalService(
             "promote_log_slice_to_memory" => (await memoryService.PromoteLogSliceAsync(Deserialize<PromoteLogSliceRequest>(payloadJson), cancellationToken)).Id,
             "project_artifact_publish" => (await artifactExchangeService.PublishAsync(Deserialize<ProjectArtifactPublishRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_artifact_upload_object" => (await artifactExchangeService.UploadManagedObjectAsync(Deserialize<ProjectArtifactManagedObjectPublishRequest>(payloadJson), cancellationToken)).MemoryId,
+            "project_information_upsert" => (await projectInformationService.UpsertAsync(Deserialize<ProjectInformationUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
             _ => throw new InvalidOperationException($"Tool '{toolName}' is not supported for proposal approval.")
         };
     }

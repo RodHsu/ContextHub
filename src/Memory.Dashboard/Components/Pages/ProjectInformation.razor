@@ -1,0 +1,117 @@
+@page "/project-information"
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>Context Hub | 專案資訊</PageTitle>
+
+<PageViewport Title="專案資訊"
+              Subtitle="維護每個 ProjectId 的固定背景；所有 build_working_context 結果都會先帶回這份資料。">
+    <Actions>
+        <div class="page-actions-secondary">
+            <button class="ghost-button" @onclick="LoadAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">讀取專案資訊</button>
+            <button class="ghost-button" @onclick="EnableEditing" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">編輯</button>
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="SaveAsync" disabled="@(_loading || !_editing)">儲存變更</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        <section class="panel panel-scroll">
+            <div class="panel-title">專案背景</div>
+            <div class="panel-scroll-body detail-scroll-shell">
+                <div class="form-grid">
+                    <label>
+                        <span>ProjectId</span>
+                        <select @bind="_projectId" disabled="@_loading">
+                            <option value="">選擇專案</option>
+                            @foreach (var project in _projects)
+                            {
+                                <option value="@project.ProjectId">@project.ProjectId (@project.ItemCount)</option>
+                            }
+                        </select>
+                    </label>
+                    <label>
+                        <span>顯示名稱</span>
+                        <input @bind="_displayName" disabled="@(!_editing)" placeholder="ContextHub" />
+                    </label>
+                    <label class="span-2">
+                        <span>專案描述</span>
+                        <textarea @bind="_description" disabled="@(!_editing)" placeholder="產品目標、系統邊界、主要技術選擇與工作時必須遵守的固定背景。"></textarea>
+                    </label>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(_message))
+                {
+                    <p class="stack-item-meta">@_message</p>
+                }
+            </div>
+        </section>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private string _projectId = string.Empty;
+    private string _displayName = string.Empty;
+    private string _description = string.Empty;
+    private IReadOnlyList<ProjectSuggestionResult> _projects = [];
+    private string? _message;
+    private bool _loading;
+    private bool _editing;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _projects = await ApiClient.GetMemoryProjectsAsync(null, 200, CancellationToken.None);
+        _projectId = _projects.FirstOrDefault()?.ProjectId ?? string.Empty;
+    }
+
+    private async Task LoadAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_projectId))
+        {
+            return;
+        }
+
+        _loading = true;
+        try
+        {
+            var result = await ApiClient.GetProjectInformationAsync(_projectId.Trim(), CancellationToken.None);
+            _displayName = result?.DisplayName ?? _projectId.Trim();
+            _description = result?.Description ?? string.Empty;
+            _editing = false;
+            _message = result is null ? "尚未建立此專案的資訊。" : $"最後更新：{result.UpdatedAt.LocalDateTime:g}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_projectId))
+        {
+            _message = "請先輸入 ProjectId。";
+            return;
+        }
+
+        _loading = true;
+        try
+        {
+            var result = await ApiClient.UpsertProjectInformationAsync(
+                new ProjectInformationUpdateRequest(_projectId.Trim(), _displayName, _description),
+                CancellationToken.None);
+            _displayName = result.DisplayName;
+            _description = result.Description;
+            _editing = false;
+            _message = "專案資訊已儲存，後續工作上下文會自動帶入。";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void EnableEditing()
+    {
+        _editing = true;
+        _message = "已進入編輯模式。";
+    }
+}

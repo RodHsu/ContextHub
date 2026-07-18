@@ -6,6 +6,7 @@ namespace Memory.Dashboard.Services.Testing;
 internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 {
     private readonly DashboardBrowserTestProfileAccessor _profileAccessor;
+    private ProjectInformationResult? _projectInformation;
 
     public BrowserTestContextHubApiClient(DashboardBrowserTestProfileAccessor profileAccessor)
     {
@@ -600,6 +601,22 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 result.ResultJson,
                 string.Empty)
         ]);
+    }
+
+    public Task<ProjectInformationResult?> GetProjectInformationAsync(string projectId, CancellationToken cancellationToken)
+        => Task.FromResult(_projectInformation is not null && string.Equals(_projectInformation.ProjectId, projectId, StringComparison.OrdinalIgnoreCase)
+            ? _projectInformation
+            : null);
+
+    public Task<ProjectInformationResult> UpsertProjectInformationAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken)
+    {
+        _projectInformation = new ProjectInformationResult(
+            Guid.Parse("cccccccc-0000-0000-0000-000000000001"),
+            request.ProjectId,
+            string.IsNullOrWhiteSpace(request.DisplayName) ? request.ProjectId : request.DisplayName.Trim(),
+            request.Description,
+            DateTimeOffset.UtcNow);
+        return Task.FromResult(_projectInformation);
     }
 
     public Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
