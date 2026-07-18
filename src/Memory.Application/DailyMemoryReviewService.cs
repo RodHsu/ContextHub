@@ -41,37 +41,48 @@ public sealed class DailyMemoryReviewService(
             "chatgpt-mcp-gateway:daily-memory-review",
             cancellationToken);
 
-        var insights = await conversationAutomationService.ListInsightsAsync(
-            new ConversationInsightListRequest(
-                PromotionStatus: ConversationPromotionStatus.Pending,
-                Limit: 400),
-            cancellationToken);
-        var highSignalInsights = insights
-            .Where(insight => insight.Importance >= HighSignalImportance && insight.Confidence >= HighSignalConfidence)
-            .ToArray();
-
+        var insights = new List<ConversationInsightResult>();
         var pendingSuggestedActions = new List<SuggestedActionResult>();
+        var pendingProposals = new List<ChatGptProposalResult>();
         foreach (var projectId in readableProjectIds)
         {
-            var actions = await suggestedActionService.ListAsync(
+            insights.AddRange(await conversationAutomationService.ListInsightsAsync(
+                new ConversationInsightListRequest(
+                    ProjectId: projectId,
+                    PromotionStatus: ConversationPromotionStatus.Pending,
+                    Limit: 400),
+                cancellationToken));
+
+            pendingSuggestedActions.AddRange(await suggestedActionService.ListAsync(
                 new SuggestedActionListRequest(projectId, SuggestedActionStatus.Pending, Limit: 100),
-                cancellationToken);
-            pendingSuggestedActions.AddRange(actions);
+                cancellationToken));
+
+            pendingProposals.AddRange(await proposalService.ListAsync(
+                new ChatGptProposalListRequest(
+                    ProjectId: projectId,
+                    Status: ChatGptProposalStatus.Pending,
+                    Limit: 200),
+                cancellationToken));
         }
+
+        var highSignalInsights = insights
+            .Where(insight => insight.Importance >= HighSignalImportance && insight.Confidence >= HighSignalConfidence)
+            .OrderByDescending(insight => insight.UpdatedAt)
+            .Take(400)
+            .ToArray();
 
         var userPreferences = await memoryService.ListUserPreferencesAsync(
             new UserPreferenceListRequest(IncludeArchived: true, Limit: 200),
             cancellationToken);
-        var pendingProposals = await proposalService.ListAsync(
-            new ChatGptProposalListRequest(Status: ChatGptProposalStatus.Pending, Limit: 200),
-            cancellationToken);
-
         return new DailyMemoryReviewResult(
             projects,
             retention,
             highSignalInsights,
             pendingSuggestedActions,
             userPreferences,
-            pendingProposals);
+            pendingProposals
+                .OrderByDescending(proposal => proposal.UpdatedAt)
+                .Take(200)
+                .ToArray());
     }
 }

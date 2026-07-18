@@ -730,6 +730,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var rejectedExternalKey = $"chatgpt-gateway-rejected:{Guid.NewGuid():N}";
 
         await SeedCodexReadableMemoryAsync("Gateway read fixture", "ChatGPT gateway can read authorized project memory.");
+        var insightOnlyProjectId = $"insight-only-{Guid.NewGuid():N}";
+        await SeedInsightOnlyProjectAsync(insightOnlyProjectId);
 
         var captureHandler = new SessionCaptureHandler(environment.GetFactory().Server.CreateHandler());
         using var client = CreateAuthorizedClient(environment.GetFactory(), captureHandler);
@@ -762,6 +764,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             string.Equals(project.GetProperty("projectId").GetString(), ProjectContext.DefaultProjectId, StringComparison.OrdinalIgnoreCase));
         projects.EnumerateArray().Should().Contain(project =>
             string.Equals(project.GetProperty("projectId").GetString(), ProjectId, StringComparison.OrdinalIgnoreCase));
+        projects.EnumerateArray().Should().Contain(project =>
+            string.Equals(project.GetProperty("projectId").GetString(), insightOnlyProjectId, StringComparison.OrdinalIgnoreCase));
 
         var retentionPreviewPayload = await SendMcpAsync(client, sessionId!, 22, "tools/call", new
         {
@@ -782,6 +786,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             string.Equals(project.GetProperty("projectId").GetString(), ProjectId, StringComparison.OrdinalIgnoreCase));
         dailyReview.GetProperty("retention").GetProperty("mode").GetString().Should().Be("Classify");
         dailyReview.GetProperty("retention").GetProperty("deletedMemoryItems").GetInt64().Should().Be(0);
+        dailyReview.GetProperty("highSignalConversationInsights").EnumerateArray().Should().OnlyContain(insight =>
+            projects.EnumerateArray().Any(project => string.Equals(
+                project.GetProperty("projectId").GetString(),
+                insight.GetProperty("projectId").GetString(),
+                StringComparison.OrdinalIgnoreCase)));
 
         var readPayload = await SendMcpAsync(client, sessionId!, 3, "tools/call", new
         {
@@ -1229,6 +1238,71 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 Confidence: 0.9m,
                 ProjectId: ProjectId),
             CancellationToken.None);
+    }
+
+    private async Task SeedInsightOnlyProjectAsync(string projectId)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await dbContext.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
+        var now = DateTimeOffset.UtcNow;
+        var session = new ConversationSession
+        {
+            TenantId = user.TenantId,
+            OwnerUserId = user.Id,
+            ConversationId = $"insight-only-{Guid.NewGuid():N}",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            TaskId = "scope-regression",
+            SourceSystem = "test",
+            LastTurnId = "turn-1",
+            StartedAt = now,
+            LastCheckpointAt = now,
+            UpdatedAt = now
+        };
+        var checkpoint = new ConversationCheckpoint
+        {
+            Session = session,
+            TenantId = user.TenantId,
+            OwnerUserId = user.Id,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            TaskId = session.TaskId,
+            SourceSystem = session.SourceSystem,
+            EventType = ConversationEventType.SessionCheckpoint,
+            SourceKind = ConversationSourceKind.AgentSupplemental,
+            SourceRef = "scope-regression",
+            DedupKey = $"scope-regression:{Guid.NewGuid():N}",
+            CreatedAt = now
+        };
+        dbContext.ConversationInsights.Add(new ConversationInsight
+        {
+            Session = session,
+            Checkpoint = checkpoint,
+            TenantId = user.TenantId,
+            OwnerUserId = user.Id,
+            ConversationId = session.ConversationId,
+            TurnId = checkpoint.TurnId,
+            ProjectId = projectId,
+            ProjectName = projectId,
+            TaskId = session.TaskId,
+            SourceSystem = session.SourceSystem,
+            SourceKind = ConversationSourceKind.AgentSupplemental,
+            InsightType = ConversationInsightType.Fact,
+            Title = "Insight-only project scope regression",
+            Content = "The project must be listed before daily review can return its insight.",
+            Summary = "Insight-only project belongs to the authoritative project list.",
+            SourceRef = checkpoint.SourceRef,
+            Tags = ["scope-regression"],
+            Importance = 0.9m,
+            Confidence = 0.9m,
+            DedupKey = $"scope-regression:{Guid.NewGuid():N}",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await dbContext.SaveChangesAsync();
     }
 
     private async Task DurableMemoryShouldExistAsync(string externalKey)
