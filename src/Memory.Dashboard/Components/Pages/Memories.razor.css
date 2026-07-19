@@ -28,8 +28,9 @@
 .memories-detail-panel .memory-detail-shell {
     min-height: 0;
     max-height: min(48rem, calc(100dvh - 12rem));
-    overflow: auto;
+    overflow-y: auto !important;
     overscroll-behavior: contain;
+    scrollbar-gutter: stable;
 }
 
 .memories-list-panel .data-table {

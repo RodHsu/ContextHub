@@ -136,6 +136,13 @@
                         </NavLink>
                         @if (isAdmin)
                         {
+                        <NavLink class="nav-item" href="/inbox">
+                            <span class="nav-icon" aria-hidden="true">☑</span>
+                            <span class="nav-label">專案待辦</span>
+                        </NavLink>
+                        }
+                        @if (isAdmin)
+                        {
                         <NavLink class="nav-item" href="/retention">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -168,15 +175,6 @@
                     {
                     <div class="sidebar-section-label">審核治理</div>
                     <nav class="sidebar-nav">
-                        <NavLink class="nav-item" href="/inbox">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M4 5h16v11H4z" />
-                                    <path d="M4 13h4l2 3h4l2-3h4" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">專案待辦</span>
-                        </NavLink>
                         <NavLink class="nav-item" href="/governance">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -336,6 +334,10 @@
 
                 <main class="content">
                     @Body
+                    <footer class="dashboard-footer">
+                        <span>ContextHub</span>
+                        <span>知識工作與專案協作主控台</span>
+                    </footer>
                 </main>
             </div>
 
@@ -389,12 +391,12 @@
         new("維運監控", "L", "日誌", "/logs", NavLinkMatch.Prefix, true),
         new("維運監控", "J", "工作佇列", "/jobs", NavLinkMatch.Prefix, true),
         new("維運監控", "P", "效能", "/performance", NavLinkMatch.Prefix, true),
-        new("知識工作", "G", "記憶圖譜", "/graph", NavLinkMatch.Prefix, false),
         new("知識工作", "K", "記憶資料", "/memories", NavLinkMatch.Prefix, false),
         new("知識工作", "X", "跨專案討論", "/discussions", NavLinkMatch.Prefix, false),
+        new("知識工作", "I", "專案待辦", "/inbox", NavLinkMatch.Prefix, true),
         new("知識工作", "T", "記憶整理", "/retention", NavLinkMatch.Prefix, true),
+        new("知識工作", "G", "記憶圖譜", "/graph", NavLinkMatch.Prefix, false),
         new("知識工作", "S", "資料來源", "/sources", NavLinkMatch.Prefix, true),
-        new("審核治理", "I", "專案待辦", "/inbox", NavLinkMatch.Prefix, true),
         new("審核治理", "V", "治理", "/governance", NavLinkMatch.Prefix, true),
         new("審核治理", "E", "評估", "/evaluation", NavLinkMatch.Prefix, true),
         new("審核治理", "C", "ChatGPT", "/chatgpt-proposals", NavLinkMatch.Prefix, true),

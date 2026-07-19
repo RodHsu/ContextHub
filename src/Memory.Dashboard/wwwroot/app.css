@@ -3058,7 +3058,7 @@ textarea {
 
 .retention-table {
     table-layout: fixed;
-    min-width: 920px;
+    min-width: 720px;
 }
 
 .retention-table tbody tr {
@@ -3071,20 +3071,42 @@ textarea {
 }
 
 .retention-table-col-kind {
-    width: 8.5rem;
+    width: 11%;
 }
 
 .retention-table-col-memory {
-    width: 27rem;
+    width: 32%;
 }
 
 .retention-table-col-signal {
-    width: 26rem;
+    width: 36%;
 }
 
 .retention-table-col-action {
-    width: 13rem;
+    width: 21%;
 }
+
+.dashboard-footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 1.5rem;
+    padding: 1rem 0.25rem 0.25rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-subtle);
+    font-size: 0.78rem;
+}
+
+@media (max-width: 640px) {
+    .dashboard-footer { flex-direction: column; gap: 0.25rem; }
+}
+
+.sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/memories"] { order: 1; }
+.sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/discussions"] { order: 2; }
+.sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/inbox"] { order: 3; }
+.sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/retention"] { order: 4; }
+.sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/graph"] { order: 5; }
+.sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/sources"] { order: 6; }
 
 .retention-memory-title,
 .retention-memory-meta,
