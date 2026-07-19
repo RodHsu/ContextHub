@@ -498,7 +498,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         discussionsHtml.Should().Contain("跨專案討論");
         discussionsHtml.Should().Contain("建立跨專案討論");
         discussionsHtml.Should().Contain("相關討論");
-        discussionsHtml.Should().Contain("內容檢查器");
+        discussionsHtml.Should().Contain("依專案、參與者、狀態或內容篩選");
+        discussionsHtml.Should().Contain("搜尋討論內容或主題");
+        discussionsHtml.Should().Contain("顯示");
         discussionsHtml.Should().Contain("參與專案");
         discussionsHtml.Should().Contain("discussions-workspace");
 

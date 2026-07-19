@@ -26,45 +26,70 @@
             </section>
         }
         <section class="discussions-workspace">
-            <aside class="discussion-list-panel panel">
-                <div class="panel-heading-row"><div><div class="panel-title">相關討論</div><div class="panel-heading-meta">@_projectId</div></div><button class="ghost-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
+            <aside class="discussion-list-panel">
+                <div class="panel-heading-row discussion-list-heading"><div><div class="panel-title">相關討論</div><div class="panel-heading-meta">依專案、參與者、狀態或內容篩選</div></div><button class="ghost-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
+                <div class="discussion-filter-toolbar" aria-label="討論篩選">
+                    <input @bind="_search" @bind:event="oninput" @bind:after="ApplyFiltersAsync" placeholder="搜尋討論內容或主題" aria-label="搜尋討論" />
+                    <select @bind="_hostProjectFilter" @bind:after="ApplyFiltersAsync" aria-label="篩選主責專案"><option value="">所有主責專案</option>@foreach (var project in HostProjects) { <option value="@project">@project</option> }</select>
+                    <select @bind="_participantProjectFilter" @bind:after="ApplyFiltersAsync" aria-label="篩選參與專案"><option value="">所有參與專案</option>@foreach (var project in ParticipantProjects) { <option value="@project">@project</option> }</select>
+                    <select @bind="_statusFilter" @bind:after="ApplyFiltersAsync" aria-label="篩選狀態"><option value="">所有狀態</option>@foreach (var status in Statuses) { <option value="@status">@status</option> }</select>
+                </div>
+                <div class="discussion-list-column-labels" aria-hidden="true"><span>專案與參與者</span><span>討論內容</span><span>最後活動</span></div>
                 <div class="discussion-list-scroll">
-                    @if (_threads.Count == 0) { <div class="empty-inline">目前沒有相關討論。</div> }
-                    @foreach (var thread in _threads)
+                    @if (FilteredThreads.Count == 0) { <div class="empty-inline">沒有符合篩選條件的討論。</div> }
+                    @foreach (var thread in PagedThreads)
                     {
                         <button class="discussion-list-item @(_selectedThreadId == thread.Id ? "selected" : string.Empty)" @onclick="() => SelectThreadAsync(thread.Id)">
-                            <span class="discussion-list-item-top"><code>@thread.HostProjectId</code>@if (thread.UnreadCount > 0) { <strong>@thread.UnreadCount</strong> }</span>
-                            <span class="discussion-list-title">@thread.Title</span><span class="discussion-list-participants">@string.Join(" · ", thread.ParticipantProjectIds)</span><span class="discussion-list-time"><ClientLocalTime Value="thread.UpdatedAt" /></span>
+                            <span class="discussion-list-project"><code>@thread.HostProjectId</code><span class="discussion-list-participants">@string.Join(" · ", thread.ParticipantProjectIds)</span></span>
+                            <span class="discussion-list-summary"><strong>@thread.Title</strong><span>@(thread.UnreadCount > 0 ? $"{thread.UnreadCount} 則未讀" : "已讀")</span></span>
+                            <span class="discussion-list-time"><ClientLocalTime Value="thread.UpdatedAt" /></span>
                         </button>
                     }
                 </div>
+                <footer class="discussion-pagination">
+                    <span>@PageRangeLabel</span>
+                    <div><button class="ghost-button" @onclick="PreviousPageAsync" disabled="@(_currentPage <= 1 || _loading)">上一頁</button>@for (var page = 1; page <= PageCount; page++) { var pageNumber = page; <button class="page-number @(_currentPage == pageNumber ? "selected" : string.Empty)" @onclick="() => GoToPageAsync(pageNumber)" aria-label="第 @pageNumber 頁">@pageNumber</button> }<button class="ghost-button" @onclick="NextPageAsync" disabled="@(_currentPage >= PageCount || _loading)">下一頁</button></div>
+                </footer>
             </aside>
-            <main class="discussion-thread-panel panel">
+            <main class="discussion-thread-panel">
                 @if (_selected is null) { <div class="empty-state">從左側選擇一個討論串。</div> }
                 else
                 {
-                    <div class="discussion-thread-heading"><div><div class="studio-eyebrow">主責專案</div><h2>@_selected.Title</h2><p><code>@_selected.HostProjectId</code> 的跨專案討論</p></div><span class="status-badge success">@_selected.Status</span></div>
+                    <div class="discussion-thread-heading"><div><div class="studio-eyebrow">主責專案 <code>@_selected.HostProjectId</code></div><h2>@_selected.Title</h2><div class="discussion-participant-chips">@foreach (var participant in _selected.ParticipantProjectIds) { <span class="discussion-chip @(string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase) ? "host" : string.Empty)">@participant</span> }</div></div><div class="discussion-heading-side"><span class="status-badge success">@_selected.Status</span><span><ClientLocalTime Value="_selected.UpdatedAt" /></span></div></div>
+                    <div class="discussion-thread-meta"><span>參與專案 @(_selected.ParticipantProjectIds.Count)</span><span>內容僅對參與專案可見</span></div>
                     <div class="discussion-message-stream">@foreach (var message in _selected.Messages) { <article class="discussion-message"><div><strong>@message.SenderProjectId</strong><span><ClientLocalTime Value="message.CreatedAt" /></span></div><p>@message.Content</p></article> }</div>
                     <div class="discussion-reply"><textarea @bind="_reply" placeholder="回覆討論…"></textarea><button class="primary-button" @onclick="ReplyAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_reply))">送出</button></div>
                 }
             </main>
-            <aside class="discussion-inspector panel">
-                <div class="panel-title">內容檢查器</div>
-                @if (_selected is not null) { <div class="inspector-section"><span>可見範圍</span><p>僅列出的參與專案可讀取與回覆此討論。</p></div><div class="inspector-section"><span>參與專案</span><ul>@foreach (var participant in _selected.ParticipantProjectIds) { <li class="@(string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase) ? "host" : string.Empty)"><code>@participant</code>@if (string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase)) { <small>主責</small> }</li> }</ul></div><div class="inspector-section"><span>最後更新</span><p><ClientLocalTime Value="_selected.UpdatedAt" /></p></div> }
-                else { <p class="panel-heading-meta">選取討論後顯示主責專案、參與專案及可見範圍。</p> }
-            </aside>
         </section>
     </ChildContent>
 </PageViewport>
 
 @code {
+    private const int PageSize = 15;
     private IReadOnlyList<ProjectInformationListItem> _projects = [];
     private IReadOnlyList<DiscussionThreadResult> _threads = [];
     private DiscussionThreadDetailResult? _selected;
     private Guid? _selectedThreadId;
     private string _projectId = string.Empty, _reply = string.Empty, _newHostProjectId = string.Empty, _newTitle = string.Empty, _newParticipants = string.Empty, _newMessage = string.Empty;
+    private string _search = string.Empty, _hostProjectFilter = string.Empty, _participantProjectFilter = string.Empty, _statusFilter = string.Empty;
     private string? _error;
     private bool _loading, _creating;
+    private int _currentPage = 1;
+
+    private IReadOnlyList<DiscussionThreadResult> FilteredThreads => _threads
+        .Where(thread => string.IsNullOrWhiteSpace(_hostProjectFilter) || string.Equals(thread.HostProjectId, _hostProjectFilter, StringComparison.OrdinalIgnoreCase))
+        .Where(thread => string.IsNullOrWhiteSpace(_participantProjectFilter) || thread.ParticipantProjectIds.Contains(_participantProjectFilter, StringComparer.OrdinalIgnoreCase))
+        .Where(thread => string.IsNullOrWhiteSpace(_statusFilter) || string.Equals(thread.Status, _statusFilter, StringComparison.OrdinalIgnoreCase))
+        .Where(thread => string.IsNullOrWhiteSpace(_search) || thread.Title.Contains(_search, StringComparison.OrdinalIgnoreCase) || thread.HostProjectId.Contains(_search, StringComparison.OrdinalIgnoreCase) || thread.ParticipantProjectIds.Any(project => project.Contains(_search, StringComparison.OrdinalIgnoreCase)))
+        .OrderByDescending(thread => thread.UpdatedAt)
+        .ToArray();
+    private IReadOnlyList<DiscussionThreadResult> PagedThreads => FilteredThreads.Skip((_currentPage - 1) * PageSize).Take(PageSize).ToArray();
+    private IReadOnlyList<string> HostProjects => _threads.Select(thread => thread.HostProjectId).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(project => project).ToArray();
+    private IReadOnlyList<string> ParticipantProjects => _threads.SelectMany(thread => thread.ParticipantProjectIds).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(project => project).ToArray();
+    private IReadOnlyList<string> Statuses => _threads.Select(thread => thread.Status).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(status => status).ToArray();
+    private int PageCount => Math.Max(1, (int)Math.Ceiling(FilteredThreads.Count / (double)PageSize));
+    private string PageRangeLabel => FilteredThreads.Count == 0 ? "顯示 0 筆" : $"顯示 {((_currentPage - 1) * PageSize) + 1}–{Math.Min(_currentPage * PageSize, FilteredThreads.Count)}，共 {FilteredThreads.Count} 筆";
 
     protected override async Task OnInitializedAsync()
     {
@@ -77,10 +102,32 @@
     private async Task LoadAsync()
     {
         if (string.IsNullOrWhiteSpace(_projectId)) return;
-        _loading = true; _error = null;
-        try { _threads = await ApiClient.GetDiscussionThreadsAsync(new DiscussionThreadListRequest(_projectId), CancellationToken.None); if (_threads.FirstOrDefault() is { } first) await SelectThreadAsync(first.Id); else { _selected = null; _selectedThreadId = null; } }
+        _loading = true; _error = null; _currentPage = 1;
+        try { _threads = await ApiClient.GetDiscussionThreadsAsync(new DiscussionThreadListRequest(_projectId), CancellationToken.None); await EnsureSelectionAsync(); }
         catch (Exception ex) { _error = ex.Message; }
         finally { _loading = false; }
+    }
+
+    private async Task ApplyFiltersAsync()
+    {
+        _currentPage = 1;
+        await EnsureSelectionAsync();
+    }
+
+    private async Task PreviousPageAsync() => await GoToPageAsync(_currentPage - 1);
+    private async Task NextPageAsync() => await GoToPageAsync(_currentPage + 1);
+    private async Task GoToPageAsync(int page)
+    {
+        _currentPage = Math.Clamp(page, 1, PageCount);
+        await EnsureSelectionAsync();
+    }
+
+    private async Task EnsureSelectionAsync()
+    {
+        _currentPage = Math.Clamp(_currentPage, 1, PageCount);
+        var selectedIsVisible = PagedThreads.Any(thread => thread.Id == _selectedThreadId);
+        if (!selectedIsVisible && PagedThreads.FirstOrDefault() is { } first) await SelectThreadAsync(first.Id);
+        else if (PagedThreads.Count == 0) { _selected = null; _selectedThreadId = null; }
     }
 
     private async Task SelectThreadAsync(Guid id)

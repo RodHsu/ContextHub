@@ -650,10 +650,28 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     public Task<IReadOnlyList<DiscussionThreadResult>> GetDiscussionThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<DiscussionThreadResult>>(
-        [new DiscussionThreadResult(Guid.Parse("77000000-0000-0000-0000-000000000001"), "Vital_AirMeet_BackEnd", "API contract alignment", "Open", ["Vital_AirMeet", "Vital_AirMeet_BackEnd"], 2, DateTimeOffset.UtcNow.AddHours(-3), DateTimeOffset.UtcNow.AddMinutes(-5))]);
+            Enumerable.Range(1, 18)
+                .Select(index => new DiscussionThreadResult(
+                    Guid.Parse($"77000000-0000-0000-0000-{index:D12}"),
+                    index % 3 == 0 ? "Vital_AirMeet_DriveApp" : index % 2 == 0 ? "Vital_AirMeet_Document" : "Vital_AirMeet_BackEnd",
+                    $"API contract {index} 對齊",
+                    "Open",
+                    ["Vital_AirMeet", index % 3 == 0 ? "Vital_AirMeet_DriveApp" : index % 2 == 0 ? "Vital_AirMeet_Document" : "Vital_AirMeet_BackEnd"],
+                    index % 4,
+                    DateTimeOffset.UtcNow.AddDays(-1),
+                    DateTimeOffset.UtcNow.AddMinutes(-index)))
+                .ToArray());
 
     public Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken)
-        => Task.FromResult<DiscussionThreadDetailResult?>(new DiscussionThreadDetailResult(threadId, "Vital_AirMeet_BackEnd", "API contract alignment", "Open", ["Vital_AirMeet", "Vital_AirMeet_BackEnd"], [new DiscussionMessageResult(Guid.NewGuid(), "Vital_AirMeet", "請確認 API contract 的部署順序。", DateTimeOffset.UtcNow.AddMinutes(-8))], DateTimeOffset.UtcNow.AddHours(-3), DateTimeOffset.UtcNow.AddMinutes(-5)));
+        => Task.FromResult<DiscussionThreadDetailResult?>(new DiscussionThreadDetailResult(
+            threadId,
+            "Vital_AirMeet_BackEnd",
+            "API contract alignment",
+            "Open",
+            ["Vital_AirMeet", "Vital_AirMeet_BackEnd"],
+            Enumerable.Range(1, 24).Select(index => new DiscussionMessageResult(Guid.NewGuid(), index % 2 == 0 ? "Vital_AirMeet" : "Vital_AirMeet_BackEnd", $"第 {index} 則 API contract 討論訊息，請確認部署順序與相容性。", DateTimeOffset.UtcNow.AddMinutes(-index))).ToArray(),
+            DateTimeOffset.UtcNow.AddHours(-3),
+            DateTimeOffset.UtcNow.AddMinutes(-5)));
 
     public Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new DiscussionThreadDetailResult(Guid.NewGuid(), request.HostProjectId, request.Title, "Open", request.ParticipantProjectIds, [new DiscussionMessageResult(Guid.NewGuid(), request.SenderProjectId, request.InitialMessage, DateTimeOffset.UtcNow)], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));

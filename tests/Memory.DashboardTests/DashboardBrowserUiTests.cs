@@ -1815,12 +1815,54 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
+    public async Task Discussions_Should_Keep_Filterable_Paginated_List_And_Independent_Scrollable_Detail()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/discussions?uiProfile=dense");
+        var listItems = page.Locator(".discussion-list-item");
+        await listItems.First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+        (await listItems.CountAsync()).Should().Be(15);
+
+        var layoutJson = await page.EvaluateAsync<string>(
+            @"() => JSON.stringify({
+                list: document.querySelector('.discussion-list-scroll'),
+                detail: document.querySelector('.discussion-message-stream'),
+                listOverflowY: getComputedStyle(document.querySelector('.discussion-list-scroll')).overflowY,
+                detailOverflowY: getComputedStyle(document.querySelector('.discussion-message-stream')).overflowY,
+                listScrollHeight: document.querySelector('.discussion-list-scroll').scrollHeight,
+                listClientHeight: document.querySelector('.discussion-list-scroll').clientHeight,
+                detailScrollHeight: document.querySelector('.discussion-message-stream').scrollHeight,
+                detailClientHeight: document.querySelector('.discussion-message-stream').clientHeight
+            })");
+        using (var document = JsonDocument.Parse(layoutJson))
+        {
+            var root = document.RootElement;
+            root.GetProperty("listOverflowY").GetString().Should().Be("auto", layoutJson);
+            root.GetProperty("detailOverflowY").GetString().Should().Be("auto", layoutJson);
+            root.GetProperty("listScrollHeight").GetInt32().Should().BeGreaterThan(root.GetProperty("listClientHeight").GetInt32(), layoutJson);
+            root.GetProperty("detailScrollHeight").GetInt32().Should().BeGreaterThan(root.GetProperty("detailClientHeight").GetInt32(), layoutJson);
+        }
+
+        await page.GetByRole(AriaRole.Button, new() { Name = "下一頁" }).ClickAsync();
+        await page.WaitForTimeoutAsync(250);
+        (await listItems.CountAsync()).Should().Be(3);
+        await page.GetByLabel("搜尋討論").FillAsync("API contract 18");
+        await page.WaitForTimeoutAsync(250);
+        (await listItems.CountAsync()).Should().Be(1);
+        (await listItems.First.InnerTextAsync()).Should().Contain("API contract 18");
+    }
+
+    [Fact]
     public async Task Memories_Detail_Readers_Should_Frame_Long_Content_And_Keep_Copyable_Text_On_Desktop_And_TabS7()
     {
         await _fixture.EnsureDashboardRunningAsync();
         var viewports = new[]
         {
             new DashboardViewport("1080p", 1920, 1080),
+            new DashboardViewport("reported-desktop", 1668, 792),
             new DashboardViewport("tab-s7-portrait", 800, 1280)
         };
 
@@ -1848,6 +1890,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             var layoutJson = await page.EvaluateAsync<string>(
                 @"() => {
                     const root = document.documentElement;
+                    const detailShell = document.querySelector('.memory-detail-shell');
                     const contentReader = document.querySelector('.memory-detail-content-reader .detail-reader-body');
                     const chunkReader = document.querySelector('.memory-chunk-card .chunk-reader-body');
                     const revisionSection = Array.from(document.querySelectorAll('.memory-detail-section'))
@@ -1868,6 +1911,12 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                         viewportWidth: window.innerWidth,
                         documentScrollWidth: root.scrollWidth,
                         bodyScrollWidth: document.body.scrollWidth,
+                        detailShell: {
+                            scrollHeight: detailShell?.scrollHeight ?? 0,
+                            clientHeight: detailShell?.clientHeight ?? 0,
+                            overflowY: detailShell ? getComputedStyle(detailShell).overflowY : '',
+                            scrollbarGutter: detailShell ? getComputedStyle(detailShell).scrollbarGutter : ''
+                        },
                         contentReader: {
                             scrollWidth: contentReader?.scrollWidth ?? 0,
                             clientWidth: contentReader?.clientWidth ?? 0,
@@ -1895,6 +1944,17 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             var root = document.RootElement;
             root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, layoutJson);
             root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, layoutJson);
+
+            if (viewport.Width > 1024)
+            {
+                var detailShell = root.GetProperty("detailShell");
+                detailShell.GetProperty("overflowY").GetString().Should().Be("auto", layoutJson);
+                detailShell.GetProperty("scrollbarGutter").GetString().Should().Contain("stable", layoutJson);
+                detailShell.GetProperty("scrollHeight").GetInt32().Should().BeGreaterThan(
+                    detailShell.GetProperty("clientHeight").GetInt32(),
+                    "the full memory detail must remain reachable by scrolling its visible panel at {0}",
+                    viewport.Name);
+            }
 
             var contentReader = root.GetProperty("contentReader");
             contentReader.GetProperty("overflowX").GetString().Should().Be("auto", layoutJson);
