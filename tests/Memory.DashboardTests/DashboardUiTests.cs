@@ -451,6 +451,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("REST API 摘要");
         mcpToolsHtml.Should().Contain("project_cleanup_preview");
         mcpToolsHtml.Should().Contain("project_cleanup_apply");
+        mcpToolsHtml.Should().Contain("discussion_threads_list / discussion_thread_get");
+        mcpToolsHtml.Should().Contain("discussion_thread_create / discussion_message_create");
+        mcpToolsHtml.Should().Contain("project_hierarchy_get_children / project_hierarchy_set_children");
+        mcpToolsHtml.Should().Contain("/api/projects/hierarchy/*, /api/discussions/*");
         mcpToolsHtml.Should().Contain("memory_delete");
         mcpToolsHtml.Should().Contain("需核准");
         mcpToolsHtml.Should().Contain("中文說明");

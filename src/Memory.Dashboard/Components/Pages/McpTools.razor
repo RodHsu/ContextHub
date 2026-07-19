@@ -141,7 +141,7 @@
     private static readonly IReadOnlyList<EndpointDoc> Endpoints =
     [
         new("/mcp", "可信 coding agent / 內部自動化", "完整工具面", "warn", "提供讀取、寫入、搬移、封存、刪除、維運 lease、reindex、summary refresh、artifact exchange、log promotion 與 proposal 審核工具。"),
-        new("/mcp-chat", "ChatGPT / custom assistant", "受控 gateway", "neutral", "透過 OAuth/OIDC 驗證 actor，依 Project 授權限制讀取範圍；寫入以 pending proposal 為主，避免聊天代理直接改 durable memory。"),
+        new("/mcp-chat", "ChatGPT / custom assistant", "受控 gateway", "neutral", "透過 OAuth/OIDC 驗證 actor，依 Project 授權限制讀取範圍；durable memory 寫入以 pending proposal 為主，但討論串與專案階層可在授權範圍內直接協作。"),
         new("/api/*", "Dashboard / 維運腳本", "REST", "ok", "提供 Dashboard 狀態、記憶查詢、治理、整理、維運、security、jobs、storage 與 performance probe 等 HTTP API。")
     ];
 
@@ -158,6 +158,9 @@
         new("project_cleanup_apply", "對 preview 後選定的安全候選執行封存或刪除；不安全 active memory 會略過。", "直接寫入", "warn", "適合完成 ProjectId 清理收尾。"),
         new("conversation_ingest", "寫入對話 checkpoint 到 staging layer，供後續自動 promotion 或人工整理。", "直接寫入", "warn", "收尾、交接或壓縮前使用。"),
         new("conversation_sessions_list / conversation_insights_list", "檢視對話 staging session、insight 與 promotion 狀態。", "讀取", "neutral", "用於每日整理與稽核。"),
+        new("project_hierarchy_get_children / project_hierarchy_set_children", "讀取或設定父專案管理的子專案清單。", "混合", "warn", "僅是組織 metadata，不會授權存取、複製記憶或自動加入討論。"),
+        new("discussion_threads_list / discussion_thread_get", "列出或讀取目前 ProjectId 可參與的跨專案討論；讀取會標記已讀。", "讀取", "neutral", "討論以 hostProjectId 為主要議題，只有 participant ProjectId 能存取。"),
+        new("discussion_thread_create / discussion_message_create", "建立跨專案討論串或在既有討論回覆。", "直接寫入", "warn", "討論不會變成 memory 或 knowledge；建立時需能讀取所有 participants，回覆僅需 sender 的寫入權限。"),
         new("log_search / log_read / promote_log_slice_to_memory", "查詢 runtime logs，或將已驗證的 log slice 升級為 durable memory。", "混合", "warn", "promotion 屬寫入，應避免保存大型原始 log。"),
         new("user_preference_list / user_preference_upsert / user_preference_archive", "管理長期使用者偏好。", "混合", "warn", "只保存明確、可重用且已確認的偏好。"),
         new("project_artifact_*", "發佈、上傳、搜尋、讀取或清理 project-scoped artifact exchange records。", "混合", "warn", "大型內容應走 managed object pointer，不直接塞進 memory。"),
@@ -176,6 +179,9 @@
         new("project_artifacts_list / project_artifacts_search / project_artifact_get", "讀取同 ProjectId agent 共享的 artifact exchange records。", "讀取", "neutral", "不直接暴露未授權專案內容。"),
         new("log_search / log_read", "查詢 actor 授權範圍內的 runtime logs。", "讀取", "neutral", "避免把大型 raw log 直接升級為記憶。"),
         new("conversation_ingest", "補送 ChatGPT 對話 checkpoint 到 staging layer。", "直接寫入", "warn", "來源會標記為 ChatGPT gateway。"),
+        new("project_hierarchy_get_children / project_hierarchy_set_children", "讀取或設定 OAuth actor 授權範圍內的父子專案管理關係。", "混合", "warn", "不改 memory ACL；設定時以 MCP schema 的 request 物件傳入。"),
+        new("discussion_threads_list / discussion_thread_get", "列出或讀取 OAuth actor 可參與的跨專案討論。", "讀取", "neutral", "以 participant ProjectId 限制可見範圍，讀取時會更新已讀狀態。"),
+        new("discussion_thread_create / discussion_message_create", "直接建立跨專案討論或回覆既有討論。", "直接寫入", "warn", "不建立 durable memory，也不需要 proposal；建立與回覆仍受 OAuth actor 的 Project 授權限制。"),
         new("memory_upsert / memory_update / memory_archive / memory_move / memory_delete", "建立記憶寫入、更新、封存、搬移或刪除 proposal。", "需核准", "warn", "ChatGPT 不直接改 durable memory。"),
         new("project_cleanup_apply", "建立 project cleanup apply proposal。", "需核准", "warn", "核准後才封存或刪除候選記憶。"),
         new("user_preference_upsert / user_preference_archive", "建立偏好新增、更新、封存或還原 proposal。", "需核准", "warn", "避免聊天代理自行改長期偏好。"),
@@ -190,6 +196,7 @@
         new("記憶資料", "/api/memories, /api/memories/search, /api/memories/{id}, /api/memories/{id}/archive|restore|move|delete", "查詢、讀取、封存、還原、搬移與刪除記憶資料。"),
         new("專案清理", "/api/memories/project-cleanup/preview, /api/memories/project-cleanup/apply", "支援 ProjectId 殘留資料 preview 與 apply。"),
         new("工作上下文", "/api/context/build, /api/context/bootstrap", "建立 working context 或取得 ContextHub bootstrap 說明。"),
+        new("跨專案討論", "/api/projects/hierarchy/*, /api/discussions/*", "管理父子專案關係，並建立、列出、讀取與回覆 participant-scoped 討論串。"),
         new("來源、治理、評估", "/api/sources/*, /api/governance/*, /api/evaluation/*", "管理來源同步、治理 findings 與 retrieval evaluation。"),
         new("對話與 ChatGPT", "/api/conversations/*, /api/chatgpt/proposals/*, /api/actions/*", "處理 conversation staging、proposal 審核與 suggested actions。"),
         new("使用者與安全", "/api/user-preferences, /api/me/*, /api/security/*", "管理偏好、個人 token、tenant、project grant、audit events。"),
