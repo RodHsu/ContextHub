@@ -444,7 +444,14 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         using var mcpToolsResponse = await client.GetAsync("/mcp-tools");
         mcpToolsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var mcpToolsHtml = WebUtility.HtmlDecode(await mcpToolsResponse.Content.ReadAsStringAsync());
-        mcpToolsHtml.Should().Contain("MCP / API 工具說明");
+        mcpToolsHtml.Should().Contain("功能與 MCP API");
+        mcpToolsHtml.Should().Contain("知識協作能力");
+        mcpToolsHtml.Should().Contain("專案知識");
+        mcpToolsHtml.Should().Contain("共用知識");
+        mcpToolsHtml.Should().Contain("使用者偏好");
+        mcpToolsHtml.Should().Contain("跨專案討論");
+        mcpToolsHtml.Should().Contain("專案待辦事項");
+        mcpToolsHtml.Should().Contain("規劃中");
         mcpToolsHtml.Should().Contain("連線面總覽");
         mcpToolsHtml.Should().Contain("Direct MCP 工具");
         mcpToolsHtml.Should().Contain("ChatGPT Gateway 工具");
@@ -459,6 +466,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("需核准");
         mcpToolsHtml.Should().Contain("中文說明");
         mcpToolsHtml.Should().Contain("mcp-tools-page-stack");
+        mcpToolsHtml.Should().Contain("mcp-capability-grid");
 
         using var memoriesResponse = await client.GetAsync("/memories");
         memoriesResponse.StatusCode.Should().Be(HttpStatusCode.OK);

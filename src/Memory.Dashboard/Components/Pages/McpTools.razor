@@ -1,12 +1,49 @@
 @page "/mcp-tools"
 
-<PageTitle>Context Hub | MCP / API 工具說明</PageTitle>
+<PageTitle>Context Hub | 功能與 MCP API</PageTitle>
 
-<PageViewport Title="MCP / API 工具說明"
-              Subtitle="用中文整理目前 ContextHub 對 agent、ChatGPT gateway 與 Dashboard REST 提供的工具面。"
+<PageViewport Title="功能與 MCP API"
+              Subtitle="先用產品功能理解知識協作能力，再查看對應的 MCP、Chat gateway 與 REST API。"
               BodyClass="page-viewport-body mcp-tools-page-body">
     <ChildContent>
         <div class="mcp-tools-page-stack page-scroll-host">
+            <section class="panel mcp-capabilities-panel">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">知識協作能力</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">所有能力均以授權範圍為前提。以下先說明使用者可得到什麼，再列出可由 agent 或系統呼叫的介面。</div>
+                    </div>
+                    <span class="status-badge ok">功能導向</span>
+                </div>
+
+                <div class="mcp-capability-grid">
+                    @foreach (var capability in Capabilities)
+                    {
+                        <article class="mcp-capability-card">
+                            <div class="mcp-capability-header">
+                                <div class="stack-item-title">@capability.Name</div>
+                                <span class="status-badge @capability.BadgeClass">@capability.Badge</span>
+                            </div>
+                            <p>@capability.Description</p>
+                            <dl class="mcp-capability-details">
+                                <div>
+                                    <dt>UI</dt>
+                                    <dd>@capability.Ui</dd>
+                                </div>
+                                <div>
+                                    <dt>對應 API</dt>
+                                    <dd><code>@capability.Api</code></dd>
+                                </div>
+                                <div>
+                                    <dt>註解</dt>
+                                    <dd>@capability.Note</dd>
+                                </div>
+                            </dl>
+                        </article>
+                    }
+                </div>
+            </section>
+
             <section class="panel mcp-tools-overview-panel">
                 <div class="panel-heading-row">
                     <div>
@@ -43,9 +80,9 @@
                     <table class="data-table mcp-tools-table">
                         <thead>
                             <tr>
-                                <th>工具</th>
-                                <th>用途</th>
-                                <th>風險與使用時機</th>
+                                <th>API／工具</th>
+                                <th>功能</th>
+                                <th>使用方式與限制</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -74,9 +111,9 @@
                     <table class="data-table mcp-tools-table">
                         <thead>
                             <tr>
-                                <th>工具</th>
-                                <th>用途</th>
-                                <th>寫入治理</th>
+                                <th>API／工具</th>
+                                <th>功能</th>
+                                <th>寫入規則與限制</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -105,9 +142,9 @@
                     <table class="data-table mcp-tools-table">
                         <thead>
                             <tr>
-                                <th>API 群組</th>
-                                <th>代表端點</th>
-                                <th>用途</th>
+                                <th>功能分類</th>
+                                <th>REST API</th>
+                                <th>功能與註解</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -138,6 +175,15 @@
 </PageViewport>
 
 @code {
+    private static readonly IReadOnlyList<CapabilityDoc> Capabilities =
+    [
+        new("專案知識", "保存特定專案可重用的事實、決策、產物與工作上下文，讓後續任務可以延續。", "記憶資料、專案資訊", "build_working_context, memory_search, memory_*", "已提供", "ok", "必須明確指定 ProjectId；只有穩定、可重用的內容才應寫入 durable memory。"),
+        new("共用知識", "在授權範圍內彙整可跨專案重用的知識，避免把相同背景與決策重複保存。", "記憶資料、工作上下文", "memory_search, memory_get, enqueue_summary_refresh", "已提供", "ok", "仍受 ProjectId、includedProjectIds 與 actor 授權限制；不是所有專案都自動共享。"),
+        new("使用者偏好", "保存已明確確認、可長期沿用的使用者協作習慣與回覆偏好。", "使用者偏好", "user_preference_list, user_preference_upsert, user_preference_archive", "已提供", "ok", "Chat gateway 的偏好寫入會先建立 proposal，核准後才套用。"),
+        new("跨專案討論", "以主專案為議題中心，讓參與專案在獨立討論串內溝通，不混入知識或記憶。", "跨專案討論工作台", "discussion_threads_list, discussion_thread_get, discussion_thread_create, discussion_message_create", "已提供", "ok", "清單預設顯示 actor 可參與的所有討論；hostProjectId 表示主要討論對象，participants 決定可見範圍。"),
+        new("專案待辦事項", "規劃提供專案層級的待辦清單、負責範圍與完成狀態，作為知識與討論以外的執行追蹤。", "尚未提供", "尚未提供", "規劃中", "neutral", "目前沒有待辦事項的 UI、MCP 或 REST API；介面設計完成前不得假設可建立、指派或同步待辦。")
+    ];
+
     private static readonly IReadOnlyList<EndpointDoc> Endpoints =
     [
         new("/mcp", "可信 coding agent / 內部自動化", "完整工具面", "warn", "提供讀取、寫入、搬移、封存、刪除、維運 lease、reindex、summary refresh、artifact exchange、log promotion 與 proposal 審核工具。"),
@@ -159,7 +205,7 @@
         new("conversation_ingest", "寫入對話 checkpoint 到 staging layer，供後續自動 promotion 或人工整理。", "直接寫入", "warn", "收尾、交接或壓縮前使用。"),
         new("conversation_sessions_list / conversation_insights_list", "檢視對話 staging session、insight 與 promotion 狀態。", "讀取", "neutral", "用於每日整理與稽核。"),
         new("project_hierarchy_get_children / project_hierarchy_set_children", "讀取或設定父專案管理的子專案清單。", "混合", "warn", "僅是組織 metadata，不會授權存取、複製記憶或自動加入討論。"),
-        new("discussion_threads_list / discussion_thread_get", "列出或讀取目前 ProjectId 可參與的跨專案討論；讀取會標記已讀。", "讀取", "neutral", "討論以 hostProjectId 為主要議題，只有 participant ProjectId 能存取。"),
+        new("discussion_threads_list / discussion_thread_get", "列出或讀取 actor 授權範圍內可參與的跨專案討論；讀取會標記已讀。", "讀取", "neutral", "未指定 ProjectId 時可取得所有可參與討論；討論以 hostProjectId 為主要議題，只有 participant ProjectId 能存取。"),
         new("discussion_thread_create / discussion_message_create", "建立跨專案討論串或在既有討論回覆。", "直接寫入", "warn", "討論不會變成 memory 或 knowledge；建立時需能讀取所有 participants，回覆僅需 sender 的寫入權限。"),
         new("log_search / log_read / promote_log_slice_to_memory", "查詢 runtime logs，或將已驗證的 log slice 升級為 durable memory。", "混合", "warn", "promotion 屬寫入，應避免保存大型原始 log。"),
         new("user_preference_list / user_preference_upsert / user_preference_archive", "管理長期使用者偏好。", "混合", "warn", "只保存明確、可重用且已確認的偏好。"),
@@ -180,7 +226,7 @@
         new("log_search / log_read", "查詢 actor 授權範圍內的 runtime logs。", "讀取", "neutral", "避免把大型 raw log 直接升級為記憶。"),
         new("conversation_ingest", "補送 ChatGPT 對話 checkpoint 到 staging layer。", "直接寫入", "warn", "來源會標記為 ChatGPT gateway。"),
         new("project_hierarchy_get_children / project_hierarchy_set_children", "讀取或設定 OAuth actor 授權範圍內的父子專案管理關係。", "混合", "warn", "不改 memory ACL；設定時以 MCP schema 的 request 物件傳入。"),
-        new("discussion_threads_list / discussion_thread_get", "列出或讀取 OAuth actor 可參與的跨專案討論。", "讀取", "neutral", "以 participant ProjectId 限制可見範圍，讀取時會更新已讀狀態。"),
+        new("discussion_threads_list / discussion_thread_get", "列出或讀取 OAuth actor 可參與的跨專案討論。", "讀取", "neutral", "未指定 ProjectId 時可列出所有可參與討論；以 participant ProjectId 限制可見範圍，讀取時會更新已讀狀態。"),
         new("discussion_thread_create / discussion_message_create", "直接建立跨專案討論或回覆既有討論。", "直接寫入", "warn", "不建立 durable memory，也不需要 proposal；建立與回覆仍受 OAuth actor 的 Project 授權限制。"),
         new("memory_upsert / memory_update / memory_archive / memory_move / memory_delete", "建立記憶寫入、更新、封存、搬移或刪除 proposal。", "需核准", "warn", "ChatGPT 不直接改 durable memory。"),
         new("project_cleanup_apply", "建立 project cleanup apply proposal。", "需核准", "warn", "核准後才封存或刪除候選記憶。"),
@@ -206,6 +252,8 @@
     ];
 
     private sealed record EndpointDoc(string Path, string Audience, string Badge, string BadgeClass, string Description);
+
+    private sealed record CapabilityDoc(string Name, string Description, string Ui, string Api, string Badge, string BadgeClass, string Note);
 
     private sealed record ToolDoc(string Name, string Description, string Risk, string RiskClass, string Note);
 

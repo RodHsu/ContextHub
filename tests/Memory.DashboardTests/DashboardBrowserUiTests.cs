@@ -64,7 +64,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("jobs", "/jobs", "工作佇列", [".jobs-operations-panel", ".jobs-list-panel", ".jobs-table", ".detail-panel"], [".page-header", ".jobs-operations-panel", ".jobs-page-body > .split-layout"], [".content", ".jobs-table-shell", ".panel-scroll-body"]),
         new("storage", "/storage", "資料庫檢視", [".storage-layout", ".storage-table-panel", ".storage-detail-panel"], [".storage-table-panel", ".storage-detail-panel"], [".content", ".storage-table-list", ".table-scroll-shell"]),
         new("security", "/security", "安全管理", [".security-layout", ".settings-form-grid", ".table-scroll-shell"], [".page-header", ".security-layout"], [".content", ".security-layout"]),
-        new("mcp-tools", "/mcp-tools", "MCP / API 工具說明", [".mcp-tools-page-stack", ".mcp-tools-overview-panel", ".mcp-tools-table-shell"], [".page-header", ".mcp-tools-overview-panel", ".mcp-tools-table-shell"], [".content", ".mcp-tools-page-stack", ".table-scroll-shell"]),
+        new("mcp-tools", "/mcp-tools", "功能與 MCP API", [".mcp-tools-page-stack", ".mcp-capabilities-panel", ".mcp-capability-grid", ".mcp-tools-overview-panel", ".mcp-tools-table-shell"], [".page-header", ".mcp-capabilities-panel", ".mcp-tools-overview-panel", ".mcp-tools-table-shell"], [".content", ".mcp-tools-page-stack", ".table-scroll-shell"]),
         new("performance", "/performance", "效能", [".performance-form-grid", ".performance-config-footer", ".empty-inline"], [".page-header", ".performance-page-body"], [".content", ".performance-results-shell"]),
         new("settings", "/settings", "系統設定", [".settings-layout", ".settings-form-grid", ".settings-transfer-panel"], [".settings-info-panel", ".settings-auth-panel"], [".content", ".settings-layout"]),
         new("forbidden", "/forbidden", "無權限", [".panel", ".empty-inline"], [".page-header", ".panel"], [".content", ".panel"]),
@@ -203,6 +203,23 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }
 
         failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task McpTools_Should_Keep_Capability_Cards_And_Api_Tables_Within_The_Viewport()
+    {
+        var route = Routes.Single(candidate => candidate.Name == "mcp-tools");
+        DashboardViewport[] viewports =
+        [
+            new("desktop", 1366, 768),
+            new("high-dpi-equivalent", 1205, 1216),
+            new("mobile", 390, 844)
+        ];
+
+        foreach (var viewport in viewports)
+        {
+            await ValidateRouteAsync(route, DashboardUiProfile.Normal, viewport, DashboardTheme.Dark);
+        }
     }
 
     [Fact]
