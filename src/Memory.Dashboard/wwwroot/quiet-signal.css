@@ -1144,6 +1144,23 @@ textarea:disabled {
     flex: 0 0 auto;
 }
 
+/* 記憶細節使用單一閱讀捲動區，避免內容 reader 把 chunks 推到看不到的位置。 */
+.memories-detail-panel .memory-detail-content-block {
+    max-height: none;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.memories-detail-panel .memory-detail-list-scroll-shell,
+.memories-detail-panel .memory-chunk-scroll-shell {
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+}
+
 .preferences-page-body > .preferences-workspace-layout {
     grid-template-columns: minmax(22rem, 0.78fr) minmax(0, 1.22fr);
     align-items: start;

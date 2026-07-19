@@ -44,9 +44,24 @@
                 </section>
                 <section class="project-context-contract">
                     <span>下屬專案</span>
-                    <textarea class="child-projects-input" @bind="_childProjectIdsText" placeholder="每行一個 ProjectId"></textarea>
+                    <details class="child-projects-picker" aria-label="選擇下屬專案">
+                        <summary><span>@ChildProjectsSelectionText</span><small>展開複選</small></summary>
+                        <div class="child-projects-picker-options">
+                            @foreach (var project in _projects.Where(project => !string.Equals(project.Information.ProjectId, _projectId, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                var childProjectId = project.Information.ProjectId;
+                                <label>
+                                    <input type="checkbox"
+                                           checked="@_childProjectIds.Contains(childProjectId, StringComparer.OrdinalIgnoreCase)"
+                                           @onchange="@(() => ToggleChildProject(childProjectId))"
+                                           disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))" />
+                                    <span>@ProjectLabel(project.Information)</span>
+                                </label>
+                            }
+                        </div>
+                    </details>
                     <button class="lifecycle-action" @onclick="SaveChildrenAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">儲存下屬專案</button>
-                    <small>用於表示此專案管理哪些 repo；不會自動授權、共享記憶或加入討論。</small>
+                    <small>按住 Ctrl／Cmd 可複選。用於表示此專案管理哪些 repo；不會自動授權、共享記憶或加入討論。</small>
                 </section>
             </aside>
 
@@ -100,7 +115,7 @@
     private bool _loading;
     private bool _editing;
     private bool _includeInactive;
-    private string _childProjectIdsText = string.Empty;
+    private string[] _childProjectIds = [];
 
     protected override async Task OnInitializedAsync()
     {
@@ -124,7 +139,7 @@
             _description = result?.Description ?? string.Empty;
             _information = result;
             var hierarchy = await ApiClient.GetProjectChildrenAsync(_projectId.Trim(), CancellationToken.None);
-            _childProjectIdsText = string.Join(Environment.NewLine, hierarchy.ChildProjectIds);
+            _childProjectIds = hierarchy.ChildProjectIds.ToArray();
             _editing = false;
             _message = result is null ? "尚未建立此專案的資訊。" : $"最後更新：{result.UpdatedAt.LocalDateTime:g}";
         }
@@ -209,12 +224,14 @@
         _loading = true;
         try
         {
-            var childProjectIds = _childProjectIdsText
-                .Split(["\r\n", "\n", ","], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            var childProjectIds = _childProjectIds
+                .Where(projectId => !string.IsNullOrWhiteSpace(projectId))
+                .Where(projectId => !string.Equals(projectId, _projectId, StringComparison.OrdinalIgnoreCase))
+                .Select(projectId => projectId.Trim())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             var hierarchy = await ApiClient.SetProjectChildrenAsync(new ProjectHierarchySetChildrenRequest(_projectId.Trim(), childProjectIds), CancellationToken.None);
-            _childProjectIdsText = string.Join(Environment.NewLine, hierarchy.ChildProjectIds);
+            _childProjectIds = hierarchy.ChildProjectIds.ToArray();
             _message = "下屬專案設定已儲存；權限與資料範圍維持不變。";
         }
         finally
@@ -233,6 +250,20 @@
         => string.Equals(project.DisplayName, project.ProjectId, StringComparison.OrdinalIgnoreCase)
             ? project.ProjectId
             : $"{project.DisplayName} ({project.ProjectId})";
+
+    private string ChildProjectsSelectionText => _childProjectIds.Length switch
+    {
+        0 => "選擇下屬專案",
+        1 => _childProjectIds[0],
+        _ => $"已選擇 {_childProjectIds.Length} 個下屬專案"
+    };
+
+    private void ToggleChildProject(string projectId)
+    {
+        _childProjectIds = _childProjectIds.Contains(projectId, StringComparer.OrdinalIgnoreCase)
+            ? _childProjectIds.Where(item => !string.Equals(item, projectId, StringComparison.OrdinalIgnoreCase)).ToArray()
+            : [.. _childProjectIds, projectId];
+    }
 
     private string LifecycleDescription => _information switch
     {

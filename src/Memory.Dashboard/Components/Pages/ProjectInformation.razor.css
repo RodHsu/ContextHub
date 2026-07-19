@@ -139,12 +139,65 @@
     line-height: 1.45;
 }
 
-.child-projects-input {
-    min-height: 5.5rem;
-    resize: vertical;
+.child-projects-picker {
+    min-width: 0;
+}
+
+.child-projects-picker summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    min-height: 2.45rem;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
     border-radius: 6px;
-    font-family: "JetBrains Mono", Consolas, monospace;
-    font-size: 0.76rem;
+    cursor: pointer;
+    font-size: 0.8rem;
+    list-style: none;
+}
+
+.child-projects-picker summary::-webkit-details-marker {
+    display: none;
+}
+
+.child-projects-picker-options {
+    display: grid;
+    gap: 0.2rem;
+    max-height: 15rem;
+    margin-top: 0.35rem;
+    padding: 0.35rem;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+}
+
+.child-projects-picker-options label {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    min-width: 0;
+    padding: 0.42rem;
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.child-projects-picker-options label:hover {
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.child-projects-picker-options input {
+    width: auto;
+    margin-top: 0.15rem;
+    accent-color: var(--accent);
+}
+
+.child-projects-picker-options span {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .display-name-field {

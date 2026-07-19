@@ -301,7 +301,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal));
         overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("資料來源", StringComparison.Ordinal));
         overviewHtml.IndexOf("日誌", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
-        overviewHtml.IndexOf("收件匣", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("偏好", StringComparison.Ordinal));
+        overviewHtml.IndexOf("專案待辦", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("偏好", StringComparison.Ordinal));
         overviewHtml.IndexOf("資料庫檢視", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("安全管理", StringComparison.Ordinal));
         overviewHtml.IndexOf("安全管理", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("MCP 說明", StringComparison.Ordinal));
         overviewHtml.IndexOf("MCP 說明", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("系統設定", StringComparison.Ordinal));
@@ -451,7 +451,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("使用者偏好");
         mcpToolsHtml.Should().Contain("跨專案討論");
         mcpToolsHtml.Should().Contain("專案待辦事項");
-        mcpToolsHtml.Should().Contain("規劃中");
+        mcpToolsHtml.Should().Contain("suggested_actions_list");
         mcpToolsHtml.Should().Contain("連線面總覽");
         mcpToolsHtml.Should().Contain("Direct MCP 工具");
         mcpToolsHtml.Should().Contain("ChatGPT Gateway 工具");
@@ -497,6 +497,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         projectInformationHtml.Should().Contain("project-studio");
         projectInformationHtml.Should().Contain("Context contract");
         projectInformationHtml.Should().Contain("system:project-information");
+        projectInformationHtml.Should().Contain("下屬專案");
+        projectInformationHtml.Should().Contain("child-projects-picker");
+        projectInformationHtml.Should().Contain("展開複選");
         projectInformationHtml.Should().Contain("背景注入");
         projectInformationHtml.Should().Contain("顯示範圍");
 
@@ -558,9 +561,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         using var inboxResponse = await client.GetAsync("/inbox");
         inboxResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var inboxHtml = WebUtility.HtmlDecode(await inboxResponse.Content.ReadAsStringAsync());
-        inboxHtml.Should().Contain("收件匣");
-        inboxHtml.Should().Contain("待處理建議");
-        inboxHtml.Should().Contain("建議細節");
+        inboxHtml.Should().Contain("專案待辦");
+        inboxHtml.Should().Contain("待辦清單");
+        inboxHtml.Should().Contain("待辦細節");
         inboxHtml.Should().Contain("治理分析與評測回歸");
         inboxHtml.Should().Contain("suggested actions");
 

@@ -2,10 +2,10 @@
 @inject IContextHubApiClient ApiClient
 @inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
 
-<PageTitle>Context Hub | 收件匣</PageTitle>
+<PageTitle>Context Hub | 專案待辦</PageTitle>
 
-<PageViewport Title="收件匣"
-              Subtitle="集中處理治理分析與評測產生的建議動作。"
+<PageViewport Title="專案待辦"
+              Subtitle="集中處理目前專案由治理分析與評測產生的待辦事項。"
               BodyClass="page-viewport-body">
     <Actions>
         <div class="page-actions-status">
@@ -25,7 +25,7 @@
             <div class="metric-grid">
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
-                        <span class="metric-label-inline">建議總數：</span>
+                        <span class="metric-label-inline">待辦總數：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(_actions.Count)</span>
                         <span class="metric-meta-inline">actions</span>
                     </div>
@@ -58,15 +58,15 @@
                     <section class="panel panel-scroll">
                         <div class="panel-heading-row">
                             <div>
-                                <div class="panel-title">待處理建議 (@DashboardFormatting.Integer(_actions.Count))</div>
-                                <div class="panel-heading-meta">此處只顯示真實 suggested actions。資料來自治理分析與評測回歸結果，不會自動建立示範待辦。</div>
+                                <div class="panel-title">待辦清單 (@DashboardFormatting.Integer(_actions.Count))</div>
+                                <div class="panel-heading-meta">此處只顯示真實、專案範圍內的 system suggested actions。資料來自治理分析與評測回歸結果，不會自動建立示範待辦。</div>
                             </div>
                         </div>
                         @if (_actions.Count == 0)
                         {
                             <div class="empty-inline">
-                                <div class="empty-inline-title">目前沒有待處理建議</div>
-                                <div class="empty-inline-copy">建議不是手動新增的資料。先執行治理分析或跑 evaluation，當系統判定需要 sync、reindex 或治理處理時，這裡才會出現待辦。</div>
+                                <div class="empty-inline-title">目前沒有待處理事項</div>
+                                <div class="empty-inline-copy">目前待辦由系統產生，尚不支援手動建立。先執行治理分析或跑 evaluation，當系統判定需要 sync、reindex 或治理處理時，這裡會出現專案待辦。</div>
                                 <div class="empty-inline-actions">
                                     <a class="primary-button" href="/governance">前往治理檢查</a>
                                     <a class="ghost-button" href="/evaluation">前往評估驗證</a>
@@ -98,13 +98,13 @@
                     </section>
 
                     <section class="panel detail-panel panel-scroll">
-                        <div class="panel-title">建議細節</div>
+                        <div class="panel-title">待辦細節</div>
                         <div class="panel-scroll-body detail-scroll-shell">
                             @if (_selectedAction is null)
                             {
                                 <div class="empty-inline">
-                                    <div class="empty-inline-title">尚未選擇建議</div>
-                                    <div class="empty-inline-copy">點選左側建議後，這裡會顯示 payload、執行狀態與實際可執行動作，方便你決定要接受還是忽略。</div>
+                                    <div class="empty-inline-title">尚未選擇待辦</div>
+                                    <div class="empty-inline-copy">點選左側待辦後，這裡會顯示 payload、執行狀態與實際可執行動作，方便你決定要接受還是忽略。</div>
                                 </div>
                             }
                             else
@@ -198,7 +198,7 @@
         }
         catch (Exception ex)
         {
-            _loadError = DashboardUiErrorFormatter.BuildLoadError("收件匣", ex, _actions.Count > 0);
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("專案待辦", ex, _actions.Count > 0);
         }
         finally
         {

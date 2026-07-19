@@ -181,7 +181,7 @@
         new("共用知識", "在授權範圍內彙整可跨專案重用的知識，避免把相同背景與決策重複保存。", "記憶資料、工作上下文", "memory_search, memory_get, enqueue_summary_refresh", "已提供", "ok", "仍受 ProjectId、includedProjectIds 與 actor 授權限制；不是所有專案都自動共享。"),
         new("使用者偏好", "保存已明確確認、可長期沿用的使用者協作習慣與回覆偏好。", "使用者偏好", "user_preference_list, user_preference_upsert, user_preference_archive", "已提供", "ok", "Chat gateway 的偏好寫入會先建立 proposal，核准後才套用。"),
         new("跨專案討論", "以主專案為議題中心，讓參與專案在獨立討論串內溝通，不混入知識或記憶。", "跨專案討論工作台", "discussion_threads_list, discussion_thread_get, discussion_thread_create, discussion_message_create", "已提供", "ok", "清單預設顯示 actor 可參與的所有討論；hostProjectId 表示主要討論對象，participants 決定可見範圍。"),
-        new("專案待辦事項", "規劃提供專案層級的待辦清單、負責範圍與完成狀態，作為知識與討論以外的執行追蹤。", "尚未提供", "尚未提供", "規劃中", "neutral", "目前沒有待辦事項的 UI、MCP 或 REST API；介面設計完成前不得假設可建立、指派或同步待辦。")
+        new("專案待辦事項", "顯示目前專案由治理分析與評測產生的待辦，並可接受、執行或忽略。", "專案待辦", "suggested_actions_list, suggested_action_accept, suggested_action_dismiss", "已提供", "ok", "目前是系統產生的待辦，不支援手動建立、指派或跨專案同步；完整人工待辦將另行擴充。")
     ];
 
     private static readonly IReadOnlyList<EndpointDoc> Endpoints =
