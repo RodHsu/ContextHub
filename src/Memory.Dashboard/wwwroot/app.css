@@ -3086,7 +3086,20 @@ textarea {
     width: 21%;
 }
 
+.content-flow {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 100%;
+}
+
+.content-flow > .page-viewport {
+    flex: 0 0 auto;
+    min-height: 100%;
+}
+
 .dashboard-footer {
+    flex: 0 0 auto;
     display: flex;
     justify-content: space-between;
     gap: 1rem;

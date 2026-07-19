@@ -223,6 +223,75 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
+    public async Task Dashboard_Footer_Should_Follow_Page_Content_Without_Overlaying_The_Workspace()
+    {
+        var route = Routes.Single(candidate => candidate.Name == "memories");
+        DashboardViewport[] viewports =
+        [
+            new("desktop", 1366, 768),
+            new("mobile", 390, 844)
+        ];
+
+        foreach (var viewport in viewports)
+        {
+            await _fixture.EnsureDashboardRunningAsync();
+            await using var context = await _fixture.CreateContextAsync(viewport);
+            var page = await context.NewPageAsync();
+
+            await LoginAndOpenAsync(page, route.Route);
+            await page.Locator(".memories-workspace-layout").WaitForAsync();
+
+            var layoutJson = await page.EvaluateAsync<string>(
+                @"() => {
+                    const content = document.querySelector('.content');
+                    const flow = document.querySelector('.content-flow');
+                    const pageViewport = document.querySelector('.page-viewport');
+                    const footer = document.querySelector('.dashboard-footer');
+                    const before = {
+                        content: content?.getBoundingClientRect(),
+                        pageViewport: pageViewport?.getBoundingClientRect(),
+                        footer: footer?.getBoundingClientRect()
+                    };
+
+                    if (content) content.scrollTop = content.scrollHeight;
+
+                    const after = {
+                        content: content?.getBoundingClientRect(),
+                        pageViewport: pageViewport?.getBoundingClientRect(),
+                        footer: footer?.getBoundingClientRect()
+                    };
+
+                    return JSON.stringify({
+                        footerPosition: footer ? getComputedStyle(footer).position : '',
+                        flowMinHeight: flow ? getComputedStyle(flow).minHeight : '',
+                        contentScrollHeight: content?.scrollHeight ?? 0,
+                        contentClientHeight: content?.clientHeight ?? 0,
+                        before,
+                        after
+                    });
+                }");
+
+            using var layoutDocument = JsonDocument.Parse(layoutJson);
+            var layout = layoutDocument.RootElement;
+            layout.GetProperty("footerPosition").GetString().Should().Be("static", layoutJson);
+            layout.GetProperty("contentScrollHeight").GetDouble().Should().BeGreaterThan(
+                layout.GetProperty("contentClientHeight").GetDouble(), layoutJson);
+
+            var before = layout.GetProperty("before");
+            before.GetProperty("footer").GetProperty("top").GetDouble().Should().BeGreaterThanOrEqualTo(
+                before.GetProperty("pageViewport").GetProperty("bottom").GetDouble() - 1, layoutJson);
+
+            var after = layout.GetProperty("after");
+            after.GetProperty("footer").GetProperty("top").GetDouble().Should().BeGreaterThanOrEqualTo(
+                after.GetProperty("content").GetProperty("top").GetDouble() - 1, layoutJson);
+            after.GetProperty("footer").GetProperty("bottom").GetDouble().Should().BeLessThanOrEqualTo(
+                after.GetProperty("content").GetProperty("bottom").GetDouble() + 1, layoutJson);
+            after.GetProperty("pageViewport").GetProperty("bottom").GetDouble().Should().BeLessThanOrEqualTo(
+                after.GetProperty("footer").GetProperty("top").GetDouble() + 1, layoutJson);
+        }
+    }
+
+    [Fact]
     public async Task ChatGpt_Proposals_Should_Render_As_Review_Workbench()
     {
         await _fixture.EnsureDashboardRunningAsync();
