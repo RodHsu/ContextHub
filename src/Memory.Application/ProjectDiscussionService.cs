@@ -70,6 +70,7 @@ public sealed class ProjectDiscussionService(
             ;
         query = ApplyActorScope(query, actor);
         if (project is not null) query = query.Where(x => x.Participants.Any(p => p.ProjectId == project));
+        else if (actor.AllowedProjectIds.Count > 0) query = query.Where(x => x.Participants.Any(p => actor.AllowedProjectIds.Contains(p.ProjectId)));
         if (!string.IsNullOrWhiteSpace(request.HostProjectId)) { var host = ProjectContext.Normalize(request.HostProjectId); ActorAuthorization.EnsureProjectAllowed(actor, host, false); query = query.Where(x => x.HostProjectId == host); }
         if (!string.IsNullOrWhiteSpace(request.Status)) query = query.Where(x => x.Status == request.Status.Trim());
         var threads = await query.OrderByDescending(x => x.UpdatedAt).Take(Math.Clamp(request.Limit, 1, 100)).ToListAsync(cancellationToken);
@@ -80,14 +81,9 @@ public sealed class ProjectDiscussionService(
     {
         var thread = await LoadThreadAsync(threadId, cancellationToken);
         if (thread is null) return null;
-        var reader = string.IsNullOrWhiteSpace(readerProjectId) ? null : ProjectContext.Normalize(readerProjectId);
-        EnsureCanReadThread(thread, reader);
-        if (reader is not null)
-        {
-            var participant = thread.Participants.Single(x => x.ProjectId == reader);
-            participant.LastReadAt = clock.UtcNow;
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
+        var reader = ResolveReaderProjectId(thread, readerProjectId);
+        thread.Participants.Single(x => x.ProjectId == reader).LastReadAt = clock.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
         return MapDetail(thread);
     }
 
@@ -97,7 +93,7 @@ public sealed class ProjectDiscussionService(
         var thread = await LoadThreadAsync(request.ThreadId, cancellationToken) ?? throw new InvalidOperationException("Discussion thread was not found.");
         if (!string.Equals(thread.Status, "Open", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Discussion thread is closed.");
         var sender = ProjectContext.Normalize(request.SenderProjectId);
-        EnsureCanReadThread(thread, sender);
+        _ = ResolveReaderProjectId(thread, sender);
         ActorAuthorization.EnsureScopeAllowed(actorAccessor.Current, SecurityScopes.MemoryWrite);
         ActorAuthorization.EnsureProjectAllowed(actorAccessor.Current, sender, write: true);
         var now = clock.UtcNow;
@@ -114,7 +110,21 @@ public sealed class ProjectDiscussionService(
 
     private async Task<DiscussionThread?> LoadThreadAsync(Guid id, CancellationToken cancellationToken)
         => await ApplyActorScope(dbContext.DiscussionThreads.Include(x => x.Participants).Include(x => x.Messages).Where(x => x.Id == id), actorAccessor.Current).SingleOrDefaultAsync(cancellationToken);
-    private void EnsureCanReadThread(DiscussionThread thread, string? reader) { var actor = actorAccessor.Current; ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead); var project = reader ?? throw new InvalidOperationException("readerProjectId is required to read a discussion thread."); ActorAuthorization.EnsureProjectAllowed(actor, project, false); if (!thread.Participants.Any(x => string.Equals(x.ProjectId, project, StringComparison.OrdinalIgnoreCase))) throw new UnauthorizedAccessException($"Project '{project}' is not a discussion participant."); }
+    private string ResolveReaderProjectId(DiscussionThread thread, string? readerProjectId)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        if (!string.IsNullOrWhiteSpace(readerProjectId))
+        {
+            var requested = ProjectContext.Normalize(readerProjectId);
+            ActorAuthorization.EnsureProjectAllowed(actor, requested, false);
+            if (!thread.Participants.Any(x => string.Equals(x.ProjectId, requested, StringComparison.OrdinalIgnoreCase))) throw new UnauthorizedAccessException($"Project '{requested}' is not a discussion participant.");
+            return requested;
+        }
+
+        var readable = thread.Participants.Select(x => x.ProjectId).FirstOrDefault(project => actor.AllowedProjectIds.Count == 0 || actor.AllowedProjectIds.Contains(project, StringComparer.OrdinalIgnoreCase));
+        return readable ?? throw new UnauthorizedAccessException("No readable discussion participant is available for the current token.");
+    }
     private void EnsureActorCanReadParticipants(IReadOnlyList<string> projects) { var actor = actorAccessor.Current; ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead); ActorAuthorization.EnsureProjectsAllowed(actor, projects, false); }
     private static IQueryable<DiscussionThread> ApplyActorScope(IQueryable<DiscussionThread> query, ContextHubRequestActor actor)
         => !actor.HasUser

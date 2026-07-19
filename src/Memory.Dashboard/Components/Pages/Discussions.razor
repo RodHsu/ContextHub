@@ -5,10 +5,7 @@
 
 <PageViewport Title="跨專案討論" Subtitle="只顯示目前專案可參與的討論；主責專案與參與者會決定每一串的可見範圍。" BodyClass="page-viewport-body discussions-page-body">
     <Actions>
-        <div class="page-actions-secondary">
-            <label class="discussion-project-picker"><span>我的專案</span><select @bind="_projectId" @bind:after="LoadAsync" disabled="@_loading">@foreach (var project in _projects) { <option value="@project.Information.ProjectId">@project.Information.DisplayName</option> }</select></label>
-        </div>
-        <div class="page-actions-primary"><button class="primary-button" @onclick="ToggleComposer" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">建立跨專案討論</button></div>
+        <div class="page-actions-primary"><button class="primary-button" @onclick="ToggleComposer" disabled="@_loading">建立跨專案討論</button></div>
     </Actions>
     <ChildContent>
         @if (!string.IsNullOrWhiteSpace(_error)) { <div class="inline-error">@_error</div> }
@@ -18,6 +15,7 @@
                 <div class="panel-heading-row"><div><div class="panel-title">建立跨專案討論</div><div class="panel-heading-meta">先選主責專案，再填入可見的參與專案。</div></div><button class="ghost-button" @onclick="ToggleComposer">取消</button></div>
                 <div class="discussion-compose-grid">
                     <label><span>主責專案</span><select @bind="_newHostProjectId">@foreach (var project in _projects) { <option value="@project.Information.ProjectId">@project.Information.DisplayName</option> }</select></label>
+                    <label><span>發送專案</span><select @bind="_newSenderProjectId">@foreach (var project in _projects) { <option value="@project.Information.ProjectId">@project.Information.DisplayName</option> }</select></label>
                     <label><span>討論標題</span><input @bind="_newTitle" placeholder="例如：API contract 對齊" /></label>
                     <label class="discussion-compose-wide"><span>參與專案</span><input @bind="_newParticipants" placeholder="Vital_AirMeet, Vital_AirMeet_BackEnd" /><small>以逗號分隔；建立者與主責專案會自動加入。</small></label>
                     <label class="discussion-compose-wide"><span>第一則訊息</span><textarea @bind="_newMessage" placeholder="說明要討論的決策、問題或交接事項。"></textarea></label>
@@ -58,7 +56,7 @@
                     <div class="discussion-thread-heading"><div><div class="studio-eyebrow">主責專案 <code>@_selected.HostProjectId</code></div><h2>@_selected.Title</h2><div class="discussion-participant-chips">@foreach (var participant in _selected.ParticipantProjectIds) { <span class="discussion-chip @(string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase) ? "host" : string.Empty)">@participant</span> }</div></div><div class="discussion-heading-side"><span class="status-badge success">@_selected.Status</span><span><ClientLocalTime Value="_selected.UpdatedAt" /></span></div></div>
                     <div class="discussion-thread-meta"><span>參與專案 @(_selected.ParticipantProjectIds.Count)</span><span>內容僅對參與專案可見</span></div>
                     <div class="discussion-message-stream">@foreach (var message in _selected.Messages) { <article class="discussion-message"><div><strong>@message.SenderProjectId</strong><span><ClientLocalTime Value="message.CreatedAt" /></span></div><p>@message.Content</p></article> }</div>
-                    <div class="discussion-reply"><textarea @bind="_reply" placeholder="回覆討論…"></textarea><button class="primary-button" @onclick="ReplyAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_reply))">送出</button></div>
+                    <div class="discussion-reply"><select @bind="_replyProjectId" aria-label="回覆專案">@foreach (var participant in _selected.ParticipantProjectIds) { <option value="@participant">以 @participant 回覆</option> }</select><textarea @bind="_reply" placeholder="回覆討論…"></textarea><button class="primary-button" @onclick="ReplyAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_reply))">送出</button></div>
                 }
             </main>
         </section>
@@ -71,7 +69,7 @@
     private IReadOnlyList<DiscussionThreadResult> _threads = [];
     private DiscussionThreadDetailResult? _selected;
     private Guid? _selectedThreadId;
-    private string _projectId = string.Empty, _reply = string.Empty, _newHostProjectId = string.Empty, _newTitle = string.Empty, _newParticipants = string.Empty, _newMessage = string.Empty;
+    private string _reply = string.Empty, _replyProjectId = string.Empty, _newHostProjectId = string.Empty, _newSenderProjectId = string.Empty, _newTitle = string.Empty, _newParticipants = string.Empty, _newMessage = string.Empty;
     private string _search = string.Empty, _hostProjectFilter = string.Empty, _participantProjectFilter = string.Empty, _statusFilter = string.Empty;
     private string? _error;
     private bool _loading, _creating;
@@ -94,16 +92,15 @@
     protected override async Task OnInitializedAsync()
     {
         _projects = await ApiClient.GetProjectInformationProjectsAsync(false, CancellationToken.None);
-        _projectId = _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty;
-        _newHostProjectId = _projectId;
+        _newHostProjectId = _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty;
+        _newSenderProjectId = _newHostProjectId;
         await LoadAsync();
     }
 
     private async Task LoadAsync()
     {
-        if (string.IsNullOrWhiteSpace(_projectId)) return;
         _loading = true; _error = null; _currentPage = 1;
-        try { _threads = await ApiClient.GetDiscussionThreadsAsync(new DiscussionThreadListRequest(_projectId), CancellationToken.None); await EnsureSelectionAsync(); }
+        try { _threads = await ApiClient.GetDiscussionThreadsAsync(new DiscussionThreadListRequest(Limit: 100), CancellationToken.None); await EnsureSelectionAsync(); }
         catch (Exception ex) { _error = ex.Message; }
         finally { _loading = false; }
     }
@@ -132,14 +129,14 @@
 
     private async Task SelectThreadAsync(Guid id)
     {
-        _selectedThreadId = id; _selected = await ApiClient.GetDiscussionThreadAsync(id, _projectId, CancellationToken.None); _reply = string.Empty;
+        _selectedThreadId = id; _selected = await ApiClient.GetDiscussionThreadAsync(id, string.Empty, CancellationToken.None); _replyProjectId = _selected?.ParticipantProjectIds.FirstOrDefault() ?? string.Empty; _reply = string.Empty;
     }
 
-    private void ToggleComposer() { _creating = !_creating; _newHostProjectId = string.IsNullOrWhiteSpace(_newHostProjectId) ? _projectId : _newHostProjectId; }
+    private void ToggleComposer() { _creating = !_creating; _newHostProjectId = string.IsNullOrWhiteSpace(_newHostProjectId) ? _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty : _newHostProjectId; _newSenderProjectId = string.IsNullOrWhiteSpace(_newSenderProjectId) ? _newHostProjectId : _newSenderProjectId; }
     private async Task CreateAsync()
     {
         _loading = true; _error = null;
-        try { var participants = _newParticipants.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries); var created = await ApiClient.CreateDiscussionThreadAsync(new DiscussionThreadCreateRequest(_newHostProjectId, _projectId, _newTitle, participants, _newMessage), CancellationToken.None); _creating = false; _selected = created; _selectedThreadId = created.Id; await LoadAsync(); }
+        try { var participants = _newParticipants.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries); var created = await ApiClient.CreateDiscussionThreadAsync(new DiscussionThreadCreateRequest(_newHostProjectId, _newSenderProjectId, _newTitle, participants, _newMessage), CancellationToken.None); _creating = false; _selected = created; _selectedThreadId = created.Id; await LoadAsync(); }
         catch (Exception ex) { _error = ex.Message; }
         finally { _loading = false; }
     }
@@ -147,7 +144,7 @@
     {
         if (_selected is null) return;
         _loading = true; _error = null;
-        try { await ApiClient.CreateDiscussionMessageAsync(new DiscussionMessageCreateRequest(_selected.Id, _projectId, _reply), CancellationToken.None); await SelectThreadAsync(_selected.Id); await LoadAsync(); }
+        try { await ApiClient.CreateDiscussionMessageAsync(new DiscussionMessageCreateRequest(_selected.Id, _replyProjectId, _reply), CancellationToken.None); await SelectThreadAsync(_selected.Id); await LoadAsync(); }
         catch (Exception ex) { _error = ex.Message; }
         finally { _loading = false; }
     }

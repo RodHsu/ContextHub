@@ -1306,7 +1306,7 @@ discussions.MapPost("/threads", async (DiscussionThreadCreateRequest request, IP
 });
 discussions.MapGet("/threads", async (string? projectId, string? hostProjectId, string? status, int? limit, IProjectDiscussionService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ListThreadsAsync(new DiscussionThreadListRequest(projectId, hostProjectId, status, limit ?? 50), cancellationToken)));
-discussions.MapGet("/threads/{threadId:guid}", async (Guid threadId, string readerProjectId, IProjectDiscussionService service, CancellationToken cancellationToken) =>
+discussions.MapGet("/threads/{threadId:guid}", async (Guid threadId, string? readerProjectId, IProjectDiscussionService service, CancellationToken cancellationToken) =>
 {
     var result = await service.GetThreadAsync(threadId, readerProjectId, cancellationToken);
     return result is null ? Results.NotFound() : Results.Ok(result);

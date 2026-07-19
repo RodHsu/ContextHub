@@ -1824,6 +1824,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         await LoginAndOpenAsync(page, "/discussions?uiProfile=dense");
         var listItems = page.Locator(".discussion-list-item");
         await listItems.First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+        (await page.GetByText("我的專案", new() { Exact = true }).CountAsync()).Should().Be(0);
         (await listItems.CountAsync()).Should().Be(15);
 
         var layoutJson = await page.EvaluateAsync<string>(
