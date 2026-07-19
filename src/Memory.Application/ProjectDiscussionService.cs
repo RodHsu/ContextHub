@@ -51,8 +51,8 @@ public sealed class ProjectDiscussionService(
         var now = clock.UtcNow;
         var actor = actorAccessor.Current;
         var thread = new DiscussionThread { TenantId = actor.TenantId, OwnerUserId = actor.UserId, HostProjectId = host, Title = request.Title.Trim(), CreatedAt = now, UpdatedAt = now };
-        thread.Participants.AddRange(participants.Select(x => new DiscussionParticipant { ProjectId = x, LastReadAt = string.Equals(x, sender, StringComparison.OrdinalIgnoreCase) ? now : DateTimeOffset.MinValue }));
-        thread.Messages.Add(new DiscussionMessage { SenderProjectId = sender, Content = request.InitialMessage.Trim(), CreatedAt = now });
+        thread.Participants.AddRange(participants.Select(x => new DiscussionParticipant { ThreadId = thread.Id, ProjectId = x, LastReadAt = string.Equals(x, sender, StringComparison.OrdinalIgnoreCase) ? now : DateTimeOffset.MinValue }));
+        thread.Messages.Add(new DiscussionMessage { ThreadId = thread.Id, SenderProjectId = sender, Content = request.InitialMessage.Trim(), CreatedAt = now });
         await dbContext.DiscussionThreads.AddAsync(thread, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return MapDetail(thread);
@@ -102,10 +102,13 @@ public sealed class ProjectDiscussionService(
         ActorAuthorization.EnsureProjectAllowed(actorAccessor.Current, sender, write: true);
         var now = clock.UtcNow;
         var message = new DiscussionMessage { ThreadId = thread.Id, SenderProjectId = sender, Content = request.Content.Trim(), CreatedAt = now };
-        thread.Messages.Add(message);
-        thread.UpdatedAt = now;
+        await dbContext.DiscussionMessages.AddAsync(message, cancellationToken);
         thread.Participants.Single(x => x.ProjectId == sender).LastReadAt = now;
         await dbContext.SaveChangesAsync(cancellationToken);
+        var updated = await dbContext.DiscussionThreads
+            .Where(x => x.Id == thread.Id)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.UpdatedAt, now), cancellationToken);
+        if (updated != 1) throw new InvalidOperationException("Discussion thread was not found.");
         return new DiscussionMessageResult(message.Id, sender, message.Content, now);
     }
 

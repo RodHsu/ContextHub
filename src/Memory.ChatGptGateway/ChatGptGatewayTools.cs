@@ -13,6 +13,7 @@ public sealed class ChatGptGatewayTools(
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
     IProjectInformationService projectInformationService,
+    IProjectDiscussionService projectDiscussionService,
     IAccessibleProjectService accessibleProjectService,
     IDailyMemoryReviewService dailyMemoryReviewService,
     ISuggestedActionService suggestedActionService,
@@ -114,6 +115,30 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Read durable project information before starting work in a ProjectId.")]
     public Task<ProjectInformationResult?> project_information_get(string projectId, CancellationToken cancellationToken = default)
         => projectInformationService.GetAsync(projectId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List cross-project discussion threads visible to an authorized participant ProjectId.")]
+    public Task<IReadOnlyList<DiscussionThreadResult>> discussion_threads_list(DiscussionThreadListRequest request, CancellationToken cancellationToken = default)
+        => projectDiscussionService.ListThreadsAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Read one cross-project discussion thread and mark it read for the authorized participant ProjectId.")]
+    public Task<DiscussionThreadDetailResult?> discussion_thread_get(Guid threadId, string readerProjectId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.GetThreadAsync(threadId, readerProjectId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a persistent cross-project discussion. The host and every participant must be authorized to the OAuth actor.")]
+    public Task<DiscussionThreadDetailResult> discussion_thread_create(DiscussionThreadCreateRequest request, CancellationToken cancellationToken = default)
+        => projectDiscussionService.CreateThreadAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Post a message to an open cross-project discussion as an authorized participant ProjectId.")]
+    public Task<DiscussionMessageResult> discussion_message_create(DiscussionMessageCreateRequest request, CancellationToken cancellationToken = default)
+        => projectDiscussionService.AddMessageAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Read configured child ProjectIds for an authorized parent ProjectId.")]
+    public Task<ProjectHierarchyResult> project_hierarchy_get_children(string parentProjectId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.GetChildrenAsync(parentProjectId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Set child ProjectIds for an authorized parent ProjectId. This changes project-management hierarchy metadata only, not memory sharing.")]
+    public Task<ProjectHierarchyResult> project_hierarchy_set_children(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken = default)
+        => projectDiscussionService.SetChildrenAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Propose an update to durable project information. Approved data is included in build_working_context.")]
     public Task<ChatGptProposalResult> project_information_upsert(ProjectInformationUpdateRequest request, CancellationToken cancellationToken = default)

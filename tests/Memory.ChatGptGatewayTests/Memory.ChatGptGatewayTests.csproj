@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Memory.ChatGptGateway\Memory.ChatGptGateway.csproj" />
+    <ProjectReference Include="..\..\src\Memory.McpServer\Memory.McpServer.csproj" Aliases="mcpserver" />
     <ProjectReference Include="..\..\src\Memory.Infrastructure\Memory.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\Memory.Application\Memory.Application.csproj" />
     <ProjectReference Include="..\..\src\Memory.Domain\Memory.Domain.csproj" />

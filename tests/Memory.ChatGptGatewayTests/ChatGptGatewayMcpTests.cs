@@ -1,3 +1,5 @@
+extern alias mcpserver;
+
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -9,6 +11,7 @@ using Memory.Application;
 using Memory.ChatGptGateway;
 using Memory.Domain;
 using Memory.Infrastructure;
+using MemoryMcpTools = mcpserver::Memory.McpServer.MemoryMcpTools;
 using Memory.Tests.Shared;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
@@ -698,6 +701,12 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "suggested_actions_list",
             "memory_retention_preview",
             "project_cleanup_preview",
+            "discussion_threads_list",
+            "discussion_thread_get",
+            "discussion_thread_create",
+            "discussion_message_create",
+            "project_hierarchy_get_children",
+            "project_hierarchy_set_children",
             "memory_upsert",
             "memory_update",
             "memory_archive",
@@ -721,6 +730,80 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "system_status",
             "sessions_list"
         ]);
+    }
+
+    [DockerRequiredFact]
+    public async Task Discussion_Tools_Should_Interoperate_Between_Direct_Mcp_And_Chat_Gateway()
+    {
+        var peerProjectId = $"discussion-peer-{Guid.NewGuid():N}";
+        async Task<T> UseDirectMcpAsync<T>(Func<MemoryMcpTools, Task<T>> action)
+        {
+            using var scope = environment.GetFactory().Services.CreateScope();
+            UseGatewayActor(scope.ServiceProvider);
+            return await action(ActivatorUtilities.CreateInstance<MemoryMcpTools>(scope.ServiceProvider));
+        }
+
+        var captureHandler = new SessionCaptureHandler(environment.GetFactory().Server.CreateHandler());
+        using var chatClient = CreateAuthorizedClient(environment.GetFactory(), captureHandler);
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri(chatClient.BaseAddress!, "/mcp"),
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, chatClient);
+        await using var chatMcp = await McpClient.CreateAsync(transport);
+        _ = await chatMcp.ListToolsAsync();
+        var sessionId = captureHandler.SessionId;
+        sessionId.Should().NotBeNullOrWhiteSpace();
+
+        // MCP to MCP: direct MCP creates and replies to the same thread.
+        var mcpToMcp = await UseDirectMcpAsync(mcp => mcp.discussion_thread_create(new(
+            ProjectId, ProjectId, "MCP to MCP", [ProjectId, peerProjectId], "Created by direct MCP.")));
+        await UseDirectMcpAsync(mcp => mcp.discussion_message_create(new(mcpToMcp.Id, peerProjectId, "Replied by direct MCP.")));
+        (await UseDirectMcpAsync(mcp => mcp.discussion_thread_get(mcpToMcp.Id, ProjectId)))!.Messages.Should().HaveCount(2);
+
+        // Chat to chat: both writes use the OAuth-protected mcp-chat transport.
+        var chatToChatPayload = await SendMcpAsync(chatClient, sessionId!, 101, "tools/call", new
+        {
+            name = "discussion_thread_create",
+            arguments = new { request = new { hostProjectId = ProjectId, senderProjectId = ProjectId, title = "Chat to chat", participantProjectIds = new[] { ProjectId, peerProjectId }, initialMessage = "Created by mcp-chat." } }
+        });
+        var chatToChatId = ExtractToolJson(chatToChatPayload).GetProperty("id").GetGuid();
+        _ = await SendMcpAsync(chatClient, sessionId!, 102, "tools/call", new
+        {
+            name = "discussion_message_create",
+            arguments = new { request = new { threadId = chatToChatId, senderProjectId = peerProjectId, content = "Replied by mcp-chat." } }
+        });
+        var chatToChatReadPayload = await SendMcpAsync(chatClient, sessionId!, 103, "tools/call", new
+        {
+            name = "discussion_thread_get",
+            arguments = new { threadId = chatToChatId, readerProjectId = ProjectId }
+        });
+        ExtractToolJson(chatToChatReadPayload).GetProperty("messages").GetArrayLength().Should().Be(2);
+
+        // MCP to chat: direct MCP creates, then mcp-chat replies and reads it.
+        var mcpToChat = await UseDirectMcpAsync(mcp => mcp.discussion_thread_create(new(
+            ProjectId, ProjectId, "MCP to chat", [ProjectId, peerProjectId], "Created by direct MCP.")));
+        _ = await SendMcpAsync(chatClient, sessionId!, 104, "tools/call", new
+        {
+            name = "discussion_message_create",
+            arguments = new { request = new { threadId = mcpToChat.Id, senderProjectId = peerProjectId, content = "Replied by mcp-chat." } }
+        });
+        var mcpToChatReadPayload = await SendMcpAsync(chatClient, sessionId!, 105, "tools/call", new
+        {
+            name = "discussion_thread_get",
+            arguments = new { threadId = mcpToChat.Id, readerProjectId = ProjectId }
+        });
+        ExtractToolJson(mcpToChatReadPayload).GetProperty("messages").GetArrayLength().Should().Be(2);
+
+        // Chat to MCP: mcp-chat creates, then direct MCP replies and reads it.
+        var chatToMcpPayload = await SendMcpAsync(chatClient, sessionId!, 106, "tools/call", new
+        {
+            name = "discussion_thread_create",
+            arguments = new { request = new { hostProjectId = ProjectId, senderProjectId = ProjectId, title = "Chat to MCP", participantProjectIds = new[] { ProjectId, peerProjectId }, initialMessage = "Created by mcp-chat." } }
+        });
+        var chatToMcpId = ExtractToolJson(chatToMcpPayload).GetProperty("id").GetGuid();
+        await UseDirectMcpAsync(mcp => mcp.discussion_message_create(new(chatToMcpId, peerProjectId, "Replied by direct MCP.")));
+        (await UseDirectMcpAsync(mcp => mcp.discussion_thread_get(chatToMcpId, ProjectId)))!.Messages.Should().HaveCount(2);
     }
 
     [DockerRequiredFact]
