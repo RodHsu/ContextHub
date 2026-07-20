@@ -235,8 +235,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         using var overviewResponse = await client.GetAsync("/");
         overviewResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var overviewHtml = WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync());
-        overviewHtml.Should().Contain("Quiet Signal");
-        overviewHtml.Should().Contain("Operations and knowledge governance");
+        overviewHtml.Should().Contain("靜默訊號");
+        overviewHtml.Should().Contain("維運與知識治理");
         overviewHtml.Should().Contain("記憶條目");
         overviewHtml.Should().Contain("預設專案記憶");
         overviewHtml.Should().Contain("Docker 主機");
@@ -388,11 +388,11 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         retentionResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var retentionHtml = WebUtility.HtmlDecode(await retentionResponse.Content.ReadAsStringAsync());
         retentionHtml.Should().Contain("記憶整理");
-        retentionHtml.Should().Contain("Retention Review Workspace");
+        retentionHtml.Should().Contain("記憶整理審核工作區");
         retentionHtml.Should().Contain("整理候選");
         retentionHtml.Should().Contain("Expired low signal memory");
         retentionHtml.Should().Contain("Important archived decision");
-        retentionHtml.Should().Contain("Review note");
+        retentionHtml.Should().Contain("審核備註");
         retentionHtml.Should().Contain("複製整理計畫");
         retentionHtml.Should().Contain("開啟記憶資料");
 
@@ -555,8 +555,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         evaluationHtml.Should().Contain("建立最小評測集");
         evaluationHtml.Should().Contain("評測組清單");
         evaluationHtml.Should().Contain("評測細節");
-        evaluationHtml.Should().Contain("expected external keys");
-        evaluationHtml.Should().Contain("query` 會直接送進檢索");
+        evaluationHtml.Should().Contain("預期外部鍵");
+        evaluationHtml.Should().Contain("查詢字串會直接送進檢索");
 
         using var inboxResponse = await client.GetAsync("/inbox");
         inboxResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -612,14 +612,14 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         using var accountTokensResponse = await client.GetAsync("/account/tokens");
         accountTokensResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var accountTokensHtml = WebUtility.HtmlDecode(await accountTokensResponse.Content.ReadAsStringAsync());
-        accountTokensHtml.Should().Contain("我的 Token");
+        accountTokensHtml.Should().Contain("我的存取權杖");
         accountTokensHtml.Should().Contain("<select");
         accountTokensHtml.Should().Contain("ContextHub");
         accountTokensHtml.Should().Contain("MCP Client（記憶與偏好讀寫）");
         accountTokensHtml.Should().Contain("全部");
         accountTokensHtml.Should().Contain("個人完整權限");
         accountTokensHtml.Should().Contain("編輯");
-        accountTokensHtml.Should().Contain("更多 Token 操作");
+        accountTokensHtml.Should().Contain("更多存取權杖操作");
         accountTokensHtml.Should().Contain("重新產生");
         accountTokensHtml.Should().Contain("撤銷");
         accountTokensHtml.Should().NotContain("尚未同步");
@@ -1063,6 +1063,15 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public MemoryListRequest? LastMemoryListRequest { get; private set; }
     public MemoryGraphRequest? LastMemoryGraphRequest { get; private set; }
+
+    public Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>([]);
+    public Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectWorkItemResult(Guid.NewGuid(), request.ProjectId, request.Title, request.Description ?? string.Empty, request.Tags ?? [], [], ProjectWorkItemStatus.Pending, request.Priority, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
+    public Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectWorkItemResult(request.Id, "ContextHub", request.Title ?? string.Empty, request.Description ?? string.Empty, request.Tags ?? [], [], request.Status ?? ProjectWorkItemStatus.Pending, request.Priority ?? 0, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
+    public Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
+        => UpdateProjectWorkItemAsync(new ProjectWorkItemUpdateRequest(workItemId), cancellationToken);
 
     public Task<IReadOnlyList<ChatGptProposalResult>> GetChatGptProposalsAsync(ChatGptProposalListRequest request, CancellationToken cancellationToken)
     {

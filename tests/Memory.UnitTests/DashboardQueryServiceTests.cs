@@ -926,6 +926,8 @@ public sealed class DashboardQueryServiceTests
         public DbSet<DiscussionThread> DiscussionThreads => throw new NotSupportedException();
         public DbSet<DiscussionParticipant> DiscussionParticipants => throw new NotSupportedException();
         public DbSet<DiscussionMessage> DiscussionMessages => throw new NotSupportedException();
+        public DbSet<ProjectWorkItem> ProjectWorkItems => throw new NotSupportedException();
+        public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => throw new NotSupportedException();
 
         public void ClearTrackedChanges()
         {

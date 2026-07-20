@@ -151,6 +151,15 @@ public enum MaintenanceRunType
     MemoryDataRetention
 }
 
+public enum ProjectWorkItemStatus
+{
+    Pending,
+    InProgress,
+    Blocked,
+    Completed,
+    Cancelled
+}
+
 public enum MaintenanceRunStatus
 {
     Scheduled,
@@ -870,4 +879,34 @@ public sealed class DiscussionMessage
     public string Content { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
     public DiscussionThread? Thread { get; set; }
+}
+
+public sealed class ProjectWorkItem
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public string[] Tags { get; set; } = [];
+    public ProjectWorkItemStatus Status { get; set; } = ProjectWorkItemStatus.Pending;
+    public int Priority { get; set; }
+    public DateTimeOffset? DueAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public ICollection<ProjectWorkItemChecklistItem> ChecklistItems { get; set; } = [];
+}
+
+public sealed class ProjectWorkItemChecklistItem
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid WorkItemId { get; set; }
+    public string Content { get; set; } = string.Empty;
+    public bool IsCompleted { get; set; }
+    public int SortOrder { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public ProjectWorkItem? WorkItem { get; set; }
 }

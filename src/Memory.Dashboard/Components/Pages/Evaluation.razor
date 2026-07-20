@@ -27,21 +27,21 @@
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">評測組：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(_suites.Count)</span>
-                        <span class="metric-meta-inline">suites</span>
+                        <span class="metric-meta-inline">組評測</span>
                     </div>
                 </section>
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">案例總數：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(TotalCaseCount)</span>
-                        <span class="metric-meta-inline">cases</span>
+                        <span class="metric-meta-inline">筆案例</span>
                     </div>
                 </section>
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">最近結果：</span>
                         <span class="metric-value-inline">@LastRunStatusText</span>
-                        <span class="metric-meta-inline">status</span>
+                        <span class="metric-meta-inline">執行狀態</span>
                     </div>
                 </section>
                 <section class="panel metric-card metric-card-inline">
@@ -57,7 +57,7 @@
                 <div class="panel-heading-row">
                     <div>
                         <div class="panel-title">建立最小評測集</div>
-                        <div class="panel-heading-meta panel-heading-meta-left">請輸入真實查詢與 `expected external keys`。UI 會先做前端驗證，避免送出沒有意義的評測案例。</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">請輸入真實查詢與預期外部鍵。介面會先做前端驗證，避免送出沒有意義的評測案例。</div>
                     </div>
                 </div>
 
@@ -77,9 +77,9 @@
                         <label class="@FieldBlockCss(nameof(_suiteName))">
                             <span class="field-label">
                                 <span class="field-label-primary">評測組名稱</span>
-                                <span class="field-label-secondary">Suite Name</span>
+                                <span class="field-label-secondary">評測組名稱</span>
                             </span>
-                            <input @bind="_suiteName" placeholder="例如：Baseline Retrieval / Reindex Regression" />
+                            <input @bind="_suiteName" placeholder="例如：基準檢索／重建索引回歸" />
                             @if (TryGetFieldError(nameof(_suiteName), out var suiteNameError))
                             {
                                 <div class="field-validation-message">@suiteNameError</div>
@@ -88,7 +88,7 @@
                         <label>
                             <span class="field-label">
                                 <span class="field-label-primary">說明</span>
-                                <span class="field-label-secondary">Description</span>
+                                <span class="field-label-secondary">說明</span>
                             </span>
                             <input @bind="_suiteDescription" placeholder="說明這組評測要驗證的情境" />
                         </label>
@@ -106,9 +106,9 @@
                         <label class="@FieldBlockCss(nameof(_caseScenarioLabel))">
                             <span class="field-label">
                                 <span class="field-label-primary">案例標籤</span>
-                                <span class="field-label-secondary">Scenario Label</span>
+                                <span class="field-label-secondary">情境標籤</span>
                             </span>
-                            <input @bind="_caseScenarioLabel" placeholder="例如：Repository Readme / PR Summary" />
+                            <input @bind="_caseScenarioLabel" placeholder="例如：儲存庫說明／合併請求摘要" />
                             @if (TryGetFieldError(nameof(_caseScenarioLabel), out var caseScenarioError))
                             {
                                 <div class="field-validation-message">@caseScenarioError</div>
@@ -120,7 +120,7 @@
                         <label class="evaluation-query-field @FieldBlockCss(nameof(_caseQuery))">
                             <span class="field-label">
                                 <span class="field-label-primary">查詢字串</span>
-                                <span class="field-label-secondary">實際送進 retrieval 的 query</span>
+                                <span class="field-label-secondary">實際送進檢索的查詢字串</span>
                             </span>
                             <textarea @bind="_caseQuery" rows="4" placeholder="請填使用者真的會查的問題"></textarea>
                             @if (TryGetFieldError(nameof(_caseQuery), out var caseQueryError))
@@ -130,11 +130,11 @@
                         </label>
                         <label class="evaluation-keys-field @FieldBlockCss(nameof(_caseExpectedExternalKeys))">
                             <span class="field-label">
-                                <span class="field-label-primary">Expected External Keys</span>
-                                <span class="field-label-secondary">支援逗號或換行；每個 key 代表預期命中的記憶</span>
+                                <span class="field-label-primary">預期外部鍵</span>
+                                <span class="field-label-secondary">支援逗號或換行；每個鍵代表預期命中的記憶</span>
                             </span>
                             <textarea @bind="_caseExpectedExternalKeys" rows="4" placeholder="demo-memory&#10;repo:readme:1"></textarea>
-                            <div class="stack-item-meta">目前會解析為 @DashboardFormatting.Integer(ParsedExpectedExternalKeyCount) 個 key。</div>
+                            <div class="stack-item-meta">目前會解析為 @DashboardFormatting.Integer(ParsedExpectedExternalKeyCount) 個鍵。</div>
                             @if (TryGetFieldError(nameof(_caseExpectedExternalKeys), out var caseExternalKeysError))
                             {
                                 <div class="field-validation-message">@caseExternalKeysError</div>
@@ -142,7 +142,7 @@
                         </label>
                     </div>
 
-                    <div class="panel-note">`query` 會直接送進檢索；`expected external keys` 會作為命中判斷基準。若留空，這筆案例即使能建立，也無法做有效回歸驗證，因此 UI 會先阻擋。</div>
+                    <div class="panel-note">查詢字串會直接送進檢索；預期外部鍵會作為命中判斷基準。若留空，這筆案例即使能建立，也無法做有效回歸驗證，因此介面會先阻擋。</div>
                     <div class="inline-actions">
                         <button class="ghost-button" @onclick="ResetCreateDraftFromUi" disabled="@_loading">清空草稿</button>
                         <button class="primary-button" @onclick="CreateSuiteAsync" disabled="@_loading">建立評測集</button>
@@ -163,7 +163,7 @@
                         {
                             <div class="empty-inline">
                                 <div class="empty-inline-title">尚未建立評測集</div>
-                                <div class="empty-inline-copy">先建立至少一筆包含真實 query 與 expected keys 的 evaluation suite，再執行 run，這裡才會有評測組與結果。</div>
+                                <div class="empty-inline-copy">先建立至少一筆包含真實查詢與預期鍵的評測組，再執行測試，這裡才會有評測組與結果。</div>
                                 <div class="empty-inline-actions">
                                     <a class="primary-button" href="/evaluation#evaluation-suite-form">建立第一個評測集</a>
                                 </div>
@@ -200,7 +200,7 @@
                             {
                                 <div class="empty-inline">
                                     <div class="empty-inline-title">尚未選擇評測組</div>
-                                    <div class="empty-inline-copy">建立或點選左側評測組後，這裡會顯示案例內容、執行設定與最近一次 run 的結果。</div>
+                                    <div class="empty-inline-copy">建立或點選左側評測組後，這裡會顯示案例內容、執行設定與最近一次測試的結果。</div>
                                 </div>
                             }
                             else
@@ -222,15 +222,15 @@
                                 <div class="filter-grid evaluation-run-grid">
                                     <label>
                                         <span class="field-label">
-                                            <span class="field-label-primary">Embedding Profile</span>
-                                            <span class="field-label-secondary">可留空，使用目前 active profile</span>
+                                            <span class="field-label-primary">嵌入模型設定檔</span>
+                                            <span class="field-label-secondary">可留空，使用目前啟用的設定檔</span>
                                         </span>
                                         <input @bind="_embeddingProfile" placeholder="compact / dense / custom profile" />
                                     </label>
                                     <label>
                                         <span class="field-label">
                                             <span class="field-label-primary">查詢模式</span>
-                                            <span class="field-label-secondary">Query Mode</span>
+                                            <span class="field-label-secondary">查詢模式</span>
                                         </span>
                                         <select @bind="_queryMode">
                                             <option value="@MemoryQueryMode.CurrentOnly">目前專案</option>
@@ -248,7 +248,7 @@
                                     <div class="sources-toggle-shell">
                                         <span class="field-label">
                                             <span class="field-label-primary">共用綜合層</span>
-                                            <span class="field-label-secondary">執行 run 時一併讀取 summary layer</span>
+                                            <span class="field-label-secondary">執行測試時一併讀取綜合層</span>
                                         </span>
                                         <label class="toggle-field">
                                             <input type="checkbox" @bind="_useSummaryLayer" />

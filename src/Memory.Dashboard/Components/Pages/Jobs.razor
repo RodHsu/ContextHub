@@ -236,8 +236,8 @@
 
         <dl class="definition-grid jobs-retention-summary-grid">
             <div><dt>最近執行</dt><dd>@if (_lastRetentionRun?.CompletedAt.HasValue == true) { <ClientLocalTime Value="_lastRetentionRun.CompletedAt.Value" /> } else { <span>-</span> }</dd></div>
-            <div><dt>Auto-delete</dt><dd>@DashboardFormatting.Integer(LastRetentionAutoDeleteCount)</dd></div>
-            <div><dt>Review</dt><dd>@DashboardFormatting.Integer(LastRetentionReviewCount)</dd></div>
+            <div><dt>自動刪除</dt><dd>@DashboardFormatting.Integer(LastRetentionAutoDeleteCount)</dd></div>
+            <div><dt>人工審核</dt><dd>@DashboardFormatting.Integer(LastRetentionReviewCount)</dd></div>
             <div><dt>狀態</dt><dd>@(_lastRetentionRun?.Status.ToString() ?? "-")</dd></div>
         </dl>
 
@@ -281,7 +281,7 @@
                         @foreach (var candidate in _retentionResult.AutoDeleteCandidates.Take(5))
                         {
                             <tr>
-                                <td><span class="status-badge bad">Auto-delete</span></td>
+                                <td><span class="status-badge bad">自動刪除</span></td>
                                 <td class="truncate-cell" title="@candidate.MemoryId.ToString("D")">@candidate.Title</td>
                                 <td>@CandidateSignalText(candidate)</td>
                                 <td>@candidate.RecommendedAction</td>
@@ -290,7 +290,7 @@
                         @foreach (var candidate in _retentionResult.ReviewCandidates.Take(5))
                         {
                             <tr>
-                                <td><span class="status-badge warn">Review</span></td>
+                                <td><span class="status-badge warn">人工審核</span></td>
                                 <td class="truncate-cell" title="@candidate.MemoryId.ToString("D")">@candidate.Title</td>
                                 <td>@CandidateSignalText(candidate)</td>
                                 <td>@candidate.RecommendedAction</td>
@@ -491,7 +491,7 @@
         try
         {
             _retentionResult = await ApiClient.RunMemoryDataRetentionAsync(request, _cts.Token);
-            ShowMessage($"{actionName} 已完成：Auto-delete {_retentionResult.AutoDeleteCandidateCount}，Review {_retentionResult.ReviewCandidateCount}。");
+            ShowMessage($"{actionName} 已完成：自動刪除 {_retentionResult.AutoDeleteCandidateCount}，人工審核 {_retentionResult.ReviewCandidateCount}。");
             await LoadAsync();
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested)

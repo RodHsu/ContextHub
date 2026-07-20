@@ -3086,40 +3086,72 @@ textarea {
     width: 21%;
 }
 
-.content-flow {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 100%;
-}
-
-.content-flow > .page-viewport {
-    flex: 0 0 auto;
-    min-height: 100%;
-}
-
 .dashboard-footer {
     flex: 0 0 auto;
     display: flex;
     justify-content: space-between;
     gap: 1rem;
-    margin-top: 1.5rem;
-    padding: 1rem 0.25rem 0.25rem;
+    min-height: 3.2rem;
+    padding: 0.8rem calc(var(--dashboard-content-padding) + 0.25rem);
     border-top: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(12px);
     color: var(--text-subtle);
     font-size: 0.78rem;
 }
 
 @media (max-width: 640px) {
-    .dashboard-footer { flex-direction: column; gap: 0.25rem; }
+    .dashboard-footer { min-height: 4.3rem; flex-direction: column; gap: 0.25rem; }
 }
 
 .sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/memories"] { order: 1; }
 .sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/discussions"] { order: 2; }
-.sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/inbox"] { order: 3; }
+.sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/project-work-items"] { order: 3; }
 .sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/retention"] { order: 4; }
 .sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/graph"] { order: 5; }
 .sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/sources"] { order: 6; }
+
+.project-work-item-toolbar, .project-work-item-heading, .project-work-item-toolbar > label, .project-work-item-checklist label { display: flex; align-items: center; gap: .7rem; }
+.project-work-item-toolbar { justify-content: space-between; }
+.project-work-item-toolbar > label { min-width: min(100%, 25rem); }
+.project-work-item-toolbar select { min-width: 12rem; }
+.project-work-item-compose, .project-work-items-list { display: grid; gap: var(--dashboard-grid-gap); }
+.project-work-item-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--dashboard-form-gap); margin: .85rem 0; }
+.project-work-item-form label { display: grid; gap: .35rem; }
+.project-work-item-form .wide { grid-column: 1 / -1; }
+.project-work-item-form textarea { min-height: 5rem; resize: vertical; }
+.project-work-item-heading { justify-content: space-between; align-items: start; }
+.project-work-item h2 { margin: 0; font-size: 1rem; }
+.project-work-item p { color: var(--text-subtle); white-space: pre-wrap; }
+.project-work-item-tags { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .45rem; }
+.project-work-item-tags span { padding: .12rem .42rem; border: 1px solid var(--border); border-radius: 999px; color: var(--text-subtle); font-size: .76rem; }
+.project-work-item-checklist { display: grid; gap: .48rem; margin: .8rem 0; }
+.project-work-item.completed { opacity: .72; }
+@media (max-width: 640px) { .project-work-item-form { grid-template-columns: 1fr; } .project-work-item-heading { gap: .65rem; flex-direction: column; } .project-work-item-toolbar { align-items: stretch; flex-direction: column; } }
+
+/* Project work items follow the discussion master-detail workspace. */
+.project-work-items-page { grid-template-rows: minmax(0, 1fr); }
+.project-work-items-workspace { display: grid; grid-template-columns: minmax(19rem, .82fr) minmax(0, 1.6fr); min-height: clamp(30rem, calc(var(--dashboard-viewport-height) - 15rem), 52rem); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg-panel); }
+.project-work-items-list-panel, .project-work-item-detail-panel { min-width: 0; min-height: 0; padding: var(--dashboard-panel-padding-block) var(--dashboard-panel-padding-inline); }
+.project-work-items-list-panel { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: .8rem; border-right: 1px solid var(--border); }
+.project-work-items-filter-toolbar { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: .55rem; }
+.project-work-items-list-scroll, .project-work-item-detail-scroll { min-height: 0; overflow: auto; scrollbar-gutter: stable; }
+.project-work-item-list-item { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: .8rem; padding: .75rem .2rem; text-align: left; color: inherit; background: transparent; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.project-work-item-list-item > span { min-width: 0; display: grid; gap: .18rem; }
+.project-work-item-list-item strong, .project-work-item-list-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-work-item-list-item small, .project-work-item-list-meta { color: var(--text-subtle); font-size: .76rem; }
+.project-work-item-list-item.selected { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+.project-work-item-detail-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 1rem; }
+.project-work-item-detail-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
+.project-work-item-detail-heading h2 { margin: .2rem 0 0; }
+.project-work-item-description { margin-top: 0; white-space: pre-wrap; color: var(--text-subtle); }
+
+/* Keep the retention table inside its own scroll host at dense widths. */
+.retention-page-body .retention-workspace-layout, .retention-page-body .retention-list-panel, .retention-page-body .retention-list-body { min-width: 0; max-width: 100%; }
+.retention-page-body .retention-table-shell { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto !important; overflow-y: auto !important; }
+.retention-page-body .retention-table { width: max(100%, 620px); min-width: 620px; }
+@media (max-width: 900px) { .project-work-items-workspace { grid-template-columns: 1fr; min-height: auto; } .project-work-items-list-panel { grid-template-rows: auto auto minmax(16rem, 34vh); border-right: 0; border-bottom: 1px solid var(--border); } .project-work-item-detail-panel { min-height: 24rem; } .retention-page-body .retention-table { min-width: 580px; } }
+@media (max-width: 640px) { .project-work-items-filter-toolbar { grid-template-columns: 1fr; } .project-work-item-detail-heading { flex-direction: column; } .retention-page-body .retention-table { min-width: 540px; } .retention-table-col-kind { width: 15%; } .retention-table-col-memory { width: 33%; } .retention-table-col-signal { width: 35%; } .retention-table-col-action { width: 17%; } }
 
 .retention-memory-title,
 .retention-memory-meta,
@@ -7222,6 +7254,31 @@ textarea:focus {
     .retention-table-shell,
     .retention-detail-scroll-shell {
         max-height: none;
+    }
+}
+
+/* The sidebar reduces the usable content width well before the browser reaches
+   the usual tablet breakpoint. Keep every retention control in-flow at this
+   density instead of allowing the detail panel or fourth filter to escape. */
+@media (max-width: 1600px) {
+    .retention-summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .retention-command-grid {
+        grid-template-columns: repeat(3, minmax(0, max-content));
+    }
+
+    .retention-filter-grid,
+    .retention-workspace-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .retention-list-panel,
+    .retention-detail-panel {
+        min-width: 0;
+        max-width: 100%;
+        min-height: auto;
     }
 }
 

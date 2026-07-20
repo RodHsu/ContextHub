@@ -4,10 +4,10 @@
 @inject IContextHubApiClient ApiClient
 @inject IJSRuntime JsRuntime
 
-<PageTitle>Context Hub | 我的 Token</PageTitle>
+<PageTitle>Context Hub | 我的存取權杖</PageTitle>
 
-<PageViewport Title="我的 Token"
-              Subtitle="建立與管理自己用於 MCP / API 連線的 Token。"
+<PageViewport Title="我的存取權杖"
+              Subtitle="建立與管理自己用於 MCP / API 連線的存取權杖。"
               BodyClass="page-viewport-body page-grid-body account-tokens-page-body">
     <Actions>
         <div class="page-actions-status security-header-actions">
@@ -27,26 +27,26 @@
         @if (!string.IsNullOrWhiteSpace(_createdPlainToken))
         {
             <section class="panel security-token-secret-panel">
-                <div class="panel-title">完整 Token</div>
+                <div class="panel-title">完整存取權杖</div>
                 <div class="table-subtitle">只會顯示這一次；離開後無法取回，只能重新產生。</div>
                 <textarea readonly rows="2">@_createdPlainToken</textarea>
                 <div class="settings-button-row">
-                    <button type="button" class="ghost-button" @onclick="CopyCreatedTokenAsync" disabled="@_loading">複製 Token</button>
+                    <button type="button" class="ghost-button" @onclick="CopyCreatedTokenAsync" disabled="@_loading">複製存取權杖</button>
                 </div>
             </section>
         }
 
         <section class="panel account-tokens-panel">
-            <div class="panel-title">建立 Token</div>
+            <div class="panel-title">建立存取權杖</div>
             <div class="settings-form-grid settings-query-grid">
                 <label>
-                    <span>Token 名稱</span>
+                    <span>存取權杖名稱</span>
                     <input @bind="_name" placeholder="MCP Client" />
                 </label>
                 <TokenScopeSelect @bind-Value="_scopes" />
                 <ProjectIdSelect @bind-Value="_projectIds" Options="_projectOptions" Disabled="_loading" />
                 <label>
-                    <span>到期時間 (ISO / optional)</span>
+                    <span>到期時間（ISO，可留空）</span>
                     <input @bind="_expiresAt" placeholder="2026-12-31T23:59:59+08:00" />
                 </label>
                 <label class="settings-field-span">
@@ -55,7 +55,7 @@
                 </label>
             </div>
             <div class="settings-button-row">
-                <button type="button" class="primary-button" @onclick="CreateAsync" disabled="@_loading">建立 Token</button>
+                <button type="button" class="primary-button" @onclick="CreateAsync" disabled="@_loading">建立存取權杖</button>
                 <label class="toggle-field settings-inline-toggle-field">
                     <input type="checkbox" @bind="_includeRevoked" />
                     <span>顯示已撤銷</span>
@@ -67,9 +67,9 @@
                     <thead>
                         <tr>
                             <th>名稱</th>
-                            <th>Token</th>
-                            <th>Scopes</th>
-                            <th>Projects</th>
+                            <th>存取權杖</th>
+                            <th>權限範圍</th>
+                            <th>專案</th>
                             <th>最後使用</th>
                             <th>備註</th>
                             <th></th>
@@ -90,8 +90,8 @@
                                     <button type="button"
                                             class="ghost-button security-token-more-button"
                                             aria-expanded="@(_openTokenActionsId == token.Id)"
-                                            aria-label="@($"更多 Token 操作，包含重新產生 Token：{token.Name}")"
-                                            title="更多 Token 操作"
+                                            aria-label="@($"更多存取權杖操作，包含重新產生：{token.Name}")"
+                                            title="更多存取權杖操作"
                                             @onclick="@(() => ToggleTokenActions(token.Id))"
                                             @onclick:stopPropagation="true"
                                             disabled="@_loading">...</button>
@@ -104,13 +104,13 @@
                                         <div class="security-token-action-menu">
                                             @if (token.RevokedAt.HasValue)
                                             {
-                                                <span class="table-subtitle">這個 Token 已撤銷，沒有可用操作。</span>
+                                                <span class="table-subtitle">這個存取權杖已撤銷，沒有可用操作。</span>
                                             }
                                             else
                                             {
-                                                <button type="button" class="ghost-button" @onclick="@(() => RegenerateAsync(token.Id))" disabled="@_loading">重新產生 Token</button>
-                                                <button type="button" class="ghost-button danger-button" @onclick="@(() => RevokeAsync(token.Id))" disabled="@_loading">撤銷 Token</button>
-                                                <span class="table-subtitle">完整 token 只會在重新產生後顯示一次。</span>
+                                                <button type="button" class="ghost-button" @onclick="@(() => RegenerateAsync(token.Id))" disabled="@_loading">重新產生存取權杖</button>
+                                                <button type="button" class="ghost-button danger-button" @onclick="@(() => RevokeAsync(token.Id))" disabled="@_loading">撤銷存取權杖</button>
+                                                <span class="table-subtitle">完整存取權杖只會在重新產生後顯示一次。</span>
                                             }
                                         </div>
                                     </td>
@@ -124,7 +124,7 @@
             @if (_editTokenId.HasValue)
             {
                 <section class="storage-info-panel">
-                    <div class="storage-info-title">編輯 Token 權限</div>
+                    <div class="storage-info-title">編輯存取權杖權限</div>
                     <div class="settings-form-grid settings-query-grid">
                         <label>
                             <span>名稱</span>
@@ -133,7 +133,7 @@
                         <TokenScopeSelect @bind-Value="_editScopes" />
                         <ProjectIdSelect @bind-Value="_editProjectIds" Options="_projectOptions" Disabled="_loading" />
                         <label>
-                            <span>到期時間 (ISO / optional)</span>
+                            <span>到期時間（ISO，可留空）</span>
                             <input @bind="_editExpiresAt" />
                         </label>
                         <label class="settings-field-span">
@@ -142,7 +142,7 @@
                         </label>
                     </div>
                     <div class="settings-button-row">
-                        <button type="button" class="primary-button" @onclick="SaveEditAsync" disabled="@_loading">儲存 Token</button>
+                        <button type="button" class="primary-button" @onclick="SaveEditAsync" disabled="@_loading">儲存存取權杖</button>
                         <button type="button" class="ghost-button" @onclick="CancelEdit" disabled="@_loading">取消</button>
                     </div>
                 </section>

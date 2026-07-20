@@ -180,6 +180,38 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
+    public async Task Project_Information_Should_Restore_Selected_Project_After_Browser_Reload()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("project-information-selection", 1366, 768));
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/project-information");
+        var projectSelect = page.Locator("select[aria-label='選擇專案']");
+        await projectSelect.SelectOptionAsync("dashboard-test-secondary");
+        await page.WaitForURLAsync("**/project-information?projectId=dashboard-test-secondary");
+        await page.WaitForFunctionAsync(
+            "() => document.querySelector(\"select[aria-label='選擇專案']\")?.value === 'dashboard-test-secondary'");
+        await page.ReloadAsync();
+
+        (await projectSelect.InputValueAsync()).Should().Be("dashboard-test-secondary");
+    }
+
+    [Fact]
+    public async Task Project_Work_Items_Should_Show_Project_Checklists_And_Guarded_Completion()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("project-work-items", 1366, 768));
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/project-work-items");
+        await page.Locator(".project-work-items-workspace").WaitForAsync();
+        (await page.Locator(".project-work-item-list-item").CountAsync()).Should().BeGreaterThan(0);
+        (await page.Locator(".project-work-item-checklist input[type='checkbox']").CountAsync()).Should().BeGreaterThan(0);
+        (await page.Locator("button:has-text('完成代辦')").IsDisabledAsync()).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Public_Boundary_Pages_Should_Render_Cleanly_Across_Key_Viewports()
     {
         var failures = new List<string>();
@@ -223,7 +255,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
-    public async Task Dashboard_Footer_Should_Follow_Page_Content_Without_Overlaying_The_Workspace()
+    public async Task Dashboard_Footer_Should_Remain_Anchored_Outside_The_Scrollable_Workspace()
     {
         var route = Routes.Single(candidate => candidate.Name == "memories");
         DashboardViewport[] viewports =
@@ -244,7 +276,6 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             var layoutJson = await page.EvaluateAsync<string>(
                 @"() => {
                     const content = document.querySelector('.content');
-                    const flow = document.querySelector('.content-flow');
                     const pageViewport = document.querySelector('.page-viewport');
                     const footer = document.querySelector('.dashboard-footer');
                     const before = {
@@ -263,7 +294,6 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
                     return JSON.stringify({
                         footerPosition: footer ? getComputedStyle(footer).position : '',
-                        flowMinHeight: flow ? getComputedStyle(flow).minHeight : '',
                         contentScrollHeight: content?.scrollHeight ?? 0,
                         contentClientHeight: content?.clientHeight ?? 0,
                         before,
@@ -274,20 +304,14 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             using var layoutDocument = JsonDocument.Parse(layoutJson);
             var layout = layoutDocument.RootElement;
             layout.GetProperty("footerPosition").GetString().Should().Be("static", layoutJson);
-            layout.GetProperty("contentScrollHeight").GetDouble().Should().BeGreaterThan(
-                layout.GetProperty("contentClientHeight").GetDouble(), layoutJson);
-
             var before = layout.GetProperty("before");
-            before.GetProperty("footer").GetProperty("top").GetDouble().Should().BeGreaterThanOrEqualTo(
-                before.GetProperty("pageViewport").GetProperty("bottom").GetDouble() - 1, layoutJson);
-
             var after = layout.GetProperty("after");
-            after.GetProperty("footer").GetProperty("top").GetDouble().Should().BeGreaterThanOrEqualTo(
-                after.GetProperty("content").GetProperty("top").GetDouble() - 1, layoutJson);
-            after.GetProperty("footer").GetProperty("bottom").GetDouble().Should().BeLessThanOrEqualTo(
-                after.GetProperty("content").GetProperty("bottom").GetDouble() + 1, layoutJson);
+            before.GetProperty("footer").GetProperty("top").GetDouble().Should().BeGreaterThanOrEqualTo(
+                before.GetProperty("content").GetProperty("bottom").GetDouble() - 1, layoutJson);
+            after.GetProperty("footer").GetProperty("top").GetDouble().Should().BeApproximately(
+                before.GetProperty("footer").GetProperty("top").GetDouble(), 1, layoutJson);
             after.GetProperty("pageViewport").GetProperty("bottom").GetDouble().Should().BeLessThanOrEqualTo(
-                after.GetProperty("footer").GetProperty("top").GetDouble() + 1, layoutJson);
+                after.GetProperty("content").GetProperty("bottom").GetDouble() + 1, layoutJson);
         }
     }
 
@@ -314,7 +338,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         var detailText = await page.Locator(".chatgpt-proposals-detail-panel").InnerTextAsync();
         detailText.Should().Contain("尚未寫入 ContextHub");
-        detailText.Should().Contain("Payload JSON");
+        detailText.Should().Contain("內容 JSON");
         detailText.Should().Contain("批准寫入");
         detailText.Should().Contain("拒絕");
 
@@ -2074,11 +2098,12 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
-    public async Task Retention_Workspace_Should_Stack_And_Keep_Table_Scroll_Ownership_On_Mid_Width_And_TabS7()
+    public async Task Retention_Workspace_Should_Stack_And_Keep_Table_Scroll_Ownership_When_Sidebar_Reduces_Content_Width()
     {
         await _fixture.EnsureDashboardRunningAsync();
         var viewports = new[]
         {
+            new DashboardViewport("high-dpi-desktop", 1440, 900),
             new DashboardViewport("reported-mid-width", 1225, 768),
             new DashboardViewport("tab-s7-landscape", 1280, 800),
             new DashboardViewport("tab-s7-portrait", 800, 1280)
@@ -3139,7 +3164,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         using var document = JsonDocument.Parse(layoutJson);
         var sidebarFooterTop = document.RootElement.GetProperty("sidebarFooterTop").GetDouble();
         var sidebarBuildTop = document.RootElement.GetProperty("sidebarBuildTop").GetDouble();
-        document.RootElement.GetProperty("sidebarBuildLabel").GetString().Should().Be("Dashboard UI");
+        document.RootElement.GetProperty("sidebarBuildLabel").GetString().Should().Be("管理介面");
         document.RootElement.GetProperty("sidebarBuildValue").GetString().Should().NotBeNullOrWhiteSpace();
         document.RootElement.GetProperty("sidebarBuildTime").GetString().Should().NotBeNullOrWhiteSpace();
         document.RootElement.GetProperty("sidebarBuildAlign").GetString().Should().Be("center");

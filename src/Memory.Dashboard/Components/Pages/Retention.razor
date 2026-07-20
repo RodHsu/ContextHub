@@ -36,7 +36,7 @@
         <section class="panel retention-command-panel">
             <div class="panel-heading-row">
                 <div>
-                    <div class="panel-title">Retention Review Workspace</div>
+                    <div class="panel-title">記憶整理審核工作區</div>
                     <div class="panel-heading-meta panel-heading-meta-left">每日排程只分類；刪除必須先 preview，再由 admin 明確套用。</div>
                 </div>
                 <span class="status-badge neutral">@RetentionModeText</span>
@@ -44,16 +44,16 @@
 
             <dl class="definition-grid retention-summary-grid">
                 <div><dt>最近執行</dt><dd>@if (_lastRetentionRun?.CompletedAt.HasValue == true) { <ClientLocalTime Value="_lastRetentionRun.CompletedAt.Value" /> } else { <span>-</span> }</dd></div>
-                <div><dt>Auto-delete</dt><dd>@DashboardFormatting.Integer(LastRetentionAutoDeleteCount)</dd></div>
-                <div><dt>Review</dt><dd>@DashboardFormatting.Integer(LastRetentionReviewCount)</dd></div>
-                <div><dt>Blocked</dt><dd>@DashboardFormatting.Integer(CurrentBlockedReasons.Count)</dd></div>
+                <div><dt>自動刪除</dt><dd>@DashboardFormatting.Integer(LastRetentionAutoDeleteCount)</dd></div>
+                <div><dt>人工審核</dt><dd>@DashboardFormatting.Integer(LastRetentionReviewCount)</dd></div>
+                <div><dt>阻擋項目</dt><dd>@DashboardFormatting.Integer(CurrentBlockedReasons.Count)</dd></div>
                 <div><dt>狀態</dt><dd>@(_lastRetentionRun?.Status.ToString() ?? "-")</dd></div>
             </dl>
 
             <div class="retention-command-grid">
                 <button class="ghost-button" @onclick="ClassifyRetentionAsync" disabled="@RetentionActionDisabled">重新分類</button>
                 <button class="ghost-button" @onclick="PreviewRetentionDeleteAsync" disabled="@RetentionActionDisabled">預覽刪除</button>
-                <button class="primary-button" @onclick="ApplyRetentionDeleteAsync" disabled="@(!CanApplyRetentionDelete)">確認套用 Auto-delete</button>
+                <button class="primary-button" @onclick="ApplyRetentionDeleteAsync" disabled="@(!CanApplyRetentionDelete)">確認套用自動刪除</button>
                 <button class="ghost-button" @onclick="CopyReviewPlanAsync" disabled="@(!VisibleDecisions.Any())">複製整理計畫</button>
                 <button class="ghost-button" @onclick="CopyRetentionResultAsync" disabled="@(CurrentResult is null)">複製原始結果</button>
             </div>
@@ -74,8 +74,8 @@
                 <input @bind="_candidateQuery" @bind:event="oninput" placeholder="搜尋標題、ProjectId、reason 或 memory id" />
                 <select @bind="_candidateKind">
                     <option value="">全部清單</option>
-                    <option value="auto">Auto-delete</option>
-                    <option value="review">Review</option>
+                    <option value="auto">自動刪除</option>
+                    <option value="review">人工審核</option>
                 </select>
                 <select @bind="_actionFilter">
                     <option value="">全部建議</option>
@@ -170,26 +170,26 @@
                 <div class="panel-scroll-body detail-scroll-shell retention-detail-scroll-shell">
                     @if (SelectedDecision is null)
                     {
-                        <div class="empty-inline">點選左側候選項目後編輯 review decision。</div>
+                        <div class="empty-inline">點選左側候選項目後編輯審核決策。</div>
                     }
                     else
                     {
                         <dl class="definition-grid retention-detail-grid">
-                            <div><dt>Memory Id</dt><dd class="retention-memory-id">@SelectedDecision.Candidate.MemoryId</dd></div>
-                            <div><dt>Project</dt><dd>@SelectedDecision.Candidate.ProjectId</dd></div>
+                            <div><dt>記憶識別碼</dt><dd class="retention-memory-id">@SelectedDecision.Candidate.MemoryId</dd></div>
+                            <div><dt>專案</dt><dd>@SelectedDecision.Candidate.ProjectId</dd></div>
                             <div><dt>類型</dt><dd>@DashboardText.Label(SelectedDecision.Candidate.MemoryType)</dd></div>
                             <div><dt>狀態</dt><dd>@DashboardText.Label(SelectedDecision.Candidate.Status)</dd></div>
                             <div><dt>重要性</dt><dd>@SelectedDecision.Candidate.Importance.ToString("0.##")</dd></div>
                             <div><dt>可信度</dt><dd>@SelectedDecision.Candidate.Confidence.ToString("0.##")</dd></div>
-                            <div><dt>Hits</dt><dd>@DashboardFormatting.Integer(SelectedDecision.Candidate.RecentHitCount)</dd></div>
-                            <div><dt>Links</dt><dd>@DashboardFormatting.Integer(SelectedDecision.Candidate.LinkDegree)</dd></div>
+                            <div><dt>命中次數</dt><dd>@DashboardFormatting.Integer(SelectedDecision.Candidate.RecentHitCount)</dd></div>
+                            <div><dt>關聯數</dt><dd>@DashboardFormatting.Integer(SelectedDecision.Candidate.LinkDegree)</dd></div>
                             <div><dt>更新時間</dt><dd><ClientLocalTime Value="SelectedDecision.Candidate.UpdatedAtUtc" /></dd></div>
                         </dl>
 
                         <div class="subpanel-title">整理決策</div>
                         <div class="form-grid retention-decision-grid">
                             <label>
-                                <span>Action</span>
+                                <span>處理動作</span>
                                 <select @bind="SelectedDecision.SelectedAction">
                                     @foreach (var action in Enum.GetValues<MemoryRetentionRecommendedAction>())
                                     {
@@ -198,7 +198,7 @@
                                 </select>
                             </label>
                             <label class="span-2 retention-note-field">
-                                <span>Review note</span>
+                                <span>審核備註</span>
                                 <textarea @bind="SelectedDecision.Note" placeholder="補充人工或 agent 判斷，例如保留理由、合併目標、刪除前需確認事項。"></textarea>
                             </label>
                         </div>
@@ -208,7 +208,7 @@
                             <a class="ghost-button button-link" href="@($"/memories?query={Uri.EscapeDataString(SelectedDecision.Candidate.MemoryId.ToString("D"))}")">開啟記憶資料</a>
                         </div>
 
-                        <div class="subpanel-title">Reason codes</div>
+                        <div class="subpanel-title">判定原因代碼</div>
                         <div class="compact-chip-row">
                             @foreach (var reason in SelectedDecision.Candidate.ReasonCodes)
                             {
@@ -218,7 +218,7 @@
 
                         @if (SelectedDecision.Candidate.BlockedReasons.Count > 0)
                         {
-                            <div class="subpanel-title">Blocked reasons</div>
+                            <div class="subpanel-title">阻擋原因</div>
                             <div class="compact-chip-row">
                                 @foreach (var reason in SelectedDecision.Candidate.BlockedReasons)
                                 {
@@ -345,7 +345,7 @@
         {
             _retentionResult = await ApiClient.RunMemoryDataRetentionAsync(request, _cts.Token);
             SyncDecisionDrafts();
-            ShowMessage($"{actionName} 已完成：Auto-delete {_retentionResult.AutoDeleteCandidateCount}，Review {_retentionResult.ReviewCandidateCount}。");
+            ShowMessage($"{actionName} 已完成：自動刪除 {_retentionResult.AutoDeleteCandidateCount}，人工審核 {_retentionResult.ReviewCandidateCount}。");
             await LoadAsync();
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested)
@@ -742,7 +742,7 @@
         => $"hit {DashboardFormatting.Integer(candidate.RecentHitCount)} / link {DashboardFormatting.Integer(candidate.LinkDegree)} / I {candidate.Importance:0.##} / C {candidate.Confidence:0.##}";
 
     private static string CandidateKindText(string kind)
-        => kind == "auto" ? "Auto-delete" : "Review";
+        => kind == "auto" ? "自動刪除" : "人工審核";
 
     private static string CandidateKindClass(string kind)
         => kind == "auto" ? "bad" : "warn";

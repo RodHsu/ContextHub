@@ -21,7 +21,7 @@
                         <div class="brand-mark">C</div>
                         <div>
                             <div class="brand-title">ContextHub</div>
-                            <div class="brand-subtitle">Quiet Signal</div>
+                            <div class="brand-subtitle">靜默訊號</div>
                         </div>
                     </div>
 
@@ -136,7 +136,7 @@
                         </NavLink>
                         @if (isAdmin)
                         {
-                        <NavLink class="nav-item" href="/inbox">
+                        <NavLink class="nav-item" href="/project-work-items">
                             <span class="nav-icon" aria-hidden="true">☑</span>
                             <span class="nav-label">專案待辦</span>
                         </NavLink>
@@ -284,13 +284,13 @@
                                     <path d="m14 10 2 2" />
                                 </svg>
                             </span>
-                            <span class="nav-label">Token</span>
+                            <span class="nav-label">存取權杖</span>
                         </NavLink>
                     </nav>
 
                     <div class="sidebar-bottom">
                         <div class="sidebar-build">
-                            <span class="sidebar-build-label">Dashboard UI</span>
+                            <span class="sidebar-build-label">管理介面</span>
                             <span class="sidebar-build-value">@BuildMetadata.Current.Version</span>
                             <span class="sidebar-build-time"><ClientLocalTime Value="BuildMetadata.Current.TimestampUtc" /></span>
                         </div>
@@ -305,7 +305,7 @@
                             <span class="status-dot"></span>
                             <span>ContextHub</span>
                         </div>
-                        <div class="topbar-subtitle">Operations and knowledge governance</div>
+                        <div class="topbar-subtitle">維運與知識治理</div>
                     </div>
 
                     <div class="topbar-actions">
@@ -333,14 +333,12 @@
                 </header>
 
                 <main class="content">
-                    <div class="content-flow">
-                        @Body
-                        <footer class="dashboard-footer">
-                            <span>ContextHub</span>
-                            <span>知識工作與專案協作主控台</span>
-                        </footer>
-                    </div>
+                    @Body
                 </main>
+                <footer class="dashboard-footer">
+                    <span>ContextHub</span>
+                    <span>知識工作與專案協作主控台</span>
+                </footer>
             </div>
 
             @if (_commandPaletteOpen)
@@ -349,7 +347,7 @@
                     <section class="command-palette" role="dialog" aria-modal="true" aria-label="快速切換功能" @onclick:stopPropagation="true">
                         <div class="command-palette-header">
                             <div>
-                                <div class="command-palette-eyebrow">Command surface</div>
+                                <div class="command-palette-eyebrow">快速操作</div>
                                 <h2>快速切換功能</h2>
                             </div>
                             <button type="button" class="icon-button" aria-label="關閉快速切換功能" @onclick="CloseCommandPalette">×</button>
@@ -395,7 +393,7 @@
         new("維運監控", "P", "效能", "/performance", NavLinkMatch.Prefix, true),
         new("知識工作", "K", "記憶資料", "/memories", NavLinkMatch.Prefix, false),
         new("知識工作", "X", "跨專案討論", "/discussions", NavLinkMatch.Prefix, false),
-        new("知識工作", "I", "專案待辦", "/inbox", NavLinkMatch.Prefix, true),
+        new("知識工作", "I", "專案待辦", "/project-work-items", NavLinkMatch.Prefix, true),
         new("知識工作", "T", "記憶整理", "/retention", NavLinkMatch.Prefix, true),
         new("知識工作", "G", "記憶圖譜", "/graph", NavLinkMatch.Prefix, false),
         new("知識工作", "S", "資料來源", "/sources", NavLinkMatch.Prefix, true),

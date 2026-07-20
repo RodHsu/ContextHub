@@ -5,7 +5,7 @@
 <PageTitle>Context Hub | 治理檢查</PageTitle>
 
 <PageViewport Title="治理檢查"
-              Subtitle="集中處理 duplicate、conflict、stale 與 reindex findings。"
+              Subtitle="集中處理重複、衝突、過期與需要重建索引的治理項目。"
               BodyClass="page-viewport-body">
     <Actions>
         <div class="page-actions-status">
@@ -28,30 +28,30 @@
             <div class="metric-grid">
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
-                        <span class="metric-label-inline">總 findings：</span>
+                        <span class="metric-label-inline">治理項目總數：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(_findings.Count)</span>
-                        <span class="metric-meta-inline">items</span>
+                        <span class="metric-meta-inline">筆項目</span>
                     </div>
                 </section>
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">待處理：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(OpenFindings)</span>
-                        <span class="metric-meta-inline">open</span>
+                        <span class="metric-meta-inline">筆待處理</span>
                     </div>
                 </section>
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">需要重建索引：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(ReindexFindings)</span>
-                        <span class="metric-meta-inline">reindex</span>
+                        <span class="metric-meta-inline">筆需重建索引</span>
                     </div>
                 </section>
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">來源異常：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(SourceFindings)</span>
-                        <span class="metric-meta-inline">source</span>
+                        <span class="metric-meta-inline">筆來源異常</span>
                     </div>
                 </section>
             </div>
@@ -62,14 +62,14 @@
                         <div class="panel-heading-row">
                             <div>
                                 <div class="panel-title">治理清單 (@DashboardFormatting.Integer(_findings.Count))</div>
-                                <div class="panel-heading-meta">這裡只顯示真實 findings。來源來自治理分析結果，不會自動塞示範資料。</div>
+                                <div class="panel-heading-meta">這裡只顯示真實治理項目，來源來自治理分析結果，不會自動塞示範資料。</div>
                             </div>
                         </div>
                         @if (_findings.Count == 0)
                         {
                             <div class="empty-inline">
-                                <div class="empty-inline-title">尚未產生治理 findings</div>
-                                <div class="empty-inline-copy">請先有來源與記憶資料，再執行治理分析。分析後才會出現 stale source、missing source、duplicate/conflict 與 reindex required 等項目。</div>
+                                <div class="empty-inline-title">尚未產生治理項目</div>
+                                <div class="empty-inline-copy">請先有來源與記憶資料，再執行治理分析。分析後才會出現過期或缺少來源、重複或衝突，以及需重建索引等項目。</div>
                                 <div class="empty-inline-actions">
                                     <button class="primary-button" @onclick="AnalyzeAsync" disabled="@_loading">執行治理分析</button>
                                     <a class="ghost-button" href="/sources">前往資料來源</a>
@@ -107,7 +107,7 @@
                             {
                                 <div class="empty-inline">
                                     <div class="empty-inline-title">尚未選擇治理項目</div>
-                                    <div class="empty-inline-copy">執行治理分析後，點選左側 finding，這裡會顯示關聯記憶、來源連線與可採取的處理動作。</div>
+                                    <div class="empty-inline-copy">執行治理分析後，點選左側項目，這裡會顯示關聯記憶、來源連線與可採取的處理動作。</div>
                                 </div>
                             }
                             else
@@ -119,10 +119,10 @@
 
                                 <dl class="definition-grid">
                                     <div><dt>專案</dt><dd>@_selectedFinding.ProjectId</dd></div>
-                                    <div><dt>Dedup Key</dt><dd>@_selectedFinding.DedupKey</dd></div>
+                                    <div><dt>去重鍵</dt><dd>@_selectedFinding.DedupKey</dd></div>
                                     <div><dt>來源連線</dt><dd>@(_selectedFinding.SourceConnectionId?.ToString() ?? "n/a")</dd></div>
-                                    <div><dt>Primary Memory</dt><dd>@(_selectedFinding.PrimaryMemoryId?.ToString() ?? "n/a")</dd></div>
-                                    <div><dt>Secondary Memory</dt><dd>@(_selectedFinding.SecondaryMemoryId?.ToString() ?? "n/a")</dd></div>
+                                    <div><dt>主要記憶</dt><dd>@(_selectedFinding.PrimaryMemoryId?.ToString() ?? "n/a")</dd></div>
+                                    <div><dt>次要記憶</dt><dd>@(_selectedFinding.SecondaryMemoryId?.ToString() ?? "n/a")</dd></div>
                                     <div><dt>建立時間</dt><dd><ClientLocalTime Value="_selectedFinding.CreatedAt" /></dd></div>
                                     <div><dt>最近更新</dt><dd><ClientLocalTime Value="_selectedFinding.UpdatedAt" /></dd></div>
                                 </dl>
@@ -130,7 +130,7 @@
                                 <div class="subpanel-title">摘要</div>
                                 <div class="code-block">@_selectedFinding.Summary</div>
 
-                                <div class="subpanel-title">Details JSON</div>
+                                <div class="subpanel-title">詳細資料 JSON</div>
                                 <div class="code-block">@_selectedFinding.DetailsJson</div>
 
                                 <div class="inline-actions">

@@ -612,7 +612,8 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     {
         IReadOnlyList<ProjectInformationListItem> projects =
         [
-            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000001"), "dashboard-test", "Dashboard test", "Dashboard UI test project information.", DateTimeOffset.UtcNow), 3)
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000001"), "dashboard-test", "Dashboard test", "Dashboard UI test project information.", DateTimeOffset.UtcNow), 3),
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000002"), "dashboard-test-secondary", "Dashboard test secondary", "Secondary Dashboard UI test project information.", DateTimeOffset.UtcNow), 2)
         ];
         return Task.FromResult(projects);
     }
@@ -678,6 +679,19 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     public Task<DiscussionMessageResult> CreateDiscussionMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new DiscussionMessageResult(Guid.NewGuid(), request.SenderProjectId, request.Content, DateTimeOffset.UtcNow));
+
+    public Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>(
+        [new(Guid.Parse("88000000-0000-0000-0000-000000000001"), "dashboard-test", "完成 Dashboard 驗證", "測試自訂專案代辦。", ["release", "ui"], [new(Guid.Parse("88000000-0000-0000-0000-000000000011"), "完成 API 測試", true, 0), new(Guid.Parse("88000000-0000-0000-0000-000000000012"), "完成瀏覽器測試", false, 1)], ProjectWorkItemStatus.InProgress, 80, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null)]);
+
+    public Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectWorkItemResult(Guid.NewGuid(), request.ProjectId, request.Title, request.Description ?? string.Empty, request.Tags ?? [], (request.ChecklistItems ?? []).Select((content, index) => new ProjectWorkItemChecklistItemResult(Guid.NewGuid(), content, false, index)).ToArray(), ProjectWorkItemStatus.Pending, request.Priority, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
+
+    public Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectWorkItemResult(request.Id, "dashboard-test", request.Title ?? "更新後代辦", request.Description ?? string.Empty, request.Tags ?? [], [], request.Status ?? ProjectWorkItemStatus.InProgress, request.Priority ?? 0, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, request.Status == ProjectWorkItemStatus.Completed ? DateTimeOffset.UtcNow : null));
+
+    public Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
+        => UpdateProjectWorkItemAsync(new ProjectWorkItemUpdateRequest(workItemId), cancellationToken);
 
     public Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
         => Task.FromResult(BuildRetentionResult(request.Mode));

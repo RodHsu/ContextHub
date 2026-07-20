@@ -1173,6 +1173,18 @@ public sealed record DailyMemoryReviewResult(
     IReadOnlyList<UserPreferenceResult> UserPreferences,
     IReadOnlyList<ChatGptProposalResult> PendingProposals);
 
+public sealed record KnowledgeReviewRequest(IReadOnlyList<string>? ProjectIds = null, int LimitPerSection = 100);
+public sealed record KnowledgeReviewResult(
+    IReadOnlyList<AccessibleProjectResult> Projects,
+    MemoryDataRetentionRunResult ProjectKnowledge,
+    IReadOnlyList<MemoryDataRetentionCandidateResult> SharedKnowledgeCandidates,
+    IReadOnlyList<UserPreferenceResult> UserPreferences,
+    IReadOnlyList<DiscussionThreadResult> Discussions,
+    IReadOnlyList<ProjectWorkItemResult> WorkItems,
+    IReadOnlyList<ConversationInsightResult> HighSignalConversationInsights,
+    IReadOnlyList<SuggestedActionResult> PendingSuggestedActions,
+    IReadOnlyList<ChatGptProposalResult> PendingProposals);
+
 public sealed record ConversationCheckpointSearchRequest(
     string? Query = null,
     string? ProjectId = null,
@@ -1489,6 +1501,8 @@ public interface IApplicationDbContext
     DbSet<DiscussionThread> DiscussionThreads { get; }
     DbSet<DiscussionParticipant> DiscussionParticipants { get; }
     DbSet<DiscussionMessage> DiscussionMessages { get; }
+    DbSet<ProjectWorkItem> ProjectWorkItems { get; }
+    DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems { get; }
     void ClearTrackedChanges();
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
@@ -1668,6 +1682,12 @@ public sealed record DiscussionMessageResult(Guid Id, string SenderProjectId, st
 public sealed record DiscussionThreadResult(Guid Id, string HostProjectId, string Title, string Status, IReadOnlyList<string> ParticipantProjectIds, int UnreadCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
 public sealed record DiscussionThreadDetailResult(Guid Id, string HostProjectId, string Title, string Status, IReadOnlyList<string> ParticipantProjectIds, IReadOnlyList<DiscussionMessageResult> Messages, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
 
+public sealed record ProjectWorkItemCreateRequest(string ProjectId, string Title, string? Description = null, IReadOnlyList<string>? Tags = null, IReadOnlyList<string>? ChecklistItems = null, int Priority = 0, DateTimeOffset? DueAt = null);
+public sealed record ProjectWorkItemUpdateRequest(Guid Id, string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
+public sealed record ProjectWorkItemListRequest(string ProjectId, ProjectWorkItemStatus? Status = null, int Limit = 100);
+public sealed record ProjectWorkItemChecklistItemResult(Guid Id, string Content, bool IsCompleted, int SortOrder);
+public sealed record ProjectWorkItemResult(Guid Id, string ProjectId, string Title, string Description, IReadOnlyList<string> Tags, IReadOnlyList<ProjectWorkItemChecklistItemResult> ChecklistItems, ProjectWorkItemStatus Status, int Priority, DateTimeOffset? DueAt, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? CompletedAt);
+
 public interface IProjectDiscussionService
 {
     Task<ProjectHierarchyResult> SetChildrenAsync(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken);
@@ -1678,9 +1698,22 @@ public interface IProjectDiscussionService
     Task<DiscussionMessageResult> AddMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken);
 }
 
+public interface IProjectWorkItemService
+{
+    Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken);
+    Task<ProjectWorkItemResult> UpdateAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken);
+    Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken);
+}
+
 public interface IDailyMemoryReviewService
 {
     Task<DailyMemoryReviewResult> ReviewAsync(CancellationToken cancellationToken);
+}
+
+public interface IKnowledgeReviewService
+{
+    Task<KnowledgeReviewResult> ReviewAsync(KnowledgeReviewRequest request, CancellationToken cancellationToken);
 }
 
 public interface IProjectArtifactExchangeService

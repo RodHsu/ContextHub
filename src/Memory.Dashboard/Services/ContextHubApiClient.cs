@@ -30,6 +30,10 @@ public interface IContextHubApiClient
     Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken);
     Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken);
     Task<DiscussionMessageResult> CreateDiscussionMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken);
+    Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken);
+    Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken);
+    Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
     Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken);
     Task<MemoryImportPreviewResult> PreviewMemoryImportAsync(MemoryImportRequest request, CancellationToken cancellationToken);
@@ -226,6 +230,27 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     {
         using var response = await httpClient.PostAsJsonAsync($"/api/discussions/threads/{request.ThreadId:D}/messages", new { request.SenderProjectId, request.Content }, cancellationToken);
         return await ReadRequiredAsync<DiscussionMessageResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<ProjectWorkItemResult>>(QueryHelpers.AddQueryString("/api/work-items", new Dictionary<string, string?> { ["projectId"] = request.ProjectId, ["status"] = request.Status?.ToString(), ["limit"] = request.Limit.ToString() }), cancellationToken);
+
+    public async Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/work-items", request, cancellationToken);
+        return await ReadRequiredAsync<ProjectWorkItemResult>(response, cancellationToken);
+    }
+
+    public async Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PutAsJsonAsync($"/api/work-items/{request.Id:D}", request, cancellationToken);
+        return await ReadRequiredAsync<ProjectWorkItemResult>(response, cancellationToken);
+    }
+
+    public async Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PutAsJsonAsync($"/api/work-items/{workItemId:D}/checklist/{checklistItemId:D}", new { isCompleted }, cancellationToken);
+        return await ReadRequiredAsync<ProjectWorkItemResult>(response, cancellationToken);
     }
 
     public async Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)

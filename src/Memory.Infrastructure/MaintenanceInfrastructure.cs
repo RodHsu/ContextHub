@@ -4245,8 +4245,8 @@ public sealed class MemoryDataRetentionHostedService(
                 await service.RunAsync(
                     new MemoryDataRetentionRunRequest(
                         TriggeredBy: "scheduled",
-                        Mode: MemoryDataRetentionRunMode.ApplyMaintenanceCleanup,
-                        IncludeCandidateDetails: false),
+                        Mode: MemoryDataRetentionRunMode.Classify,
+                        IncludeCandidateDetails: true),
                     "scheduled",
                     stoppingToken);
             }

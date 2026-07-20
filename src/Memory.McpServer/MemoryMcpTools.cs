@@ -11,6 +11,8 @@ public sealed class MemoryMcpTools(
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
     IProjectDiscussionService projectDiscussionService,
+    IProjectWorkItemService projectWorkItemService,
+    IKnowledgeReviewService knowledgeReviewService,
     IProjectInformationService projectInformationService,
     IProjectArtifactExchangeService artifactExchangeService,
     IChatGptProposalService chatGptProposalService,
@@ -170,6 +172,22 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("Reply to a cross-project discussion as SenderProjectId. The sender must be a participant and writable for the current actor.")]
     public Task<DiscussionMessageResult> discussion_message_create(DiscussionMessageCreateRequest request, CancellationToken cancellationToken = default)
         => projectDiscussionService.AddMessageAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a project work item. Work items are distinct from automated governance suggested actions.")]
+    public Task<ProjectWorkItemResult> project_work_item_create(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken = default)
+        => projectWorkItemService.CreateAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Update a project work item status, content, priority, or due date.")]
+    public Task<ProjectWorkItemResult> project_work_item_update(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken = default)
+        => projectWorkItemService.UpdateAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List project work items. These are user-managed project tasks, not governance suggested actions.")]
+    public Task<IReadOnlyList<ProjectWorkItemResult>> project_work_items_list(ProjectWorkItemListRequest request, CancellationToken cancellationToken = default)
+        => projectWorkItemService.ListAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Return a non-destructive, actor-scoped review of project knowledge, shared knowledge, user preferences, discussions, work items, insights, governance actions, and proposals.")]
+    public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
+        => knowledgeReviewService.ReviewAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Enqueue a background reindex job for the current or target embedding model.")]
     public Task<EnqueueReindexResult> enqueue_reindex(EnqueueReindexRequest request, CancellationToken cancellationToken = default)

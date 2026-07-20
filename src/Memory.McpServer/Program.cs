@@ -1317,6 +1317,38 @@ discussions.MapPost("/threads/{threadId:guid}/messages", async (Guid threadId, D
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["discussion"] = [ex.Message] }); }
 });
 
+var workItems = app.MapGroup("/api/work-items");
+workItems.RequireAuthIfEnabled(requireAuthentication);
+workItems.MapGet(string.Empty, async (string projectId, string? status, int? limit, IProjectWorkItemService service, CancellationToken cancellationToken) =>
+{
+    if (!EnumParser.TryParse(status, out ProjectWorkItemStatus? parsedStatus, out var error))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = [error ?? "Unsupported ProjectWorkItemStatus value."] });
+    }
+    return Results.Ok(await service.ListAsync(new ProjectWorkItemListRequest(ProjectContext.Normalize(projectId), parsedStatus, limit ?? 100), cancellationToken));
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+workItems.MapPost(string.Empty, async (ProjectWorkItemCreateRequest request, IProjectWorkItemService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Created("/api/work-items", await service.CreateAsync(request, cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+workItems.MapPut("/{id:guid}", async (Guid id, ProjectWorkItemUpdateBody body, IProjectWorkItemService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.UpdateAsync(new ProjectWorkItemUpdateRequest(id, body.Title, body.Description, body.Tags, body.Status, body.Priority, body.DueAt), cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+workItems.MapPut("/{workItemId:guid}/checklist/{checklistItemId:guid}", async (Guid workItemId, Guid checklistItemId, ProjectWorkItemChecklistCompletionBody body, IProjectWorkItemService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.SetChecklistItemCompletionAsync(workItemId, checklistItemId, body.IsCompleted, cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["checklistItem"] = [ex.Message] }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
+var knowledgeReviews = app.MapGroup("/api/knowledge-reviews");
+knowledgeReviews.RequireAuthIfEnabled(requireAuthentication);
+knowledgeReviews.MapPost(string.Empty, async (KnowledgeReviewRequest request, IKnowledgeReviewService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ReviewAsync(request, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+
 var projectHierarchy = app.MapGroup("/api/projects/hierarchy");
 projectHierarchy.RequireAuthIfEnabled(requireAuthentication);
 projectHierarchy.MapGet("/{parentProjectId}", async (string parentProjectId, IProjectDiscussionService service, CancellationToken cancellationToken)
@@ -1914,6 +1946,8 @@ internal sealed record TenantUserUpdateBody(
     TenantUserStatus? Status = null,
     string? Password = null);
 internal sealed record DiscussionMessageCreateBody(string SenderProjectId, string Content);
+internal sealed record ProjectWorkItemUpdateBody(string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
+internal sealed record ProjectWorkItemChecklistCompletionBody(bool IsCompleted);
 internal sealed record ProjectHierarchySetChildrenBody(IReadOnlyList<string>? ChildProjectIds);
 
 internal sealed record TenantProjectGrantUpsertBody(

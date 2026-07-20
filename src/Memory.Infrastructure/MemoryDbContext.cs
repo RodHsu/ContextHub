@@ -55,6 +55,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
     public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
+    public DbSet<ProjectWorkItem> ProjectWorkItems => Set<ProjectWorkItem>();
+    public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => Set<ProjectWorkItemChecklistItem>();
 
     public void ClearTrackedChanges()
         => ChangeTracker.Clear();
@@ -819,6 +821,41 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Content).HasColumnName("content");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.HasIndex(x => new { x.ThreadId, x.CreatedAt });
+        });
+
+        modelBuilder.Entity<ProjectWorkItem>(entity =>
+        {
+            entity.ToTable("project_work_items");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.Title).HasColumnName("title");
+            entity.Property(x => x.Description).HasColumnName("description");
+            entity.Property(x => x.Tags).HasColumnName("tags").HasColumnType("text[]");
+            entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.Priority).HasColumnName("priority");
+            entity.Property(x => x.DueAt).HasColumnName("due_at");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Status, x.DueAt });
+        });
+
+        modelBuilder.Entity<ProjectWorkItemChecklistItem>(entity =>
+        {
+            entity.ToTable("project_work_item_checklist_items");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.WorkItemId).HasColumnName("work_item_id");
+            entity.Property(x => x.Content).HasColumnName("content");
+            entity.Property(x => x.IsCompleted).HasColumnName("is_completed");
+            entity.Property(x => x.SortOrder).HasColumnName("sort_order");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasOne(x => x.WorkItem).WithMany(x => x.ChecklistItems).HasForeignKey(x => x.WorkItemId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.WorkItemId, x.SortOrder });
         });
     }
 

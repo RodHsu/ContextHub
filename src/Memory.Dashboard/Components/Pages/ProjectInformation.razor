@@ -1,5 +1,6 @@
 @page "/project-information"
 @inject IContextHubApiClient ApiClient
+@inject NavigationManager Navigation
 
 <PageTitle>Context Hub | 專案資訊</PageTitle>
 
@@ -20,7 +21,7 @@
                 <div class="studio-eyebrow">目前專案</div>
                 <label class="project-picker-label">
                     <span>專案</span>
-                    <select class="project-select" @bind="_projectId" @bind:after="LoadAsync" disabled="@_loading" aria-label="選擇專案">
+                    <select class="project-select" @bind="_projectId" @bind:after="SelectProjectAsync" disabled="@_loading" aria-label="選擇專案">
                             <option value="">選擇專案</option>
                             @foreach (var project in _projects)
                             {
@@ -116,11 +117,33 @@
     private bool _editing;
     private bool _includeInactive;
     private string[] _childProjectIds = [];
+    private bool _initialized;
+
+    [SupplyParameterFromQuery(Name = "projectId")]
+    public string? ProjectIdQuery { get; set; }
 
     protected override async Task OnInitializedAsync()
     {
         await RefreshProjectsAsync();
-        _projectId = _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty;
+        _projectId = ResolveProjectId(ProjectIdQuery);
+        _initialized = true;
+        await LoadAsync();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!_initialized)
+        {
+            return;
+        }
+
+        var projectId = ResolveProjectId(ProjectIdQuery);
+        if (string.Equals(_projectId, projectId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _projectId = projectId;
         await LoadAsync();
     }
 
@@ -147,6 +170,17 @@
         {
             _loading = false;
         }
+    }
+
+    private async Task SelectProjectAsync()
+    {
+        var projectId = ResolveProjectId(_projectId);
+        if (string.IsNullOrWhiteSpace(projectId))
+        {
+            return;
+        }
+
+        Navigation.NavigateTo($"/project-information?projectId={Uri.EscapeDataString(projectId)}", forceLoad: true);
     }
 
     private async Task SaveAsync()
@@ -245,6 +279,11 @@
 
     private async Task RefreshProjectsCoreAsync()
         => _projects = await ApiClient.GetProjectInformationProjectsAsync(_includeInactive, CancellationToken.None);
+
+    private string ResolveProjectId(string? requestedProjectId)
+        => _projects.FirstOrDefault(project => string.Equals(project.Information.ProjectId, requestedProjectId, StringComparison.OrdinalIgnoreCase))?.Information.ProjectId
+            ?? _projects.FirstOrDefault()?.Information.ProjectId
+            ?? string.Empty;
 
     private static string ProjectLabel(ProjectInformationResult project)
         => string.Equals(project.DisplayName, project.ProjectId, StringComparison.OrdinalIgnoreCase)

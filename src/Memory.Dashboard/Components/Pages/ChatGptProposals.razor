@@ -6,7 +6,7 @@
 <PageTitle>ChatGPT 寫入審核</PageTitle>
 
 <PageViewport Title="ChatGPT 寫入審核"
-              Subtitle="在 ChatGPT proposal 寫入 durable memory 或 preference 前，先完成 payload、來源與狀態檢查。"
+              Subtitle="在 ChatGPT 提案寫入長期記憶或偏好前，先完成內容、來源與狀態檢查。"
               BodyClass="page-viewport-body chatgpt-proposals-page-body">
     <Actions>
         <div class="page-actions-status">
@@ -21,17 +21,17 @@
             <section class="filter-panel chatgpt-proposals-filter">
                 <div class="filter-grid">
                     <label>
-                        <span>Project</span>
+                        <span>專案</span>
                         <input @bind="_projectId" placeholder="ContextHub" />
                     </label>
                     <label>
-                        <span>Status</span>
+                        <span>狀態</span>
                         <select @bind="_status">
                             <option value="">全部</option>
-                            <option value="Pending">Pending</option>
-                            <option value="Applied">Applied</option>
-                            <option value="Rejected">Rejected</option>
-                            <option value="Failed">Failed</option>
+                            <option value="Pending">待審核</option>
+                            <option value="Applied">已套用</option>
+                            <option value="Rejected">已拒絕</option>
+                            <option value="Failed">失敗</option>
                         </select>
                     </label>
                     <div class="filter-action-cell">
@@ -50,28 +50,28 @@
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">目前清單：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(_proposals.Count)</span>
-                        <span class="metric-meta-inline">proposals</span>
+                        <span class="metric-meta-inline">筆提案</span>
                     </div>
                 </section>
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">待審核：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(PendingCount)</span>
-                        <span class="metric-meta-inline">pending</span>
+                        <span class="metric-meta-inline">筆待審核</span>
                     </div>
                 </section>
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">已處理：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(ResolvedCount)</span>
-                        <span class="metric-meta-inline">resolved</span>
+                        <span class="metric-meta-inline">筆已處理</span>
                     </div>
                 </section>
                 <section class="panel metric-card metric-card-inline">
                     <div class="metric-inline-line">
                         <span class="metric-label-inline">異常：</span>
                         <span class="metric-value-inline">@DashboardFormatting.Integer(FailedCount)</span>
-                        <span class="metric-meta-inline">failed</span>
+                        <span class="metric-meta-inline">筆失敗</span>
                     </div>
                 </section>
             </div>
@@ -82,7 +82,7 @@
             }
             else if (_proposals.Count == 0)
             {
-                <div class="empty-state">目前沒有符合條件的 ChatGPT proposal。</div>
+                <div class="empty-state">目前沒有符合條件的 ChatGPT 提案。</div>
             }
             else
             {
@@ -91,8 +91,8 @@
                         <section class="panel panel-scroll chatgpt-proposals-list-panel">
                             <div class="panel-heading-row">
                                 <div>
-                                    <div class="panel-title">Proposal Queue</div>
-                                    <div class="panel-heading-meta">先選擇左側項目，再在右側檢查 payload 與寫入結果。</div>
+                                    <div class="panel-title">提案佇列</div>
+                                    <div class="panel-heading-meta">先選擇左側項目，再在右側檢查內容與寫入結果。</div>
                                 </div>
                                 <span class="status-badge neutral">@DashboardFormatting.Integer(_proposals.Count)</span>
                             </div>
@@ -139,8 +139,8 @@
                                 @if (SelectedProposal is null)
                                 {
                                     <div class="empty-inline">
-                                        <div class="empty-inline-title">尚未選擇 proposal</div>
-                                        <div class="empty-inline-copy">點選左側 proposal 後，這裡會顯示來源、payload、錯誤與可執行的批准或拒絕動作。</div>
+                                        <div class="empty-inline-title">尚未選擇提案</div>
+                                        <div class="empty-inline-copy">點選左側提案後，這裡會顯示來源、內容、錯誤與可執行的批准或拒絕動作。</div>
                                     </div>
                                 }
                                 else
@@ -151,7 +151,7 @@
                                     {
                                         <div class="chatgpt-proposals-safety-notice">
                                             <strong>尚未寫入 ContextHub</strong>
-                                            <span>批准後才會產生 durable memory 或 preference 變更；拒絕會保留審核紀錄但不寫入。</span>
+                                            <span>批准後才會產生長期記憶或偏好變更；拒絕會保留審核紀錄但不寫入。</span>
                                         </div>
                                     }
 
@@ -159,15 +159,15 @@
                                     <div class="stack-item-copy">@selected.Summary</div>
 
                                     <dl class="definition-grid chatgpt-proposals-definition-grid">
-                                        <div><dt>Project</dt><dd>@selected.ProjectId</dd></div>
+                                        <div><dt>專案</dt><dd>@selected.ProjectId</dd></div>
                                         <div><dt>Tool</dt><dd><code>@selected.ToolName</code></dd></div>
                                         <div><dt>來源</dt><dd>@DisplayUser(selected)</dd></div>
-                                        <div><dt>OAuth Subject</dt><dd class="stack-item-copy">@selected.OAuthSubject</dd></div>
+                                        <div><dt>OAuth 主體</dt><dd class="stack-item-copy">@selected.OAuthSubject</dd></div>
                                         <div><dt>建立時間</dt><dd><ClientLocalTime Value="selected.CreatedAt" /></dd></div>
                                         <div><dt>更新時間</dt><dd><ClientLocalTime Value="selected.UpdatedAt" /></dd></div>
                                     </dl>
 
-                                    <div class="subpanel-title">Payload JSON</div>
+                                    <div class="subpanel-title">內容 JSON</div>
                                     <pre class="payload-preview code-block chatgpt-proposals-payload">@selected.PayloadJson</pre>
 
                                     @if (!string.IsNullOrWhiteSpace(selected.Error))

@@ -54,17 +54,17 @@
                     <article class="performance-kpi-card">
                         <div class="metric-label">近期 P95</div>
                         <div class="performance-kpi-value">@FormatMs(_status.RecentP95ClientElapsedMs)</div>
-                        <div class="performance-kpi-meta">近 10 分鐘 client observed latency</div>
+                        <div class="performance-kpi-meta">近 10 分鐘由用戶端觀測的延遲</div>
                     </article>
                     <article class="performance-kpi-card">
                         <div class="metric-label">失敗率</div>
                         <div class="performance-kpi-value">@FormatPercent(_status.RecentFailureRate)</div>
-                        <div class="performance-kpi-meta">@DashboardFormatting.Integer(_status.RecentFailureCount) / @DashboardFormatting.Integer(_status.RecentSampleCount) samples</div>
+                        <div class="performance-kpi-meta">@DashboardFormatting.Integer(_status.RecentFailureCount) / @DashboardFormatting.Integer(_status.RecentSampleCount) 筆樣本</div>
                     </article>
                     <article class="performance-kpi-card">
                         <div class="metric-label">收集設定</div>
                         <div class="performance-kpi-value">@_settings.Profile</div>
-                        <div class="performance-kpi-meta">Raw @_settings.RawRetentionDays 天 / Summary @_settings.SummaryRetentionDays 天</div>
+                        <div class="performance-kpi-meta">原始資料 @_settings.RawRetentionDays 天／摘要 @_settings.SummaryRetentionDays 天</div>
                     </article>
                 </div>
             </section>
@@ -82,15 +82,15 @@
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th>Bucket</th>
-                                <th>Agent</th>
-                                <th>Method</th>
-                                <th>Tool</th>
-                                <th>Samples</th>
-                                <th>Fail</th>
+                                <th>時間區段</th>
+                                <th>代理程式</th>
+                                <th>方法</th>
+                                <th>工具</th>
+                                <th>樣本數</th>
+                                <th>失敗數</th>
                                 <th>P95</th>
                                 <th>Max</th>
-                                <th>Status</th>
+                                <th>狀態</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -126,14 +126,14 @@
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th>Time</th>
-                                <th>Agent</th>
-                                <th>Endpoint</th>
-                                <th>Method</th>
-                                <th>Success</th>
-                                <th>Latency</th>
-                                <th>Error</th>
-                                <th>Correlation</th>
+                                <th>時間</th>
+                                <th>代理程式</th>
+                                <th>端點</th>
+                                <th>方法</th>
+                                <th>成功</th>
+                                <th>延遲</th>
+                                <th>錯誤</th>
+                                <th>關聯識別碼</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -144,7 +144,7 @@
                                     <td>@row.AgentId</td>
                                     <td>@row.EndpointHost</td>
                                     <td>@row.McpMethod</td>
-                                    <td>@(row.Success ? "Yes" : "No")</td>
+                                    <td>@(row.Success ? "是" : "否")</td>
                                     <td>@FormatMs(row.ClientElapsedMs)</td>
                                     <td>@EmptyDash(row.ErrorKind)</td>
                                     <td>@EmptyDash(row.CorrelationId)</td>
@@ -201,10 +201,10 @@
     private static string StatusLabel(AgentConnectivityStatus status)
         => status switch
         {
-            AgentConnectivityStatus.Healthy => "Healthy",
-            AgentConnectivityStatus.Degraded => "Degraded",
-            AgentConnectivityStatus.Unavailable => "Unavailable",
-            _ => "Unknown"
+            AgentConnectivityStatus.Healthy => "健康",
+            AgentConnectivityStatus.Degraded => "降級",
+            AgentConnectivityStatus.Unavailable => "無法使用",
+            _ => "未知"
         };
 
     private static string FormatPercent(double? value)

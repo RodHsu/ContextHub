@@ -2721,6 +2721,38 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         cdnValues.Should().ContainSingle("no-store");
     }
 
+    [DockerRequiredFact]
+    public async Task Work_Items_And_Knowledge_Review_Endpoints_Should_Keep_Project_Tasks_Separate_From_Governance()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        using var createResponse = await client.PostAsJsonAsync("/api/work-items", new ProjectWorkItemCreateRequest(
+            ProjectContext.DefaultProjectId,
+            "驗證分區整理 API",
+            "確認專案代辦不會混入治理建議。",
+            ChecklistItems: ["完成 checklist"],
+            Priority: 80));
+        createResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Created);
+        var created = await createResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>();
+        created.Should().NotBeNull();
+        created!.Status.Should().Be(ProjectWorkItemStatus.Pending);
+
+        using var guardedCompletionResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed });
+        guardedCompletionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+
+        using var updateResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.InProgress });
+        updateResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+
+        var listed = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&status=InProgress");
+        listed.Should().ContainSingle(x => x.Id == created.Id);
+
+        using var reviewResponse = await client.PostAsJsonAsync("/api/knowledge-reviews", new KnowledgeReviewRequest([ProjectContext.DefaultProjectId]));
+        reviewResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var review = await reviewResponse.Content.ReadFromJsonAsync<KnowledgeReviewResult>();
+        review.Should().NotBeNull();
+        review!.Projects.Should().Contain(x => x.ProjectId == ProjectContext.DefaultProjectId);
+        review.WorkItems.Should().Contain(x => x.Id == created.Id && x.Status == ProjectWorkItemStatus.InProgress);
+    }
+
     private static async Task CompleteActiveMaintenanceLeasesAsync(HttpClient client)
     {
         var status = await client.GetFromJsonAsync<MaintenanceStatusResult>("/api/maintenance/status");
