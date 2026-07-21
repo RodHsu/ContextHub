@@ -11,10 +11,11 @@ Choose ProjectId
   -> start or connect to ContextHub
   -> configure MCP client
   -> add repo AGENTS.md
+  -> initialize durable project information
   -> begin tasks with build_working_context
-  -> search memory/logs when needed
+  -> route each write to knowledge, shared summary, work item, discussion, or checkpoint
   -> close useful work with conversation_ingest
-  -> save durable decisions/facts/preferences only when stable
+  -> save only verified, reusable knowledge
 ```
 
 ## Prerequisites
@@ -77,6 +78,27 @@ Rules:
 
 All ContextHub MCP calls for that repo should pass the same `projectId`.
 
+## Initialize Project Information
+
+Before the first substantial task, create a concise, durable description for the repository. It is fixed project background, not an activity log or a task list.
+
+```text
+project_information_upsert(
+  projectId = "<RepoName>",
+  displayName = "<Human-readable repository name>",
+  description = "Purpose, key boundaries, and stable operating context."
+)
+```
+
+Then verify the client can read it and that it appears in task context:
+
+```text
+project_information_get(projectId = "<RepoName>")
+build_working_context(projectId = "<RepoName>", query = "Initialize repository working context")
+```
+
+Use a normal repository `ProjectId` for project information and work items. Do not create work items under `shared` or `user`.
+
 ## Add AGENTS.md
 
 Place `AGENTS.md` at the repo root.
@@ -95,6 +117,8 @@ Minimum template:
 - At task close, call `conversation_ingest` when the work has reusable value.
 - Save stable decisions, facts, artifacts, and preferences only when they are reusable.
 - Do not write secrets, tokens, private keys, full raw logs, or large diffs.
+- Route unfinished actions to `project_work_item_*`; do not use durable memory or checkpoints as task trackers.
+- Use `discussion_thread_*` only for unresolved coordination that genuinely needs at least two project participants.
 ```
 
 Recommended additions:
@@ -134,6 +158,30 @@ Use ContextHub when you need durable context:
 
 Do not query ContextHub on every message. Query when it changes the quality of a decision, implementation, or diagnosis.
 
+## Route Context to the Right Store
+
+ContextHub has separate stores because searchable content is not automatically appropriate for durable knowledge. Decide the destination before writing:
+
+| Content | Destination | Rules |
+| --- | --- | --- |
+| Confirmed, reusable conclusion for one repo | Current repo `ProjectId` durable memory | Save only verified Facts, Decisions, Artifacts, Preferences, or concise summaries. Exclude reminders, unconfirmed options, and task lists. |
+| Confirmed, decontextualized conclusion reusable by multiple repos | `ProjectId = shared` summary layer | Write only material with long-term value beyond one repo. Read with `useSummaryLayer = true` or `queryMode = SummaryOnly` when needed. |
+| Unfinished action, blocker, owner follow-up, or verification | `project_work_item_*` for the responsible normal repo `ProjectId` | This is the only action-tracking store. Use status, priority, due date, tags, and checklist as appropriate. |
+| Unresolved coordination between at least two repos | `discussion_thread_*` | Use the primary receiving repo as `hostProjectId`, list only required participants, and use the actual speaking repo as `senderProjectId`. |
+| Recoverable conversation progress | `conversation_ingest` with the current repo `ProjectId` | Keep it concise. It may refer to a work item or discussion, but cannot replace either record. |
+
+For a one-way reference to another repository, use the current `projectId` with explicit `includedProjectIds`; do not create a discussion merely to retrieve context. A confirmed discussion outcome belongs in the affected project's knowledge or, when genuinely reusable and decontextualized, in the shared summary layer. Create resulting actions as work items in the repo that owns the work, not automatically in the discussion host project.
+
+### Write Decision
+
+```text
+Confirmed, reusable for this repo?         -> durable memory under this ProjectId
+Confirmed, reusable across multiple repos? -> shared summary layer
+Unfinished action requiring tracking?      -> project work item in responsible ProjectId
+Needs two or more repos to coordinate?     -> participant-scoped discussion
+Need only task recovery?                   -> conversation checkpoint
+```
+
 ## Close A Task
 
 Use `conversation_ingest` for a concise checkpoint when the work should be recoverable later.
@@ -157,7 +205,8 @@ Onboarding is complete when:
 - `build_working_context(projectId = <RepoName>)` returns repo rules or useful context
 - `memory_search` can find a known decision or fact
 - the repo has `AGENTS.md` with a stable `ProjectId`
-- the team knows when to use `conversation_ingest` versus durable memory writes
+- project information has been created and is returned by `build_working_context`
+- the team knows when to use durable memory, shared summary, work items, discussions, and `conversation_ingest`
 
 ## Multi-Repo Context
 
@@ -169,4 +218,4 @@ Examples:
 - deployment repo referencing service repo release behavior
 - docs repo summarizing product architecture
 
-Write cross-repo conclusions to the repo most affected by the decision, or to a shared project only when the conclusion is genuinely shared.
+Write cross-repo conclusions to the repo most affected by the decision, or to the shared summary layer only when the conclusion is genuinely shared and does not retain a repo-specific owner, schedule, task, or sensitive detail.

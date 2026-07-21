@@ -276,7 +276,7 @@ Notes:
 - [Architecture](docs/architecture.md)
 - [MCP usage guide](docs/mcp-usage-guide.md)
 - [Agent connectivity telemetry](docs/agent-connectivity-telemetry.md)
-- [Repo onboarding guide](docs/repo-onboarding.md)
+- [Repo onboarding guide](docs/repo-onboarding.md) — initial `ProjectId`／project information setup and data-routing rules
 - [Public Nginx proxy guide](docs/context-hub-public-nginx.md)
 - [Cloudflare edge rules](docs/context-hub-cloudflare-rules.md)
 - [Design baseline](DESIGN.md)
