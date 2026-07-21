@@ -523,6 +523,15 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         discussionsHtml.Should().Contain("參與專案");
         discussionsHtml.Should().Contain("discussions-workspace");
 
+        using var projectWorkItemsResponse = await client.GetAsync("/project-work-items");
+        projectWorkItemsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var projectWorkItemsHtml = WebUtility.HtmlDecode(await projectWorkItemsResponse.Content.ReadAsStringAsync());
+        projectWorkItemsHtml.Should().Contain("相關代辦");
+        projectWorkItemsHtml.Should().Contain("project-work-items-workspace");
+        projectWorkItemsHtml.Should().Contain("project-work-items-list-column-labels");
+        projectWorkItemsHtml.Should().Contain("檢核清單執行面板");
+        projectWorkItemsHtml.Should().Contain("完成進度");
+
         using var graphResponse = await client.GetAsync("/graph");
         graphResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var graphHtml = WebUtility.HtmlDecode(await graphResponse.Content.ReadAsStringAsync());
@@ -1073,7 +1082,25 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
     public MemoryGraphRequest? LastMemoryGraphRequest { get; private set; }
 
     public Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
-        => Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>([]);
+        => Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>
+        ([
+            new ProjectWorkItemResult(
+                Guid.Parse("e367c784-a8f8-4a17-a94b-8f6f09e2653a"),
+                request.ProjectId,
+                "驗證專案工作區",
+                "確認專案代辦清單與檢核面板皆可使用。",
+                ["Dashboard", "QA"],
+                [
+                    new ProjectWorkItemChecklistItemResult(Guid.Parse("6f593ffd-d345-48d2-b8b1-f7dddff8687b"), "完成清單樣式檢視", true, 0),
+                    new ProjectWorkItemChecklistItemResult(Guid.Parse("b2f65089-5444-4fbe-a456-c90d2d698ff2"), "確認完成按鈕狀態", false, 1)
+                ],
+                ProjectWorkItemStatus.InProgress,
+                0,
+                null,
+                DateTimeOffset.UtcNow.AddHours(-2),
+                DateTimeOffset.UtcNow,
+                null)
+        ]);
     public Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectWorkItemResult(Guid.NewGuid(), request.ProjectId, request.Title, request.Description ?? string.Empty, request.Tags ?? [], [], ProjectWorkItemStatus.Pending, request.Priority, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
     public Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)

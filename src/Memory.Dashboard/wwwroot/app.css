@@ -3111,7 +3111,7 @@ textarea {
 .sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/graph"] { order: 5; }
 .sidebar-nav:has(.nav-item[href="/graph"]) .nav-item[href="/sources"] { order: 6; }
 
-.project-work-item-toolbar, .project-work-item-heading, .project-work-item-toolbar > label, .project-work-item-checklist label { display: flex; align-items: center; gap: .7rem; }
+.project-work-item-toolbar, .project-work-item-heading, .project-work-item-toolbar > label { display: flex; align-items: center; gap: .7rem; }
 .project-work-item-toolbar { justify-content: space-between; }
 .project-work-item-toolbar > label { min-width: min(100%, 25rem); }
 .project-work-item-toolbar select { min-width: 12rem; }
@@ -3125,33 +3125,51 @@ textarea {
 .project-work-item p { color: var(--text-subtle); white-space: pre-wrap; }
 .project-work-item-tags { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .45rem; }
 .project-work-item-tags span { padding: .12rem .42rem; border: 1px solid var(--border); border-radius: 999px; color: var(--text-subtle); font-size: .76rem; }
-.project-work-item-checklist { display: grid; gap: .48rem; margin: .8rem 0; }
+.project-work-item-checklist { display: grid; margin-top: .8rem; border-top: 1px solid var(--border); }
 .project-work-item.completed { opacity: .72; }
 @media (max-width: 640px) { .project-work-item-form { grid-template-columns: 1fr; } .project-work-item-heading { gap: .65rem; flex-direction: column; } .project-work-item-toolbar { align-items: stretch; flex-direction: column; } }
 
 /* Project work items follow the discussion master-detail workspace. */
 .project-work-items-page { grid-template-rows: minmax(0, 1fr); }
-.project-work-items-workspace { display: grid; grid-template-columns: minmax(19rem, .82fr) minmax(0, 1.6fr); min-height: clamp(30rem, calc(var(--dashboard-viewport-height) - 15rem), 52rem); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg-panel); }
-.project-work-items-list-panel, .project-work-item-detail-panel { min-width: 0; min-height: 0; padding: var(--dashboard-panel-padding-block) var(--dashboard-panel-padding-inline); }
-.project-work-items-list-panel { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: .8rem; border-right: 1px solid var(--border); }
-.project-work-items-filter-toolbar { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: .55rem; }
+.project-work-items-workspace { display: grid; grid-template-columns: minmax(26rem, 54fr) minmax(25rem, 46fr); min-height: clamp(30rem, calc(var(--dashboard-viewport-height) - 15rem), 52rem); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-panel); }
+.project-work-items-list-panel, .project-work-item-detail-panel { min-width: 0; min-height: 0; padding: 0; }
+.project-work-items-list-panel { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); border-right: 1px solid var(--border); }
+.project-work-items-list-panel .panel-heading-row { padding: .9rem .9rem .55rem; }
+.project-work-items-filter-toolbar { display: grid; grid-template-columns: minmax(10rem, 1.35fr) repeat(2, minmax(7rem, 1fr)); gap: .45rem; padding: .55rem .9rem .8rem; border-bottom: 1px solid var(--border); }
+.project-work-items-list-column-labels { display: grid; grid-template-columns: minmax(8rem, .85fr) minmax(11rem, 1.25fr) minmax(7.75rem, auto); gap: .7rem; padding: .5rem .9rem; color: var(--text-subtle); font-family: "JetBrains Mono", Consolas, monospace; font-size: .67rem; letter-spacing: .04em; text-transform: uppercase; }
+.project-work-items-list-column-labels span:last-child { text-align: right; }
 .project-work-items-list-scroll, .project-work-item-detail-scroll { min-height: 0; overflow: auto; scrollbar-gutter: stable; }
-.project-work-item-list-item { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: .8rem; padding: .75rem .2rem; text-align: left; color: inherit; background: transparent; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
-.project-work-item-list-item > span { min-width: 0; display: grid; gap: .18rem; }
-.project-work-item-list-item strong, .project-work-item-list-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-work-item-list-item small, .project-work-item-list-meta { color: var(--text-subtle); font-size: .76rem; }
-.project-work-item-list-item.selected { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
-.project-work-item-detail-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 1rem; }
-.project-work-item-detail-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
-.project-work-item-detail-heading h2 { margin: .2rem 0 0; }
-.project-work-item-description { margin-top: 0; white-space: pre-wrap; color: var(--text-subtle); }
+.project-work-items-list-scroll { border-top: 1px solid var(--border); }
+.project-work-item-list-item { display: grid; width: 100%; grid-template-columns: minmax(8rem, .85fr) minmax(11rem, 1.25fr) minmax(7.75rem, auto); align-items: center; gap: .7rem; padding: .75rem .9rem; text-align: left; color: inherit; background: transparent; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.project-work-item-list-item:hover, .project-work-item-list-item.selected { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.project-work-item-list-item.selected { box-shadow: inset 3px 0 0 var(--accent); }
+.project-work-item-list-project, .project-work-item-list-summary, .project-work-item-list-progress { min-width: 0; display: grid; gap: .28rem; }
+.project-work-item-list-project code { overflow: hidden; color: var(--accent); font-size: .73rem; text-overflow: ellipsis; white-space: nowrap; }
+.project-work-item-list-tags { overflow: hidden; color: var(--text-muted); font-size: .71rem; text-overflow: ellipsis; white-space: nowrap; }
+.project-work-item-list-summary strong { overflow: hidden; color: var(--text); font-size: .84rem; text-overflow: ellipsis; white-space: nowrap; }
+.project-work-item-list-summary .status-badge { justify-self: start; padding: .12rem .38rem; font-size: .66rem; }
+.project-work-item-list-progress { justify-items: end; color: var(--text-muted); font-family: "JetBrains Mono", Consolas, monospace; font-size: .69rem; text-align: right; white-space: nowrap; }
+.project-work-item-list-progress strong { color: var(--text); font-size: .73rem; }
+.project-work-item-detail-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.project-work-item-detail-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; padding: 1rem 1rem .75rem; border-bottom: 1px solid var(--border); }
+.project-work-item-detail-heading h2 { margin: .3rem 0 .55rem; font-size: 1.08rem; }
+.project-work-item-heading-side { display: grid; align-content: start; justify-items: end; gap: .5rem; color: var(--text-muted); font-family: "JetBrains Mono", Consolas, monospace; font-size: .69rem; text-align: right; white-space: nowrap; }
+.project-work-item-detail-scroll { padding: 1rem; }
+.project-work-item-description { margin: 0; color: var(--text); font-size: .86rem; line-height: 1.55; white-space: pre-wrap; }
+.project-work-item-execution-panel { margin-top: 1.15rem; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in srgb, var(--bg-panel) 86%, var(--bg) 14%); overflow: hidden; }
+.project-work-item-execution-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem .9rem; border-bottom: 1px solid var(--border); }
+.project-work-item-execution-heading > div { display: grid; gap: .2rem; }.project-work-item-execution-heading > div > span { color: var(--text-muted); font-size: .72rem; }.project-work-item-execution-heading .primary-button { min-height: 2rem; font-size: .74rem; }
+.project-work-item-progress-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .7rem; padding: .65rem .9rem; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: .72rem; }.project-work-item-progress-summary strong { color: var(--text); font-size: .74rem; white-space: nowrap; }
+.project-work-item-progress-track { height: .35rem; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--border) 82%, transparent); }.project-work-item-progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
+.project-work-item-checklist-row { display: flex; align-items: center; gap: .7rem; min-height: 3.55rem; padding: .65rem .9rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 76%, transparent); cursor: pointer; }.project-work-item-checklist-row:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }.project-work-item-checklist-row input { flex: 0 0 auto; inline-size: 1rem; block-size: 1rem; accent-color: var(--accent); }.project-work-item-checklist-row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }.project-work-item-checklist-copy { display: grid; gap: .2rem; min-width: 0; }.project-work-item-checklist-copy strong { color: var(--text); font-size: .82rem; font-weight: 500; }.project-work-item-checklist-copy small { color: var(--text-muted); font-size: .7rem; }.project-work-item-checklist-row.completed { background: color-mix(in srgb, var(--ok) 7%, transparent); }.project-work-item-checklist-row.completed .project-work-item-checklist-copy strong { color: var(--text-muted); text-decoration: line-through; }.project-work-item-checklist-row.completed .project-work-item-checklist-copy small { color: var(--ok); }
+.project-work-item-checklist-helper { padding: .65rem .9rem; color: var(--text-subtle); font-size: .72rem; }
 
 /* Keep the retention table inside its own scroll host at dense widths. */
 .retention-page-body .retention-workspace-layout, .retention-page-body .retention-list-panel, .retention-page-body .retention-list-body { min-width: 0; max-width: 100%; }
 .retention-page-body .retention-table-shell { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto !important; overflow-y: auto !important; }
 .retention-page-body .retention-table { width: max(100%, 620px); min-width: 620px; }
-@media (max-width: 900px) { .project-work-items-workspace { grid-template-columns: 1fr; min-height: auto; } .project-work-items-list-panel { grid-template-rows: auto auto minmax(16rem, 34vh); border-right: 0; border-bottom: 1px solid var(--border); } .project-work-item-detail-panel { min-height: 24rem; } .retention-page-body .retention-table { min-width: 580px; } }
-@media (max-width: 640px) { .project-work-items-filter-toolbar { grid-template-columns: 1fr; } .project-work-item-detail-heading { flex-direction: column; } .retention-page-body .retention-table { min-width: 540px; } .retention-table-col-kind { width: 15%; } .retention-table-col-memory { width: 33%; } .retention-table-col-signal { width: 35%; } .retention-table-col-action { width: 17%; } }
+@media (max-width: 960px) { .project-work-items-workspace { grid-template-columns: 1fr; min-height: auto; } .project-work-items-list-panel { grid-template-rows: auto auto auto minmax(16rem, 34vh); border-right: 0; border-bottom: 1px solid var(--border); } .project-work-item-detail-panel { min-height: 24rem; } .project-work-items-list-scroll { max-height: 24rem; } .retention-page-body .retention-table { min-width: 580px; } }
+@media (max-width: 720px) { .project-work-items-filter-toolbar { grid-template-columns: 1fr; } .project-work-items-list-column-labels { display: none; } .project-work-item-list-item { grid-template-columns: minmax(0, 1fr) auto; }.project-work-item-list-summary { grid-column: 1; }.project-work-item-list-progress { grid-column: 2; grid-row: 1 / span 2; }.project-work-item-detail-heading { flex-direction: column; }.project-work-item-heading-side { justify-items: start; text-align: left; }.project-work-item-execution-heading { align-items: start; flex-direction: column; }.project-work-item-progress-summary { grid-template-columns: 1fr; }.project-work-item-progress-summary strong { white-space: normal; } .retention-page-body .retention-table { min-width: 540px; } .retention-table-col-kind { width: 15%; } .retention-table-col-memory { width: 33%; } .retention-table-col-signal { width: 35%; } .retention-table-col-action { width: 17%; } }
 
 .retention-memory-title,
 .retention-memory-meta,
