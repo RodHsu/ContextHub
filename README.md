@@ -12,6 +12,9 @@ The goal is to keep durable context outside the prompt while still letting agent
 - Local ONNX embedding service, with no external embedding API required at runtime
 - Blazor dashboard for memory, logs, jobs, telemetry, security, storage, and runtime status
 - Explicit user preference management through MCP tools and REST APIs
+- Durable project information, explicit project hierarchy, and participant-scoped cross-project discussions
+- Project work items with checklists, ownership boundaries, and completion guards
+- Non-destructive knowledge review that keeps knowledge, discussions, work items, and governance actions distinct
 - DB-first runtime logs that can be searched and promoted into durable memory
 - Retrieval telemetry and maintenance APIs for retention, summaries, and reclaim workflows
 - Chat-agent gateway for restricted MCP access with OAuth/OIDC and proposal-gated writes
@@ -138,8 +141,11 @@ Primary tools:
 - `memory_upsert`
 - `memory_update`
 - `conversation_ingest`
+- `project_information_get` / `project_information_upsert`
 - `discussion_thread_create` / `discussion_threads_list` / `discussion_message_create`
 - `project_hierarchy_set_children`
+- `project_work_item_create` / `project_work_item_update` / `project_work_items_list`
+- `daily_memory_review`
 - `log_search`
 - `log_read`
 - `promote_log_slice_to_memory`
@@ -224,6 +230,9 @@ Key routes:
 - `/graph`
 - `/sources`
 - `/retention`
+- `/project-information`
+- `/project-work-items`
+- `/discussions`
 - `/inbox`
 - `/chatgpt-proposals`
 - `/governance`
@@ -236,6 +245,8 @@ Key routes:
 - `/performance`
 - `/settings`
 - `/account/tokens`
+- `/connectivity`
+- `/mcp-tools`
 
 ## Development
 
@@ -264,6 +275,7 @@ Notes:
 
 - [Architecture](docs/architecture.md)
 - [MCP usage guide](docs/mcp-usage-guide.md)
+- [Agent connectivity telemetry](docs/agent-connectivity-telemetry.md)
 - [Repo onboarding guide](docs/repo-onboarding.md)
 - [Public Nginx proxy guide](docs/context-hub-public-nginx.md)
 - [Cloudflare edge rules](docs/context-hub-cloudflare-rules.md)

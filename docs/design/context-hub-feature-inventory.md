@@ -24,17 +24,23 @@ ContextHub Dashboard
 │   ├── Runtime /runtime
 │   ├── Logs /logs
 │   ├── Jobs /jobs
-│   └── Performance /performance
+│   ├── Performance /performance
+│   └── Connectivity /connectivity
 ├── Knowledge Work
 │   ├── Graph /graph
 │   ├── Memories /memories
 │   ├── Retention /retention
-│   └── Sources /sources
+│   ├── Sources /sources
+│   └── Project Work Items /project-work-items
+├── Project Collaboration
+│   ├── Project Information /project-information
+│   └── Discussions /discussions
 ├── Governance
 │   ├── Inbox /inbox
 │   ├── Governance /governance
 │   ├── Evaluation /evaluation
-│   └── ChatGPT Proposals /chatgpt-proposals
+│   ├── ChatGPT Proposals /chatgpt-proposals
+│   └── MCP Tools /mcp-tools
 ├── Administration
 │   ├── Preferences /preferences
 │   ├── Storage /storage
@@ -76,6 +82,7 @@ ContextHub Dashboard
 | `/logs` | Search and inspect runtime logs | Query bar, severity filter, log table, log reader, copy line | empty, validation error, selectable log text |
 | `/jobs` | Inspect and operate background jobs | Job table, detail drawer, retry, cancel, copy result | failed retry, destructive confirmation |
 | `/performance` | Run and inspect performance probes | Probe form, metrics, charts, payload reader, retry | validation error, measurement failed |
+| `/connectivity` | Inspect agent-to-ContextHub MCP connectivity telemetry | Active policy, recent observations, summaries, and retention context | no sampled observations, stale summary, telemetry disabled |
 
 ## Knowledge Work
 
@@ -85,6 +92,14 @@ ContextHub Dashboard
 | `/memories` | Search and inspect memory items | Filters, memory table, detail drawer, content reader, revisions, chunks | no results, conflict, copyable readers |
 | `/retention` | Review retention candidates and cleanup decisions | Run summary, generate list, preview delete, apply delete, candidate table, decision panel | busy, blocked, destructive confirmation |
 | `/sources` | Manage source inventory and sync status | Source table, detail drawer, trigger sync, pause/resume, failed diagnostics | secret redaction, unhealthy source gating |
+| `/project-work-items` | Execute user-managed work for one project | Project and status filters, work list, detail reader, ordered checklist, completion action | checklist completion guard, blocked/cancelled distinction, empty result |
+
+## Project Collaboration
+
+| Route | Page Purpose | Key Functions | Required States / Guardrails |
+| --- | --- | --- | --- |
+| `/project-information` | Inspect and maintain durable project background | Project selector, description editor, lifecycle controls, project hierarchy | hidden/archived distinction, lifecycle confirmation, no implicit scope change |
+| `/discussions` | Read and manage participant-scoped cross-project threads | Project filter, thread list, message reader, create/reply actions, unread state | participant access boundary, closed thread, empty inbox, discussion not presented as knowledge |
 
 ## Governance
 
@@ -94,6 +109,7 @@ ContextHub Dashboard
 | `/governance` | Manage policy rules, exceptions, and approvals | Policy table, exception drawer, approval workflow, warnings | permission denied, publish guard |
 | `/evaluation` | Review evaluation runs and regressions | Run selector, scorecards, failure table, evidence drawer | stale result warning, code/diff local scroll |
 | `/chatgpt-proposals` | Review chat-agent write proposals | Filters, proposal queue, review surface, decision zone, audit trail | pending/applied distinction, no secret exposure |
+| `/mcp-tools` | Explain ContextHub MCP and REST surfaces | Endpoint comparison, tool catalog, suggested task sequence | direct versus proposal-gated writes, no secret-bearing configuration examples |
 
 ## Administration
 

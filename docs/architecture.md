@@ -98,6 +98,10 @@ Memory.Dashboard
 - `promote_log_slice_to_memory`
 - `enqueue_reindex`
 - performance probe orchestration
+- durable project information and project lifecycle orchestration
+- participant-scoped cross-project discussions and project hierarchy metadata
+- project work items and checklist completion guards
+- non-destructive knowledge review across knowledge, discussions, work items, and governance records
 
 這層是系統的用例核心，REST 與 MCP 都共用這一層。
 
@@ -368,6 +372,24 @@ DB-first logs 的主表。
 - `derived_from`
 - `related_decision`
 
+### 5.8 專案協作資料
+
+專案協作資料與 durable memory 分開儲存，避免把尚未定案的討論或待辦混入檢索知識。
+
+- `project_information`
+  - 每個 `ProjectId` 的正式名稱、描述與 lifecycle 狀態
+  - `build_working_context` 會將其作為固定背景帶回
+- `project_hierarchies`
+  - 父子 repo 的組織關係；不授予 token 存取權，也不會複製記憶
+- `discussion_threads`、`discussion_participants`、`discussion_messages`
+  - host project 與明確 participant scope 的跨專案討論
+  - 討論訊息不會自動成為 memory 或 conversation insight
+- `project_work_items`、`project_work_item_checklist_items`
+  - 使用者管理的專案代辦、tag、priority、due date 與檢核清單
+  - 代辦有未完成的 checklist item 時不得轉為 `Completed`
+
+這些資料都必須通過相同的 tenant、owner 與 `ProjectId` authorization 檢查；它們不是共享知識或自動化 governance suggested action 的替代品。
+
 ## 6. User Preference 設計
 
 這是 ContextHub 用來「顯式了解使用者」的正式能力。
@@ -497,6 +519,9 @@ chunk 命中後再 regroup 成 item，避免同一份 memory 因多個 chunk 重
 - `userPreferences`
 - `suggestedTests`
 - `citations`
+- `projectInformation`
+
+`projectInformation` 是固定的專案背景；task-shaped query 命中的 facts、decisions、artifacts 與 episodes 則仍由檢索層決定。跨專案 discussion 與 project work item 不會因為同一個 `ProjectId` 而被自動併入 working context。
 
 ### 9.1 為什麼要結構化
 
@@ -528,6 +553,10 @@ chunk 命中後再 regroup 成 item，避免同一份 memory 因多個 chunk 重
 - `user_preference_upsert`
 - `user_preference_list`
 - `user_preference_archive`
+- `project_information_get` / `project_information_upsert` / `project_information_update_lifecycle`
+- `discussion_thread_*` 與 `project_hierarchy_*`
+- `project_work_item_create` / `project_work_item_update` / `project_work_items_list`
+- `daily_memory_review`
 
 ### 10.2 REST
 
@@ -561,6 +590,10 @@ chunk 命中後再 regroup 成 item，避免同一份 memory 因多個 chunk 重
 - `GET /api/user/preferences`
 - `POST /api/user/preferences`
 - `PATCH /api/user/preferences/{id}`
+- `GET/PUT/POST /api/project-information/*`
+- `GET/POST/PUT /api/discussions/threads/*`
+- `GET/POST/PUT /api/work-items/*`
+- `POST /api/knowledge-reviews`
 
 ### 10.3 MCP 與 REST 的關係
 

@@ -88,12 +88,19 @@ Do not write:
 | `conversation_ingest` | Saving a concise checkpoint for future task continuity |
 | `conversation_sessions_list` | Auditing staged conversation sessions |
 | `conversation_insights_list` | Reviewing staged conversation insights and promotion state |
+| `project_information_get` | Reading fixed project background before task-specific retrieval |
+| `project_information_upsert` | Creating or correcting the durable name and description for one ProjectId on trusted `/mcp` |
+| `project_information_update_lifecycle` | Hiding, unhiding, archiving, or restoring a project on trusted `/mcp`; archiving excludes it from default retrieval |
 | `project_hierarchy_set_children` | Maintaining the child repositories managed by one parent ProjectId; this does not change ACLs; available on `/mcp` and `/mcp-chat` |
 | `project_hierarchy_get_children` | Reading the configured child repositories for one parent ProjectId; available on `/mcp` and `/mcp-chat` |
 | `discussion_thread_create` | Starting a persistent, participant-scoped discussion hosted by a target project; available on `/mcp` and `/mcp-chat` |
 | `discussion_threads_list` | Polling discussion threads visible to one participant ProjectId; available on `/mcp` and `/mcp-chat` |
 | `discussion_thread_get` | Reading one discussion and marking it read for that participant project; available on `/mcp` and `/mcp-chat` |
 | `discussion_message_create` | Posting to an open discussion as an authorized participant; available on `/mcp` and `/mcp-chat` |
+| `project_work_item_create` | Creating a user-managed project task with optional tags, priority, due date, and checklist on trusted `/mcp` |
+| `project_work_item_update` | Updating a project work item; `Completed` requires every checklist item to be completed first |
+| `project_work_items_list` | Listing user-managed work items for one ProjectId; work items are not governance suggested actions |
+| `daily_memory_review` | Reading an actor-scoped, non-destructive review of knowledge, preferences, discussions, work items, insights, actions, and proposals through `/mcp-chat` |
 | `log_search` | Searching recent runtime events |
 | `log_read` | Reading a specific log slice or event |
 | `promote_log_slice_to_memory` | Turning a verified incident into durable knowledge |
@@ -126,6 +133,20 @@ For example, A can open a thread hosted by C with participants A and C. A separa
 Configure parent-to-child repo structure independently with `project_hierarchy_set_children`. It is organizational metadata only: it never grants token access, copies memories, or silently adds children to a discussion.
 
 For `discussion_thread_create`, `discussion_message_create`, and `project_hierarchy_set_children`, pass the contract fields inside the MCP tool's `request` argument, as shown by its tool schema. The same contract is available through both `/mcp` and the OAuth-protected `/mcp-chat` gateway.
+
+## Project Information and Work Items
+
+Project information is the durable, fixed background for a `ProjectId`; it is not a scratchpad. Create or update it only when the project purpose, boundaries, or stable operating description is known. `build_working_context` returns that information separately from task-retrieved knowledge.
+
+Use project work items for actionable, user-managed follow-up. They support `Pending`, `InProgress`, `Blocked`, `Completed`, and `Cancelled` states, plus tags, priority, optional due date, and an ordered checklist. A work item can move to `Completed` only when every checklist item is complete. Do not use work items to store an architecture decision or use a discussion thread as a substitute for an auditable task.
+
+```text
+Stable project background -> project_information_*
+Question, proposal, or reply -> discussion_thread_* / discussion_message_create
+Action with an owner or checklist -> project_work_item_*
+Reusable verified fact or decision -> memory_upsert / memory_update
+Automated governance candidate -> suggested-action or proposal workflow
+```
 
 ## Standard Task Lifecycle
 

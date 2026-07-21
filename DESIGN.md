@@ -13,6 +13,7 @@ It is not a marketing landing page. The first screen after login should help an 
 - Is the system healthy?
 - Are memories, logs, jobs, and telemetry current?
 - Is any queue, proposal, or governance item waiting for review?
+- Which project is in scope, and are its discussions or work items waiting for action?
 - Can I inspect or act without losing context?
 
 ## Design Source
@@ -81,6 +82,9 @@ Rules:
 | `MasterDetail` | Desktop split view; tablet/mobile drawer or full-width detail |
 | `ContentReader` | Selectable text, copy action, wrap toggle, visible scrollbar, bounded height |
 | `FormSection` | Label above control, inline validation, dirty state, disabled explanation |
+| `ProjectScope` | A visible project identifier, its durable description, and lifecycle state; project scope must not be inferred from a generic list selection |
+| `DiscussionWorkspace` | Participant-scoped thread list and reader; clearly distinguish discussion from durable knowledge and from project work items |
+| `WorkItemWorkspace` | Filterable project work list, execution checklist, status, and completion guard; completion remains disabled until every checklist item is complete |
 | `RefreshState` | Preserve current data while refresh is running; update client-local timestamp on success |
 | `DestructiveDialog` | Object name, impact preview, consequence, and typed confirmation for high-risk actions |
 | `AsyncState` | Loading, stale, empty, error, retry, disabled, and success states preserve layout shape |
@@ -91,8 +95,10 @@ Rules:
 | --- | --- |
 | Operations | `/`, `/monitoring`, `/runtime`, `/logs`, `/jobs`, `/performance` |
 | Knowledge work | `/graph`, `/memories`, `/retention`, `/sources` |
-| Governance | `/inbox`, `/governance`, `/evaluation`, `/chatgpt-proposals` |
+| Project collaboration | `/project-information`, `/project-work-items`, `/discussions` |
+| Governance | `/inbox`, `/governance`, `/evaluation`, `/chatgpt-proposals`, `/mcp-tools` |
 | Administration | `/preferences`, `/storage`, `/security`, `/settings`, `/account/tokens` |
+| Operations detail | `/connectivity` |
 | Boundaries | `/login`, `/forbidden`, `/not-found`, `/Error` |
 
 Every route should have:
