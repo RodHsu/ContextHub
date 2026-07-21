@@ -499,7 +499,15 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         projectInformationHtml.Should().Contain("system:project-information");
         projectInformationHtml.Should().Contain("下屬專案");
         projectInformationHtml.Should().Contain("child-projects-picker");
-        projectInformationHtml.Should().Contain("展開複選");
+        projectInformationHtml.Should().Contain("直接勾選");
+        projectInformationHtml.Should().NotContain("<details");
+        projectInformationHtml.Should().Contain("專案工作區");
+        projectInformationHtml.Should().Contain("project-workspace-links");
+        projectInformationHtml.Should().Contain("跨專案討論");
+        projectInformationHtml.Should().Contain("系統維運");
+        projectInformationHtml.Should().Contain("專案工作與知識");
+        projectInformationHtml.Should().Contain("治理與審核");
+        projectInformationHtml.Should().Contain("系統與個人設定");
         projectInformationHtml.Should().Contain("背景注入");
         projectInformationHtml.Should().Contain("顯示範圍");
 

@@ -2,10 +2,10 @@
 @inject IContextHubApiClient ApiClient
 @inject NavigationManager Navigation
 
-<PageTitle>Context Hub | 專案資訊</PageTitle>
+<PageTitle>Context Hub | 專案工作區</PageTitle>
 
-<PageViewport Title="專案資訊"
-              Subtitle="為協作與 build_working_context 維護專案的固定背景。">
+<PageViewport Title="專案工作區"
+              Subtitle="集中管理協作範圍、working context 與專案生命週期。">
     <Actions>
         <div class="page-actions-secondary">
             <button class="ghost-button" @onclick="LoadAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">重新載入</button>
@@ -38,6 +38,11 @@
                     <div><dt>Project ID</dt><dd>@_projectId</dd></div>
                     <div><dt>最後更新</dt><dd>@(_information?.UpdatedAt.LocalDateTime.ToString("yyyy/MM/dd HH:mm") ?? "尚未建立")</dd></div>
                 </dl>
+                <nav class="project-workspace-links" aria-label="專案工作區捷徑">
+                    <a href="/discussions">跨專案討論</a>
+                    <a href="/project-work-items">專案待辦</a>
+                    <a href="/memories">相關記憶</a>
+                </nav>
                 <section class="project-context-contract">
                     <span>Context contract</span>
                     <p><code>system:project-information</code></p>
@@ -45,8 +50,8 @@
                 </section>
                 <section class="project-context-contract">
                     <span>下屬專案</span>
-                    <details class="child-projects-picker" aria-label="選擇下屬專案">
-                        <summary><span>@ChildProjectsSelectionText</span><small>展開複選</small></summary>
+                    <div class="child-projects-picker" aria-label="選擇下屬專案">
+                        <div class="child-projects-picker-heading"><span>@ChildProjectsSelectionText</span><small>直接勾選</small></div>
                         <div class="child-projects-picker-options">
                             @foreach (var project in _projects.Where(project => !string.Equals(project.Information.ProjectId, _projectId, StringComparison.OrdinalIgnoreCase)))
                             {
@@ -60,14 +65,14 @@
                                 </label>
                             }
                         </div>
-                    </details>
+                    </div>
                     <button class="lifecycle-action" @onclick="SaveChildrenAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">儲存下屬專案</button>
                     <small>按住 Ctrl／Cmd 可複選。用於表示此專案管理哪些 repo；不會自動授權、共享記憶或加入討論。</small>
                 </section>
             </aside>
 
             <main class="project-editor">
-                <div class="studio-eyebrow">專案概覽</div>
+                <div class="studio-eyebrow">工作區背景</div>
                 <label class="display-name-field">
                     <span>顯示名稱</span>
                     <input @bind="_displayName" disabled="@(!_editing)" placeholder="ContextHub" />
