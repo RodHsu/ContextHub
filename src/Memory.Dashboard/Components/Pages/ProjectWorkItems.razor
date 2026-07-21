@@ -11,14 +11,14 @@
         {
             <section class="panel project-work-item-compose">
                 <div class="panel-heading-row"><div><div class="panel-title">建立專案代辦</div><div class="panel-heading-meta">標籤用逗號分隔，檢核清單每行一項。</div></div><button class="ghost-button" @onclick="ToggleComposer">取消</button></div>
-                <div class="project-work-item-form"><label><span>標題</span><input @bind="_title" aria-label="代辦標題" /></label><label><span>標籤</span><input @bind="_tags" placeholder="發布, API" /></label><label class="wide"><span>內容</span><textarea @bind="_description"></textarea></label><label class="wide"><span>檢核清單</span><textarea @bind="_checklist" placeholder="完成 API 測試&#10;完成瀏覽器驗證"></textarea></label></div>
+                <div class="project-work-item-form"><label><span>所屬專案</span><select @bind="_createProjectId" aria-label="選擇建立代辦的專案">@foreach (var project in _projects) { <option value="@project.Information.ProjectId">@project.Information.DisplayName</option> }</select></label><label><span>標題</span><input @bind="_title" aria-label="代辦標題" /></label><label><span>標籤</span><input @bind="_tags" placeholder="發布, API" /></label><label class="wide"><span>內容</span><textarea @bind="_description"></textarea></label><label class="wide"><span>檢核清單</span><textarea @bind="_checklist" placeholder="完成 API 測試&#10;完成瀏覽器驗證"></textarea></label></div>
                 <button class="primary-button" @onclick="CreateAsync" disabled="@_loading">建立</button>
             </section>
         }
         <section class="project-work-items-workspace">
             <aside class="project-work-items-list-panel">
                 <div class="panel-heading-row"><div><div class="panel-title">相關代辦</div><div class="panel-heading-meta">依專案、狀態或內容篩選，選擇後在右側處理。</div></div><button class="ghost-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
-                <div class="project-work-items-filter-toolbar" aria-label="代辦篩選"><input @bind="_query" @bind:event="oninput" @bind:after="ApplyFilters" placeholder="搜尋標題、內容或 tag" aria-label="搜尋專案代辦" /><select @bind="_projectId" @bind:after="LoadAsync" aria-label="選擇代辦專案">@foreach (var project in _projects) { <option value="@project.Information.ProjectId">@project.Information.DisplayName</option> }</select><select @bind="_statusFilter" @bind:after="ApplyFilters" aria-label="篩選代辦狀態"><option value="">所有狀態</option>@foreach (var status in WorkItemStatuses) { <option value="@status">@StatusLabel(status)</option> }</select></div>
+                <div class="project-work-items-filter-toolbar" aria-label="代辦篩選"><input @bind="_query" @bind:event="oninput" @bind:after="ApplyFilters" placeholder="搜尋標題、內容或 tag" aria-label="搜尋專案代辦" /><select @bind="_projectId" @bind:after="LoadAsync" aria-label="選擇代辦專案"><option value="">所有專案</option>@foreach (var project in _projects) { <option value="@project.Information.ProjectId">@project.Information.DisplayName</option> }</select><select @bind="_statusFilter" @bind:after="ApplyFilters" aria-label="篩選代辦狀態"><option value="">所有狀態</option>@foreach (var status in WorkItemStatuses) { <option value="@status">@StatusLabel(status)</option> }</select></div>
                 <div class="project-work-items-list-column-labels" aria-hidden="true"><span>專案</span><span>工作內容</span><span>進度</span></div>
                 <div class="project-work-items-list-scroll">
                     @if (FilteredItems.Count == 0) { <div class="empty-inline">此專案尚未建立符合條件的代辦。</div> }
@@ -53,13 +53,26 @@
 @code {
     private IReadOnlyList<ProjectInformationListItem> _projects = [];
     private IReadOnlyList<ProjectWorkItemResult> _items = [];
-    private string _projectId = string.Empty, _title = string.Empty, _description = string.Empty, _tags = string.Empty, _checklist = string.Empty, _query = string.Empty, _statusFilter = string.Empty;
+    private string _projectId = string.Empty, _createProjectId = string.Empty, _title = string.Empty, _description = string.Empty, _tags = string.Empty, _checklist = string.Empty, _query = string.Empty, _statusFilter = string.Empty;
     private Guid? _selectedId; private bool _creating, _loading; private string? _error;
     private IReadOnlyList<ProjectWorkItemResult> FilteredItems => _items.Where(item => string.IsNullOrWhiteSpace(_statusFilter) || string.Equals(item.Status.ToString(), _statusFilter, StringComparison.OrdinalIgnoreCase)).Where(item => string.IsNullOrWhiteSpace(_query) || item.Title.Contains(_query, StringComparison.OrdinalIgnoreCase) || item.Description.Contains(_query, StringComparison.OrdinalIgnoreCase) || item.Tags.Any(tag => tag.Contains(_query, StringComparison.OrdinalIgnoreCase))).OrderByDescending(item => item.UpdatedAt).ToArray();
     private IReadOnlyList<ProjectWorkItemStatus> WorkItemStatuses => _items.Select(item => item.Status).Distinct().OrderBy(status => status).ToArray();
     private ProjectWorkItemResult? Selected => _selectedId is Guid id ? _items.FirstOrDefault(item => item.Id == id) : null;
-    protected override async Task OnInitializedAsync() { _projects = await ApiClient.GetProjectInformationProjectsAsync(false, CancellationToken.None); _projectId = _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty; await LoadAsync(); }
-    private async Task LoadAsync() { if (string.IsNullOrWhiteSpace(_projectId)) return; _loading = true; _error = null; try { _items = await ApiClient.GetProjectWorkItemsAsync(new ProjectWorkItemListRequest(_projectId), CancellationToken.None); _selectedId = FilteredItems.FirstOrDefault()?.Id; } catch (Exception ex) { _error = ex.Message; } finally { _loading = false; } }
+    protected override async Task OnInitializedAsync() { _projects = await ApiClient.GetProjectInformationProjectsAsync(false, CancellationToken.None); _createProjectId = _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty; await LoadAsync(); }
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            var projectIds = string.IsNullOrWhiteSpace(_projectId) ? _projects.Select(project => project.Information.ProjectId) : [_projectId];
+            var resultSets = await Task.WhenAll(projectIds.Select(projectId => ApiClient.GetProjectWorkItemsAsync(new ProjectWorkItemListRequest(projectId), CancellationToken.None)));
+            _items = resultSets.SelectMany(items => items).ToArray();
+            _selectedId = FilteredItems.FirstOrDefault()?.Id;
+        }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _loading = false; }
+    }
     private void Select(Guid id) => _selectedId = id;
     private void ApplyFilters()
     {
@@ -69,7 +82,7 @@
         }
     }
     private void ToggleComposer() => _creating = !_creating;
-    private async Task CreateAsync() { _loading = true; _error = null; try { await ApiClient.CreateProjectWorkItemAsync(new ProjectWorkItemCreateRequest(_projectId, _title, _description, Split(_tags), Split(_checklist)), CancellationToken.None); _title = _description = _tags = _checklist = string.Empty; _creating = false; await LoadAsync(); } catch (Exception ex) { _error = ex.Message; } finally { _loading = false; } }
+    private async Task CreateAsync() { if (string.IsNullOrWhiteSpace(_createProjectId)) { _error = "請先選擇建立代辦的專案。"; return; } _loading = true; _error = null; try { await ApiClient.CreateProjectWorkItemAsync(new ProjectWorkItemCreateRequest(_createProjectId, _title, _description, Split(_tags), Split(_checklist)), CancellationToken.None); _title = _description = _tags = _checklist = string.Empty; _creating = false; await LoadAsync(); } catch (Exception ex) { _error = ex.Message; } finally { _loading = false; } }
     private async Task ToggleChecklistAsync(ProjectWorkItemResult workItem, ProjectWorkItemChecklistItemResult item, bool isCompleted) { _loading = true; _error = null; try { await ApiClient.SetProjectWorkItemChecklistCompletionAsync(workItem.Id, item.Id, isCompleted, CancellationToken.None); await LoadAsync(); _selectedId = workItem.Id; } catch (Exception ex) { _error = ex.Message; } finally { _loading = false; } }
     private async Task CompleteAsync(ProjectWorkItemResult workItem) { _loading = true; _error = null; try { await ApiClient.UpdateProjectWorkItemAsync(new ProjectWorkItemUpdateRequest(workItem.Id, Status: ProjectWorkItemStatus.Completed), CancellationToken.None); await LoadAsync(); _selectedId = workItem.Id; } catch (Exception ex) { _error = ex.Message; } finally { _loading = false; } }
     private static string[] Split(string value) => value.Split([',', '\n', '\r'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);

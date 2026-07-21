@@ -527,6 +527,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         projectWorkItemsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var projectWorkItemsHtml = WebUtility.HtmlDecode(await projectWorkItemsResponse.Content.ReadAsStringAsync());
         projectWorkItemsHtml.Should().Contain("相關代辦");
+        projectWorkItemsHtml.Should().Contain("所有專案");
         projectWorkItemsHtml.Should().Contain("project-work-items-workspace");
         projectWorkItemsHtml.Should().Contain("project-work-items-list-column-labels");
         projectWorkItemsHtml.Should().Contain("檢核清單執行面板");
