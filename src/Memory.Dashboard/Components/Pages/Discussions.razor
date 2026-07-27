@@ -1,5 +1,6 @@
 @page "/discussions"
 @inject IContextHubApiClient ApiClient
+@inject IJSRuntime JsRuntime
 
 <PageTitle>ContextHub | 跨專案討論</PageTitle>
 
@@ -27,19 +28,29 @@
             <aside class="discussion-list-panel">
                 <div class="panel-heading-row discussion-list-heading"><div><div class="panel-title">相關討論</div><div class="panel-heading-meta">依專案、參與者、狀態或內容篩選</div></div><button class="ghost-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
                 <div class="discussion-filter-toolbar" aria-label="討論篩選">
+                    <select @bind="_readerProjectId" @bind:after="ReaderProjectChangedAsync" aria-label="讀取身分">
+                        @foreach (var project in _projects)
+                        {
+                            <option value="@project.Information.ProjectId">以 @project.Information.DisplayName 讀取</option>
+                        }
+                    </select>
                     <input @bind="_search" @bind:event="oninput" @bind:after="ApplyFiltersAsync" placeholder="搜尋討論內容或主題" aria-label="搜尋討論" />
                     <select @bind="_hostProjectFilter" @bind:after="ApplyFiltersAsync" aria-label="篩選主責專案"><option value="">所有主責專案</option>@foreach (var project in HostProjects) { <option value="@project">@project</option> }</select>
                     <select @bind="_participantProjectFilter" @bind:after="ApplyFiltersAsync" aria-label="篩選參與專案"><option value="">所有參與專案</option>@foreach (var project in ParticipantProjects) { <option value="@project">@project</option> }</select>
                     <select @bind="_statusFilter" @bind:after="ApplyFiltersAsync" aria-label="篩選狀態"><option value="">所有狀態</option>@foreach (var status in Statuses) { <option value="@status">@status</option> }</select>
                 </div>
-                <div class="discussion-list-column-labels" aria-hidden="true"><span>專案與參與者</span><span>討論內容</span><span>最後活動</span></div>
-                <div class="discussion-list-scroll">
+                <div class="discussion-list-column-labels" aria-hidden="true"><span></span><span>專案與參與者</span><span>討論內容</span><span>最後活動</span></div>
+                <div class="discussion-list-scroll" data-scroll-viewport="true">
                     @if (FilteredThreads.Count == 0) { <div class="empty-inline">沒有符合篩選條件的討論。</div> }
                     @foreach (var thread in PagedThreads)
                     {
-                        <button class="discussion-list-item @(_selectedThreadId == thread.Id ? "selected" : string.Empty)" @onclick="() => SelectThreadAsync(thread.Id)">
+                        var unreadCount = EffectiveUnreadCount(thread);
+                        <button class="discussion-list-item @(_selectedThreadId == thread.Id ? "selected" : string.Empty) @(unreadCount > 0 ? "unread" : string.Empty)"
+                                @onclick="() => SelectThreadAsync(thread.Id)"
+                                aria-label="@DiscussionItemLabel(thread, unreadCount)">
+                            <span class="discussion-unread-dot" aria-hidden="true"></span>
                             <span class="discussion-list-project"><code>@thread.HostProjectId</code><span class="discussion-list-participants">@string.Join(" · ", thread.ParticipantProjectIds)</span></span>
-                            <span class="discussion-list-summary"><strong>@thread.Title</strong><span>@(thread.UnreadCount > 0 ? $"{thread.UnreadCount} 則未讀" : "已讀")</span></span>
+                            <span class="discussion-list-summary"><strong>@thread.Title</strong><span>@(unreadCount > 0 ? $"{unreadCount} 則未讀" : "已讀")</span></span>
                             <span class="discussion-list-time"><ClientLocalTime Value="thread.UpdatedAt" /></span>
                         </button>
                     }
@@ -53,10 +64,31 @@
                 @if (_selected is null) { <div class="empty-state">從左側選擇一個討論串。</div> }
                 else
                 {
-                    <div class="discussion-thread-heading"><div><div class="studio-eyebrow">主責專案 <code>@_selected.HostProjectId</code></div><h2>@_selected.Title</h2><div class="discussion-participant-chips">@foreach (var participant in _selected.ParticipantProjectIds) { <span class="discussion-chip @(string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase) ? "host" : string.Empty)">@participant</span> }</div></div><div class="discussion-heading-side"><span class="status-badge success">@_selected.Status</span><span><ClientLocalTime Value="_selected.UpdatedAt" /></span></div></div>
-                    <div class="discussion-thread-meta"><span>參與專案 @(_selected.ParticipantProjectIds.Count)</span><span>內容僅對參與專案可見</span></div>
-                    <div class="discussion-message-stream">@foreach (var message in _selected.Messages) { <article class="discussion-message"><div><strong>@message.SenderProjectId</strong><span><ClientLocalTime Value="message.CreatedAt" /></span></div><p>@message.Content</p></article> }</div>
-                    <div class="discussion-reply"><select @bind="_replyProjectId" aria-label="回覆專案">@foreach (var participant in _selected.ParticipantProjectIds) { <option value="@participant">以 @participant 回覆</option> }</select><textarea @bind="_reply" placeholder="回覆討論…"></textarea><button class="primary-button" @onclick="ReplyAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_reply))">送出</button></div>
+                    <div class="discussion-thread-heading"><div><div class="studio-eyebrow">主責專案 <code>@_selected.HostProjectId</code></div><h2>@_selected.Title</h2><div class="discussion-participant-chips">@foreach (var participant in _selected.ParticipantProjectIds) { <span class="discussion-chip @(string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase) ? "host" : string.Empty)">@participant</span> }</div></div><div class="discussion-heading-side"><span class="status-badge @(IsOpenThread(_selected) ? "success" : "neutral")">@_selected.Status</span>@if (CanCloseSelected) { <button class="ghost-button" @onclick="CloseSelectedAsync" disabled="@_loading">關閉討論</button> }<span><ClientLocalTime Value="_selected.UpdatedAt" /></span></div></div>
+                    <div class="discussion-thread-meta"><span>參與專案 @(_selected.ParticipantProjectIds.Count)</span><span>讀取身分 @_selected.ReaderProjectId</span><span>內容僅對參與專案可見</span></div>
+                    <div class="discussion-message-stream" data-scroll-viewport="true" @onscroll="MessageStreamScrolledAsync">
+                        @foreach (var message in _selected.Messages)
+                        {
+                            var isUnread = IsUnreadMessage(message.Id);
+                            <article class="discussion-message @(isUnread ? "unread" : string.Empty)"
+                                     data-thread-id="@_selected.Id"
+                                     data-message-id="@message.Id"
+                                     data-unread="@(isUnread ? "true" : "false")">
+                                <div>
+                                    <strong>@message.SenderProjectId</strong>
+                                    <span class="discussion-message-meta">
+                                        @if (isUnread)
+                                        {
+                                            <span class="discussion-message-unread">未讀</span>
+                                        }
+                                        <ClientLocalTime Value="message.CreatedAt" />
+                                    </span>
+                                </div>
+                                <p>@message.Content</p>
+                            </article>
+                        }
+                    </div>
+                    <div class="discussion-reply"><select @bind="_replyProjectId" aria-label="回覆專案" disabled="@(!IsOpenThread(_selected))">@foreach (var participant in _selected.ParticipantProjectIds) { <option value="@participant">以 @participant 回覆</option> }</select><textarea @bind="_reply" placeholder="@(IsOpenThread(_selected) ? "回覆討論…" : "此討論串已關閉，無法回覆。")" disabled="@(!IsOpenThread(_selected))"></textarea><button class="primary-button" @onclick="ReplyAsync" disabled="@(_loading || !IsOpenThread(_selected) || string.IsNullOrWhiteSpace(_reply))">送出</button></div>
                 }
             </main>
         </section>
@@ -69,11 +101,16 @@
     private IReadOnlyList<DiscussionThreadResult> _threads = [];
     private DiscussionThreadDetailResult? _selected;
     private Guid? _selectedThreadId;
-    private string _reply = string.Empty, _replyProjectId = string.Empty, _newHostProjectId = string.Empty, _newSenderProjectId = string.Empty, _newTitle = string.Empty, _newParticipants = string.Empty, _newMessage = string.Empty;
+    private string _reply = string.Empty, _replyProjectId = string.Empty, _readerProjectId = string.Empty, _newHostProjectId = string.Empty, _newSenderProjectId = string.Empty, _newTitle = string.Empty, _newParticipants = string.Empty, _newMessage = string.Empty;
     private string _search = string.Empty, _hostProjectFilter = string.Empty, _participantProjectFilter = string.Empty, _statusFilter = string.Empty;
     private string? _error;
     private bool _loading, _creating;
+    private bool _advancingReadCursor;
     private int _currentPage = 1;
+    private readonly Dictionary<Guid, DateTimeOffset> _uiReadAt = new();
+    private readonly HashSet<Guid> _selectedUnreadMessageIds = [];
+    private Guid? _pendingMessageScrollThreadId;
+    private string _pendingReadProjectId = string.Empty;
 
     private IReadOnlyList<DiscussionThreadResult> FilteredThreads => _threads
         .Where(thread => string.IsNullOrWhiteSpace(_hostProjectFilter) || string.Equals(thread.HostProjectId, _hostProjectFilter, StringComparison.OrdinalIgnoreCase))
@@ -97,12 +134,50 @@
         await LoadAsync();
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_pendingMessageScrollThreadId is not { } threadId || !string.Equals(_selected?.ReaderProjectId, _pendingReadProjectId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _pendingMessageScrollThreadId = null;
+        var scrollTarget = await JsRuntime.InvokeAsync<string?>("contextHubDiscussions.scrollToFirstUnreadOrLatest", threadId.ToString("D"));
+        if (string.IsNullOrWhiteSpace(scrollTarget))
+        {
+            return;
+        }
+
+    }
+
     private async Task LoadAsync()
     {
         _loading = true; _error = null; _currentPage = 1;
-        try { _threads = await ApiClient.GetDiscussionThreadsAsync(new DiscussionThreadListRequest(Limit: 100), CancellationToken.None); await EnsureSelectionAsync(); }
+        try
+        {
+            _threads = await ApiClient.GetDiscussionThreadsAsync(new DiscussionThreadListRequest(ProjectId: ReaderProjectIdOrNull, Limit: 100), CancellationToken.None);
+            if (string.IsNullOrWhiteSpace(_readerProjectId))
+            {
+                _readerProjectId = ResolveInitialReaderProjectId(_threads);
+                if (!string.IsNullOrWhiteSpace(_readerProjectId))
+                {
+                    _threads = await ApiClient.GetDiscussionThreadsAsync(new DiscussionThreadListRequest(ProjectId: _readerProjectId, Limit: 100), CancellationToken.None);
+                }
+            }
+
+            await EnsureSelectionAsync();
+        }
         catch (Exception ex) { _error = ex.Message; }
         finally { _loading = false; }
+    }
+
+    private async Task ReaderProjectChangedAsync()
+    {
+        _uiReadAt.Clear();
+        _selectedUnreadMessageIds.Clear();
+        _selected = null;
+        _selectedThreadId = null;
+        await LoadAsync();
     }
 
     private async Task ApplyFiltersAsync()
@@ -129,7 +204,83 @@
 
     private async Task SelectThreadAsync(Guid id)
     {
-        _selectedThreadId = id; _selected = await ApiClient.GetDiscussionThreadAsync(id, string.Empty, CancellationToken.None); _replyProjectId = _selected?.ParticipantProjectIds.FirstOrDefault() ?? string.Empty; _reply = string.Empty;
+        _selectedThreadId = id;
+        _selectedUnreadMessageIds.Clear();
+        _selected = await ApiClient.GetDiscussionThreadAsync(id, ReaderProjectIdOrNull ?? string.Empty, CancellationToken.None);
+        _replyProjectId = _selected?.ParticipantProjectIds.FirstOrDefault(project => string.Equals(project, _readerProjectId, StringComparison.OrdinalIgnoreCase)) ?? _selected?.ParticipantProjectIds.FirstOrDefault() ?? string.Empty;
+        _reply = string.Empty;
+        foreach (var messageId in _selected?.UnreadMessageIds ?? [])
+        {
+            _selectedUnreadMessageIds.Add(messageId);
+        }
+
+        if (_selected is not null)
+        {
+            _pendingMessageScrollThreadId = _selected.Id;
+            _pendingReadProjectId = _selected.ReaderProjectId;
+        }
+    }
+
+    private async Task MessageStreamScrolledAsync()
+    {
+        if (_advancingReadCursor || _selected is not { } selected || _selectedUnreadMessageIds.Count == 0)
+        {
+            return;
+        }
+
+        var isAtBottom = await JsRuntime.InvokeAsync<bool>("contextHubDiscussions.isMessageStreamAtBottom", selected.Id.ToString("D"));
+        if (!isAtBottom || selected.Messages.LastOrDefault() is not { } lastMessage)
+        {
+            return;
+        }
+
+        _advancingReadCursor = true;
+        try
+        {
+            var updated = await ApiClient.AdvanceDiscussionThreadReadCursorAsync(selected.Id, selected.ReaderProjectId, lastMessage.Id, CancellationToken.None);
+            if (updated is not null)
+            {
+                _threads = _threads.Select(thread => thread.Id == updated.Id ? updated : thread).ToArray();
+                _selectedUnreadMessageIds.Clear();
+                _uiReadAt[selected.Id] = DateTimeOffset.UtcNow;
+            }
+        }
+        catch (Exception exception)
+        {
+            _error = exception.Message;
+        }
+        finally
+        {
+            _advancingReadCursor = false;
+        }
+    }
+
+    private async Task CloseSelectedAsync()
+    {
+        if (_selected is not { } selected || !CanCloseSelected)
+        {
+            return;
+        }
+
+        _loading = true;
+        _error = null;
+        try
+        {
+            var updated = await ApiClient.CloseDiscussionThreadAsync(selected.Id, CancellationToken.None);
+            if (updated is not null)
+            {
+                _threads = _threads.Select(thread => thread.Id == updated.Id ? updated : thread).ToArray();
+                _selected = selected with { Status = updated.Status, UpdatedAt = updated.UpdatedAt };
+            }
+        }
+        catch (Exception exception)
+        {
+            _error = exception.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
     }
 
     private void ToggleComposer() { _creating = !_creating; _newHostProjectId = string.IsNullOrWhiteSpace(_newHostProjectId) ? _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty : _newHostProjectId; _newSenderProjectId = string.IsNullOrWhiteSpace(_newSenderProjectId) ? _newHostProjectId : _newSenderProjectId; }
@@ -147,5 +298,31 @@
         try { await ApiClient.CreateDiscussionMessageAsync(new DiscussionMessageCreateRequest(_selected.Id, _replyProjectId, _reply), CancellationToken.None); await SelectThreadAsync(_selected.Id); await LoadAsync(); }
         catch (Exception ex) { _error = ex.Message; }
         finally { _loading = false; }
+    }
+
+    private string? ReaderProjectIdOrNull => string.IsNullOrWhiteSpace(_readerProjectId) ? null : _readerProjectId;
+
+    private int EffectiveUnreadCount(DiscussionThreadResult thread)
+        => _uiReadAt.TryGetValue(thread.Id, out var readAt) && readAt >= thread.UpdatedAt ? 0 : thread.UnreadCount;
+
+    private bool CanCloseSelected => _selected is not null && IsOpenThread(_selected) && string.Equals(_selected.HostProjectId, _readerProjectId, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsOpenThread(DiscussionThreadDetailResult thread)
+        => string.Equals(thread.Status, "Open", StringComparison.OrdinalIgnoreCase);
+
+    private bool IsUnreadMessage(Guid messageId)
+        => _selectedUnreadMessageIds.Contains(messageId);
+
+    private static string DiscussionItemLabel(DiscussionThreadResult thread, int unreadCount)
+        => unreadCount > 0 ? $"{thread.Title}，{unreadCount} 則未讀" : $"{thread.Title}，已讀";
+
+    private string ResolveInitialReaderProjectId(IReadOnlyList<DiscussionThreadResult> threads)
+    {
+        var knownProjects = _projects.Select(project => project.Information.ProjectId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return threads
+            .SelectMany(thread => thread.ParticipantProjectIds)
+            .FirstOrDefault(project => knownProjects.Contains(project))
+            ?? _projects.FirstOrDefault()?.Information.ProjectId
+            ?? string.Empty;
     }
 }

@@ -142,7 +142,7 @@ Primary tools:
 - `memory_update`
 - `conversation_ingest`
 - `project_information_get` / `project_information_upsert`
-- `discussion_thread_create` / `discussion_threads_list` / `discussion_message_create`
+- `discussion_thread_create` / `discussion_threads_list` / `discussion_thread_get` / `discussion_thread_close` / `discussion_message_create`
 - `project_hierarchy_set_children`
 - `project_work_item_create` / `project_work_item_update` / `project_work_items_list`
 - `daily_memory_review`

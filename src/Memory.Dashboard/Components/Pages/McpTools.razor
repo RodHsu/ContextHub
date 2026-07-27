@@ -180,7 +180,7 @@
         new("專案知識", "保存特定專案可重用的事實、決策、產物與工作上下文，讓後續任務可以延續。", "記憶資料、專案資訊", "build_working_context, memory_search, memory_*", "已提供", "ok", "必須明確指定 ProjectId；只有穩定、可重用的內容才應寫入 durable memory。"),
         new("共用知識", "在授權範圍內彙整可跨專案重用的知識，避免把相同背景與決策重複保存。", "記憶資料、工作上下文", "memory_search, memory_get, enqueue_summary_refresh", "已提供", "ok", "仍受 ProjectId、includedProjectIds 與 actor 授權限制；不是所有專案都自動共享。"),
         new("使用者偏好", "保存已明確確認、可長期沿用的使用者協作習慣與回覆偏好。", "使用者偏好", "user_preference_list, user_preference_upsert, user_preference_archive", "已提供", "ok", "Chat gateway 的偏好寫入會先建立 proposal，核准後才套用。"),
-        new("跨專案討論", "以主專案為議題中心，讓參與專案在獨立討論串內溝通，不混入知識或記憶。", "跨專案討論工作台", "discussion_threads_list, discussion_thread_get, discussion_thread_create, discussion_message_create", "已提供", "ok", "清單預設顯示 actor 可參與的所有討論；hostProjectId 表示主要討論對象，participants 決定可見範圍。"),
+        new("跨專案討論", "以主專案為議題中心，讓參與專案在獨立討論串內溝通，不混入知識或記憶。", "跨專案討論工作台", "discussion_threads_list, discussion_thread_get, discussion_thread_create, discussion_thread_close, discussion_message_create", "已提供", "ok", "清單預設顯示 actor 可參與的所有討論；hostProjectId 表示主要討論對象，participants 決定可見範圍，只有主責專案可關閉。"),
         new("專案待辦事項", "顯示目前專案由治理分析與評測產生的待辦，並可接受、執行或忽略。", "專案待辦", "suggested_actions_list, suggested_action_accept, suggested_action_dismiss", "已提供", "ok", "目前是系統產生的待辦，不支援手動建立、指派或跨專案同步；完整人工待辦將另行擴充。")
     ];
 
@@ -205,8 +205,8 @@
         new("conversation_ingest", "寫入對話 checkpoint 到 staging layer，供後續自動 promotion 或人工整理。", "直接寫入", "warn", "收尾、交接或壓縮前使用。"),
         new("conversation_sessions_list / conversation_insights_list", "檢視對話 staging session、insight 與 promotion 狀態。", "讀取", "neutral", "用於每日整理與稽核。"),
         new("project_hierarchy_get_children / project_hierarchy_set_children", "讀取或設定父專案管理的子專案清單。", "混合", "warn", "僅是組織 metadata，不會授權存取、複製記憶或自動加入討論。"),
-        new("discussion_threads_list / discussion_thread_get", "列出或讀取 actor 授權範圍內可參與的跨專案討論；讀取會標記已讀。", "讀取", "neutral", "未指定 ProjectId 時可取得所有可參與討論；討論以 hostProjectId 為主要議題，只有 participant ProjectId 能存取。"),
-        new("discussion_thread_create / discussion_message_create", "建立跨專案討論串或在既有討論回覆。", "直接寫入", "warn", "討論不會變成 memory 或 knowledge；建立時需能讀取所有 participants，回覆僅需 sender 的寫入權限。"),
+        new("discussion_threads_list / discussion_thread_get", "列出或讀取 actor 授權範圍內可參與的跨專案討論；讀取不會直接改變已讀狀態。", "讀取", "neutral", "未指定 ProjectId 時可取得所有可參與討論；討論以 hostProjectId 為主要議題，只有 participant ProjectId 能存取。"),
+        new("discussion_thread_create / discussion_thread_close / discussion_message_create", "建立、關閉跨專案討論串或在既有開放討論回覆。", "直接寫入", "warn", "討論不會變成 memory 或 knowledge；建立時需能讀取所有 participants，關閉需 hostProjectId 寫入權限，回覆僅需 sender 的寫入權限。"),
         new("log_search / log_read / promote_log_slice_to_memory", "查詢 runtime logs，或將已驗證的 log slice 升級為 durable memory。", "混合", "warn", "promotion 屬寫入，應避免保存大型原始 log。"),
         new("user_preference_list / user_preference_upsert / user_preference_archive", "管理長期使用者偏好。", "混合", "warn", "只保存明確、可重用且已確認的偏好。"),
         new("project_artifact_*", "發佈、上傳、搜尋、讀取或清理 project-scoped artifact exchange records。", "混合", "warn", "大型內容應走 managed object pointer，不直接塞進 memory。"),
@@ -226,8 +226,8 @@
         new("log_search / log_read", "查詢 actor 授權範圍內的 runtime logs。", "讀取", "neutral", "避免把大型 raw log 直接升級為記憶。"),
         new("conversation_ingest", "補送 ChatGPT 對話 checkpoint 到 staging layer。", "直接寫入", "warn", "來源會標記為 ChatGPT gateway。"),
         new("project_hierarchy_get_children / project_hierarchy_set_children", "讀取或設定 OAuth actor 授權範圍內的父子專案管理關係。", "混合", "warn", "不改 memory ACL；設定時以 MCP schema 的 request 物件傳入。"),
-        new("discussion_threads_list / discussion_thread_get", "列出或讀取 OAuth actor 可參與的跨專案討論。", "讀取", "neutral", "未指定 ProjectId 時可列出所有可參與討論；以 participant ProjectId 限制可見範圍，讀取時會更新已讀狀態。"),
-        new("discussion_thread_create / discussion_message_create", "直接建立跨專案討論或回覆既有討論。", "直接寫入", "warn", "不建立 durable memory，也不需要 proposal；建立與回覆仍受 OAuth actor 的 Project 授權限制。"),
+        new("discussion_threads_list / discussion_thread_get", "列出或讀取 OAuth actor 可參與的跨專案討論。", "讀取", "neutral", "未指定 ProjectId 時可列出所有可參與討論；以 participant ProjectId 限制可見範圍，讀取不會直接更新已讀狀態。"),
+        new("discussion_thread_create / discussion_thread_close / discussion_message_create", "直接建立、關閉跨專案討論或回覆既有開放討論。", "直接寫入", "warn", "不建立 durable memory，也不需要 proposal；關閉需 hostProjectId 寫入權限，建立與回覆仍受 OAuth actor 的 Project 授權限制。"),
         new("memory_upsert / memory_update / memory_archive / memory_move / memory_delete", "建立記憶寫入、更新、封存、搬移或刪除 proposal。", "需核准", "warn", "ChatGPT 不直接改 durable memory。"),
         new("project_cleanup_apply", "建立 project cleanup apply proposal。", "需核准", "warn", "核准後才封存或刪除候選記憶。"),
         new("user_preference_upsert / user_preference_archive", "建立偏好新增、更新、封存或還原 proposal。", "需核准", "warn", "避免聊天代理自行改長期偏好。"),

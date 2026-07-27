@@ -124,6 +124,10 @@ public sealed class ChatGptGatewayTools(
     public Task<DiscussionThreadDetailResult?> discussion_thread_get(Guid threadId, string readerProjectId, CancellationToken cancellationToken = default)
         => projectDiscussionService.GetThreadAsync(threadId, readerProjectId, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Close a cross-project discussion when the authorized actor has write access to its HostProjectId. Closed discussions retain their history and reject new replies.")]
+    public Task<DiscussionThreadResult?> discussion_thread_close(Guid threadId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.CloseThreadAsync(threadId, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Create a persistent cross-project discussion. The host and every participant must be authorized to the OAuth actor.")]
     public Task<DiscussionThreadDetailResult> discussion_thread_create(DiscussionThreadCreateRequest request, CancellationToken cancellationToken = default)
         => projectDiscussionService.CreateThreadAsync(request, cancellationToken);

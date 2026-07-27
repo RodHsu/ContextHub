@@ -1311,6 +1311,23 @@ discussions.MapGet("/threads/{threadId:guid}", async (Guid threadId, string? rea
     var result = await service.GetThreadAsync(threadId, readerProjectId, cancellationToken);
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
+discussions.MapPost("/threads/{threadId:guid}/close", async (Guid threadId, IProjectDiscussionService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.CloseThreadAsync(threadId, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+discussions.MapPost("/threads/{threadId:guid}/read", async (Guid threadId, DiscussionThreadReadBody body, IProjectDiscussionService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.AdvanceThreadReadCursorAsync(threadId, body.ReaderProjectId, body.LastReadMessageId, cancellationToken);
+        return result is null ? Results.NotFound() : Results.Ok(result);
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["lastReadMessageId"] = [exception.Message] });
+    }
+});
 discussions.MapPost("/threads/{threadId:guid}/messages", async (Guid threadId, DiscussionMessageCreateBody body, IProjectDiscussionService service, CancellationToken cancellationToken) =>
 {
     try { return Results.Created($"/api/discussions/threads/{threadId:D}/messages", await service.AddMessageAsync(new DiscussionMessageCreateRequest(threadId, body.SenderProjectId, body.Content), cancellationToken)); }
@@ -1946,6 +1963,7 @@ internal sealed record TenantUserUpdateBody(
     TenantUserStatus? Status = null,
     string? Password = null);
 internal sealed record DiscussionMessageCreateBody(string SenderProjectId, string Content);
+internal sealed record DiscussionThreadReadBody(string ReaderProjectId, Guid LastReadMessageId);
 internal sealed record ProjectWorkItemUpdateBody(string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
 internal sealed record ProjectWorkItemChecklistCompletionBody(bool IsCompleted);
 internal sealed record ProjectHierarchySetChildrenBody(IReadOnlyList<string>? ChildProjectIds);

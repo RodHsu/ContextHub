@@ -95,7 +95,8 @@ Do not write:
 | `project_hierarchy_get_children` | Reading the configured child repositories for one parent ProjectId; available on `/mcp` and `/mcp-chat` |
 | `discussion_thread_create` | Starting a persistent, participant-scoped discussion hosted by a target project; available on `/mcp` and `/mcp-chat` |
 | `discussion_threads_list` | Polling discussion threads visible to one participant ProjectId; available on `/mcp` and `/mcp-chat` |
-| `discussion_thread_get` | Reading one discussion and marking it read for that participant project; available on `/mcp` and `/mcp-chat` |
+| `discussion_thread_get` | Reading one discussion for a participant project without changing its read cursor; available on `/mcp` and `/mcp-chat` |
+| `discussion_thread_close` | Closing a discussion when the caller has write access to its `hostProjectId`; closed history is retained and new replies are rejected; available on `/mcp` and `/mcp-chat` |
 | `discussion_message_create` | Posting to an open discussion as an authorized participant; available on `/mcp` and `/mcp-chat` |
 | `project_work_item_create` | Creating a user-managed project task with optional tags, priority, due date, and checklist on trusted `/mcp` |
 | `project_work_item_update` | Updating a project work item; `Completed` requires every checklist item to be completed first |
@@ -133,6 +134,8 @@ For example, A can open a thread hosted by C with participants A and C. A separa
 Configure parent-to-child repo structure independently with `project_hierarchy_set_children`. It is organizational metadata only: it never grants token access, copies memories, or silently adds children to a discussion.
 
 For `discussion_thread_create`, `discussion_message_create`, and `project_hierarchy_set_children`, pass the contract fields inside the MCP tool's `request` argument, as shown by its tool schema. The same contract is available through both `/mcp` and the OAuth-protected `/mcp-chat` gateway.
+
+Only the host project can close a discussion: `discussion_thread_close` accepts the thread id, validates the caller's write access to that thread's `hostProjectId`, retains the entire discussion history, and prevents further replies.
 
 ## Project Information and Work Items
 

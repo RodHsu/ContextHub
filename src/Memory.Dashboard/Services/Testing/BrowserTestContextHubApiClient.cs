@@ -658,21 +658,63 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                     $"API contract {index} 對齊",
                     "Open",
                     ["Vital_AirMeet", index % 3 == 0 ? "Vital_AirMeet_DriveApp" : index % 2 == 0 ? "Vital_AirMeet_Document" : "Vital_AirMeet_BackEnd"],
-                    index % 4,
+                    index == 4 ? 0 : index == 5 ? 24 : index % 4,
                     DateTimeOffset.UtcNow.AddDays(-1),
                     DateTimeOffset.UtcNow.AddMinutes(-index)))
                 .ToArray());
 
     public Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken)
-        => Task.FromResult<DiscussionThreadDetailResult?>(new DiscussionThreadDetailResult(
+    {
+        var reader = string.IsNullOrWhiteSpace(readerProjectId) ? "Vital_AirMeet" : readerProjectId;
+        var isAllReadThread = threadId == Guid.Parse("77000000-0000-0000-0000-000000000004");
+        var isManyUnreadThread = threadId == Guid.Parse("77000000-0000-0000-0000-000000000005");
+        var messages = Enumerable.Range(1, 24)
+            .Select(index => new DiscussionMessageResult(
+                Guid.Parse($"77000000-0000-0001-0000-{index:D12}"),
+                isAllReadThread ? reader : isManyUnreadThread ? "Vital_AirMeet_BackEnd" : index % 2 == 0 ? "Vital_AirMeet" : "Vital_AirMeet_BackEnd",
+                $"第 {index} 則 API contract 討論訊息，請確認部署順序與相容性。這段內容刻意保持較長，確保跨專案討論在長訊息下仍能換行、滾動並維持未讀標記可見。",
+                DateTimeOffset.UtcNow.AddMinutes(-24 + index)))
+            .ToArray();
+        var unreadMessageIds = messages
+            .Where(message => isManyUnreadThread || message.CreatedAt >= DateTimeOffset.UtcNow.AddMinutes(-4))
+            .Where(message => !string.Equals(message.SenderProjectId, reader, StringComparison.OrdinalIgnoreCase))
+            .Select(message => message.Id)
+            .ToArray();
+
+        return Task.FromResult<DiscussionThreadDetailResult?>(new DiscussionThreadDetailResult(
             threadId,
             "Vital_AirMeet_BackEnd",
             "API contract alignment",
             "Open",
             ["Vital_AirMeet", "Vital_AirMeet_BackEnd"],
-            Enumerable.Range(1, 24).Select(index => new DiscussionMessageResult(Guid.NewGuid(), index % 2 == 0 ? "Vital_AirMeet" : "Vital_AirMeet_BackEnd", $"第 {index} 則 API contract 討論訊息，請確認部署順序與相容性。", DateTimeOffset.UtcNow.AddMinutes(-index))).ToArray(),
+            messages,
             DateTimeOffset.UtcNow.AddHours(-3),
-            DateTimeOffset.UtcNow.AddMinutes(-5)));
+            DateTimeOffset.UtcNow.AddMinutes(-5),
+            reader,
+            unreadMessageIds));
+    }
+
+    public Task<DiscussionThreadResult?> CloseDiscussionThreadAsync(Guid threadId, CancellationToken cancellationToken)
+        => Task.FromResult<DiscussionThreadResult?>(new DiscussionThreadResult(
+            threadId,
+            "Vital_AirMeet_BackEnd",
+            "API contract alignment",
+            "Closed",
+            ["Vital_AirMeet", "Vital_AirMeet_BackEnd"],
+            0,
+            DateTimeOffset.UtcNow.AddHours(-3),
+            DateTimeOffset.UtcNow));
+
+    public Task<DiscussionThreadResult?> AdvanceDiscussionThreadReadCursorAsync(Guid threadId, string readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken)
+        => Task.FromResult<DiscussionThreadResult?>(new DiscussionThreadResult(
+            threadId,
+            "Vital_AirMeet_BackEnd",
+            "API contract alignment",
+            "Open",
+            ["Vital_AirMeet", "Vital_AirMeet_BackEnd"],
+            0,
+            DateTimeOffset.UtcNow.AddHours(-3),
+            DateTimeOffset.UtcNow));
 
     public Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new DiscussionThreadDetailResult(Guid.NewGuid(), request.HostProjectId, request.Title, "Open", request.ParticipantProjectIds, [new DiscussionMessageResult(Guid.NewGuid(), request.SenderProjectId, request.InitialMessage, DateTimeOffset.UtcNow)], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));

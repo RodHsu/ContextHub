@@ -1680,7 +1680,7 @@ public sealed record DiscussionMessageCreateRequest(Guid ThreadId, string Sender
 public sealed record DiscussionThreadListRequest(string? ProjectId = null, string? HostProjectId = null, string? Status = null, int Limit = 50);
 public sealed record DiscussionMessageResult(Guid Id, string SenderProjectId, string Content, DateTimeOffset CreatedAt);
 public sealed record DiscussionThreadResult(Guid Id, string HostProjectId, string Title, string Status, IReadOnlyList<string> ParticipantProjectIds, int UnreadCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
-public sealed record DiscussionThreadDetailResult(Guid Id, string HostProjectId, string Title, string Status, IReadOnlyList<string> ParticipantProjectIds, IReadOnlyList<DiscussionMessageResult> Messages, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+public sealed record DiscussionThreadDetailResult(Guid Id, string HostProjectId, string Title, string Status, IReadOnlyList<string> ParticipantProjectIds, IReadOnlyList<DiscussionMessageResult> Messages, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string ReaderProjectId = "", IReadOnlyList<Guid>? UnreadMessageIds = null);
 
 public sealed record ProjectWorkItemCreateRequest(string ProjectId, string Title, string? Description = null, IReadOnlyList<string>? Tags = null, IReadOnlyList<string>? ChecklistItems = null, int Priority = 0, DateTimeOffset? DueAt = null);
 public sealed record ProjectWorkItemUpdateRequest(Guid Id, string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
@@ -1695,6 +1695,8 @@ public interface IProjectDiscussionService
     Task<DiscussionThreadDetailResult> CreateThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<DiscussionThreadResult>> ListThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken);
     Task<DiscussionThreadDetailResult?> GetThreadAsync(Guid threadId, string? readerProjectId, CancellationToken cancellationToken);
+    Task<DiscussionThreadResult?> CloseThreadAsync(Guid threadId, CancellationToken cancellationToken);
+    Task<DiscussionThreadResult?> AdvanceThreadReadCursorAsync(Guid threadId, string? readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken);
     Task<DiscussionMessageResult> AddMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken);
 }
 

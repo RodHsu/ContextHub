@@ -479,6 +479,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             "discussion_thread_create",
             "discussion_threads_list",
             "discussion_thread_get",
+            "discussion_thread_close",
             "discussion_message_create"
         });
 

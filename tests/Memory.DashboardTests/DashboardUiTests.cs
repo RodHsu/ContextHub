@@ -518,6 +518,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         discussionsHtml.Should().Contain("建立跨專案討論");
         discussionsHtml.Should().Contain("相關討論");
         discussionsHtml.Should().Contain("依專案、參與者、狀態或內容篩選");
+        discussionsHtml.Should().Contain("讀取身分");
         discussionsHtml.Should().Contain("搜尋討論內容或主題");
         discussionsHtml.Should().Contain("顯示");
         discussionsHtml.Should().Contain("參與專案");
@@ -1707,6 +1708,12 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken)
         => Task.FromResult<DiscussionThreadDetailResult?>(null);
+
+    public Task<DiscussionThreadResult?> CloseDiscussionThreadAsync(Guid threadId, CancellationToken cancellationToken)
+        => Task.FromResult<DiscussionThreadResult?>(null);
+
+    public Task<DiscussionThreadResult?> AdvanceDiscussionThreadReadCursorAsync(Guid threadId, string readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken)
+        => Task.FromResult<DiscussionThreadResult?>(null);
 
     public Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken)
         => throw new NotSupportedException();

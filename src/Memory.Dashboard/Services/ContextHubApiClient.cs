@@ -28,6 +28,8 @@ public interface IContextHubApiClient
     Task<ProjectHierarchyResult> SetProjectChildrenAsync(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<DiscussionThreadResult>> GetDiscussionThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken);
     Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken);
+    Task<DiscussionThreadResult?> CloseDiscussionThreadAsync(Guid threadId, CancellationToken cancellationToken);
+    Task<DiscussionThreadResult?> AdvanceDiscussionThreadReadCursorAsync(Guid threadId, string readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken);
     Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken);
     Task<DiscussionMessageResult> CreateDiscussionMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken);
@@ -219,6 +221,18 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken)
         => GetRequiredAsync<DiscussionThreadDetailResult>($"/api/discussions/threads/{threadId:D}?readerProjectId={Uri.EscapeDataString(readerProjectId)}", cancellationToken)!;
+
+    public async Task<DiscussionThreadResult?> CloseDiscussionThreadAsync(Guid threadId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsync($"/api/discussions/threads/{threadId:D}/close", content: null, cancellationToken);
+        return await ReadRequiredAsync<DiscussionThreadResult>(response, cancellationToken);
+    }
+
+    public async Task<DiscussionThreadResult?> AdvanceDiscussionThreadReadCursorAsync(Guid threadId, string readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/discussions/threads/{threadId:D}/read", new { ReaderProjectId = readerProjectId, LastReadMessageId = lastReadMessageId }, cancellationToken);
+        return await ReadRequiredAsync<DiscussionThreadResult>(response, cancellationToken);
+    }
 
     public async Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken)
     {

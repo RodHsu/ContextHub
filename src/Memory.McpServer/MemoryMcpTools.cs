@@ -169,6 +169,10 @@ public sealed class MemoryMcpTools(
     public Task<DiscussionThreadDetailResult?> discussion_thread_get(Guid threadId, string readerProjectId, CancellationToken cancellationToken = default)
         => projectDiscussionService.GetThreadAsync(threadId, readerProjectId, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Close a cross-project discussion. Only an actor with write access to the thread HostProjectId can close it; closed threads retain their history and reject new replies.")]
+    public Task<DiscussionThreadResult?> discussion_thread_close(Guid threadId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.CloseThreadAsync(threadId, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Reply to a cross-project discussion as SenderProjectId. The sender must be a participant and writable for the current actor.")]
     public Task<DiscussionMessageResult> discussion_message_create(DiscussionMessageCreateRequest request, CancellationToken cancellationToken = default)
         => projectDiscussionService.AddMessageAsync(request, cancellationToken);

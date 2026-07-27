@@ -55,7 +55,7 @@ public sealed class ProjectDiscussionService(
         thread.Messages.Add(new DiscussionMessage { ThreadId = thread.Id, SenderProjectId = sender, Content = request.InitialMessage.Trim(), CreatedAt = now });
         await dbContext.DiscussionThreads.AddAsync(thread, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
-        return MapDetail(thread);
+        return MapDetail(thread, sender);
     }
 
     public async Task<IReadOnlyList<DiscussionThreadResult>> ListThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken)
@@ -82,9 +82,43 @@ public sealed class ProjectDiscussionService(
         var thread = await LoadThreadAsync(threadId, cancellationToken);
         if (thread is null) return null;
         var reader = ResolveReaderProjectId(thread, readerProjectId);
-        thread.Participants.Single(x => x.ProjectId == reader).LastReadAt = clock.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return MapDetail(thread);
+        return MapDetail(thread, reader);
+    }
+
+    public async Task<DiscussionThreadResult?> CloseThreadAsync(Guid threadId, CancellationToken cancellationToken)
+    {
+        var thread = await LoadThreadAsync(threadId, cancellationToken);
+        if (thread is null) return null;
+
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        ActorAuthorization.EnsureProjectAllowed(actor, thread.HostProjectId, write: true);
+
+        if (string.Equals(thread.Status, "Open", StringComparison.OrdinalIgnoreCase))
+        {
+            thread.Status = "Closed";
+            thread.UpdatedAt = clock.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        return MapSummary(thread, thread.HostProjectId);
+    }
+
+    public async Task<DiscussionThreadResult?> AdvanceThreadReadCursorAsync(Guid threadId, string? readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken)
+    {
+        var thread = await LoadThreadAsync(threadId, cancellationToken);
+        if (thread is null) return null;
+        var reader = ResolveReaderProjectId(thread, readerProjectId);
+        var lastReadMessage = thread.Messages.SingleOrDefault(message => message.Id == lastReadMessageId)
+            ?? throw new ArgumentException("The read cursor message does not belong to this discussion thread.", nameof(lastReadMessageId));
+        var participant = thread.Participants.Single(x => x.ProjectId == reader);
+        if (lastReadMessage.CreatedAt > participant.LastReadAt)
+        {
+            participant.LastReadAt = lastReadMessage.CreatedAt;
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        return MapSummary(thread, reader);
     }
 
     public async Task<DiscussionMessageResult> AddMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken)
@@ -152,5 +186,24 @@ public sealed class ProjectDiscussionService(
             : thread.Messages.Count(x => x.CreatedAt > participant.LastReadAt && !string.Equals(x.SenderProjectId, reader, StringComparison.OrdinalIgnoreCase));
         return new(thread.Id, thread.HostProjectId, thread.Title, thread.Status, thread.Participants.Select(x => x.ProjectId).OrderBy(x => x).ToArray(), unreadCount, thread.CreatedAt, thread.UpdatedAt);
     }
-    private static DiscussionThreadDetailResult MapDetail(DiscussionThread thread) => new(thread.Id, thread.HostProjectId, thread.Title, thread.Status, thread.Participants.Select(x => x.ProjectId).OrderBy(x => x).ToArray(), thread.Messages.OrderBy(x => x.CreatedAt).Select(x => new DiscussionMessageResult(x.Id, x.SenderProjectId, x.Content, x.CreatedAt)).ToArray(), thread.CreatedAt, thread.UpdatedAt);
+    private static DiscussionThreadDetailResult MapDetail(DiscussionThread thread, string reader)
+    {
+        var participant = thread.Participants.Single(x => string.Equals(x.ProjectId, reader, StringComparison.OrdinalIgnoreCase));
+        var messages = thread.Messages.OrderBy(x => x.CreatedAt).ToArray();
+        var unreadMessageIds = messages
+            .Where(x => x.CreatedAt > participant.LastReadAt && !string.Equals(x.SenderProjectId, reader, StringComparison.OrdinalIgnoreCase))
+            .Select(x => x.Id)
+            .ToArray();
+        return new(
+            thread.Id,
+            thread.HostProjectId,
+            thread.Title,
+            thread.Status,
+            thread.Participants.Select(x => x.ProjectId).OrderBy(x => x).ToArray(),
+            messages.Select(x => new DiscussionMessageResult(x.Id, x.SenderProjectId, x.Content, x.CreatedAt)).ToArray(),
+            thread.CreatedAt,
+            thread.UpdatedAt,
+            reader,
+            unreadMessageIds);
+    }
 }

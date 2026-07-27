@@ -21,6 +21,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Client;
+using StackExchange.Redis;
 using Testcontainers.PostgreSql;
 using Testcontainers.Redis;
 
@@ -95,6 +96,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         oidcMetadata.GetProperty("registration_endpoint").GetString().Should().Be($"{TestAuthority}/oauth/chat/register");
         oidcMetadata.GetProperty("userinfo_endpoint").GetString().Should().Be($"{TestAuthority}/userinfo");
         oidcMetadata.GetProperty("client_id_metadata_document_supported").GetBoolean().Should().BeTrue();
+        oidcMetadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeFalse();
         oidcMetadata.GetProperty("code_challenge_methods_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("S256");
@@ -212,6 +214,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         metadata.GetProperty("token_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/token");
         metadata.GetProperty("registration_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/register");
         metadata.GetProperty("client_id_metadata_document_supported").GetBoolean().Should().BeTrue();
+        metadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeFalse();
+        oidcMetadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeFalse();
         metadata.GetProperty("token_endpoint_auth_methods_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("none");
@@ -343,6 +347,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         {
             AllowAutoRedirect = false
         });
+        var metadata = await (await client.GetAsync("/.well-known/oauth-authorization-server/mcp-chat"))
+            .Content.ReadFromJsonAsync<JsonElement>();
+        metadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeTrue();
         var verifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
         var challenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(verifier)));
         var redirectUri = "https://chatgpt.com/connector/oauth/issuer-opt-in";
@@ -510,6 +517,13 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             tokenResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
             refreshToken = (await tokenResponse.Content.ReadFromJsonAsync<JsonElement>())
                 .GetProperty("refresh_token").GetString()!;
+        }
+
+        await using (var redis = await ConnectionMultiplexer.ConnectAsync(environment.RedisConnectionString))
+        {
+            var legacyRedisKey = $"memory:chatgpt-gateway-tests:chatgpt-oauth:refresh:{refreshToken}";
+            (await redis.GetDatabase().StringGetAsync(legacyRedisKey)).IsNull.Should().BeTrue(
+                "refresh tokens must remain usable after Redis loses transient OAuth state");
         }
 
         await using var thirdFactory = new ChatGptGatewayApplicationFactory(
@@ -704,6 +718,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "discussion_threads_list",
             "discussion_thread_get",
             "discussion_thread_create",
+            "discussion_thread_close",
             "discussion_message_create",
             "project_hierarchy_get_children",
             "project_hierarchy_set_children",
@@ -804,6 +819,16 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var chatToMcpId = ExtractToolJson(chatToMcpPayload).GetProperty("id").GetGuid();
         await UseDirectMcpAsync(mcp => mcp.discussion_message_create(new(chatToMcpId, peerProjectId, "Replied by direct MCP.")));
         (await UseDirectMcpAsync(mcp => mcp.discussion_thread_get(chatToMcpId, ProjectId)))!.Messages.Should().HaveCount(2);
+
+        // Both MCP surfaces can close a thread hosted by an authorized ProjectId.
+        (await UseDirectMcpAsync(mcp => mcp.discussion_thread_close(mcpToMcp.Id)))!.Status.Should().Be("Closed");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => UseDirectMcpAsync(mcp => mcp.discussion_message_create(new(mcpToMcp.Id, peerProjectId, "This reply must be rejected."))));
+        var closePayload = await SendMcpAsync(chatClient, sessionId!, 107, "tools/call", new
+        {
+            name = "discussion_thread_close",
+            arguments = new { threadId = chatToChatId }
+        });
+        ExtractToolJson(closePayload).GetProperty("status").GetString().Should().Be("Closed");
     }
 
     [DockerRequiredFact]
