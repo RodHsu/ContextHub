@@ -18,6 +18,7 @@ internal sealed class SelfHostedOAuthService(
     IPasswordHasher<object> passwordHasher,
     RedisOAuthStateStore stateStore,
     PostgresOAuthClientStore clientStore,
+    PostgresOAuthTokenStateStore tokenStateStore,
     IOptions<ChatGptGatewayOptions> gatewayOptions,
     IChatGptOAuthClientMetadataFetcher clientMetadataFetcher,
     ILogger<SelfHostedOAuthService> logger,
@@ -202,10 +203,11 @@ internal sealed class SelfHostedOAuthService(
             user.Username,
             user.Email,
             user.DisplayName);
-        await stateStore.SetAuthorizationCodeAsync(
+        await tokenStateStore.SetAuthorizationCodeAsync(
             code,
             payload,
-            TimeSpan.FromMinutes(Math.Max(1, options.AuthorizationCodeLifetimeMinutes)));
+            TimeSpan.FromMinutes(Math.Max(1, options.AuthorizationCodeLifetimeMinutes)),
+            cancellationToken);
 
         var includeIssuer = options.IncludeIssuerInAuthorizationResponse;
         var redirectValues = new Dictionary<string, string?>
@@ -240,7 +242,12 @@ internal sealed class SelfHostedOAuthService(
 
         var payload = string.IsNullOrWhiteSpace(code)
             ? null
-            : await stateStore.TakeAuthorizationCodeAsync(code);
+            : await tokenStateStore.TakeAuthorizationCodeAsync(code, clientId, CancellationToken.None);
+        if (payload is null && !string.IsNullOrWhiteSpace(code))
+        {
+            // Compatibility bridge: complete authorization flows that started before the durable store deployment.
+            payload = await stateStore.TakeAuthorizationCodeAsync(code);
+        }
         if (payload is null)
         {
             LogOAuthToken(clientId, "authorization_code", resource, "failed", "invalid_code");
@@ -306,7 +313,12 @@ internal sealed class SelfHostedOAuthService(
 
         var payload = string.IsNullOrWhiteSpace(refreshToken)
             ? null
-            : await stateStore.TakeRefreshTokenAsync(refreshToken);
+            : await tokenStateStore.TakeRefreshTokenAsync(refreshToken, clientId, CancellationToken.None);
+        if (payload is null && !string.IsNullOrWhiteSpace(refreshToken))
+        {
+            // Compatibility bridge: rotate existing Redis-backed connections into the durable store.
+            payload = await stateStore.TakeRefreshTokenAsync(refreshToken);
+        }
         if (payload is null)
         {
             LogOAuthToken(clientId, "refresh_token", null, "failed", "invalid_refresh_token");
@@ -428,10 +440,11 @@ internal sealed class SelfHostedOAuthService(
     private async Task<string> CreateRefreshTokenAsync(AuthorizationCodePayload payload, OAuthOptions options)
     {
         var refreshToken = CreateTokenValue(32);
-        await stateStore.SetRefreshTokenAsync(
+        await tokenStateStore.SetRefreshTokenAsync(
             refreshToken,
             payload,
-            TimeSpan.FromDays(Math.Max(1, options.RefreshTokenLifetimeDays)));
+            TimeSpan.FromDays(Math.Max(1, options.RefreshTokenLifetimeDays)),
+            CancellationToken.None);
         return refreshToken;
     }
 

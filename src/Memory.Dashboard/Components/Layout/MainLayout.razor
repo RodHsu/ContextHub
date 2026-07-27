@@ -114,6 +114,18 @@
                             </span>
                             <span class="nav-label">專案工作區</span>
                         </NavLink>
+                        <NavLink class="nav-item" href="/project-tree">
+                            <span class="nav-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M6 4v16" />
+                                    <path d="M6 7h7a3 3 0 0 1 3 3v1" />
+                                    <path d="M6 15h7a3 3 0 0 0 3-3v-1" />
+                                    <rect x="15" y="8" width="5" height="5" rx="1" />
+                                    <rect x="15" y="15" width="5" height="5" rx="1" />
+                                </svg>
+                            </span>
+                            <span class="nav-label">專案樹狀圖</span>
+                        </NavLink>
                         <NavLink class="nav-item" href="/graph">
                             <span class="nav-icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -397,6 +409,7 @@
         new("系統維運", "J", "工作佇列", "/jobs", NavLinkMatch.Prefix, true),
         new("系統維運", "P", "效能", "/performance", NavLinkMatch.Prefix, true),
         new("專案工作與知識", "W", "專案工作區", "/project-information", NavLinkMatch.Prefix, false),
+        new("專案工作與知識", "H", "專案樹狀圖", "/project-tree", NavLinkMatch.Prefix, false),
         new("專案工作與知識", "K", "記憶資料", "/memories", NavLinkMatch.Prefix, false),
         new("專案工作與知識", "X", "跨專案討論", "/discussions", NavLinkMatch.Prefix, false),
         new("專案工作與知識", "I", "專案待辦", "/project-work-items", NavLinkMatch.Prefix, true),

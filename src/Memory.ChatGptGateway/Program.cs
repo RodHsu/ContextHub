@@ -36,6 +36,7 @@ builder.Services.AddMemoryInfrastructure(builder.Configuration, "chatgpt-gateway
 builder.Services.AddScoped<SelfHostedOAuthService>();
 builder.Services.AddSingleton<RedisOAuthStateStore>();
 builder.Services.AddSingleton<PostgresOAuthClientStore>();
+builder.Services.AddSingleton<PostgresOAuthTokenStateStore>();
 
 var gatewayOptions = builder.Configuration.GetSection("ChatGptGateway").Get<ChatGptGatewayOptions>() ?? new ChatGptGatewayOptions();
 var rsaSigningCredentials = gatewayOptions.OAuth.SelfHosted && !string.IsNullOrWhiteSpace(gatewayOptions.OAuth.SelfHostedRsaPrivateKey)
@@ -496,6 +497,7 @@ static IResult CreateAuthorizationServerMetadata(HttpContext context, IOptions<C
         ["S256"],
         GetTokenEndpointAuthenticationMethods(value.OAuth),
         true,
+        value.OAuth.IncludeIssuerInAuthorizationResponse,
         NormalizeScopes(value.OAuth.Scopes));
 
     return Results.Json(metadata);
@@ -517,6 +519,7 @@ static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGa
         ["S256"],
         GetTokenEndpointAuthenticationMethods(value.OAuth),
         true,
+        value.OAuth.IncludeIssuerInAuthorizationResponse,
         ["public"],
         [string.IsNullOrWhiteSpace(value.OAuth.SelfHostedRsaPrivateKey) ? "HS256" : "RS256"],
         NormalizeScopes(value.OAuth.Scopes),
@@ -644,6 +647,7 @@ internal sealed record OAuthAuthorizationServerMetadata(
     [property: JsonPropertyName("code_challenge_methods_supported")] IReadOnlyList<string> CodeChallengeMethodsSupported,
     [property: JsonPropertyName("token_endpoint_auth_methods_supported")] IReadOnlyList<string> TokenEndpointAuthMethodsSupported,
     [property: JsonPropertyName("client_id_metadata_document_supported")] bool ClientIdMetadataDocumentSupported,
+    [property: JsonPropertyName("authorization_response_iss_parameter_supported")] bool AuthorizationResponseIssParameterSupported,
     [property: JsonPropertyName("scopes_supported")] IReadOnlyList<string> ScopesSupported);
 
 internal sealed record OpenIdConfigurationMetadata(
@@ -658,6 +662,7 @@ internal sealed record OpenIdConfigurationMetadata(
     [property: JsonPropertyName("code_challenge_methods_supported")] IReadOnlyList<string> CodeChallengeMethodsSupported,
     [property: JsonPropertyName("token_endpoint_auth_methods_supported")] IReadOnlyList<string> TokenEndpointAuthMethodsSupported,
     [property: JsonPropertyName("client_id_metadata_document_supported")] bool ClientIdMetadataDocumentSupported,
+    [property: JsonPropertyName("authorization_response_iss_parameter_supported")] bool AuthorizationResponseIssParameterSupported,
     [property: JsonPropertyName("subject_types_supported")] IReadOnlyList<string> SubjectTypesSupported,
     [property: JsonPropertyName("id_token_signing_alg_values_supported")] IReadOnlyList<string> IdTokenSigningAlgValuesSupported,
     [property: JsonPropertyName("scopes_supported")] IReadOnlyList<string> ScopesSupported,

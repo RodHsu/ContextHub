@@ -297,6 +297,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.IndexOf("sidebar-build", StringComparison.Ordinal).Should().BeGreaterThan(0);
         overviewHtml.Should().NotContain("sidebar-footer");
         overviewHtml.IndexOf("狀態監控", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("執行參數", StringComparison.Ordinal));
+        overviewHtml.IndexOf("專案工作區", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("專案樹狀圖", StringComparison.Ordinal));
+        overviewHtml.IndexOf("專案樹狀圖", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶圖譜", StringComparison.Ordinal));
         overviewHtml.IndexOf("記憶圖譜", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
         overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal));
         overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("資料來源", StringComparison.Ordinal));
@@ -395,6 +397,15 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         retentionHtml.Should().Contain("審核備註");
         retentionHtml.Should().Contain("複製整理計畫");
         retentionHtml.Should().Contain("開啟記憶資料");
+
+        using var projectTreeResponse = await client.GetAsync("/project-tree");
+        projectTreeResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var projectTreeHtml = WebUtility.HtmlDecode(await projectTreeResponse.Content.ReadAsStringAsync());
+        projectTreeHtml.Should().Contain("專案樹狀圖");
+        projectTreeHtml.Should().Contain("project-tree-workspace");
+        projectTreeHtml.Should().Contain("Dashboard test");
+        projectTreeHtml.Should().Contain("dashboard-test-secondary");
+        projectTreeHtml.Should().Contain("專案工作區");
 
         using var logsResponse = await client.GetAsync("/logs");
         logsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -1670,7 +1681,8 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
     {
         IReadOnlyList<ProjectInformationListItem> projects =
         [
-            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000001"), "dashboard-test", "Dashboard test", "Dashboard UI test project information.", DateTimeOffset.UtcNow), 3)
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000001"), "dashboard-test", "Dashboard test", "Dashboard UI test project information.", DateTimeOffset.UtcNow), 3),
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000002"), "dashboard-test-secondary", "Dashboard test secondary", "Secondary Dashboard UI test project information.", DateTimeOffset.UtcNow), 2)
         ];
         return Task.FromResult(projects);
     }
@@ -1698,7 +1710,12 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
     }
 
     public Task<ProjectHierarchyResult> GetProjectChildrenAsync(string parentProjectId, CancellationToken cancellationToken)
-        => Task.FromResult(new ProjectHierarchyResult(parentProjectId, [], DateTimeOffset.MinValue));
+        => Task.FromResult(new ProjectHierarchyResult(
+            parentProjectId,
+            string.Equals(parentProjectId, "dashboard-test", StringComparison.OrdinalIgnoreCase)
+                ? ["dashboard-test-secondary"]
+                : [],
+            DateTimeOffset.UtcNow));
 
     public Task<ProjectHierarchyResult> SetProjectChildrenAsync(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectHierarchyResult(request.ParentProjectId, request.ChildProjectIds, DateTimeOffset.UtcNow));

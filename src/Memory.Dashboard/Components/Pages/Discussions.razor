@@ -50,7 +50,7 @@
                                 aria-label="@DiscussionItemLabel(thread, unreadCount)">
                             <span class="discussion-unread-dot" aria-hidden="true"></span>
                             <span class="discussion-list-project"><code>@thread.HostProjectId</code><span class="discussion-list-participants">@string.Join(" · ", thread.ParticipantProjectIds)</span></span>
-                            <span class="discussion-list-summary"><strong>@thread.Title</strong><span>@(unreadCount > 0 ? $"{unreadCount} 則未讀" : "已讀")</span></span>
+                            <span class="discussion-list-summary"><strong>@thread.Title</strong><span class="discussion-list-summary-meta"><span class="status-badge discussion-list-status @(IsOpenThread(thread) ? "success" : "neutral")">@thread.Status</span><span>@(unreadCount > 0 ? $"{unreadCount} 則未讀" : "已讀")</span></span></span>
                             <span class="discussion-list-time"><ClientLocalTime Value="thread.UpdatedAt" /></span>
                         </button>
                     }
@@ -64,7 +64,7 @@
                 @if (_selected is null) { <div class="empty-state">從左側選擇一個討論串。</div> }
                 else
                 {
-                    <div class="discussion-thread-heading"><div><div class="studio-eyebrow">主責專案 <code>@_selected.HostProjectId</code></div><h2>@_selected.Title</h2><div class="discussion-participant-chips">@foreach (var participant in _selected.ParticipantProjectIds) { <span class="discussion-chip @(string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase) ? "host" : string.Empty)">@participant</span> }</div></div><div class="discussion-heading-side"><span class="status-badge @(IsOpenThread(_selected) ? "success" : "neutral")">@_selected.Status</span>@if (CanCloseSelected) { <button class="ghost-button" @onclick="CloseSelectedAsync" disabled="@_loading">關閉討論</button> }<span><ClientLocalTime Value="_selected.UpdatedAt" /></span></div></div>
+                    <div class="discussion-thread-heading"><div><div class="studio-eyebrow">主責專案 <code>@_selected.HostProjectId</code></div><h2>@_selected.Title</h2><div class="discussion-participant-chips">@foreach (var participant in _selected.ParticipantProjectIds) { <span class="discussion-chip @(string.Equals(participant, _selected.HostProjectId, StringComparison.OrdinalIgnoreCase) ? "host" : string.Empty)">@participant</span> }</div></div><div class="discussion-heading-side"><span class="status-badge @(IsOpenThread(_selected) ? "success" : "neutral")">@_selected.Status</span>@if (CanCloseSelected) { <button class="ghost-button" @onclick="CloseSelectedAsync" disabled="@_loading">關閉討論</button> } else if (ShowClosePermissionHint) { <span class="discussion-close-permission">僅主責專案 <code>@_selected.HostProjectId</code> 可關閉</span> }<span><ClientLocalTime Value="_selected.UpdatedAt" /></span></div></div>
                     <div class="discussion-thread-meta"><span>參與專案 @(_selected.ParticipantProjectIds.Count)</span><span>讀取身分 @_selected.ReaderProjectId</span><span>內容僅對參與專案可見</span></div>
                     <div class="discussion-message-stream" data-scroll-viewport="true" @onscroll="MessageStreamScrolledAsync">
                         @foreach (var message in _selected.Messages)
@@ -165,7 +165,7 @@
                 }
             }
 
-            await EnsureSelectionAsync();
+            await EnsureSelectionAsync(refreshSelectedDetail: true);
         }
         catch (Exception ex) { _error = ex.Message; }
         finally { _loading = false; }
@@ -194,15 +194,16 @@
         await EnsureSelectionAsync();
     }
 
-    private async Task EnsureSelectionAsync()
+    private async Task EnsureSelectionAsync(bool refreshSelectedDetail = false)
     {
         _currentPage = Math.Clamp(_currentPage, 1, PageCount);
         var selectedIsVisible = PagedThreads.Any(thread => thread.Id == _selectedThreadId);
-        if (!selectedIsVisible && PagedThreads.FirstOrDefault() is { } first) await SelectThreadAsync(first.Id);
+        if (selectedIsVisible && refreshSelectedDetail && _selectedThreadId is { } selectedThreadId) await SelectThreadAsync(selectedThreadId, scrollToTarget: false);
+        else if (!selectedIsVisible && PagedThreads.FirstOrDefault() is { } first) await SelectThreadAsync(first.Id);
         else if (PagedThreads.Count == 0) { _selected = null; _selectedThreadId = null; }
     }
 
-    private async Task SelectThreadAsync(Guid id)
+    private async Task SelectThreadAsync(Guid id, bool scrollToTarget = true)
     {
         _selectedThreadId = id;
         _selectedUnreadMessageIds.Clear();
@@ -214,7 +215,7 @@
             _selectedUnreadMessageIds.Add(messageId);
         }
 
-        if (_selected is not null)
+        if (_selected is not null && scrollToTarget)
         {
             _pendingMessageScrollThreadId = _selected.Id;
             _pendingReadProjectId = _selected.ReaderProjectId;
@@ -307,7 +308,12 @@
 
     private bool CanCloseSelected => _selected is not null && IsOpenThread(_selected) && string.Equals(_selected.HostProjectId, _readerProjectId, StringComparison.OrdinalIgnoreCase);
 
+    private bool ShowClosePermissionHint => _selected is not null && IsOpenThread(_selected) && !string.Equals(_selected.HostProjectId, _readerProjectId, StringComparison.OrdinalIgnoreCase);
+
     private static bool IsOpenThread(DiscussionThreadDetailResult thread)
+        => string.Equals(thread.Status, "Open", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsOpenThread(DiscussionThreadResult thread)
         => string.Equals(thread.Status, "Open", StringComparison.OrdinalIgnoreCase);
 
     private bool IsUnreadMessage(Guid messageId)

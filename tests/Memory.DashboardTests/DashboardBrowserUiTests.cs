@@ -53,13 +53,16 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("monitoring", "/monitoring", "狀態監控", [".monitoring-page-stack", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".page-header", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".content", ".monitoring-page-stack"]),
         new("memories", "/memories", "記憶資料", [".page-actions-secondary .info-popover", ".filter-panel", ".split-layout"], [".page-header", ".filter-panel", ".split-layout"], [".content", ".split-layout"]),
         new("graph", "/graph", "記憶圖譜", [".graph-workspace", ".graph-filter-panel", ".graph-scroll-shell"], [".page-header", ".graph-workspace"], [".content", ".graph-detail-panel"]),
+        new("project-information", "/project-information", "專案工作區", [".project-studio", ".project-identity", ".project-editor", ".lifecycle-inspector"], [".page-header", ".project-identity", ".project-editor", ".lifecycle-inspector"], [".content", ".project-studio"]),
+        new("project-tree", "/project-tree", "專案樹狀圖", [".project-tree-metrics", ".project-tree-workspace", ".project-tree-panel", ".project-tree-inspector"], [".page-header", ".project-tree-metrics", ".project-tree-workspace"], [".content", ".project-tree-list"]),
+        new("discussions", "/discussions", "跨專案討論", [".discussions-workspace", ".discussion-list-panel", ".discussion-thread-panel", ".discussion-message-stream"], [".page-header", ".discussion-list-panel", ".discussion-thread-panel"], [".content", ".discussion-list-scroll", ".discussion-message-stream"]),
         new("sources", "/sources", "資料來源", [".sources-page-stack", ".sources-setup-grid", ".sources-workspace-section"], [".page-header", ".sources-setup-grid", ".sources-workspace-section"], [".content", ".sources-page-stack", ".panel-scroll-body"]),
         new("governance", "/governance", "治理檢查", [".governance-page-stack", ".metric-grid", ".governance-workspace-section"], [".page-header", ".metric-grid", ".governance-workspace-section"], [".content", ".governance-page-stack", ".panel-scroll-body"]),
         new("evaluation", "/evaluation", "評估驗證", [".evaluation-page-stack", ".filter-panel", ".evaluation-workspace-section"], [".page-header", ".filter-panel", ".evaluation-workspace-section"], [".content", ".evaluation-page-stack", ".panel-scroll-body"]),
         new("inbox", "/inbox", "專案待辦", [".inbox-page-stack", ".metric-grid", ".inbox-workspace-section"], [".page-header", ".metric-grid", ".inbox-workspace-section"], [".content", ".inbox-page-stack", ".panel-scroll-body"]),
         new("chatgpt-proposals", "/chatgpt-proposals", "ChatGPT 寫入審核", [".chatgpt-proposals-filter", ".chatgpt-proposals-summary", ".chatgpt-proposals-workspace", ".chatgpt-proposals-list-panel", ".chatgpt-proposals-detail-panel"], [".page-header", ".chatgpt-proposals-filter", ".chatgpt-proposals-workspace"], [".content", ".panel-scroll-body"]),
         new("preferences", "/preferences", "使用者偏好", [".split-layout", ".preferences-list-panel"], [".page-header", ".split-layout"], [".content", ".preferences-list-scroll-shell"]),
-        new("account-tokens", "/account/tokens", "我的 Token", [".settings-form-grid", ".security-token-table", ".table-scroll-shell"], [".page-header", ".panel"], [".content", ".table-scroll-shell"]),
+        new("account-tokens", "/account/tokens", "我的存取權杖", [".settings-form-grid", ".security-token-table", ".table-scroll-shell"], [".page-header", ".panel"], [".content", ".table-scroll-shell"]),
         new("logs", "/logs", "日誌", [".logs-filter-grid", ".split-layout", ".table-scroll-shell"], [".filter-panel", ".split-layout"], [".content", ".table-scroll-shell"]),
         new("jobs", "/jobs", "工作佇列", [".jobs-operations-panel", ".jobs-list-panel", ".jobs-table", ".detail-panel"], [".page-header", ".jobs-operations-panel", ".jobs-page-body > .split-layout"], [".content", ".jobs-table-shell", ".panel-scroll-body"]),
         new("storage", "/storage", "資料庫檢視", [".storage-layout", ".storage-table-panel", ".storage-detail-panel"], [".storage-table-panel", ".storage-detail-panel"], [".content", ".storage-table-list", ".table-scroll-shell"]),
@@ -84,6 +87,9 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         Routes.Single(route => route.Name == "monitoring"),
         Routes.Single(route => route.Name == "memories"),
         Routes.Single(route => route.Name == "graph"),
+        Routes.Single(route => route.Name == "project-information"),
+        Routes.Single(route => route.Name == "project-tree"),
+        Routes.Single(route => route.Name == "discussions"),
         Routes.Single(route => route.Name == "logs"),
         Routes.Single(route => route.Name == "jobs"),
         Routes.Single(route => route.Name == "storage"),
@@ -195,6 +201,185 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         await page.ReloadAsync();
 
         (await projectSelect.InputValueAsync()).Should().Be("dashboard-test-secondary");
+    }
+
+    [Fact]
+    public async Task Project_Information_Workspace_Should_Not_Have_Covered_Panels_Across_Common_Viewports()
+    {
+        var failures = new List<string>();
+        DashboardViewport[] viewports =
+        [
+            new("desktop", 1366, 768),
+            new("tab-s7-landscape", 1280, 800),
+            new("reported-high-dpi", 1205, 1216),
+            new("compact-browser", 1024, 768),
+            new("tab-s7-portrait", 800, 1280),
+            new("mobile", 390, 844)
+        ];
+        string[] selectors =
+        [
+            ".project-identity",
+            ".project-editor",
+            ".lifecycle-inspector",
+            ".child-projects-picker-options",
+            ".description-field textarea"
+        ];
+
+        foreach (var viewport in viewports)
+        {
+            await _fixture.EnsureDashboardRunningAsync();
+            await using var context = await _fixture.CreateContextAsync(viewport);
+            var page = await context.NewPageAsync();
+
+            await LoginAndOpenAsync(page, "/project-information");
+            await page.GetByRole(AriaRole.Heading, new() { Name = "專案工作區" }).WaitForAsync();
+
+            foreach (var selector in selectors)
+            {
+                var locator = page.Locator(selector).First;
+                await locator.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 15000
+                });
+                await locator.ScrollIntoViewIfNeededAsync();
+
+                var hitTestJson = await locator.EvaluateAsync<string>(
+                    @"element => {
+                        const rect = element.getBoundingClientRect();
+                        const visibleLeft = Math.max(rect.left, 0);
+                        const visibleRight = Math.min(rect.right, window.innerWidth);
+                        const visibleTop = Math.max(rect.top, 0);
+                        const visibleBottom = Math.min(rect.bottom, window.innerHeight);
+                        const x = Math.round((visibleLeft + visibleRight) / 2);
+                        const y = Math.round((visibleTop + visibleBottom) / 2);
+                        const hit = document.elementFromPoint(x, y);
+                        return JSON.stringify({
+                            width: rect.width,
+                            height: rect.height,
+                            visibleWidth: Math.max(0, visibleRight - visibleLeft),
+                            visibleHeight: Math.max(0, visibleBottom - visibleTop),
+                            x,
+                            y,
+                            hitTag: hit?.tagName ?? '',
+                            hitClass: typeof hit?.className === 'string' ? hit.className : '',
+                            covered: !(hit === element || element.contains(hit))
+                        });
+                    }");
+
+                using var hitTestDocument = JsonDocument.Parse(hitTestJson);
+                var hitTest = hitTestDocument.RootElement;
+                var width = hitTest.GetProperty("width").GetDouble();
+                var height = hitTest.GetProperty("height").GetDouble();
+                if (width < 8 || height < 8)
+                {
+                    failures.Add($"{viewport.Name} / {selector}: element has tiny visible rect {width}x{height}; {hitTestJson}");
+                    continue;
+                }
+
+                if (hitTest.GetProperty("covered").GetBoolean())
+                {
+                    failures.Add($"{viewport.Name} / {selector}: center point is covered by {hitTest.GetProperty("hitTag").GetString()}.{hitTest.GetProperty("hitClass").GetString()}; {hitTestJson}");
+                }
+            }
+        }
+
+        failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task Discussions_Should_Keep_Unread_Messages_When_Thread_Is_Opened()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("discussions-unread", 1366, 768));
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/discussions");
+        await page.Locator(".discussion-list-item.unread").First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+
+        var unreadThread = page.Locator(".discussion-list-item.unread").First;
+        await unreadThread.ClickAsync();
+
+        await page.WaitForFunctionAsync(
+            "() => document.querySelector('.discussion-message-stream')?.dataset.discussionScrollTarget === 'unread'");
+        await page.Locator(".discussion-list-item.selected.unread").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+        (await page.Locator(".discussion-message.unread").CountAsync()).Should().BeGreaterThan(0);
+        (await page.Locator(".discussion-message-unread").CountAsync()).Should().BeGreaterThan(0);
+    }
+
+    [Fact]
+    public async Task Discussions_Should_Advance_Read_Cursor_Only_After_User_Reaches_The_End()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("discussions-read-cursor", 1366, 768));
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/discussions");
+        await page.GetByRole(AriaRole.Button, new() { Name = "API contract 5 對齊，24 則未讀" }).ClickAsync();
+        await page.WaitForFunctionAsync(
+            "() => document.querySelector('.discussion-message-stream')?.dataset.discussionScrollTarget === 'unread'");
+
+        await page.Locator(".discussion-list-item.selected.unread").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+        (await page.Locator(".discussion-message.unread").CountAsync()).Should().Be(24);
+
+        await page.Locator(".discussion-message-stream").EvaluateAsync(
+            "element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); }");
+
+        await page.Locator(".discussion-list-item.selected:not(.unread)").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+        (await page.Locator(".discussion-message.unread").CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Discussions_Should_Allow_The_Host_Project_To_Close_An_Open_Thread()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("discussions-close", 1366, 768));
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/discussions");
+        await page.GetByLabel("讀取身分").SelectOptionAsync("Vital_AirMeet_BackEnd");
+        await page.Locator(".discussion-list-item").First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+        await page.GetByRole(AriaRole.Button, new() { Name = "關閉討論" }).ClickAsync();
+
+        await page.Locator(".discussion-thread-heading .status-badge:has-text('Closed')").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+        (await page.Locator(".discussion-reply textarea").IsDisabledAsync()).Should().BeTrue();
+        (await page.Locator(".discussion-reply button").IsDisabledAsync()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Discussions_Should_Show_Thread_Status_And_Explain_Close_Permission()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("discussions-status", 1366, 768));
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/discussions");
+        await page.Locator(".discussion-list-status:has-text('Closed')").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+        await page.Locator(".discussion-close-permission").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+        (await page.Locator(".discussion-close-permission").InnerTextAsync()).Should().Contain("僅主責專案");
+
+        await page.Locator(".discussion-list-item", new PageLocatorOptions { HasTextString = "API contract 6 對齊" }).ClickAsync();
+        await page.Locator(".discussion-thread-heading .status-badge:has-text('Closed')").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+        (await page.Locator(".discussion-reply textarea").IsDisabledAsync()).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Discussions_Should_Scroll_To_Latest_Message_When_Selected_Thread_Has_No_Unread_Messages()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("discussions-latest", 1366, 768));
+        var page = await context.NewPageAsync();
+
+        await LoginAndOpenAsync(page, "/discussions");
+        await page.GetByRole(AriaRole.Button, new() { Name = "API contract 4 對齊，已讀" }).ClickAsync();
+
+        await page.WaitForFunctionAsync(
+            "() => document.querySelector('.discussion-message-stream')?.dataset.discussionScrollTarget === 'latest'");
+        (await page.Locator(".discussion-message.unread").CountAsync()).Should().Be(0);
+
+        var expectedMessageId = await page.Locator(".discussion-message").Last.GetAttributeAsync("data-message-id");
+        var actualMessageId = await page.Locator(".discussion-message-stream").GetAttributeAsync("data-last-discussion-scroll");
+        actualMessageId.Should().Be(expectedMessageId);
     }
 
     [Fact]

@@ -3091,6 +3091,7 @@ textarea {
     display: flex;
     justify-content: space-between;
     gap: 1rem;
+    margin-top: var(--dashboard-page-gap);
     min-height: 3.2rem;
     padding: 0.8rem calc(var(--dashboard-content-padding) + 0.25rem);
     border-top: 1px solid var(--border);
@@ -9417,8 +9418,15 @@ a.button-like {
     }
 
     .page-actions {
+        grid-column: 1 / -1;
         width: 100%;
         justify-content: flex-start;
+    }
+
+    .page-actions-primary,
+    .page-actions-secondary,
+    .page-actions-status {
+        min-width: 0;
     }
 
     .page-actions > * {
@@ -9450,6 +9458,14 @@ a.button-like {
 .mcp-tools-page-stack {
     display: grid;
     gap: var(--dashboard-page-gap);
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.mcp-tools-page-stack > * {
+    min-width: 0;
+    max-width: 100%;
 }
 
 .mcp-tools-overview-panel,
@@ -9481,6 +9497,17 @@ a.button-like {
     justify-content: space-between;
     gap: 0.65rem;
     min-width: 0;
+}
+
+.mcp-capability-header > :first-child,
+.mcp-endpoint-header > :first-child {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.mcp-capability-header .status-badge,
+.mcp-endpoint-header .status-badge {
+    flex: 0 0 auto;
 }
 
 .mcp-capability-card > p {
@@ -9557,6 +9584,35 @@ a.button-like {
 
 .mcp-tools-table-shell {
     max-height: none;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    contain: inline-size;
+}
+
+@media (max-width: 640px) {
+    .mcp-tools-page-stack {
+        width: calc(100% - 1rem);
+    }
+
+    .mcp-tools-page-body > .mcp-tools-page-stack {
+        padding-right: 0;
+    }
+
+    .mcp-tools-page-body .mcp-tools-table {
+        width: 100%;
+        min-width: 0;
+        table-layout: fixed;
+    }
+
+    .mcp-tools-page-body .mcp-tools-table th,
+    .mcp-tools-page-body .mcp-tools-table td {
+        min-width: 0;
+        max-width: none;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
 }
 
 .mcp-tools-table th:first-child,

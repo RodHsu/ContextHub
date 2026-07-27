@@ -613,7 +613,10 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         IReadOnlyList<ProjectInformationListItem> projects =
         [
             new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000001"), "dashboard-test", "Dashboard test", "Dashboard UI test project information.", DateTimeOffset.UtcNow), 3),
-            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000002"), "dashboard-test-secondary", "Dashboard test secondary", "Secondary Dashboard UI test project information.", DateTimeOffset.UtcNow), 2)
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000002"), "dashboard-test-secondary", "Dashboard test secondary", "Secondary Dashboard UI test project information.", DateTimeOffset.UtcNow), 2),
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000003"), "Vital_AirMeet", "Vital AirMeet", "AirMeet parent project for cross-repo coordination.", DateTimeOffset.UtcNow), 8),
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000004"), "Vital_AirMeet_BackEnd", "AirMeet BackEnd", "BackEnd service contracts and persistence.", DateTimeOffset.UtcNow), 5),
+            new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000005"), "Vital_AirMeet_Document", "AirMeet Document", "Authoritative product and contract documents.", DateTimeOffset.UtcNow), 4)
         ];
         return Task.FromResult(projects);
     }
@@ -644,30 +647,41 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     }
 
     public Task<ProjectHierarchyResult> GetProjectChildrenAsync(string parentProjectId, CancellationToken cancellationToken)
-        => Task.FromResult(new ProjectHierarchyResult(parentProjectId, [], DateTimeOffset.MinValue));
+    {
+        IReadOnlyList<string> children = parentProjectId switch
+        {
+            "dashboard-test" => ["dashboard-test-secondary"],
+            "Vital_AirMeet" => ["Vital_AirMeet_BackEnd", "Vital_AirMeet_Document"],
+            _ => []
+        };
+        return Task.FromResult(new ProjectHierarchyResult(parentProjectId, children, DateTimeOffset.UtcNow));
+    }
 
     public Task<ProjectHierarchyResult> SetProjectChildrenAsync(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectHierarchyResult(request.ParentProjectId, request.ChildProjectIds, DateTimeOffset.UtcNow));
 
     public Task<IReadOnlyList<DiscussionThreadResult>> GetDiscussionThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken)
-        => Task.FromResult<IReadOnlyList<DiscussionThreadResult>>(
+    {
+        return Task.FromResult<IReadOnlyList<DiscussionThreadResult>>(
             Enumerable.Range(1, 18)
                 .Select(index => new DiscussionThreadResult(
                     Guid.Parse($"77000000-0000-0000-0000-{index:D12}"),
                     index % 3 == 0 ? "Vital_AirMeet_DriveApp" : index % 2 == 0 ? "Vital_AirMeet_Document" : "Vital_AirMeet_BackEnd",
                     $"API contract {index} 對齊",
-                    "Open",
+                    index == 6 ? "Closed" : "Open",
                     ["Vital_AirMeet", index % 3 == 0 ? "Vital_AirMeet_DriveApp" : index % 2 == 0 ? "Vital_AirMeet_Document" : "Vital_AirMeet_BackEnd"],
                     index == 4 ? 0 : index == 5 ? 24 : index % 4,
                     DateTimeOffset.UtcNow.AddDays(-1),
                     DateTimeOffset.UtcNow.AddMinutes(-index)))
                 .ToArray());
+    }
 
     public Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken)
     {
         var reader = string.IsNullOrWhiteSpace(readerProjectId) ? "Vital_AirMeet" : readerProjectId;
         var isAllReadThread = threadId == Guid.Parse("77000000-0000-0000-0000-000000000004");
         var isManyUnreadThread = threadId == Guid.Parse("77000000-0000-0000-0000-000000000005");
+        var isClosedThread = threadId == Guid.Parse("77000000-0000-0000-0000-000000000006");
         var messages = Enumerable.Range(1, 24)
             .Select(index => new DiscussionMessageResult(
                 Guid.Parse($"77000000-0000-0001-0000-{index:D12}"),
@@ -685,7 +699,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             threadId,
             "Vital_AirMeet_BackEnd",
             "API contract alignment",
-            "Open",
+            isClosedThread ? "Closed" : "Open",
             ["Vital_AirMeet", "Vital_AirMeet_BackEnd"],
             messages,
             DateTimeOffset.UtcNow.AddHours(-3),

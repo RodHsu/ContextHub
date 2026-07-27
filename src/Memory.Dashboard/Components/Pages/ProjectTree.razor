@@ -1,0 +1,339 @@
+@page "/project-tree"
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>Context Hub | 專案樹狀圖</PageTitle>
+
+<PageViewport Title="專案樹狀圖"
+              Subtitle="檢視目前可讀專案的父子層級、生命週期與工作入口。"
+              BodyClass="page-viewport-body project-tree-page-body">
+    <Actions>
+        <div class="page-actions-secondary">
+            <button class="ghost-button" @onclick="LoadAsync" disabled="@_loading">重新載入</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        <section class="metric-grid project-tree-metrics" aria-label="專案樹摘要">
+            <article class="metric-card">
+                <div class="metric-label">總專案</div>
+                <div class="metric-value">@_projects.Count</div>
+                <div class="metric-meta">目前清單</div>
+            </article>
+            <article class="metric-card">
+                <div class="metric-label">根節點</div>
+                <div class="metric-value">@RootCount</div>
+                <div class="metric-meta">未被其他專案掛載</div>
+            </article>
+            <article class="metric-card">
+                <div class="metric-label">有下屬專案</div>
+                <div class="metric-value">@ParentCount</div>
+                <div class="metric-meta">已設定 children</div>
+            </article>
+            <article class="metric-card">
+                <div class="metric-label">已封存 / 隱藏</div>
+                <div class="metric-value">@InactiveCount</div>
+                <div class="metric-meta">需要開啟篩選才完整</div>
+            </article>
+        </section>
+
+        <section class="project-tree-workspace">
+            <section class="project-tree-panel" aria-label="專案樹">
+                <div class="project-tree-toolbar">
+                    <label class="project-tree-search">
+                        <span>搜尋</span>
+                        <input @bind="_query" @bind:event="oninput" placeholder="ProjectId 或顯示名稱" aria-label="搜尋專案" />
+                    </label>
+                    <label class="project-tree-toggle">
+                        <input type="checkbox" @bind="_includeInactive" @bind:after="LoadAsync" disabled="@_loading" />
+                        顯示已隱藏 / 封存
+                    </label>
+                </div>
+
+                <div class="project-tree-list" data-scroll-viewport="true">
+                    @if (_loading)
+                    {
+                        <div class="project-tree-state">正在載入專案樹狀圖。</div>
+                    }
+                    else if (!string.IsNullOrWhiteSpace(_error))
+                    {
+                        <div class="project-tree-state is-error">@_error</div>
+                    }
+                    else if (FilteredRows.Count == 0)
+                    {
+                        <div class="project-tree-state">沒有符合條件的專案。</div>
+                    }
+                    else
+                    {
+                        @foreach (var row in FilteredRows)
+                        {
+                            <button class="@TreeRowClass(row)"
+                                    style="--tree-depth: @row.Depth"
+                                    @onclick="@(() => SelectProject(row.Project.ProjectId))"
+                                    aria-pressed="@(SelectedProject?.ProjectId == row.Project.ProjectId)">
+                                <span class="project-tree-connectors" aria-hidden="true"></span>
+                                <span class="project-tree-node-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect x="4" y="5" width="16" height="14" rx="2" />
+                                        <path d="M8 9h8" />
+                                        <path d="M8 13h5" />
+                                    </svg>
+                                </span>
+                                <span class="project-tree-node-main">
+                                    <strong>@ProjectDisplayName(row.Project)</strong>
+                                    <code>@row.Project.ProjectId</code>
+                                </span>
+                                <span class="project-tree-node-count">@ChildCount(row.Project.ProjectId)</span>
+                                <span class="@StatusChipClass(row.Project)">@ProjectStatus(row.Project)</span>
+                            </button>
+                        }
+                    }
+                </div>
+            </section>
+
+            <aside class="project-tree-inspector" aria-label="專案檢視">
+                @if (SelectedProject is null)
+                {
+                    <div class="project-tree-empty-detail">
+                        <span>尚未選取專案</span>
+                        <p>從左側樹狀圖選取一個專案後，可檢視生命週期、下屬專案與工作入口。</p>
+                    </div>
+                }
+                else
+                {
+                    <div class="project-tree-inspector-header">
+                        <span class="@StatusChipClass(SelectedProject)">@ProjectStatus(SelectedProject)</span>
+                        <h2>@ProjectDisplayName(SelectedProject)</h2>
+                        <code>@SelectedProject.ProjectId</code>
+                    </div>
+
+                    <dl class="project-tree-facts">
+                        <div>
+                            <dt>記憶筆數</dt>
+                            <dd>@SelectedItemCount</dd>
+                        </div>
+                        <div>
+                            <dt>直接下屬</dt>
+                            <dd>@SelectedChildren.Count</dd>
+                        </div>
+                        <div>
+                            <dt>最後更新</dt>
+                            <dd>@SelectedProject.UpdatedAt.LocalDateTime.ToString("yyyy/MM/dd HH:mm")</dd>
+                        </div>
+                    </dl>
+
+                    <section class="project-tree-description">
+                        <span>專案描述</span>
+                        <p>@(string.IsNullOrWhiteSpace(SelectedProject.Description) ? "尚未建立專案描述。" : SelectedProject.Description)</p>
+                    </section>
+
+                    <section class="project-tree-children">
+                        <div class="project-tree-section-heading">
+                            <span>下屬專案</span>
+                            <small>@SelectedChildren.Count 個</small>
+                        </div>
+                        @if (SelectedChildren.Count == 0)
+                        {
+                            <p>沒有直接下屬專案。</p>
+                        }
+                        else
+                        {
+                            <div class="project-tree-child-list">
+                                @foreach (var child in SelectedChildren)
+                                {
+                                    <button @onclick="@(() => SelectProject(child.ProjectId))">
+                                        <span>@ProjectDisplayName(child)</span>
+                                        <code>@child.ProjectId</code>
+                                    </button>
+                                }
+                            </div>
+                        }
+                    </section>
+
+                    <nav class="project-tree-quick-links" aria-label="專案工作入口">
+                        <a href="@ProjectInfoHref">專案工作區</a>
+                        <a href="/project-work-items">專案待辦</a>
+                        <a href="/discussions">跨專案討論</a>
+                        <a href="/memories">記憶資料</a>
+                    </nav>
+                }
+            </aside>
+        </section>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private IReadOnlyList<ProjectInformationListItem> _projects = [];
+    private IReadOnlyDictionary<string, IReadOnlyList<string>> _childrenByProjectId = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+    private string _query = string.Empty;
+    private string? _selectedProjectId;
+    private string? _error;
+    private bool _loading;
+    private bool _includeInactive;
+
+    protected override async Task OnInitializedAsync()
+        => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            _projects = await ApiClient.GetProjectInformationProjectsAsync(_includeInactive, CancellationToken.None);
+            var hierarchyResults = await Task.WhenAll(_projects.Select(project =>
+                ApiClient.GetProjectChildrenAsync(project.Information.ProjectId, CancellationToken.None)));
+            _childrenByProjectId = hierarchyResults.ToDictionary(
+                hierarchy => hierarchy.ParentProjectId,
+                hierarchy => (IReadOnlyList<string>)hierarchy.ChildProjectIds
+                    .Where(childProjectId => _projects.Any(project => string.Equals(project.Information.ProjectId, childProjectId, StringComparison.OrdinalIgnoreCase)))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(childProjectId => childProjectId, StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                StringComparer.OrdinalIgnoreCase);
+            _selectedProjectId = ResolveSelectedProjectId();
+        }
+        catch (Exception ex)
+        {
+            _error = $"專案樹載入失敗：{ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private IReadOnlyList<ProjectTreeRow> FilteredRows
+    {
+        get
+        {
+            var rows = BuildRows();
+            if (string.IsNullOrWhiteSpace(_query))
+            {
+                return rows;
+            }
+
+            return rows
+                .Where(row => Matches(row.Project, _query))
+                .ToArray();
+        }
+    }
+
+    private ProjectInformationResult? SelectedProject
+        => _projects
+            .Select(project => project.Information)
+            .FirstOrDefault(project => string.Equals(project.ProjectId, _selectedProjectId, StringComparison.OrdinalIgnoreCase));
+
+    private IReadOnlyList<ProjectInformationResult> SelectedChildren
+        => SelectedProject is null
+            ? []
+            : GetChildren(SelectedProject.ProjectId)
+                .Select(FindProject)
+                .Where(project => project is not null)
+                .Cast<ProjectInformationResult>()
+                .ToArray();
+
+    private int SelectedItemCount
+        => _projects.FirstOrDefault(project => string.Equals(project.Information.ProjectId, SelectedProject?.ProjectId, StringComparison.OrdinalIgnoreCase))?.ItemCount ?? 0;
+
+    private int RootCount => RootProjectIds.Count;
+
+    private int ParentCount => _childrenByProjectId.Values.Count(children => children.Count > 0);
+
+    private int InactiveCount => _projects.Count(project => project.Information.IsArchived || project.Information.IsHidden);
+
+    private string ProjectInfoHref => SelectedProject is null
+        ? "/project-information"
+        : $"/project-information?projectId={Uri.EscapeDataString(SelectedProject.ProjectId)}";
+
+    private IReadOnlyList<string> RootProjectIds
+    {
+        get
+        {
+            var childIds = _childrenByProjectId.Values
+                .SelectMany(children => children)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return _projects
+                .Select(project => project.Information.ProjectId)
+                .Where(projectId => !childIds.Contains(projectId))
+                .OrderBy(projectId => projectId, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+    }
+
+    private IReadOnlyList<ProjectTreeRow> BuildRows()
+    {
+        var rows = new List<ProjectTreeRow>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rootProjectId in RootProjectIds)
+        {
+            AppendRows(rootProjectId, 0, rows, visited);
+        }
+
+        foreach (var projectId in _projects.Select(project => project.Information.ProjectId).OrderBy(projectId => projectId, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!visited.Contains(projectId))
+            {
+                AppendRows(projectId, 0, rows, visited);
+            }
+        }
+
+        return rows;
+    }
+
+    private void AppendRows(string projectId, int depth, List<ProjectTreeRow> rows, HashSet<string> visited)
+    {
+        if (!visited.Add(projectId) || FindProject(projectId) is not { } project)
+        {
+            return;
+        }
+
+        rows.Add(new ProjectTreeRow(project, depth));
+        foreach (var childProjectId in GetChildren(projectId))
+        {
+            AppendRows(childProjectId, depth + 1, rows, visited);
+        }
+    }
+
+    private IReadOnlyList<string> GetChildren(string projectId)
+        => _childrenByProjectId.TryGetValue(projectId, out var children) ? children : [];
+
+    private ProjectInformationResult? FindProject(string projectId)
+        => _projects
+            .Select(project => project.Information)
+            .FirstOrDefault(project => string.Equals(project.ProjectId, projectId, StringComparison.OrdinalIgnoreCase));
+
+    private string ResolveSelectedProjectId()
+    {
+        if (_selectedProjectId is not null && _projects.Any(project => string.Equals(project.Information.ProjectId, _selectedProjectId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return _selectedProjectId;
+        }
+
+        return RootProjectIds.FirstOrDefault() ?? _projects.FirstOrDefault()?.Information.ProjectId ?? string.Empty;
+    }
+
+    private void SelectProject(string projectId)
+        => _selectedProjectId = projectId;
+
+    private static bool Matches(ProjectInformationResult project, string query)
+        => project.ProjectId.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+           project.DisplayName.Contains(query, StringComparison.OrdinalIgnoreCase);
+
+    private static string ProjectDisplayName(ProjectInformationResult project)
+        => string.IsNullOrWhiteSpace(project.DisplayName) ? project.ProjectId : project.DisplayName;
+
+    private static string ProjectStatus(ProjectInformationResult project)
+        => project.IsArchived ? "已封存" : project.IsHidden ? "已隱藏" : "使用中";
+
+    private static string StatusChipClass(ProjectInformationResult project)
+        => project.IsArchived ? "project-tree-status is-archived" : project.IsHidden ? "project-tree-status is-hidden" : "project-tree-status";
+
+    private string TreeRowClass(ProjectTreeRow row)
+        => string.Equals(SelectedProject?.ProjectId, row.Project.ProjectId, StringComparison.OrdinalIgnoreCase)
+            ? "project-tree-row is-selected"
+            : "project-tree-row";
+
+    private int ChildCount(string projectId)
+        => GetChildren(projectId).Count;
+
+    private sealed record ProjectTreeRow(ProjectInformationResult Project, int Depth);
+}

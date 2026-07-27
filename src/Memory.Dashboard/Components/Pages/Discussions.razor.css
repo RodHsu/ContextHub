@@ -198,6 +198,23 @@
     white-space: nowrap;
 }
 
+.discussion-list-summary-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+}
+
+.discussion-list-summary .discussion-list-status {
+    display: inline-flex;
+    flex: 0 0 auto;
+    overflow: visible;
+    padding: 0.08rem 0.34rem;
+    font-size: 0.61rem;
+    line-height: 1.1;
+    text-overflow: clip;
+}
+
 .discussion-list-time {
     justify-self: end;
     color: var(--text-muted);
@@ -271,6 +288,17 @@
     font-size: 0.69rem;
     text-align: right;
     white-space: nowrap;
+}
+
+.discussion-close-permission {
+    color: var(--text-subtle);
+    font-family: inherit;
+    font-size: 0.66rem;
+    white-space: normal;
+}
+
+.discussion-close-permission code {
+    color: var(--text-muted);
 }
 
 .discussion-participant-chips {

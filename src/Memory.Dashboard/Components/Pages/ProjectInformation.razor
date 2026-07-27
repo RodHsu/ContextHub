@@ -5,7 +5,8 @@
 <PageTitle>Context Hub | 專案工作區</PageTitle>
 
 <PageViewport Title="專案工作區"
-              Subtitle="集中管理協作範圍、working context 與專案生命週期。">
+              Subtitle="集中管理協作範圍、working context 與專案生命週期。"
+              BodyClass="page-viewport-body project-information-page-body">
     <Actions>
         <div class="page-actions-secondary">
             <button class="ghost-button" @onclick="LoadAsync" disabled="@(_loading || string.IsNullOrWhiteSpace(_projectId))">重新載入</button>
@@ -52,7 +53,7 @@
                     <span>下屬專案</span>
                     <div class="child-projects-picker" aria-label="選擇下屬專案">
                         <div class="child-projects-picker-heading"><span>@ChildProjectsSelectionText</span><small>直接勾選</small></div>
-                        <div class="child-projects-picker-options">
+                        <div class="child-projects-picker-options" data-scroll-viewport="true">
                             @foreach (var project in _projects.Where(project => !string.Equals(project.Information.ProjectId, _projectId, StringComparison.OrdinalIgnoreCase)))
                             {
                                 var childProjectId = project.Information.ProjectId;

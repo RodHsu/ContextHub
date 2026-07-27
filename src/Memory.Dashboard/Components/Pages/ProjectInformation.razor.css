@@ -1,10 +1,10 @@
 .project-studio {
     display: grid;
-    grid-template-columns: 14.5rem minmax(0, 1fr) 19.5rem;
+    grid-template-columns: minmax(16rem, 0.72fr) minmax(24rem, 1.45fr) minmax(17.5rem, 0.68fr);
+    align-items: start;
     min-width: 0;
     border: 1px solid var(--border);
     border-radius: 8px;
-    overflow: hidden;
     background: color-mix(in srgb, var(--surface) 94%, black 6%);
     box-shadow: var(--shadow-panel);
 }
@@ -12,6 +12,7 @@
 .project-identity,
 .lifecycle-inspector {
     min-width: 0;
+    max-width: 100%;
     padding: 1.35rem;
     background: color-mix(in srgb, var(--surface-alt) 72%, var(--surface) 28%);
 }
@@ -26,6 +27,7 @@
 
 .project-editor {
     min-width: 0;
+    max-width: 100%;
     padding: 1.9rem 2.25rem;
 }
 
@@ -158,7 +160,7 @@
 .child-projects-picker-options {
     display: grid;
     gap: 0.2rem;
-    max-height: 15rem;
+    max-height: clamp(10rem, calc(var(--dashboard-viewport-height) - 34rem), 15rem);
     margin-top: 0.35rem;
     padding: 0.35rem;
     overflow: auto;
@@ -211,7 +213,7 @@
 }
 
 .description-field textarea {
-    min-height: 14rem;
+    min-height: clamp(10rem, calc(var(--dashboard-viewport-height) - 30rem), 17rem);
     line-height: 1.6;
 }
 
@@ -325,9 +327,9 @@
     background: color-mix(in srgb, var(--accent) 12%, var(--panel));
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1320px) {
     .project-studio {
-        grid-template-columns: 13.5rem minmax(0, 1fr);
+        grid-template-columns: minmax(16rem, 0.42fr) minmax(0, 1fr);
     }
 
     .lifecycle-inspector {
@@ -341,19 +343,28 @@
     }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 960px) {
     .project-studio {
         grid-template-columns: minmax(0, 1fr);
     }
 
-    .project-identity,
-    .lifecycle-inspector {
-        border: 0;
+    .project-identity {
+        border-right: 0;
         border-bottom: 1px solid var(--border);
     }
 
     .project-editor {
         padding: 1.35rem;
+    }
+
+    .lifecycle-inspector {
+        border-left: 0;
+    }
+}
+
+@media (max-width: 720px) {
+    .project-studio {
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .lifecycle-actions {

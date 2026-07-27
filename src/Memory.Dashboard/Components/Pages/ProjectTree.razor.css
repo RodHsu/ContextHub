@@ -1,0 +1,385 @@
+.project-tree-page-body {
+    display: grid;
+    gap: var(--dashboard-page-gap);
+    min-width: 0;
+}
+
+.project-tree-metrics {
+    margin: 0;
+}
+
+.project-tree-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(22rem, 0.72fr);
+    gap: 1rem;
+    min-width: 0;
+    align-items: start;
+}
+
+.project-tree-panel,
+.project-tree-inspector {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    overflow: hidden;
+}
+
+.project-tree-toolbar {
+    display: grid;
+    grid-template-columns: minmax(14rem, 1fr) auto;
+    gap: 0.75rem;
+    align-items: end;
+    min-width: 0;
+    padding: 1rem;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface-alt) 58%, var(--surface));
+}
+
+.project-tree-search {
+    display: grid;
+    gap: 0.4rem;
+    min-width: 0;
+}
+
+.project-tree-search span,
+.project-tree-section-heading span,
+.project-tree-description > span,
+.project-tree-facts dt {
+    color: var(--text-subtle);
+    font-size: 0.74rem;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+}
+
+.project-tree-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 2.5rem;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    white-space: nowrap;
+}
+
+.project-tree-toggle input {
+    accent-color: var(--accent);
+}
+
+.project-tree-list {
+    display: grid;
+    align-content: start;
+    block-size: clamp(28rem, calc(var(--dashboard-viewport-height) - 18rem), 54rem);
+    min-height: 24rem;
+    overflow-x: auto;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+}
+
+.project-tree-row {
+    --tree-indent: calc(var(--tree-depth) * 1.35rem);
+    position: relative;
+    display: grid;
+    grid-template-columns: 1.25rem minmax(13rem, 1fr) auto auto;
+    gap: 0.65rem;
+    align-items: center;
+    min-width: 42rem;
+    min-height: 3rem;
+    padding: 0.55rem 0.75rem 0.55rem calc(0.75rem + var(--tree-indent));
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+    border-radius: 0;
+    color: var(--text);
+    background: transparent;
+    cursor: pointer;
+    text-align: left;
+}
+
+.project-tree-row:hover,
+.project-tree-row:focus-visible {
+    background: var(--surface-alt);
+}
+
+.project-tree-row.is-selected {
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.project-tree-connectors {
+    position: absolute;
+    inset-block: 0;
+    left: calc(1rem + var(--tree-indent));
+    width: 1px;
+    background: color-mix(in srgb, var(--border-strong) 68%, transparent);
+}
+
+.project-tree-node-icon {
+    display: grid;
+    place-items: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    color: var(--accent);
+}
+
+.project-tree-node-icon svg {
+    width: 1rem;
+    height: 1rem;
+}
+
+.project-tree-node-main {
+    display: grid;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.project-tree-node-main strong {
+    color: var(--text-strong);
+    font-size: 0.9rem;
+    font-weight: 650;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.project-tree-node-main code,
+.project-tree-inspector-header code,
+.project-tree-child-list code {
+    color: var(--text-subtle);
+    font-family: "JetBrains Mono", Consolas, monospace;
+    font-size: 0.74rem;
+    overflow-wrap: anywhere;
+}
+
+.project-tree-node-count {
+    min-width: 2.2rem;
+    padding: 0.2rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    background: var(--bg-elevated);
+    font-family: "JetBrains Mono", Consolas, monospace;
+    font-size: 0.74rem;
+    text-align: center;
+}
+
+.project-tree-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 4rem;
+    min-height: 1.55rem;
+    padding: 0.18rem 0.45rem;
+    border: 1px solid color-mix(in srgb, var(--ok) 58%, var(--border));
+    border-radius: 4px;
+    color: color-mix(in srgb, var(--ok) 76%, var(--text));
+    background: color-mix(in srgb, var(--ok) 10%, transparent);
+    font-size: 0.74rem;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.project-tree-status.is-hidden {
+    border-color: color-mix(in srgb, var(--warn) 58%, var(--border));
+    color: color-mix(in srgb, var(--warn) 82%, var(--text));
+    background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.project-tree-status.is-archived {
+    border-color: color-mix(in srgb, var(--bad) 58%, var(--border));
+    color: color-mix(in srgb, var(--bad) 78%, var(--text));
+    background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+
+.project-tree-state {
+    margin: 1rem;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    background: var(--bg-elevated);
+}
+
+.project-tree-state.is-error {
+    border-color: color-mix(in srgb, var(--bad) 45%, var(--border));
+    color: color-mix(in srgb, var(--bad) 76%, var(--text));
+    background: color-mix(in srgb, var(--bad) 9%, var(--surface));
+}
+
+.project-tree-inspector {
+    display: grid;
+    gap: 1rem;
+    padding: 1rem;
+}
+
+.project-tree-inspector-header {
+    display: grid;
+    gap: 0.45rem;
+    min-width: 0;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.project-tree-inspector-header h2 {
+    margin: 0;
+    color: var(--text-strong);
+    font-size: 1.1rem;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.project-tree-inspector-header .project-tree-status {
+    justify-self: start;
+}
+
+.project-tree-facts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0;
+    margin: 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.project-tree-facts div {
+    display: grid;
+    gap: 0.25rem;
+    min-width: 0;
+    padding: 0.75rem;
+    border-right: 1px solid var(--border);
+    background: var(--bg-elevated);
+}
+
+.project-tree-facts div:last-child {
+    border-right: 0;
+}
+
+.project-tree-facts dd {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.82rem;
+    overflow-wrap: anywhere;
+}
+
+.project-tree-description,
+.project-tree-children {
+    display: grid;
+    gap: 0.55rem;
+    min-width: 0;
+}
+
+.project-tree-description p,
+.project-tree-children p,
+.project-tree-empty-detail p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+.project-tree-section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.project-tree-section-heading small {
+    color: var(--text-subtle);
+    font-size: 0.76rem;
+}
+
+.project-tree-child-list,
+.project-tree-quick-links {
+    display: grid;
+    gap: 0.45rem;
+    min-width: 0;
+}
+
+.project-tree-child-list button,
+.project-tree-quick-links a {
+    display: grid;
+    min-width: 0;
+    min-height: 2.5rem;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    background: var(--bg-elevated);
+    text-align: left;
+    text-decoration: none;
+}
+
+.project-tree-child-list button:hover,
+.project-tree-quick-links a:hover,
+.project-tree-quick-links a:focus-visible {
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.project-tree-child-list span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.project-tree-empty-detail {
+    display: grid;
+    gap: 0.5rem;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+}
+
+.project-tree-empty-detail span {
+    color: var(--text);
+    font-weight: 650;
+}
+
+@media (max-width: 1180px) {
+    .project-tree-workspace {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .project-tree-inspector {
+        align-content: start;
+    }
+}
+
+@media (max-width: 767px) {
+    .project-tree-toolbar {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .project-tree-list {
+        block-size: auto;
+        min-height: 18rem;
+    }
+
+    .project-tree-row {
+        grid-template-columns: 1.25rem minmax(11rem, 1fr);
+        grid-auto-columns: max-content;
+        min-width: 31rem;
+    }
+
+    .project-tree-node-count,
+    .project-tree-status {
+        grid-column: 2;
+        justify-self: start;
+    }
+
+    .project-tree-facts {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .project-tree-facts div {
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .project-tree-facts div:last-child {
+        border-bottom: 0;
+    }
+}
