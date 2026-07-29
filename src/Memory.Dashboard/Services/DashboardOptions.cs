@@ -13,7 +13,7 @@ public sealed class DashboardOptions
     public string InstanceId { get; set; } = string.Empty;
     public string AdminUsername { get; set; } = DefaultAdminUsername;
     public string AdminPasswordHash { get; set; } = DefaultAdminPasswordHash;
-    public int SessionTimeoutMinutes { get; set; } = 480;
+    public int SessionTimeoutMinutes { get; set; } = 720;
     public string ComposeProject { get; set; } = "contexthub";
     public string DockerEndpoint { get; set; } = "unix:///var/run/docker.sock";
     public int DockerSnapshotCacheSeconds { get; set; } = 3;

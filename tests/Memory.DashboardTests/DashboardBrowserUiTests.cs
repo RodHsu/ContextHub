@@ -4471,7 +4471,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         startInfo.Environment["Dashboard__ApiToken"] = "browser-test-dashboard-token";
         startInfo.Environment["Dashboard__AdminUsername"] = "admin";
         startInfo.Environment["Dashboard__AdminPasswordHash"] = "AQAAAAIAAYagAAAAEIbguUQEApMQehlC51gjy+uGulsE4ahRI7UtbdAlSsGMynNrNM3J3KfsJL+3IuBUxQ==";
-        startInfo.Environment["Dashboard__SessionTimeoutMinutes"] = "480";
+        startInfo.Environment["Dashboard__SessionTimeoutMinutes"] = "720";
         startInfo.Environment["Dashboard__ComposeProject"] = "contexthub";
         startInfo.Environment["Dashboard__DataProtectionPath"] = dataProtectionPath;
         startInfo.Environment["Dashboard__Polling__GraphSeconds"] = "1";

@@ -11,7 +11,7 @@ x-dashboard-config: &dashboard-config
   Dashboard__SecretKey: ${DASHBOARD_SECRET_KEY:-${CONTEXTHUB_SECRET_KEY:-}}
   Dashboard__AdminUsername: ${DASHBOARD_ADMIN_USERNAME}
   Dashboard__AdminPasswordHash: ${DASHBOARD_ADMIN_PASSWORD_HASH}
-  Dashboard__SessionTimeoutMinutes: ${DASHBOARD_SESSION_TIMEOUT_MINUTES:-480}
+  Dashboard__SessionTimeoutMinutes: ${DASHBOARD_SESSION_TIMEOUT_MINUTES:-720}
   Dashboard__ComposeProject: ${DASHBOARD_COMPOSE_PROJECT:-contexthub}
   Dashboard__Polling__OverviewSeconds: ${DASHBOARD_POLLING_OVERVIEW_SECONDS:-10}
   Dashboard__Polling__MetricsSeconds: ${DASHBOARD_POLLING_METRICS_SECONDS:-5}

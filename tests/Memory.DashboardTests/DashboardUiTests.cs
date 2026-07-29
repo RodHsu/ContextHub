@@ -66,6 +66,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         var cssPath = ExtractAssetPath(html, "<link rel=\"stylesheet\" href=\"([^\"]*app[^\"]*\\.css)\"");
         var blazorScriptPath = ExtractAssetPath(html, "<script src=\"([^\"]*blazor\\.web[^\"]*\\.js)\"");
         var viewportScriptPath = ExtractAssetPath(html, "<script type=\"module\" src=\"([^\"]*dashboard-viewport[^\"]*\\.js)\"");
+        var sessionScriptPath = ExtractAssetPath(html, "<script src=\"([^\"]*dashboard-session[^\"]*\\.js)\"");
 
         using var cssResponse = await client.GetAsync(cssPath);
         cssResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -84,6 +85,12 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         AssertStaticAssetCacheHeaders(viewportScriptResponse);
         viewportScriptResponse.Content.Headers.ContentType?.MediaType.Should().Contain("javascript");
         (await viewportScriptResponse.Content.ReadAsStringAsync()).Should().NotStartWith("<!DOCTYPE html>", "dashboard module script should not fall back to an HTML error page");
+
+        using var sessionScriptResponse = await client.GetAsync(sessionScriptPath);
+        sessionScriptResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertStaticAssetCacheHeaders(sessionScriptResponse);
+        var sessionScript = await sessionScriptResponse.Content.ReadAsStringAsync();
+        sessionScript.Should().Contain("/account/session/refresh");
     }
 
     [Fact]
@@ -118,6 +125,22 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         response.StatusCode.Should().Be(HttpStatusCode.Redirect);
         response.Headers.Location.Should().NotBeNull();
         response.Headers.Location!.ToString().Should().StartWith("/login?returnUrl=");
+    }
+
+    [Fact]
+    public async Task Authenticated_User_Can_Refresh_Session_Through_NoStore_Endpoint()
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        await LoginAsync(client);
+
+        using var response = await client.GetAsync("/account/session/refresh");
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        AssertNoStoreHeaders(response);
     }
 
     [Fact]
@@ -1023,7 +1046,7 @@ public sealed class DashboardApplicationFactory : WebApplicationFactory<Program>
                 ["Dashboard:AdminUsername"] = "admin",
                 ["Dashboard:AdminPasswordHash"] = "AQAAAAIAAYagAAAAEIbguUQEApMQehlC51gjy+uGulsE4ahRI7UtbdAlSsGMynNrNM3J3KfsJL+3IuBUxQ==",
                 ["Dashboard:ApiToken"] = DashboardUiTests.DashboardApiToken,
-                ["Dashboard:SessionTimeoutMinutes"] = "480",
+                ["Dashboard:SessionTimeoutMinutes"] = "720",
                 ["Dashboard:ComposeProject"] = "contexthub",
                 ["Dashboard:DataProtectionPath"] = CreateRepoTestDataPath("dataprotection", Guid.NewGuid().ToString("N")),
                 ["Memory:Namespace"] = "context-hub-test",

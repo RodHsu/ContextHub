@@ -288,6 +288,8 @@ app.MapPost("/account/logout", async (HttpContext context) =>
     return Results.Redirect("/login");
 });
 
+app.MapGet("/account/session/refresh", () => Results.NoContent());
+
 var settingsApi = app.MapGroup("/api/settings");
 settingsApi.AddEndpointFilter(async (context, next) =>
 {
@@ -638,6 +640,7 @@ internal static class DashboardRouteAuthorization
         "/graph",
         "/preferences",
         "/account/tokens",
+        "/account/session/refresh",
         "/forbidden",
         "/account/logout"
     ];
