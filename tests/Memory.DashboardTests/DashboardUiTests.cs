@@ -156,6 +156,26 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
     }
 
     [Fact]
+    public async Task Context_Savings_Windows_Should_Render_Explicit_Call_Counts()
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        await LoginAsync(client);
+
+        using var overviewResponse = await client.GetAsync("/");
+        overviewResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertContextSavingsCallCounts(WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync()));
+
+        using var monitoringResponse = await client.GetAsync("/monitoring");
+        monitoringResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertContextSavingsCallCounts(WebUtility.HtmlDecode(await monitoringResponse.Content.ReadAsStringAsync()));
+    }
+
+    [Fact]
     public async Task Anonymous_Blazor_Transport_Should_Not_Be_Redirected_To_Login()
     {
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
@@ -297,7 +317,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("3D 節省量 / 快取命中率");
         overviewHtml.Should().Contain("7D 節省量 / 快取命中率");
         overviewHtml.Should().Contain("30D 節省量 / 快取命中率");
-        overviewHtml.Should().Contain("18 次呼叫");
+        overviewHtml.Should().Contain("呼叫次數：18 次");
+        overviewHtml.Should().Contain("呼叫次數：54 次");
+        overviewHtml.Should().Contain("呼叫次數：126 次");
+        overviewHtml.Should().Contain("呼叫次數：540 次");
         overviewHtml.Should().Contain("精準 token");
         overviewHtml.Should().NotContain("context-savings-panel");
         overviewHtml.Should().Contain("contexthub-redis-1");
@@ -378,6 +401,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("3D 節省量 / 快取命中率");
         monitoringHtml.Should().Contain("7D 節省量 / 快取命中率");
         monitoringHtml.Should().Contain("30D 節省量 / 快取命中率");
+        monitoringHtml.Should().Contain("呼叫次數：18 次");
+        monitoringHtml.Should().Contain("呼叫次數：54 次");
+        monitoringHtml.Should().Contain("呼叫次數：126 次");
+        monitoringHtml.Should().Contain("呼叫次數：540 次");
         monitoringHtml.Should().Contain("精準 token");
         monitoringHtml.Should().NotContain("24H 樣本");
         monitoringHtml.Should().Contain("來源覆蓋率");
@@ -975,6 +1002,14 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         var remaining = expiresAt - DateTimeOffset.UtcNow;
         remaining.Should().BeGreaterThan(TimeSpan.FromHours(11.5));
         remaining.Should().BeLessThanOrEqualTo(TimeSpan.FromHours(12));
+    }
+
+    private static void AssertContextSavingsCallCounts(string html)
+    {
+        html.Should().Contain("呼叫次數：18 次");
+        html.Should().Contain("呼叫次數：54 次");
+        html.Should().Contain("呼叫次數：126 次");
+        html.Should().Contain("呼叫次數：540 次");
     }
 
     private static string ExtractAntiforgeryToken(string html)

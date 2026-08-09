@@ -1465,6 +1465,11 @@ textarea {
     color: var(--text-muted);
 }
 
+.context-savings-call-count {
+    color: var(--text) !important;
+    font-weight: 700;
+}
+
 .context-savings-strip-metrics strong {
     font-size: 0.9rem;
     line-height: 1.05;
