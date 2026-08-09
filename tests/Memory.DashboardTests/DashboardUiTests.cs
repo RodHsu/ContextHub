@@ -144,6 +144,18 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
     }
 
     [Fact]
+    public async Task Database_User_Login_Should_Issue_Configured_Twelve_Hour_Session()
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        await LoginAsync(client);
+    }
+
+    [Fact]
     public async Task Anonymous_Blazor_Transport_Should_Not_Be_Redirected_To_Login()
     {
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
@@ -285,7 +297,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("3D 節省量 / 快取命中率");
         overviewHtml.Should().Contain("7D 節省量 / 快取命中率");
         overviewHtml.Should().Contain("30D 節省量 / 快取命中率");
-        overviewHtml.Should().Contain("筆樣本");
+        overviewHtml.Should().Contain("18 次呼叫");
         overviewHtml.Should().Contain("精準 token");
         overviewHtml.Should().NotContain("context-savings-panel");
         overviewHtml.Should().Contain("contexthub-redis-1");
@@ -945,6 +957,24 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         response.StatusCode.Should().Be(HttpStatusCode.Redirect);
         response.Headers.Location.Should().NotBeNull();
         response.Headers.Location!.ToString().Should().Be("/");
+        AssertDashboardSessionCookieLifetime(response.Headers);
+    }
+
+    private static void AssertDashboardSessionCookieLifetime(HttpResponseHeaders headers)
+    {
+        headers.TryGetValues("Set-Cookie", out var values).Should().BeTrue();
+        var dashboardCookie = values!
+            .Single(value => value.StartsWith("contexthub.dashboard=", StringComparison.Ordinal));
+        var expiresMatch = Regex.Match(dashboardCookie, @"(?:^|;\s*)expires=([^;]+)", RegexOptions.IgnoreCase);
+        expiresMatch.Success.Should().BeTrue("the persistent dashboard cookie should declare its expiration");
+
+        var expiresAt = DateTimeOffset.Parse(
+            expiresMatch.Groups[1].Value,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal);
+        var remaining = expiresAt - DateTimeOffset.UtcNow;
+        remaining.Should().BeGreaterThan(TimeSpan.FromHours(11.5));
+        remaining.Should().BeLessThanOrEqualTo(TimeSpan.FromHours(12));
     }
 
     private static string ExtractAntiforgeryToken(string html)
@@ -2213,7 +2243,9 @@ internal sealed class FakeInstanceSettingsService(IOptions<DashboardOptions> das
         {
             SettingsRevision = 0,
             SettingsUpdatedAtUtc = null,
-            DashboardAuth = new InstanceDashboardAuthSettingsResult("admin", 480)
+            DashboardAuth = new InstanceDashboardAuthSettingsResult(
+                "admin",
+                dashboardOptionsAccessor.Value.SessionTimeoutMinutes)
         };
 
         _ = updatedBy;
@@ -2259,6 +2291,6 @@ internal sealed class FakeInstanceSettingsService(IOptions<DashboardOptions> das
                 options.Polling.JobsSeconds,
                 options.Polling.LogsSeconds,
                 options.Polling.PerformanceSeconds),
-            new InstanceDashboardAuthSettingsResult(username, 480),
+            new InstanceDashboardAuthSettingsResult(username, options.SessionTimeoutMinutes),
             new ConversationAutomationStatusResult(0, 0, 0, string.Empty));
 }

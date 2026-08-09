@@ -255,7 +255,12 @@ app.MapPost("/account/login", async (
                 user.LastLoginAt = DateTimeOffset.UtcNow;
                 user.UpdatedAt = DateTimeOffset.UtcNow;
                 await dbContext.SaveChangesAsync(context.RequestAborted);
-                return await SignInDashboardUserAsync(context, user, form.ReturnUrl);
+                var authenticationSettings = await instanceSettingsService.GetDashboardAuthenticationSettingsAsync(context.RequestAborted);
+                return await SignInDashboardUserAsync(
+                    context,
+                    user,
+                    form.ReturnUrl,
+                    authenticationSettings.SessionTimeoutMinutes);
             }
         }
     }
