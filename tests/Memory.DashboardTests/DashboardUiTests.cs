@@ -532,7 +532,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("project_cleanup_preview");
         mcpToolsHtml.Should().Contain("project_cleanup_apply");
         mcpToolsHtml.Should().Contain("discussion_threads_list / discussion_thread_get");
-        mcpToolsHtml.Should().Contain("discussion_thread_create / discussion_message_create");
+        mcpToolsHtml.Should().Contain("discussion_thread_create / discussion_thread_close / discussion_thread_archive / discussion_thread_restore / discussion_message_create");
+        mcpToolsHtml.Should().Contain("project_work_item_create / project_work_item_update / project_work_item_checklist_update / project_work_item_archive / project_work_item_restore / project_work_items_list");
         mcpToolsHtml.Should().Contain("project_hierarchy_get_children / project_hierarchy_set_children");
         mcpToolsHtml.Should().Contain("/api/projects/hierarchy/*, /api/discussions/*");
         mcpToolsHtml.Should().Contain("memory_delete");
@@ -594,6 +595,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         discussionsHtml.Should().Contain("讀取身分");
         discussionsHtml.Should().Contain("搜尋討論內容或主題");
         discussionsHtml.Should().Contain("顯示");
+        discussionsHtml.Should().Contain("顯示已封存");
         discussionsHtml.Should().Contain("參與專案");
         discussionsHtml.Should().Contain("discussions-workspace");
 
@@ -606,6 +608,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         projectWorkItemsHtml.Should().Contain("project-work-items-list-column-labels");
         projectWorkItemsHtml.Should().Contain("檢核清單執行面板");
         projectWorkItemsHtml.Should().Contain("完成進度");
+        projectWorkItemsHtml.Should().Contain("顯示已封存");
+        projectWorkItemsHtml.Should().Contain("封存");
 
         using var graphResponse = await client.GetAsync("/graph");
         graphResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -1202,6 +1206,9 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
                 DateTimeOffset.UtcNow,
                 null)
         ]);
+
+    public Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid id, bool archived, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
     public Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectWorkItemResult(Guid.NewGuid(), request.ProjectId, request.Title, request.Description ?? string.Empty, request.Tags ?? [], [], ProjectWorkItemStatus.Pending, request.Priority, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
     public Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
@@ -1815,6 +1822,9 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
         => Task.FromResult<DiscussionThreadDetailResult?>(null);
 
     public Task<DiscussionThreadResult?> CloseDiscussionThreadAsync(Guid threadId, CancellationToken cancellationToken)
+        => Task.FromResult<DiscussionThreadResult?>(null);
+
+    public Task<DiscussionThreadResult?> SetDiscussionThreadArchivedAsync(Guid threadId, bool archived, CancellationToken cancellationToken)
         => Task.FromResult<DiscussionThreadResult?>(null);
 
     public Task<DiscussionThreadResult?> AdvanceDiscussionThreadReadCursorAsync(Guid threadId, string readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken)

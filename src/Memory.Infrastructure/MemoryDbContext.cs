@@ -794,6 +794,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.HostProjectId).HasColumnName("host_project_id");
             entity.Property(x => x.Title).HasColumnName("title");
             entity.Property(x => x.Status).HasColumnName("status");
+            entity.Property(x => x.ArchivedAt).HasColumnName("archived_at");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.HostProjectId, x.UpdatedAt });
@@ -840,6 +841,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
+            entity.Property(x => x.ArchivedAt).HasColumnName("archived_at");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Status, x.DueAt });
         });
 

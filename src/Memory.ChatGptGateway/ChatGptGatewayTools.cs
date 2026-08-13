@@ -128,6 +128,14 @@ public sealed class ChatGptGatewayTools(
     public Task<DiscussionThreadResult?> discussion_thread_close(Guid threadId, CancellationToken cancellationToken = default)
         => projectDiscussionService.CloseThreadAsync(threadId, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Archive a cross-project discussion. Archived threads are hidden from default lists and reject mutations until restored.")]
+    public Task<DiscussionThreadResult?> discussion_thread_archive(Guid threadId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.SetThreadArchivedAsync(threadId, archived: true, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Restore an archived cross-project discussion without changing its Open or Closed status.")]
+    public Task<DiscussionThreadResult?> discussion_thread_restore(Guid threadId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.SetThreadArchivedAsync(threadId, archived: false, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Create a persistent cross-project discussion. The host and every participant must be authorized to the OAuth actor.")]
     public Task<DiscussionThreadDetailResult> discussion_thread_create(DiscussionThreadCreateRequest request, CancellationToken cancellationToken = default)
         => projectDiscussionService.CreateThreadAsync(request, cancellationToken);

@@ -2722,6 +2722,55 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Discussion_Archive_Should_Default_Hide_Block_Mutations_And_Restore_Closed_Status()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        const string peerProjectId = "api-contract-discussion-peer";
+        using var createResponse = await client.PostAsJsonAsync("/api/discussions/threads", new DiscussionThreadCreateRequest(
+            ProjectContext.DefaultProjectId,
+            ProjectContext.DefaultProjectId,
+            "Archive lifecycle contract",
+            [peerProjectId],
+            "Initial message"));
+        createResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Created);
+        var created = await createResponse.Content.ReadFromJsonAsync<DiscussionThreadDetailResult>();
+        created.Should().NotBeNull();
+
+        using var closeResponse = await client.PostAsync($"/api/discussions/threads/{created!.Id:D}/close", null);
+        closeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+
+        using var archiveResponse = await client.PostAsync($"/api/discussions/threads/{created.Id:D}/archive", null);
+        archiveResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var archived = await archiveResponse.Content.ReadFromJsonAsync<DiscussionThreadResult>();
+        archived.Should().NotBeNull();
+        archived!.Status.Should().Be("Closed");
+        archived.IsArchived.Should().BeTrue();
+
+        var defaultList = await client.GetFromJsonAsync<List<DiscussionThreadResult>>(
+            $"/api/discussions/threads?projectId={ProjectContext.DefaultProjectId}");
+        defaultList.Should().NotContain(x => x.Id == created.Id);
+        var archivedList = await client.GetFromJsonAsync<List<DiscussionThreadResult>>(
+            $"/api/discussions/threads?projectId={ProjectContext.DefaultProjectId}&includeArchived=true");
+        archivedList.Should().ContainSingle(x => x.Id == created.Id && x.IsArchived);
+
+        using var rejectedReply = await client.PostAsJsonAsync(
+            $"/api/discussions/threads/{created.Id:D}/messages",
+            new { senderProjectId = ProjectContext.DefaultProjectId, content = "Archived reply" });
+        rejectedReply.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+
+        using var restoreResponse = await client.PostAsync($"/api/discussions/threads/{created.Id:D}/restore", null);
+        restoreResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var restored = await restoreResponse.Content.ReadFromJsonAsync<DiscussionThreadResult>();
+        restored.Should().NotBeNull();
+        restored!.Status.Should().Be("Closed");
+        restored.IsArchived.Should().BeFalse();
+
+        var restoredList = await client.GetFromJsonAsync<List<DiscussionThreadResult>>(
+            $"/api/discussions/threads?projectId={ProjectContext.DefaultProjectId}");
+        restoredList.Should().ContainSingle(x => x.Id == created.Id && x.Status == "Closed");
+    }
+
+    [DockerRequiredFact]
     public async Task Work_Items_And_Knowledge_Review_Endpoints_Should_Keep_Project_Tasks_Separate_From_Governance()
     {
         using var client = environment.GetFactory().CreateClient();
@@ -2739,18 +2788,45 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         using var guardedCompletionResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed });
         guardedCompletionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
 
-        using var updateResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.InProgress });
+        using var checklistResponse = await client.PutAsJsonAsync(
+            $"/api/work-items/{created.Id:D}/checklist/{created.ChecklistItems.Single().Id:D}",
+            new { isCompleted = true });
+        checklistResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+
+        using var updateResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed });
         updateResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
 
-        var listed = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&status=InProgress");
+        var listed = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&status=Completed");
         listed.Should().ContainSingle(x => x.Id == created.Id);
+
+        using var archiveResponse = await client.PostAsync($"/api/work-items/{created.Id:D}/archive", null);
+        archiveResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var archived = await archiveResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>();
+        archived.Should().NotBeNull();
+        archived!.Status.Should().Be(ProjectWorkItemStatus.Completed);
+        archived.IsArchived.Should().BeTrue();
+
+        var defaultList = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}");
+        defaultList.Should().NotContain(x => x.Id == created.Id);
+        var archivedList = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&includeArchived=true");
+        archivedList.Should().ContainSingle(x => x.Id == created.Id && x.IsArchived);
+
+        using var rejectedMutation = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { priority = 99 });
+        rejectedMutation.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+
+        using var restoreResponse = await client.PostAsync($"/api/work-items/{created.Id:D}/restore", null);
+        restoreResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var restored = await restoreResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>();
+        restored.Should().NotBeNull();
+        restored!.Status.Should().Be(ProjectWorkItemStatus.Completed);
+        restored.IsArchived.Should().BeFalse();
 
         using var reviewResponse = await client.PostAsJsonAsync("/api/knowledge-reviews", new KnowledgeReviewRequest([ProjectContext.DefaultProjectId]));
         reviewResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         var review = await reviewResponse.Content.ReadFromJsonAsync<KnowledgeReviewResult>();
         review.Should().NotBeNull();
         review!.Projects.Should().Contain(x => x.ProjectId == ProjectContext.DefaultProjectId);
-        review.WorkItems.Should().Contain(x => x.Id == created.Id && x.Status == ProjectWorkItemStatus.InProgress);
+        review.WorkItems.Should().Contain(x => x.Id == created.Id && x.Status == ProjectWorkItemStatus.Completed);
     }
 
     private static async Task CompleteActiveMaintenanceLeasesAsync(HttpClient client)

@@ -29,12 +29,14 @@ public interface IContextHubApiClient
     Task<IReadOnlyList<DiscussionThreadResult>> GetDiscussionThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken);
     Task<DiscussionThreadDetailResult?> GetDiscussionThreadAsync(Guid threadId, string readerProjectId, CancellationToken cancellationToken);
     Task<DiscussionThreadResult?> CloseDiscussionThreadAsync(Guid threadId, CancellationToken cancellationToken);
+    Task<DiscussionThreadResult?> SetDiscussionThreadArchivedAsync(Guid threadId, bool archived, CancellationToken cancellationToken);
     Task<DiscussionThreadResult?> AdvanceDiscussionThreadReadCursorAsync(Guid threadId, string readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken);
     Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken);
     Task<DiscussionMessageResult> CreateDiscussionMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken);
+    Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
     Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken);
@@ -215,7 +217,7 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public Task<IReadOnlyList<DiscussionThreadResult>> GetDiscussionThreadsAsync(DiscussionThreadListRequest request, CancellationToken cancellationToken)
     {
-        var query = new Dictionary<string, string?> { ["projectId"] = request.ProjectId, ["hostProjectId"] = request.HostProjectId, ["status"] = request.Status, ["limit"] = request.Limit.ToString() };
+        var query = new Dictionary<string, string?> { ["projectId"] = request.ProjectId, ["hostProjectId"] = request.HostProjectId, ["status"] = request.Status, ["limit"] = request.Limit.ToString(), ["includeArchived"] = request.IncludeArchived.ToString() };
         return GetRequiredAsync<IReadOnlyList<DiscussionThreadResult>>(QueryHelpers.AddQueryString("/api/discussions/threads", query), cancellationToken);
     }
 
@@ -225,6 +227,13 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     public async Task<DiscussionThreadResult?> CloseDiscussionThreadAsync(Guid threadId, CancellationToken cancellationToken)
     {
         using var response = await httpClient.PostAsync($"/api/discussions/threads/{threadId:D}/close", content: null, cancellationToken);
+        return await ReadRequiredAsync<DiscussionThreadResult>(response, cancellationToken);
+    }
+
+    public async Task<DiscussionThreadResult?> SetDiscussionThreadArchivedAsync(Guid threadId, bool archived, CancellationToken cancellationToken)
+    {
+        var action = archived ? "archive" : "restore";
+        using var response = await httpClient.PostAsync($"/api/discussions/threads/{threadId:D}/{action}", content: null, cancellationToken);
         return await ReadRequiredAsync<DiscussionThreadResult>(response, cancellationToken);
     }
 
@@ -247,7 +256,7 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     }
 
     public Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
-        => GetRequiredAsync<IReadOnlyList<ProjectWorkItemResult>>(QueryHelpers.AddQueryString("/api/work-items", new Dictionary<string, string?> { ["projectId"] = request.ProjectId, ["status"] = request.Status?.ToString(), ["limit"] = request.Limit.ToString() }), cancellationToken);
+        => GetRequiredAsync<IReadOnlyList<ProjectWorkItemResult>>(QueryHelpers.AddQueryString("/api/work-items", new Dictionary<string, string?> { ["projectId"] = request.ProjectId, ["status"] = request.Status?.ToString(), ["limit"] = request.Limit.ToString(), ["includeArchived"] = request.IncludeArchived.ToString() }), cancellationToken);
 
     public async Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
     {
@@ -258,6 +267,13 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     public async Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
     {
         using var response = await httpClient.PutAsJsonAsync($"/api/work-items/{request.Id:D}", request, cancellationToken);
+        return await ReadRequiredAsync<ProjectWorkItemResult>(response, cancellationToken);
+    }
+
+    public async Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken)
+    {
+        var action = archived ? "archive" : "restore";
+        using var response = await httpClient.PostAsync($"/api/work-items/{workItemId:D}/{action}", content: null, cancellationToken);
         return await ReadRequiredAsync<ProjectWorkItemResult>(response, cancellationToken);
     }
 

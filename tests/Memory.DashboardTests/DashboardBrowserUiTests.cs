@@ -2124,8 +2124,6 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         var layoutJson = await page.EvaluateAsync<string>(
             @"() => JSON.stringify({
-                list: document.querySelector('.discussion-list-scroll'),
-                detail: document.querySelector('.discussion-message-stream'),
                 listOverflowY: getComputedStyle(document.querySelector('.discussion-list-scroll')).overflowY,
                 detailOverflowY: getComputedStyle(document.querySelector('.discussion-message-stream')).overflowY,
                 listScrollHeight: document.querySelector('.discussion-list-scroll').scrollHeight,

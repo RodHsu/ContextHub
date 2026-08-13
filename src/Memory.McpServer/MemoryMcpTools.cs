@@ -161,7 +161,7 @@ public sealed class MemoryMcpTools(
     public Task<DiscussionThreadDetailResult> discussion_thread_create(DiscussionThreadCreateRequest request, CancellationToken cancellationToken = default)
         => projectDiscussionService.CreateThreadAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("List cross-project discussion threads visible to one participant ProjectId, optionally filtered by host project or status.")]
+    [McpServerTool(UseStructuredContent = true), Description("List cross-project discussion threads visible to one participant ProjectId, optionally filtered by host project or status. Archived threads are excluded unless IncludeArchived is true.")]
     public Task<IReadOnlyList<DiscussionThreadResult>> discussion_threads_list(DiscussionThreadListRequest request, CancellationToken cancellationToken = default)
         => projectDiscussionService.ListThreadsAsync(request, cancellationToken);
 
@@ -172,6 +172,14 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("Close a cross-project discussion. Only an actor with write access to the thread HostProjectId can close it; closed threads retain their history and reject new replies.")]
     public Task<DiscussionThreadResult?> discussion_thread_close(Guid threadId, CancellationToken cancellationToken = default)
         => projectDiscussionService.CloseThreadAsync(threadId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Archive a cross-project discussion. Archived threads are hidden from default lists and reject mutations until restored.")]
+    public Task<DiscussionThreadResult?> discussion_thread_archive(Guid threadId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.SetThreadArchivedAsync(threadId, archived: true, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Restore an archived cross-project discussion without changing its Open or Closed status.")]
+    public Task<DiscussionThreadResult?> discussion_thread_restore(Guid threadId, CancellationToken cancellationToken = default)
+        => projectDiscussionService.SetThreadArchivedAsync(threadId, archived: false, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Reply to a cross-project discussion as SenderProjectId. The sender must be a participant and writable for the current actor.")]
     public Task<DiscussionMessageResult> discussion_message_create(DiscussionMessageCreateRequest request, CancellationToken cancellationToken = default)
@@ -185,7 +193,19 @@ public sealed class MemoryMcpTools(
     public Task<ProjectWorkItemResult> project_work_item_update(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.UpdateAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("List project work items. These are user-managed project tasks, not governance suggested actions.")]
+    [McpServerTool(UseStructuredContent = true), Description("Complete or reopen one checklist item on a project work item. Archived work items reject checklist mutations.")]
+    public Task<ProjectWorkItemResult> project_work_item_checklist_update(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken = default)
+        => projectWorkItemService.SetChecklistItemCompletionAsync(workItemId, checklistItemId, isCompleted, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Archive a project work item. Archived work items are hidden from default lists and reject mutations until restored.")]
+    public Task<ProjectWorkItemResult> project_work_item_archive(Guid workItemId, CancellationToken cancellationToken = default)
+        => projectWorkItemService.SetArchivedAsync(workItemId, archived: true, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Restore an archived project work item without changing its business status.")]
+    public Task<ProjectWorkItemResult> project_work_item_restore(Guid workItemId, CancellationToken cancellationToken = default)
+        => projectWorkItemService.SetArchivedAsync(workItemId, archived: false, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List project work items. Archived work items are excluded unless IncludeArchived is true. These are user-managed project tasks, not governance suggested actions.")]
     public Task<IReadOnlyList<ProjectWorkItemResult>> project_work_items_list(ProjectWorkItemListRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.ListAsync(request, cancellationToken);
 

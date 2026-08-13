@@ -719,6 +719,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "discussion_thread_get",
             "discussion_thread_create",
             "discussion_thread_close",
+            "discussion_thread_archive",
+            "discussion_thread_restore",
             "discussion_message_create",
             "project_hierarchy_get_children",
             "project_hierarchy_set_children",
@@ -829,6 +831,28 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             arguments = new { threadId = chatToChatId }
         });
         ExtractToolJson(closePayload).GetProperty("status").GetString().Should().Be("Closed");
+
+        var directArchived = await UseDirectMcpAsync(mcp => mcp.discussion_thread_archive(mcpToMcp.Id));
+        directArchived!.IsArchived.Should().BeTrue();
+        (await UseDirectMcpAsync(mcp => mcp.discussion_threads_list(new(ProjectId))))
+            .Should().NotContain(x => x.Id == mcpToMcp.Id);
+        (await UseDirectMcpAsync(mcp => mcp.discussion_threads_list(new(ProjectId, IncludeArchived: true))))
+            .Should().ContainSingle(x => x.Id == mcpToMcp.Id && x.IsArchived);
+        (await UseDirectMcpAsync(mcp => mcp.discussion_thread_restore(mcpToMcp.Id)))!.Status.Should().Be("Closed");
+
+        var archivePayload = await SendMcpAsync(chatClient, sessionId!, 108, "tools/call", new
+        {
+            name = "discussion_thread_archive",
+            arguments = new { threadId = chatToChatId }
+        });
+        ExtractToolJson(archivePayload).GetProperty("isArchived").GetBoolean().Should().BeTrue();
+        var restorePayload = await SendMcpAsync(chatClient, sessionId!, 109, "tools/call", new
+        {
+            name = "discussion_thread_restore",
+            arguments = new { threadId = chatToChatId }
+        });
+        ExtractToolJson(restorePayload).GetProperty("status").GetString().Should().Be("Closed");
+        ExtractToolJson(restorePayload).GetProperty("isArchived").GetBoolean().Should().BeFalse();
     }
 
     [DockerRequiredFact]

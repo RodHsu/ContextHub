@@ -857,6 +857,7 @@ public sealed class DiscussionThread
     public string HostProjectId { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string Status { get; set; } = "Open";
+    public DateTimeOffset? ArchivedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public List<DiscussionParticipant> Participants { get; set; } = [];
@@ -896,6 +897,7 @@ public sealed class ProjectWorkItem
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
+    public DateTimeOffset? ArchivedAt { get; set; }
     public ICollection<ProjectWorkItemChecklistItem> ChecklistItems { get; set; } = [];
 }
 

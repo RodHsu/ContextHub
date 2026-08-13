@@ -1304,8 +1304,8 @@ discussions.MapPost("/threads", async (DiscussionThreadCreateRequest request, IP
     try { return Results.Created($"/api/discussions/threads", await service.CreateThreadAsync(request, cancellationToken)); }
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["discussion"] = [ex.Message] }); }
 });
-discussions.MapGet("/threads", async (string? projectId, string? hostProjectId, string? status, int? limit, IProjectDiscussionService service, CancellationToken cancellationToken)
-    => Results.Ok(await service.ListThreadsAsync(new DiscussionThreadListRequest(projectId, hostProjectId, status, limit ?? 50), cancellationToken)));
+discussions.MapGet("/threads", async (string? projectId, string? hostProjectId, string? status, int? limit, bool? includeArchived, IProjectDiscussionService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ListThreadsAsync(new DiscussionThreadListRequest(projectId, hostProjectId, status, limit ?? 50, includeArchived ?? false), cancellationToken)));
 discussions.MapGet("/threads/{threadId:guid}", async (Guid threadId, string? readerProjectId, IProjectDiscussionService service, CancellationToken cancellationToken) =>
 {
     var result = await service.GetThreadAsync(threadId, readerProjectId, cancellationToken);
@@ -1313,7 +1313,21 @@ discussions.MapGet("/threads/{threadId:guid}", async (Guid threadId, string? rea
 });
 discussions.MapPost("/threads/{threadId:guid}/close", async (Guid threadId, IProjectDiscussionService service, CancellationToken cancellationToken) =>
 {
-    var result = await service.CloseThreadAsync(threadId, cancellationToken);
+    try
+    {
+        var result = await service.CloseThreadAsync(threadId, cancellationToken);
+        return result is null ? Results.NotFound() : Results.Ok(result);
+    }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["discussion"] = [ex.Message] }); }
+});
+discussions.MapPost("/threads/{threadId:guid}/archive", async (Guid threadId, IProjectDiscussionService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.SetThreadArchivedAsync(threadId, archived: true, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+discussions.MapPost("/threads/{threadId:guid}/restore", async (Guid threadId, IProjectDiscussionService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.SetThreadArchivedAsync(threadId, archived: false, cancellationToken);
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
 discussions.MapPost("/threads/{threadId:guid}/read", async (Guid threadId, DiscussionThreadReadBody body, IProjectDiscussionService service, CancellationToken cancellationToken) =>
@@ -1327,6 +1341,10 @@ discussions.MapPost("/threads/{threadId:guid}/read", async (Guid threadId, Discu
     {
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["lastReadMessageId"] = [exception.Message] });
     }
+    catch (InvalidOperationException exception)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["discussion"] = [exception.Message] });
+    }
 });
 discussions.MapPost("/threads/{threadId:guid}/messages", async (Guid threadId, DiscussionMessageCreateBody body, IProjectDiscussionService service, CancellationToken cancellationToken) =>
 {
@@ -1336,13 +1354,13 @@ discussions.MapPost("/threads/{threadId:guid}/messages", async (Guid threadId, D
 
 var workItems = app.MapGroup("/api/work-items");
 workItems.RequireAuthIfEnabled(requireAuthentication);
-workItems.MapGet(string.Empty, async (string projectId, string? status, int? limit, IProjectWorkItemService service, CancellationToken cancellationToken) =>
+workItems.MapGet(string.Empty, async (string projectId, string? status, int? limit, bool? includeArchived, IProjectWorkItemService service, CancellationToken cancellationToken) =>
 {
     if (!EnumParser.TryParse(status, out ProjectWorkItemStatus? parsedStatus, out var error))
     {
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = [error ?? "Unsupported ProjectWorkItemStatus value."] });
     }
-    return Results.Ok(await service.ListAsync(new ProjectWorkItemListRequest(ProjectContext.Normalize(projectId), parsedStatus, limit ?? 100), cancellationToken));
+    return Results.Ok(await service.ListAsync(new ProjectWorkItemListRequest(ProjectContext.Normalize(projectId), parsedStatus, limit ?? 100, includeArchived ?? false), cancellationToken));
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 workItems.MapPost(string.Empty, async (ProjectWorkItemCreateRequest request, IProjectWorkItemService service, CancellationToken cancellationToken) =>
 {
@@ -1352,6 +1370,16 @@ workItems.MapPost(string.Empty, async (ProjectWorkItemCreateRequest request, IPr
 workItems.MapPut("/{id:guid}", async (Guid id, ProjectWorkItemUpdateBody body, IProjectWorkItemService service, CancellationToken cancellationToken) =>
 {
     try { return Results.Ok(await service.UpdateAsync(new ProjectWorkItemUpdateRequest(id, body.Title, body.Description, body.Tags, body.Status, body.Priority, body.DueAt), cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+workItems.MapPost("/{id:guid}/archive", async (Guid id, IProjectWorkItemService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.SetArchivedAsync(id, archived: true, cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+workItems.MapPost("/{id:guid}/restore", async (Guid id, IProjectWorkItemService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.SetArchivedAsync(id, archived: false, cancellationToken)); }
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 workItems.MapPut("/{workItemId:guid}/checklist/{checklistItemId:guid}", async (Guid workItemId, Guid checklistItemId, ProjectWorkItemChecklistCompletionBody body, IProjectWorkItemService service, CancellationToken cancellationToken) =>

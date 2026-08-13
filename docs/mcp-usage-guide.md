@@ -97,9 +97,12 @@ Do not write:
 | `discussion_threads_list` | Polling discussion threads visible to one participant ProjectId; available on `/mcp` and `/mcp-chat` |
 | `discussion_thread_get` | Reading one discussion for a participant project without changing its read cursor; available on `/mcp` and `/mcp-chat` |
 | `discussion_thread_close` | Closing a discussion when the caller has write access to its `hostProjectId`; closed history is retained and new replies are rejected; available on `/mcp` and `/mcp-chat` |
+| `discussion_thread_archive` / `discussion_thread_restore` | Hiding or restoring a discussion without changing its `Open` or `Closed` status; archived discussions reject mutations and are excluded from default lists; available on `/mcp` and `/mcp-chat` |
 | `discussion_message_create` | Posting to an open discussion as an authorized participant; available on `/mcp` and `/mcp-chat` |
 | `project_work_item_create` | Creating a user-managed project task with optional tags, priority, due date, and checklist on trusted `/mcp` |
 | `project_work_item_update` | Updating a project work item; `Completed` requires every checklist item to be completed first |
+| `project_work_item_checklist_update` | Completing or reopening one checklist item so guarded work items can progress to `Completed` |
+| `project_work_item_archive` / `project_work_item_restore` | Hiding or restoring a work item without changing its business status; archived work items reject mutations and are excluded from default lists |
 | `project_work_items_list` | Listing user-managed work items for one ProjectId; work items are not governance suggested actions |
 | `daily_memory_review` | Reading an actor-scoped, non-destructive review of knowledge, preferences, discussions, work items, insights, actions, and proposals through `/mcp-chat` |
 | `log_search` | Searching recent runtime events |
@@ -137,11 +140,15 @@ For `discussion_thread_create`, `discussion_message_create`, and `project_hierar
 
 Only the host project can close a discussion: `discussion_thread_close` accepts the thread id, validates the caller's write access to that thread's `hostProjectId`, retains the entire discussion history, and prevents further replies.
 
+Archive is a separate lifecycle dimension from close. `discussion_thread_archive` hides the thread from default lists and rejects replies, read-cursor updates, and close mutations until `discussion_thread_restore` is called. Restore preserves the prior `Open` or `Closed` status. Pass `includeArchived: true` to list archived history explicitly.
+
 ## Project Information and Work Items
 
 Project information is the durable, fixed background for a `ProjectId`; it is not a scratchpad. Create or update it only when the project purpose, boundaries, or stable operating description is known. `build_working_context` returns that information separately from task-retrieved knowledge.
 
-Use project work items for actionable, user-managed follow-up. They support `Pending`, `InProgress`, `Blocked`, `Completed`, and `Cancelled` states, plus tags, priority, optional due date, and an ordered checklist. A work item can move to `Completed` only when every checklist item is complete. Do not use work items to store an architecture decision or use a discussion thread as a substitute for an auditable task.
+Use project work items for actionable, user-managed follow-up. They support `Pending`, `InProgress`, `Blocked`, `Completed`, and `Cancelled` states, plus tags, priority, optional due date, and an ordered checklist. Use `project_work_item_checklist_update` to complete checklist entries; a work item can move to `Completed` only when every checklist item is complete. Do not use work items to store an architecture decision or use a discussion thread as a substitute for an auditable task.
+
+Archive is also separate from the work-item status. `project_work_item_archive` hides an item from default lists and freezes updates and checklist mutations until restore; `project_work_item_restore` returns it with the same status it had before archival. Use `includeArchived: true` only for history or restore workflows.
 
 ```text
 Stable project background -> project_information_*

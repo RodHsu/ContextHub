@@ -554,8 +554,8 @@ chunk 命中後再 regroup 成 item，避免同一份 memory 因多個 chunk 重
 - `user_preference_list`
 - `user_preference_archive`
 - `project_information_get` / `project_information_upsert` / `project_information_update_lifecycle`
-- `discussion_thread_*` 與 `project_hierarchy_*`
-- `project_work_item_create` / `project_work_item_update` / `project_work_items_list`
+- `discussion_thread_*`（含 close / archive / restore）與 `project_hierarchy_*`
+- `project_work_item_create` / `project_work_item_update` / `project_work_item_checklist_update` / `project_work_item_archive` / `project_work_item_restore` / `project_work_items_list`
 - `daily_memory_review`
 
 ### 10.2 REST

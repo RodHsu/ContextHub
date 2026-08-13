@@ -57,6 +57,7 @@ public sealed class ProjectWorkItemService(
         var entity = await ApplyActorScope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor).SingleOrDefaultAsync(x => x.Id == request.Id, cancellationToken)
             ?? throw new InvalidOperationException($"Project work item '{request.Id}' was not found.");
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
+        EnsureNotArchived(entity);
         if (request.Title is not null)
         {
             ValidateText(request.Title, 200, "Work item title");
@@ -91,11 +92,32 @@ public sealed class ProjectWorkItemService(
         var projectId = ProjectContext.Normalize(request.ProjectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
         var query = ApplyActorScope(dbContext.ProjectWorkItems.AsNoTracking().Include(x => x.ChecklistItems), actor).Where(x => x.ProjectId == projectId);
+        if (!request.IncludeArchived) query = query.Where(x => x.ArchivedAt == null);
         if (request.Status.HasValue) query = query.Where(x => x.Status == request.Status.Value);
         var items = await query.OrderBy(x => x.Status == ProjectWorkItemStatus.Completed || x.Status == ProjectWorkItemStatus.Cancelled)
             .ThenByDescending(x => x.Priority).ThenBy(x => x.DueAt).ThenByDescending(x => x.UpdatedAt)
             .Take(Math.Clamp(request.Limit, 1, 200)).ToListAsync(cancellationToken);
         return items.Select(Map).ToArray();
+    }
+
+    public async Task<ProjectWorkItemResult> SetArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        var entity = await ApplyActorScope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor).SingleOrDefaultAsync(x => x.Id == workItemId, cancellationToken)
+            ?? throw new InvalidOperationException($"Project work item '{workItemId}' was not found.");
+        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
+
+        var shouldChange = archived ? entity.ArchivedAt is null : entity.ArchivedAt is not null;
+        if (shouldChange)
+        {
+            var now = clock.UtcNow;
+            entity.ArchivedAt = archived ? now : null;
+            entity.UpdatedAt = now;
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        return Map(entity);
     }
 
     public async Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
@@ -105,6 +127,7 @@ public sealed class ProjectWorkItemService(
         var entity = await ApplyActorScope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor).SingleOrDefaultAsync(x => x.Id == workItemId, cancellationToken)
             ?? throw new InvalidOperationException($"Project work item '{workItemId}' was not found.");
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
+        EnsureNotArchived(entity);
         var item = entity.ChecklistItems.SingleOrDefault(x => x.Id == checklistItemId)
             ?? throw new InvalidOperationException($"Checklist item '{checklistItemId}' was not found.");
         item.IsCompleted = isCompleted;
@@ -118,7 +141,11 @@ public sealed class ProjectWorkItemService(
         => !actor.HasUser ? query : actor.IsServiceActor
             ? query.Where(x => x.TenantId == actor.TenantId)
             : query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
-    private static ProjectWorkItemResult Map(ProjectWorkItem x) => new(x.Id, x.ProjectId, x.Title, x.Description, x.Tags, x.ChecklistItems.OrderBy(item => item.SortOrder).Select(item => new ProjectWorkItemChecklistItemResult(item.Id, item.Content, item.IsCompleted, item.SortOrder)).ToArray(), x.Status, x.Priority, x.DueAt, x.CreatedAt, x.UpdatedAt, x.CompletedAt);
+    private static ProjectWorkItemResult Map(ProjectWorkItem x) => new(x.Id, x.ProjectId, x.Title, x.Description, x.Tags, x.ChecklistItems.OrderBy(item => item.SortOrder).Select(item => new ProjectWorkItemChecklistItemResult(item.Id, item.Content, item.IsCompleted, item.SortOrder)).ToArray(), x.Status, x.Priority, x.DueAt, x.CreatedAt, x.UpdatedAt, x.CompletedAt, x.ArchivedAt);
+    private static void EnsureNotArchived(ProjectWorkItem entity)
+    {
+        if (entity.ArchivedAt.HasValue) throw new InvalidOperationException("Project work item is archived. Restore it before making changes.");
+    }
     private static string[] NormalizeTags(IReadOnlyList<string>? tags)
         => (tags ?? []).Select(tag => tag.Trim()).Where(tag => tag.Length is > 0 and <= 50).Distinct(StringComparer.OrdinalIgnoreCase).Take(12).ToArray();
     private static string[] NormalizeChecklist(IReadOnlyList<string>? items)

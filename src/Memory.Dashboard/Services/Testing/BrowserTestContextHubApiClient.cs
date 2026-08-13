@@ -719,6 +719,18 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             DateTimeOffset.UtcNow.AddHours(-3),
             DateTimeOffset.UtcNow));
 
+    public Task<DiscussionThreadResult?> SetDiscussionThreadArchivedAsync(Guid threadId, bool archived, CancellationToken cancellationToken)
+        => Task.FromResult<DiscussionThreadResult?>(new DiscussionThreadResult(
+            threadId,
+            "Vital_AirMeet_BackEnd",
+            "API contract alignment",
+            "Closed",
+            ["Vital_AirMeet", "Vital_AirMeet_BackEnd"],
+            0,
+            DateTimeOffset.UtcNow.AddHours(-3),
+            DateTimeOffset.UtcNow,
+            archived ? DateTimeOffset.UtcNow : null));
+
     public Task<DiscussionThreadResult?> AdvanceDiscussionThreadReadCursorAsync(Guid threadId, string readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken)
         => Task.FromResult<DiscussionThreadResult?>(new DiscussionThreadResult(
             threadId,
@@ -745,6 +757,9 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     public Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectWorkItemResult(request.Id, "dashboard-test", request.Title ?? "更新後代辦", request.Description ?? string.Empty, request.Tags ?? [], [], request.Status ?? ProjectWorkItemStatus.InProgress, request.Priority ?? 0, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, request.Status == ProjectWorkItemStatus.Completed ? DateTimeOffset.UtcNow : null));
+
+    public Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken)
+        => Task.FromResult(new ProjectWorkItemResult(workItemId, "dashboard-test", "封存代辦", string.Empty, [], [], ProjectWorkItemStatus.Completed, 0, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, archived ? DateTimeOffset.UtcNow : null));
 
     public Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
         => UpdateProjectWorkItemAsync(new ProjectWorkItemUpdateRequest(workItemId), cancellationToken);

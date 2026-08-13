@@ -69,6 +69,7 @@ public sealed class ProjectDiscussionService(
             .Include(x => x.Messages)
             ;
         query = ApplyActorScope(query, actor);
+        if (!request.IncludeArchived) query = query.Where(x => x.ArchivedAt == null);
         if (project is not null) query = query.Where(x => x.Participants.Any(p => p.ProjectId == project));
         else if (actor.AllowedProjectIds.Count > 0) query = query.Where(x => x.Participants.Any(p => actor.AllowedProjectIds.Contains(p.ProjectId)));
         if (!string.IsNullOrWhiteSpace(request.HostProjectId)) { var host = ProjectContext.Normalize(request.HostProjectId); ActorAuthorization.EnsureProjectAllowed(actor, host, false); query = query.Where(x => x.HostProjectId == host); }
@@ -93,6 +94,7 @@ public sealed class ProjectDiscussionService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         ActorAuthorization.EnsureProjectAllowed(actor, thread.HostProjectId, write: true);
+        EnsureNotArchived(thread);
 
         if (string.Equals(thread.Status, "Open", StringComparison.OrdinalIgnoreCase))
         {
@@ -104,10 +106,32 @@ public sealed class ProjectDiscussionService(
         return MapSummary(thread, thread.HostProjectId);
     }
 
+    public async Task<DiscussionThreadResult?> SetThreadArchivedAsync(Guid threadId, bool archived, CancellationToken cancellationToken)
+    {
+        var thread = await LoadThreadAsync(threadId, cancellationToken);
+        if (thread is null) return null;
+
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        ActorAuthorization.EnsureProjectAllowed(actor, thread.HostProjectId, write: true);
+
+        var shouldChange = archived ? thread.ArchivedAt is null : thread.ArchivedAt is not null;
+        if (shouldChange)
+        {
+            var now = clock.UtcNow;
+            thread.ArchivedAt = archived ? now : null;
+            thread.UpdatedAt = now;
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        return MapSummary(thread, thread.HostProjectId);
+    }
+
     public async Task<DiscussionThreadResult?> AdvanceThreadReadCursorAsync(Guid threadId, string? readerProjectId, Guid lastReadMessageId, CancellationToken cancellationToken)
     {
         var thread = await LoadThreadAsync(threadId, cancellationToken);
         if (thread is null) return null;
+        EnsureNotArchived(thread);
         var reader = ResolveReaderProjectId(thread, readerProjectId);
         var lastReadMessage = thread.Messages.SingleOrDefault(message => message.Id == lastReadMessageId)
             ?? throw new ArgumentException("The read cursor message does not belong to this discussion thread.", nameof(lastReadMessageId));
@@ -125,6 +149,7 @@ public sealed class ProjectDiscussionService(
     {
         ValidateText(request.Content, 12000, "Discussion message");
         var thread = await LoadThreadAsync(request.ThreadId, cancellationToken) ?? throw new InvalidOperationException("Discussion thread was not found.");
+        EnsureNotArchived(thread);
         if (!string.Equals(thread.Status, "Open", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Discussion thread is closed.");
         var sender = ProjectContext.Normalize(request.SenderProjectId);
         _ = ResolveReaderProjectId(thread, sender);
@@ -184,7 +209,7 @@ public sealed class ProjectDiscussionService(
         var unreadCount = participant is null
             ? 0
             : thread.Messages.Count(x => x.CreatedAt > participant.LastReadAt && !string.Equals(x.SenderProjectId, reader, StringComparison.OrdinalIgnoreCase));
-        return new(thread.Id, thread.HostProjectId, thread.Title, thread.Status, thread.Participants.Select(x => x.ProjectId).OrderBy(x => x).ToArray(), unreadCount, thread.CreatedAt, thread.UpdatedAt);
+        return new(thread.Id, thread.HostProjectId, thread.Title, thread.Status, thread.Participants.Select(x => x.ProjectId).OrderBy(x => x).ToArray(), unreadCount, thread.CreatedAt, thread.UpdatedAt, thread.ArchivedAt);
     }
     private static DiscussionThreadDetailResult MapDetail(DiscussionThread thread, string reader)
     {
@@ -204,6 +229,12 @@ public sealed class ProjectDiscussionService(
             thread.CreatedAt,
             thread.UpdatedAt,
             reader,
-            unreadMessageIds);
+            unreadMessageIds,
+            thread.ArchivedAt);
+    }
+
+    private static void EnsureNotArchived(DiscussionThread thread)
+    {
+        if (thread.ArchivedAt.HasValue) throw new InvalidOperationException("Discussion thread is archived. Restore it before making changes.");
     }
 }

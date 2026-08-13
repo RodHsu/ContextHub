@@ -480,7 +480,15 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             "discussion_threads_list",
             "discussion_thread_get",
             "discussion_thread_close",
-            "discussion_message_create"
+            "discussion_thread_archive",
+            "discussion_thread_restore",
+            "discussion_message_create",
+            "project_work_item_create",
+            "project_work_item_update",
+            "project_work_item_checklist_update",
+            "project_work_item_archive",
+            "project_work_item_restore",
+            "project_work_items_list"
         });
 
         var sessionId = captureHandler.SessionId;
