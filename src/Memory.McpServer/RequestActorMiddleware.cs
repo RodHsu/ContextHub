@@ -85,7 +85,8 @@ internal sealed class RequestActorMiddleware(RequestDelegate next)
             tokenActor.Scopes,
             tokenActor.AllowedProjectIds,
             true,
-            IsServiceActor: false);
+            IsServiceActor: false,
+            IsInteractiveUser: true);
     }
 
     private static ContextHubRequestActor BuildTokenActor(ClaimsPrincipal user)

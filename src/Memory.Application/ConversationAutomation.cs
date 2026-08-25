@@ -291,6 +291,7 @@ public sealed class ConversationAutomationService(
 
         return await query
             .OrderByDescending(x => x.UpdatedAt)
+            .Skip(Math.Max(0, request.Offset))
             .Take(Math.Clamp(request.Limit, 1, 400))
             .Select(x => new ConversationInsightResult(
                 x.Id,
@@ -318,6 +319,60 @@ public sealed class ConversationAutomationService(
                 x.CreatedAt,
                 x.UpdatedAt))
             .ToListAsync(cancellationToken);
+    }
+
+    public async Task<ConversationInsightResult?> GetInsightAsync(Guid insightId, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        var query = ApplyInsightActorScope(dbContext.ConversationInsights.AsNoTracking(), actor);
+        var insight = await query.FirstOrDefaultAsync(x => x.Id == insightId, cancellationToken);
+        if (insight is null)
+        {
+            return null;
+        }
+
+        ActorAuthorization.EnsureProjectAllowed(actor, insight.ProjectId, write: false);
+        return MapInsight(insight);
+    }
+
+    public async Task<ConversationInsightResult> RetryInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        ValidateGovernanceRunId(request.GovernanceRunId);
+        var insight = await LoadGovernableInsightAsync(request.InsightId, actor, cancellationToken);
+        ActorAuthorization.EnsureProjectAllowed(actor, insight.ProjectId, write: true);
+        if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
+        {
+            return MapInsight(insight);
+        }
+
+        insight.PromotionStatus = ConversationPromotionStatus.Pending;
+        insight.Error = string.Empty;
+        insight.UpdatedAt = clock.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await EnqueuePromotionJobIfNeededAsync(insight.ConversationId, insight.ProjectId, cancellationToken);
+        return MapInsight(insight);
+    }
+
+    public async Task<ConversationInsightResult> SkipInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        ValidateGovernanceRunId(request.GovernanceRunId);
+        var insight = await LoadGovernableInsightAsync(request.InsightId, actor, cancellationToken);
+        ActorAuthorization.EnsureProjectAllowed(actor, insight.ProjectId, write: true);
+        if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
+        {
+            return MapInsight(insight);
+        }
+
+        insight.PromotionStatus = ConversationPromotionStatus.Skipped;
+        insight.Error = string.IsNullOrWhiteSpace(request.Reason) ? "Skipped by governance." : request.Reason.Trim();
+        insight.UpdatedAt = clock.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return MapInsight(insight);
     }
 
     public async Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken)
@@ -619,6 +674,61 @@ public sealed class ConversationAutomationService(
         };
 
         await jobQueue.EnqueueAsync(job, cancellationToken);
+    }
+
+    private async Task<ConversationInsight> LoadGovernableInsightAsync(Guid insightId, ContextHubRequestActor actor, CancellationToken cancellationToken)
+    {
+        var insight = await ApplyInsightActorScope(dbContext.ConversationInsights, actor)
+            .FirstOrDefaultAsync(x => x.Id == insightId, cancellationToken)
+            ?? throw new InvalidOperationException($"Conversation insight '{insightId}' was not found.");
+        if (insight.Tags.Contains("chatgpt-proposal", StringComparer.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("ChatGPT proposals must be governed through the proposal lifecycle tools.");
+        }
+
+        return insight;
+    }
+
+    private static IQueryable<ConversationInsight> ApplyInsightActorScope(IQueryable<ConversationInsight> query, ContextHubRequestActor actor)
+        => !actor.HasUser
+            ? query
+            : actor.IsServiceActor
+                ? query.Where(x => x.TenantId == actor.TenantId)
+                : query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+
+    private static ConversationInsightResult MapInsight(ConversationInsight x)
+        => new(
+            x.Id,
+            x.SessionId,
+            x.CheckpointId,
+            x.ConversationId,
+            x.TurnId,
+            x.ProjectId,
+            x.ProjectName,
+            x.TaskId,
+            x.SourceSystem,
+            x.SourceKind,
+            x.InsightType,
+            x.Title,
+            x.Content,
+            x.Summary,
+            x.SourceRef,
+            x.Tags,
+            x.Importance,
+            x.Confidence,
+            x.DedupKey,
+            x.PromotionStatus,
+            x.PromotedMemoryId,
+            x.Error,
+            x.CreatedAt,
+            x.UpdatedAt);
+
+    private static void ValidateGovernanceRunId(string? governanceRunId)
+    {
+        if (governanceRunId?.Trim().Length > 128)
+        {
+            throw new InvalidOperationException("GovernanceRunId must not exceed 128 characters.");
+        }
     }
 
     private static ContextHubRequestActor BuildAutomationActor(ConversationInsight item)

@@ -168,7 +168,8 @@ public sealed record SuggestedActionListRequest(
     string ProjectId = ProjectContext.DefaultProjectId,
     SuggestedActionStatus? Status = SuggestedActionStatus.Pending,
     SuggestedActionType? Type = null,
-    int Limit = 100);
+    int Limit = 100,
+    int Offset = 0);
 
 public sealed record SuggestedActionResult(
     Guid Id,

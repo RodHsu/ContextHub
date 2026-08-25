@@ -2815,6 +2815,7 @@ public sealed record MemoryDataRetentionPolicy(
     decimal MaxImportance,
     decimal MaxConfidence,
     int PreviewLimit,
+    int PreviewOffset,
     int BatchSize,
     int DelayBetweenBatchesMs,
     int RevisionRetentionDays,
@@ -2835,6 +2836,7 @@ public sealed record MemoryDataRetentionPolicy(
             Math.Clamp(request.MaxImportance ?? options.MaxImportance, 0m, 1m),
             Math.Clamp(request.MaxConfidence ?? options.MaxConfidence, 0m, 1m),
             Math.Clamp(request.PreviewLimit ?? options.PreviewLimit, 1, 500),
+            Math.Max(0, request.PreviewOffset),
             Math.Clamp(request.BatchSize ?? options.BatchSize, 1, 100_000),
             Math.Clamp(request.DelayBetweenBatchesMs ?? options.DelayBetweenBatchesMs, 0, 60_000),
             Math.Clamp(request.RevisionRetentionDays ?? options.RevisionRetentionDays, 1, 3650),
@@ -3725,11 +3727,13 @@ public sealed class MemoryDataRetentionService(
             FROM classified
             WHERE is_auto_delete = @is_auto_delete
             ORDER BY updated_at ASC, id ASC
-            LIMIT @preview_limit;
+            LIMIT @preview_limit
+            OFFSET @preview_offset;
             """;
         AddClassificationParameters(command, cutoffUtc, hitWindowStart, policy, projectIds, tenantId);
         command.Parameters.Add(new NpgsqlParameter<bool>("is_auto_delete", autoDelete));
         command.Parameters.Add(new NpgsqlParameter<int>("preview_limit", policy.PreviewLimit));
+        command.Parameters.Add(new NpgsqlParameter<int>("preview_offset", policy.PreviewOffset));
 
         var candidates = new List<MemoryDataRetentionCandidateResult>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -3800,6 +3804,7 @@ public sealed class MemoryDataRetentionService(
             maxImportance = policy.MaxImportance,
             maxConfidence = policy.MaxConfidence,
             previewLimit = policy.PreviewLimit,
+            previewOffset = policy.PreviewOffset,
             revisionRetentionDays = policy.RevisionRetentionDays,
             minRevisionsToKeep = policy.MinRevisionsToKeep,
             maxChunksPerMemoryItem = policy.MaxChunksPerMemoryItem,

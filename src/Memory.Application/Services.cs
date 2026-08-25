@@ -1538,12 +1538,13 @@ public sealed class MemoryService(
             .OrderByDescending(x => x.Importance)
             .ThenByDescending(x => x.Confidence)
             .ThenByDescending(x => x.UpdatedAt)
-            .Take(Math.Max(request.Limit * 4, 32))
+            .Take(Math.Max((Math.Max(0, request.Offset) + request.Limit) * 4, 32))
             .ToListAsync(cancellationToken);
 
         return items
             .Select(MapUserPreference)
             .Where(x => !request.Kind.HasValue || x.Kind == request.Kind.Value)
+            .Skip(Math.Max(0, request.Offset))
             .Take(request.Limit)
             .ToArray();
     }

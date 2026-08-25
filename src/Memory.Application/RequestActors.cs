@@ -10,7 +10,8 @@ public sealed record ContextHubRequestActor(
     IReadOnlyList<string> Scopes,
     IReadOnlyList<string> AllowedProjectIds,
     bool IsAuthenticated,
-    bool IsServiceActor = false)
+    bool IsServiceActor = false,
+    bool IsInteractiveUser = false)
 {
     public static ContextHubRequestActor Unrestricted { get; } = new(
         null,

@@ -74,7 +74,7 @@ public sealed class ProjectDiscussionService(
         else if (actor.AllowedProjectIds.Count > 0) query = query.Where(x => x.Participants.Any(p => actor.AllowedProjectIds.Contains(p.ProjectId)));
         if (!string.IsNullOrWhiteSpace(request.HostProjectId)) { var host = ProjectContext.Normalize(request.HostProjectId); ActorAuthorization.EnsureProjectAllowed(actor, host, false); query = query.Where(x => x.HostProjectId == host); }
         if (!string.IsNullOrWhiteSpace(request.Status)) query = query.Where(x => x.Status == request.Status.Trim());
-        var threads = await query.OrderByDescending(x => x.UpdatedAt).Take(Math.Clamp(request.Limit, 1, 100)).ToListAsync(cancellationToken);
+        var threads = await query.OrderByDescending(x => x.UpdatedAt).Skip(Math.Max(0, request.Offset)).Take(Math.Clamp(request.Limit, 1, 100)).ToListAsync(cancellationToken);
         return threads.Select(x => MapSummary(x, project)).ToArray();
     }
 

@@ -322,6 +322,10 @@ public sealed record ProjectInformationUpdateRequest(
     string? DisplayName,
     string Description);
 
+public sealed record ProjectInformationAgentUpdateRequest(
+    string ProjectId,
+    string Description);
+
 public sealed record ProjectInformationResult(
     Guid MemoryId,
     string ProjectId,
@@ -603,6 +607,7 @@ public sealed record MemoryDataRetentionRunRequest(
     decimal? MaxImportance = null,
     decimal? MaxConfidence = null,
     int? PreviewLimit = null,
+    int PreviewOffset = 0,
     bool IncludeCandidateDetails = true,
     IReadOnlyList<string>? ProjectIds = null,
     Guid? TenantId = null,
@@ -754,7 +759,8 @@ public sealed record UserPreferenceUpsertRequest(
 public sealed record UserPreferenceListRequest(
     UserPreferenceKind? Kind = null,
     bool IncludeArchived = false,
-    int Limit = 50);
+    int Limit = 50,
+    int Offset = 0);
 
 public sealed record UserPreferenceArchiveRequest(
     Guid Id,
@@ -1132,7 +1138,8 @@ public sealed record ConversationInsightListRequest(
     string? ConversationId = null,
     ConversationPromotionStatus? PromotionStatus = null,
     ConversationInsightType? InsightType = null,
-    int Limit = 100);
+    int Limit = 100,
+    int Offset = 0);
 
 public sealed record ConversationInsightResult(
     Guid Id,
@@ -1160,6 +1167,11 @@ public sealed record ConversationInsightResult(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
 
+public sealed record ConversationInsightGovernanceRequest(
+    Guid InsightId,
+    string? GovernanceRunId = null,
+    string? Reason = null);
+
 public sealed record AccessibleProjectResult(
     string ProjectId,
     bool CanRead,
@@ -1173,7 +1185,47 @@ public sealed record DailyMemoryReviewResult(
     IReadOnlyList<UserPreferenceResult> UserPreferences,
     IReadOnlyList<ChatGptProposalResult> PendingProposals);
 
-public sealed record KnowledgeReviewRequest(IReadOnlyList<string>? ProjectIds = null, int LimitPerSection = 100);
+public sealed record KnowledgeReviewRequest(
+    IReadOnlyList<string>? ProjectIds = null,
+    int LimitPerSection = 100,
+    int Offset = 0,
+    string? GovernanceRunId = null,
+    bool IsReReview = false);
+
+public sealed record KnowledgeReviewPageResult(
+    int Offset,
+    int Limit,
+    int ReturnedCount,
+    int TotalCount,
+    bool HasMore);
+
+public sealed record KnowledgeReviewPaginationResult(
+    KnowledgeReviewPageResult ProjectKnowledgeCandidates,
+    KnowledgeReviewPageResult SharedKnowledgeCandidates,
+    KnowledgeReviewPageResult UserPreferences,
+    KnowledgeReviewPageResult Discussions,
+    KnowledgeReviewPageResult WorkItems,
+    KnowledgeReviewPageResult HighSignalConversationInsights,
+    KnowledgeReviewPageResult PendingSuggestedActions,
+    KnowledgeReviewPageResult PendingProposals)
+{
+    public bool HasMore =>
+        ProjectKnowledgeCandidates.HasMore ||
+        SharedKnowledgeCandidates.HasMore ||
+        UserPreferences.HasMore ||
+        Discussions.HasMore ||
+        WorkItems.HasMore ||
+        HighSignalConversationInsights.HasMore ||
+        PendingSuggestedActions.HasMore ||
+        PendingProposals.HasMore;
+}
+
+public sealed record KnowledgeReviewConvergenceResult(
+    string Status,
+    int ActionableItemCount,
+    bool RequiresReReview,
+    bool IsConverged);
+
 public sealed record KnowledgeReviewResult(
     IReadOnlyList<AccessibleProjectResult> Projects,
     MemoryDataRetentionRunResult ProjectKnowledge,
@@ -1183,7 +1235,11 @@ public sealed record KnowledgeReviewResult(
     IReadOnlyList<ProjectWorkItemResult> WorkItems,
     IReadOnlyList<ConversationInsightResult> HighSignalConversationInsights,
     IReadOnlyList<SuggestedActionResult> PendingSuggestedActions,
-    IReadOnlyList<ChatGptProposalResult> PendingProposals);
+    IReadOnlyList<ChatGptProposalResult> PendingProposals,
+    string GovernanceRunId,
+    bool IsReReview,
+    KnowledgeReviewPaginationResult Pagination,
+    KnowledgeReviewConvergenceResult Convergence);
 
 public sealed record ConversationCheckpointSearchRequest(
     string? Query = null,
@@ -1264,12 +1320,22 @@ public sealed record ChatGptProposalCreateRequest(
     string Summary,
     string OAuthSubject = "",
     string OAuthEmail = "",
-    string OAuthName = "");
+    string OAuthName = "",
+    string? GovernanceRunId = null);
+
+public sealed record ChatGptGovernanceProposalRequest(
+    string ToolName,
+    string ProjectId,
+    string PayloadJson,
+    string Title,
+    string Summary,
+    string GovernanceRunId);
 
 public sealed record ChatGptProposalListRequest(
     string? ProjectId = null,
     ChatGptProposalStatus? Status = null,
-    int Limit = 50);
+    int Limit = 50,
+    int Offset = 0);
 
 public sealed record ChatGptProposalDecisionRequest(
     Guid ProposalId,
@@ -1290,7 +1356,8 @@ public sealed record ChatGptProposalResult(
     Guid? AppliedResourceId,
     string Error,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string GovernanceRunId = "");
 
 public sealed record InstanceSettingsSnapshot(
     string InstanceId,
@@ -1662,6 +1729,7 @@ public interface IProjectInformationService
 {
     Task<ProjectInformationResult?> GetAsync(string projectId, CancellationToken cancellationToken);
     Task<ProjectInformationResult> UpsertAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken);
+    Task<ProjectInformationResult> UpdateFromAgentAsync(ProjectInformationAgentUpdateRequest request, CancellationToken cancellationToken);
     Task<ProjectInformationResult> UpdateLifecycleAsync(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectInformationListItem>> ListAsync(bool includeInactive, CancellationToken cancellationToken);
     Task<IReadOnlyList<string>> GetArchivedProjectIdsAsync(IReadOnlyList<string> projectIds, CancellationToken cancellationToken);
@@ -1677,7 +1745,7 @@ public sealed record ProjectHierarchyResult(string ParentProjectId, IReadOnlyLis
 
 public sealed record DiscussionThreadCreateRequest(string HostProjectId, string SenderProjectId, string Title, IReadOnlyList<string> ParticipantProjectIds, string InitialMessage);
 public sealed record DiscussionMessageCreateRequest(Guid ThreadId, string SenderProjectId, string Content);
-public sealed record DiscussionThreadListRequest(string? ProjectId = null, string? HostProjectId = null, string? Status = null, int Limit = 50, bool IncludeArchived = false);
+public sealed record DiscussionThreadListRequest(string? ProjectId = null, string? HostProjectId = null, string? Status = null, int Limit = 50, bool IncludeArchived = false, int Offset = 0);
 public sealed record DiscussionMessageResult(Guid Id, string SenderProjectId, string Content, DateTimeOffset CreatedAt);
 public sealed record DiscussionThreadResult(Guid Id, string HostProjectId, string Title, string Status, IReadOnlyList<string> ParticipantProjectIds, int UnreadCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? ArchivedAt = null)
 {
@@ -1690,7 +1758,7 @@ public sealed record DiscussionThreadDetailResult(Guid Id, string HostProjectId,
 
 public sealed record ProjectWorkItemCreateRequest(string ProjectId, string Title, string? Description = null, IReadOnlyList<string>? Tags = null, IReadOnlyList<string>? ChecklistItems = null, int Priority = 0, DateTimeOffset? DueAt = null);
 public sealed record ProjectWorkItemUpdateRequest(Guid Id, string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
-public sealed record ProjectWorkItemListRequest(string ProjectId, ProjectWorkItemStatus? Status = null, int Limit = 100, bool IncludeArchived = false);
+public sealed record ProjectWorkItemListRequest(string ProjectId, ProjectWorkItemStatus? Status = null, int Limit = 100, bool IncludeArchived = false, int Offset = 0);
 public sealed record ProjectWorkItemChecklistItemResult(Guid Id, string Content, bool IsCompleted, int SortOrder);
 public sealed record ProjectWorkItemResult(Guid Id, string ProjectId, string Title, string Description, IReadOnlyList<string> Tags, IReadOnlyList<ProjectWorkItemChecklistItemResult> ChecklistItems, ProjectWorkItemStatus Status, int Priority, DateTimeOffset? DueAt, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? CompletedAt, DateTimeOffset? ArchivedAt = null)
 {
@@ -1772,6 +1840,9 @@ public interface IConversationAutomationService
     Task<ConversationIngestResult> IngestAsync(ConversationIngestRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationSessionResult>> ListSessionsAsync(ConversationSessionListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationInsightResult>> ListInsightsAsync(ConversationInsightListRequest request, CancellationToken cancellationToken);
+    Task<ConversationInsightResult?> GetInsightAsync(Guid insightId, CancellationToken cancellationToken);
+    Task<ConversationInsightResult> RetryInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
+    Task<ConversationInsightResult> SkipInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
     Task<ConversationPipelineStatusResult?> GetPipelineStatusAsync(Guid checkpointId, CancellationToken cancellationToken);
     Task<ConversationPipelineStatusResult> ProcessCheckpointNowAsync(Guid checkpointId, CancellationToken cancellationToken);

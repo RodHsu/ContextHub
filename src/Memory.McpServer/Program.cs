@@ -1262,6 +1262,7 @@ conversations.MapGet("/insights", async (
     string? promotionStatus,
     string? insightType,
     int? limit,
+    int? offset,
     IConversationAutomationService service,
     CancellationToken cancellationToken) =>
 {
@@ -1278,10 +1279,28 @@ conversations.MapGet("/insights", async (
     }
 
     var result = await service.ListInsightsAsync(
-        new ConversationInsightListRequest(projectId, conversationId, parsedPromotionStatus, parsedInsightType, limit ?? 100),
+        new ConversationInsightListRequest(projectId, conversationId, parsedPromotionStatus, parsedInsightType, limit ?? 100, offset ?? 0),
         cancellationToken);
     return Results.Ok(result);
 });
+
+conversations.MapGet("/insights/{insightId:guid}", async (Guid insightId, IConversationAutomationService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.GetInsightAsync(insightId, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+
+conversations.MapPost("/insights/{insightId:guid}/retry", async (Guid insightId, ConversationInsightGovernanceBody body, IConversationAutomationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.RetryInsightAsync(new ConversationInsightGovernanceRequest(insightId, body.GovernanceRunId, body.Reason), cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["insight"] = [ex.Message] }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
+conversations.MapPost("/insights/{insightId:guid}/skip", async (Guid insightId, ConversationInsightGovernanceBody body, IConversationAutomationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.SkipInsightAsync(new ConversationInsightGovernanceRequest(insightId, body.GovernanceRunId, body.Reason), cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["insight"] = [ex.Message] }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 
 conversations.MapGet("/checkpoints/search", async (
     string? query,
@@ -1994,6 +2013,7 @@ internal sealed record DiscussionMessageCreateBody(string SenderProjectId, strin
 internal sealed record DiscussionThreadReadBody(string ReaderProjectId, Guid LastReadMessageId);
 internal sealed record ProjectWorkItemUpdateBody(string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
 internal sealed record ProjectWorkItemChecklistCompletionBody(bool IsCompleted);
+internal sealed record ConversationInsightGovernanceBody(string? GovernanceRunId = null, string? Reason = null);
 internal sealed record ProjectHierarchySetChildrenBody(IReadOnlyList<string>? ChildProjectIds);
 
 internal sealed record TenantProjectGrantUpsertBody(

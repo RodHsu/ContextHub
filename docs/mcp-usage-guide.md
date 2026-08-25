@@ -87,9 +87,10 @@ Do not write:
 | `project_cleanup_apply` | Archiving or deleting selected safe cleanup candidates after preview |
 | `conversation_ingest` | Saving a concise checkpoint for future task continuity |
 | `conversation_sessions_list` | Auditing staged conversation sessions |
-| `conversation_insights_list` | Reviewing staged conversation insights and promotion state |
+| `conversation_insights_list` | Reviewing staged conversation insights and promotion state with offset pagination |
+| `conversation_insight_status` / `conversation_insight_retry` / `conversation_insight_skip` | Inspecting and converging a staged insight; retry and skip are idempotent and available on `/mcp` and `/mcp-chat` |
 | `project_information_get` | Reading fixed project background before task-specific retrieval |
-| `project_information_upsert` | Creating or correcting the durable name and description for one ProjectId on trusted `/mcp` |
+| `project_information_upsert` | Creating or correcting the durable description for one ProjectId; agent and background callers cannot change the Dashboard-owned `DisplayName` |
 | `project_information_update_lifecycle` | Hiding, unhiding, archiving, or restoring a project on trusted `/mcp`; archiving excludes it from default retrieval |
 | `project_hierarchy_set_children` | Maintaining the child repositories managed by one parent ProjectId; this does not change ACLs; available on `/mcp` and `/mcp-chat` |
 | `project_hierarchy_get_children` | Reading the configured child repositories for one parent ProjectId; available on `/mcp` and `/mcp-chat` |
@@ -99,12 +100,14 @@ Do not write:
 | `discussion_thread_close` | Closing a discussion when the caller has write access to its `hostProjectId`; closed history is retained and new replies are rejected; available on `/mcp` and `/mcp-chat` |
 | `discussion_thread_archive` / `discussion_thread_restore` | Hiding or restoring a discussion without changing its `Open` or `Closed` status; archived discussions reject mutations and are excluded from default lists; available on `/mcp` and `/mcp-chat` |
 | `discussion_message_create` | Posting to an open discussion as an authorized participant; available on `/mcp` and `/mcp-chat` |
-| `project_work_item_create` | Creating a user-managed project task with optional tags, priority, due date, and checklist on trusted `/mcp` |
+| `project_work_item_create` | Creating a user-managed project task with optional tags, priority, due date, and checklist; available on `/mcp` and `/mcp-chat` |
 | `project_work_item_update` | Updating a project work item; `Completed` requires every checklist item to be completed first |
 | `project_work_item_checklist_update` | Completing or reopening one checklist item so guarded work items can progress to `Completed` |
 | `project_work_item_archive` / `project_work_item_restore` | Hiding or restoring a work item without changing its business status; archived work items reject mutations and are excluded from default lists |
 | `project_work_items_list` | Listing user-managed work items for one ProjectId; work items are not governance suggested actions |
-| `daily_memory_review` | Reading an actor-scoped, non-destructive review of knowledge, preferences, discussions, work items, insights, actions, and proposals through `/mcp-chat` |
+| `knowledge_review` | Reading a paged, actor-scoped governance review through `/mcp-chat`; callers must follow `hasMore`, retain the same `governanceRunId`, execute archive-first/proposal-first actions, and re-review until `Converged` |
+| `daily_memory_review` | Reading a compatibility daily review through `/mcp-chat`; scheduled governance should use `knowledge_review` |
+| `chatgpt_governance_proposal_create` | Creating one proposal-gated governance operation per `governanceRunId` and operation payload; retries return the existing proposal |
 | `log_search` | Searching recent runtime events |
 | `log_read` | Reading a specific log slice or event |
 | `promote_log_slice_to_memory` | Turning a verified incident into durable knowledge |

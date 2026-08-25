@@ -34,6 +34,7 @@ public sealed class SuggestedActionService(
 
         var entities = await query
             .OrderByDescending(x => x.UpdatedAt)
+            .Skip(Math.Max(0, request.Offset))
             .Take(Math.Clamp(request.Limit, 1, 200))
             .ToListAsync(cancellationToken);
         return entities.Select(Map).ToArray();

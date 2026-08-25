@@ -53,8 +53,8 @@ public sealed class MemoryMcpTools(
         => projectInformationService.GetAsync(projectId, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Create or update the durable name and description for one ProjectId. This information is included in build_working_context.")]
-    public Task<ProjectInformationResult> project_information_upsert(ProjectInformationUpdateRequest request, CancellationToken cancellationToken = default)
-        => projectInformationService.UpsertAsync(request, cancellationToken);
+    public Task<ProjectInformationResult> project_information_upsert(ProjectInformationAgentUpdateRequest request, CancellationToken cancellationToken = default)
+        => projectInformationService.UpdateFromAgentAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Hide, unhide, archive, or restore a project. Archived projects are excluded from default memory search and build_working_context. Safe deletion is only eligible seven days after archival and is not performed by this tool.")]
     public Task<ProjectInformationResult> project_information_update_lifecycle(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken = default)
@@ -148,6 +148,18 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("List staged conversation insights and their promotion state.")]
     public Task<IReadOnlyList<ConversationInsightResult>> conversation_insights_list(ConversationInsightListRequest request, CancellationToken cancellationToken = default)
         => conversationAutomationService.ListInsightsAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Read one conversation insight and its current governance/promotion status.")]
+    public Task<ConversationInsightResult?> conversation_insight_status(Guid insightId, CancellationToken cancellationToken = default)
+        => conversationAutomationService.GetInsightAsync(insightId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Idempotently return a failed conversation insight to Pending and enqueue promotion if no equivalent job is already pending.")]
+    public Task<ConversationInsightResult> conversation_insight_retry(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken = default)
+        => conversationAutomationService.RetryInsightAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Idempotently skip a pending or failed conversation insight with a governance reason.")]
+    public Task<ConversationInsightResult> conversation_insight_skip(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken = default)
+        => conversationAutomationService.SkipInsightAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Set the child repositories managed by a parent ProjectId. This controls project structure only; it does not copy memories or grant token access.")]
     public Task<ProjectHierarchyResult> project_hierarchy_set_children(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken = default)

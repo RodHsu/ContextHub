@@ -233,7 +233,8 @@ public enum SecurityAuditEventType
     ApiTokenRevoked,
     ApiTokenAuthenticated,
     ApiTokenAuthenticationFailed,
-    ApiTokenProjectDenied
+    ApiTokenProjectDenied,
+    ProjectDisplayNameUpdated
 }
 
 public enum AgentConnectivityStatus

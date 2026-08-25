@@ -49,7 +49,24 @@ public sealed class ChatGptProposalService(
 
         var now = clock.UtcNow;
         var conversationId = $"{SourceSystem}:{request.OAuthSubject.Trim()}:{projectId}";
-        var turnId = $"proposal:{Guid.NewGuid():N}";
+        var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        var turnId = governanceRunId.Length == 0
+            ? $"proposal:{Guid.NewGuid():N}"
+            : $"governance:{Hash(governanceRunId)[..24]}";
+        var dedupKey = governanceRunId.Length == 0
+            ? Hash(SourceSystem, conversationId, turnId, request.ToolName.Trim(), projectId, request.PayloadJson.Trim())
+            : Hash(SourceSystem, actor.TenantId?.ToString("D") ?? string.Empty, actor.UserId?.ToString("D") ?? string.Empty, governanceRunId, request.ToolName.Trim(), projectId, request.PayloadJson.Trim());
+        if (governanceRunId.Length > 0)
+        {
+            var existing = await dbContext.ConversationInsights.AsNoTracking()
+                .Where(x => x.DedupKey == dedupKey && x.SourceSystem == SourceSystem && x.Tags.Contains(ProposalTag))
+                .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+                .FirstOrDefaultAsync(cancellationToken);
+            if (existing is not null)
+            {
+                return ToResult(existing);
+            }
+        }
         var session = await dbContext.ConversationSessions.FirstOrDefaultAsync(
             x => x.SourceSystem == SourceSystem && x.ConversationId == conversationId,
             cancellationToken);
@@ -92,9 +109,9 @@ public sealed class ChatGptProposalService(
             oauthSubject = request.OAuthSubject.Trim(),
             oauthEmail = request.OAuthEmail.Trim(),
             oauthName = request.OAuthName.Trim(),
+            governanceRunId,
             createdBy = actor.Username
         }, JsonOptions);
-        var dedupKey = Hash(SourceSystem, conversationId, turnId, request.ToolName.Trim(), projectId, request.PayloadJson.Trim());
         var checkpoint = new ConversationCheckpoint
         {
             Session = session,
@@ -178,6 +195,7 @@ public sealed class ChatGptProposalService(
 
         var rows = await query
             .OrderByDescending(x => x.UpdatedAt)
+            .Skip(Math.Max(0, request.Offset))
             .Take(Math.Clamp(request.Limit, 1, 200))
             .ToListAsync(cancellationToken);
 
@@ -190,6 +208,10 @@ public sealed class ChatGptProposalService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var proposal = await LoadProposalForWriteAsync(request.ProposalId, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, proposal.ProjectId, write: true);
+        if (proposal.PromotionStatus == ConversationPromotionStatus.Promoted)
+        {
+            return ToResult(proposal);
+        }
         if (proposal.PromotionStatus != ConversationPromotionStatus.Pending)
         {
             throw new InvalidOperationException($"Proposal '{request.ProposalId}' is not pending.");
@@ -257,7 +279,7 @@ public sealed class ChatGptProposalService(
             "promote_log_slice_to_memory" => (await memoryService.PromoteLogSliceAsync(Deserialize<PromoteLogSliceRequest>(payloadJson), cancellationToken)).Id,
             "project_artifact_publish" => (await artifactExchangeService.PublishAsync(Deserialize<ProjectArtifactPublishRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_artifact_upload_object" => (await artifactExchangeService.UploadManagedObjectAsync(Deserialize<ProjectArtifactManagedObjectPublishRequest>(payloadJson), cancellationToken)).MemoryId,
-            "project_information_upsert" => (await projectInformationService.UpsertAsync(Deserialize<ProjectInformationUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
+            "project_information_upsert" => (await projectInformationService.UpdateFromAgentAsync(Deserialize<ProjectInformationAgentUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_information_update_lifecycle" => (await projectInformationService.UpdateLifecycleAsync(Deserialize<ProjectLifecycleUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
             _ => throw new InvalidOperationException($"Tool '{toolName}' is not supported for proposal approval.")
         };
@@ -308,7 +330,8 @@ public sealed class ChatGptProposalService(
             payload,
             root.TryGetProperty("oauthSubject", out var subject) ? subject.GetString() ?? string.Empty : string.Empty,
             root.TryGetProperty("oauthEmail", out var email) ? email.GetString() ?? string.Empty : string.Empty,
-            root.TryGetProperty("oauthName", out var name) ? name.GetString() ?? string.Empty : string.Empty);
+            root.TryGetProperty("oauthName", out var name) ? name.GetString() ?? string.Empty : string.Empty,
+            root.TryGetProperty("governanceRunId", out var governanceRunId) ? governanceRunId.GetString() ?? string.Empty : string.Empty);
     }
 
     private static ChatGptProposalResult ToResult(ConversationInsight item)
@@ -329,7 +352,8 @@ public sealed class ChatGptProposalService(
             item.PromotedMemoryId,
             item.Error,
             item.CreatedAt,
-            item.UpdatedAt);
+            item.UpdatedAt,
+            metadata.GovernanceRunId);
     }
 
     private static ConversationPromotionStatus ToPromotionStatus(ChatGptProposalStatus status)
@@ -358,10 +382,27 @@ public sealed class ChatGptProposalService(
     private static string Hash(params string[] values)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("|", values))));
 
+    private static string NormalizeGovernanceRunId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = value.Trim();
+        if (normalized.Length > 128)
+        {
+            throw new InvalidOperationException("GovernanceRunId must not exceed 128 characters.");
+        }
+
+        return normalized;
+    }
+
     private sealed record ChatGptProposalMetadata(
         string ToolName,
         string PayloadJson,
         string OAuthSubject,
         string OAuthEmail,
-        string OAuthName);
+        string OAuthName,
+        string GovernanceRunId);
 }

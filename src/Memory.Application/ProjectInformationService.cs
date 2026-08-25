@@ -30,7 +30,19 @@ public sealed class ProjectInformationService(
         return item is null ? null : Map(item);
     }
 
-    public async Task<ProjectInformationResult> UpsertAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken)
+    public Task<ProjectInformationResult> UpsertAsync(ProjectInformationUpdateRequest request, CancellationToken cancellationToken)
+        => UpsertCoreAsync(request, allowInteractiveDisplayNameUpdate: true, cancellationToken);
+
+    public Task<ProjectInformationResult> UpdateFromAgentAsync(ProjectInformationAgentUpdateRequest request, CancellationToken cancellationToken)
+        => UpsertCoreAsync(
+            new ProjectInformationUpdateRequest(request.ProjectId, null, request.Description),
+            allowInteractiveDisplayNameUpdate: false,
+            cancellationToken);
+
+    private async Task<ProjectInformationResult> UpsertCoreAsync(
+        ProjectInformationUpdateRequest request,
+        bool allowInteractiveDisplayNameUpdate,
+        CancellationToken cancellationToken)
     {
         var normalizedProjectId = ProjectContext.Normalize(request.ProjectId);
         if (ProjectContext.IsShared(normalizedProjectId) || ProjectContext.IsUser(normalizedProjectId))
@@ -44,8 +56,9 @@ public sealed class ProjectInformationService(
             throw new InvalidOperationException("Project information description must not exceed 12000 characters.");
         }
 
-        var displayName = string.IsNullOrWhiteSpace(request.DisplayName) ? normalizedProjectId : request.DisplayName.Trim();
-        if (displayName.Length > 200)
+        var actor = actorAccessor.Current;
+        var requestedDisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? normalizedProjectId : request.DisplayName.Trim();
+        if (allowInteractiveDisplayNameUpdate && actor.IsInteractiveUser && requestedDisplayName.Length > 200)
         {
             throw new InvalidOperationException("Project display name must not exceed 200 characters.");
         }
@@ -55,7 +68,6 @@ public sealed class ProjectInformationService(
             await maintenanceCoordinator.EnsureWriteAllowedAsync("project_information_upsert", cancellationToken);
         }
 
-        var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: true);
 
@@ -64,6 +76,12 @@ public sealed class ProjectInformationService(
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .FirstOrDefaultAsync(cancellationToken);
         var now = clock.UtcNow;
+        var previousDisplayName = item?.Title;
+        var displayName = allowInteractiveDisplayNameUpdate && actor.IsInteractiveUser
+            ? requestedDisplayName
+            : string.IsNullOrWhiteSpace(previousDisplayName)
+                ? normalizedProjectId
+                : previousDisplayName;
 
         if (item is null)
         {
@@ -93,6 +111,23 @@ public sealed class ProjectInformationService(
         item.Content = description;
         item.Summary = description.Length <= 500 ? description : description[..500];
         item.UpdatedAt = now;
+        if (allowInteractiveDisplayNameUpdate && actor.IsInteractiveUser && !string.Equals(previousDisplayName ?? normalizedProjectId, displayName, StringComparison.Ordinal))
+        {
+            await dbContext.SecurityAuditEvents.AddAsync(new SecurityAuditEvent
+            {
+                TenantId = actor.TenantId,
+                ActorUserId = actor.UserId,
+                EventType = SecurityAuditEventType.ProjectDisplayNameUpdated,
+                Outcome = "Succeeded",
+                DetailsJson = JsonSerializer.Serialize(new
+                {
+                    projectId = normalizedProjectId,
+                    previousDisplayName = previousDisplayName ?? normalizedProjectId,
+                    displayName
+                }, JsonOptions),
+                CreatedAt = now
+            }, cancellationToken);
+        }
         await dbContext.SaveChangesAsync(cancellationToken);
         await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
 
@@ -215,7 +250,7 @@ public sealed class ProjectInformationService(
         return new(
             item.Id,
             item.ProjectId,
-            item.Title,
+            string.IsNullOrWhiteSpace(item.Title) ? item.ProjectId : item.Title,
             item.Content,
             item.UpdatedAt,
             lifecycle.IsHidden,

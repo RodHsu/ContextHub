@@ -190,7 +190,9 @@ For local compose:
 /mcp-chat
 ```
 
-It is separate from `/mcp` and is intended for OAuth/OIDC-authenticated clients, project allowlists, rate limits, audit trails, restricted tool discovery, and proposal-gated durable writes. The full Codex/agent MCP endpoint remains `/mcp`.
+It is separate from `/mcp` and is intended for OAuth/OIDC-authenticated clients, project allowlists, rate limits, audit trails, restricted tool discovery, proposal-gated durable knowledge writes, and direct project work-item lifecycle operations. Scheduled governance uses `knowledge_review` pagination plus a stable `governanceRunId`: review every page, execute archive-first/proposal-first actions, re-review, and accept completion only when the result is `Converged`. The full Codex/agent MCP endpoint remains `/mcp`.
+
+Project workspace `DisplayName` is an interactive Dashboard-owned field. New projects and blank legacy values fall back to `ProjectId`; MCP, ChatGPT, scheduled/background governance, cleanup, retention, insights, suggested actions, and hierarchy synchronization can update project descriptions or lifecycle data but cannot change `DisplayName`.
 
 ## Embedding Profiles
 

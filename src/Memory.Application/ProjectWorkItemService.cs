@@ -96,6 +96,7 @@ public sealed class ProjectWorkItemService(
         if (request.Status.HasValue) query = query.Where(x => x.Status == request.Status.Value);
         var items = await query.OrderBy(x => x.Status == ProjectWorkItemStatus.Completed || x.Status == ProjectWorkItemStatus.Cancelled)
             .ThenByDescending(x => x.Priority).ThenBy(x => x.DueAt).ThenByDescending(x => x.UpdatedAt)
+            .Skip(Math.Max(0, request.Offset))
             .Take(Math.Clamp(request.Limit, 1, 200)).ToListAsync(cancellationToken);
         return items.Select(Map).ToArray();
     }

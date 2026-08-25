@@ -16,10 +16,12 @@ public sealed class ChatGptGatewayTools(
     IProjectDiscussionService projectDiscussionService,
     IAccessibleProjectService accessibleProjectService,
     IDailyMemoryReviewService dailyMemoryReviewService,
+    IKnowledgeReviewService knowledgeReviewService,
     ISuggestedActionService suggestedActionService,
     IMemoryDataRetentionService retentionService,
     IProjectArtifactExchangeService artifactExchangeService,
     IChatGptProposalService proposalService,
+    IProjectWorkItemService projectWorkItemService,
     IRequestActorAccessor actorAccessor,
     IHttpContextAccessor httpContextAccessor)
 {
@@ -37,6 +39,10 @@ public sealed class ChatGptGatewayTools(
     public Task<DailyMemoryReviewResult> daily_memory_review(CancellationToken cancellationToken = default)
         => dailyMemoryReviewService.ReviewAsync(cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Review all knowledge-governance surfaces. Follow Review -> Execute -> Re-review; Converged is returned only by an explicit re-review with zero actionable items and no additional pages.")]
+    public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
+        => knowledgeReviewService.ReviewAsync(request, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("List persisted global user preferences for remote knowledge-governance review.")]
     public Task<IReadOnlyList<UserPreferenceResult>> user_preferences_list(UserPreferenceListRequest request, CancellationToken cancellationToken = default)
         => memoryService.ListUserPreferencesAsync(request, cancellationToken);
@@ -44,6 +50,18 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("List staged conversation insights for the current actor's authorized projects.")]
     public Task<IReadOnlyList<ConversationInsightResult>> conversation_insights_list(ConversationInsightListRequest request, CancellationToken cancellationToken = default)
         => conversationAutomationService.ListInsightsAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Read one conversation insight and its current governance/promotion status.")]
+    public Task<ConversationInsightResult?> conversation_insight_status(Guid insightId, CancellationToken cancellationToken = default)
+        => conversationAutomationService.GetInsightAsync(insightId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Idempotently return a failed conversation insight to Pending and enqueue promotion if no equivalent job is already pending.")]
+    public Task<ConversationInsightResult> conversation_insight_retry(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken = default)
+        => conversationAutomationService.RetryInsightAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Idempotently skip a pending or failed conversation insight with a governance reason.")]
+    public Task<ConversationInsightResult> conversation_insight_skip(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken = default)
+        => conversationAutomationService.SkipInsightAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("List pending or historical governance suggested actions for one explicitly authorized ProjectId.")]
     public Task<IReadOnlyList<SuggestedActionResult>> suggested_actions_list(SuggestedActionListRequest request, CancellationToken cancellationToken = default)
@@ -152,9 +170,33 @@ public sealed class ChatGptGatewayTools(
     public Task<ProjectHierarchyResult> project_hierarchy_set_children(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken = default)
         => projectDiscussionService.SetChildrenAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Propose an update to durable project information. Approved data is included in build_working_context.")]
-    public Task<ChatGptProposalResult> project_information_upsert(ProjectInformationUpdateRequest request, CancellationToken cancellationToken = default)
-        => CreateProposalAsync("project_information_upsert", request.ProjectId, request.DisplayName ?? request.ProjectId, "Update project information.", request, cancellationToken);
+    [McpServerTool(UseStructuredContent = true), Description("List user-managed project work items for one explicitly authorized ProjectId.")]
+    public Task<IReadOnlyList<ProjectWorkItemResult>> project_work_items_list(ProjectWorkItemListRequest request, CancellationToken cancellationToken = default)
+        => projectWorkItemService.ListAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Create a user-managed project work item for one explicitly authorized ProjectId.")]
+    public Task<ProjectWorkItemResult> project_work_item_create(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken = default)
+        => projectWorkItemService.CreateAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Update project work item content, priority, due date, or lifecycle status.")]
+    public Task<ProjectWorkItemResult> project_work_item_update(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken = default)
+        => projectWorkItemService.UpdateAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Complete or reopen one project work item checklist entry.")]
+    public Task<ProjectWorkItemResult> project_work_item_checklist_update(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken = default)
+        => projectWorkItemService.SetChecklistItemCompletionAsync(workItemId, checklistItemId, isCompleted, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Archive a project work item. Archived work items are hidden from default lists and reject mutations until restored.")]
+    public Task<ProjectWorkItemResult> project_work_item_archive(Guid workItemId, CancellationToken cancellationToken = default)
+        => projectWorkItemService.SetArchivedAsync(workItemId, archived: true, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Restore an archived project work item without changing its business status.")]
+    public Task<ProjectWorkItemResult> project_work_item_restore(Guid workItemId, CancellationToken cancellationToken = default)
+        => projectWorkItemService.SetArchivedAsync(workItemId, archived: false, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Propose an update to the durable project description. DisplayName is UI-managed and cannot be changed by ChatGPT or MCP agents.")]
+    public Task<ChatGptProposalResult> project_information_upsert(ProjectInformationAgentUpdateRequest request, string? governanceRunId = null, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("project_information_upsert", request.ProjectId, request.ProjectId, "Update project information.", request, governanceRunId, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Propose hiding, unhiding, archiving, or restoring a project. Archiving excludes its memories from default search and build_working_context after approval.")]
     public Task<ChatGptProposalResult> project_information_update_lifecycle(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken = default)
@@ -247,6 +289,24 @@ public sealed class ChatGptGatewayTools(
     public Task<IReadOnlyList<ChatGptProposalResult>> chatgpt_proposals_list(ChatGptProposalListRequest request, CancellationToken cancellationToken = default)
         => proposalService.ListAsync(request, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Create an idempotent proposal for a scheduled governance run. Reusing the same GovernanceRunId, tool, project, and payload returns the original proposal.")]
+    public Task<ChatGptProposalResult> chatgpt_governance_proposal_create(ChatGptGovernanceProposalRequest request, CancellationToken cancellationToken = default)
+    {
+        var user = ResolveOAuthUser();
+        return proposalService.CreateAsync(
+            new ChatGptProposalCreateRequest(
+                request.ToolName,
+                request.ProjectId,
+                request.PayloadJson,
+                request.Title,
+                request.Summary,
+                user.Subject,
+                user.Email,
+                user.Name,
+                request.GovernanceRunId),
+            cancellationToken);
+    }
+
     [McpServerTool(UseStructuredContent = true), Description("Approve a ChatGPT write proposal and apply it through ContextHub write use cases.")]
     public Task<ChatGptProposalResult> chatgpt_proposal_approve(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
         => proposalService.ApproveAsync(request, cancellationToken);
@@ -262,6 +322,16 @@ public sealed class ChatGptGatewayTools(
         string summary,
         T payload,
         CancellationToken cancellationToken)
+        => CreateProposalAsync(toolName, projectId, title, summary, payload, null, cancellationToken);
+
+    private Task<ChatGptProposalResult> CreateProposalAsync<T>(
+        string toolName,
+        string projectId,
+        string title,
+        string summary,
+        T payload,
+        string? governanceRunId,
+        CancellationToken cancellationToken)
     {
         var user = ResolveOAuthUser();
         return proposalService.CreateAsync(
@@ -273,7 +343,8 @@ public sealed class ChatGptGatewayTools(
                 summary,
                 user.Subject,
                 user.Email,
-                user.Name),
+                user.Name,
+                governanceRunId),
             cancellationToken);
     }
 
