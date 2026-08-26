@@ -883,6 +883,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             SourceRef = "full-governance-fixture",
             Importance = .9m,
             Confidence = .95m,
+            Tags = index == 3 ? ["obsolete"] : [],
             Status = index % 5 == 0 ? MemoryStatus.Archived : MemoryStatus.Active,
             MetadataJson = index < 2 ? JsonSerializer.Serialize(new { expectedProjectId = $"target-{index}" }) : "{}",
             CreatedAt = now.AddMinutes(-index),
@@ -901,6 +902,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         first.DurableMemoryCoverage.ArchivedCount.Should().BeGreaterThan(0);
         first.ProjectKnowledgeGovernance!.Pagination.HasMore.Should().BeTrue();
         first.ProjectKnowledgeGovernance.Pagination.Continuation.Should().NotBeNullOrWhiteSpace();
+        first.PendingSuggestedActions.Should().Contain(x =>
+            x.ProjectId == projectId && x.Type == SuggestedActionType.ArchiveStaleMemory);
 
         var second = await gatewayTools.knowledge_review(
             new KnowledgeReviewRequest([projectId], LimitPerSection: 1, Offset: 1, GovernanceRunId: runId),

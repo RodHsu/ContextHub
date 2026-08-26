@@ -53,15 +53,14 @@ public sealed class KnowledgeReviewService(
         var proposalResults = new List<ChatGptProposalResult>();
         var discussionResults = new Dictionary<Guid, DiscussionThreadResult>();
         var workItemResults = new List<ProjectWorkItemResult>();
+        // Materialize semantic findings before reading execution queues so findings produced by
+        // this review are executable in the same Review -> Execute cycle.
+        var governanceSnapshot = await durableGovernance.GetOrCreateSnapshotAsync(ids, governanceRunId, request.IsReReview, cancellationToken);
         foreach (var project in projects.Where(x => !ProjectContext.IsShared(x.ProjectId) && !ProjectContext.IsUser(x.ProjectId)))
         {
             var projectId = project.ProjectId;
             insightResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => conversationService.ListInsightsAsync(
                 new ConversationInsightListRequest(projectId, Limit: pageLimit, Offset: pageOffset), cancellationToken)));
-            actionResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => suggestedActions.ListAsync(
-                new SuggestedActionListRequest(projectId, SuggestedActionStatus.Pending, Limit: pageLimit, Offset: pageOffset), cancellationToken)));
-            proposalResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => proposals.ListAsync(
-                new ChatGptProposalListRequest(projectId, ChatGptProposalStatus.Pending, pageLimit, pageOffset), cancellationToken)));
             foreach (var thread in await LoadAllAsync((pageOffset, pageLimit) => discussions.ListThreadsAsync(
                          new DiscussionThreadListRequest(ProjectId: projectId, Status: "Open", Limit: Math.Min(pageLimit, 100), Offset: pageOffset), cancellationToken), 100))
             {
@@ -69,6 +68,14 @@ public sealed class KnowledgeReviewService(
             }
             workItemResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => workItems.ListAsync(
                 new ProjectWorkItemListRequest(projectId, Limit: pageLimit, Offset: pageOffset), cancellationToken)));
+        }
+
+        foreach (var projectId in ids.Append(ProjectContext.SharedProjectId).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            actionResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => suggestedActions.ListAsync(
+                new SuggestedActionListRequest(projectId, SuggestedActionStatus.Pending, Limit: pageLimit, Offset: pageOffset), cancellationToken)));
+            proposalResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => proposals.ListAsync(
+                new ChatGptProposalListRequest(projectId, ChatGptProposalStatus.Pending, pageLimit, pageOffset), cancellationToken)));
         }
 
         var preferences = await LoadAllAsync((pageOffset, pageLimit) => memoryService.ListUserPreferencesAsync(
@@ -86,7 +93,6 @@ public sealed class KnowledgeReviewService(
             .OrderBy(x => x.UpdatedAtUtc)
             .ThenBy(x => x.MemoryId)
             .ToArray();
-        var governanceSnapshot = await durableGovernance.GetOrCreateSnapshotAsync(ids, governanceRunId, request.IsReReview, cancellationToken);
         var orderedDiscussions = discussionResults.Values.OrderByDescending(x => x.UpdatedAt).ToArray();
         var orderedWorkItems = workItemResults.OrderBy(x => x.Status == ProjectWorkItemStatus.Completed || x.Status == ProjectWorkItemStatus.Cancelled)
             .ThenByDescending(x => x.Priority).ThenBy(x => x.DueAt).ThenByDescending(x => x.UpdatedAt).ToArray();
