@@ -11,6 +11,7 @@ public sealed class KnowledgeReviewService(
     IChatGptProposalService proposals,
     IProjectDiscussionService discussions,
     IProjectWorkItemService workItems,
+    IDurableMemoryGovernanceService durableGovernance,
     IRequestActorAccessor actorAccessor) : IKnowledgeReviewService
 {
     private const int PageSize = 200;
@@ -56,7 +57,7 @@ public sealed class KnowledgeReviewService(
         {
             var projectId = project.ProjectId;
             insightResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => conversationService.ListInsightsAsync(
-                new ConversationInsightListRequest(projectId, PromotionStatus: ConversationPromotionStatus.Pending, Limit: pageLimit, Offset: pageOffset), cancellationToken)));
+                new ConversationInsightListRequest(projectId, Limit: pageLimit, Offset: pageOffset), cancellationToken)));
             actionResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => suggestedActions.ListAsync(
                 new SuggestedActionListRequest(projectId, SuggestedActionStatus.Pending, Limit: pageLimit, Offset: pageOffset), cancellationToken)));
             proposalResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => proposals.ListAsync(
@@ -85,10 +86,15 @@ public sealed class KnowledgeReviewService(
             .OrderBy(x => x.UpdatedAtUtc)
             .ThenBy(x => x.MemoryId)
             .ToArray();
+        var governanceSnapshot = await durableGovernance.GetOrCreateSnapshotAsync(ids, governanceRunId, request.IsReReview, cancellationToken);
         var orderedDiscussions = discussionResults.Values.OrderByDescending(x => x.UpdatedAt).ToArray();
         var orderedWorkItems = workItemResults.OrderBy(x => x.Status == ProjectWorkItemStatus.Completed || x.Status == ProjectWorkItemStatus.Cancelled)
             .ThenByDescending(x => x.Priority).ThenBy(x => x.DueAt).ThenByDescending(x => x.UpdatedAt).ToArray();
-        var orderedInsights = insightResults.Where(x => x.Importance >= .70m && x.Confidence >= .75m).OrderByDescending(x => x.UpdatedAt).ToArray();
+        var orderedInsights = insightResults
+            .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending)
+            .Where(x => x.Importance >= .70m && x.Confidence >= .75m)
+            .OrderByDescending(x => x.UpdatedAt)
+            .ToArray();
         var orderedActions = actionResults.OrderByDescending(x => x.UpdatedAt).ToArray();
         var orderedProposals = proposalResults.OrderByDescending(x => x.UpdatedAt).ToArray();
 
@@ -99,18 +105,19 @@ public sealed class KnowledgeReviewService(
         var insightPage = Page(orderedInsights, offset, limit);
         var actionPage = Page(orderedActions, offset, limit);
         var proposalPage = Page(orderedProposals, offset, limit);
-        var projectKnowledgeReturned = retention.AutoDeleteCandidates.Count + retention.ReviewCandidates.Count;
-        var projectKnowledgeTotal = checked((int)Math.Min(int.MaxValue, retention.AutoDeleteCandidateCount + retention.ReviewCandidateCount));
-        var projectKnowledgeHasMore =
-            offset + retention.AutoDeleteCandidates.Count < retention.AutoDeleteCandidateCount ||
-            offset + retention.ReviewCandidates.Count < retention.ReviewCandidateCount;
-        var sharedKnowledgeTotal = checked((int)Math.Min(int.MaxValue, sharedRetention.AutoDeleteCandidateCount + sharedRetention.ReviewCandidateCount));
-        var sharedKnowledgeHasMore =
-            offset + sharedRetention.AutoDeleteCandidates.Count < sharedRetention.AutoDeleteCandidateCount ||
-            offset + sharedRetention.ReviewCandidates.Count < sharedRetention.ReviewCandidateCount;
+        var projectGovernancePage = Page(governanceSnapshot.ProjectCandidates, offset, limit);
+        var sharedGovernancePage = Page(governanceSnapshot.SharedCandidates, offset, limit);
+        var projectGovernancePageInfo = PageInfo(projectGovernancePage, governanceSnapshot.ProjectCandidates.Count, offset, limit) with
+        {
+            Continuation = BuildContinuation(governanceSnapshot.Coverage.SnapshotToken, "project", offset, projectGovernancePage.Length, governanceSnapshot.ProjectCandidates.Count)
+        };
+        var sharedGovernancePageInfo = PageInfo(sharedGovernancePage, governanceSnapshot.SharedCandidates.Count, offset, limit) with
+        {
+            Continuation = BuildContinuation(governanceSnapshot.Coverage.SnapshotToken, "shared", offset, sharedGovernancePage.Length, governanceSnapshot.SharedCandidates.Count)
+        };
         var pagination = new KnowledgeReviewPaginationResult(
-            new KnowledgeReviewPageResult(offset, limit, projectKnowledgeReturned, projectKnowledgeTotal, projectKnowledgeHasMore),
-            new KnowledgeReviewPageResult(offset, limit, sharedPage.Length, sharedKnowledgeTotal, sharedKnowledgeHasMore),
+            projectGovernancePageInfo,
+            sharedGovernancePageInfo,
             PageInfo(preferencePage, preferences.Count, offset, limit),
             PageInfo(discussionPage, orderedDiscussions.Length, offset, limit),
             PageInfo(workItemPage, orderedWorkItems.Length, offset, limit),
@@ -118,18 +125,27 @@ public sealed class KnowledgeReviewService(
             PageInfo(actionPage, orderedActions.Length, offset, limit),
             PageInfo(proposalPage, orderedProposals.Length, offset, limit));
 
-        var activeWorkItems = orderedWorkItems.Count(x => x.Status is ProjectWorkItemStatus.Pending or ProjectWorkItemStatus.InProgress or ProjectWorkItemStatus.Blocked);
-        var retentionActionableCount = (int)Math.Min(int.MaxValue, retention.AutoDeleteCandidateCount + retention.ReviewCandidateCount);
+        // Pending and in-progress work is healthy operational state, not by itself a governance defect.
+        // Governance only requires action for blocked work or finished work that still needs archival.
+        var workItemGovernanceActionCount = orderedWorkItems.Count(x =>
+            x.Status == ProjectWorkItemStatus.Blocked ||
+            (x.Status is ProjectWorkItemStatus.Completed or ProjectWorkItemStatus.Cancelled && !x.IsArchived));
+        var semanticActionableCount = governanceSnapshot.ProjectCandidates.Count + governanceSnapshot.SharedCandidates.Count;
         var actionableCount = (int)Math.Min(
             int.MaxValue,
-            (long)retentionActionableCount + activeWorkItems + orderedInsights.Length + orderedActions.Length + orderedProposals.Length);
-        var converged = request.IsReReview && actionableCount == 0 && !pagination.HasMore;
-        var status = converged
-            ? "Converged"
-            : actionableCount > 0
-                ? "ExecutionRequired"
-                : "ReReviewRequired";
-        var convergence = new KnowledgeReviewConvergenceResult(status, actionableCount, !converged, converged);
+            (long)semanticActionableCount + workItemGovernanceActionCount + orderedInsights.Length + orderedActions.Length + orderedProposals.Length);
+        var deferredCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.Deferred);
+        var userDecisionCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision);
+        var hostBlockedCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.HostBlocked);
+        var coverageComplete = governanceSnapshot.Coverage.CoverageComplete && !governanceSnapshot.Coverage.HasMore;
+        var convergence = BuildConvergence(
+            request.IsReReview,
+            coverageComplete,
+            pagination.HasMore,
+            actionableCount,
+            deferredCount,
+            userDecisionCount,
+            hostBlockedCount);
 
         return new KnowledgeReviewResult(
             projects,
@@ -144,7 +160,12 @@ public sealed class KnowledgeReviewService(
             governanceRunId,
             request.IsReReview,
             pagination,
-            convergence);
+            convergence)
+        {
+            DurableMemoryCoverage = governanceSnapshot.Coverage,
+            ProjectKnowledgeGovernance = new KnowledgeGovernanceSectionResult(projectGovernancePage, projectGovernancePageInfo),
+            SharedKnowledgeGovernance = new KnowledgeGovernanceSectionResult(sharedGovernancePage, sharedGovernancePageInfo)
+        };
     }
 
     private static async Task<IReadOnlyList<T>> LoadAllAsync<T>(
@@ -168,6 +189,38 @@ public sealed class KnowledgeReviewService(
 
     private static KnowledgeReviewPageResult PageInfo<T>(IReadOnlyList<T> page, int totalCount, int offset, int limit)
         => new(offset, limit, page.Count, totalCount, offset + page.Count < totalCount);
+
+    private static string? BuildContinuation(string snapshotToken, string section, int offset, int returnedCount, int totalCount)
+        => offset + returnedCount < totalCount
+            ? $"{snapshotToken}:{section}:{offset + returnedCount}"
+            : null;
+
+    internal static KnowledgeReviewConvergenceResult BuildConvergence(
+        bool isReReview,
+        bool coverageComplete,
+        bool hasMore,
+        int actionableItemCount,
+        int deferredCount,
+        int requiresUserDecisionCount,
+        int hostBlockedCount)
+    {
+        var exceptionCount = deferredCount + requiresUserDecisionCount + hostBlockedCount;
+        var converged = isReReview && coverageComplete && !hasMore && actionableItemCount == 0;
+        var status = converged
+            ? exceptionCount > 0 ? "ConvergedWithExceptions" : "Converged"
+            : actionableItemCount > 0
+                ? "ExecutionRequired"
+                : !coverageComplete || hasMore
+                    ? "CoverageIncomplete"
+                    : "ReReviewRequired";
+        return new KnowledgeReviewConvergenceResult(status, actionableItemCount, !converged, converged)
+        {
+            CoverageComplete = coverageComplete,
+            DeferredCount = deferredCount,
+            RequiresUserDecisionCount = requiresUserDecisionCount,
+            HostBlockedCount = hostBlockedCount
+        };
+    }
 
     private static string NormalizeGovernanceRunId(string? value)
     {

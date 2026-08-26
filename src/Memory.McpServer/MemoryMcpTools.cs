@@ -161,6 +161,10 @@ public sealed class MemoryMcpTools(
     public Task<ConversationInsightResult> conversation_insight_skip(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken = default)
         => conversationAutomationService.SkipInsightAsync(request, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Idempotently mark an actionable conversation insight as Deferred, RequiresUserDecision, or HostBlocked with an audited reason. Exception states are excluded from automatic retry and may be manually retried later.")]
+    public Task<ConversationInsightResult> conversation_insight_set_disposition(ConversationInsightDispositionRequest request, CancellationToken cancellationToken = default)
+        => conversationAutomationService.SetInsightDispositionAsync(request, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Set the child repositories managed by a parent ProjectId. This controls project structure only; it does not copy memories or grant token access.")]
     public Task<ProjectHierarchyResult> project_hierarchy_set_children(ProjectHierarchySetChildrenRequest request, CancellationToken cancellationToken = default)
         => projectDiscussionService.SetChildrenAsync(request, cancellationToken);
@@ -221,7 +225,7 @@ public sealed class MemoryMcpTools(
     public Task<IReadOnlyList<ProjectWorkItemResult>> project_work_items_list(ProjectWorkItemListRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.ListAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Return a non-destructive, actor-scoped review of project knowledge, shared knowledge, user preferences, discussions, work items, insights, governance actions, and proposals.")]
+    [McpServerTool(UseStructuredContent = true), Description("Run server-side full-coverage governance across every authorized active/archived Project and Shared durable memory, then return compact stable-snapshot candidate pages plus user preferences, discussions, work items, insights, actions, and proposals.")]
     public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
 

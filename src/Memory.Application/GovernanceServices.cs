@@ -8,7 +8,8 @@ public sealed class GovernanceService(
     IApplicationDbContext dbContext,
     IEmbeddingProvider embeddingProvider,
     ICacheVersionStore cacheStore,
-    IClock clock) : IGovernanceService
+    IClock clock,
+    IRequestActorAccessor actorAccessor) : IGovernanceService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -57,14 +58,22 @@ public sealed class GovernanceService(
         var normalizedProjectId = ProjectContext.Normalize(projectId);
         var now = clock.UtcNow;
         var findings = new List<GovernanceDraft>();
-        var sources = await dbContext.SourceConnections
-            .AsNoTracking()
-            .Where(x => x.ProjectId == normalizedProjectId)
-            .ToListAsync(cancellationToken);
-        var memories = await dbContext.MemoryItems
-            .AsNoTracking()
-            .Where(x => x.ProjectId == normalizedProjectId)
-            .ToListAsync(cancellationToken);
+        var actor = actorAccessor.Current;
+        if (actor.HasUser)
+        {
+            ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+            ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: false);
+        }
+
+        var sourceQuery = dbContext.SourceConnections.AsNoTracking().Where(x => x.ProjectId == normalizedProjectId);
+        var memoryQuery = dbContext.MemoryItems.AsNoTracking().Where(x => x.ProjectId == normalizedProjectId);
+        if (actor.HasUser)
+        {
+            memoryQuery = memoryQuery.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        }
+
+        var sources = await sourceQuery.ToListAsync(cancellationToken);
+        var memories = await memoryQuery.ToListAsync(cancellationToken);
 
         foreach (var source in sources.Where(static source => source.Enabled))
         {
@@ -184,14 +193,174 @@ public sealed class GovernanceService(
                 JsonSerializer.Serialize(new { memory.Importance, memory.Confidence, memory.UpdatedAt, memory.Tags }, JsonOptions)));
         }
 
-        var vectorCandidates = await dbContext.MemoryItems
+        foreach (var memory in memories)
+        {
+            var expectedProjectId = TryGetMetadataString(memory.MetadataJson, "expectedProjectId") ??
+                                    TryGetMetadataString(memory.MetadataJson, "targetProjectId");
+            if (!string.IsNullOrWhiteSpace(expectedProjectId) &&
+                !string.Equals(ProjectContext.Normalize(expectedProjectId), normalizedProjectId, StringComparison.OrdinalIgnoreCase))
+            {
+                var targetProjectId = ProjectContext.Normalize(expectedProjectId);
+                findings.Add(CreateMemoryDraft(
+                    normalizedProjectId,
+                    memory,
+                    GovernanceFindingType.MisplacedProjectCandidate,
+                    "misplaced-project",
+                    $"ProjectId 可能放置錯誤：{memory.Title}",
+                    $"metadata 明確指定 target ProjectId '{targetProjectId}'，目前位於 '{normalizedProjectId}'。",
+                    new { targetProjectId, reasonCodes = new[] { "explicit-target-project-mismatch" } }));
+                findings.Add(CreateMemoryDraft(
+                    normalizedProjectId,
+                    memory,
+                    GovernanceFindingType.MoveMemoryCandidate,
+                    "move-memory",
+                    $"建議搬移記憶：{memory.Title}",
+                    $"此記憶具有明確 target ProjectId '{targetProjectId}'；搬移必須經 proposal 與 audit。",
+                    new { targetProjectId, reasonCodes = new[] { "explicit-target-project" } }));
+            }
+
+            if (memory.Status is MemoryStatus.Stale or MemoryStatus.Superseded || HasTag(memory, "obsolete") || HasTag(memory, "deprecated"))
+            {
+                findings.Add(CreateMemoryDraft(
+                    normalizedProjectId,
+                    memory,
+                    GovernanceFindingType.ObsoleteMemoryCandidate,
+                    "obsolete-memory",
+                    $"可能已過時：{memory.Title}",
+                    "Lifecycle status 或明確 tag 顯示此記憶可能已過時；需確認 authoritative replacement。",
+                    new { memory.Status, memory.Tags, reasonCodes = new[] { "lifecycle-obsolete-signal" } }));
+            }
+
+            if (IsLowValueMemoryCandidate(memory))
+            {
+                findings.Add(CreateMemoryDraft(
+                    normalizedProjectId,
+                    memory,
+                    GovernanceFindingType.LowValueMemoryCandidate,
+                    "low-value-memory",
+                    $"低價值記憶候選：{memory.Title}",
+                    "importance/confidence 偏低，或內容為明確 tombstone；預設僅建議封存。",
+                    new { memory.Importance, memory.Confidence, reasonCodes = new[] { "low-signal-or-tombstone" } }));
+            }
+
+            if (IsInvalidMemoryCandidate(memory, out var invalidReason))
+            {
+                findings.Add(CreateMemoryDraft(
+                    normalizedProjectId,
+                    memory,
+                    GovernanceFindingType.InvalidMemoryCandidate,
+                    "invalid-memory",
+                    $"無效或不正確記憶候選：{memory.Title}",
+                    invalidReason,
+                    new { reasonCodes = new[] { "invalid-memory-contract" } }));
+            }
+
+            if (memory.Status == MemoryStatus.Active &&
+                (IsStaleMemoryCandidate(memory, now) || IsLowValueMemoryCandidate(memory) || IsSupersededMemoryCandidate(memory, memories)))
+            {
+                findings.Add(CreateMemoryDraft(
+                    normalizedProjectId,
+                    memory,
+                    GovernanceFindingType.ArchiveMemoryCandidate,
+                    "archive-memory",
+                    $"建議先封存：{memory.Title}",
+                    "此記憶符合非破壞性 archive-first 條件；scheduled governance 不得 hard-delete。",
+                    new { reasonCodes = new[] { "archive-first" } }));
+            }
+
+            if (!ProjectContext.IsShared(normalizedProjectId) &&
+                (HasTag(memory, "shared-candidate") || HasTag(memory, "cross-project")))
+            {
+                findings.Add(CreateMemoryDraft(
+                    normalizedProjectId,
+                    memory,
+                    GovernanceFindingType.SharedKnowledgePromotionCandidate,
+                    "shared-promotion",
+                    $"Shared Knowledge 提升候選：{memory.Title}",
+                    "此記憶帶有明確跨專案重用訊號；提升需 proposal-first 並保留來源鏈。",
+                    new { targetProjectId = ProjectContext.SharedProjectId, reasonCodes = new[] { "explicit-shared-signal" } }));
+            }
+
+            if (ProjectContext.IsShared(normalizedProjectId) &&
+                (HasTag(memory, "project-specific") || !string.IsNullOrWhiteSpace(expectedProjectId)))
+            {
+                findings.Add(CreateMemoryDraft(
+                    normalizedProjectId,
+                    memory,
+                    GovernanceFindingType.SharedKnowledgeDemotionCandidate,
+                    "shared-demotion",
+                    $"Shared Knowledge 降級候選：{memory.Title}",
+                    "此 shared 記憶帶有專案專屬訊號；應人工確認後搬回明確 ProjectId。",
+                    new { targetProjectId = expectedProjectId, reasonCodes = new[] { "project-specific-shared-memory" } }));
+            }
+
+            var successorId = TryGetSupersededByMemoryId(memory.MetadataJson);
+            if (successorId.HasValue)
+            {
+                var successor = memories.FirstOrDefault(x => x.Id == successorId.Value);
+                var successorSuccessorId = successor is null ? null : TryGetSupersededByMemoryId(successor.MetadataJson);
+                if (successor is null || successorSuccessorId.HasValue)
+                {
+                    findings.Add(CreateMemoryDraft(
+                        normalizedProjectId,
+                        memory,
+                        GovernanceFindingType.ReplacementChainCandidate,
+                        "replacement-chain",
+                        $"Replacement chain 需檢閱：{memory.Title}",
+                        successor is null ? "replacement 指向不存在的記憶。" : "replacement 形成多段鏈，需確認最終 authoritative source。",
+                        new { successorId, successorSuccessorId, reasonCodes = new[] { successor is null ? "broken-replacement" : "multi-hop-replacement" } },
+                        successorId));
+                }
+            }
+        }
+
+        foreach (var group in memories
+                     .Where(x => x.Status == MemoryStatus.Active)
+                     .GroupBy(x => NormalizeKey(x.Title))
+                     .Where(x => !string.IsNullOrWhiteSpace(x.Key) && x.Count() > 1))
+        {
+            var ordered = group.OrderByDescending(AuthorityScore).ThenByDescending(x => x.UpdatedAt).ToArray();
+            var authoritative = ordered[0];
+            foreach (var candidate in ordered.Skip(1))
+            {
+                var overlap = ComputeTokenOverlap(authoritative.Summary, candidate.Summary);
+                if (overlap >= .55m)
+                {
+                    findings.Add(CreateMemoryDraft(
+                        normalizedProjectId,
+                        candidate,
+                        GovernanceFindingType.MergeMemoryCandidate,
+                        "merge-memory",
+                        $"合併候選：{candidate.Title}",
+                        $"與較高 authority 記憶摘要重疊 {overlap:P0}；合併需保留來源與 replacement chain。",
+                        new { overlap, authoritativeMemoryId = authoritative.Id, reasonCodes = new[] { "same-title-high-overlap" } },
+                        authoritative.Id));
+                }
+
+                findings.Add(CreateMemoryDraft(
+                    normalizedProjectId,
+                    candidate,
+                    GovernanceFindingType.AuthoritativeSourceCandidate,
+                    "authoritative-source",
+                    $"Authoritative source 判斷：{candidate.Title}",
+                    $"同標題 active 記憶共 {ordered.Length} 筆；目前依 explicit authority、Decision、confidence、importance、version 與更新時間排序。",
+                    new { authoritativeMemoryId = authoritative.Id, candidateMemoryId = candidate.Id, overlap, reasonCodes = new[] { "same-title-authority-ranking" } },
+                    authoritative.Id));
+            }
+        }
+
+        var vectorCandidateQuery = dbContext.MemoryItems
             .AsNoTracking()
             .Include(x => x.Chunks)
                 .ThenInclude(x => x.Vectors)
             .Where(x => x.ProjectId == normalizedProjectId)
             .Where(x => x.Status == MemoryStatus.Active)
-            .Where(x => x.MemoryType == MemoryType.Artifact)
-            .ToListAsync(cancellationToken);
+            .Where(x => x.MemoryType == MemoryType.Artifact);
+        if (actor.HasUser)
+        {
+            vectorCandidateQuery = vectorCandidateQuery.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        }
+        var vectorCandidates = await vectorCandidateQuery.ToListAsync(cancellationToken);
         foreach (var item in vectorCandidates)
         {
             var hasCurrentModel = item.Chunks.Any(chunk => chunk.Vectors.Any(vector => vector.ModelKey == embeddingProvider.ModelKey && vector.Status == VectorStatus.Active.ToString()));
@@ -211,7 +380,16 @@ public sealed class GovernanceService(
                 JsonSerializer.Serialize(new { expectedModelKey = embeddingProvider.ModelKey }, JsonOptions)));
         }
 
-        var existing = await dbContext.GovernanceFindings.Where(x => x.ProjectId == normalizedProjectId).ToListAsync(cancellationToken);
+        var existingQuery = dbContext.GovernanceFindings.Where(x => x.ProjectId == normalizedProjectId);
+        if (actor.HasUser)
+        {
+            var memoryIds = memories.Select(x => x.Id).ToArray();
+            var sourceIds = sources.Select(x => x.Id).ToArray();
+            existingQuery = existingQuery.Where(x =>
+                (x.PrimaryMemoryId.HasValue && memoryIds.Contains(x.PrimaryMemoryId.Value)) ||
+                (x.SourceConnectionId.HasValue && sourceIds.Contains(x.SourceConnectionId.Value)));
+        }
+        var existing = await existingQuery.ToListAsync(cancellationToken);
         var currentKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var draft in findings)
@@ -223,17 +401,21 @@ public sealed class GovernanceService(
                 entity = new GovernanceFinding
                 {
                     ProjectId = normalizedProjectId,
+                    Status = GovernanceFindingStatus.Open,
                     CreatedAt = clock.UtcNow
                 };
                 await dbContext.GovernanceFindings.AddAsync(entity, cancellationToken);
                 existing.Add(entity);
+            }
+            else if (entity.Status == GovernanceFindingStatus.Resolved)
+            {
+                entity.Status = GovernanceFindingStatus.Open;
             }
 
             entity.SourceConnectionId = draft.SourceConnectionId;
             entity.PrimaryMemoryId = draft.PrimaryMemoryId;
             entity.SecondaryMemoryId = draft.SecondaryMemoryId;
             entity.Type = draft.Type;
-            entity.Status = GovernanceFindingStatus.Open;
             entity.Title = draft.Title;
             entity.Summary = draft.Summary;
             entity.DetailsJson = draft.DetailsJson;
@@ -241,7 +423,10 @@ public sealed class GovernanceService(
             entity.UpdatedAt = clock.UtcNow;
 
             await EnsureLinkAsync(draft, cancellationToken);
-            await EnsureSuggestedActionAsync(normalizedProjectId, draft, cancellationToken);
+            if (entity.Status == GovernanceFindingStatus.Open)
+            {
+                await EnsureSuggestedActionAsync(normalizedProjectId, draft, cancellationToken);
+            }
         }
 
         foreach (var entity in existing.Where(x => !currentKeys.Contains(x.DedupKey) && x.Status == GovernanceFindingStatus.Open))
@@ -295,9 +480,9 @@ public sealed class GovernanceService(
         var actionType = draft.Type switch
         {
             GovernanceFindingType.StaleSource => SuggestedActionType.SyncSourceNow,
-            GovernanceFindingType.DuplicateCandidate or GovernanceFindingType.DuplicateMemoryCandidate => SuggestedActionType.MergeDuplicateCandidate,
-            GovernanceFindingType.ConflictCandidate or GovernanceFindingType.SupersededMemoryCandidate => SuggestedActionType.ReviewConflictCandidate,
-            GovernanceFindingType.StaleMemoryCandidate or GovernanceFindingType.LowSignalEpisodeCandidate => SuggestedActionType.ArchiveStaleMemory,
+            GovernanceFindingType.DuplicateCandidate or GovernanceFindingType.DuplicateMemoryCandidate or GovernanceFindingType.MergeMemoryCandidate => SuggestedActionType.MergeDuplicateCandidate,
+            GovernanceFindingType.ConflictCandidate or GovernanceFindingType.SupersededMemoryCandidate or GovernanceFindingType.InvalidMemoryCandidate or GovernanceFindingType.ReplacementChainCandidate or GovernanceFindingType.AuthoritativeSourceCandidate => SuggestedActionType.ReviewConflictCandidate,
+            GovernanceFindingType.StaleMemoryCandidate or GovernanceFindingType.LowSignalEpisodeCandidate or GovernanceFindingType.ObsoleteMemoryCandidate or GovernanceFindingType.LowValueMemoryCandidate or GovernanceFindingType.ArchiveMemoryCandidate => SuggestedActionType.ArchiveStaleMemory,
             GovernanceFindingType.MissingSource => SuggestedActionType.ArchiveStaleMemory,
             GovernanceFindingType.ReindexRequired => SuggestedActionType.ReindexProject,
             _ => (SuggestedActionType?)null
@@ -380,6 +565,87 @@ public sealed class GovernanceService(
 
     private static bool HasTag(MemoryItem entity, string tag)
         => entity.Tags.Any(candidate => string.Equals(candidate, tag, StringComparison.OrdinalIgnoreCase));
+
+    private static GovernanceDraft CreateMemoryDraft(
+        string projectId,
+        MemoryItem memory,
+        GovernanceFindingType type,
+        string keyPrefix,
+        string title,
+        string summary,
+        object details,
+        Guid? secondaryMemoryId = null)
+        => new(
+            $"{keyPrefix}:{projectId}:{memory.Id}:{secondaryMemoryId}",
+            type,
+            title,
+            summary,
+            TryGetConnectorId(memory.MetadataJson),
+            memory.Id,
+            secondaryMemoryId,
+            JsonSerializer.Serialize(details, JsonOptions));
+
+    private static bool IsLowValueMemoryCandidate(MemoryItem memory)
+        => !memory.IsReadOnly &&
+           ((memory.Importance <= .25m && memory.Confidence <= .50m) ||
+            HasTag(memory, "removed") ||
+            HasTag(memory, "migrated") ||
+            string.Equals(memory.Content.Trim(), "REMOVED", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(memory.Content.Trim(), "MIGRATED", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsInvalidMemoryCandidate(MemoryItem memory, out string reason)
+    {
+        if (string.IsNullOrWhiteSpace(memory.Title) ||
+            (string.IsNullOrWhiteSpace(memory.Content) && string.IsNullOrWhiteSpace(memory.Summary)))
+        {
+            reason = "title 或 knowledge body/summary 為空。";
+            return true;
+        }
+
+        try
+        {
+            using var _ = JsonDocument.Parse(string.IsNullOrWhiteSpace(memory.MetadataJson) ? "{}" : memory.MetadataJson);
+        }
+        catch (JsonException)
+        {
+            reason = "metadataJson 不是合法 JSON。";
+            return true;
+        }
+
+        if (HasTag(memory, "invalid") || HasTag(memory, "incorrect"))
+        {
+            reason = "記憶帶有 explicit invalid/incorrect tag。";
+            return true;
+        }
+
+        reason = string.Empty;
+        return false;
+    }
+
+    private static decimal AuthorityScore(MemoryItem memory)
+    {
+        var score = memory.Confidence * 3m + memory.Importance * 2m + Math.Min(memory.Version, 20) / 20m;
+        if (memory.MemoryType == MemoryType.Decision) score += 2m;
+        if (HasTag(memory, "authoritative") || HasTag(memory, "source-of-truth")) score += 10m;
+        return score;
+    }
+
+    private static string? TryGetMetadataString(string metadataJson, string propertyName)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(metadataJson) ? "{}" : metadataJson);
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                   document.RootElement.TryGetProperty(propertyName, out var value) &&
+                   value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     private static bool HasMetadataProperty(string metadataJson, string propertyName)
     {

@@ -51,6 +51,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<ConversationSession> ConversationSessions => Set<ConversationSession>();
     public DbSet<ConversationCheckpoint> ConversationCheckpoints => Set<ConversationCheckpoint>();
     public DbSet<ConversationInsight> ConversationInsights => Set<ConversationInsight>();
+    public DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots => Set<KnowledgeGovernanceSnapshot>();
     public DbSet<ProjectHierarchy> ProjectHierarchies => Set<ProjectHierarchy>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
@@ -761,6 +762,10 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.PromotionStatus).HasColumnName("promotion_status").HasConversion<string>();
             entity.Property(x => x.PromotedMemoryId).HasColumnName("promoted_memory_id");
             entity.Property(x => x.Error).HasColumnName("error");
+            entity.Property(x => x.GovernanceReason).HasColumnName("governance_reason");
+            entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
+            entity.Property(x => x.GovernanceRetryCount).HasColumnName("governance_retry_count");
+            entity.Property(x => x.GovernanceUpdatedAt).HasColumnName("governance_updated_at");
             entity.Property(x => x.MetadataJson)
                 .HasColumnName("metadata_json")
                 .HasColumnType("jsonb")
@@ -768,6 +773,26 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => x.DedupKey).IsUnique();
+        });
+
+        modelBuilder.Entity<KnowledgeGovernanceSnapshot>(entity =>
+        {
+            entity.ToTable("knowledge_governance_snapshots");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
+            entity.Property(x => x.IsReReview).HasColumnName("is_re_review");
+            entity.Property(x => x.ProjectSetHash).HasColumnName("project_set_hash");
+            entity.Property(x => x.ProjectIdsJson).HasColumnName("project_ids_json").HasColumnType("jsonb");
+            entity.Property(x => x.ResultJson).HasColumnName("result_json").HasColumnType("jsonb");
+            entity.Property(x => x.TotalCount).HasColumnName("total_count");
+            entity.Property(x => x.ScannedCount).HasColumnName("scanned_count");
+            entity.Property(x => x.CoverageComplete).HasColumnName("coverage_complete");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunId, x.IsReReview }).IsUnique();
         });
 
         modelBuilder.Entity<ProjectHierarchy>(entity =>

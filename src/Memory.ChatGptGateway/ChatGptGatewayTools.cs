@@ -39,7 +39,7 @@ public sealed class ChatGptGatewayTools(
     public Task<DailyMemoryReviewResult> daily_memory_review(CancellationToken cancellationToken = default)
         => dailyMemoryReviewService.ReviewAsync(cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Review all knowledge-governance surfaces. Follow Review -> Execute -> Re-review; Converged is returned only by an explicit re-review with zero actionable items and no additional pages.")]
+    [McpServerTool(UseStructuredContent = true), Description("Run server-side full-coverage governance across every authorized active/archived Project and Shared durable memory, then return compact stable-snapshot candidate pages plus the other governance surfaces. Completion requires coverageComplete, no additional pages, and zero actionable items; governed exceptions return ConvergedWithExceptions.")]
     public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
 
@@ -62,6 +62,10 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Idempotently skip a pending or failed conversation insight with a governance reason.")]
     public Task<ConversationInsightResult> conversation_insight_skip(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken = default)
         => conversationAutomationService.SkipInsightAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Idempotently mark an actionable conversation insight as Deferred, RequiresUserDecision, or HostBlocked with an audited reason. Exception states are excluded from automatic retry and may be manually retried later.")]
+    public Task<ConversationInsightResult> conversation_insight_set_disposition(ConversationInsightDispositionRequest request, CancellationToken cancellationToken = default)
+        => conversationAutomationService.SetInsightDispositionAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("List pending or historical governance suggested actions for one explicitly authorized ProjectId.")]
     public Task<IReadOnlyList<SuggestedActionResult>> suggested_actions_list(SuggestedActionListRequest request, CancellationToken cancellationToken = default)

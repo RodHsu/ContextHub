@@ -856,6 +856,94 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Full_Governance_Should_Snapshot_More_Than_One_Page_Without_Gaps_Or_Replay_Drift()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"full-governance-{Guid.NewGuid():N}";
+        var runId = $"snapshot-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+
+        var memories = Enumerable.Range(0, 205).Select(index => new MemoryItem
+        {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"full-governance:{index:D3}:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Fact,
+            Title = $"Unique governed fact {index:D3}",
+            Content = $"Durable full coverage fixture {index:D3}.",
+            Summary = $"Unique full coverage summary {index:D3}.",
+            SourceType = "test",
+            SourceRef = "full-governance-fixture",
+            Importance = .9m,
+            Confidence = .95m,
+            Status = index % 5 == 0 ? MemoryStatus.Archived : MemoryStatus.Active,
+            MetadataJson = index < 2 ? JsonSerializer.Serialize(new { expectedProjectId = $"target-{index}" }) : "{}",
+            CreatedAt = now.AddMinutes(-index),
+            UpdatedAt = now.AddMinutes(-index)
+        }).ToArray();
+        await dbContext.MemoryItems.AddRangeAsync(memories);
+        await dbContext.SaveChangesAsync();
+
+        var first = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], LimitPerSection: 1, GovernanceRunId: runId),
+            CancellationToken.None);
+        first.DurableMemoryCoverage.Should().NotBeNull();
+        first.DurableMemoryCoverage!.CoverageComplete.Should().BeTrue();
+        first.DurableMemoryCoverage.ScannedCount.Should().Be(first.DurableMemoryCoverage.TotalCount);
+        first.DurableMemoryCoverage.TotalCount.Should().BeGreaterThanOrEqualTo(205);
+        first.DurableMemoryCoverage.ArchivedCount.Should().BeGreaterThan(0);
+        first.ProjectKnowledgeGovernance!.Pagination.HasMore.Should().BeTrue();
+        first.ProjectKnowledgeGovernance.Pagination.Continuation.Should().NotBeNullOrWhiteSpace();
+
+        var second = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], LimitPerSection: 1, Offset: 1, GovernanceRunId: runId),
+            CancellationToken.None);
+        second.DurableMemoryCoverage!.SnapshotId.Should().Be(first.DurableMemoryCoverage.SnapshotId);
+        second.DurableMemoryCoverage.TotalCount.Should().Be(first.DurableMemoryCoverage.TotalCount);
+        second.ProjectKnowledgeGovernance!.Candidates.Select(x => x.FindingId)
+            .Should().NotIntersectWith(first.ProjectKnowledgeGovernance.Candidates.Select(x => x.FindingId));
+
+        var insertedAfterSnapshot = new MemoryItem
+        {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"full-governance:concurrent:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Fact,
+            Title = "Committed after governance snapshot",
+            Content = "This row belongs to the next governance snapshot.",
+            Summary = "Concurrent data change fixture.",
+            SourceType = "test",
+            SourceRef = "concurrent-change",
+            Importance = .9m,
+            Confidence = .95m,
+            CreatedAt = now.AddMinutes(1),
+            UpdatedAt = now.AddMinutes(1)
+        };
+        await dbContext.MemoryItems.AddAsync(insertedAfterSnapshot);
+        await dbContext.SaveChangesAsync();
+
+        var replay = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], LimitPerSection: 1, GovernanceRunId: runId),
+            CancellationToken.None);
+        replay.DurableMemoryCoverage!.SnapshotId.Should().Be(first.DurableMemoryCoverage.SnapshotId);
+        replay.DurableMemoryCoverage.TotalCount.Should().Be(first.DurableMemoryCoverage.TotalCount);
+
+        var nextRun = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], LimitPerSection: 1, GovernanceRunId: $"{runId}-next"),
+            CancellationToken.None);
+        nextRun.DurableMemoryCoverage!.TotalCount.Should().Be(first.DurableMemoryCoverage.TotalCount + 1);
+    }
+
+    [DockerRequiredFact]
     public async Task Scheduled_Governance_Should_Be_Paged_Idempotent_And_Respect_DisplayName_Boundary()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -879,9 +967,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             new ProjectInformationUpdateRequest(projectId, "UI managed name", "UI description."),
             CancellationToken.None);
         uiUpdated.DisplayName.Should().Be("UI managed name");
-        (await dbContext.SecurityAuditEvents.CountAsync(x =>
-            x.EventType == SecurityAuditEventType.ProjectDisplayNameUpdated &&
-            x.DetailsJson.Contains(projectId))).Should().Be(1);
+        (await dbContext.SecurityAuditEvents.AsNoTracking()
+            .Where(x => x.EventType == SecurityAuditEventType.ProjectDisplayNameUpdated)
+            .Select(x => x.DetailsJson)
+            .ToListAsync()).Count(x => x.Contains(projectId, StringComparison.Ordinal)).Should().Be(1);
 
         var interactiveAgentUpdated = await projectInformation.UpdateFromAgentAsync(
             new ProjectInformationAgentUpdateRequest(projectId, "Interactive agent description."),
@@ -1007,9 +1096,17 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
         (await gatewayTools.conversation_insight_status(insight.Id, CancellationToken.None))!.PromotionStatus.Should().Be(ConversationPromotionStatus.Failed);
         (await gatewayTools.conversation_insight_retry(new ConversationInsightGovernanceRequest(insight.Id, governanceRunId), CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.Pending);
-        (await gatewayTools.conversation_insight_retry(new ConversationInsightGovernanceRequest(insight.Id, governanceRunId), CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.Pending);
-        (await gatewayTools.conversation_insight_skip(new ConversationInsightGovernanceRequest(insight.Id, governanceRunId, "Deferred by governance."), CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
-        (await gatewayTools.conversation_insight_skip(new ConversationInsightGovernanceRequest(insight.Id, governanceRunId, "Deferred by governance."), CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
+        var hostBlockedRequest = new ConversationInsightDispositionRequest(insight.Id, ConversationInsightDisposition.HostBlocked, "ChatGPT host safety gate blocked the mutation.", governanceRunId);
+        (await gatewayTools.conversation_insight_set_disposition(hostBlockedRequest, CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.HostBlocked);
+        (await gatewayTools.conversation_insight_set_disposition(hostBlockedRequest, CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.HostBlocked);
+        (await dbContext.SecurityAuditEvents.AsNoTracking()
+            .Where(x => x.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated)
+            .Select(x => x.DetailsJson)
+            .ToListAsync()).Count(x => x.Contains(insight.Id.ToString(), StringComparison.Ordinal)).Should().Be(2); // retry + one idempotent HostBlocked transition
+        await scope.ServiceProvider.GetRequiredService<IConversationAutomationService>()
+            .PromotePendingInsightsAsync(insight.ConversationId, projectId, CancellationToken.None);
+        (await gatewayTools.conversation_insight_status(insight.Id, CancellationToken.None))!.PromotionStatus.Should().Be(ConversationPromotionStatus.HostBlocked);
+        (await gatewayTools.conversation_insight_retry(new ConversationInsightGovernanceRequest(insight.Id, governanceRunId, "Human approved retry."), CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.Pending);
     }
 
     [DockerRequiredFact]
@@ -1052,6 +1149,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "conversation_insight_status",
             "conversation_insight_retry",
             "conversation_insight_skip",
+            "conversation_insight_set_disposition",
             "chatgpt_governance_proposal_create"
         ]);
 

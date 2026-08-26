@@ -317,7 +317,13 @@ public sealed class ConversationAutomationService(
                 x.PromotedMemoryId,
                 x.Error,
                 x.CreatedAt,
-                x.UpdatedAt))
+                x.UpdatedAt)
+            {
+                GovernanceReason = x.GovernanceReason,
+                GovernanceRunId = x.GovernanceRunId,
+                GovernanceRetryCount = x.GovernanceRetryCount,
+                GovernanceUpdatedAt = x.GovernanceUpdatedAt
+            })
             .ToListAsync(cancellationToken);
     }
 
@@ -350,7 +356,12 @@ public sealed class ConversationAutomationService(
 
         insight.PromotionStatus = ConversationPromotionStatus.Pending;
         insight.Error = string.Empty;
+        insight.GovernanceReason = string.IsNullOrWhiteSpace(request.Reason) ? "Manual governance retry." : request.Reason.Trim();
+        insight.GovernanceRunId = request.GovernanceRunId?.Trim() ?? string.Empty;
+        insight.GovernanceRetryCount++;
+        insight.GovernanceUpdatedAt = clock.UtcNow;
         insight.UpdatedAt = clock.UtcNow;
+        await AddInsightGovernanceAuditAsync(insight, "Retry", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         await EnqueuePromotionJobIfNeededAsync(insight.ConversationId, insight.ProjectId, cancellationToken);
         return MapInsight(insight);
@@ -369,8 +380,56 @@ public sealed class ConversationAutomationService(
         }
 
         insight.PromotionStatus = ConversationPromotionStatus.Skipped;
-        insight.Error = string.IsNullOrWhiteSpace(request.Reason) ? "Skipped by governance." : request.Reason.Trim();
+        insight.GovernanceReason = string.IsNullOrWhiteSpace(request.Reason) ? "Skipped by governance." : request.Reason.Trim();
+        insight.GovernanceRunId = request.GovernanceRunId?.Trim() ?? string.Empty;
+        insight.GovernanceUpdatedAt = clock.UtcNow;
+        insight.Error = insight.GovernanceReason;
         insight.UpdatedAt = clock.UtcNow;
+        await AddInsightGovernanceAuditAsync(insight, "Skip", cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return MapInsight(insight);
+    }
+
+    public async Task<ConversationInsightResult> SetInsightDispositionAsync(ConversationInsightDispositionRequest request, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        ValidateGovernanceRunId(request.GovernanceRunId);
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            throw new InvalidOperationException("A governance reason is required for deferred, user-decision, or host-blocked insights.");
+        }
+
+        var insight = await LoadGovernableInsightAsync(request.InsightId, actor, cancellationToken);
+        ActorAuthorization.EnsureProjectAllowed(actor, insight.ProjectId, write: true);
+        if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
+        {
+            return MapInsight(insight);
+        }
+
+        var status = request.Disposition switch
+        {
+            ConversationInsightDisposition.Deferred => ConversationPromotionStatus.Deferred,
+            ConversationInsightDisposition.RequiresUserDecision => ConversationPromotionStatus.RequiresUserDecision,
+            ConversationInsightDisposition.HostBlocked => ConversationPromotionStatus.HostBlocked,
+            _ => throw new InvalidOperationException("Unsupported conversation insight disposition.")
+        };
+        var reason = request.Reason.Trim();
+        var runId = request.GovernanceRunId?.Trim() ?? string.Empty;
+        if (insight.PromotionStatus == status &&
+            string.Equals(insight.GovernanceReason, reason, StringComparison.Ordinal) &&
+            string.Equals(insight.GovernanceRunId, runId, StringComparison.Ordinal))
+        {
+            return MapInsight(insight);
+        }
+
+        insight.PromotionStatus = status;
+        insight.GovernanceReason = reason;
+        insight.GovernanceRunId = runId;
+        insight.GovernanceUpdatedAt = clock.UtcNow;
+        insight.Error = reason;
+        insight.UpdatedAt = clock.UtcNow;
+        await AddInsightGovernanceAuditAsync(insight, request.Disposition.ToString(), cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return MapInsight(insight);
     }
@@ -569,8 +628,7 @@ public sealed class ConversationAutomationService(
     public async Task PromotePendingInsightsAsync(string? conversationId, string? projectId, CancellationToken cancellationToken)
     {
         var query = dbContext.ConversationInsights
-            .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending ||
-                        x.PromotionStatus == ConversationPromotionStatus.Failed)
+            .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending)
             .OrderBy(x => x.CreatedAt)
             .AsQueryable();
 
@@ -721,7 +779,34 @@ public sealed class ConversationAutomationService(
             x.PromotedMemoryId,
             x.Error,
             x.CreatedAt,
-            x.UpdatedAt);
+            x.UpdatedAt)
+        {
+            GovernanceReason = x.GovernanceReason,
+            GovernanceRunId = x.GovernanceRunId,
+            GovernanceRetryCount = x.GovernanceRetryCount,
+            GovernanceUpdatedAt = x.GovernanceUpdatedAt
+        };
+
+    private async ValueTask AddInsightGovernanceAuditAsync(ConversationInsight insight, string action, CancellationToken cancellationToken)
+    {
+        await dbContext.SecurityAuditEvents.AddAsync(new SecurityAuditEvent
+        {
+            TenantId = insight.TenantId,
+            ActorUserId = actorAccessor.Current.UserId,
+            EventType = SecurityAuditEventType.ConversationInsightGovernanceUpdated,
+            Outcome = insight.PromotionStatus.ToString(),
+            DetailsJson = JsonSerializer.Serialize(new
+            {
+                insightId = insight.Id,
+                insight.ProjectId,
+                action,
+                governanceRunId = insight.GovernanceRunId,
+                reason = insight.GovernanceReason,
+                retryCount = insight.GovernanceRetryCount
+            }, JsonOptions),
+            CreatedAt = clock.UtcNow
+        }, cancellationToken);
+    }
 
     private static void ValidateGovernanceRunId(string? governanceRunId)
     {

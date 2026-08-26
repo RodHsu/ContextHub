@@ -88,7 +88,7 @@ Do not write:
 | `conversation_ingest` | Saving a concise checkpoint for future task continuity |
 | `conversation_sessions_list` | Auditing staged conversation sessions |
 | `conversation_insights_list` | Reviewing staged conversation insights and promotion state with offset pagination |
-| `conversation_insight_status` / `conversation_insight_retry` / `conversation_insight_skip` | Inspecting and converging a staged insight; retry and skip are idempotent and available on `/mcp` and `/mcp-chat` |
+| `conversation_insight_status` / `conversation_insight_retry` / `conversation_insight_skip` / `conversation_insight_set_disposition` | Inspecting and converging a staged insight. `set_disposition` records audited `Deferred`, `RequiresUserDecision`, or `HostBlocked` exceptions; exception states are not automatically retried and may be manually retried later. |
 | `project_information_get` | Reading fixed project background before task-specific retrieval |
 | `project_information_upsert` | Creating or correcting the durable description for one ProjectId; agent and background callers cannot change the Dashboard-owned `DisplayName` |
 | `project_information_update_lifecycle` | Hiding, unhiding, archiving, or restoring a project on trusted `/mcp`; archiving excludes it from default retrieval |
@@ -105,7 +105,7 @@ Do not write:
 | `project_work_item_checklist_update` | Completing or reopening one checklist item so guarded work items can progress to `Completed` |
 | `project_work_item_archive` / `project_work_item_restore` | Hiding or restoring a work item without changing its business status; archived work items reject mutations and are excluded from default lists |
 | `project_work_items_list` | Listing user-managed work items for one ProjectId; work items are not governance suggested actions |
-| `knowledge_review` | Reading a paged, actor-scoped governance review through `/mcp-chat`; callers must follow `hasMore`, retain the same `governanceRunId`, execute archive-first/proposal-first actions, and re-review until `Converged` |
+| `knowledge_review` | Reading an actor-scoped full-coverage governance snapshot through `/mcp-chat`. The server scans every authorized active/archived project and shared memory, returns `totalCount`, `scannedCount`, `coverageComplete`, snapshot tokens and stable candidate continuation, and keeps raw bodies server-side. Callers must retain the same `governanceRunId` while paging, execute archive-first/proposal-first actions, and re-review until `Converged` or `ConvergedWithExceptions`. |
 | `daily_memory_review` | Reading a compatibility daily review through `/mcp-chat`; scheduled governance should use `knowledge_review` |
 | `chatgpt_governance_proposal_create` | Creating one proposal-gated governance operation per `governanceRunId` and operation payload; retries return the existing proposal |
 | `log_search` | Searching recent runtime events |

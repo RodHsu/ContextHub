@@ -855,3 +855,6 @@ ContextHub 的核心價值不在於「多一個資料庫」，而在於把這些
 - 單機可落地的 Docker Compose 拓樸
 
 這讓它更像一個可維護的外部記憶系統，而不是一堆散落的 prompt 與腳本。
+## 20. Durable knowledge governance snapshots
+
+`knowledge_review` reuses the Application-layer governance engine for Project Knowledge and Shared Knowledge. Each initial review and re-review materializes all authorized active and archived durable memories, persists an actor-scoped snapshot keyed by `governanceRunId` and phase, and pages compact semantic findings from that immutable snapshot. This prevents mutable offsets, page limits, or concurrent inserts from being mistaken for complete coverage. Conversation insights may be moved to audited `Deferred`, `RequiresUserDecision`, or `HostBlocked` exception states; background promotion only consumes `Pending` insights.

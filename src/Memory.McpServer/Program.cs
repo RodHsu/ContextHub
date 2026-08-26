@@ -1302,6 +1302,12 @@ conversations.MapPost("/insights/{insightId:guid}/skip", async (Guid insightId, 
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["insight"] = [ex.Message] }); }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 
+conversations.MapPost("/insights/{insightId:guid}/disposition", async (Guid insightId, ConversationInsightDispositionBody body, IConversationAutomationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.SetInsightDispositionAsync(new ConversationInsightDispositionRequest(insightId, body.Disposition, body.Reason, body.GovernanceRunId), cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["insight"] = [ex.Message] }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
 conversations.MapGet("/checkpoints/search", async (
     string? query,
     string? projectId,
@@ -2014,6 +2020,7 @@ internal sealed record DiscussionThreadReadBody(string ReaderProjectId, Guid Las
 internal sealed record ProjectWorkItemUpdateBody(string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
 internal sealed record ProjectWorkItemChecklistCompletionBody(bool IsCompleted);
 internal sealed record ConversationInsightGovernanceBody(string? GovernanceRunId = null, string? Reason = null);
+internal sealed record ConversationInsightDispositionBody(ConversationInsightDisposition Disposition, string Reason, string? GovernanceRunId = null);
 internal sealed record ProjectHierarchySetChildrenBody(IReadOnlyList<string>? ChildProjectIds);
 
 internal sealed record TenantProjectGrantUpsertBody(

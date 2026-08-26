@@ -922,6 +922,7 @@ public sealed class DashboardQueryServiceTests
         public DbSet<ConversationSession> ConversationSessions => throw new NotSupportedException();
         public DbSet<ConversationCheckpoint> ConversationCheckpoints => throw new NotSupportedException();
         public DbSet<ConversationInsight> ConversationInsights => throw new NotSupportedException();
+        public DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots => throw new NotSupportedException();
         public DbSet<ProjectHierarchy> ProjectHierarchies => throw new NotSupportedException();
         public DbSet<DiscussionThread> DiscussionThreads => throw new NotSupportedException();
         public DbSet<DiscussionParticipant> DiscussionParticipants => throw new NotSupportedException();

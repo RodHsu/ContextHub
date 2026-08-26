@@ -96,7 +96,18 @@ public enum GovernanceFindingType
     StaleMemoryCandidate,
     SupersededMemoryCandidate,
     DuplicateMemoryCandidate,
-    LowSignalEpisodeCandidate
+    LowSignalEpisodeCandidate,
+    MisplacedProjectCandidate,
+    ObsoleteMemoryCandidate,
+    LowValueMemoryCandidate,
+    InvalidMemoryCandidate,
+    MergeMemoryCandidate,
+    ArchiveMemoryCandidate,
+    MoveMemoryCandidate,
+    SharedKnowledgePromotionCandidate,
+    SharedKnowledgeDemotionCandidate,
+    ReplacementChainCandidate,
+    AuthoritativeSourceCandidate
 }
 
 public enum GovernanceFindingStatus
@@ -199,7 +210,17 @@ public enum ConversationPromotionStatus
     Pending,
     Promoted,
     Skipped,
-    Failed
+    Failed,
+    Deferred,
+    RequiresUserDecision,
+    HostBlocked
+}
+
+public enum ConversationInsightDisposition
+{
+    Deferred,
+    RequiresUserDecision,
+    HostBlocked
 }
 
 public enum TenantStatus
@@ -234,7 +255,8 @@ public enum SecurityAuditEventType
     ApiTokenAuthenticated,
     ApiTokenAuthenticationFailed,
     ApiTokenProjectDenied,
-    ProjectDisplayNameUpdated
+    ProjectDisplayNameUpdated,
+    ConversationInsightGovernanceUpdated
 }
 
 public enum AgentConnectivityStatus
@@ -832,11 +854,32 @@ public sealed class ConversationInsight
     public ConversationPromotionStatus PromotionStatus { get; set; } = ConversationPromotionStatus.Pending;
     public Guid? PromotedMemoryId { get; set; }
     public string Error { get; set; } = string.Empty;
+    public string GovernanceReason { get; set; } = string.Empty;
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public int GovernanceRetryCount { get; set; }
+    public DateTimeOffset? GovernanceUpdatedAt { get; set; }
     public string MetadataJson { get; set; } = "{}";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public ConversationSession? Session { get; set; }
     public ConversationCheckpoint? Checkpoint { get; set; }
+}
+
+public sealed class KnowledgeGovernanceSnapshot
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public bool IsReReview { get; set; }
+    public string ProjectSetHash { get; set; } = string.Empty;
+    public string ProjectIdsJson { get; set; } = "[]";
+    public string ResultJson { get; set; } = "{}";
+    public int TotalCount { get; set; }
+    public int ScannedCount { get; set; }
+    public bool CoverageComplete { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset CompletedAt { get; set; }
 }
 
 public sealed class ProjectHierarchy

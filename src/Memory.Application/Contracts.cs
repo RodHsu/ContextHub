@@ -1165,12 +1165,24 @@ public sealed record ConversationInsightResult(
     Guid? PromotedMemoryId,
     string Error,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    public string GovernanceReason { get; init; } = string.Empty;
+    public string GovernanceRunId { get; init; } = string.Empty;
+    public int GovernanceRetryCount { get; init; }
+    public DateTimeOffset? GovernanceUpdatedAt { get; init; }
+}
 
 public sealed record ConversationInsightGovernanceRequest(
     Guid InsightId,
     string? GovernanceRunId = null,
     string? Reason = null);
+
+public sealed record ConversationInsightDispositionRequest(
+    Guid InsightId,
+    ConversationInsightDisposition Disposition,
+    string Reason,
+    string? GovernanceRunId = null);
 
 public sealed record AccessibleProjectResult(
     string ProjectId,
@@ -1197,7 +1209,42 @@ public sealed record KnowledgeReviewPageResult(
     int Limit,
     int ReturnedCount,
     int TotalCount,
-    bool HasMore);
+    bool HasMore)
+{
+    public string? Continuation { get; init; }
+}
+
+public sealed record KnowledgeGovernanceCandidateResult(
+    Guid FindingId,
+    Guid MemoryId,
+    Guid? RelatedMemoryId,
+    string ProjectId,
+    GovernanceFindingType Classification,
+    string Title,
+    string Summary,
+    string RecommendedAction,
+    string? TargetProjectId,
+    IReadOnlyList<string> ReasonCodes,
+    bool RequiresExplicitApproval,
+    DateTimeOffset UpdatedAt);
+
+public sealed record KnowledgeGovernanceCoverageResult(
+    Guid SnapshotId,
+    string SnapshotToken,
+    DateTimeOffset SnapshotCreatedAt,
+    int TotalCount,
+    int ScannedCount,
+    int ActiveCount,
+    int ArchivedCount,
+    int ProjectKnowledgeCount,
+    int SharedKnowledgeCount,
+    bool CoverageComplete,
+    bool HasMore,
+    string? Continuation);
+
+public sealed record KnowledgeGovernanceSectionResult(
+    IReadOnlyList<KnowledgeGovernanceCandidateResult> Candidates,
+    KnowledgeReviewPageResult Pagination);
 
 public sealed record KnowledgeReviewPaginationResult(
     KnowledgeReviewPageResult ProjectKnowledgeCandidates,
@@ -1224,7 +1271,14 @@ public sealed record KnowledgeReviewConvergenceResult(
     string Status,
     int ActionableItemCount,
     bool RequiresReReview,
-    bool IsConverged);
+    bool IsConverged)
+{
+    public bool CoverageComplete { get; init; }
+    public int DeferredCount { get; init; }
+    public int RequiresUserDecisionCount { get; init; }
+    public int HostBlockedCount { get; init; }
+    public int ExceptionCount => DeferredCount + RequiresUserDecisionCount + HostBlockedCount;
+}
 
 public sealed record KnowledgeReviewResult(
     IReadOnlyList<AccessibleProjectResult> Projects,
@@ -1239,7 +1293,12 @@ public sealed record KnowledgeReviewResult(
     string GovernanceRunId,
     bool IsReReview,
     KnowledgeReviewPaginationResult Pagination,
-    KnowledgeReviewConvergenceResult Convergence);
+    KnowledgeReviewConvergenceResult Convergence)
+{
+    public KnowledgeGovernanceCoverageResult? DurableMemoryCoverage { get; init; }
+    public KnowledgeGovernanceSectionResult? ProjectKnowledgeGovernance { get; init; }
+    public KnowledgeGovernanceSectionResult? SharedKnowledgeGovernance { get; init; }
+}
 
 public sealed record ConversationCheckpointSearchRequest(
     string? Query = null,
@@ -1564,6 +1623,7 @@ public interface IApplicationDbContext
     DbSet<ConversationSession> ConversationSessions { get; }
     DbSet<ConversationCheckpoint> ConversationCheckpoints { get; }
     DbSet<ConversationInsight> ConversationInsights { get; }
+    DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots { get; }
     DbSet<ProjectHierarchy> ProjectHierarchies { get; }
     DbSet<DiscussionThread> DiscussionThreads { get; }
     DbSet<DiscussionParticipant> DiscussionParticipants { get; }
@@ -1797,6 +1857,20 @@ public interface IKnowledgeReviewService
     Task<KnowledgeReviewResult> ReviewAsync(KnowledgeReviewRequest request, CancellationToken cancellationToken);
 }
 
+public interface IDurableMemoryGovernanceService
+{
+    Task<DurableMemoryGovernanceSnapshotResult> GetOrCreateSnapshotAsync(
+        IReadOnlyList<string> projectIds,
+        string governanceRunId,
+        bool isReReview,
+        CancellationToken cancellationToken);
+}
+
+public sealed record DurableMemoryGovernanceSnapshotResult(
+    KnowledgeGovernanceCoverageResult Coverage,
+    IReadOnlyList<KnowledgeGovernanceCandidateResult> ProjectCandidates,
+    IReadOnlyList<KnowledgeGovernanceCandidateResult> SharedCandidates);
+
 public interface IProjectArtifactExchangeService
 {
     Task<ProjectArtifactResult> PublishAsync(ProjectArtifactPublishRequest request, CancellationToken cancellationToken);
@@ -1843,6 +1917,7 @@ public interface IConversationAutomationService
     Task<ConversationInsightResult?> GetInsightAsync(Guid insightId, CancellationToken cancellationToken);
     Task<ConversationInsightResult> RetryInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
     Task<ConversationInsightResult> SkipInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
+    Task<ConversationInsightResult> SetInsightDispositionAsync(ConversationInsightDispositionRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
     Task<ConversationPipelineStatusResult?> GetPipelineStatusAsync(Guid checkpointId, CancellationToken cancellationToken);
     Task<ConversationPipelineStatusResult> ProcessCheckpointNowAsync(Guid checkpointId, CancellationToken cancellationToken);

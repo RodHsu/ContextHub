@@ -488,7 +488,9 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             "project_work_item_checklist_update",
             "project_work_item_archive",
             "project_work_item_restore",
-            "project_work_items_list"
+            "project_work_items_list",
+            "knowledge_review",
+            "conversation_insight_set_disposition"
         });
 
         var sessionId = captureHandler.SessionId;
