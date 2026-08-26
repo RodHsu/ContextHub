@@ -492,7 +492,7 @@ public sealed class GovernanceService(
             return;
         }
 
-        var dedupKey = $"action:{actionType}:{draft.DedupKey}";
+        var dedupKey = BuildSuggestedActionDedupKey(actionType.Value, draft);
         var pendingPayloads = await dbContext.SuggestedActions
             .Where(x => x.ProjectId == projectId &&
                         x.Status == SuggestedActionStatus.Pending &&
@@ -620,6 +620,25 @@ public sealed class GovernanceService(
 
         reason = string.Empty;
         return false;
+    }
+
+    private static string BuildSuggestedActionDedupKey(SuggestedActionType actionType, GovernanceDraft draft)
+    {
+        if (actionType == SuggestedActionType.ArchiveStaleMemory && draft.PrimaryMemoryId.HasValue)
+        {
+            return $"action:{actionType}:memory:{draft.PrimaryMemoryId.Value:N}";
+        }
+
+        if (actionType == SuggestedActionType.MergeDuplicateCandidate &&
+            draft.PrimaryMemoryId.HasValue && draft.SecondaryMemoryId.HasValue)
+        {
+            var ids = new[] { draft.PrimaryMemoryId.Value, draft.SecondaryMemoryId.Value }
+                .OrderBy(x => x)
+                .Select(x => x.ToString("N"));
+            return $"action:{actionType}:pair:{string.Join(':', ids)}";
+        }
+
+        return $"action:{actionType}:{draft.DedupKey}";
     }
 
     private static decimal AuthorityScore(MemoryItem memory)

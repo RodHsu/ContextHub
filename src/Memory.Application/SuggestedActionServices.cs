@@ -146,7 +146,7 @@ public sealed class SuggestedActionService(
     private async Task ArchiveMemoryAsync(Guid id, CancellationToken cancellationToken)
     {
         var entity = await dbContext.MemoryItems.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
-        if (entity is null)
+        if (entity is null || entity.Status == MemoryStatus.Archived)
         {
             return;
         }

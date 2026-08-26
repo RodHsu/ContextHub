@@ -902,8 +902,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         first.DurableMemoryCoverage.ArchivedCount.Should().BeGreaterThan(0);
         first.ProjectKnowledgeGovernance!.Pagination.HasMore.Should().BeTrue();
         first.ProjectKnowledgeGovernance.Pagination.Continuation.Should().NotBeNullOrWhiteSpace();
-        first.PendingSuggestedActions.Should().Contain(x =>
-            x.ProjectId == projectId && x.Type == SuggestedActionType.ArchiveStaleMemory);
+        first.PendingSuggestedActions.Count(x =>
+            x.ProjectId == projectId && x.Type == SuggestedActionType.ArchiveStaleMemory).Should().Be(1);
 
         var second = await gatewayTools.knowledge_review(
             new KnowledgeReviewRequest([projectId], LimitPerSection: 1, Offset: 1, GovernanceRunId: runId),
