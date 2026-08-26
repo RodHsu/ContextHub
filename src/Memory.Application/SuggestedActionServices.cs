@@ -12,7 +12,8 @@ public sealed class SuggestedActionService(
     IGovernanceService governanceService,
     IBackgroundJobQueue jobQueue,
     IRequestActorAccessor actorAccessor,
-    IClock clock) : ISuggestedActionService
+    IClock clock,
+    ISuggestedActionReconciliationService suggestedActionReconciliationService) : ISuggestedActionService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -112,6 +113,14 @@ public sealed class SuggestedActionService(
             entity.ExecutedAt = clock.UtcNow;
             entity.UpdatedAt = clock.UtcNow;
             await SupersedeEquivalentActionsAsync(entity, cancellationToken);
+            var referencedMemoryIds = SuggestedActionEquivalence.GetReferencedMemoryIds(entity);
+            if (referencedMemoryIds.Count > 0)
+            {
+                await suggestedActionReconciliationService.ReconcileForMemoriesAsync(
+                    referencedMemoryIds,
+                    [entity.ProjectId],
+                    cancellationToken);
+            }
             await dbContext.SaveChangesAsync(cancellationToken);
         }
         catch (Exception ex)

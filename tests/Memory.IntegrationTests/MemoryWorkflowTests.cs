@@ -74,20 +74,68 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
                 ProjectId: sourceProjectId),
             CancellationToken.None);
 
+        var staleMoveAction = new SuggestedAction
+        {
+            ProjectId = sourceProjectId,
+            Type = SuggestedActionType.ReviewConflictCandidate,
+            Status = SuggestedActionStatus.Pending,
+            Title = "Source-project review",
+            Summary = "Moving the target out of this project makes the review stale.",
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                dedupKey = $"move-review:{sourceProjectId}:{created.Id:D}",
+                projectId = sourceProjectId,
+                primaryMemoryId = created.Id
+            }),
+            DedupKey = $"move-review:{sourceProjectId}:{created.Id:D}",
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        await dbContext.SuggestedActions.AddAsync(staleMoveAction);
+        await dbContext.SaveChangesAsync();
+
         var moved = await memoryService.MoveAsync(
             new MemoryMoveRequest(created.Id, targetProjectId, sourceProjectId, "integration test move"),
             CancellationToken.None);
         moved.ProjectId.Should().Be(targetProjectId);
+        (await dbContext.SuggestedActions.AsNoTracking().SingleAsync(x => x.Id == staleMoveAction.Id)).Status
+            .Should().Be(SuggestedActionStatus.Superseded);
 
         var archived = await memoryService.ArchiveAsync(
             new MemoryArchiveRequest(created.Id, targetProjectId, Archived: true, "integration test archive"),
             CancellationToken.None);
         archived.Status.Should().Be(MemoryStatus.Archived);
+        var archivedRevisionCount = await dbContext.MemoryItemRevisions.CountAsync(x => x.MemoryItemId == created.Id);
+        var archivedChunkCount = await dbContext.MemoryItemChunks.CountAsync(x => x.MemoryItemId == created.Id);
+        var archivedJobCount = await dbContext.MemoryJobs.CountAsync(x => x.ProjectId == targetProjectId);
+
+        var archiveReplay = await memoryService.ArchiveAsync(
+            new MemoryArchiveRequest(created.Id, targetProjectId, Archived: true, "integration test archive"),
+            CancellationToken.None);
+        var archiveReplayWithDifferentReason = await memoryService.ArchiveAsync(
+            new MemoryArchiveRequest(created.Id, targetProjectId, Archived: true, "different audit reason"),
+            CancellationToken.None);
+        archiveReplay.Version.Should().Be(archived.Version);
+        archiveReplay.UpdatedAt.Should().Be(archived.UpdatedAt);
+        archiveReplayWithDifferentReason.Version.Should().Be(archived.Version);
+        archiveReplayWithDifferentReason.UpdatedAt.Should().Be(archived.UpdatedAt);
+        (await dbContext.MemoryItemRevisions.CountAsync(x => x.MemoryItemId == created.Id)).Should().Be(archivedRevisionCount);
+        (await dbContext.MemoryItemChunks.CountAsync(x => x.MemoryItemId == created.Id)).Should().Be(archivedChunkCount);
+        (await dbContext.MemoryJobs.CountAsync(x => x.ProjectId == targetProjectId)).Should().Be(archivedJobCount);
 
         var restored = await memoryService.ArchiveAsync(
             new MemoryArchiveRequest(created.Id, targetProjectId, Archived: false, "integration test restore"),
             CancellationToken.None);
         restored.Status.Should().Be(MemoryStatus.Active);
+        var restoredRevisionCount = await dbContext.MemoryItemRevisions.CountAsync(x => x.MemoryItemId == created.Id);
+        var restoredJobCount = await dbContext.MemoryJobs.CountAsync(x => x.ProjectId == targetProjectId);
+        var restoreReplay = await memoryService.ArchiveAsync(
+            new MemoryArchiveRequest(created.Id, targetProjectId, Archived: false, "different restore reason"),
+            CancellationToken.None);
+        restoreReplay.Version.Should().Be(restored.Version);
+        restoreReplay.UpdatedAt.Should().Be(restored.UpdatedAt);
+        (await dbContext.MemoryItemRevisions.CountAsync(x => x.MemoryItemId == created.Id)).Should().Be(restoredRevisionCount);
+        (await dbContext.MemoryJobs.CountAsync(x => x.ProjectId == targetProjectId)).Should().Be(restoredJobCount);
 
         var deleted = await memoryService.DeleteAsync(
             new MemoryDeleteRequest(created.Id, targetProjectId, "integration test delete"),

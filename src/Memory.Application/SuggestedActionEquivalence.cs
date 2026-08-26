@@ -36,6 +36,21 @@ internal static class SuggestedActionEquivalence
             : $"{action.Type}:dedup:{dedupKey}";
     }
 
+    public static IReadOnlySet<Guid> GetReferencedMemoryIds(SuggestedAction action)
+    {
+        var payload = Deserialize(action.PayloadJson);
+        var result = new HashSet<Guid>();
+        AddIfPresent(result, TryReadGuid(payload, "primaryMemoryId"));
+        AddIfPresent(result, TryReadGuid(payload, "secondaryMemoryId"));
+        AddGuids(result, TryReadString(payload, "findingId"));
+        AddGuids(result, action.DedupKey);
+        AddGuids(result, TryReadString(payload, "dedupKey"));
+        return result;
+    }
+
+    public static string? GetFindingKey(SuggestedAction action)
+        => TryReadString(Deserialize(action.PayloadJson), "findingId");
+
     private static Guid? TryReadFindingPair(IReadOnlyDictionary<string, JsonElement> payload, Guid primaryMemoryId)
     {
         var findingId = TryReadString(payload, "findingId");
@@ -53,8 +68,41 @@ internal static class SuggestedActionEquivalence
     }
 
     private static Dictionary<string, JsonElement> Deserialize(string payloadJson)
-        => JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(string.IsNullOrWhiteSpace(payloadJson) ? "{}" : payloadJson)
-            ?? [];
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(string.IsNullOrWhiteSpace(payloadJson) ? "{}" : payloadJson)
+                ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static void AddIfPresent(ISet<Guid> result, Guid? value)
+    {
+        if (value.HasValue)
+        {
+            result.Add(value.Value);
+        }
+    }
+
+    private static void AddGuids(ISet<Guid> result, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        foreach (var token in value.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (Guid.TryParse(token, out var id))
+            {
+                result.Add(id);
+            }
+        }
+    }
 
     private static string? TryReadString(IReadOnlyDictionary<string, JsonElement> payload, string key)
         => payload.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.String

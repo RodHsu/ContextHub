@@ -956,6 +956,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
         var actions = scope.ServiceProvider.GetRequiredService<ISuggestedActionService>();
         var governance = scope.ServiceProvider.GetRequiredService<IGovernanceService>();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var now = DateTimeOffset.UtcNow;
 
@@ -990,10 +991,64 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             x.ProjectId == archiveProjectId &&
             x.Type == SuggestedActionType.ArchiveStaleMemory &&
             x.PayloadJson.Contains(archiveMemory.Id.ToString(), StringComparison.OrdinalIgnoreCase));
-        (await actions.AcceptAsync(archiveAction.Id, CancellationToken.None)).Action.Status.Should().Be(SuggestedActionStatus.Executed);
-        (await actions.AcceptAsync(archiveAction.Id, CancellationToken.None)).Action.Status.Should().Be(SuggestedActionStatus.Executed);
+        var historicalConflictAction = new SuggestedAction
+        {
+            ProjectId = archiveProjectId,
+            Type = SuggestedActionType.ReviewConflictCandidate,
+            Status = SuggestedActionStatus.Accepted,
+            Title = "Historical authority review",
+            Summary = "Direct archive must terminalize this stale accepted action.",
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                dedupKey = $"legacy-authority:{archiveProjectId}:{archiveMemory.Id:D}",
+                findingId = $"authoritative-source:{archiveProjectId}:{archiveMemory.Id:D}",
+                projectId = archiveProjectId,
+                primaryMemoryId = archiveMemory.Id
+            }),
+            DedupKey = $"legacy-authority:{archiveProjectId}:{archiveMemory.Id:D}",
+            CreatedAt = now.AddMinutes(-2),
+            UpdatedAt = now.AddMinutes(-2)
+        };
+        var legacyMergeAction = new SuggestedAction
+        {
+            ProjectId = archiveProjectId,
+            Type = SuggestedActionType.MergeDuplicateCandidate,
+            Status = SuggestedActionStatus.Pending,
+            Title = "Legacy merge without secondary target",
+            Summary = "Archived primary target makes this legacy action terminal.",
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                dedupKey = $"legacy-merge:{archiveProjectId}:{archiveMemory.Id:D}",
+                projectId = archiveProjectId,
+                primaryMemoryId = archiveMemory.Id
+            }),
+            DedupKey = $"legacy-merge:{archiveProjectId}:{archiveMemory.Id:D}",
+            CreatedAt = now.AddMinutes(-2),
+            UpdatedAt = now.AddMinutes(-2)
+        };
+        await dbContext.SuggestedActions.AddRangeAsync(historicalConflictAction, legacyMergeAction);
+        await dbContext.SaveChangesAsync();
+
+        var archived = await memoryService.ArchiveAsync(
+            new MemoryArchiveRequest(archiveMemory.Id, archiveProjectId, Archived: true, "direct governance archive"),
+            CancellationToken.None);
+        var archivedRevisionCount = await dbContext.MemoryItemRevisions.CountAsync(x => x.MemoryItemId == archiveMemory.Id);
+        var replay = await memoryService.ArchiveAsync(
+            new MemoryArchiveRequest(archiveMemory.Id, archiveProjectId, Archived: true, "direct governance archive"),
+            CancellationToken.None);
+        var replayWithDifferentReason = await memoryService.ArchiveAsync(
+            new MemoryArchiveRequest(archiveMemory.Id, archiveProjectId, Archived: true, "different direct governance reason"),
+            CancellationToken.None);
+        replay.Version.Should().Be(archived.Version);
+        replay.UpdatedAt.Should().Be(archived.UpdatedAt);
+        replayWithDifferentReason.Version.Should().Be(archived.Version);
+        replayWithDifferentReason.UpdatedAt.Should().Be(archived.UpdatedAt);
+        (await dbContext.MemoryItemRevisions.CountAsync(x => x.MemoryItemId == archiveMemory.Id)).Should().Be(archivedRevisionCount);
         dbContext.ClearTrackedChanges();
         (await dbContext.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == archiveMemory.Id)).Version.Should().Be(2);
+        (await dbContext.SuggestedActions.AsNoTracking().SingleAsync(x => x.Id == archiveAction.Id)).Status.Should().Be(SuggestedActionStatus.Superseded);
+        (await dbContext.SuggestedActions.AsNoTracking().SingleAsync(x => x.Id == historicalConflictAction.Id)).Status.Should().Be(SuggestedActionStatus.Superseded);
+        (await dbContext.SuggestedActions.AsNoTracking().SingleAsync(x => x.Id == legacyMergeAction.Id)).Status.Should().Be(SuggestedActionStatus.Superseded);
 
         var historicalArchiveAction = new SuggestedAction
         {
@@ -1016,6 +1071,15 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         };
         await dbContext.SuggestedActions.AddAsync(historicalArchiveAction);
         await dbContext.SaveChangesAsync();
+
+        var persistedBeforeNoOp = await dbContext.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == archiveMemory.Id);
+        var noOpCleanup = await memoryService.ArchiveAsync(
+            new MemoryArchiveRequest(archiveMemory.Id, archiveProjectId, Archived: true, "reconcile historical action"),
+            CancellationToken.None);
+        noOpCleanup.Version.Should().Be(persistedBeforeNoOp.Version);
+        noOpCleanup.UpdatedAt.Should().Be(persistedBeforeNoOp.UpdatedAt);
+        (await dbContext.SuggestedActions.AsNoTracking().SingleAsync(x => x.Id == historicalArchiveAction.Id)).Status
+            .Should().Be(SuggestedActionStatus.Superseded);
 
         var archiveReReview = await gatewayTools.knowledge_review(
             new KnowledgeReviewRequest([archiveProjectId], GovernanceRunId: $"archive-rereview-{Guid.NewGuid():N}", IsReReview: true),
@@ -1066,8 +1130,29 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             CancellationToken.None);
         var mergeAction = mergeReview.PendingSuggestedActions.Single(x =>
             x.ProjectId == mergeProjectId && x.Type == SuggestedActionType.MergeDuplicateCandidate);
+        var historicalAuthorityAction = new SuggestedAction
+        {
+            ProjectId = mergeProjectId,
+            Type = SuggestedActionType.ReviewConflictCandidate,
+            Status = SuggestedActionStatus.Pending,
+            Title = "Historical authority pair",
+            Summary = "Replacement completion must terminalize cross-type authority review.",
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                dedupKey = $"legacy-authority:{mergeProjectId}:{mergeRight.Id:D}:{mergeLeft.Id:D}",
+                findingId = $"authoritative-source:{mergeProjectId}:{mergeRight.Id:D}:{mergeLeft.Id:D}",
+                projectId = mergeProjectId,
+                primaryMemoryId = mergeLeft.Id
+            }),
+            DedupKey = $"legacy-authority:{mergeProjectId}:{mergeRight.Id:D}:{mergeLeft.Id:D}",
+            CreatedAt = now.AddMinutes(-2),
+            UpdatedAt = now.AddMinutes(-2)
+        };
+        await dbContext.SuggestedActions.AddAsync(historicalAuthorityAction);
+        await dbContext.SaveChangesAsync();
         (await actions.AcceptAsync(mergeAction.Id, CancellationToken.None)).Action.Status.Should().Be(SuggestedActionStatus.Executed);
         (await actions.AcceptAsync(mergeAction.Id, CancellationToken.None)).Action.Status.Should().Be(SuggestedActionStatus.Executed);
+        (await dbContext.SuggestedActions.AsNoTracking().SingleAsync(x => x.Id == historicalAuthorityAction.Id)).Status.Should().Be(SuggestedActionStatus.Superseded);
         (await dbContext.MemoryLinks.AsNoTracking().CountAsync(x =>
             x.LinkType == "replaced_by" &&
             (x.FromId == mergeLeft.Id || x.FromId == mergeRight.Id) &&

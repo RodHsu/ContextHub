@@ -392,7 +392,8 @@ public sealed class MemoryService(
     ITokenCountingService tokenCountingService,
     IRequestActorAccessor actorAccessor,
     IMaintenanceCoordinator maintenanceCoordinator,
-    IProjectInformationService projectInformationService) : IMemoryService
+    IProjectInformationService projectInformationService,
+    ISuggestedActionReconciliationService suggestedActionReconciliationService) : IMemoryService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -533,11 +534,29 @@ public sealed class MemoryService(
         var entity = await LoadMemoryForWriteAsync(request.Id, request.ProjectId, actor, cancellationToken);
         EnsureMemoryWritable(entity);
 
-        entity.Status = request.Archived ? MemoryStatus.Archived : MemoryStatus.Active;
+        var targetStatus = request.Archived ? MemoryStatus.Archived : MemoryStatus.Active;
+        if (entity.Status == targetStatus)
+        {
+            if (await suggestedActionReconciliationService.ReconcileForMemoriesAsync(
+                    [entity.Id],
+                    [entity.ProjectId],
+                    cancellationToken) > 0)
+            {
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+
+            return Map(entity);
+        }
+
+        entity.Status = targetStatus;
         entity.Version += 1;
         entity.UpdatedAt = clock.UtcNow;
 
         await AddRevisionAsync(entity, request.Archived ? "archive" : "restore", cancellationToken);
+        await suggestedActionReconciliationService.ReconcileForMemoriesAsync(
+            [entity.Id],
+            [entity.ProjectId],
+            cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         await InvalidateMemoryCachesAsync(entity.ProjectId, actor, cancellationToken);
         if (entity.Status == MemoryStatus.Active)
@@ -583,6 +602,10 @@ public sealed class MemoryService(
         entity.UpdatedAt = clock.UtcNow;
 
         await AddRevisionAsync(entity, "move", cancellationToken);
+        await suggestedActionReconciliationService.ReconcileForMemoriesAsync(
+            [entity.Id],
+            [sourceProjectId, targetProjectId],
+            cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         await InvalidateMemoryCachesAsync(sourceProjectId, actor, cancellationToken);
         await InvalidateMemoryCachesAsync(targetProjectId, actor, cancellationToken);
@@ -2516,6 +2539,7 @@ public static class DependencyInjection
         services.AddScoped<IProjectInformationService, ProjectInformationService>();
         services.AddScoped<IProjectDiscussionService, ProjectDiscussionService>();
         services.AddScoped<IProjectWorkItemService, ProjectWorkItemService>();
+        services.AddScoped<ISuggestedActionReconciliationService, SuggestedActionReconciliationService>();
         services.AddScoped<IMemoryService, MemoryService>();
         services.AddSingleton<IProjectArtifactObjectStore, DisabledProjectArtifactObjectStore>();
         services.AddScoped<IProjectArtifactExchangeService, ProjectArtifactExchangeService>();

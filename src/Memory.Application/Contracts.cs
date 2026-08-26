@@ -1785,6 +1785,14 @@ public interface IMemoryService
     Task<UserPreferenceResult> ArchiveUserPreferenceAsync(UserPreferenceArchiveRequest request, CancellationToken cancellationToken);
 }
 
+public interface ISuggestedActionReconciliationService
+{
+    Task<int> ReconcileForMemoriesAsync(
+        IReadOnlyCollection<Guid> memoryIds,
+        IReadOnlyCollection<string> projectIds,
+        CancellationToken cancellationToken);
+}
+
 public interface IProjectInformationService
 {
     Task<ProjectInformationResult?> GetAsync(string projectId, CancellationToken cancellationToken);
