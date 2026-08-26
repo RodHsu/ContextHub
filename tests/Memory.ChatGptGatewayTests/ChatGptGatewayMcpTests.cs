@@ -1365,14 +1365,33 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             new ProjectWorkItemCreateRequest(projectId, "Ordinary in-progress work"), CancellationToken.None);
         var tracker = await gatewayTools.project_work_item_create(
             new ProjectWorkItemCreateRequest(projectId, "Explicit acceptance tracker"), CancellationToken.None);
+        var pending = await gatewayTools.project_work_item_create(
+            new ProjectWorkItemCreateRequest(projectId, "Pending work"), CancellationToken.None);
+        var blocked = await gatewayTools.project_work_item_create(
+            new ProjectWorkItemCreateRequest(projectId, "Blocked work"), CancellationToken.None);
+        var completed = await gatewayTools.project_work_item_create(
+            new ProjectWorkItemCreateRequest(projectId, "Completed work"), CancellationToken.None);
+        var cancelled = await gatewayTools.project_work_item_create(
+            new ProjectWorkItemCreateRequest(projectId, "Cancelled work"), CancellationToken.None);
         ordinary = await gatewayTools.project_work_item_update(
             new ProjectWorkItemUpdateRequest(ordinary.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
         tracker = await gatewayTools.project_work_item_update(
             new ProjectWorkItemUpdateRequest(tracker.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+        blocked = await gatewayTools.project_work_item_update(
+            new ProjectWorkItemUpdateRequest(blocked.Id, Status: ProjectWorkItemStatus.Blocked), CancellationToken.None);
+        completed = await gatewayTools.project_work_item_update(
+            new ProjectWorkItemUpdateRequest(completed.Id, Status: ProjectWorkItemStatus.Completed), CancellationToken.None);
+        cancelled = await gatewayTools.project_work_item_update(
+            new ProjectWorkItemUpdateRequest(cancelled.Id, Status: ProjectWorkItemStatus.Cancelled), CancellationToken.None);
 
         var initial = await gatewayTools.knowledge_review(
             new KnowledgeReviewRequest([projectId], GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
-        initial.Convergence.WorkItemActionableCount.Should().Be(2);
+        initial.WorkItems.Should().Contain(x => x.Id == pending.Id && x.Status == ProjectWorkItemStatus.Pending);
+        initial.WorkItems.Should().Contain(x => x.Id == ordinary.Id && x.Status == ProjectWorkItemStatus.InProgress);
+        initial.WorkItems.Should().Contain(x => x.Id == blocked.Id && x.Status == ProjectWorkItemStatus.Blocked);
+        initial.WorkItems.Should().Contain(x => x.Id == completed.Id && x.Status == ProjectWorkItemStatus.Completed);
+        initial.WorkItems.Should().Contain(x => x.Id == cancelled.Id && x.Status == ProjectWorkItemStatus.Cancelled);
+        initial.Convergence.WorkItemActionableCount.Should().Be(4);
         initial.Convergence.ExcludedGovernanceTrackerCount.Should().Be(0);
 
         var exclusionRequest = new ProjectWorkItemGovernanceExclusionRequest(
@@ -1383,14 +1402,14 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
         var reReview = await gatewayTools.knowledge_review(
             new KnowledgeReviewRequest([projectId], GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
-        reReview.Convergence.WorkItemActionableCount.Should().Be(1);
+        reReview.Convergence.WorkItemActionableCount.Should().Be(3);
         reReview.Convergence.ExcludedGovernanceTrackerCount.Should().Be(1);
         reReview.Convergence.ActionableItemCount.Should().BeGreaterThanOrEqualTo(1);
 
         var otherRun = $"tracker-other-{Guid.NewGuid():N}";
         var otherReview = await gatewayTools.knowledge_review(
             new KnowledgeReviewRequest([projectId], GovernanceRunId: otherRun, IsReReview: true), CancellationToken.None);
-        otherReview.Convergence.WorkItemActionableCount.Should().Be(2);
+        otherReview.Convergence.WorkItemActionableCount.Should().Be(4);
         otherReview.Convergence.ExcludedGovernanceTrackerCount.Should().Be(0);
 
         var adminActor = actorAccessor.Current;
@@ -1401,6 +1420,13 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var missingScope = async () => await gatewayTools.project_work_item_set_governance_exclusion(
             new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing dedicated scope."), CancellationToken.None);
         await missingScope.Should().ThrowAsync<UnauthorizedAccessException>();
+        actorAccessor.Current = adminActor with
+        {
+            Scopes = adminActor.Scopes.Where(x => !string.Equals(x, SecurityScopes.MemoryWrite, StringComparison.OrdinalIgnoreCase)).ToArray()
+        };
+        var missingWriteScope = async () => await gatewayTools.project_work_item_set_governance_exclusion(
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing memory write scope."), CancellationToken.None);
+        await missingWriteScope.Should().ThrowAsync<UnauthorizedAccessException>();
         actorAccessor.Current = adminActor with { Role = TenantUserRole.Member };
         var unauthorized = async () => await gatewayTools.project_work_item_set_governance_exclusion(
             new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Unauthorized escape."), CancellationToken.None);
@@ -1610,11 +1636,15 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
         var toolsPayload = await SendMcpAsync(client, sessionId!, 2, "tools/list", new { });
         var listedTools = ExtractSseJson(toolsPayload).GetProperty("result").GetProperty("tools");
+        var listedToolNames = listedTools.EnumerateArray()
+            .Select(tool => tool.GetProperty("name").GetString()!)
+            .ToArray();
         var searchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "memory_search");
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
-        listedTools.EnumerateArray().Select(tool => tool.GetProperty("name").GetString()).Should().Contain([
+        listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
+        listedToolNames.Should().Contain([
             "knowledge_review",
             "project_work_items_list",
             "project_work_item_create",
@@ -1631,6 +1661,32 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_finding_reopen",
             "chatgpt_governance_proposal_create"
         ]);
+        var exclusionTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_set_governance_exclusion");
+        var exclusionRequestSchema = exclusionTool.GetProperty("inputSchema")
+            .GetProperty("properties")
+            .GetProperty("request");
+        exclusionRequestSchema.GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "workItemId", "projectId", "governanceRunId", "reason", "excluded"
+        ]);
+        exclusionRequestSchema.GetProperty("required").EnumerateArray().Select(x => x.GetString()).Should().Contain([
+            "workItemId", "projectId", "governanceRunId", "reason"
+        ]);
+        exclusionTool.GetProperty("outputSchema").GetProperty("properties")
+            .TryGetProperty("governanceExclusions", out _).Should().BeTrue();
+
+        static string[] DeclaredToolNames(Type toolType) => toolType.GetMethods()
+            .Where(method => method.GetCustomAttributesData().Any(attribute => attribute.AttributeType.Name == "McpServerToolAttribute"))
+            .Select(method => method.Name)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var gatewayDeclaredTools = DeclaredToolNames(typeof(ChatGptGatewayTools));
+        var backendDeclaredTools = DeclaredToolNames(typeof(MemoryMcpTools));
+        gatewayDeclaredTools.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
+        backendDeclaredTools.Except(gatewayDeclaredTools, StringComparer.Ordinal)
+            .Should().BeEquivalentTo(ChatGptGatewayToolCatalog.BackendOnlyToolNames);
+        gatewayDeclaredTools.Except(backendDeclaredTools, StringComparer.Ordinal)
+            .Should().BeEquivalentTo(ChatGptGatewayToolCatalog.GatewayOnlyToolNames);
 
         var projectsPayload = await SendMcpAsync(client, sessionId!, 21, "tools/call", new
         {

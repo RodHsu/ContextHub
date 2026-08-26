@@ -222,7 +222,10 @@ app.MapGet("/api/status", (IOptions<ChatGptGatewayOptions> options) => Results.O
     publicResourceMetadataUrl = options.Value.PublicResourceMetadataUrl,
     readTools = options.Value.ReadTools,
     directWriteTools = options.Value.DirectWriteTools,
-    proposalWriteTools = options.Value.ProposalWriteTools
+    proposalWriteTools = options.Value.ProposalWriteTools,
+    publishedTools = ChatGptGatewayToolCatalog.PublishedToolNames.Order(StringComparer.Ordinal),
+    backendOnlyTools = ChatGptGatewayToolCatalog.BackendOnlyToolNames.Order(StringComparer.Ordinal),
+    gatewayOnlyTools = ChatGptGatewayToolCatalog.GatewayOnlyToolNames.Order(StringComparer.Ordinal)
 })).RequireAuthorization();
 
 app.MapGet("/.well-known/oauth-protected-resource/{resource?}", CreateProtectedResourceMetadata).AllowAnonymous();

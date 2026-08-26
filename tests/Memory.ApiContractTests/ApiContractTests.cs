@@ -2875,6 +2875,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         review.Should().NotBeNull();
         review!.Projects.Should().Contain(x => x.ProjectId == ProjectContext.DefaultProjectId);
         review.WorkItems.Should().Contain(x => x.Id == created.Id && x.Status == ProjectWorkItemStatus.Completed);
+        review.Convergence.WorkItemActionableCount.Should().Be(0);
         review.DurableMemoryCoverage.Should().NotBeNull();
         review.DurableMemoryCoverage!.CoverageComplete.Should().BeTrue();
         review.DurableMemoryCoverage.ScannedCount.Should().Be(review.DurableMemoryCoverage.TotalCount);

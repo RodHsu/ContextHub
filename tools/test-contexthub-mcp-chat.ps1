@@ -769,6 +769,9 @@ $requiredTools = @(
     "conversation_ingest",
     "projects_list",
     "daily_memory_review",
+    "knowledge_review",
+    "governance_finding_set_disposition",
+    "governance_finding_reopen",
     "user_preferences_list",
     "conversation_insights_list",
     "suggested_actions_list",
@@ -780,6 +783,8 @@ $requiredTools = @(
     "suggested_action_accept",
     "suggested_action_dismiss",
     "promote_log_slice_to_memory",
+    "project_work_items_list",
+    "project_work_item_set_governance_exclusion",
     "chatgpt_proposals_list",
     "chatgpt_proposal_approve",
     "chatgpt_proposal_reject"
@@ -802,6 +807,25 @@ foreach ($name in $requiredTools) {
 foreach ($name in $forbiddenTools) {
     if ($toolNames -contains $name) {
         throw "MCP chat gateway must not expose '$name'."
+    }
+}
+
+$trackerExclusionTool = @($toolsJson.result.tools | Where-Object { $_.name -eq "project_work_item_set_governance_exclusion" })
+if ($trackerExclusionTool.Count -ne 1) {
+    throw "Expected exactly one project_work_item_set_governance_exclusion schema."
+}
+
+$trackerRequestProperties = @($trackerExclusionTool[0].inputSchema.properties.request.properties.psobject.Properties.Name)
+foreach ($property in @("workItemId", "projectId", "governanceRunId", "reason", "excluded")) {
+    if ($trackerRequestProperties -notcontains $property) {
+        throw "Governance tracker exclusion schema is missing '$property'."
+    }
+}
+
+$trackerRequiredProperties = @($trackerExclusionTool[0].inputSchema.properties.request.required)
+foreach ($property in @("workItemId", "projectId", "governanceRunId", "reason")) {
+    if ($trackerRequiredProperties -notcontains $property) {
+        throw "Governance tracker exclusion schema must require '$property'."
     }
 }
 Write-Host "Restricted tool allowlist verified ($($toolNames.Count) tools)."

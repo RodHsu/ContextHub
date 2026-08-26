@@ -132,8 +132,7 @@ public sealed class KnowledgeReviewService(
             PageInfo(proposalPage, orderedProposals.Length, offset, limit));
 
         static bool IsWorkItemActionable(ProjectWorkItemResult workItem) =>
-            workItem.Status is ProjectWorkItemStatus.Pending or ProjectWorkItemStatus.InProgress or ProjectWorkItemStatus.Blocked ||
-            (workItem.Status is ProjectWorkItemStatus.Completed or ProjectWorkItemStatus.Cancelled && !workItem.IsArchived);
+            workItem.Status is ProjectWorkItemStatus.Pending or ProjectWorkItemStatus.InProgress or ProjectWorkItemStatus.Blocked;
         var excludedGovernanceTrackers = orderedWorkItems
             .Where(IsWorkItemActionable)
             .Where(x => x.GovernanceExclusions.Any(exclusion =>
