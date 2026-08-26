@@ -131,11 +131,16 @@ public sealed class KnowledgeReviewService(
             PageInfo(actionPage, orderedActions.Length, offset, limit),
             PageInfo(proposalPage, orderedProposals.Length, offset, limit));
 
-        // Pending and in-progress work is healthy operational state, not by itself a governance defect.
-        // Governance only requires action for blocked work or finished work that still needs archival.
+        static bool IsWorkItemActionable(ProjectWorkItemResult workItem) =>
+            workItem.Status is ProjectWorkItemStatus.Pending or ProjectWorkItemStatus.InProgress or ProjectWorkItemStatus.Blocked ||
+            (workItem.Status is ProjectWorkItemStatus.Completed or ProjectWorkItemStatus.Cancelled && !workItem.IsArchived);
+        var excludedGovernanceTrackers = orderedWorkItems
+            .Where(IsWorkItemActionable)
+            .Where(x => x.GovernanceExclusions.Any(exclusion =>
+                exclusion.IsActive && string.Equals(exclusion.GovernanceRunId, governanceRunId, StringComparison.Ordinal)))
+            .ToArray();
         var workItemGovernanceActionCount = orderedWorkItems.Count(x =>
-            x.Status == ProjectWorkItemStatus.Blocked ||
-            (x.Status is ProjectWorkItemStatus.Completed or ProjectWorkItemStatus.Cancelled && !x.IsArchived));
+            IsWorkItemActionable(x) && !excludedGovernanceTrackers.Any(excluded => excluded.Id == x.Id));
         var semanticActionableCount = governanceSnapshot.ProjectCandidates.Count + governanceSnapshot.SharedCandidates.Count;
         var actionableCount = (int)Math.Min(
             int.MaxValue,
@@ -151,7 +156,9 @@ public sealed class KnowledgeReviewService(
             actionableCount,
             deferredCount,
             userDecisionCount,
-            hostBlockedCount);
+            hostBlockedCount,
+            workItemGovernanceActionCount,
+            excludedGovernanceTrackers.Length);
 
         return new KnowledgeReviewResult(
             projects,
@@ -208,7 +215,9 @@ public sealed class KnowledgeReviewService(
         int actionableItemCount,
         int deferredCount,
         int requiresUserDecisionCount,
-        int hostBlockedCount)
+        int hostBlockedCount,
+        int workItemActionableCount = 0,
+        int excludedGovernanceTrackerCount = 0)
     {
         var exceptionCount = deferredCount + requiresUserDecisionCount + hostBlockedCount;
         var converged = isReReview && coverageComplete && !hasMore && actionableItemCount == 0;
@@ -224,7 +233,9 @@ public sealed class KnowledgeReviewService(
             CoverageComplete = coverageComplete,
             DeferredCount = deferredCount,
             RequiresUserDecisionCount = requiresUserDecisionCount,
-            HostBlockedCount = hostBlockedCount
+            HostBlockedCount = hostBlockedCount,
+            WorkItemActionableCount = workItemActionableCount,
+            ExcludedGovernanceTrackerCount = excludedGovernanceTrackerCount
         };
     }
 

@@ -874,6 +874,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
             entity.Property(x => x.ArchivedAt).HasColumnName("archived_at");
+            entity.Property(x => x.GovernanceExclusionsJson).HasColumnName("governance_exclusions_json").HasColumnType("jsonb");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Status, x.DueAt });
         });
 

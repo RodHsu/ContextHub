@@ -1277,6 +1277,8 @@ public sealed record KnowledgeReviewConvergenceResult(
     public int DeferredCount { get; init; }
     public int RequiresUserDecisionCount { get; init; }
     public int HostBlockedCount { get; init; }
+    public int WorkItemActionableCount { get; init; }
+    public int ExcludedGovernanceTrackerCount { get; init; }
     public int ExceptionCount => DeferredCount + RequiresUserDecisionCount + HostBlockedCount;
 }
 
@@ -1826,11 +1828,17 @@ public sealed record DiscussionThreadDetailResult(Guid Id, string HostProjectId,
 
 public sealed record ProjectWorkItemCreateRequest(string ProjectId, string Title, string? Description = null, IReadOnlyList<string>? Tags = null, IReadOnlyList<string>? ChecklistItems = null, int Priority = 0, DateTimeOffset? DueAt = null);
 public sealed record ProjectWorkItemUpdateRequest(Guid Id, string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
+public sealed record ProjectWorkItemGovernanceExclusionRequest(Guid WorkItemId, string ProjectId, string GovernanceRunId, string Reason, bool Excluded = true);
+public sealed record ProjectWorkItemGovernanceExclusionResult(string GovernanceRunId, string Reason, string Actor, DateTimeOffset UpdatedAt, DateTimeOffset? RevokedAt = null)
+{
+    public bool IsActive => RevokedAt is null;
+}
 public sealed record ProjectWorkItemListRequest(string ProjectId, ProjectWorkItemStatus? Status = null, int Limit = 100, bool IncludeArchived = false, int Offset = 0);
 public sealed record ProjectWorkItemChecklistItemResult(Guid Id, string Content, bool IsCompleted, int SortOrder);
 public sealed record ProjectWorkItemResult(Guid Id, string ProjectId, string Title, string Description, IReadOnlyList<string> Tags, IReadOnlyList<ProjectWorkItemChecklistItemResult> ChecklistItems, ProjectWorkItemStatus Status, int Priority, DateTimeOffset? DueAt, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? CompletedAt, DateTimeOffset? ArchivedAt = null)
 {
     public bool IsArchived => ArchivedAt.HasValue;
+    public IReadOnlyList<ProjectWorkItemGovernanceExclusionResult> GovernanceExclusions { get; init; } = [];
 }
 
 public interface IProjectDiscussionService
@@ -1853,6 +1861,7 @@ public interface IProjectWorkItemService
     Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> SetArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken);
+    Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken cancellationToken);
 }
 
 public interface IDailyMemoryReviewService
@@ -1882,6 +1891,7 @@ public sealed record DurableMemoryGovernanceSnapshotResult(
     public int DeferredCount { get; init; }
     public int RequiresUserDecisionCount { get; init; }
     public int HostBlockedCount { get; init; }
+    public IReadOnlyList<Guid> FindingIds { get; init; } = [];
 }
 
 public interface IProjectArtifactExchangeService

@@ -1436,6 +1436,11 @@ workItems.MapPut("/{workItemId:guid}/checklist/{checklistItemId:guid}", async (G
     try { return Results.Ok(await service.SetChecklistItemCompletionAsync(workItemId, checklistItemId, body.IsCompleted, cancellationToken)); }
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["checklistItem"] = [ex.Message] }); }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+workItems.MapPut("/{workItemId:guid}/governance-exclusion", async (Guid workItemId, ProjectWorkItemGovernanceExclusionBody body, IProjectWorkItemService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.SetGovernanceExclusionAsync(new ProjectWorkItemGovernanceExclusionRequest(workItemId, body.ProjectId, body.GovernanceRunId, body.Reason, body.Excluded), cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["governanceExclusion"] = [ex.Message] }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 
 var knowledgeReviews = app.MapGroup("/api/knowledge-reviews");
 knowledgeReviews.RequireAuthIfEnabled(requireAuthentication);
@@ -2043,6 +2048,7 @@ internal sealed record DiscussionMessageCreateBody(string SenderProjectId, strin
 internal sealed record DiscussionThreadReadBody(string ReaderProjectId, Guid LastReadMessageId);
 internal sealed record ProjectWorkItemUpdateBody(string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
 internal sealed record ProjectWorkItemChecklistCompletionBody(bool IsCompleted);
+internal sealed record ProjectWorkItemGovernanceExclusionBody(string ProjectId, string GovernanceRunId, string Reason, bool Excluded = true);
 internal sealed record ConversationInsightGovernanceBody(string? GovernanceRunId = null, string? Reason = null);
 internal sealed record ConversationInsightDispositionBody(ConversationInsightDisposition Disposition, string Reason, string? GovernanceRunId = null);
 internal sealed record ProjectHierarchySetChildrenBody(IReadOnlyList<string>? ChildProjectIds);

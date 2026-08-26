@@ -114,7 +114,8 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
                 SecurityScopes.MemoryWrite,
                 SecurityScopes.PreferencesRead,
                 SecurityScopes.PreferencesWrite,
-                SecurityScopes.LogsRead
+                SecurityScopes.LogsRead,
+                SecurityScopes.GovernanceTrackerManage
             ],
             [],
             IsAuthenticated: true,

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Memory.Domain;
 
@@ -8,6 +9,8 @@ public sealed class ProjectWorkItemService(
     IRequestActorAccessor actorAccessor,
     IClock clock) : IProjectWorkItemService
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     public async Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
     {
         var projectId = ProjectContext.Normalize(request.ProjectId);
@@ -138,11 +141,100 @@ public sealed class ProjectWorkItemService(
         return Map(entity);
     }
 
+    public async Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(
+        ProjectWorkItemGovernanceExclusionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.GovernanceTrackerManage);
+        if (!actor.IsAdmin)
+        {
+            throw new UnauthorizedAccessException("Only a tenant owner or administrator may change governance tracker exclusions.");
+        }
+
+        var projectId = ProjectContext.Normalize(request.ProjectId);
+        ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
+        var entity = await ApplyActorScope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor)
+            .SingleOrDefaultAsync(x => x.Id == request.WorkItemId, cancellationToken)
+            ?? throw new InvalidOperationException($"Project work item '{request.WorkItemId}' was not found.");
+        if (!string.Equals(entity.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new UnauthorizedAccessException("The work item does not belong to the requested ProjectId.");
+        }
+        EnsureNotArchived(entity);
+
+        var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            throw new InvalidOperationException("A governance tracker exclusion reason is required.");
+        }
+
+        var relatedSnapshots = await dbContext.KnowledgeGovernanceSnapshots
+            .AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId &&
+                        x.OwnerUserId == actor.UserId &&
+                        x.GovernanceRunId == governanceRunId)
+            .Select(x => x.ProjectIdsJson)
+            .ToListAsync(cancellationToken);
+        if (!relatedSnapshots.Any(json => ReadProjectIds(json).Contains(projectId, StringComparer.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException("GovernanceRunId does not identify an authorized review snapshot containing this ProjectId.");
+        }
+
+        var exclusions = ReadExclusions(entity.GovernanceExclusionsJson).ToList();
+        var index = exclusions.FindIndex(x => string.Equals(x.GovernanceRunId, governanceRunId, StringComparison.Ordinal));
+        var now = clock.UtcNow;
+        var reason = request.Reason.Trim();
+        ProjectWorkItemGovernanceExclusionResult updated;
+        if (request.Excluded)
+        {
+            if (index >= 0 && exclusions[index].IsActive && string.Equals(exclusions[index].Reason, reason, StringComparison.Ordinal))
+            {
+                return Map(entity);
+            }
+            updated = new ProjectWorkItemGovernanceExclusionResult(governanceRunId, reason, actor.Username, now);
+        }
+        else
+        {
+            if (index < 0 || !exclusions[index].IsActive)
+            {
+                return Map(entity);
+            }
+            updated = exclusions[index] with { Reason = reason, Actor = actor.Username, UpdatedAt = now, RevokedAt = now };
+        }
+
+        if (index >= 0) exclusions[index] = updated;
+        else exclusions.Add(updated);
+        entity.GovernanceExclusionsJson = JsonSerializer.Serialize(exclusions, JsonOptions);
+        entity.UpdatedAt = now;
+        await dbContext.SecurityAuditEvents.AddAsync(new SecurityAuditEvent
+        {
+            TenantId = actor.TenantId,
+            ActorUserId = actor.UserId,
+            EventType = SecurityAuditEventType.ProjectWorkItemGovernanceExclusionUpdated,
+            Outcome = request.Excluded ? "Excluded" : "Revoked",
+            DetailsJson = JsonSerializer.Serialize(new
+            {
+                workItemId = entity.Id,
+                projectId,
+                governanceRunId,
+                reason
+            }, JsonOptions),
+            CreatedAt = now
+        }, cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Map(entity);
+    }
+
     private static IQueryable<ProjectWorkItem> ApplyActorScope(IQueryable<ProjectWorkItem> query, ContextHubRequestActor actor)
         => !actor.HasUser ? query : actor.IsServiceActor
             ? query.Where(x => x.TenantId == actor.TenantId)
             : query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
-    private static ProjectWorkItemResult Map(ProjectWorkItem x) => new(x.Id, x.ProjectId, x.Title, x.Description, x.Tags, x.ChecklistItems.OrderBy(item => item.SortOrder).Select(item => new ProjectWorkItemChecklistItemResult(item.Id, item.Content, item.IsCompleted, item.SortOrder)).ToArray(), x.Status, x.Priority, x.DueAt, x.CreatedAt, x.UpdatedAt, x.CompletedAt, x.ArchivedAt);
+    private static ProjectWorkItemResult Map(ProjectWorkItem x) => new(x.Id, x.ProjectId, x.Title, x.Description, x.Tags, x.ChecklistItems.OrderBy(item => item.SortOrder).Select(item => new ProjectWorkItemChecklistItemResult(item.Id, item.Content, item.IsCompleted, item.SortOrder)).ToArray(), x.Status, x.Priority, x.DueAt, x.CreatedAt, x.UpdatedAt, x.CompletedAt, x.ArchivedAt)
+    {
+        GovernanceExclusions = ReadExclusions(x.GovernanceExclusionsJson)
+    };
     private static void EnsureNotArchived(ProjectWorkItem entity)
     {
         if (entity.ArchivedAt.HasValue) throw new InvalidOperationException("Project work item is archived. Restore it before making changes.");
@@ -162,5 +254,38 @@ public sealed class ProjectWorkItemService(
     private static void ValidateOptionalText(string? value, int max, string field)
     {
         if (value is not null && value.Trim().Length > max) throw new InvalidOperationException($"{field} must not exceed {max} characters.");
+    }
+
+    private static IReadOnlyList<ProjectWorkItemGovernanceExclusionResult> ReadExclusions(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<ProjectWorkItemGovernanceExclusionResult[]>(json, JsonOptions) ?? [];
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException("Persisted work item governance exclusions are invalid.", exception);
+        }
+    }
+
+    private static IReadOnlyList<string> ReadProjectIds(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<string[]>(json, JsonOptions) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static string NormalizeGovernanceRunId(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Trim().Length > 128)
+        {
+            throw new InvalidOperationException("GovernanceRunId is required and must not exceed 128 characters.");
+        }
+        return value.Trim();
     }
 }

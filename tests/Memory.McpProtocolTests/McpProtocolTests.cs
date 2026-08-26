@@ -485,6 +485,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             "discussion_message_create",
             "project_work_item_create",
             "project_work_item_update",
+            "project_work_item_set_governance_exclusion",
             "project_work_item_checklist_update",
             "project_work_item_archive",
             "project_work_item_restore",

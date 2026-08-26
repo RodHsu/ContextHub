@@ -2880,6 +2880,40 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         review.DurableMemoryCoverage.ScannedCount.Should().Be(review.DurableMemoryCoverage.TotalCount);
     }
 
+    [DockerRequiredFact]
+    public async Task Work_Item_Governance_Exclusion_Endpoint_Should_Be_Explicit_Run_Scoped_And_Diagnostic()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        var projectId = $"api-tracker-{Guid.NewGuid():N}";
+        var governanceRunId = $"api-tracker-run-{Guid.NewGuid():N}";
+        using var createResponse = await client.PostAsJsonAsync("/api/work-items", new ProjectWorkItemCreateRequest(
+            projectId, "API governance acceptance tracker"));
+        createResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Created);
+        var tracker = (await createResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
+
+        using var reviewResponse = await client.PostAsJsonAsync("/api/knowledge-reviews", new KnowledgeReviewRequest(
+            [projectId], GovernanceRunId: governanceRunId, IsReReview: true));
+        reviewResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var before = (await reviewResponse.Content.ReadFromJsonAsync<KnowledgeReviewResult>())!;
+        before.Convergence.WorkItemActionableCount.Should().Be(1);
+
+        using var exclusionResponse = await client.PutAsJsonAsync(
+            $"/api/work-items/{tracker.Id:D}/governance-exclusion",
+            new { projectId, governanceRunId, reason = "Tracks this exact API governance acceptance run.", excluded = true });
+        exclusionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var excluded = (await exclusionResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
+        excluded.GovernanceExclusions.Should().ContainSingle(x => x.GovernanceRunId == governanceRunId && x.IsActive);
+
+        using var reReviewResponse = await client.PostAsJsonAsync("/api/knowledge-reviews", new KnowledgeReviewRequest(
+            [projectId], GovernanceRunId: governanceRunId, IsReReview: true));
+        reReviewResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var after = (await reReviewResponse.Content.ReadFromJsonAsync<KnowledgeReviewResult>())!;
+        after.Convergence.WorkItemActionableCount.Should().Be(0);
+        after.Convergence.ExcludedGovernanceTrackerCount.Should().Be(1);
+        after.Convergence.ActionableItemCount.Should().Be(0);
+        after.Convergence.Status.Should().Be("Converged");
+    }
+
     private static async Task CompleteActiveMaintenanceLeasesAsync(HttpClient client)
     {
         var status = await client.GetFromJsonAsync<MaintenanceStatusResult>("/api/maintenance/status");

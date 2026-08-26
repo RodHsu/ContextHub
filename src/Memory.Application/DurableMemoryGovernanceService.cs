@@ -49,7 +49,7 @@ public sealed class DurableMemoryGovernanceService(
                 throw new InvalidOperationException("GovernanceRunId cannot be replayed with a different authorized ProjectId set.");
             }
 
-            return Deserialize(existing.ResultJson);
+            return await ApplyLiveLifecycleOverlayAsync(Deserialize(existing.ResultJson), cancellationToken);
         }
 
         foreach (var projectId in normalizedProjects)
@@ -107,7 +107,8 @@ public sealed class DurableMemoryGovernanceService(
         {
             DeferredCount = findings.Count(x => x.Status == GovernanceFindingStatus.Deferred),
             RequiresUserDecisionCount = findings.Count(x => x.Status == GovernanceFindingStatus.RequiresUserDecision),
-            HostBlockedCount = findings.Count(x => x.Status == GovernanceFindingStatus.HostBlocked)
+            HostBlockedCount = findings.Count(x => x.Status == GovernanceFindingStatus.HostBlocked),
+            FindingIds = findings.Select(x => x.Id).ToArray()
         };
         var resultJson = JsonSerializer.Serialize(result, JsonOptions);
         await dbContext.KnowledgeGovernanceSnapshots.AddAsync(new KnowledgeGovernanceSnapshot
@@ -147,8 +148,54 @@ public sealed class DurableMemoryGovernanceService(
                 throw;
             }
 
-            return Deserialize(winner.ResultJson);
+            return await ApplyLiveLifecycleOverlayAsync(Deserialize(winner.ResultJson), cancellationToken);
         }
+    }
+
+    private async Task<DurableMemoryGovernanceSnapshotResult> ApplyLiveLifecycleOverlayAsync(
+        DurableMemoryGovernanceSnapshotResult snapshot,
+        CancellationToken cancellationToken)
+    {
+        var persistedFindingIds = snapshot.FindingIds.Count > 0
+            ? snapshot.FindingIds
+            : snapshot.ProjectCandidates.Concat(snapshot.SharedCandidates).Select(x => x.FindingId).ToArray();
+        if (persistedFindingIds.Count == 0)
+        {
+            return snapshot;
+        }
+
+        var liveFindings = await dbContext.GovernanceFindings
+            .AsNoTracking()
+            .Where(x => persistedFindingIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, cancellationToken);
+        var orderedLiveFindings = persistedFindingIds
+            .Where(liveFindings.ContainsKey)
+            .Select(id => liveFindings[id])
+            .ToArray();
+        var candidates = orderedLiveFindings
+            .Where(x => x.Status == GovernanceFindingStatus.Open && x.PrimaryMemoryId.HasValue)
+            .Select(MapCandidate)
+            .ToArray();
+
+        var usesCompleteFindingMembership = snapshot.FindingIds.Count > 0;
+        var deferredCount = orderedLiveFindings.Count(x => x.Status == GovernanceFindingStatus.Deferred);
+        var requiresUserDecisionCount = orderedLiveFindings.Count(x => x.Status == GovernanceFindingStatus.RequiresUserDecision);
+        var hostBlockedCount = orderedLiveFindings.Count(x => x.Status == GovernanceFindingStatus.HostBlocked);
+        if (!usesCompleteFindingMembership)
+        {
+            deferredCount += snapshot.DeferredCount;
+            requiresUserDecisionCount += snapshot.RequiresUserDecisionCount;
+            hostBlockedCount += snapshot.HostBlockedCount;
+        }
+
+        return snapshot with
+        {
+            ProjectCandidates = candidates.Where(x => !ProjectContext.IsShared(x.ProjectId)).ToArray(),
+            SharedCandidates = candidates.Where(x => ProjectContext.IsShared(x.ProjectId)).ToArray(),
+            DeferredCount = deferredCount,
+            RequiresUserDecisionCount = requiresUserDecisionCount,
+            HostBlockedCount = hostBlockedCount
+        };
     }
 
     private static DurableMemoryGovernanceSnapshotResult Deserialize(string resultJson)

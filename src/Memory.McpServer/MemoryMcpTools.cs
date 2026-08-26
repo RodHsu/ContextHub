@@ -210,6 +210,10 @@ public sealed class MemoryMcpTools(
     public Task<ProjectWorkItemResult> project_work_item_update(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.UpdateAsync(request, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true), Description("Explicitly and auditably exclude or restore one governance acceptance tracker for one existing governanceRunId. Only tenant owners or administrators may change this project-scoped relationship; ordinary work items remain actionable.")]
+    public Task<ProjectWorkItemResult> project_work_item_set_governance_exclusion(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken cancellationToken = default)
+        => projectWorkItemService.SetGovernanceExclusionAsync(request, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Complete or reopen one checklist item on a project work item. Archived work items reject checklist mutations.")]
     public Task<ProjectWorkItemResult> project_work_item_checklist_update(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken = default)
         => projectWorkItemService.SetChecklistItemCompletionAsync(workItemId, checklistItemId, isCompleted, cancellationToken);

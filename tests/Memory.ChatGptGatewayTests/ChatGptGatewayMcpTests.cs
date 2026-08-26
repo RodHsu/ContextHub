@@ -1255,6 +1255,171 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Knowledge_Review_Should_Refresh_Lifecycle_Across_Multiple_ReReviews_Without_Changing_Snapshot_Membership()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var proposals = scope.ServiceProvider.GetRequiredService<IChatGptProposalService>();
+        var projectId = $"multi-round-{Guid.NewGuid():N}";
+        var governanceRunId = $"multi-round-run-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        for (var index = 0; index < 4; index++)
+        {
+            await dbContext.MemoryItems.AddAsync(new MemoryItem
+            {
+                TenantId = actorAccessor.Current.TenantId,
+                OwnerUserId = actorAccessor.Current.UserId,
+                ProjectId = projectId,
+                ExternalKey = $"multi-round:{index}:{Guid.NewGuid():N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Artifact,
+                Title = "Multi-round governance candidate",
+                Content = $"Mutually exclusive authority statement {index}.",
+                Summary = $"Distinct governance evidence {index}.",
+                SourceType = "test",
+                SourceRef = "multi-round-governance",
+                Importance = .9m,
+                Confidence = .95m,
+                Version = 1,
+                Status = MemoryStatus.Active,
+                CreatedAt = now.AddMinutes(index),
+                UpdatedAt = now.AddMinutes(index)
+            });
+        }
+        await dbContext.SaveChangesAsync();
+
+        var initial = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId),
+            CancellationToken.None);
+        initial.ProjectKnowledgeGovernance!.Candidates.Count.Should().BeGreaterThan(2);
+        var findingA = initial.ProjectKnowledgeGovernance.Candidates[0];
+        var findingB = initial.ProjectKnowledgeGovernance.Candidates[1];
+        await gatewayTools.governance_finding_set_disposition(
+            new GovernanceFindingDispositionRequest(findingA.FindingId, GovernanceFindingDisposition.Deferred, "Defer first stable member.", governanceRunId),
+            CancellationToken.None);
+
+        var pendingProposal = await proposals.CreateAsync(new ChatGptProposalCreateRequest(
+            "memory_upsert",
+            projectId,
+            "{}",
+            "Live proposal overlay",
+            "Verify terminal proposal state is read live.",
+            actorAccessor.Current.Username,
+            GovernanceRunId: governanceRunId), CancellationToken.None);
+        var firstReReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], LimitPerSection: 1, GovernanceRunId: governanceRunId, IsReReview: true),
+            CancellationToken.None);
+        firstReReview.ProjectKnowledgeGovernance!.Candidates.Should().NotContain(x => x.FindingId == findingA.FindingId);
+        firstReReview.ProjectKnowledgeGovernance.Candidates.Should().Contain(x => x.FindingId == findingB.FindingId);
+        firstReReview.ProjectKnowledgeGovernance.Pagination.HasMore.Should().BeTrue();
+        var secondStablePage = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], LimitPerSection: 1, Offset: 1, GovernanceRunId: governanceRunId, IsReReview: true),
+            CancellationToken.None);
+        secondStablePage.DurableMemoryCoverage!.SnapshotId.Should().Be(firstReReview.DurableMemoryCoverage!.SnapshotId);
+        secondStablePage.ProjectKnowledgeGovernance!.Candidates.Should().ContainSingle();
+        secondStablePage.ProjectKnowledgeGovernance.Candidates[0].FindingId.Should().NotBe(firstReReview.ProjectKnowledgeGovernance.Candidates[0].FindingId);
+        var completeStableReReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true),
+            CancellationToken.None);
+        firstReReview.PendingProposals.Should().Contain(x => x.Id == pendingProposal.Id);
+        firstReReview.Convergence.DeferredCount.Should().BeGreaterThanOrEqualTo(1);
+        var stableCandidateOrder = completeStableReReview.ProjectKnowledgeGovernance!.Candidates.Select(x => x.FindingId).ToArray();
+
+        await gatewayTools.governance_finding_set_disposition(
+            new GovernanceFindingDispositionRequest(findingB.FindingId, GovernanceFindingDisposition.RequiresUserDecision, "Owner must decide the second stable member.", governanceRunId),
+            CancellationToken.None);
+        await proposals.RejectAsync(new ChatGptProposalDecisionRequest(pendingProposal.Id, "Terminalize proposal for live overlay regression."), CancellationToken.None);
+
+        var secondReReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true),
+            CancellationToken.None);
+        secondReReview.DurableMemoryCoverage!.SnapshotId.Should().Be(firstReReview.DurableMemoryCoverage!.SnapshotId);
+        secondReReview.DurableMemoryCoverage.SnapshotToken.Should().Be(firstReReview.DurableMemoryCoverage.SnapshotToken);
+        secondReReview.DurableMemoryCoverage.TotalCount.Should().Be(firstReReview.DurableMemoryCoverage.TotalCount);
+        secondReReview.DurableMemoryCoverage.ScannedCount.Should().Be(firstReReview.DurableMemoryCoverage.ScannedCount);
+        secondReReview.ProjectKnowledgeGovernance!.Candidates.Should().NotContain(x => x.FindingId == findingA.FindingId || x.FindingId == findingB.FindingId);
+        secondReReview.ProjectKnowledgeGovernance.Candidates.Select(x => x.FindingId)
+            .Should().Equal(stableCandidateOrder.Where(id => id != findingB.FindingId));
+        secondReReview.Convergence.DeferredCount.Should().BeGreaterThanOrEqualTo(1);
+        secondReReview.Convergence.RequiresUserDecisionCount.Should().BeGreaterThanOrEqualTo(1);
+        secondReReview.PendingSuggestedActions.Should().NotContain(x => x.DedupKey.Contains(findingB.FindingId.ToString(), StringComparison.OrdinalIgnoreCase));
+        secondReReview.PendingProposals.Should().NotContain(x => x.Id == pendingProposal.Id);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Tracker_Exclusion_Should_Be_Run_Scoped_Audited_And_Fail_Closed()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"tracker-{Guid.NewGuid():N}";
+        var governanceRunId = $"tracker-run-{Guid.NewGuid():N}";
+        var ordinary = await gatewayTools.project_work_item_create(
+            new ProjectWorkItemCreateRequest(projectId, "Ordinary in-progress work"), CancellationToken.None);
+        var tracker = await gatewayTools.project_work_item_create(
+            new ProjectWorkItemCreateRequest(projectId, "Explicit acceptance tracker"), CancellationToken.None);
+        ordinary = await gatewayTools.project_work_item_update(
+            new ProjectWorkItemUpdateRequest(ordinary.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+        tracker = await gatewayTools.project_work_item_update(
+            new ProjectWorkItemUpdateRequest(tracker.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+
+        var initial = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        initial.Convergence.WorkItemActionableCount.Should().Be(2);
+        initial.Convergence.ExcludedGovernanceTrackerCount.Should().Be(0);
+
+        var exclusionRequest = new ProjectWorkItemGovernanceExclusionRequest(
+            tracker.Id, projectId, governanceRunId, "Tracks acceptance of this exact governance run.");
+        var excluded = await gatewayTools.project_work_item_set_governance_exclusion(exclusionRequest, CancellationToken.None);
+        excluded.GovernanceExclusions.Should().ContainSingle(x => x.GovernanceRunId == governanceRunId && x.IsActive);
+        (await gatewayTools.project_work_item_set_governance_exclusion(exclusionRequest, CancellationToken.None)).UpdatedAt.Should().Be(excluded.UpdatedAt);
+
+        var reReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        reReview.Convergence.WorkItemActionableCount.Should().Be(1);
+        reReview.Convergence.ExcludedGovernanceTrackerCount.Should().Be(1);
+        reReview.Convergence.ActionableItemCount.Should().BeGreaterThanOrEqualTo(1);
+
+        var otherRun = $"tracker-other-{Guid.NewGuid():N}";
+        var otherReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([projectId], GovernanceRunId: otherRun, IsReReview: true), CancellationToken.None);
+        otherReview.Convergence.WorkItemActionableCount.Should().Be(2);
+        otherReview.Convergence.ExcludedGovernanceTrackerCount.Should().Be(0);
+
+        var adminActor = actorAccessor.Current;
+        actorAccessor.Current = adminActor with
+        {
+            Scopes = adminActor.Scopes.Where(x => !string.Equals(x, SecurityScopes.GovernanceTrackerManage, StringComparison.OrdinalIgnoreCase)).ToArray()
+        };
+        var missingScope = async () => await gatewayTools.project_work_item_set_governance_exclusion(
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing dedicated scope."), CancellationToken.None);
+        await missingScope.Should().ThrowAsync<UnauthorizedAccessException>();
+        actorAccessor.Current = adminActor with { Role = TenantUserRole.Member };
+        var unauthorized = async () => await gatewayTools.project_work_item_set_governance_exclusion(
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Unauthorized escape."), CancellationToken.None);
+        await unauthorized.Should().ThrowAsync<UnauthorizedAccessException>();
+        actorAccessor.Current = adminActor;
+
+        var wrongProject = async () => await gatewayTools.project_work_item_set_governance_exclusion(
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, $"wrong-{projectId}", governanceRunId, "Wrong project."), CancellationToken.None);
+        await wrongProject.Should().ThrowAsync<UnauthorizedAccessException>();
+        var invalidRun = async () => await gatewayTools.project_work_item_set_governance_exclusion(
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, $"missing-{Guid.NewGuid():N}", "Missing relationship."), CancellationToken.None);
+        await invalidRun.Should().ThrowAsync<InvalidOperationException>();
+        (await dbContext.SecurityAuditEvents.AsNoTracking()
+            .Where(x => x.EventType == SecurityAuditEventType.ProjectWorkItemGovernanceExclusionUpdated)
+            .Select(x => x.DetailsJson)
+            .ToListAsync()).Count(x => x.Contains(tracker.Id.ToString(), StringComparison.OrdinalIgnoreCase)).Should().Be(1);
+    }
+
+    [DockerRequiredFact]
     public async Task Scheduled_Governance_Should_Be_Paged_Idempotent_And_Respect_DisplayName_Boundary()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -1454,6 +1619,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "project_work_items_list",
             "project_work_item_create",
             "project_work_item_update",
+            "project_work_item_set_governance_exclusion",
             "project_work_item_checklist_update",
             "project_work_item_archive",
             "project_work_item_restore",
@@ -2251,7 +2417,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 SecurityScopes.MemoryWrite,
                 SecurityScopes.PreferencesRead,
                 SecurityScopes.PreferencesWrite,
-                SecurityScopes.LogsRead
+                SecurityScopes.LogsRead,
+                SecurityScopes.GovernanceTrackerManage
             ],
             [],
             IsAuthenticated: true);

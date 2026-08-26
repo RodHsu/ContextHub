@@ -267,7 +267,8 @@ public enum SecurityAuditEventType
     ApiTokenAuthenticationFailed,
     ApiTokenProjectDenied,
     ProjectDisplayNameUpdated,
-    ConversationInsightGovernanceUpdated
+    ConversationInsightGovernanceUpdated,
+    ProjectWorkItemGovernanceExclusionUpdated
 }
 
 public enum AgentConnectivityStatus
@@ -959,6 +960,7 @@ public sealed class ProjectWorkItem
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public DateTimeOffset? ArchivedAt { get; set; }
+    public string GovernanceExclusionsJson { get; set; } = "[]";
     public ICollection<ProjectWorkItemChecklistItem> ChecklistItems { get; set; } = [];
 }
 
