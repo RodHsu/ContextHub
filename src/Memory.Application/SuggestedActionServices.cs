@@ -237,8 +237,8 @@ public sealed class SuggestedActionService(
 
     private async Task SupersedeEquivalentActionsAsync(SuggestedAction terminal, CancellationToken cancellationToken)
     {
-        var dedupKey = GetDedupKey(terminal);
-        if (string.IsNullOrWhiteSpace(dedupKey))
+        var identity = SuggestedActionEquivalence.GetIdentity(terminal);
+        if (string.IsNullOrWhiteSpace(identity))
         {
             return;
         }
@@ -249,7 +249,7 @@ public sealed class SuggestedActionService(
                         x.Type == terminal.Type &&
                         (x.Status == SuggestedActionStatus.Pending || x.Status == SuggestedActionStatus.Accepted))
             .ToListAsync(cancellationToken);
-        foreach (var candidate in candidates.Where(x => string.Equals(GetDedupKey(x), dedupKey, StringComparison.Ordinal)))
+        foreach (var candidate in candidates.Where(x => string.Equals(SuggestedActionEquivalence.GetIdentity(x), identity, StringComparison.Ordinal)))
         {
             candidate.Status = SuggestedActionStatus.Superseded;
             candidate.UpdatedAt = clock.UtcNow;

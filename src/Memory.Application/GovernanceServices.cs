@@ -523,6 +523,7 @@ public sealed class GovernanceService(
 
         foreach (var entity in existing.Where(x => !currentKeys.Contains(x.DedupKey) &&
                                                     x.Status is GovernanceFindingStatus.Open or
+                                                        GovernanceFindingStatus.Accepted or
                                                         GovernanceFindingStatus.Deferred or
                                                         GovernanceFindingStatus.RequiresUserDecision or
                                                         GovernanceFindingStatus.HostBlocked))
@@ -595,10 +596,23 @@ public sealed class GovernanceService(
         var matchingActions = await dbContext.SuggestedActions
             .Where(x => x.ProjectId == projectId && x.Type == actionType.Value)
             .ToListAsync(cancellationToken);
+        var probe = new SuggestedAction
+        {
+            Type = actionType.Value,
+            DedupKey = dedupKey,
+            PayloadJson = JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["dedupKey"] = dedupKey,
+                ["findingId"] = draft.DedupKey,
+                ["primaryMemoryId"] = draft.PrimaryMemoryId,
+                ["secondaryMemoryId"] = draft.SecondaryMemoryId
+            }, JsonOptions)
+        };
+        var identity = SuggestedActionEquivalence.GetIdentity(probe);
         var equivalents = matchingActions
             .Concat(dbContext.SuggestedActions.Local.Where(x => x.ProjectId == projectId && x.Type == actionType.Value))
             .DistinctBy(x => x.Id)
-            .Where(x => string.Equals(GetActionDedupKey(x), dedupKey, StringComparison.Ordinal))
+            .Where(x => string.Equals(SuggestedActionEquivalence.GetIdentity(x), identity, StringComparison.Ordinal))
             .ToArray();
         if (equivalents.Any(x => x.Status is SuggestedActionStatus.Executed or SuggestedActionStatus.Dismissed or SuggestedActionStatus.Superseded))
         {
@@ -849,8 +863,8 @@ public sealed class GovernanceService(
         foreach (var group in actions
                      .Concat(dbContext.SuggestedActions.Local.Where(x => x.ProjectId == projectId))
                      .DistinctBy(x => x.Id)
-                     .Where(x => !string.IsNullOrWhiteSpace(GetActionDedupKey(x)))
-                     .GroupBy(GetActionDedupKey, StringComparer.Ordinal))
+                     .Where(x => !string.IsNullOrWhiteSpace(SuggestedActionEquivalence.GetIdentity(x)))
+                     .GroupBy(SuggestedActionEquivalence.GetIdentity, StringComparer.Ordinal))
         {
             if (!group.Any(x => x.Status is SuggestedActionStatus.Executed or SuggestedActionStatus.Dismissed or SuggestedActionStatus.Superseded))
             {

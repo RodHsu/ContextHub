@@ -1002,8 +1002,15 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             Status = SuggestedActionStatus.Pending,
             Title = "Historical duplicate archive",
             Summary = "Historical pending action must converge.",
-            PayloadJson = archiveAction.PayloadJson,
-            DedupKey = archiveAction.DedupKey,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                dedupKey = $"action:ArchiveStaleMemory:archive-memory:{archiveProjectId}:{archiveMemory.Id:D}:",
+                findingId = $"archive-memory:{archiveProjectId}:{archiveMemory.Id:D}:",
+                projectId = archiveProjectId,
+                primaryMemoryId = archiveMemory.Id,
+                sourceConnectionId = (Guid?)null
+            }),
+            DedupKey = $"action:ArchiveStaleMemory:archive-memory:{archiveProjectId}:{archiveMemory.Id:D}:",
             CreatedAt = now.AddMinutes(-1),
             UpdatedAt = now.AddMinutes(-1)
         };
@@ -1073,8 +1080,15 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             Status = SuggestedActionStatus.Pending,
             Title = "Historical duplicate merge",
             Summary = "Reversed pair must share the canonical dedup key.",
-            PayloadJson = mergeAction.PayloadJson,
-            DedupKey = mergeAction.DedupKey,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                dedupKey = $"action:MergeDuplicateCandidate:merge-memory:{mergeProjectId}:{mergeRight.Id:D}:{mergeLeft.Id:D}",
+                findingId = $"merge-memory:{mergeProjectId}:{mergeRight.Id:D}:{mergeLeft.Id:D}",
+                projectId = mergeProjectId,
+                primaryMemoryId = mergeLeft.Id,
+                sourceConnectionId = (Guid?)null
+            }),
+            DedupKey = $"action:MergeDuplicateCandidate:merge-memory:{mergeProjectId}:{mergeRight.Id:D}:{mergeLeft.Id:D}",
             CreatedAt = now.AddMinutes(-1),
             UpdatedAt = now.AddMinutes(-1)
         };
