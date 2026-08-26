@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Memory.Domain;
 
@@ -53,6 +55,70 @@ public sealed class GovernanceService(
         return Map(entity);
     }
 
+    public async Task<GovernanceFindingResult> SetDispositionAsync(
+        GovernanceFindingDispositionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        var entity = await GetRequiredAsync(request.FindingId, cancellationToken);
+        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            throw new InvalidOperationException("A governance disposition reason is required.");
+        }
+
+        var status = request.Disposition switch
+        {
+            GovernanceFindingDisposition.Deferred => GovernanceFindingStatus.Deferred,
+            GovernanceFindingDisposition.RequiresUserDecision => GovernanceFindingStatus.RequiresUserDecision,
+            GovernanceFindingDisposition.HostBlocked => GovernanceFindingStatus.HostBlocked,
+            _ => throw new InvalidOperationException($"Unsupported governance finding disposition '{request.Disposition}'.")
+        };
+        var reason = request.Reason.Trim();
+        var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        if (entity.Status == status &&
+            string.Equals(entity.GovernanceReason, reason, StringComparison.Ordinal) &&
+            string.Equals(entity.GovernanceRunId, governanceRunId, StringComparison.Ordinal))
+        {
+            return Map(entity);
+        }
+
+        entity.Status = status;
+        entity.GovernanceReason = reason;
+        entity.GovernanceRunId = governanceRunId;
+        entity.GovernanceActor = actor.Username;
+        entity.GovernanceUpdatedAt = clock.UtcNow;
+        entity.UpdatedAt = clock.UtcNow;
+        await SupersedePendingActionsForFindingAsync(entity.ProjectId, entity.DedupKey, cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Map(entity);
+    }
+
+    public async Task<GovernanceFindingResult> ReopenAsync(
+        GovernanceFindingReopenRequest request,
+        CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        var entity = await GetRequiredAsync(request.FindingId, cancellationToken);
+        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
+        if (entity.Status is not (GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision or GovernanceFindingStatus.HostBlocked))
+        {
+            throw new InvalidOperationException($"Governance finding '{entity.Id}' is not in an exception disposition.");
+        }
+
+        entity.Status = GovernanceFindingStatus.Open;
+        entity.GovernanceReason = string.IsNullOrWhiteSpace(request.Reason) ? "Reopened for governance review." : request.Reason.Trim();
+        entity.GovernanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        entity.GovernanceActor = actor.Username;
+        entity.GovernanceRetryCount += 1;
+        entity.GovernanceUpdatedAt = clock.UtcNow;
+        entity.UpdatedAt = clock.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Map(entity);
+    }
+
     public async Task AnalyzeAsync(string projectId, CancellationToken cancellationToken)
     {
         var normalizedProjectId = ProjectContext.Normalize(projectId);
@@ -74,6 +140,19 @@ public sealed class GovernanceService(
 
         var sources = await sourceQuery.ToListAsync(cancellationToken);
         var memories = await memoryQuery.ToListAsync(cancellationToken);
+        var memoryIdsForLinks = memories.Select(x => x.Id).ToArray();
+        var replacementPairs = memoryIdsForLinks.Length == 0
+            ? new HashSet<string>(StringComparer.Ordinal)
+            : (await dbContext.MemoryLinks
+                .AsNoTracking()
+                .Where(x => x.LinkType == "replaced_by" &&
+                            memoryIdsForLinks.Contains(x.FromId) &&
+                            memoryIdsForLinks.Contains(x.ToId))
+                .Select(x => new { x.FromId, x.ToId })
+                .ToListAsync(cancellationToken))
+                .Select(x => CanonicalPairKey(x.FromId, x.ToId))
+                .ToHashSet(StringComparer.Ordinal);
+        await MaterializeExecutedMergeRelationshipsAsync(normalizedProjectId, memories, replacementPairs, cancellationToken);
 
         foreach (var source in sources.Where(static source => source.Enabled))
         {
@@ -124,11 +203,15 @@ public sealed class GovernanceService(
                 {
                     var left = items[i];
                     var right = items[j];
+                    if (replacementPairs.Contains(CanonicalPairKey(left.Id, right.Id)))
+                    {
+                        continue;
+                    }
                     var similarity = ComputeTokenOverlap(left.Summary, right.Summary);
                     if (similarity >= 0.45m)
                     {
                         findings.Add(new GovernanceDraft(
-                            $"duplicate:{normalizedProjectId}:{left.Id}:{right.Id}",
+                            $"duplicate:{normalizedProjectId}:{CanonicalPairKey(left.Id, right.Id)}",
                             GovernanceFindingType.DuplicateMemoryCandidate,
                             $"可能重複的記憶：{left.Title}",
                             $"兩筆記憶具有相近標題與高重疊摘要，相似度 {similarity:P0}。",
@@ -141,7 +224,7 @@ public sealed class GovernanceService(
                     if (!string.Equals(left.Summary, right.Summary, StringComparison.OrdinalIgnoreCase) && similarity <= 0.35m)
                     {
                         findings.Add(new GovernanceDraft(
-                            $"conflict:{normalizedProjectId}:{left.Id}:{right.Id}",
+                            $"conflict:{normalizedProjectId}:{CanonicalPairKey(left.Id, right.Id)}",
                             GovernanceFindingType.ConflictCandidate,
                             $"可能衝突的記憶：{left.Title}",
                             "標題相近，但摘要內容差異明顯，建議人工比對來源。",
@@ -231,7 +314,7 @@ public sealed class GovernanceService(
                     new { memory.Status, memory.Tags, reasonCodes = new[] { "lifecycle-obsolete-signal" } }));
             }
 
-            if (IsLowValueMemoryCandidate(memory))
+            if (IsLifecycleCandidate(memory) && IsLowValueMemoryCandidate(memory))
             {
                 findings.Add(CreateMemoryDraft(
                     normalizedProjectId,
@@ -323,6 +406,11 @@ public sealed class GovernanceService(
             var authoritative = ordered[0];
             foreach (var candidate in ordered.Skip(1))
             {
+                if (replacementPairs.Contains(CanonicalPairKey(authoritative.Id, candidate.Id)))
+                {
+                    continue;
+                }
+
                 var overlap = ComputeTokenOverlap(authoritative.Summary, candidate.Summary);
                 if (overlap >= .55m)
                 {
@@ -427,13 +515,24 @@ public sealed class GovernanceService(
             {
                 await EnsureSuggestedActionAsync(normalizedProjectId, draft, cancellationToken);
             }
+            else
+            {
+                await SupersedePendingActionsForFindingAsync(normalizedProjectId, draft.DedupKey, cancellationToken);
+            }
         }
 
-        foreach (var entity in existing.Where(x => !currentKeys.Contains(x.DedupKey) && x.Status == GovernanceFindingStatus.Open))
+        foreach (var entity in existing.Where(x => !currentKeys.Contains(x.DedupKey) &&
+                                                    x.Status is GovernanceFindingStatus.Open or
+                                                        GovernanceFindingStatus.Deferred or
+                                                        GovernanceFindingStatus.RequiresUserDecision or
+                                                        GovernanceFindingStatus.HostBlocked))
         {
             entity.Status = GovernanceFindingStatus.Resolved;
             entity.UpdatedAt = clock.UtcNow;
+            await SupersedePendingActionsForFindingAsync(normalizedProjectId, entity.DedupKey, cancellationToken);
         }
+
+        await SupersedePendingActionsWithTerminalEquivalentAsync(normalizedProjectId, cancellationToken);
 
         await dbContext.SaveChangesAsync(cancellationToken);
         await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
@@ -493,14 +592,25 @@ public sealed class GovernanceService(
         }
 
         var dedupKey = BuildSuggestedActionDedupKey(actionType.Value, draft);
-        var pendingPayloads = await dbContext.SuggestedActions
-            .Where(x => x.ProjectId == projectId &&
-                        x.Status == SuggestedActionStatus.Pending &&
-                        x.Type == actionType.Value)
-            .Select(x => x.PayloadJson)
+        var matchingActions = await dbContext.SuggestedActions
+            .Where(x => x.ProjectId == projectId && x.Type == actionType.Value)
             .ToListAsync(cancellationToken);
-        var exists = pendingPayloads.Any(payload => payload.Contains(dedupKey, StringComparison.Ordinal));
-        if (exists)
+        var equivalents = matchingActions
+            .Concat(dbContext.SuggestedActions.Local.Where(x => x.ProjectId == projectId && x.Type == actionType.Value))
+            .DistinctBy(x => x.Id)
+            .Where(x => string.Equals(GetActionDedupKey(x), dedupKey, StringComparison.Ordinal))
+            .ToArray();
+        if (equivalents.Any(x => x.Status is SuggestedActionStatus.Executed or SuggestedActionStatus.Dismissed or SuggestedActionStatus.Superseded))
+        {
+            foreach (var pending in equivalents.Where(x => x.Status is SuggestedActionStatus.Pending or SuggestedActionStatus.Accepted))
+            {
+                pending.Status = SuggestedActionStatus.Superseded;
+                pending.UpdatedAt = clock.UtcNow;
+            }
+            return;
+        }
+
+        if (equivalents.Any(x => x.Status is SuggestedActionStatus.Pending or SuggestedActionStatus.Accepted))
         {
             return;
         }
@@ -512,12 +622,14 @@ public sealed class GovernanceService(
             Status = SuggestedActionStatus.Pending,
             Title = draft.Title,
             Summary = draft.Summary,
+            DedupKey = dedupKey,
             PayloadJson = JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["dedupKey"] = dedupKey,
                 ["findingId"] = draft.DedupKey,
                 ["sourceConnectionId"] = draft.SourceConnectionId,
                 ["primaryMemoryId"] = draft.PrimaryMemoryId,
+                ["secondaryMemoryId"] = draft.SecondaryMemoryId,
                 ["projectId"] = projectId
             }, JsonOptions),
             CreatedAt = clock.UtcNow,
@@ -575,8 +687,13 @@ public sealed class GovernanceService(
         string summary,
         object details,
         Guid? secondaryMemoryId = null)
-        => new(
-            $"{keyPrefix}:{projectId}:{memory.Id}:{secondaryMemoryId}",
+    {
+        var dedupKey = secondaryMemoryId.HasValue &&
+                       type is GovernanceFindingType.MergeMemoryCandidate or GovernanceFindingType.AuthoritativeSourceCandidate
+            ? $"{keyPrefix}:{projectId}:{CanonicalPairKey(memory.Id, secondaryMemoryId.Value)}"
+            : $"{keyPrefix}:{projectId}:{memory.Id}:{secondaryMemoryId}";
+        return new(
+            dedupKey,
             type,
             title,
             summary,
@@ -584,6 +701,7 @@ public sealed class GovernanceService(
             memory.Id,
             secondaryMemoryId,
             JsonSerializer.Serialize(details, JsonOptions));
+    }
 
     private static bool IsLowValueMemoryCandidate(MemoryItem memory)
         => !memory.IsReadOnly &&
@@ -639,6 +757,165 @@ public sealed class GovernanceService(
         }
 
         return $"action:{actionType}:{draft.DedupKey}";
+    }
+
+    private async Task MaterializeExecutedMergeRelationshipsAsync(
+        string projectId,
+        IReadOnlyList<MemoryItem> memories,
+        ISet<string> replacementPairs,
+        CancellationToken cancellationToken)
+    {
+        if (memories.Count < 2)
+        {
+            return;
+        }
+
+        var executedActions = await dbContext.SuggestedActions
+            .AsNoTracking()
+            .Where(x => x.ProjectId == projectId &&
+                        x.Type == SuggestedActionType.MergeDuplicateCandidate &&
+                        x.Status == SuggestedActionStatus.Executed)
+            .Select(x => x.PayloadJson)
+            .ToListAsync(cancellationToken);
+        var findingKeys = executedActions
+            .Select(x => TryGetPayloadString(x, "findingId"))
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (findingKeys.Length == 0)
+        {
+            return;
+        }
+
+        var findings = await dbContext.GovernanceFindings
+            .AsNoTracking()
+            .Where(x => findingKeys.Contains(x.DedupKey) &&
+                        x.PrimaryMemoryId.HasValue &&
+                        x.SecondaryMemoryId.HasValue)
+            .ToListAsync(cancellationToken);
+        foreach (var finding in findings)
+        {
+            var left = memories.FirstOrDefault(x => x.Id == finding.PrimaryMemoryId!.Value);
+            var right = memories.FirstOrDefault(x => x.Id == finding.SecondaryMemoryId!.Value);
+            if (left is null || right is null)
+            {
+                continue;
+            }
+
+            var pairKey = CanonicalPairKey(left.Id, right.Id);
+            if (!replacementPairs.Add(pairKey))
+            {
+                continue;
+            }
+
+            var authoritative = new[] { left, right }
+                .OrderByDescending(AuthorityScore)
+                .ThenByDescending(x => x.UpdatedAt)
+                .ThenBy(x => x.Id)
+                .First();
+            var replaced = authoritative.Id == left.Id ? right : left;
+            await dbContext.MemoryLinks.AddAsync(new MemoryLink
+            {
+                Id = DeterministicReplacementLinkId(replaced.Id, authoritative.Id),
+                FromId = replaced.Id,
+                ToId = authoritative.Id,
+                LinkType = "replaced_by",
+                CreatedAt = clock.UtcNow
+            }, cancellationToken);
+        }
+    }
+
+    private async Task SupersedePendingActionsForFindingAsync(
+        string projectId,
+        string findingDedupKey,
+        CancellationToken cancellationToken)
+    {
+        var pending = await dbContext.SuggestedActions
+            .Where(x => x.ProjectId == projectId &&
+                        (x.Status == SuggestedActionStatus.Pending || x.Status == SuggestedActionStatus.Accepted))
+            .ToListAsync(cancellationToken);
+        foreach (var action in pending.Where(x => PayloadReferencesFinding(x.PayloadJson, findingDedupKey)))
+        {
+            action.Status = SuggestedActionStatus.Superseded;
+            action.UpdatedAt = clock.UtcNow;
+        }
+    }
+
+    private async Task SupersedePendingActionsWithTerminalEquivalentAsync(string projectId, CancellationToken cancellationToken)
+    {
+        var actions = await dbContext.SuggestedActions
+            .Where(x => x.ProjectId == projectId)
+            .ToListAsync(cancellationToken);
+        foreach (var group in actions
+                     .Concat(dbContext.SuggestedActions.Local.Where(x => x.ProjectId == projectId))
+                     .DistinctBy(x => x.Id)
+                     .Where(x => !string.IsNullOrWhiteSpace(GetActionDedupKey(x)))
+                     .GroupBy(GetActionDedupKey, StringComparer.Ordinal))
+        {
+            if (!group.Any(x => x.Status is SuggestedActionStatus.Executed or SuggestedActionStatus.Dismissed or SuggestedActionStatus.Superseded))
+            {
+                continue;
+            }
+
+            foreach (var pending in group.Where(x => x.Status is SuggestedActionStatus.Pending or SuggestedActionStatus.Accepted))
+            {
+                pending.Status = SuggestedActionStatus.Superseded;
+                pending.UpdatedAt = clock.UtcNow;
+            }
+        }
+    }
+
+    private static string GetActionDedupKey(SuggestedAction action)
+    {
+        if (!string.IsNullOrWhiteSpace(action.DedupKey))
+        {
+            return action.DedupKey;
+        }
+
+        return TryGetPayloadString(action.PayloadJson, "dedupKey") ?? string.Empty;
+    }
+
+    private static bool PayloadReferencesFinding(string payloadJson, string findingDedupKey)
+        => string.Equals(TryGetPayloadString(payloadJson, "findingId"), findingDedupKey, StringComparison.Ordinal);
+
+    private static string? TryGetPayloadString(string payloadJson, string propertyName)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(payloadJson) ? "{}" : payloadJson);
+            return document.RootElement.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string CanonicalPairKey(Guid left, Guid right)
+        => string.Join(':', new[] { left, right }.OrderBy(x => x).Select(x => x.ToString("N")));
+
+    private static Guid DeterministicReplacementLinkId(Guid replacedId, Guid authoritativeId)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"replaced_by:{replacedId:N}:{authoritativeId:N}"));
+        return new Guid(bytes.AsSpan(0, 16));
+    }
+
+    private static string NormalizeGovernanceRunId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = value.Trim();
+        if (normalized.Length > 128)
+        {
+            throw new InvalidOperationException("GovernanceRunId must not exceed 128 characters.");
+        }
+
+        return normalized;
     }
 
     private static decimal AuthorityScore(MemoryItem memory)
@@ -766,7 +1043,14 @@ public sealed class GovernanceService(
             entity.DetailsJson,
             entity.DedupKey,
             entity.CreatedAt,
-            entity.UpdatedAt);
+            entity.UpdatedAt)
+        {
+            GovernanceReason = entity.GovernanceReason,
+            GovernanceRunId = entity.GovernanceRunId,
+            GovernanceActor = entity.GovernanceActor,
+            GovernanceRetryCount = entity.GovernanceRetryCount,
+            GovernanceUpdatedAt = entity.GovernanceUpdatedAt
+        };
 
     private sealed record GovernanceDraft(
         string DedupKey,

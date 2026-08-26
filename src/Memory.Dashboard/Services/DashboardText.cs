@@ -183,6 +183,9 @@ public static class DashboardText
             GovernanceFindingStatus.Accepted => "已接受",
             GovernanceFindingStatus.Dismissed => "已忽略",
             GovernanceFindingStatus.Resolved => "已解決",
+            GovernanceFindingStatus.Deferred => "已延後",
+            GovernanceFindingStatus.RequiresUserDecision => "需要使用者決策",
+            GovernanceFindingStatus.HostBlocked => "Host 阻擋",
             _ => value.ToString()
         };
 
@@ -205,6 +208,7 @@ public static class DashboardText
             SuggestedActionStatus.Accepted => "已接受",
             SuggestedActionStatus.Dismissed => "已忽略",
             SuggestedActionStatus.Executed => "已執行",
+            SuggestedActionStatus.Superseded => "已取代",
             SuggestedActionStatus.Failed => "失敗",
             _ => value.ToString()
         };

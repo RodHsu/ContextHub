@@ -1124,6 +1124,30 @@ governance.MapPost("/findings/{id:guid}/dismiss", async (Guid id, IGovernanceSer
     return Results.Ok(result);
 });
 
+governance.MapPost("/findings/disposition", async (GovernanceFindingDispositionRequest request, IGovernanceService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await service.SetDispositionAsync(request, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["finding"] = [ex.Message] });
+    }
+});
+
+governance.MapPost("/findings/reopen", async (GovernanceFindingReopenRequest request, IGovernanceService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await service.ReopenAsync(request, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["finding"] = [ex.Message] });
+    }
+});
+
 var evaluation = app.MapGroup("/api/evaluation");
 evaluation.RequireAuthIfEnabled(requireAuthentication);
 evaluation.RequireAdminIfEnabled(requireAuthentication);

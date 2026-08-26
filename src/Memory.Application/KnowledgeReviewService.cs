@@ -140,9 +140,9 @@ public sealed class KnowledgeReviewService(
         var actionableCount = (int)Math.Min(
             int.MaxValue,
             (long)semanticActionableCount + workItemGovernanceActionCount + orderedInsights.Length + orderedActions.Length + orderedProposals.Length);
-        var deferredCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.Deferred);
-        var userDecisionCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision);
-        var hostBlockedCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.HostBlocked);
+        var deferredCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.Deferred) + governanceSnapshot.DeferredCount;
+        var userDecisionCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision) + governanceSnapshot.RequiresUserDecisionCount;
+        var hostBlockedCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.HostBlocked) + governanceSnapshot.HostBlockedCount;
         var coverageComplete = governanceSnapshot.Coverage.CoverageComplete && !governanceSnapshot.Coverage.HasMore;
         var convergence = BuildConvergence(
             request.IsReReview,

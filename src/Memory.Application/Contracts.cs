@@ -1869,7 +1869,12 @@ public interface IDurableMemoryGovernanceService
 public sealed record DurableMemoryGovernanceSnapshotResult(
     KnowledgeGovernanceCoverageResult Coverage,
     IReadOnlyList<KnowledgeGovernanceCandidateResult> ProjectCandidates,
-    IReadOnlyList<KnowledgeGovernanceCandidateResult> SharedCandidates);
+    IReadOnlyList<KnowledgeGovernanceCandidateResult> SharedCandidates)
+{
+    public int DeferredCount { get; init; }
+    public int RequiresUserDecisionCount { get; init; }
+    public int HostBlockedCount { get; init; }
+}
 
 public interface IProjectArtifactExchangeService
 {

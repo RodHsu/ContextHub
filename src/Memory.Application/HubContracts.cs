@@ -88,7 +88,25 @@ public sealed record GovernanceFindingResult(
     string DetailsJson,
     string DedupKey,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    public string GovernanceReason { get; init; } = string.Empty;
+    public string GovernanceRunId { get; init; } = string.Empty;
+    public string GovernanceActor { get; init; } = string.Empty;
+    public int GovernanceRetryCount { get; init; }
+    public DateTimeOffset? GovernanceUpdatedAt { get; init; }
+}
+
+public sealed record GovernanceFindingDispositionRequest(
+    Guid FindingId,
+    GovernanceFindingDisposition Disposition,
+    string Reason,
+    string? GovernanceRunId = null);
+
+public sealed record GovernanceFindingReopenRequest(
+    Guid FindingId,
+    string Reason,
+    string? GovernanceRunId = null);
 
 public sealed record EvaluateCaseUpsertRequest(
     string ScenarioLabel,
@@ -182,7 +200,10 @@ public sealed record SuggestedActionResult(
     string Error,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    DateTimeOffset? ExecutedAt);
+    DateTimeOffset? ExecutedAt)
+{
+    public string DedupKey { get; init; } = string.Empty;
+}
 
 public sealed record SuggestedActionMutationResult(
     SuggestedActionResult Action,
@@ -209,6 +230,8 @@ public interface IGovernanceService
     Task<IReadOnlyList<GovernanceFindingResult>> ListAsync(GovernanceFindingListRequest request, CancellationToken cancellationToken);
     Task<GovernanceFindingResult> AcceptAsync(Guid id, CancellationToken cancellationToken);
     Task<GovernanceFindingResult> DismissAsync(Guid id, CancellationToken cancellationToken);
+    Task<GovernanceFindingResult> SetDispositionAsync(GovernanceFindingDispositionRequest request, CancellationToken cancellationToken);
+    Task<GovernanceFindingResult> ReopenAsync(GovernanceFindingReopenRequest request, CancellationToken cancellationToken);
     Task AnalyzeAsync(string projectId, CancellationToken cancellationToken);
 }
 

@@ -947,6 +947,215 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Governance_Terminal_Archive_Merge_And_Finding_Disposition_Should_Converge_Idempotently()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var actions = scope.ServiceProvider.GetRequiredService<ISuggestedActionService>();
+        var governance = scope.ServiceProvider.GetRequiredService<IGovernanceService>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        var archiveProjectId = $"archive-terminal-{Guid.NewGuid():N}";
+        var archiveMemory = new MemoryItem
+        {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
+            ProjectId = archiveProjectId,
+            ExternalKey = $"archive-terminal:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Fact,
+            Title = "Terminal archive fixture",
+            Content = "REMOVED",
+            Summary = "Low-value archive candidate.",
+            SourceType = "test",
+            SourceRef = "terminal-governance",
+            Importance = .1m,
+            Confidence = .2m,
+            Version = 1,
+            Status = MemoryStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        await dbContext.MemoryItems.AddAsync(archiveMemory);
+        await dbContext.SaveChangesAsync();
+
+        var archiveReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([archiveProjectId], GovernanceRunId: $"archive-review-{Guid.NewGuid():N}"),
+            CancellationToken.None);
+        var archiveAction = archiveReview.PendingSuggestedActions.Single(x =>
+            x.ProjectId == archiveProjectId &&
+            x.Type == SuggestedActionType.ArchiveStaleMemory &&
+            x.PayloadJson.Contains(archiveMemory.Id.ToString(), StringComparison.OrdinalIgnoreCase));
+        (await actions.AcceptAsync(archiveAction.Id, CancellationToken.None)).Action.Status.Should().Be(SuggestedActionStatus.Executed);
+        (await actions.AcceptAsync(archiveAction.Id, CancellationToken.None)).Action.Status.Should().Be(SuggestedActionStatus.Executed);
+        dbContext.ClearTrackedChanges();
+        (await dbContext.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == archiveMemory.Id)).Version.Should().Be(2);
+
+        var historicalArchiveAction = new SuggestedAction
+        {
+            ProjectId = archiveProjectId,
+            Type = SuggestedActionType.ArchiveStaleMemory,
+            Status = SuggestedActionStatus.Pending,
+            Title = "Historical duplicate archive",
+            Summary = "Historical pending action must converge.",
+            PayloadJson = archiveAction.PayloadJson,
+            DedupKey = archiveAction.DedupKey,
+            CreatedAt = now.AddMinutes(-1),
+            UpdatedAt = now.AddMinutes(-1)
+        };
+        await dbContext.SuggestedActions.AddAsync(historicalArchiveAction);
+        await dbContext.SaveChangesAsync();
+
+        var archiveReReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([archiveProjectId], GovernanceRunId: $"archive-rereview-{Guid.NewGuid():N}", IsReReview: true),
+            CancellationToken.None);
+        archiveReReview.DurableMemoryCoverage!.TotalCount.Should().BeGreaterThanOrEqualTo(1);
+        archiveReReview.DurableMemoryCoverage.ArchivedCount.Should().BeGreaterThanOrEqualTo(1);
+        archiveReReview.ProjectKnowledgeGovernance!.Candidates.Should().NotContain(x =>
+            x.MemoryId == archiveMemory.Id &&
+            (x.Classification == GovernanceFindingType.LowValueMemoryCandidate ||
+             x.Classification == GovernanceFindingType.ArchiveMemoryCandidate));
+        archiveReReview.PendingSuggestedActions.Should().NotContain(x => x.DedupKey == archiveAction.DedupKey);
+        (await dbContext.SuggestedActions.AsNoTracking().SingleAsync(x => x.Id == historicalArchiveAction.Id)).Status.Should().Be(SuggestedActionStatus.Superseded);
+        (await dbContext.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == archiveMemory.Id)).Version.Should().Be(2);
+
+        var mergeProjectId = $"merge-terminal-{Guid.NewGuid():N}";
+        MemoryItem CreateArtifact(string externalKey, decimal importance, decimal confidence, DateTimeOffset updatedAt)
+        {
+            var item = new MemoryItem
+            {
+                TenantId = actorAccessor.Current.TenantId,
+                OwnerUserId = actorAccessor.Current.UserId,
+                ProjectId = mergeProjectId,
+                ExternalKey = externalKey,
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Artifact,
+                Title = "Canonical duplicate pair",
+                Content = "The same authoritative durable content.",
+                Summary = "The same authoritative durable summary.",
+                SourceType = "test",
+                SourceRef = "terminal-governance",
+                Importance = importance,
+                Confidence = confidence,
+                Version = 1,
+                Status = MemoryStatus.Active,
+                CreatedAt = updatedAt,
+                UpdatedAt = updatedAt
+            };
+            return item;
+        }
+
+        var mergeLeft = CreateArtifact($"merge-left:{Guid.NewGuid():N}", .7m, .8m, now.AddMinutes(-2));
+        var mergeRight = CreateArtifact($"merge-right:{Guid.NewGuid():N}", .9m, .95m, now.AddMinutes(-1));
+        await dbContext.MemoryItems.AddRangeAsync(mergeLeft, mergeRight);
+        await dbContext.SaveChangesAsync();
+
+        var mergeReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([mergeProjectId], GovernanceRunId: $"merge-review-{Guid.NewGuid():N}"),
+            CancellationToken.None);
+        var mergeAction = mergeReview.PendingSuggestedActions.Single(x =>
+            x.ProjectId == mergeProjectId && x.Type == SuggestedActionType.MergeDuplicateCandidate);
+        (await actions.AcceptAsync(mergeAction.Id, CancellationToken.None)).Action.Status.Should().Be(SuggestedActionStatus.Executed);
+        (await actions.AcceptAsync(mergeAction.Id, CancellationToken.None)).Action.Status.Should().Be(SuggestedActionStatus.Executed);
+        (await dbContext.MemoryLinks.AsNoTracking().CountAsync(x =>
+            x.LinkType == "replaced_by" &&
+            (x.FromId == mergeLeft.Id || x.FromId == mergeRight.Id) &&
+            (x.ToId == mergeLeft.Id || x.ToId == mergeRight.Id))).Should().Be(1);
+
+        var historicalMergeAction = new SuggestedAction
+        {
+            ProjectId = mergeProjectId,
+            Type = SuggestedActionType.MergeDuplicateCandidate,
+            Status = SuggestedActionStatus.Pending,
+            Title = "Historical duplicate merge",
+            Summary = "Reversed pair must share the canonical dedup key.",
+            PayloadJson = mergeAction.PayloadJson,
+            DedupKey = mergeAction.DedupKey,
+            CreatedAt = now.AddMinutes(-1),
+            UpdatedAt = now.AddMinutes(-1)
+        };
+        await dbContext.SuggestedActions.AddAsync(historicalMergeAction);
+        await dbContext.SaveChangesAsync();
+
+        var mergeReReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([mergeProjectId], GovernanceRunId: $"merge-rereview-{Guid.NewGuid():N}", IsReReview: true),
+            CancellationToken.None);
+        mergeReReview.ProjectKnowledgeGovernance!.Candidates.Should().NotContain(x =>
+            (x.MemoryId == mergeLeft.Id || x.MemoryId == mergeRight.Id) &&
+            (x.Classification == GovernanceFindingType.DuplicateMemoryCandidate ||
+             x.Classification == GovernanceFindingType.MergeMemoryCandidate ||
+             x.Classification == GovernanceFindingType.AuthoritativeSourceCandidate));
+        mergeReReview.PendingSuggestedActions.Should().NotContain(x => x.DedupKey == mergeAction.DedupKey);
+        (await dbContext.SuggestedActions.AsNoTracking().SingleAsync(x => x.Id == historicalMergeAction.Id)).Status.Should().Be(SuggestedActionStatus.Superseded);
+        (await dbContext.MemoryLinks.AsNoTracking().CountAsync(x =>
+            x.LinkType == "replaced_by" &&
+            (x.FromId == mergeLeft.Id || x.FromId == mergeRight.Id) &&
+            (x.ToId == mergeLeft.Id || x.ToId == mergeRight.Id))).Should().Be(1);
+        (await dbContext.MemoryItems.AsNoTracking().Where(x => x.Id == mergeLeft.Id || x.Id == mergeRight.Id).Select(x => x.Version).ToArrayAsync()).Should().OnlyContain(x => x == 1);
+
+        var conflictProjectId = $"conflict-disposition-{Guid.NewGuid():N}";
+        MemoryItem CreateConflictArtifact(string externalKey, string summary)
+        {
+            var item = new MemoryItem
+            {
+                TenantId = actorAccessor.Current.TenantId,
+                OwnerUserId = actorAccessor.Current.UserId,
+                ProjectId = conflictProjectId,
+                ExternalKey = externalKey,
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Artifact,
+                Title = "Durable conflict pair",
+                Content = summary,
+                Summary = summary,
+                SourceType = "test",
+                SourceRef = "terminal-governance",
+                Importance = .9m,
+                Confidence = .95m,
+                Version = 1,
+                Status = MemoryStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            return item;
+        }
+
+        var conflictLeft = CreateConflictArtifact($"conflict-left:{Guid.NewGuid():N}", "Alpha-only source statement.");
+        var conflictRight = CreateConflictArtifact($"conflict-right:{Guid.NewGuid():N}", "Completely different beta evidence.");
+        await dbContext.MemoryItems.AddRangeAsync(conflictLeft, conflictRight);
+        await dbContext.SaveChangesAsync();
+
+        var conflictReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([conflictProjectId], GovernanceRunId: $"conflict-review-{Guid.NewGuid():N}"),
+            CancellationToken.None);
+        var conflict = conflictReview.ProjectKnowledgeGovernance!.Candidates.Single(x => x.Classification == GovernanceFindingType.ConflictCandidate);
+        foreach (var other in conflictReview.ProjectKnowledgeGovernance.Candidates.Where(x => x.FindingId != conflict.FindingId))
+        {
+            await governance.AcceptAsync(other.FindingId, CancellationToken.None);
+        }
+        var dispositionRunId = $"conflict-disposition-{Guid.NewGuid():N}";
+        var disposition = await gatewayTools.governance_finding_set_disposition(
+            new GovernanceFindingDispositionRequest(conflict.FindingId, GovernanceFindingDisposition.RequiresUserDecision, "Owner must choose the authoritative durable memory.", dispositionRunId),
+            CancellationToken.None);
+        disposition.Status.Should().Be(GovernanceFindingStatus.RequiresUserDecision);
+        (await gatewayTools.governance_finding_set_disposition(
+            new GovernanceFindingDispositionRequest(conflict.FindingId, GovernanceFindingDisposition.RequiresUserDecision, "Owner must choose the authoritative durable memory.", dispositionRunId),
+            CancellationToken.None)).GovernanceUpdatedAt.Should().Be(disposition.GovernanceUpdatedAt);
+
+        var conflictReReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([conflictProjectId], GovernanceRunId: $"conflict-rereview-{Guid.NewGuid():N}", IsReReview: true),
+            CancellationToken.None);
+        conflictReReview.ProjectKnowledgeGovernance!.Candidates.Should().NotContain(x => x.FindingId == conflict.FindingId);
+        conflictReReview.Convergence.RequiresUserDecisionCount.Should().BeGreaterThanOrEqualTo(1);
+        conflictReReview.Convergence.ActionableItemCount.Should().Be(0);
+        conflictReReview.Convergence.Status.Should().Be("ConvergedWithExceptions");
+        conflictReReview.Convergence.IsConverged.Should().BeTrue();
+    }
+
+    [DockerRequiredFact]
     public async Task Scheduled_Governance_Should_Be_Paged_Idempotent_And_Respect_DisplayName_Boundary()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -1153,6 +1362,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "conversation_insight_retry",
             "conversation_insight_skip",
             "conversation_insight_set_disposition",
+            "governance_finding_set_disposition",
+            "governance_finding_reopen",
             "chatgpt_governance_proposal_create"
         ]);
 

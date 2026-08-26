@@ -341,6 +341,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         {
             UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
             dbContext.SourceConnections.Add(new SourceConnection
             {
                 ProjectId = ProjectContext.DefaultProjectId,
@@ -352,6 +353,25 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 LastSuccessfulSyncAt = null,
                 CreatedAt = DateTimeOffset.UtcNow.AddDays(-2),
                 UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2)
+            });
+            dbContext.MemoryItems.Add(new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = ProjectContext.DefaultProjectId,
+                ExternalKey = $"governance-disposition:{Guid.NewGuid():N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Fact,
+                Title = "Governance disposition contract fixture",
+                Content = "REMOVED",
+                Summary = "Durable finding disposition contract fixture.",
+                SourceType = "test",
+                SourceRef = "api-contract",
+                Importance = .1m,
+                Confidence = .2m,
+                Status = MemoryStatus.Active,
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow
             });
             await dbContext.SaveChangesAsync(CancellationToken.None);
         }
@@ -373,6 +393,34 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             $"/api/governance/findings?projectId={ProjectContext.DefaultProjectId}&status=Open");
         findings.Should().NotBeNull();
         findings!.Should().Contain(x => x.Type == GovernanceFindingType.StaleSource);
+        var memoryFinding = findings.Single(x => x.Type == GovernanceFindingType.LowValueMemoryCandidate);
+
+        var dispositionRequest = new GovernanceFindingDispositionRequest(
+            memoryFinding.Id,
+            GovernanceFindingDisposition.RequiresUserDecision,
+            "Contract test owner decision.",
+            $"api-contract-{Guid.NewGuid():N}");
+        using var dispositionResponse = await client.PostAsJsonAsync("/api/governance/findings/disposition", dispositionRequest);
+        dispositionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var disposed = await dispositionResponse.Content.ReadFromJsonAsync<GovernanceFindingResult>();
+        disposed.Should().NotBeNull();
+        disposed!.Status.Should().Be(GovernanceFindingStatus.RequiresUserDecision);
+        disposed.GovernanceReason.Should().Be(dispositionRequest.Reason);
+        disposed.GovernanceRunId.Should().Be(dispositionRequest.GovernanceRunId);
+        disposed.GovernanceActor.Should().NotBeNullOrWhiteSpace();
+
+        using var replayResponse = await client.PostAsJsonAsync("/api/governance/findings/disposition", dispositionRequest);
+        replayResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var replayed = await replayResponse.Content.ReadFromJsonAsync<GovernanceFindingResult>();
+        replayed!.GovernanceUpdatedAt.Should().BeCloseTo(disposed.GovernanceUpdatedAt!.Value, TimeSpan.FromMilliseconds(1));
+
+        using var reopenResponse = await client.PostAsJsonAsync(
+            "/api/governance/findings/reopen",
+            new GovernanceFindingReopenRequest(memoryFinding.Id, "Explicit retry.", dispositionRequest.GovernanceRunId));
+        reopenResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var reopened = await reopenResponse.Content.ReadFromJsonAsync<GovernanceFindingResult>();
+        reopened!.Status.Should().Be(GovernanceFindingStatus.Open);
+        reopened.GovernanceRetryCount.Should().Be(1);
 
         var actions = await client.GetFromJsonAsync<List<SuggestedActionResult>>(
             $"/api/actions?projectId={ProjectContext.DefaultProjectId}&status=Pending");

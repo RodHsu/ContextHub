@@ -73,8 +73,7 @@ public sealed class DurableMemoryGovernanceService(
             ? []
             : await dbContext.GovernanceFindings
                 .AsNoTracking()
-                .Where(x => x.Status == GovernanceFindingStatus.Open &&
-                            x.PrimaryMemoryId.HasValue &&
+                .Where(x => x.PrimaryMemoryId.HasValue &&
                             memoryIds.Contains(x.PrimaryMemoryId.Value))
                 .OrderBy(x => x.ProjectId)
                 .ThenBy(x => x.Type)
@@ -82,7 +81,10 @@ public sealed class DurableMemoryGovernanceService(
                 .ThenBy(x => x.Id)
                 .ToListAsync(cancellationToken);
 
-        var candidates = findings.Select(MapCandidate).ToArray();
+        var candidates = findings
+            .Where(x => x.Status == GovernanceFindingStatus.Open)
+            .Select(MapCandidate)
+            .ToArray();
         var projectCandidates = candidates.Where(x => !ProjectContext.IsShared(x.ProjectId)).ToArray();
         var sharedCandidates = candidates.Where(x => ProjectContext.IsShared(x.ProjectId)).ToArray();
         var snapshotId = Guid.NewGuid();
@@ -101,7 +103,12 @@ public sealed class DurableMemoryGovernanceService(
             CoverageComplete: true,
             HasMore: false,
             Continuation: null);
-        var result = new DurableMemoryGovernanceSnapshotResult(coverage, projectCandidates, sharedCandidates);
+        var result = new DurableMemoryGovernanceSnapshotResult(coverage, projectCandidates, sharedCandidates)
+        {
+            DeferredCount = findings.Count(x => x.Status == GovernanceFindingStatus.Deferred),
+            RequiresUserDecisionCount = findings.Count(x => x.Status == GovernanceFindingStatus.RequiresUserDecision),
+            HostBlockedCount = findings.Count(x => x.Status == GovernanceFindingStatus.HostBlocked)
+        };
         var resultJson = JsonSerializer.Serialize(result, JsonOptions);
         await dbContext.KnowledgeGovernanceSnapshots.AddAsync(new KnowledgeGovernanceSnapshot
         {

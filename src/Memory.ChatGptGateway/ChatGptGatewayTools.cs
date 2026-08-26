@@ -17,6 +17,7 @@ public sealed class ChatGptGatewayTools(
     IAccessibleProjectService accessibleProjectService,
     IDailyMemoryReviewService dailyMemoryReviewService,
     IKnowledgeReviewService knowledgeReviewService,
+    IGovernanceService governanceService,
     ISuggestedActionService suggestedActionService,
     IMemoryDataRetentionService retentionService,
     IProjectArtifactExchangeService artifactExchangeService,
@@ -42,6 +43,14 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Run server-side full-coverage governance across every authorized active/archived Project and Shared durable memory, then return compact stable-snapshot candidate pages plus the other governance surfaces. Completion requires coverageComplete, no additional pages, and zero actionable items; governed exceptions return ConvergedWithExceptions.")]
     public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Idempotently classify a durable-memory governance finding as Deferred, RequiresUserDecision, or HostBlocked with an audited reason and governanceRunId. The finding remains in full coverage but is excluded from actionable convergence counts.")]
+    public Task<GovernanceFindingResult> governance_finding_set_disposition(GovernanceFindingDispositionRequest request, CancellationToken cancellationToken = default)
+        => governanceService.SetDispositionAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Reopen a durable-memory governance finding exception for explicit retry and increment its audited retry count.")]
+    public Task<GovernanceFindingResult> governance_finding_reopen(GovernanceFindingReopenRequest request, CancellationToken cancellationToken = default)
+        => governanceService.ReopenAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("List persisted global user preferences for remote knowledge-governance review.")]
     public Task<IReadOnlyList<UserPreferenceResult>> user_preferences_list(UserPreferenceListRequest request, CancellationToken cancellationToken = default)

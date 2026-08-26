@@ -115,7 +115,17 @@ public enum GovernanceFindingStatus
     Open,
     Accepted,
     Dismissed,
-    Resolved
+    Resolved,
+    Deferred,
+    RequiresUserDecision,
+    HostBlocked
+}
+
+public enum GovernanceFindingDisposition
+{
+    Deferred,
+    RequiresUserDecision,
+    HostBlocked
 }
 
 public enum EvaluationRunStatus
@@ -142,7 +152,8 @@ public enum SuggestedActionStatus
     Accepted,
     Dismissed,
     Executed,
-    Failed
+    Failed,
+    Superseded
 }
 
 public enum MemoryJobStatus
@@ -694,6 +705,11 @@ public sealed class GovernanceFinding
     public string Summary { get; set; } = string.Empty;
     public string DetailsJson { get; set; } = "{}";
     public string DedupKey { get; set; } = string.Empty;
+    public string GovernanceReason { get; set; } = string.Empty;
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public string GovernanceActor { get; set; } = string.Empty;
+    public int GovernanceRetryCount { get; set; }
+    public DateTimeOffset? GovernanceUpdatedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
@@ -776,6 +792,7 @@ public sealed class SuggestedAction
     public string Title { get; set; } = string.Empty;
     public string Summary { get; set; } = string.Empty;
     public string PayloadJson { get; set; } = "{}";
+    public string DedupKey { get; set; } = string.Empty;
     public string Error { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }

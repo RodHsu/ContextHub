@@ -579,6 +579,11 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
                 .HasColumnType("jsonb")
                 .HasConversion(JsonDocumentConverter, JsonStringComparer);
             entity.Property(x => x.DedupKey).HasColumnName("dedup_key");
+            entity.Property(x => x.GovernanceReason).HasColumnName("governance_reason");
+            entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
+            entity.Property(x => x.GovernanceActor).HasColumnName("governance_actor");
+            entity.Property(x => x.GovernanceRetryCount).HasColumnName("governance_retry_count");
+            entity.Property(x => x.GovernanceUpdatedAt).HasColumnName("governance_updated_at");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => x.DedupKey).IsUnique();
@@ -671,10 +676,12 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
                 .HasColumnName("payload_json")
                 .HasColumnType("jsonb")
                 .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.DedupKey).HasColumnName("dedup_key");
             entity.Property(x => x.Error).HasColumnName("error");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.Property(x => x.ExecutedAt).HasColumnName("executed_at");
+            entity.HasIndex(x => new { x.ProjectId, x.Type, x.DedupKey });
         });
 
         modelBuilder.Entity<ConversationSession>(entity =>
