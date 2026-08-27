@@ -7,6 +7,7 @@ artifacts/
 postgres-data/
 .env
 .agent/
+.codex-remote-attachments/
 .vscode/mcp.json
 docker-compose.release.yml
 deploy/release-*/
