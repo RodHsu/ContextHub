@@ -13,6 +13,7 @@ public sealed class MemoryMcpTools(
     IProjectDiscussionService projectDiscussionService,
     IProjectWorkItemService projectWorkItemService,
     IKnowledgeReviewService knowledgeReviewService,
+    IGovernanceBatchExecutor governanceBatchExecutor,
     IGovernanceService governanceService,
     IProjectInformationService projectInformationService,
     IProjectArtifactExchangeService artifactExchangeService,
@@ -233,6 +234,10 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("Run server-side full-coverage governance across every authorized active/archived Project and Shared durable memory, then return compact stable-snapshot candidate pages plus user preferences, discussions, work items, insights, actions, and proposals.")]
     public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Execute one persisted, bounded governance batch from a full-review snapshot. Scheduled mode is low-risk, proposal-first, archive-first, replay-idempotent, and never hard-deletes. Returns compact per-item read-back evidence, audit ids, and a saved continuation cursor.")]
+    public Task<GovernanceBatchExecuteResult> governance_batch_execute(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken = default)
+        => governanceBatchExecutor.ExecuteAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Idempotently classify a durable-memory governance finding as Deferred, RequiresUserDecision, or HostBlocked with an audited reason and governanceRunId.")]
     public Task<GovernanceFindingResult> governance_finding_set_disposition(GovernanceFindingDispositionRequest request, CancellationToken cancellationToken = default)

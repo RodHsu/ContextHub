@@ -2915,6 +2915,43 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         after.Convergence.Status.Should().Be("Converged");
     }
 
+    [DockerRequiredFact]
+    public async Task Governance_Batch_Execute_Endpoint_Should_Expose_Contract_And_Fail_Closed_On_Snapshot_Mismatch()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        var projectId = $"api-governance-batch-{Guid.NewGuid():N}";
+        var governanceRunId = $"api-governance-run-{Guid.NewGuid():N}";
+        using var reviewResponse = await client.PostAsJsonAsync("/api/knowledge-reviews", new KnowledgeReviewRequest(
+            [projectId], GovernanceRunId: governanceRunId));
+        reviewResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var review = (await reviewResponse.Content.ReadFromJsonAsync<KnowledgeReviewResult>())!;
+
+        var request = new GovernanceBatchExecuteRequest(
+            governanceRunId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 10,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.Reindex],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: false,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        using var executeResponse = await client.PostAsJsonAsync("/api/knowledge-reviews/execute", request);
+        executeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var result = await executeResponse.Content.ReadFromJsonAsync<GovernanceBatchExecuteResult>();
+        result.Should().NotBeNull();
+        result!.GovernanceRunId.Should().Be(governanceRunId);
+        result.SnapshotToken.Should().Be(review.DurableMemoryCoverage.SnapshotToken);
+
+        using var mismatchResponse = await client.PostAsJsonAsync("/api/knowledge-reviews/execute", request with
+        {
+            GovernanceRunId = $"wrong-run-{Guid.NewGuid():N}",
+            SnapshotToken = review.DurableMemoryCoverage.SnapshotToken
+        });
+        mismatchResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+    }
+
     private static async Task CompleteActiveMaintenanceLeasesAsync(HttpClient client)
     {
         var status = await client.GetFromJsonAsync<MaintenanceStatusResult>("/api/maintenance/status");

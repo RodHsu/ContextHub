@@ -1447,6 +1447,20 @@ knowledgeReviews.RequireAuthIfEnabled(requireAuthentication);
 knowledgeReviews.MapPost(string.Empty, async (KnowledgeReviewRequest request, IKnowledgeReviewService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ReviewAsync(request, cancellationToken)))
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+knowledgeReviews.MapPost("/execute", async (GovernanceBatchExecuteRequest request, IGovernanceBatchExecutor service, CancellationToken cancellationToken)
+    =>
+    {
+        try
+        {
+            return Results.Ok(await service.ExecuteAsync(request, cancellationToken));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]> { ["governanceBatch"] = [ex.Message] });
+        }
+    })
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite)
+    .RequireAdminIfEnabled(requireAuthentication);
 
 var projectHierarchy = app.MapGroup("/api/projects/hierarchy");
 projectHierarchy.RequireAuthIfEnabled(requireAuthentication);

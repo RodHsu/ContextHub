@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -20,6 +21,10 @@ public sealed class ChatGptProposalService(
     public const string SourceSystem = "chatgpt-mcp-gateway";
     private const string ProposalTag = "chatgpt-proposal";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions StrictJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+    };
     private static readonly HashSet<string> SupportedProposalTools = new(StringComparer.Ordinal)
     {
         "memory_upsert",
@@ -36,7 +41,8 @@ public sealed class ChatGptProposalService(
         "project_artifact_publish",
         "project_artifact_upload_object",
         "project_information_upsert",
-        "project_information_update_lifecycle"
+        "project_information_update_lifecycle",
+        "enqueue_reindex"
     };
 
     public async Task<ChatGptProposalResult> CreateAsync(ChatGptProposalCreateRequest request, CancellationToken cancellationToken)
@@ -281,6 +287,7 @@ public sealed class ChatGptProposalService(
             "project_artifact_upload_object" => (await artifactExchangeService.UploadManagedObjectAsync(Deserialize<ProjectArtifactManagedObjectPublishRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_information_upsert" => (await projectInformationService.UpdateFromAgentAsync(Deserialize<ProjectInformationAgentUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_information_update_lifecycle" => (await projectInformationService.UpdateLifecycleAsync(Deserialize<ProjectLifecycleUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
+            "enqueue_reindex" => (await memoryService.EnqueueReindexAsync(Deserialize<EnqueueReindexRequest>(payloadJson), cancellationToken)).JobId,
             _ => throw new InvalidOperationException($"Tool '{toolName}' is not supported for proposal approval.")
         };
     }
@@ -302,7 +309,99 @@ public sealed class ChatGptProposalService(
             throw new InvalidOperationException("ProjectId is required.");
         }
 
-        _ = ParsePayload(request.PayloadJson);
+        ValidatePayload(request.ToolName.Trim(), request.PayloadJson);
+    }
+
+    private static void ValidatePayload(string toolName, string payloadJson)
+    {
+        _ = ParsePayload(payloadJson);
+        switch (toolName)
+        {
+            case "memory_upsert": _ = DeserializeStrict<MemoryUpsertRequest>(payloadJson); break;
+            case "memory_update": EnsureId(DeserializeStrict<MemoryUpdateRequest>(payloadJson).Id, "Id"); break;
+            case "memory_archive": EnsureId(DeserializeStrict<MemoryArchiveRequest>(payloadJson).Id, "Id"); break;
+            case "memory_move": EnsureId(DeserializeStrict<MemoryMoveRequest>(payloadJson).Id, "Id"); break;
+            case "memory_delete": EnsureId(DeserializeStrict<MemoryDeleteRequest>(payloadJson).Id, "Id"); break;
+            case "project_cleanup_apply": _ = DeserializeStrict<ProjectCleanupApplyRequest>(payloadJson); break;
+            case "user_preference_upsert": _ = DeserializeStrict<UserPreferenceUpsertRequest>(payloadJson); break;
+            case "user_preference_archive": EnsureId(DeserializeStrict<UserPreferenceArchiveRequest>(payloadJson).Id, "Id"); break;
+            case "suggested_action_accept": EnsureId(DeserializeStrict<HubActionRequest>(payloadJson).Id, "Id"); break;
+            case "suggested_action_dismiss": EnsureId(DeserializeStrict<HubActionRequest>(payloadJson).Id, "Id"); break;
+            case "promote_log_slice_to_memory": _ = DeserializeStrict<PromoteLogSliceRequest>(payloadJson); break;
+            case "project_artifact_publish": _ = DeserializeStrict<ProjectArtifactPublishRequest>(payloadJson); break;
+            case "project_artifact_upload_object": _ = DeserializeStrict<ProjectArtifactManagedObjectPublishRequest>(payloadJson); break;
+            case "project_information_upsert": _ = DeserializeStrict<ProjectInformationAgentUpdateRequest>(payloadJson); break;
+            case "project_information_update_lifecycle": _ = DeserializeStrict<ProjectLifecycleUpdateRequest>(payloadJson); break;
+            case "enqueue_reindex":
+                {
+                    var request = DeserializeStrict<EnqueueReindexRequest>(payloadJson);
+                    if (!request.MemoryItemId.HasValue && string.IsNullOrWhiteSpace(request.ProjectId))
+                    {
+                        throw new InvalidOperationException("Proposal payload for enqueue_reindex requires memoryItemId or projectId.");
+                    }
+                    if (request.MemoryItemId == Guid.Empty)
+                    {
+                        throw new InvalidOperationException("Proposal payload field 'memoryItemId' must be a non-empty UUID.");
+                    }
+                    break;
+                }
+            default: throw new InvalidOperationException($"Tool '{toolName}' is not supported for proposal validation.");
+        }
+    }
+
+    private static void EnsureId(Guid id, string propertyName)
+    {
+        if (id == Guid.Empty) throw new InvalidOperationException($"Proposal payload field '{propertyName}' must be a non-empty UUID.");
+    }
+
+    private static T DeserializeStrict<T>(string json)
+    {
+        try
+        {
+            var result = JsonSerializer.Deserialize<T>(json, StrictJsonOptions)
+                         ?? throw new InvalidOperationException($"Payload could not be deserialized as {typeof(T).Name}.");
+            ValidateRequiredConstructorArguments<T>(json);
+            return result;
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException($"Payload does not match the {typeof(T).Name} schema: {ex.Message}", ex);
+        }
+    }
+
+    private static void ValidateRequiredConstructorArguments<T>(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind != JsonValueKind.Object)
+            throw new InvalidOperationException($"Payload for {typeof(T).Name} must be a JSON object.");
+        var constructor = typeof(T).GetConstructors()
+            .OrderByDescending(x => x.GetParameters().Length)
+            .FirstOrDefault();
+        if (constructor is null) return;
+        foreach (var parameter in constructor.GetParameters().Where(x => !x.HasDefaultValue))
+        {
+            var jsonName = JsonNamingPolicy.CamelCase.ConvertName(parameter.Name!);
+            if (!TryGetProperty(document.RootElement, jsonName, out var value) || value.ValueKind == JsonValueKind.Null)
+                throw new InvalidOperationException($"Proposal payload is missing required field '{jsonName}'.");
+            if (parameter.ParameterType == typeof(string) && string.IsNullOrWhiteSpace(value.GetString()))
+                throw new InvalidOperationException($"Proposal payload field '{jsonName}' must not be blank.");
+            if (parameter.ParameterType == typeof(Guid) && (!value.TryGetGuid(out var id) || id == Guid.Empty))
+                throw new InvalidOperationException($"Proposal payload field '{jsonName}' must be a non-empty UUID.");
+        }
+    }
+
+    private static bool TryGetProperty(JsonElement element, string name, out JsonElement value)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+        value = default;
+        return false;
     }
 
     private static T Deserialize<T>(string json)

@@ -10,7 +10,7 @@ public sealed class AccessibleProjectService(
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
-        var take = Math.Clamp(limit, 1, 200);
+        var take = limit <= 0 ? int.MaxValue : Math.Clamp(limit, 1, 200);
 
         if (actor.AllowedProjectIds.Count > 0)
         {

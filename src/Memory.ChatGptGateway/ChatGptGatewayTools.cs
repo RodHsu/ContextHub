@@ -17,6 +17,7 @@ public sealed class ChatGptGatewayTools(
     IAccessibleProjectService accessibleProjectService,
     IDailyMemoryReviewService dailyMemoryReviewService,
     IKnowledgeReviewService knowledgeReviewService,
+    IGovernanceBatchExecutor governanceBatchExecutor,
     IGovernanceService governanceService,
     ISuggestedActionService suggestedActionService,
     IMemoryDataRetentionService retentionService,
@@ -43,6 +44,10 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Run server-side full-coverage governance across every authorized active/archived Project and Shared durable memory, then return compact stable-snapshot candidate pages plus the other governance surfaces. Completion requires coverageComplete, no additional pages, and zero actionable items; governed exceptions return ConvergedWithExceptions.")]
     public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Execute one server-side bounded governance batch from the saved full-review snapshot. Scheduled mode only applies low-risk proposal-first actions, performs resource read-back, never hard-deletes, and returns replay-safe continuation and audit references.")]
+    public Task<GovernanceBatchExecuteResult> governance_batch_execute(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken = default)
+        => governanceBatchExecutor.ExecuteAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Idempotently classify a durable-memory governance finding as Deferred, RequiresUserDecision, or HostBlocked with an audited reason and governanceRunId. The finding remains in full coverage but is excluded from actionable convergence counts.")]
     public Task<GovernanceFindingResult> governance_finding_set_disposition(GovernanceFindingDispositionRequest request, CancellationToken cancellationToken = default)

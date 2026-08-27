@@ -52,6 +52,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<ConversationCheckpoint> ConversationCheckpoints => Set<ConversationCheckpoint>();
     public DbSet<ConversationInsight> ConversationInsights => Set<ConversationInsight>();
     public DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots => Set<KnowledgeGovernanceSnapshot>();
+    public DbSet<GovernanceBatchRun> GovernanceBatchRuns => Set<GovernanceBatchRun>();
+    public DbSet<GovernanceBatchExecution> GovernanceBatchExecutions => Set<GovernanceBatchExecution>();
     public DbSet<ProjectHierarchy> ProjectHierarchies => Set<ProjectHierarchy>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
@@ -800,6 +802,44 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunId, x.IsReReview }).IsUnique();
+        });
+
+        modelBuilder.Entity<GovernanceBatchRun>(entity =>
+        {
+            entity.ToTable("governance_batch_runs");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
+            entity.Property(x => x.SnapshotToken).HasColumnName("snapshot_token");
+            entity.Property(x => x.ProjectSetHash).HasColumnName("project_set_hash");
+            entity.Property(x => x.ProjectIdsJson).HasColumnName("project_ids_json").HasColumnType("jsonb");
+            entity.Property(x => x.PlanJson).HasColumnName("plan_json").HasColumnType("jsonb");
+            entity.Property(x => x.LastCursor).HasColumnName("last_cursor");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunId, x.SnapshotToken }).IsUnique();
+            entity.HasMany(x => x.Executions).WithOne(x => x.Run).HasForeignKey(x => x.GovernanceBatchRunId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<GovernanceBatchExecution>(entity =>
+        {
+            entity.ToTable("governance_batch_executions");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.GovernanceBatchRunId).HasColumnName("governance_batch_run_id");
+            entity.Property(x => x.RequestHash).HasColumnName("request_hash");
+            entity.Property(x => x.RequestJson).HasColumnName("request_json").HasColumnType("jsonb");
+            entity.Property(x => x.CursorBefore).HasColumnName("cursor_before");
+            entity.Property(x => x.CursorAfter).HasColumnName("cursor_after");
+            entity.Property(x => x.Status).HasColumnName("status");
+            entity.Property(x => x.ResultJson).HasColumnName("result_json").HasColumnType("jsonb");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
+            entity.HasIndex(x => new { x.GovernanceBatchRunId, x.RequestHash }).IsUnique();
         });
 
         modelBuilder.Entity<ProjectHierarchy>(entity =>

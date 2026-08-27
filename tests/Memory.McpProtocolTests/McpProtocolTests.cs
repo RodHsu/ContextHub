@@ -196,12 +196,23 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .Single(tool => tool.GetProperty("name").GetString() == "describe_context_hub");
         var trackerExclusionTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_set_governance_exclusion");
+        var governanceBatchTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
         var bootstrapResult = ExtractSseJson(bootstrapPayload).GetProperty("result");
 
         toolsPayload.Should().Contain("describe_context_hub");
         toolsPayload.Should().Contain("memory_search");
         toolsPayload.Should().Contain("log_search");
         toolsPayload.Should().Contain("user_preference_upsert");
+        governanceBatchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+                "governanceRunId", "projectIds", "snapshotToken", "cursor", "maxMutations", "maxDurationSeconds",
+                "allowedActionTypes", "maxRiskLevel", "dryRun", "allowHardDelete", "isReReview", "executionMode"
+            ]);
+        governanceBatchTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "scannedCount", "attemptedCount", "appliedCount", "noOpCount", "failedCount", "deferredCount",
+            "requiresUserDecisionCount", "nextCursor", "hasMore", "items", "auditIds", "stoppedReason"
+        ]);
         bootstrapTool.GetProperty("outputSchema").GetProperty("type").GetString().Should().Be("object");
         trackerExclusionTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
             .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([

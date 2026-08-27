@@ -1302,6 +1302,100 @@ public sealed record KnowledgeReviewResult(
     public KnowledgeGovernanceSectionResult? SharedKnowledgeGovernance { get; init; }
 }
 
+public enum GovernanceBatchExecutionMode
+{
+    Scheduled,
+    Interactive,
+    Manual
+}
+
+public enum GovernanceBatchRiskLevel
+{
+    Low,
+    Medium,
+    High,
+    Critical
+}
+
+public enum GovernanceBatchActionType
+{
+    Merge,
+    Update,
+    Move,
+    Archive,
+    Reindex,
+    DeleteProposal,
+    SuggestedActionReconcile,
+    ConversationInsightDisposition,
+    ProposalApply
+}
+
+public enum GovernanceBatchItemDisposition
+{
+    Applied,
+    NoOp,
+    Failed,
+    Deferred,
+    RequiresUserDecision,
+    UnknownResult
+}
+
+public sealed record GovernanceBatchExecuteRequest(
+    string GovernanceRunId,
+    IReadOnlyList<string>? ProjectIds = null,
+    string? SnapshotToken = null,
+    string? Cursor = null,
+    int MaxMutations = 100,
+    int MaxDurationSeconds = 120,
+    IReadOnlyList<GovernanceBatchActionType>? AllowedActionTypes = null,
+    GovernanceBatchRiskLevel MaxRiskLevel = GovernanceBatchRiskLevel.Low,
+    bool DryRun = false,
+    bool AllowHardDelete = false,
+    bool IsReReview = false,
+    GovernanceBatchExecutionMode ExecutionMode = GovernanceBatchExecutionMode.Scheduled);
+
+public sealed record GovernanceBatchItemResult(
+    string ItemKey,
+    string ItemKind,
+    Guid ResourceId,
+    string ProjectId,
+    GovernanceBatchActionType? ActionType,
+    GovernanceBatchItemDisposition Disposition,
+    string Summary,
+    string Error,
+    bool Retryable,
+    string CursorDisposition,
+    IReadOnlyList<Guid> AuditIds,
+    IReadOnlyList<Guid> ProposalIds,
+    IReadOnlyList<Guid> ResourceIds);
+
+public sealed record GovernanceBatchExecuteResult(
+    int ScannedCount,
+    int AttemptedCount,
+    int AppliedCount,
+    int NoOpCount,
+    int FailedCount,
+    int DeferredCount,
+    int RequiresUserDecisionCount,
+    int MergedCount,
+    int UpdatedCount,
+    int MovedCount,
+    int ArchivedCount,
+    int ReindexedCount,
+    int DeleteProposalCount,
+    string? NextCursor,
+    bool HasMore,
+    bool RequiresReReview,
+    IReadOnlyList<GovernanceBatchItemResult> Items,
+    IReadOnlyList<Guid> AuditIds,
+    string SnapshotToken,
+    string StoppedReason)
+{
+    public bool IsReplay { get; init; }
+    public string GovernanceRunId { get; init; } = string.Empty;
+    public long ElapsedMilliseconds { get; init; }
+}
+
 public sealed record ConversationCheckpointSearchRequest(
     string? Query = null,
     string? ProjectId = null,
@@ -1626,6 +1720,8 @@ public interface IApplicationDbContext
     DbSet<ConversationCheckpoint> ConversationCheckpoints { get; }
     DbSet<ConversationInsight> ConversationInsights { get; }
     DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots { get; }
+    DbSet<GovernanceBatchRun> GovernanceBatchRuns { get; }
+    DbSet<GovernanceBatchExecution> GovernanceBatchExecutions { get; }
     DbSet<ProjectHierarchy> ProjectHierarchies { get; }
     DbSet<DiscussionThread> DiscussionThreads { get; }
     DbSet<DiscussionParticipant> DiscussionParticipants { get; }
@@ -1872,6 +1968,11 @@ public interface IDailyMemoryReviewService
 public interface IKnowledgeReviewService
 {
     Task<KnowledgeReviewResult> ReviewAsync(KnowledgeReviewRequest request, CancellationToken cancellationToken);
+}
+
+public interface IGovernanceBatchExecutor
+{
+    Task<GovernanceBatchExecuteResult> ExecuteAsync(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken);
 }
 
 public interface IDurableMemoryGovernanceService

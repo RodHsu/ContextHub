@@ -268,7 +268,9 @@ public enum SecurityAuditEventType
     ApiTokenProjectDenied,
     ProjectDisplayNameUpdated,
     ConversationInsightGovernanceUpdated,
-    ProjectWorkItemGovernanceExclusionUpdated
+    ProjectWorkItemGovernanceExclusionUpdated,
+    GovernanceBatchItemProcessed,
+    GovernanceBatchExecutionCompleted
 }
 
 public enum AgentConnectivityStatus
@@ -898,6 +900,39 @@ public sealed class KnowledgeGovernanceSnapshot
     public bool CoverageComplete { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset CompletedAt { get; set; }
+}
+
+public sealed class GovernanceBatchRun
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public string SnapshotToken { get; set; } = string.Empty;
+    public string ProjectSetHash { get; set; } = string.Empty;
+    public string ProjectIdsJson { get; set; } = "[]";
+    public string PlanJson { get; set; } = "[]";
+    public string LastCursor { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public List<GovernanceBatchExecution> Executions { get; set; } = [];
+}
+
+public sealed class GovernanceBatchExecution
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid GovernanceBatchRunId { get; set; }
+    public string RequestHash { get; set; } = string.Empty;
+    public string RequestJson { get; set; } = "{}";
+    public string CursorBefore { get; set; } = string.Empty;
+    public string CursorAfter { get; set; } = string.Empty;
+    public string Status { get; set; } = "Running";
+    public string ResultJson { get; set; } = "{}";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public GovernanceBatchRun? Run { get; set; }
 }
 
 public sealed class ProjectHierarchy
