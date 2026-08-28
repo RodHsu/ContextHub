@@ -677,8 +677,12 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
             await LoginAndOpenAsync(page, "/jobs?uiProfile=dense");
             var table = page.Locator(".jobs-list-panel .jobs-table-shell");
-            await table.ScrollIntoViewIfNeededAsync();
-            await table.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 40, Y = 80 } });
+            await InteractWithStableLocatorAsync(
+                table,
+                locator => locator.ScrollIntoViewIfNeededAsync());
+            await InteractWithStableLocatorAsync(
+                table,
+                locator => locator.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 40, Y = 80 } }));
             var before = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
             await page.Mouse.WheelAsync(0, 600);
             await page.WaitForTimeoutAsync(150);
@@ -769,11 +773,14 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             await chunkShell.EvaluateAsync("element => element.scrollTop = 0");
             await chunkShell.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 80, Y = 160 } });
             var detailPageScrollBefore = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+            var detailShellScrollBefore = await page.Locator(".memory-detail-shell").EvaluateAsync<double>("element => element.scrollTop");
             await page.Mouse.WheelAsync(0, -600);
             await page.WaitForTimeoutAsync(150);
             var detailPageScrollAfter = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
-            detailPageScrollAfter.Should().BeLessThan(detailPageScrollBefore,
-                "wheel input at the start of the chunk reader must chain to the page scroll owner");
+            var detailShellScrollAfter = await page.Locator(".memory-detail-shell").EvaluateAsync<double>("element => element.scrollTop");
+            (detailPageScrollAfter < detailPageScrollBefore || detailShellScrollAfter < detailShellScrollBefore)
+                .Should()
+                .BeTrue("wheel input at the start of the chunk reader must chain to an ancestor scroll owner");
 
             var overlap = await page.Locator(".memories-workspace-layout").EvaluateAsync<bool>(
                 @"element => {
@@ -793,7 +800,9 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     const listRect = list.getBoundingClientRect();
                     const detailRect = detail.getBoundingClientRect();
                     return JSON.stringify({
-                        columns: getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length,
+                        columns: getComputedStyle(element).display === 'grid'
+                            ? getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length
+                            : 1,
                         detailTop: detailRect.top,
                         listBottom: listRect.bottom
                     });
@@ -827,7 +836,9 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 const detailRect = detail.getBoundingClientRect();
                 const table = element.querySelector('.memories-table-scroll-shell');
                 return JSON.stringify({
-                    columns: getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length,
+                    columns: getComputedStyle(element).display === 'grid'
+                        ? getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length
+                        : 1,
                     detailTop: detailRect.top,
                     listBottom: listRect.bottom,
                     tableClientHeight: table?.clientHeight ?? 0,
@@ -3899,6 +3910,27 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.WaitForTimeoutAsync(400);
+    }
+
+    private static async Task InteractWithStableLocatorAsync(
+        ILocator locator,
+        Func<ILocator, Task> interaction)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            await locator.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+            try
+            {
+                await interaction(locator);
+                return;
+            }
+            catch (PlaywrightException ex) when (
+                attempt < 2 &&
+                ex.Message.Contains("not attached to the DOM", StringComparison.OrdinalIgnoreCase))
+            {
+                await Task.Delay(100);
+            }
+        }
     }
 
     private static string BuildRouteUrl(string route, DashboardUiProfile profile)

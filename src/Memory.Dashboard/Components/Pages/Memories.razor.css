@@ -22,15 +22,39 @@
     min-height: 0;
     max-height: none;
     overflow: auto !important;
-    overscroll-behavior: contain;
+    overscroll-behavior-x: contain;
+    overscroll-behavior-y: auto;
 }
 
 .memories-detail-panel .memory-detail-shell {
     min-height: 0;
     max-height: min(48rem, calc(100dvh - 12rem));
     overflow-y: auto !important;
-    overscroll-behavior: contain;
+    overscroll-behavior-x: contain;
+    overscroll-behavior-y: auto;
     scrollbar-gutter: stable;
+}
+
+.memories-detail-panel .memory-detail-content-block {
+    max-height: clamp(14rem, 34vh, 28rem);
+}
+
+.memories-detail-panel .memory-detail-list-scroll-shell {
+    height: clamp(14rem, 30vh, 22rem);
+    min-height: 14rem;
+    max-height: 22rem;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: auto;
+}
+
+.memories-detail-panel .memory-chunk-scroll-shell {
+    height: clamp(20rem, 44vh, 34rem);
+    min-height: 20rem;
+    max-height: 34rem;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: auto;
 }
 
 .memories-list-panel .data-table {
