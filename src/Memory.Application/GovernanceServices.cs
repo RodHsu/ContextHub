@@ -89,6 +89,10 @@ public sealed class GovernanceService(
         entity.GovernanceRunId = governanceRunId;
         entity.GovernanceActor = actor.Username;
         entity.GovernanceUpdatedAt = clock.UtcNow;
+        entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+        entity.GovernanceEvidenceFingerprint = await GovernanceEvidenceFingerprint.BuildAsync(
+            dbContext, entity.ProjectId, entity.PrimaryMemoryId, entity.SecondaryMemoryId, null,
+            GovernanceEvidenceFingerprint.FindingPayload(entity), cancellationToken);
         entity.UpdatedAt = clock.UtcNow;
         await SupersedePendingActionsForFindingAsync(entity.ProjectId, entity.DedupKey, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -509,6 +513,25 @@ public sealed class GovernanceService(
             entity.DetailsJson = draft.DetailsJson;
             entity.DedupKey = draft.DedupKey;
             entity.UpdatedAt = clock.UtcNow;
+
+            if (entity.Status is GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision &&
+                !string.IsNullOrWhiteSpace(entity.GovernanceEvidenceFingerprint))
+            {
+                var currentFingerprint = await GovernanceEvidenceFingerprint.BuildAsync(
+                    dbContext, normalizedProjectId, entity.PrimaryMemoryId, entity.SecondaryMemoryId, null,
+                    GovernanceEvidenceFingerprint.FindingPayload(entity), cancellationToken);
+                if (!string.Equals(entity.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal) ||
+                    !string.Equals(entity.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal))
+                {
+                    entity.Status = GovernanceFindingStatus.Open;
+                    entity.GovernanceReason = "Automatically reopened because governance evidence or policy changed.";
+                    entity.GovernanceRunId = string.Empty;
+                    entity.GovernanceRetryCount += 1;
+                    entity.GovernanceUpdatedAt = clock.UtcNow;
+                    entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+                    entity.GovernanceEvidenceFingerprint = currentFingerprint;
+                }
+            }
 
             await EnsureLinkAsync(draft, cancellationToken);
             if (entity.Status == GovernanceFindingStatus.Open)

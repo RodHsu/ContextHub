@@ -18,6 +18,7 @@ public sealed class ChatGptGatewayTools(
     IDailyMemoryReviewService dailyMemoryReviewService,
     IKnowledgeReviewService knowledgeReviewService,
     IGovernanceBatchExecutor governanceBatchExecutor,
+    IAutonomousRetentionService autonomousRetentionService,
     IGovernanceService governanceService,
     ISuggestedActionService suggestedActionService,
     IMemoryDataRetentionService retentionService,
@@ -45,7 +46,7 @@ public sealed class ChatGptGatewayTools(
     public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Execute one server-side bounded governance batch from the saved full-review snapshot. Scheduled mode only applies low-risk proposal-first actions, performs resource read-back, never hard-deletes, and returns replay-safe continuation and audit references.")]
+    [McpServerTool(UseStructuredContent = true), Description("Execute one server-side bounded governance batch from the saved full-review snapshot. Scheduled direct hard-delete is prohibited; the explicit matured-delete capability only applies after quarantine, typed grace, and immediate eligibility revalidation. Returns replay-safe counters, tombstone/audit references, and continuation.")]
     public async Task<GovernanceBatchExecuteResult> governance_batch_execute(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken = default)
     {
         try
@@ -57,6 +58,10 @@ public sealed class ChatGptGatewayTools(
             return GovernanceBatchExecuteResult.Failure(request, ex);
         }
     }
+
+    [McpServerTool(UseStructuredContent = true), Description("Read the immutable minimal tombstone for a hard-deleted resource without returning original content, chunks, vectors, revisions, or payloads.")]
+    public Task<ResourceTombstoneResult?> governance_tombstone_get(Guid resourceId, string? projectId = null, CancellationToken cancellationToken = default)
+        => autonomousRetentionService.GetTombstoneAsync(resourceId, projectId, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Idempotently classify a durable-memory governance finding as Deferred, RequiresUserDecision, or HostBlocked with an audited reason and governanceRunId. The finding remains in full coverage but is excluded from actionable convergence counts.")]
     public Task<GovernanceFindingResult> governance_finding_set_disposition(GovernanceFindingDispositionRequest request, CancellationToken cancellationToken = default)

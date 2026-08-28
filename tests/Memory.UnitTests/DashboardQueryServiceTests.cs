@@ -925,6 +925,8 @@ public sealed class DashboardQueryServiceTests
         public DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots => throw new NotSupportedException();
         public DbSet<GovernanceBatchRun> GovernanceBatchRuns => throw new NotSupportedException();
         public DbSet<GovernanceBatchExecution> GovernanceBatchExecutions => throw new NotSupportedException();
+        public DbSet<MemoryRetentionState> MemoryRetentionStates => throw new NotSupportedException();
+        public DbSet<ResourceTombstone> ResourceTombstones => throw new NotSupportedException();
         public DbSet<ProjectHierarchy> ProjectHierarchies => throw new NotSupportedException();
         public DbSet<DiscussionThread> DiscussionThreads => throw new NotSupportedException();
         public DbSet<DiscussionParticipant> DiscussionParticipants => throw new NotSupportedException();

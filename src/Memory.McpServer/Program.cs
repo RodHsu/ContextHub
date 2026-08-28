@@ -1469,6 +1469,12 @@ knowledgeReviews.MapPost("/execute", async (GovernanceBatchExecuteRequest reques
     })
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite)
     .RequireAdminIfEnabled(requireAuthentication);
+knowledgeReviews.MapGet("/tombstones/{resourceId:guid}", async (Guid resourceId, string? projectId, IAutonomousRetentionService service, CancellationToken cancellationToken) =>
+    {
+        var tombstone = await service.GetTombstoneAsync(resourceId, projectId, cancellationToken);
+        return tombstone is null ? Results.NotFound() : Results.Ok(tombstone);
+    })
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
 var projectHierarchy = app.MapGroup("/api/projects/hierarchy");
 projectHierarchy.RequireAuthIfEnabled(requireAuthentication);
@@ -1785,11 +1791,18 @@ maintenance.MapPost("/memory-data-retention/run", async (
     IRequestActorAccessor actorAccessor,
     IHostApplicationLifetime applicationLifetime) =>
 {
-    var result = await service.RunAsync(
-        request,
-        MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor),
-        applicationLifetime.ApplicationStopping);
-    return Results.Ok(result);
+    try
+    {
+        var result = await service.RunAsync(
+            request,
+            MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor),
+            applicationLifetime.ApplicationStopping);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["memoryDataRetention"] = [ex.Message] });
+    }
 });
 
 maintenance.MapPost("/domain-owner-repair/preview", async (

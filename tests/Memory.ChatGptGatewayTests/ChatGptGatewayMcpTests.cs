@@ -1178,6 +1178,195 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Scheduled_Governance_Should_Delete_Only_Revalidated_Matured_Quarantine_And_Replay_Safely()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var owner = actorAccessor.Current;
+        var projectId = $"scheduled-matured-delete-{Guid.NewGuid():N}";
+        var runId = $"scheduled-matured-delete-run-{Guid.NewGuid():N}";
+        var memory = new MemoryItem
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"synthetic-disposable:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Episode,
+            Title = "Disposable tool execution evidence",
+            Content = "Synthetic production-safe governance fixture.",
+            Summary = "Disposable execution evidence.",
+            SourceType = "tool-execution",
+            SourceRef = "synthetic-governance-fixture",
+            Tags = ["execution-evidence", "synthetic-disposable", "low-value"],
+            Importance = .1m,
+            Confidence = .2m,
+            Status = MemoryStatus.Active,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        dbContext.MemoryItems.Add(memory);
+        await dbContext.SaveChangesAsync();
+
+        var initialReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: runId), CancellationToken.None);
+        var quarantineRequest = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            initialReview.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 20,
+            MaxDurationSeconds: 60,
+            AllowedActionTypes: [GovernanceBatchActionType.Quarantine],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var quarantined = await gatewayTools.governance_batch_execute(quarantineRequest, CancellationToken.None);
+        quarantined.QuarantinedCount.Should().Be(1, JsonSerializer.Serialize(quarantined));
+        (await dbContext.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id)).Status.Should().Be(MemoryStatus.Archived);
+
+        var state = await dbContext.MemoryRetentionStates.SingleAsync(x => x.ResourceId == memory.Id);
+        state.QuarantinedAt = DateTimeOffset.UtcNow.AddDays(-8);
+        state.DeleteEligibleAt = DateTimeOffset.UtcNow.AddDays(-1);
+        await dbContext.SaveChangesAsync();
+
+        var maturedReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: runId, IsReReview: true), CancellationToken.None);
+        var deleteRequest = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            maturedReview.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 20,
+            MaxDurationSeconds: 60,
+            AllowedActionTypes: [GovernanceBatchActionType.MaturedDelete],
+            MaxRiskLevel: GovernanceBatchRiskLevel.High,
+            AllowHardDelete: false,
+            AllowMaturedDelete: true,
+            IsReReview: true,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var deleted = await gatewayTools.governance_batch_execute(deleteRequest, CancellationToken.None);
+        deleted.AutoDeletedCount.Should().Be(1, JsonSerializer.Serialize(deleted));
+        deleted.TombstonedCount.Should().Be(1);
+        deleted.DeleteMaturedCount.Should().Be(1);
+        deleted.Items.Should().ContainSingle(x => x.TombstoneId.HasValue && !x.IsReplay);
+        (await dbContext.MemoryItems.AnyAsync(x => x.Id == memory.Id)).Should().BeFalse();
+        (await dbContext.ResourceTombstones.CountAsync(x => x.ResourceId == memory.Id)).Should().Be(1);
+
+        var replay = await gatewayTools.governance_batch_execute(deleteRequest, CancellationToken.None);
+        replay.IsReplay.Should().BeTrue();
+        (await dbContext.ResourceTombstones.CountAsync(x => x.ResourceId == memory.Id)).Should().Be(1);
+    }
+
+    [DockerRequiredFact]
+    public async Task Scheduled_Governance_Should_AutoResolve_Reversible_Semantic_Candidate_With_Exact_Durable_Evidence()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var owner = actorAccessor.Current;
+        var projectId = $"semantic-auto-resolution-{Guid.NewGuid():N}";
+        var runId = $"semantic-auto-resolution-run-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var durable = new MemoryItem
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"semantic-authority:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Artifact,
+            Title = "Verified reversible semantic evidence",
+            Content = "Durable evidence already contains the candidate meaning.",
+            Summary = "Exact durable semantic evidence.",
+            SourceType = "verified-fixture",
+            SourceRef = "synthetic-governance-fixture",
+            Importance = .7m,
+            Confidence = .99m,
+            Status = MemoryStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var session = new ConversationSession
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = $"semantic-auto:{Guid.NewGuid():N}",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = "semantic-fixture",
+            LastTurnId = "turn-1",
+            StartedAt = now,
+            LastCheckpointAt = now,
+            UpdatedAt = now
+        };
+        var checkpoint = new ConversationCheckpoint
+        {
+            Session = session,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = "semantic-fixture",
+            DedupKey = $"semantic-auto:{Guid.NewGuid():N}",
+            CreatedAt = now
+        };
+        var insight = new ConversationInsight
+        {
+            Session = session,
+            Checkpoint = checkpoint,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = "semantic-fixture",
+            SourceKind = ConversationSourceKind.AgentSupplemental,
+            InsightType = ConversationInsightType.Episode,
+            Title = durable.Title,
+            Content = durable.Content,
+            Summary = durable.Summary,
+            Importance = .6m,
+            Confidence = .96m,
+            DedupKey = $"semantic-auto-insight:{Guid.NewGuid():N}",
+            PromotionStatus = ConversationPromotionStatus.Pending,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        dbContext.MemoryItems.Add(durable);
+        dbContext.ConversationInsights.Add(insight);
+        await dbContext.SaveChangesAsync();
+
+        var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: runId), CancellationToken.None);
+        var result = await gatewayTools.governance_batch_execute(new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 20,
+            MaxDurationSeconds: 60,
+            AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition, GovernanceBatchActionType.SemanticReevaluate],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Medium,
+            SemanticAutoResolutionConfidenceThreshold: .90m,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled), CancellationToken.None);
+
+        result.SemanticAutoResolvedCount.Should().Be(1, JsonSerializer.Serialize(result));
+        result.Items.Should().ContainSingle(x => x.ResourceId == insight.Id && x.SemanticAutoResolved);
+        (await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
+    }
+
+    [DockerRequiredFact]
     public async Task Governance_Batch_Cursor_Should_Continue_Across_ReReview_And_Return_Stable_Error_Codes()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -1402,6 +1591,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .Select(x => x.ItemKey)
             .ToArray();
         orderedInsightKeys.Should().HaveCount(6);
+        var firstInsightId = Guid.ParseExact(orderedInsightKeys[0].Split(':')[1], "N");
         var requestA = new GovernanceBatchExecuteRequest(
             governanceRunId,
             [projectId],
@@ -1412,10 +1602,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             MaxRiskLevel: GovernanceBatchRiskLevel.Low,
             ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
         var batchStart = await gatewayTools.governance_batch_execute(requestA, CancellationToken.None);
-        batchStart.Items.Should().ContainSingle(x => x.ItemKey == orderedInsightKeys[0] && x.Disposition == GovernanceBatchItemDisposition.Deferred);
+        batchStart.Items.Should().ContainSingle(x => x.ResourceId == firstInsightId && x.Disposition == GovernanceBatchItemDisposition.Deferred,
+            JsonSerializer.Serialize(batchStart));
         batchStart.NextCursor.Should().NotBeNullOrWhiteSpace();
 
-        var retriedInsightId = Guid.ParseExact(orderedInsightKeys[1]["insight:".Length..], "N");
+        var retriedInsightId = Guid.ParseExact(orderedInsightKeys[1].Split(':')[1], "N");
         var retriedInsight = await dbContext.ConversationInsights.SingleAsync(x => x.Id == retriedInsightId);
         retriedInsight.PromotionStatus = ConversationPromotionStatus.Deferred;
         retriedInsight.GovernanceReason = "Synthetic state change after immutable execution plan.";
@@ -1437,7 +1628,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         await dbContext.SaveChangesAsync();
         var reReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
             [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
-        reReview.GovernancePlan.Should().Contain(x => x.ItemKey == orderedInsightKeys[1]);
+        var reopenedInsightKey = reReview.GovernancePlan.Single(x =>
+            x.ItemKind == GovernanceItemKind.ConversationInsight && x.AuthorityResourceId == retriedInsightId).ItemKey;
+        reopenedInsightKey.Should().NotBe(orderedInsightKeys[1], "evidence-versioned keys must make reopened items executable in a new generation");
 
         var batchB = await gatewayTools.governance_batch_execute(requestA with
         {
@@ -1445,7 +1638,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             Cursor = batchA.NextCursor,
             IsReReview = true
         }, CancellationToken.None);
-        batchB.Items.Should().Contain(x => x.ItemKey == orderedInsightKeys[1] && x.Disposition == GovernanceBatchItemDisposition.Deferred);
+        batchB.Items.Should().Contain(x => x.ItemKey == reopenedInsightKey && x.Disposition == GovernanceBatchItemDisposition.Deferred);
         (await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == retriedInsightId))
             .PromotionStatus.Should().Be(ConversationPromotionStatus.Deferred);
     }
@@ -2691,6 +2884,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         listedToolNames.Should().Contain([
             "knowledge_review",
             "governance_batch_execute",
+            "governance_tombstone_get",
             "project_work_items_list",
             "project_work_item_create",
             "project_work_item_update",
@@ -2716,13 +2910,16 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var batchRequestSchema = batchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request");
         batchRequestSchema.GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
             "governanceRunId", "projectIds", "snapshotToken", "cursor", "maxMutations", "maxDurationSeconds",
-            "allowedActionTypes", "maxRiskLevel", "dryRun", "allowHardDelete", "isReReview", "executionMode"
+            "allowedActionTypes", "maxRiskLevel", "dryRun", "allowHardDelete", "allowMaturedDelete",
+            "semanticAutoResolutionConfidenceThreshold", "isReReview", "executionMode"
         ]);
         batchTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
             "scannedCount", "attemptedCount", "appliedCount", "noOpCount", "failedCount", "deferredCount",
             "requiresUserDecisionCount", "mergedCount", "updatedCount", "movedCount", "archivedCount",
             "reindexedCount", "deleteProposalCount", "nextCursor", "hasMore", "requiresReReview", "items",
-            "auditIds", "snapshotToken", "stoppedReason", "errorCode", "succeeded"
+            "auditIds", "snapshotToken", "stoppedReason", "errorCode", "succeeded", "quarantinedCount",
+            "deleteEligibleCount", "deleteMaturedCount", "autoDeletedCount", "deleteCancelledCount",
+            "tombstonedCount", "semanticAutoResolvedCount", "remainingHumanDecisionCount", "protectedRetentionCount"
         ]);
         var exclusionTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_set_governance_exclusion");

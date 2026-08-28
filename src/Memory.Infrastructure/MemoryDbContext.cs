@@ -54,6 +54,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots => Set<KnowledgeGovernanceSnapshot>();
     public DbSet<GovernanceBatchRun> GovernanceBatchRuns => Set<GovernanceBatchRun>();
     public DbSet<GovernanceBatchExecution> GovernanceBatchExecutions => Set<GovernanceBatchExecution>();
+    public DbSet<MemoryRetentionState> MemoryRetentionStates => Set<MemoryRetentionState>();
+    public DbSet<ResourceTombstone> ResourceTombstones => Set<ResourceTombstone>();
     public DbSet<ProjectHierarchy> ProjectHierarchies => Set<ProjectHierarchy>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
@@ -586,6 +588,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.GovernanceActor).HasColumnName("governance_actor");
             entity.Property(x => x.GovernanceRetryCount).HasColumnName("governance_retry_count");
             entity.Property(x => x.GovernanceUpdatedAt).HasColumnName("governance_updated_at");
+            entity.Property(x => x.GovernanceEvidenceFingerprint).HasColumnName("governance_evidence_fingerprint");
+            entity.Property(x => x.GovernancePolicyVersion).HasColumnName("governance_policy_version");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => x.DedupKey).IsUnique();
@@ -775,6 +779,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
             entity.Property(x => x.GovernanceRetryCount).HasColumnName("governance_retry_count");
             entity.Property(x => x.GovernanceUpdatedAt).HasColumnName("governance_updated_at");
+            entity.Property(x => x.GovernanceEvidenceFingerprint).HasColumnName("governance_evidence_fingerprint");
+            entity.Property(x => x.GovernancePolicyVersion).HasColumnName("governance_policy_version");
             entity.Property(x => x.MetadataJson)
                 .HasColumnName("metadata_json")
                 .HasColumnType("jsonb")
@@ -841,6 +847,57 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
             entity.HasIndex(x => new { x.GovernanceBatchRunId, x.RequestHash }).IsUnique();
+        });
+
+        modelBuilder.Entity<MemoryRetentionState>(entity =>
+        {
+            entity.ToTable("memory_retention_states");
+            entity.HasKey(x => x.ResourceId);
+            entity.Property(x => x.ResourceId).HasColumnName("resource_id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ResourceType).HasColumnName("resource_type");
+            entity.Property(x => x.Classification).HasColumnName("classification");
+            entity.Property(x => x.PolicyKind).HasColumnName("policy_kind");
+            entity.Property(x => x.PolicyVersion).HasColumnName("policy_version");
+            entity.Property(x => x.GracePeriodDays).HasColumnName("grace_period_days");
+            entity.Property(x => x.LifecycleStatus).HasColumnName("lifecycle_status");
+            entity.Property(x => x.QuarantinedAt).HasColumnName("quarantined_at");
+            entity.Property(x => x.DeleteEligibleAt).HasColumnName("delete_eligible_at");
+            entity.Property(x => x.LastRevalidatedAt).HasColumnName("last_revalidated_at");
+            entity.Property(x => x.EvidenceFingerprint).HasColumnName("evidence_fingerprint");
+            entity.Property(x => x.ReasonCodesJson).HasColumnName("reason_codes_json").HasColumnType("jsonb");
+            entity.Property(x => x.BlockedReasonsJson).HasColumnName("blocked_reasons_json").HasColumnType("jsonb");
+            entity.Property(x => x.ReplacementResourceId).HasColumnName("replacement_resource_id");
+            entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.LifecycleStatus });
+        });
+
+        modelBuilder.Entity<ResourceTombstone>(entity =>
+        {
+            entity.ToTable("resource_tombstones");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.ResourceId).HasColumnName("resource_id");
+            entity.Property(x => x.ResourceType).HasColumnName("resource_type");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ContentHash).HasColumnName("content_hash");
+            entity.Property(x => x.Classification).HasColumnName("classification");
+            entity.Property(x => x.ArchivedAt).HasColumnName("archived_at");
+            entity.Property(x => x.DeletedAt).HasColumnName("deleted_at");
+            entity.Property(x => x.RetentionPolicyVersion).HasColumnName("retention_policy_version");
+            entity.Property(x => x.ReasonCodesJson).HasColumnName("reason_codes_json").HasColumnType("jsonb");
+            entity.Property(x => x.ReplacementResourceId).HasColumnName("replacement_resource_id");
+            entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
+            entity.Property(x => x.AuditId).HasColumnName("audit_id");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ResourceType, x.ResourceId }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.DeletedAt });
         });
 
         modelBuilder.Entity<ProjectHierarchy>(entity =>

@@ -14,6 +14,7 @@ public static class ChatGptGatewayToolCatalog
         "daily_memory_review",
         "knowledge_review",
         "governance_batch_execute",
+        "governance_tombstone_get",
         "governance_finding_set_disposition",
         "governance_finding_reopen",
         "user_preferences_list",

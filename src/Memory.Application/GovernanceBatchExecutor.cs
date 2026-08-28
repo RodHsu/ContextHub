@@ -16,6 +16,7 @@ public sealed class GovernanceBatchExecutor(
     IGovernanceService governanceService,
     IConversationAutomationService conversationService,
     IFullGovernancePlanService fullGovernance,
+    IAutonomousRetentionService autonomousRetention,
     IRequestActorAccessor actorAccessor,
     IClock clock) : IGovernanceBatchExecutor
 {
@@ -366,11 +367,13 @@ public sealed class GovernanceBatchExecutor(
         execution.Status = "Completed";
         execution.CompletedAt = clock.UtcNow;
         execution.UpdatedAt = clock.UtcNow;
+        var retentionReview = await autonomousRetention.ReviewAsync(projectIds, request.GovernanceRunId.Trim(), CancellationToken.None);
+        accumulator.ApplyRetentionReview(retentionReview);
         var completionAudit = await AddAuditAsync(
             actor,
             SecurityAuditEventType.GovernanceBatchExecutionCompleted,
             stoppedReason,
-            new { runId = run.Id, executionId = execution.Id, accumulator.ScannedCount, accumulator.AttemptedCount, accumulator.AppliedCount, hasMore, hardDeleteCount = 0 },
+            new { runId = run.Id, executionId = execution.Id, accumulator.ScannedCount, accumulator.AttemptedCount, accumulator.AppliedCount, hasMore, hardDeleteCount = accumulator.AutoDeletedCount },
             CancellationToken.None);
         accumulator.AuditIds.Add(completionAudit);
         var result = accumulator.ToResult(nextCursor, hasMore, stopwatch.ElapsedMilliseconds, stoppedReason);
@@ -406,6 +409,10 @@ public sealed class GovernanceBatchExecutor(
         CancellationToken cancellationToken)
     {
         ActorAuthorization.EnsureProjectAllowed(actor, item.ProjectId, write: true);
+        if (item.Kind == nameof(GovernanceItemKind.Retention))
+        {
+            return await ProcessRetentionAsync(item, request, allowed, actor, cancellationToken);
+        }
         if (item.Kind == nameof(GovernanceItemKind.ProjectHierarchy) && item.RequiresExplicitApproval)
         {
             var rows = await dbContext.ProjectHierarchies.AsNoTracking()
@@ -434,12 +441,55 @@ public sealed class GovernanceBatchExecutor(
                 "A schema-validated hierarchy proposal was created; no hierarchy mutation occurred.", [proposal.Id],
                 item.RelatedResourceIds, actor, cancellationToken);
         }
-        if (item.RequiresExplicitApproval || item.RiskLevel > request.MaxRiskLevel)
+        var semanticAutoResolutionAllowed = item.IsReversible &&
+            item.SemanticConfidence >= request.SemanticAutoResolutionConfidenceThreshold &&
+            item.RiskLevel < GovernanceBatchRiskLevel.Critical;
+        if ((item.RequiresExplicitApproval || item.RiskLevel > request.MaxRiskLevel) && !semanticAutoResolutionAllowed)
         {
             return await AuditedResultAsync(item, ParseRecommendedAction(item.RecommendedAction),
                 GovernanceBatchItemDisposition.RequiresUserDecision,
                 $"{item.Classification} requires explicit authority or exceeds this batch risk policy.", [],
                 item.RelatedResourceIds, actor, cancellationToken);
+        }
+
+        if (item.Kind == nameof(GovernanceItemKind.Artifact) &&
+            item.Classification == "DuplicateArtifact" &&
+            allowed.Contains(GovernanceBatchActionType.ArtifactReconcile))
+        {
+            var duplicate = await dbContext.MemoryItems.AsNoTracking().SingleOrDefaultAsync(x => x.Id == item.Id, cancellationToken);
+            var authorityId = item.RelatedResourceIds.FirstOrDefault();
+            var authority = authorityId == Guid.Empty
+                ? null
+                : await dbContext.MemoryItems.AsNoTracking().SingleOrDefaultAsync(x => x.Id == authorityId, cancellationToken);
+            if (duplicate is null || authority is null || duplicate.Status == MemoryStatus.Archived)
+            {
+                return await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
+                    GovernanceBatchItemDisposition.NoOp, "Artifact duplicate is already reconciled or no longer exists.", [],
+                    authority is null ? [] : [authority.Id], actor, cancellationToken);
+            }
+            if (!string.Equals(duplicate.ProjectId, authority.ProjectId, StringComparison.OrdinalIgnoreCase) ||
+                duplicate.MemoryType != MemoryType.Artifact || authority.MemoryType != MemoryType.Artifact ||
+                !string.Equals(Normalize(duplicate.Title), Normalize(authority.Title), StringComparison.Ordinal) ||
+                !string.Equals(Normalize(duplicate.Summary), Normalize(authority.Summary), StringComparison.Ordinal) ||
+                !string.Equals(Normalize(duplicate.SourceType), Normalize(authority.SourceType), StringComparison.Ordinal))
+            {
+                return await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
+                    GovernanceBatchItemDisposition.RequiresUserDecision,
+                    "Artifact semantic evidence no longer establishes a deterministic authority winner.", [], [duplicate.Id], actor, cancellationToken);
+            }
+            var proposal = await CreateAndApplyProposalAsync("memory_archive", duplicate.ProjectId,
+                "Archive deterministic duplicate artifact",
+                $"Archive duplicate artifact {duplicate.Id:D}; authority {authority.Id:D} remains active.",
+                new MemoryArchiveRequest(duplicate.Id, duplicate.ProjectId, true, "Autonomous semantic duplicate resolution."),
+                request.GovernanceRunId, cancellationToken);
+            var readBack = await memoryService.GetAsync(duplicate.Id, cancellationToken);
+            if (readBack?.Status != MemoryStatus.Archived)
+                throw new InvalidOperationException("Semantic artifact resolution failed resource read-back.");
+            var result = await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
+                GovernanceBatchItemDisposition.Applied,
+                "Deterministic duplicate artifact was autonomously archived with authority and resource read-back.",
+                [proposal.Id], [duplicate.Id, authority.Id], actor, cancellationToken);
+            return result with { SemanticAutoResolved = true };
         }
 
         if (item.Kind == nameof(GovernanceItemKind.Discussion) &&
@@ -562,6 +612,55 @@ public sealed class GovernanceBatchExecutor(
 
         return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.Deferred,
             "No scheduled low-risk mechanical action is authorized for this finding classification.", actor, cancellationToken);
+    }
+
+    private async Task<GovernanceBatchItemResult> ProcessRetentionAsync(
+        BatchPlanItem item,
+        GovernanceBatchExecuteRequest request,
+        IReadOnlySet<GovernanceBatchActionType> allowed,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        if (item.RecommendedAction == "Quarantine")
+        {
+            if (!allowed.Contains(GovernanceBatchActionType.Quarantine))
+            {
+                return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
+                    GovernanceBatchItemDisposition.Deferred, "Quarantine is not allowed by this execution payload.", [],
+                    [item.Id], actor, cancellationToken);
+            }
+            var candidate = await autonomousRetention.QuarantineAsync(item.Id, item.ProjectId, request.GovernanceRunId, cancellationToken);
+            return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
+                GovernanceBatchItemDisposition.Applied,
+                $"Resource was archived and quarantined under typed policy {candidate.PolicyKind}; deleteEligibleAt={candidate.DeleteEligibleAt:O}.",
+                [], [item.Id], actor, cancellationToken);
+        }
+
+        if (item.RecommendedAction != "MaturedDelete")
+        {
+            return await AuditedResultAsync(item, null, GovernanceBatchItemDisposition.Deferred,
+                "Retention item does not identify an executable lifecycle transition.", [], [item.Id], actor, cancellationToken);
+        }
+        if (!request.AllowMaturedDelete || !allowed.Contains(GovernanceBatchActionType.MaturedDelete))
+        {
+            return await AuditedResultAsync(item, GovernanceBatchActionType.MaturedDelete,
+                GovernanceBatchItemDisposition.Deferred,
+                "Matured delete requires the explicit scheduled matured-delete capability; direct hard-delete remains prohibited.",
+                [], [item.Id], actor, cancellationToken);
+        }
+        var deleted = await autonomousRetention.DeleteMaturedAsync(item.Id, item.ProjectId, request.GovernanceRunId, cancellationToken);
+        var result = await AuditedResultAsync(item, GovernanceBatchActionType.MaturedDelete,
+            deleted.IsReplay ? GovernanceBatchItemDisposition.NoOp : GovernanceBatchItemDisposition.Applied,
+            deleted.IsReplay
+                ? "Matured delete replay returned the original immutable tombstone and audit references."
+                : "Matured resource passed immediate eligibility revalidation, was hard-deleted, tombstoned, and read back.",
+            [], [deleted.TombstoneId], actor, cancellationToken);
+        return result with
+        {
+            IsReplay = deleted.IsReplay,
+            TombstoneId = deleted.TombstoneId,
+            AuditIds = result.AuditIds.Append(deleted.AuditId).Distinct().ToArray()
+        };
     }
 
     private async Task<GovernanceBatchItemResult> MergeExactDuplicateAsync(
@@ -758,7 +857,27 @@ public sealed class GovernanceBatchExecutor(
         {
             return await AuditedResultAsync(item, null, GovernanceBatchItemDisposition.Deferred, "Conversation Insight disposition is not allowed by this execution payload.", [], [], actor, cancellationToken);
         }
-        var protectedInsight = insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact || insight.Importance >= 0.8m || insight.Confidence >= 0.9m;
+        var protectedInsight = insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact || insight.Importance >= 0.8m;
+        if (!protectedInsight && insight.Confidence >= request.SemanticAutoResolutionConfidenceThreshold)
+        {
+            var title = Normalize(insight.Title);
+            var summary = Normalize(insight.Summary);
+            var durableEquivalent = await dbContext.MemoryItems.AsNoTracking().FirstOrDefaultAsync(x =>
+                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && x.ProjectId == insight.ProjectId &&
+                x.Status == MemoryStatus.Active && x.Title.ToLower() == title && x.Summary.ToLower() == summary,
+                cancellationToken);
+            if (durableEquivalent is not null)
+            {
+                await conversationService.SkipInsightAsync(new ConversationInsightGovernanceRequest(
+                    insight.Id, request.GovernanceRunId,
+                    $"Autonomously resolved against durable evidence {durableEquivalent.Id:D}."), cancellationToken);
+                var semantic = await AuditedResultAsync(item, GovernanceBatchActionType.SemanticReevaluate,
+                    GovernanceBatchItemDisposition.Applied,
+                    "Reopened or pending insight was autonomously resolved against an exact durable evidence match.",
+                    [], [insight.Id, durableEquivalent.Id], actor, cancellationToken);
+                return semantic with { SemanticAutoResolved = true };
+            }
+        }
         var disposition = protectedInsight ? ConversationInsightDisposition.RequiresUserDecision : ConversationInsightDisposition.Deferred;
         var updated = await conversationService.SetInsightDispositionAsync(new ConversationInsightDispositionRequest(
             insight.Id,
@@ -911,7 +1030,11 @@ public sealed class GovernanceBatchExecutor(
                 x.RecommendedAction,
                 x.RiskLevel,
                 x.RequiresExplicitApproval,
-                x.RelatedResourceIds))
+                x.RelatedResourceIds,
+                x.SemanticConfidence,
+                x.IsReversible,
+                x.RetentionPolicyVersion,
+                x.DeleteEligibleAt))
             .OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Key, StringComparer.Ordinal).ToList();
     }
 
@@ -979,6 +1102,8 @@ public sealed class GovernanceBatchExecutor(
             throw new InvalidOperationException("Scheduled governance requires the snapshotToken returned by a full knowledge review.");
         if (!Enum.IsDefined(request.MaxRiskLevel))
             throw new InvalidOperationException("MaxRiskLevel is invalid.");
+        if (request.SemanticAutoResolutionConfidenceThreshold is < 0m or > 1m)
+            throw new InvalidOperationException("SemanticAutoResolutionConfidenceThreshold must be between 0 and 1.");
     }
 
     private static object Canonicalize(GovernanceBatchExecuteRequest request, string snapshotToken, IReadOnlyList<string> projectIds)
@@ -994,6 +1119,8 @@ public sealed class GovernanceBatchExecutor(
             request.MaxRiskLevel,
             request.DryRun,
             allowHardDelete = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled ? false : request.AllowHardDelete,
+            request.AllowMaturedDelete,
+            request.SemanticAutoResolutionConfidenceThreshold,
             request.IsReReview,
             request.ExecutionMode
         };
@@ -1081,6 +1208,8 @@ public sealed class GovernanceBatchExecutor(
             allowedActionTypes = (request.AllowedActionTypes ?? []).Distinct().OrderBy(x => x).ToArray(),
             request.MaxRiskLevel,
             allowHardDelete = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled ? false : request.AllowHardDelete,
+            request.AllowMaturedDelete,
+            request.SemanticAutoResolutionConfidenceThreshold,
             request.ExecutionMode
         }, JsonOptions));
 
@@ -1291,7 +1420,11 @@ public sealed class GovernanceBatchExecutor(
         string RecommendedAction = "",
         GovernanceBatchRiskLevel RiskLevel = GovernanceBatchRiskLevel.Low,
         bool RequiresExplicitApproval = false,
-        IReadOnlyList<Guid>? RelatedIds = null)
+        IReadOnlyList<Guid>? RelatedIds = null,
+        decimal SemanticConfidence = 0m,
+        bool IsReversible = false,
+        string RetentionPolicyVersion = "",
+        DateTimeOffset? DeleteEligibleAt = null)
     {
         public IReadOnlyList<Guid> RelatedResourceIds => RelatedIds ?? [];
     }
@@ -1311,6 +1444,14 @@ public sealed class GovernanceBatchExecutor(
         public int ArchivedCount { get; private set; }
         public int ReindexedCount { get; private set; }
         public int DeleteProposalCount { get; private set; }
+        public int QuarantinedCount { get; private set; }
+        public int DeleteEligibleCount { get; private set; }
+        public int DeleteMaturedCount { get; private set; }
+        public int AutoDeletedCount { get; private set; }
+        public int DeleteCancelledCount { get; private set; }
+        public int TombstonedCount { get; private set; }
+        public int SemanticAutoResolvedCount { get; private set; }
+        public int ProtectedRetentionCount { get; private set; }
         public List<GovernanceBatchItemResult> Items { get; } = [];
         public List<Guid> AuditIds { get; } = [];
 
@@ -1332,12 +1473,41 @@ public sealed class GovernanceBatchExecutor(
             if (item.Disposition == GovernanceBatchItemDisposition.Applied && item.ActionType == GovernanceBatchActionType.Archive) ArchivedCount++;
             if (item.Disposition == GovernanceBatchItemDisposition.Applied && item.ActionType == GovernanceBatchActionType.Reindex) ReindexedCount++;
             if (item.ActionType == GovernanceBatchActionType.DeleteProposal) DeleteProposalCount++;
+            if (item.Disposition == GovernanceBatchItemDisposition.Applied && item.ActionType == GovernanceBatchActionType.Quarantine) QuarantinedCount++;
+            if (item.Disposition == GovernanceBatchItemDisposition.Applied && item.ActionType == GovernanceBatchActionType.MaturedDelete)
+            {
+                DeleteMaturedCount++;
+                AutoDeletedCount++;
+                TombstonedCount++;
+            }
+            if (item.SemanticAutoResolved && item.Disposition == GovernanceBatchItemDisposition.Applied) SemanticAutoResolvedCount++;
+        }
+
+        public void ApplyRetentionReview(AutonomousRetentionReviewResult review)
+        {
+            QuarantinedCount += review.QuarantinedCount;
+            DeleteEligibleCount = review.DeleteEligibleCount;
+            DeleteMaturedCount += review.DeleteMaturedCount;
+            DeleteCancelledCount = review.DeleteCancelledCount;
+            ProtectedRetentionCount = review.ProtectedRetentionCount;
         }
 
         public GovernanceBatchExecuteResult ToResult(string? nextCursor, bool hasMore, long elapsedMilliseconds, string stoppedReason)
             => new(ScannedCount, AttemptedCount, AppliedCount, NoOpCount, FailedCount, DeferredCount, RequiresUserDecisionCount,
                 MergedCount, UpdatedCount, MovedCount, ArchivedCount, ReindexedCount, DeleteProposalCount,
                 nextCursor, hasMore, Items.Count > 0, Items.ToArray(), AuditIds.Distinct().ToArray(), snapshotToken, stoppedReason)
-            { GovernanceRunId = governanceRunId, ElapsedMilliseconds = elapsedMilliseconds };
+            {
+                GovernanceRunId = governanceRunId,
+                ElapsedMilliseconds = elapsedMilliseconds,
+                QuarantinedCount = QuarantinedCount,
+                DeleteEligibleCount = DeleteEligibleCount,
+                DeleteMaturedCount = DeleteMaturedCount,
+                AutoDeletedCount = AutoDeletedCount,
+                DeleteCancelledCount = DeleteCancelledCount,
+                TombstonedCount = TombstonedCount,
+                SemanticAutoResolvedCount = SemanticAutoResolvedCount,
+                RemainingHumanDecisionCount = RequiresUserDecisionCount,
+                ProtectedRetentionCount = ProtectedRetentionCount
+            };
     }
 }

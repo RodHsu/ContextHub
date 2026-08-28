@@ -713,6 +713,8 @@ public sealed class GovernanceFinding
     public string GovernanceActor { get; set; } = string.Empty;
     public int GovernanceRetryCount { get; set; }
     public DateTimeOffset? GovernanceUpdatedAt { get; set; }
+    public string GovernanceEvidenceFingerprint { get; set; } = string.Empty;
+    public string GovernancePolicyVersion { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
@@ -878,6 +880,8 @@ public sealed class ConversationInsight
     public string GovernanceRunId { get; set; } = string.Empty;
     public int GovernanceRetryCount { get; set; }
     public DateTimeOffset? GovernanceUpdatedAt { get; set; }
+    public string GovernanceEvidenceFingerprint { get; set; } = string.Empty;
+    public string GovernancePolicyVersion { get; set; } = string.Empty;
     public string MetadataJson { get; set; } = "{}";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -934,6 +938,50 @@ public sealed class GovernanceBatchExecution
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public GovernanceBatchRun? Run { get; set; }
+}
+
+public sealed class MemoryRetentionState
+{
+    public Guid ResourceId { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public string ResourceType { get; set; } = nameof(MemoryItem);
+    public string Classification { get; set; } = string.Empty;
+    public string PolicyKind { get; set; } = string.Empty;
+    public string PolicyVersion { get; set; } = string.Empty;
+    public int GracePeriodDays { get; set; }
+    public string LifecycleStatus { get; set; } = "Candidate";
+    public DateTimeOffset? QuarantinedAt { get; set; }
+    public DateTimeOffset? DeleteEligibleAt { get; set; }
+    public DateTimeOffset? LastRevalidatedAt { get; set; }
+    public string EvidenceFingerprint { get; set; } = string.Empty;
+    public string ReasonCodesJson { get; set; } = "[]";
+    public string BlockedReasonsJson { get; set; } = "[]";
+    public Guid? ReplacementResourceId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class ResourceTombstone
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ResourceId { get; set; }
+    public string ResourceType { get; set; } = nameof(MemoryItem);
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public string ContentHash { get; set; } = string.Empty;
+    public string Classification { get; set; } = string.Empty;
+    public DateTimeOffset ArchivedAt { get; set; }
+    public DateTimeOffset DeletedAt { get; set; }
+    public string RetentionPolicyVersion { get; set; } = string.Empty;
+    public string ReasonCodesJson { get; set; } = "[]";
+    public Guid? ReplacementResourceId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public Guid AuditId { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
 }
 
 public sealed class ProjectHierarchy

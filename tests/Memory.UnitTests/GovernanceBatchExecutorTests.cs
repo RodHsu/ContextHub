@@ -6,7 +6,7 @@ namespace Memory.UnitTests;
 public sealed class GovernanceBatchExecutorTests
 {
     [Fact]
-    public void Scheduled_Request_Should_Require_Bounds_Snapshot_And_No_Hard_Delete()
+    public void Scheduled_Request_Should_Require_Bounds_Snapshot_And_Reject_Direct_Hard_Delete()
     {
         var valid = new GovernanceBatchExecuteRequest(
             "unit-run",
@@ -20,6 +20,8 @@ public sealed class GovernanceBatchExecutorTests
 
         var validAction = () => GovernanceBatchExecutor.ValidateRequest(valid);
         validAction.Should().NotThrow();
+        ((Action)(() => GovernanceBatchExecutor.ValidateRequest(valid with { AllowMaturedDelete = true })))
+            .Should().NotThrow("scheduled execution may consume only already-matured retention candidates");
         ((Action)(() => GovernanceBatchExecutor.ValidateRequest(valid with { SnapshotToken = null })))
             .Should().Throw<InvalidOperationException>().WithMessage("*snapshotToken*");
         ((Action)(() => GovernanceBatchExecutor.ValidateRequest(valid with { AllowHardDelete = true })))
@@ -30,5 +32,7 @@ public sealed class GovernanceBatchExecutorTests
             .Should().Throw<InvalidOperationException>().WithMessage("*MaxDurationSeconds*");
         ((Action)(() => GovernanceBatchExecutor.ValidateRequest(valid with { MaxRiskLevel = (GovernanceBatchRiskLevel)999 })))
             .Should().Throw<InvalidOperationException>().WithMessage("*MaxRiskLevel*");
+        ((Action)(() => GovernanceBatchExecutor.ValidateRequest(valid with { SemanticAutoResolutionConfidenceThreshold = 1.01m })))
+            .Should().Throw<InvalidOperationException>().WithMessage("*SemanticAutoResolutionConfidenceThreshold*");
     }
 }

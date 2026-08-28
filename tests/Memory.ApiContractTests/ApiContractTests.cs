@@ -1816,7 +1816,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
-    public async Task Memory_Data_Retention_Run_Should_Preview_Then_Delete_Archived_Memory_Data()
+    public async Task Memory_Data_Retention_Run_Should_Preview_Then_Reject_Legacy_Direct_Delete()
     {
         var projectId = $"MemoryRetention_{Guid.NewGuid():N}";
         var autoDeleteId = Guid.Empty;
@@ -2020,13 +2020,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 DelayBetweenBatchesMs: 0,
                 CommandTimeoutSeconds: 30,
                 MaxDurationMinutes: 5));
-        applyResponse.EnsureSuccessStatusCode();
-        var apply = await applyResponse.Content.ReadFromJsonAsync<MemoryDataRetentionRunResult>();
-        apply.Should().NotBeNull();
-        apply!.Mode.Should().Be(MemoryDataRetentionRunMode.ApplyAutoDelete);
-        apply.AffectedProjectIds.Should().Contain(projectId);
-        apply.DeletedMemoryItems.Should().Be(1);
-        apply.DeletedVectors.Should().BeGreaterThanOrEqualTo(1);
+        applyResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        (await applyResponse.Content.ReadAsStringAsync()).Should().Contain("quarantine").And.Contain("matured-delete");
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
@@ -2036,22 +2031,13 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
             var afterApplyStamp = await cacheStore.GetVersionStampAsync([projectId], actor, includeShared: false, CancellationToken.None);
 
-            (await dbContext.MemoryItems.AnyAsync(x => x.Id == autoDeleteId)).Should().BeFalse();
-            (await dbContext.MemoryItemChunks.AnyAsync(x => x.MemoryItemId == autoDeleteId)).Should().BeFalse();
-            (await dbContext.MemoryLinks.AnyAsync(x => x.FromId == autoDeleteId || x.ToId == autoDeleteId)).Should().BeFalse();
+            (await dbContext.MemoryItems.AnyAsync(x => x.Id == autoDeleteId)).Should().BeTrue();
+            (await dbContext.MemoryItemChunks.AnyAsync(x => x.MemoryItemId == autoDeleteId)).Should().BeTrue();
             (await dbContext.MemoryItems.AnyAsync(x => x.Id == reviewArchivedId)).Should().BeTrue();
             (await dbContext.MemoryItems.AnyAsync(x => x.Id == activeId)).Should().BeTrue();
             (await dbContext.MemoryItems.AnyAsync(x => x.Id == reviewActiveId)).Should().BeTrue();
-            afterApplyStamp.ProjectVersions[projectId].Should().BeGreaterThan(beforePreviewStamp.ProjectVersions[projectId]);
-
-            var run = await dbContext.MaintenanceRuns.SingleAsync(x => x.Id == apply.RunId);
-            using var policyDocument = JsonDocument.Parse(run.PolicyJson);
-            policyDocument.RootElement.GetProperty("mode").GetInt32().Should().Be((int)MemoryDataRetentionRunMode.ApplyAutoDelete);
-            using var resultDocument = JsonDocument.Parse(run.ResultJson);
-            resultDocument.RootElement.GetProperty("deletedVectors").GetInt64().Should().BeGreaterThanOrEqualTo(1);
-            resultDocument.RootElement.GetProperty("autoDeleteCandidateCount").GetInt64().Should().BeGreaterThanOrEqualTo(1);
-            resultDocument.RootElement.GetProperty("reviewCandidateCount").GetInt64().Should().BeGreaterThanOrEqualTo(2);
-            resultDocument.RootElement.GetProperty("affectedProjectIds").EnumerateArray().Select(x => x.GetString()).Should().Contain(projectId);
+            afterApplyStamp.ProjectVersions[projectId].Should().Be(beforePreviewStamp.ProjectVersions[projectId]);
+            (await dbContext.MaintenanceRuns.AnyAsync(x => x.TriggeredBy == "memory-retention-apply-test")).Should().BeFalse();
         }
     }
 
@@ -2966,6 +2952,10 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         using var mismatchProblem = JsonDocument.Parse(await mismatchResponse.Content.ReadAsStringAsync());
         mismatchProblem.RootElement.GetProperty("code").GetString()
             .Should().Be(nameof(GovernanceBatchErrorCode.CursorSnapshotMismatch));
+
+        using var missingTombstone = await client.GetAsync(
+            $"/api/knowledge-reviews/tombstones/{Guid.NewGuid():D}?projectId={Uri.EscapeDataString(projectId)}");
+        missingTombstone.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
     }
 
     private static async Task CompleteActiveMaintenanceLeasesAsync(HttpClient client)

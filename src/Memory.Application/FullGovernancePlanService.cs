@@ -7,6 +7,7 @@ namespace Memory.Application;
 public sealed class FullGovernancePlanService(
     IApplicationDbContext dbContext,
     IRequestActorAccessor actorAccessor,
+    IAutonomousRetentionService autonomousRetention,
     IClock clock) : IFullGovernancePlanService
 {
     private const string ProjectInformationExternalKey = "system:project-information";
@@ -28,11 +29,28 @@ public sealed class FullGovernancePlanService(
         ActorAuthorization.EnsureProjectsAllowed(actor, projects, write: false);
         var projectSet = projects.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var items = new List<GovernanceReviewItem>();
+        var retention = await autonomousRetention.ReviewAsync(projects, governanceRunId, cancellationToken);
+        foreach (var candidate in retention.Candidates)
+        {
+            items.Add(new GovernanceReviewItem(
+                $"retention:{candidate.ResourceId:N}:{candidate.RecommendedAction.ToLowerInvariant()}", GovernanceItemKind.Retention, candidate.ProjectId,
+                candidate.Classification, candidate.RecommendedAction,
+                candidate.Matured ? GovernanceBatchRiskLevel.High : GovernanceBatchRiskLevel.Low,
+                false, candidate.ResourceId,
+                candidate.ReplacementResourceId.HasValue ? [candidate.ReplacementResourceId.Value] : [],
+                candidate.ReasonCodes, governanceRunId)
+            {
+                IsReversible = !candidate.Matured,
+                SemanticConfidence = candidate.Matured ? 1.00m : 0.99m,
+                RetentionPolicyVersion = candidate.PolicyVersion,
+                DeleteEligibleAt = candidate.DeleteEligibleAt
+            });
+        }
 
         foreach (var candidate in memorySnapshot.ProjectCandidates.Concat(memorySnapshot.SharedCandidates))
         {
             items.Add(new GovernanceReviewItem(
-                $"finding:{candidate.FindingId:N}", GovernanceItemKind.Memory, candidate.ProjectId,
+                $"finding:{candidate.FindingId:N}:{candidate.UpdatedAt.UtcTicks}", GovernanceItemKind.Memory, candidate.ProjectId,
                 candidate.Classification.ToString(), candidate.RecommendedAction,
                 candidate.RequiresExplicitApproval ? GovernanceBatchRiskLevel.High : GovernanceBatchRiskLevel.Low,
                 candidate.RequiresExplicitApproval, candidate.MemoryId,
@@ -125,7 +143,11 @@ public sealed class FullGovernancePlanService(
             {
                 items.Add(new GovernanceReviewItem($"artifact:{duplicate.Id:N}", GovernanceItemKind.Artifact,
                     duplicate.ProjectId, "DuplicateArtifact", "ArtifactReconcile", GovernanceBatchRiskLevel.Medium,
-                    true, authority.Id, [duplicate.Id], ["ARTIFACT_DUPLICATE_KEY", "AUDIT_CHAIN_REQUIRED"], governanceRunId));
+                    false, authority.Id, [authority.Id], ["ARTIFACT_DUPLICATE_KEY", "DETERMINISTIC_AUTHORITY_WINNER"], governanceRunId)
+                {
+                    IsReversible = true,
+                    SemanticConfidence = 0.96m
+                });
             }
         }
         foreach (var artifact in artifacts.Where(x => HasExpiredObject(x.MetadataJson, clock.UtcNow)))
@@ -174,6 +196,7 @@ public sealed class FullGovernancePlanService(
             }
         }
 
+        await ReopenChangedInsightsAsync(projects, tenantId, ownerUserId, governanceRunId, cancellationToken);
         var insights = await dbContext.ConversationInsights.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId))
             .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending || x.PromotionStatus == ConversationPromotionStatus.Failed)
@@ -181,7 +204,7 @@ public sealed class FullGovernancePlanService(
         var proposalInsights = insights.Where(IsProposal).ToArray();
         foreach (var insight in insights.Where(x => !IsProposal(x)))
         {
-            items.Add(Item($"insight:{insight.Id:N}", GovernanceItemKind.ConversationInsight, insight.ProjectId,
+            items.Add(Item($"insight:{insight.Id:N}:{insight.UpdatedAt.UtcTicks}", GovernanceItemKind.ConversationInsight, insight.ProjectId,
                 "PendingConversationInsight", "ConversationInsightDisposition",
                 IsProtectedInsight(insight) ? GovernanceBatchRiskLevel.High : GovernanceBatchRiskLevel.Low,
                 IsProtectedInsight(insight), insight.Id,
@@ -259,7 +282,13 @@ public sealed class FullGovernancePlanService(
             Surface(proposalInsights.Length, proposalInsights.Length, ordered, GovernanceItemKind.Proposal),
             Surface(checked((int)Math.Min(logTotal, int.MaxValue)), logPartitions.Take(MaximumLogPartitions).Sum(x => x.Count), ordered, GovernanceItemKind.LogPartition,
                 logHasMore, !logHasMore));
-        return new FullGovernancePlanResult(ordered, coverage, ordered.Count(x => !x.RequiresExplicitApproval), businessWorkItems, governedExceptions);
+        var semanticAutoResolvable = ordered.Count(x => x.IsReversible && x.SemanticConfidence > 0m && !x.RequiresExplicitApproval);
+        return new FullGovernancePlanResult(ordered, coverage, ordered.Count(x => !x.RequiresExplicitApproval), businessWorkItems, governedExceptions)
+        {
+            Retention = retention,
+            SemanticAutoResolvableCount = semanticAutoResolvable,
+            RemainingHumanDecisionCount = governedExceptions
+        };
     }
 
     private static GovernanceReviewItem Item(string key, GovernanceItemKind kind, string projectId, string classification,
@@ -278,7 +307,46 @@ public sealed class FullGovernancePlanService(
 
     private static bool IsProtectedInsight(ConversationInsight insight)
         => insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact ||
-           insight.Importance >= .8m || insight.Confidence >= .9m;
+           insight.Importance >= .8m;
+
+    private async Task ReopenChangedInsightsAsync(
+        IReadOnlyList<string> projects,
+        Guid tenantId,
+        Guid ownerUserId,
+        string governanceRunId,
+        CancellationToken cancellationToken)
+    {
+        var exceptions = await dbContext.ConversationInsights
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId) &&
+                        (x.PromotionStatus == ConversationPromotionStatus.Deferred ||
+                         x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision))
+            .ToListAsync(cancellationToken);
+        foreach (var insight in exceptions.Where(x => !string.IsNullOrWhiteSpace(x.GovernanceEvidenceFingerprint)))
+        {
+            var current = await GovernanceEvidenceFingerprint.BuildAsync(
+                dbContext, insight.ProjectId, insight.PromotedMemoryId, null, insight.Id,
+                GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
+                [insight.Id.ToString("D"), insight.Title]);
+            if (string.Equals(insight.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal) &&
+                string.Equals(insight.GovernanceEvidenceFingerprint, current, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            insight.PromotionStatus = ConversationPromotionStatus.Pending;
+            insight.GovernanceReason = "Automatically reopened because governance evidence or policy changed.";
+            insight.GovernanceRunId = governanceRunId;
+            insight.GovernanceRetryCount += 1;
+            insight.GovernanceUpdatedAt = clock.UtcNow;
+            insight.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+            insight.GovernanceEvidenceFingerprint = current;
+            insight.Error = string.Empty;
+            insight.UpdatedAt = clock.UtcNow;
+        }
+        if (exceptions.Any(x => x.PromotionStatus == ConversationPromotionStatus.Pending))
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+    }
 
     private static bool IsValidJson(string value)
     {

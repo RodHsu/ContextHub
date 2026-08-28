@@ -41,6 +41,7 @@ public static class DependencyInjection
         services.Configure<TelemetryRetentionOptions>(configuration.GetSection(TelemetryRetentionOptions.SectionName));
         services.Configure<AgentConnectivityTelemetryOptions>(configuration.GetSection(AgentConnectivityTelemetryOptions.SectionName));
         services.Configure<MemoryDataRetentionOptions>(configuration.GetSection(MemoryDataRetentionOptions.SectionName));
+        services.Configure<AutonomousGovernanceOptions>(configuration.GetSection(AutonomousGovernanceOptions.SectionName));
         services.Configure<ProjectArtifactObjectStorageOptions>(configuration.GetSection(ProjectArtifactObjectStorageOptions.SectionName));
         services.AddOptions<DockerRuntimeOptions>()
             .Configure(options =>
@@ -84,6 +85,7 @@ public static class DependencyInjection
         services.AddScoped<ITokenCountingService, TokenCountingService>();
         services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
         services.AddScoped<IMemoryDataRetentionService, MemoryDataRetentionService>();
+        services.AddScoped<IAutonomousRetentionService, AutonomousRetentionService>();
         services.AddScoped<IVacuumFullReclaimService, VacuumFullReclaimService>();
         services.AddScoped<IDomainOwnerRepairService, DomainOwnerRepairService>();
         services.AddScoped<IMaintenanceRunQueryService, MaintenanceRunQueryService>();
