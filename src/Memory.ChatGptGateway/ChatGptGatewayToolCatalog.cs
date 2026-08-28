@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace Memory.ChatGptGateway;
 
 /// <summary>
@@ -102,4 +105,10 @@ public static class ChatGptGatewayToolCatalog
     };
 
     public static string PublishedCatalogVersion => Memory.Application.GovernanceToolContract.PublishedCatalogVersion;
+
+    public static string PublishedCatalogHash { get; } = Convert.ToHexString(SHA256.HashData(
+        Encoding.UTF8.GetBytes(string.Join('\n', PublishedToolNames.Order(StringComparer.Ordinal))))).ToLowerInvariant();
+
+    public static string PublicationIdentity =>
+        $"{Memory.Application.BuildMetadata.Current.Version}+catalog.{PublishedCatalogVersion}.{PublishedCatalogHash[..12]}";
 }

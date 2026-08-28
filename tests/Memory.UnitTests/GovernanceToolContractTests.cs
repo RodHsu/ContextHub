@@ -12,7 +12,7 @@ public sealed class GovernanceToolContractTests
         var contract = GovernanceToolContract.Describe();
         contract.ToolName.Should().Be("governance_batch_execute");
         contract.ToolContractVersion.Should().Be("2.0");
-        contract.PublishedCatalogVersion.Should().Be("2026-08-28-v2");
+        contract.PublishedCatalogVersion.Should().Be("2026-08-29-v3");
         contract.SupportedActions.Should().BeEquivalentTo(Enum.GetNames<GovernanceBatchActionType>());
         contract.SupportedActions.Should().Contain([
             nameof(GovernanceBatchActionType.Quarantine),

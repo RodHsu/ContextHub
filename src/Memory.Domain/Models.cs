@@ -1022,6 +1022,10 @@ public sealed class GovernanceRunReceipt
     public int BusinessWorkItemActionable { get; set; }
     public string FinalConvergenceStatus { get; set; } = string.Empty;
     public string StoppedReason { get; set; } = string.Empty;
+    public string EventType { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public bool LatestBatchReceived { get; set; }
+    public string RequestIdentityHash { get; set; } = string.Empty;
     public string AuditIdsJson { get; set; } = "[]";
     public string ProjectIdsJson { get; set; } = "[]";
     public bool IsReplay { get; set; }

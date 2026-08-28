@@ -1150,6 +1150,85 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         replayReceipt!.IsReplay.Should().BeTrue();
         replayReceipt.Applied.Should().Be(result.AppliedCount);
         replayReceipt.AuditIds.Should().BeEquivalentTo(result.AuditIds);
+        replayReceipt.RunExists.Should().BeTrue();
+        replayReceipt.Status.Should().Be("Completed");
+        replayReceipt.LatestBatchReceived.Should().BeTrue();
+        replayReceipt.RequestIdentityHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        replayReceipt.LatestBatch.Should().NotBeNull();
+        replayReceipt.LatestBatch!.Executed.Should().BeTrue();
+        replayReceipt.LatestBatch.RequestHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        replayReceipt.LatestBatch.Applied.Should().Be(result.AppliedCount);
+        replayReceipt.LatestBatch.AuditIds.Should().BeEquivalentTo(result.AuditIds);
+        replayReceipt.LatestBatch.NextCursor.Should().Be(result.NextCursor);
+        replayReceipt.LatestBatch.RequiresReReview.Should().Be(result.RequiresReReview);
+        replayReceipt.LatestBatch.SnapshotGeneration.Should().Be(0);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Run_Receipt_Should_Recover_Unknown_Outcome_And_Enforce_Project_And_Tenant_Isolation()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var originalActor = actorAccessor.Current;
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var projectId = $"receipt-recovery-{Guid.NewGuid():N}";
+        var runId = $"receipt-recovery-run-{Guid.NewGuid():N}";
+        var request = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            $"kg:{Guid.NewGuid():N}:0123456789abcdef:i0",
+            Cursor: "opaque-cursor",
+            MaxMutations: 10,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.Archive],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: false,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var startedAt = DateTimeOffset.UtcNow;
+
+        await receipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
+
+        var running = await receipts.GetAsync(runId, CancellationToken.None);
+        running.Should().NotBeNull();
+        running!.RunExists.Should().BeTrue();
+        running.Status.Should().Be("Running");
+        running.LatestBatchReceived.Should().BeTrue();
+        running.RequestIdentityHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        running.LatestBatch.Should().NotBeNull();
+        running.LatestBatch!.Received.Should().BeTrue();
+        running.LatestBatch.Executed.Should().BeFalse();
+        running.LatestBatch.RequestHash.Should().BeEmpty();
+        running.LatestBatch.CursorBefore.Should().BeEmpty();
+        running.LatestBatch.RequiresReReview.Should().BeTrue();
+
+        await receipts.RecordExecutionStoppedAsync(
+            request, startedAt, "Stopped", "RequestCancelledOutcomeUnknown", CancellationToken.None);
+        var stopped = await receipts.GetAsync(runId, CancellationToken.None);
+        stopped!.Status.Should().Be("Stopped");
+        stopped.StoppedReason.Should().Be("RequestCancelledOutcomeUnknown");
+        stopped.LatestBatch!.Executed.Should().BeFalse();
+        stopped.LatestBatch.Status.Should().Be("Stopped");
+
+        var failedRunId = $"receipt-failed-run-{Guid.NewGuid():N}";
+        var failedRequest = request with { GovernanceRunId = failedRunId };
+        await receipts.RecordExecutionStartedAsync(failedRequest, startedAt, CancellationToken.None);
+        await receipts.RecordExecutionStoppedAsync(
+            failedRequest, startedAt, "Failed", "UnhandledExecutionFailure", CancellationToken.None);
+        (await receipts.GetAsync(failedRunId, CancellationToken.None))!.Status.Should().Be("Failed");
+
+        actorAccessor.Current = originalActor with { AllowedProjectIds = ["different-project"] };
+        var deniedGet = () => receipts.GetAsync(runId, CancellationToken.None);
+        await deniedGet.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await receipts.ListAsync(new GovernanceRunReceiptListRequest(Limit: 100), CancellationToken.None))
+            .Should().NotContain(x => x.GovernanceRunId == runId);
+
+        actorAccessor.Current = originalActor with { TenantId = Guid.NewGuid(), AllowedProjectIds = [] };
+        (await receipts.GetAsync(runId, CancellationToken.None)).Should().BeNull();
+        (await receipts.ListAsync(new GovernanceRunReceiptListRequest(Limit: 100), CancellationToken.None))
+            .Should().NotContain(x => x.GovernanceRunId == runId);
     }
 
     [DockerRequiredFact]
@@ -1293,6 +1372,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         blockedReceipt.Should().NotBeNull();
         blockedReceipt!.StoppedReason.Should().Be(nameof(GovernanceBatchErrorCode.HostBlockedMaturedDelete));
         blockedReceipt.HostBlocked.Should().BeGreaterThan(0);
+        blockedReceipt.Status.Should().Be("Stopped");
+        blockedReceipt.LatestBatch.Should().NotBeNull();
+        blockedReceipt.LatestBatch!.Executed.Should().BeFalse(
+            "the prior quarantine execution must not be attributed to the later host-blocked request");
+        blockedReceipt.LatestBatch.RequestHash.Should().BeEmpty();
 
         var internalExecutor = scope.ServiceProvider.GetRequiredService<IInternalMaturedDeleteExecutor>();
         var workerResult = await internalExecutor.ExecuteNextBatchAsync(CancellationToken.None);
@@ -2945,6 +3029,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
+        listedToolNames.Should().HaveCount(65);
+        ChatGptGatewayToolCatalog.PublishedCatalogHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        ChatGptGatewayToolCatalog.PublicationIdentity.Should().Contain(GovernanceToolContract.PublishedCatalogVersion);
         listedToolNames.Should().Contain([
             "knowledge_review",
             "governance_contract_get",
@@ -2999,6 +3086,17 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "deleteEligibleCount", "deleteMaturedCount", "autoDeletedCount", "deleteCancelledCount",
             "tombstonedCount", "semanticAutoResolvedCount", "remainingHumanDecisionCount", "protectedRetentionCount"
         ]);
+        var runGetTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "governance_run_get");
+        runGetTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "runExists", "status", "latestBatchReceived", "requestIdentityHash", "latestBatch",
+            "auditIds", "finalSnapshotToken", "finalConvergenceStatus", "stoppedReason"
+        ]);
+        runGetTool.GetProperty("outputSchema").GetProperty("properties").GetProperty("latestBatch")
+            .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+                "received", "executed", "requestIdentityHash", "requestHash", "status", "snapshotGeneration",
+                "nextCursor", "requiresReReview", "stoppedReason", "auditIds"
+            ]);
         var exclusionTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_set_governance_exclusion");
         var exclusionRequestSchema = exclusionTool.GetProperty("inputSchema")

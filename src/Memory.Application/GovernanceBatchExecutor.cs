@@ -45,15 +45,28 @@ public sealed class GovernanceBatchExecutor(
                     "External MaturedDelete is fail-closed. Observe policy-bound internal retention through governance run receipts and tombstones.");
             }
 
+            await runReceipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
             var result = await ExecuteCoreAsync(request, cancellationToken);
-            await runReceipts.RecordExecutionAsync(request, result, startedAt, cancellationToken);
+            await runReceipts.RecordExecutionAsync(request, result, startedAt, CancellationToken.None);
             return result;
         }
         catch (GovernanceBatchException ex)
         {
             var failure = GovernanceBatchExecuteResult.Failure(request, ex);
-            await runReceipts.RecordExecutionAsync(request, failure, startedAt, cancellationToken);
+            await runReceipts.RecordExecutionAsync(request, failure, startedAt, CancellationToken.None);
             return failure;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await runReceipts.RecordExecutionStoppedAsync(
+                request, startedAt, "Stopped", "RequestCancelledOutcomeUnknown", CancellationToken.None);
+            throw;
+        }
+        catch
+        {
+            await runReceipts.RecordExecutionStoppedAsync(
+                request, startedAt, "Failed", "UnhandledExecutionFailure", CancellationToken.None);
+            throw;
         }
     }
 

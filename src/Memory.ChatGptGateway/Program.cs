@@ -107,7 +107,11 @@ else
 
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<ChatGptGatewayTools>();
-builder.Services.AddMcpServer()
+builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
+{
+    Name = "Memory.ChatGptGateway",
+    Version = ChatGptGatewayToolCatalog.PublicationIdentity
+})
     .WithHttpTransport(options => options.Stateless = true)
     .WithTools<ChatGptGatewayTools>()
     .WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult
@@ -229,6 +233,9 @@ app.MapGet("/api/status", (IOptions<ChatGptGatewayOptions> options) => Results.O
     backendOnlyTools = ChatGptGatewayToolCatalog.BackendOnlyToolNames.Order(StringComparer.Ordinal),
     gatewayOnlyTools = ChatGptGatewayToolCatalog.GatewayOnlyToolNames.Order(StringComparer.Ordinal),
     publishedCatalogVersion = GovernanceToolContract.PublishedCatalogVersion,
+    publishedCatalogHash = ChatGptGatewayToolCatalog.PublishedCatalogHash,
+    publishedCatalogToolCount = ChatGptGatewayToolCatalog.PublishedToolNames.Count,
+    mcpPublicationIdentity = ChatGptGatewayToolCatalog.PublicationIdentity,
     governanceToolContractVersion = GovernanceToolContract.ToolContractVersion,
     governanceSchemaHash = GovernanceToolContract.SchemaHash
 })).RequireAuthorization();

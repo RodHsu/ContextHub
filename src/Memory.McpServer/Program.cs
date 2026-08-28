@@ -48,7 +48,11 @@ builder.Services.AddMemoryInfrastructure(builder.Configuration, "mcp-server");
 builder.Services.AddHostedService<InProcessMaintenanceRunRecoveryHostedService>();
 builder.Services.AddHostedService<DashboardSnapshotCollectorHostedService>();
 builder.Services.AddScoped<MemoryMcpTools>();
-builder.Services.AddMcpServer()
+builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
+{
+    Name = "Memory.McpServer",
+    Version = $"{BuildMetadata.Current.Version}+catalog.{GovernanceToolContract.PublishedCatalogVersion}"
+})
     .WithHttpTransport(options => options.Stateless = true)
     .WithTools<MemoryMcpTools>()
     .WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult

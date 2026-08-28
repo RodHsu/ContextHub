@@ -1658,6 +1658,47 @@ public sealed record GovernanceRunReceiptResult(
     string StoppedReason,
     IReadOnlyList<Guid> AuditIds,
     IReadOnlyList<string> ProjectIds,
+    bool IsReplay,
+    bool RunExists,
+    string Status,
+    bool LatestBatchReceived,
+    string RequestIdentityHash,
+    GovernanceBatchOutcomeResult? LatestBatch);
+
+public sealed record GovernanceBatchOutcomeResult(
+    bool Received,
+    bool Executed,
+    string RequestIdentityHash,
+    string RequestHash,
+    string Status,
+    DateTimeOffset ReceivedAt,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? CompletedAt,
+    string SnapshotToken,
+    int SnapshotGeneration,
+    bool IsReReview,
+    string CursorBefore,
+    string? NextCursor,
+    bool HasMore,
+    bool RequiresReReview,
+    string StoppedReason,
+    int Scanned,
+    int Attempted,
+    int Applied,
+    int NoOp,
+    int Failed,
+    int Deferred,
+    int RequiresUserDecision,
+    int Quarantined,
+    int DeleteEligible,
+    int DeleteMatured,
+    int AutoDeleted,
+    int DeleteCancelled,
+    int Tombstoned,
+    int SemanticAutoResolved,
+    int RemainingHumanDecision,
+    int ProtectedRetention,
+    IReadOnlyList<Guid> AuditIds,
     bool IsReplay);
 
 public sealed record GovernanceRunReceiptListRequest(
@@ -2272,7 +2313,9 @@ public interface IGovernanceBatchExecutor
 public interface IGovernanceRunReceiptService
 {
     Task RecordReviewAsync(KnowledgeReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
+    Task RecordExecutionStartedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task RecordExecutionAsync(GovernanceBatchExecuteRequest request, GovernanceBatchExecuteResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
+    Task RecordExecutionStoppedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, string status, string stoppedReason, CancellationToken cancellationToken);
     Task RecordInternalRetentionAsync(InternalMaturedDeleteBatchResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task<GovernanceRunReceiptResult?> GetAsync(string governanceRunId, CancellationToken cancellationToken);
     Task<IReadOnlyList<GovernanceRunReceiptResult>> ListAsync(GovernanceRunReceiptListRequest request, CancellationToken cancellationToken);

@@ -240,6 +240,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_set_governance_exclusion");
         var governanceBatchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
+        listedTools.GetArrayLength().Should().Be(66);
         var bootstrapResult = ExtractSseJson(bootstrapPayload).GetProperty("result");
 
         toolsPayload.Should().Contain("describe_context_hub");
@@ -265,6 +266,12 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             ]);
         governanceBatchTool.GetProperty("description").GetString().Should().Contain(GovernanceToolContract.SchemaHash);
         PublishedToolSchemaHash.Compute(governanceBatchTool).Should().Be(GovernanceToolContract.SchemaHash);
+        var runGetTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "governance_run_get");
+        runGetTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "runExists", "status", "latestBatchReceived", "requestIdentityHash", "latestBatch",
+            "auditIds", "finalSnapshotToken", "finalConvergenceStatus", "stoppedReason"
+        ]);
         governanceBatchTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
             "scannedCount", "attemptedCount", "appliedCount", "noOpCount", "failedCount", "deferredCount",
             "requiresUserDecisionCount", "nextCursor", "hasMore", "items", "auditIds", "stoppedReason", "errorCode", "succeeded"
