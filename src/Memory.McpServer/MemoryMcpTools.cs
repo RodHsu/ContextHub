@@ -15,6 +15,7 @@ public sealed class MemoryMcpTools(
     IKnowledgeReviewService knowledgeReviewService,
     IGovernanceBatchExecutor governanceBatchExecutor,
     IAutonomousRetentionService autonomousRetentionService,
+    IGovernanceRunReceiptService governanceRunReceipts,
     IGovernanceService governanceService,
     IProjectInformationService projectInformationService,
     IProjectArtifactExchangeService artifactExchangeService,
@@ -236,7 +237,7 @@ public sealed class MemoryMcpTools(
     public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Execute one persisted, bounded governance batch from a full-review snapshot. Scheduled direct hard-delete is prohibited; only resources that completed quarantine, typed grace, and immediate eligibility revalidation may use the explicit matured-delete capability. Returns replay-safe counters, tombstone/audit references, and a continuation cursor.")]
+    [McpServerTool(UseStructuredContent = true), Description(GovernanceToolContract.ExecuteDescription)]
     public async Task<GovernanceBatchExecuteResult> governance_batch_execute(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken = default)
     {
         try
@@ -248,6 +249,18 @@ public sealed class MemoryMcpTools(
             return GovernanceBatchExecuteResult.Failure(request, ex);
         }
     }
+
+    [McpServerTool(UseStructuredContent = true), Description("Read the canonical governance tool contract version, schema hash, published catalog version, and supported actions.")]
+    public GovernanceToolContractResult governance_contract_get()
+        => GovernanceToolContract.Describe();
+
+    [McpServerTool(UseStructuredContent = true), Description("Read the latest immutable governance run receipt for the current actor and GovernanceRunId.")]
+    public Task<GovernanceRunReceiptResult?> governance_run_get(string governanceRunId, CancellationToken cancellationToken = default)
+        => governanceRunReceipts.GetAsync(governanceRunId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List a bounded page of latest immutable governance run receipts for the current actor, optionally filtered by ProjectId.")]
+    public Task<IReadOnlyList<GovernanceRunReceiptResult>> governance_runs_list(GovernanceRunReceiptListRequest request, CancellationToken cancellationToken = default)
+        => governanceRunReceipts.ListAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Read the immutable minimal tombstone for a hard-deleted resource without returning original content, chunks, vectors, revisions, or payloads.")]
     public Task<ResourceTombstoneResult?> governance_tombstone_get(Guid resourceId, string? projectId = null, CancellationToken cancellationToken = default)

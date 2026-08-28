@@ -10,6 +10,7 @@ builder.Services.AddMemoryInfrastructure(builder.Configuration, "worker");
 builder.Services.AddHostedService<JobWorker>();
 builder.Services.AddHostedService<TelemetryRetentionHostedService>();
 builder.Services.AddHostedService<MemoryDataRetentionHostedService>();
+builder.Services.AddHostedService<AutonomousMaturedDeleteHostedService>();
 
 var app = builder.Build();
 

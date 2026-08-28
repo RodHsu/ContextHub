@@ -15,6 +15,7 @@ The goal is to keep durable context outside the prompt while still letting agent
 - Durable project information, explicit project hierarchy, and participant-scoped cross-project discussions
 - Project work items with checklists, ownership boundaries, and completion guards
 - Non-destructive knowledge review that keeps knowledge, discussions, work items, and governance actions distinct
+- Canonical versioned governance tool contracts, auditable run receipts, and policy-bound internal matured deletion
 - DB-first runtime logs that can be searched and promoted into durable memory
 - Retrieval telemetry and maintenance APIs for retention, summaries, and reclaim workflows
 - Chat-agent gateway for restricted MCP access with OAuth/OIDC and proposal-gated writes

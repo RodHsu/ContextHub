@@ -204,11 +204,25 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         toolsPayload.Should().Contain("memory_search");
         toolsPayload.Should().Contain("log_search");
         toolsPayload.Should().Contain("user_preference_upsert");
+        toolsPayload.Should().Contain("governance_contract_get");
+        toolsPayload.Should().Contain("governance_run_get");
+        toolsPayload.Should().Contain("governance_runs_list");
+        toolsPayload.Should().Contain(GovernanceToolContract.SchemaHash);
         governanceBatchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
             .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
                 "governanceRunId", "projectIds", "snapshotToken", "cursor", "maxMutations", "maxDurationSeconds",
-                "allowedActionTypes", "maxRiskLevel", "dryRun", "allowHardDelete", "isReReview", "executionMode"
+                "allowedActionTypes", "maxRiskLevel", "dryRun", "allowHardDelete", "allowMaturedDelete",
+                "semanticAutoResolutionConfidenceThreshold", "toolContractVersion", "schemaHash", "isReReview", "executionMode"
             ]);
+        governanceBatchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties").GetProperty("allowedActionTypes").GetProperty("items").GetProperty("enum")
+            .EnumerateArray().Select(x => x.GetString()).Should().Contain([
+                nameof(GovernanceBatchActionType.Quarantine),
+                nameof(GovernanceBatchActionType.MaturedDelete),
+                nameof(GovernanceBatchActionType.SemanticReevaluate)
+            ]);
+        governanceBatchTool.GetProperty("description").GetString().Should().Contain(GovernanceToolContract.SchemaHash);
+        PublishedToolSchemaHash.Compute(governanceBatchTool).Should().Be(GovernanceToolContract.SchemaHash);
         governanceBatchTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
             "scannedCount", "attemptedCount", "appliedCount", "noOpCount", "failedCount", "deferredCount",
             "requiresUserDecisionCount", "nextCursor", "hasMore", "items", "auditIds", "stoppedReason", "errorCode", "succeeded"

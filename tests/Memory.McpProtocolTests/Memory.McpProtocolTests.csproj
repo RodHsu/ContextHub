@@ -32,6 +32,7 @@
 
   <ItemGroup>
     <Compile Include="..\Shared\ContainerTestEnvironment.cs" Link="Shared\ContainerTestEnvironment.cs" />
+    <Compile Include="..\Shared\PublishedToolSchemaHash.cs" Link="Shared\PublishedToolSchemaHash.cs" />
   </ItemGroup>
 
 </Project>

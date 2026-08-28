@@ -18,7 +18,8 @@ public sealed class GovernanceBatchExecutor(
     IFullGovernancePlanService fullGovernance,
     IAutonomousRetentionService autonomousRetention,
     IRequestActorAccessor actorAccessor,
-    IClock clock) : IGovernanceBatchExecutor
+    IClock clock,
+    IGovernanceRunReceiptService runReceipts) : IGovernanceBatchExecutor
 {
     private const int MaximumMutations = 500;
     private const int MaximumDurationSeconds = 900;
@@ -28,6 +29,35 @@ public sealed class GovernanceBatchExecutor(
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<GovernanceBatchExecuteResult> ExecuteAsync(
+        GovernanceBatchExecuteRequest request,
+        CancellationToken cancellationToken)
+    {
+        var startedAt = clock.UtcNow;
+        try
+        {
+            ValidatePublishedContract(request);
+            EnsureExecutionActorAllowed(actorAccessor.Current);
+            if (request.AllowMaturedDelete ||
+                request.AllowedActionTypes?.Contains(GovernanceBatchActionType.MaturedDelete) == true)
+            {
+                throw new GovernanceBatchException(
+                    GovernanceBatchErrorCode.HostBlockedMaturedDelete,
+                    "External MaturedDelete is fail-closed. Observe policy-bound internal retention through governance run receipts and tombstones.");
+            }
+
+            var result = await ExecuteCoreAsync(request, cancellationToken);
+            await runReceipts.RecordExecutionAsync(request, result, startedAt, cancellationToken);
+            return result;
+        }
+        catch (GovernanceBatchException ex)
+        {
+            var failure = GovernanceBatchExecuteResult.Failure(request, ex);
+            await runReceipts.RecordExecutionAsync(request, failure, startedAt, cancellationToken);
+            return failure;
+        }
+    }
+
+    private async Task<GovernanceBatchExecuteResult> ExecuteCoreAsync(
         GovernanceBatchExecuteRequest request,
         CancellationToken cancellationToken)
     {
@@ -380,6 +410,33 @@ public sealed class GovernanceBatchExecutor(
         execution.ResultJson = JsonSerializer.Serialize(result, JsonOptions);
         await dbContext.SaveChangesAsync(CancellationToken.None);
         return result;
+    }
+
+    private static void ValidatePublishedContract(GovernanceBatchExecuteRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.ToolContractVersion) &&
+            !string.Equals(request.ToolContractVersion.Trim(), GovernanceToolContract.ToolContractVersion, StringComparison.Ordinal))
+        {
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                $"ToolContractVersion must be '{GovernanceToolContract.ToolContractVersion}'.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SchemaHash) &&
+            !string.Equals(request.SchemaHash.Trim(), GovernanceToolContract.SchemaHash, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                $"SchemaHash must be '{GovernanceToolContract.SchemaHash}'.");
+        }
+    }
+
+    private static void EnsureExecutionActorAllowed(ContextHubRequestActor actor)
+    {
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        if (!actor.IsAdmin)
+        {
+            throw new UnauthorizedAccessException("Governance batch execution requires an administrator.");
+        }
     }
 
     private async Task<GovernanceBatchItemResult> ProcessItemAsync(
@@ -1121,6 +1178,8 @@ public sealed class GovernanceBatchExecutor(
             allowHardDelete = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled ? false : request.AllowHardDelete,
             request.AllowMaturedDelete,
             request.SemanticAutoResolutionConfidenceThreshold,
+            toolContractVersion = request.ToolContractVersion?.Trim() ?? GovernanceToolContract.ToolContractVersion,
+            schemaHash = request.SchemaHash?.Trim().ToLowerInvariant() ?? GovernanceToolContract.SchemaHash,
             request.IsReReview,
             request.ExecutionMode
         };
@@ -1210,6 +1269,8 @@ public sealed class GovernanceBatchExecutor(
             allowHardDelete = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled ? false : request.AllowHardDelete,
             request.AllowMaturedDelete,
             request.SemanticAutoResolutionConfidenceThreshold,
+            toolContractVersion = request.ToolContractVersion?.Trim() ?? GovernanceToolContract.ToolContractVersion,
+            schemaHash = request.SchemaHash?.Trim().ToLowerInvariant() ?? GovernanceToolContract.SchemaHash,
             request.ExecutionMode
         }, JsonOptions));
 

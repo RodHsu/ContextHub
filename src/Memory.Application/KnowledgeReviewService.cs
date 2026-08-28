@@ -13,12 +13,15 @@ public sealed class KnowledgeReviewService(
     IProjectWorkItemService workItems,
     IDurableMemoryGovernanceService durableGovernance,
     IFullGovernancePlanService fullGovernance,
-    IRequestActorAccessor actorAccessor) : IKnowledgeReviewService
+    IRequestActorAccessor actorAccessor,
+    IGovernanceRunReceiptService runReceipts,
+    IClock clock) : IKnowledgeReviewService
 {
     private const int PageSize = 200;
 
     public async Task<KnowledgeReviewResult> ReviewAsync(KnowledgeReviewRequest request, CancellationToken cancellationToken)
     {
+        var startedAt = clock.UtcNow;
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var available = await accessibleProjects.ListAsync(200, cancellationToken);
@@ -159,7 +162,8 @@ public sealed class KnowledgeReviewService(
             workItemGovernanceActionCount,
             excludedGovernanceTrackers.Length);
 
-        return new KnowledgeReviewResult(
+        var candidateCount = CountCandidates(fullGovernancePlan.Coverage);
+        var result = new KnowledgeReviewResult(
             projects,
             retention,
             sharedPage,
@@ -188,13 +192,20 @@ public sealed class KnowledgeReviewService(
             SemanticAutoResolvedCount = 0,
             RemainingHumanDecisionCount = fullGovernancePlan.RemainingHumanDecisionCount,
             ProtectedRetentionCount = fullGovernancePlan.Retention.ProtectedRetentionCount,
+            CandidateCount = candidateCount,
+            ExecutionActionableCount = fullGovernancePlan.GovernanceActionableCount,
+            GovernedExceptionCount = deferredCount + userDecisionCount + hostBlockedCount,
             Convergence = convergence with
             {
                 GovernanceActionableCount = fullGovernancePlan.GovernanceActionableCount,
                 BusinessWorkItemActionableCount = fullGovernancePlan.BusinessWorkItemActionableCount,
-                GovernedExceptionCount = fullGovernancePlan.GovernedExceptionCount
+                GovernedExceptionCount = deferredCount + userDecisionCount + hostBlockedCount,
+                CandidateCount = candidateCount,
+                ExecutionActionableCount = fullGovernancePlan.GovernanceActionableCount
             }
         };
+        await runReceipts.RecordReviewAsync(result, startedAt, cancellationToken);
+        return result;
     }
 
     private static async Task<IReadOnlyList<T>> LoadAllAsync<T>(
@@ -223,6 +234,14 @@ public sealed class KnowledgeReviewService(
         => offset + returnedCount < totalCount
             ? $"{snapshotToken}:{section}:{offset + returnedCount}"
             : null;
+
+    private static int CountCandidates(FullGovernanceCoverageResult coverage)
+        => coverage.ProjectCoverage.CandidateCount + coverage.HierarchyCoverage.CandidateCount +
+           coverage.MemoryCoverage.CandidateCount + coverage.PreferenceCoverage.CandidateCount +
+           coverage.ArtifactCoverage.CandidateCount + coverage.DiscussionCoverage.CandidateCount +
+           coverage.WorkItemCoverage.CandidateCount + coverage.InsightCoverage.CandidateCount +
+           coverage.SuggestedActionCoverage.CandidateCount + coverage.ProposalCoverage.CandidateCount +
+           coverage.LogCoverage.CandidateCount;
 
     internal static KnowledgeReviewConvergenceResult BuildConvergence(
         bool isReReview,
@@ -253,6 +272,8 @@ public sealed class KnowledgeReviewService(
             RequiresUserDecisionCount = requiresUserDecisionCount,
             HostBlockedCount = hostBlockedCount,
             WorkItemActionableCount = workItemActionableCount,
+            ExecutionActionableCount = convergenceActionableCount,
+            GovernedExceptionCount = exceptionCount,
             ExcludedGovernanceTrackerCount = excludedGovernanceTrackerCount
         };
     }

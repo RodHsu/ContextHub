@@ -13,7 +13,10 @@ public static class ChatGptGatewayToolCatalog
         "projects_list",
         "daily_memory_review",
         "knowledge_review",
+        "governance_contract_get",
         "governance_batch_execute",
+        "governance_run_get",
+        "governance_runs_list",
         "governance_tombstone_get",
         "governance_finding_set_disposition",
         "governance_finding_reopen",
@@ -97,4 +100,6 @@ public static class ChatGptGatewayToolCatalog
         "suggested_actions_list",
         "user_preferences_list"
     };
+
+    public static string PublishedCatalogVersion => Memory.Application.GovernanceToolContract.PublishedCatalogVersion;
 }

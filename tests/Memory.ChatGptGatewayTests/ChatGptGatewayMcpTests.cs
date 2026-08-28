@@ -940,10 +940,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         }
 
         var first = await executor.ExecuteAsync(request, CancellationToken.None);
-        var payloadMismatch = () => executor.ExecuteAsync(request with { MaxDurationSeconds = 31 }, CancellationToken.None);
-        await payloadMismatch.Should().ThrowAsync<InvalidOperationException>().WithMessage("*payload*");
-        var invalidCursor = () => executor.ExecuteAsync(request with { Cursor = "invalid-cursor", MaxMutations = 11 }, CancellationToken.None);
-        await invalidCursor.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Cursor*");
+        var payloadMismatch = await executor.ExecuteAsync(request with { MaxDurationSeconds = 31 }, CancellationToken.None);
+        payloadMismatch.ErrorCode.Should().Be(GovernanceBatchErrorCode.ReplayPayloadMismatch);
+        var invalidCursor = await executor.ExecuteAsync(request with { Cursor = "invalid-cursor", MaxMutations = 11 }, CancellationToken.None);
+        invalidCursor.ErrorCode.Should().Be(GovernanceBatchErrorCode.InvalidCursor);
         var wrongProject = () => executor.ExecuteAsync(request with
         {
             ProjectIds = [projectId, $"wrong-project-{Guid.NewGuid():N}"],
@@ -954,8 +954,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var run = await dbContext.GovernanceBatchRuns.SingleAsync(x => x.GovernanceRunId == runId);
         run.ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
         await dbContext.SaveChangesAsync();
-        var expired = () => executor.ExecuteAsync(request with { SnapshotToken = first.SnapshotToken, MaxDurationSeconds = 31 }, CancellationToken.None);
-        await expired.Should().ThrowAsync<InvalidOperationException>().WithMessage("*expired*");
+        var expired = await executor.ExecuteAsync(request with { SnapshotToken = first.SnapshotToken, MaxDurationSeconds = 31 }, CancellationToken.None);
+        expired.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorExpired);
 
         actorAccessor.Current = admin with { Role = TenantUserRole.Member };
         var nonAdmin = () => executor.ExecuteAsync(request with { GovernanceRunId = $"member-{Guid.NewGuid():N}" }, CancellationToken.None);
@@ -1114,6 +1114,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var replay = await gatewayTools.governance_batch_execute(request, CancellationToken.None);
         replay.IsReplay.Should().BeTrue();
         (await dbContext.MemoryItems.CountAsync(x => x.ProjectId == projectId && x.Status == MemoryStatus.Archived)).Should().Be(1);
+        var replayReceipt = await gatewayTools.governance_run_get(runId, CancellationToken.None);
+        replayReceipt.Should().NotBeNull();
+        replayReceipt!.IsReplay.Should().BeTrue();
+        replayReceipt.Applied.Should().Be(result.AppliedCount);
+        replayReceipt.AuditIds.Should().BeEquivalentTo(result.AuditIds);
     }
 
     [DockerRequiredFact]
@@ -1178,7 +1183,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
-    public async Task Scheduled_Governance_Should_Delete_Only_Revalidated_Matured_Quarantine_And_Replay_Safely()
+    public async Task Internal_Worker_Should_Delete_Only_Revalidated_Matured_Quarantine_And_External_Call_Should_Fail_Closed()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         UseGatewayActor(scope.ServiceProvider);
@@ -1248,16 +1253,44 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             IsReReview: true,
             ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
         var deleted = await gatewayTools.governance_batch_execute(deleteRequest, CancellationToken.None);
-        deleted.AutoDeletedCount.Should().Be(1, JsonSerializer.Serialize(deleted));
-        deleted.TombstonedCount.Should().Be(1);
-        deleted.DeleteMaturedCount.Should().Be(1);
-        deleted.Items.Should().ContainSingle(x => x.TombstoneId.HasValue && !x.IsReplay);
+        deleted.Succeeded.Should().BeFalse();
+        deleted.ErrorCode.Should().Be(GovernanceBatchErrorCode.HostBlockedMaturedDelete);
+        deleted.AutoDeletedCount.Should().Be(0);
+        (await dbContext.MemoryItems.AnyAsync(x => x.Id == memory.Id)).Should().BeTrue();
+
+        var blockedReceipt = await gatewayTools.governance_run_get(runId, CancellationToken.None);
+        blockedReceipt.Should().NotBeNull();
+        blockedReceipt!.StoppedReason.Should().Be(nameof(GovernanceBatchErrorCode.HostBlockedMaturedDelete));
+        blockedReceipt.HostBlocked.Should().BeGreaterThan(0);
+
+        var internalExecutor = scope.ServiceProvider.GetRequiredService<IInternalMaturedDeleteExecutor>();
+        var workerResult = await internalExecutor.ExecuteNextBatchAsync(CancellationToken.None);
+        workerResult.DeletedCount.Should().BeGreaterThan(0, JsonSerializer.Serialize(workerResult));
         (await dbContext.MemoryItems.AnyAsync(x => x.Id == memory.Id)).Should().BeFalse();
         (await dbContext.ResourceTombstones.CountAsync(x => x.ResourceId == memory.Id)).Should().Be(1);
 
-        var replay = await gatewayTools.governance_batch_execute(deleteRequest, CancellationToken.None);
-        replay.IsReplay.Should().BeTrue();
+        var replay = await internalExecutor.ExecuteNextBatchAsync(CancellationToken.None);
+        replay.DeletedCount.Should().Be(0);
         (await dbContext.ResourceTombstones.CountAsync(x => x.ResourceId == memory.Id)).Should().Be(1);
+
+        var workerReceipt = await gatewayTools.governance_run_get(workerResult.GovernanceRunId, CancellationToken.None);
+        workerReceipt.Should().NotBeNull();
+        workerReceipt!.ExecutionMode.Should().Be("InternalRetentionWorker");
+        workerReceipt.AutoDeleted.Should().Be(workerResult.DeletedCount);
+        workerReceipt.Tombstoned.Should().Be(workerResult.TombstoneIds.Count);
+        var receipts = await gatewayTools.governance_runs_list(
+            new GovernanceRunReceiptListRequest(projectId, Limit: 20), CancellationToken.None);
+        receipts.Should().Contain(x => x.GovernanceRunId == runId
+            && x.StoppedReason == nameof(GovernanceBatchErrorCode.HostBlockedMaturedDelete));
+        receipts.Should().Contain(x => x.GovernanceRunId == workerResult.GovernanceRunId
+            && x.ExecutionMode == "InternalRetentionWorker");
+        var storedReceipt = await dbContext.GovernanceRunReceipts.SingleAsync(x =>
+            x.GovernanceRunId == workerResult.GovernanceRunId);
+        storedReceipt.StoppedReason = "tampered";
+        var mutateReceipt = () => dbContext.SaveChangesAsync();
+        var immutableError = await mutateReceipt.Should().ThrowAsync<DbUpdateException>();
+        immutableError.Which.InnerException!.Message.Should().Contain("append-only");
+        dbContext.ChangeTracker.Clear();
     }
 
     [DockerRequiredFact]
@@ -2883,7 +2916,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
         listedToolNames.Should().Contain([
             "knowledge_review",
+            "governance_contract_get",
             "governance_batch_execute",
+            "governance_run_get",
+            "governance_runs_list",
             "governance_tombstone_get",
             "project_work_items_list",
             "project_work_item_create",
@@ -2907,14 +2943,23 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         reviewTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
             "governancePlan", "governanceCoverage", "convergence", "quarantinedCount", "deleteEligibleCount",
             "deleteMaturedCount", "autoDeletedCount", "deleteCancelledCount", "tombstonedCount",
-            "semanticAutoResolvedCount", "remainingHumanDecisionCount", "protectedRetentionCount"
+            "semanticAutoResolvedCount", "remainingHumanDecisionCount", "protectedRetentionCount",
+            "candidateCount", "executionActionableCount", "governedExceptionCount"
         ]);
         var batchRequestSchema = batchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request");
         batchRequestSchema.GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
             "governanceRunId", "projectIds", "snapshotToken", "cursor", "maxMutations", "maxDurationSeconds",
             "allowedActionTypes", "maxRiskLevel", "dryRun", "allowHardDelete", "allowMaturedDelete",
-            "semanticAutoResolutionConfidenceThreshold", "isReReview", "executionMode"
+            "semanticAutoResolutionConfidenceThreshold", "toolContractVersion", "schemaHash", "isReReview", "executionMode"
         ]);
+        batchRequestSchema.GetProperty("properties").GetProperty("allowedActionTypes")
+            .GetProperty("items").GetProperty("enum").EnumerateArray().Select(x => x.GetString()).Should().Contain([
+                nameof(GovernanceBatchActionType.Quarantine),
+                nameof(GovernanceBatchActionType.MaturedDelete),
+                nameof(GovernanceBatchActionType.SemanticReevaluate)
+            ]);
+        batchTool.GetProperty("description").GetString().Should().Contain(GovernanceToolContract.SchemaHash);
+        PublishedToolSchemaHash.Compute(batchTool).Should().Be(GovernanceToolContract.SchemaHash);
         batchTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
             "scannedCount", "attemptedCount", "appliedCount", "noOpCount", "failedCount", "deferredCount",
             "requiresUserDecisionCount", "mergedCount", "updatedCount", "movedCount", "archivedCount",
@@ -2949,6 +2994,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .Should().BeEquivalentTo(ChatGptGatewayToolCatalog.BackendOnlyToolNames);
         gatewayDeclaredTools.Except(backendDeclaredTools, StringComparer.Ordinal)
             .Should().BeEquivalentTo(ChatGptGatewayToolCatalog.GatewayOnlyToolNames);
+        typeof(ChatGptGatewayTools).GetMethod(nameof(ChatGptGatewayTools.governance_batch_execute))!.GetParameters()[0].ParameterType
+            .Should().Be(typeof(GovernanceBatchExecuteRequest));
+        typeof(MemoryMcpTools).GetMethod(nameof(MemoryMcpTools.governance_batch_execute))!.GetParameters()[0].ParameterType
+            .Should().Be(typeof(GovernanceBatchExecuteRequest));
 
         var projectsPayload = await SendMcpAsync(client, sessionId!, 21, "tools/call", new
         {

@@ -163,6 +163,9 @@ public sealed class AutonomousGovernanceOptions
     public int MaxLinkDegree { get; set; }
     public decimal MaxImportance { get; set; } = 0.35m;
     public decimal MaxConfidence { get; set; } = 0.60m;
+    public bool InternalMaturedDeleteEnabled { get; set; } = true;
+    public int InternalMaturedDeleteBatchSize { get; set; } = 50;
+    public int InternalMaturedDeletePollSeconds { get; set; } = 60;
 
     public int NormalizedMachineExecutionEvidenceGraceDays => Math.Clamp(MachineExecutionEvidenceGraceDays, 1, 3650);
     public int NormalizedRuntimeNoiseGraceDays => Math.Clamp(RuntimeNoiseGraceDays, 1, 3650);
@@ -173,4 +176,6 @@ public sealed class AutonomousGovernanceOptions
     public int NormalizedMaxLinkDegree => Math.Max(0, MaxLinkDegree);
     public decimal NormalizedMaxImportance => Math.Clamp(MaxImportance, 0m, 1m);
     public decimal NormalizedMaxConfidence => Math.Clamp(MaxConfidence, 0m, 1m);
+    public int NormalizedInternalMaturedDeleteBatchSize => Math.Clamp(InternalMaturedDeleteBatchSize, 1, 500);
+    public int NormalizedInternalMaturedDeletePollSeconds => Math.Clamp(InternalMaturedDeletePollSeconds, 5, 3600);
 }

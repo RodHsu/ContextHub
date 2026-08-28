@@ -984,6 +984,50 @@ public sealed class ResourceTombstone
     public DateTimeOffset CreatedAt { get; set; }
 }
 
+public sealed class GovernanceRunReceipt
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public long EventSequence { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public string EventKey { get; set; } = string.Empty;
+    public string Actor { get; set; } = string.Empty;
+    public string ExecutionMode { get; set; } = string.Empty;
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset CompletedAt { get; set; }
+    public string ToolContractVersion { get; set; } = string.Empty;
+    public string SchemaHash { get; set; } = string.Empty;
+    public string PublishedCatalogVersion { get; set; } = string.Empty;
+    public string InitialSnapshotToken { get; set; } = string.Empty;
+    public string FinalSnapshotToken { get; set; } = string.Empty;
+    public bool CoverageComplete { get; set; }
+    public int InitialGovernanceActionable { get; set; }
+    public int FinalGovernanceActionable { get; set; }
+    public int CandidateCount { get; set; }
+    public int ExecutionActionableCount { get; set; }
+    public int GovernedExceptionCount { get; set; }
+    public int Applied { get; set; }
+    public int Failed { get; set; }
+    public int Deferred { get; set; }
+    public int RequiresUserDecision { get; set; }
+    public int HostBlocked { get; set; }
+    public int Quarantined { get; set; }
+    public int DeleteEligible { get; set; }
+    public int DeleteMatured { get; set; }
+    public int AutoDeleted { get; set; }
+    public int DeleteCancelled { get; set; }
+    public int Tombstoned { get; set; }
+    public int SemanticAutoResolved { get; set; }
+    public int BusinessWorkItemActionable { get; set; }
+    public string FinalConvergenceStatus { get; set; } = string.Empty;
+    public string StoppedReason { get; set; } = string.Empty;
+    public string AuditIdsJson { get; set; } = "[]";
+    public string ProjectIdsJson { get; set; } = "[]";
+    public bool IsReplay { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
 public sealed class ProjectHierarchy
 {
     public Guid Id { get; set; } = Guid.NewGuid();

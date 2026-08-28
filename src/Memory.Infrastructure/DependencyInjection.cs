@@ -86,6 +86,8 @@ public static class DependencyInjection
         services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
         services.AddScoped<IMemoryDataRetentionService, MemoryDataRetentionService>();
         services.AddScoped<IAutonomousRetentionService, AutonomousRetentionService>();
+        services.AddScoped<IGovernanceRunReceiptService, GovernanceRunReceiptService>();
+        services.AddSingleton<IInternalMaturedDeleteExecutor, InternalMaturedDeleteExecutor>();
         services.AddScoped<IVacuumFullReclaimService, VacuumFullReclaimService>();
         services.AddScoped<IDomainOwnerRepairService, DomainOwnerRepairService>();
         services.AddScoped<IMaintenanceRunQueryService, MaintenanceRunQueryService>();
