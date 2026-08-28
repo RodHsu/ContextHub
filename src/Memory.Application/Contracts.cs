@@ -1388,6 +1388,15 @@ public sealed record KnowledgeReviewResult(
     public KnowledgeGovernanceSectionResult? SharedKnowledgeGovernance { get; init; }
     public IReadOnlyList<GovernanceReviewItem> GovernancePlan { get; init; } = [];
     public FullGovernanceCoverageResult? GovernanceCoverage { get; init; }
+    public int QuarantinedCount { get; init; }
+    public int DeleteEligibleCount { get; init; }
+    public int DeleteMaturedCount { get; init; }
+    public int AutoDeletedCount { get; init; }
+    public int DeleteCancelledCount { get; init; }
+    public int TombstonedCount { get; init; }
+    public int SemanticAutoResolvedCount { get; init; }
+    public int RemainingHumanDecisionCount { get; init; }
+    public int ProtectedRetentionCount { get; init; }
 }
 
 public enum GovernanceBatchExecutionMode

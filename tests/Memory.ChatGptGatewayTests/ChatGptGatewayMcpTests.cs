@@ -2905,7 +2905,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var reviewTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "knowledge_review");
         reviewTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
-            "governancePlan", "governanceCoverage", "convergence"
+            "governancePlan", "governanceCoverage", "convergence", "quarantinedCount", "deleteEligibleCount",
+            "deleteMaturedCount", "autoDeletedCount", "deleteCancelledCount", "tombstonedCount",
+            "semanticAutoResolvedCount", "remainingHumanDecisionCount", "protectedRetentionCount"
         ]);
         var batchRequestSchema = batchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request");
         batchRequestSchema.GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([

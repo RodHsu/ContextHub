@@ -179,6 +179,15 @@ public sealed class KnowledgeReviewService(
             SharedKnowledgeGovernance = new KnowledgeGovernanceSectionResult(sharedGovernancePage, sharedGovernancePageInfo),
             GovernancePlan = fullGovernancePlan.Items,
             GovernanceCoverage = fullGovernancePlan.Coverage,
+            QuarantinedCount = fullGovernancePlan.Retention.QuarantinedCount,
+            DeleteEligibleCount = fullGovernancePlan.Retention.DeleteEligibleCount,
+            DeleteMaturedCount = fullGovernancePlan.Retention.DeleteMaturedCount,
+            AutoDeletedCount = 0,
+            DeleteCancelledCount = fullGovernancePlan.Retention.DeleteCancelledCount,
+            TombstonedCount = 0,
+            SemanticAutoResolvedCount = 0,
+            RemainingHumanDecisionCount = fullGovernancePlan.RemainingHumanDecisionCount,
+            ProtectedRetentionCount = fullGovernancePlan.Retention.ProtectedRetentionCount,
             Convergence = convergence with
             {
                 GovernanceActionableCount = fullGovernancePlan.GovernanceActionableCount,
