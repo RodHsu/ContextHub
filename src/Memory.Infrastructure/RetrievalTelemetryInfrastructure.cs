@@ -66,3 +66,27 @@ public sealed class DatabaseRetrievalTelemetryService(
     private static string ComputeQueryHash(string? queryText)
         => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(queryText ?? string.Empty)));
 }
+
+public sealed class DatabaseMcpToolCallTelemetryService(
+    IDbContextFactory<MemoryDbContext> dbContextFactory,
+    TimeProvider timeProvider,
+    IRequestActorAccessor actorAccessor) : IMcpToolCallTelemetryService
+{
+    public async Task RecordAsync(McpToolCallTelemetryWriteRequest request, CancellationToken cancellationToken)
+    {
+        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var actor = actorAccessor.Current;
+        dbContext.McpToolCallEvents.Add(new McpToolCallEvent
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = ProjectContext.Normalize(request.ProjectId),
+            ServiceName = request.ServiceName?.Trim() ?? string.Empty,
+            ToolName = request.ToolName?.Trim() ?? string.Empty,
+            Success = request.Success,
+            DurationMs = request.DurationMs < 0 ? 0 : request.DurationMs,
+            CreatedAt = timeProvider.GetUtcNow()
+        });
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+}

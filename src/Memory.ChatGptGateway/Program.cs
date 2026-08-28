@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using System.Diagnostics;
 using System.Text.Json.Serialization;
 using System.Net;
 using System.Security.Claims;
@@ -125,6 +126,27 @@ builder.Services.AddScoped<ChatGptGatewayTools>();
 builder.Services.AddMcpServer()
     .WithHttpTransport(options => options.Stateless = true)
     .WithTools<ChatGptGatewayTools>()
+    .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (context, cancellationToken) =>
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        var success = false;
+        try
+        {
+            var result = await next(context, cancellationToken);
+            success = result.IsError is not true;
+            return result;
+        }
+        finally
+        {
+            await McpToolCallTelemetry.TryRecordAsync(
+                context.Services,
+                "chatgpt-gateway",
+                context.Params?.Name ?? string.Empty,
+                context.Params?.Arguments,
+                success,
+                Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+        }
+    }))
     .WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult
     {
         Resources = []

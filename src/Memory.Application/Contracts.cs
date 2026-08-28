@@ -310,6 +310,13 @@ public sealed record RetrievalTelemetryWriteRequest(
     string RequestId,
     IReadOnlyList<RetrievalTelemetryHitWriteRequest> Hits);
 
+public sealed record McpToolCallTelemetryWriteRequest(
+    string ProjectId,
+    string ServiceName,
+    string ToolName,
+    bool Success,
+    double DurationMs);
+
 public sealed record WorkingContextSection(
     Guid MemoryId,
     string Title,
@@ -1644,6 +1651,11 @@ public interface IChunkingService
 public interface IRetrievalTelemetryService
 {
     Task RecordAsync(RetrievalTelemetryWriteRequest request, CancellationToken cancellationToken);
+}
+
+public interface IMcpToolCallTelemetryService
+{
+    Task RecordAsync(McpToolCallTelemetryWriteRequest request, CancellationToken cancellationToken);
 }
 
 public interface IEmbeddingUsageTelemetry

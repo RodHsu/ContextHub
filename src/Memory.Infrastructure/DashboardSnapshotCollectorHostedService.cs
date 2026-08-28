@@ -656,7 +656,23 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 x.MetadataJson))
             .ToListAsync(cancellationToken);
 
-        var savings = BuildContextSavings(now, windowStartedAt, events.OrderBy(x => x.CreatedAt));
+        var toolCallCounts = await dbContext.McpToolCallEvents
+            .AsNoTracking()
+            .Where(x => x.CreatedAt >= windowStartedAt && x.CreatedAt <= now)
+            .GroupBy(_ => 1)
+            .Select(group => new McpToolCallWindowCounts(
+                group.LongCount(x => x.CreatedAt >= now.AddHours(-24)),
+                group.LongCount(x => x.CreatedAt >= now.AddDays(-3)),
+                group.LongCount(x => x.CreatedAt >= now.AddDays(-7)),
+                group.LongCount()))
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? new McpToolCallWindowCounts(0, 0, 0, 0);
+
+        var savings = BuildContextSavings(
+            now,
+            windowStartedAt,
+            events.OrderBy(x => x.CreatedAt),
+            toolCallCounts);
         await WriteSnapshotAsync(
             DashboardSnapshotKeys.ContextSavings,
             intervalSeconds,
@@ -732,7 +748,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
     internal static DashboardContextSavingsResult BuildContextSavings(
         DateTimeOffset now,
         DateTimeOffset windowStartedAt,
-        IEnumerable<ContextSavingsTelemetryEvent> events)
+        IEnumerable<ContextSavingsTelemetryEvent> events,
+        McpToolCallWindowCounts? toolCallCounts = null)
     {
         var samples = events
             .Select(x => new ContextSavingsTelemetrySample(
@@ -743,7 +760,10 @@ public sealed class DashboardSnapshotCollectorHostedService(
             .OrderBy(x => x.CreatedAt)
             .ToArray();
 
-        var windows = BuildContextSavingsWindows(now, samples);
+        var windows = BuildContextSavingsWindows(
+            now,
+            samples,
+            toolCallCounts ?? new McpToolCallWindowCounts(0, 0, 0, 0));
         var primaryWindow = windows[0];
         if (!primaryWindow.HasData)
         {
@@ -768,18 +788,20 @@ public sealed class DashboardSnapshotCollectorHostedService(
             primaryWindow.Label,
             windows,
             primaryWindow.ExactCoveragePercent,
-            primaryWindow.TokenCountingMode);
+            primaryWindow.TokenCountingMode,
+            primaryWindow.ActualToolCallCount);
     }
 
     private static IReadOnlyList<DashboardContextSavingsWindowResult> BuildContextSavingsWindows(
         DateTimeOffset now,
-        IReadOnlyList<ContextSavingsTelemetrySample> samples)
+        IReadOnlyList<ContextSavingsTelemetrySample> samples,
+        McpToolCallWindowCounts toolCallCounts)
         =>
         [
-            BuildContextSavingsWindow("24h", "24H", now.AddHours(-24), now, samples),
-            BuildContextSavingsWindow("3d", "3D", now.AddDays(-3), now, samples),
-            BuildContextSavingsWindow("7d", "7D", now.AddDays(-7), now, samples),
-            BuildContextSavingsWindow("30d", "30D", now.AddDays(-30), now, samples)
+            BuildContextSavingsWindow("24h", "24H", now.AddHours(-24), now, samples, toolCallCounts.TwentyFourHours),
+            BuildContextSavingsWindow("3d", "3D", now.AddDays(-3), now, samples, toolCallCounts.ThreeDays),
+            BuildContextSavingsWindow("7d", "7D", now.AddDays(-7), now, samples, toolCallCounts.SevenDays),
+            BuildContextSavingsWindow("30d", "30D", now.AddDays(-30), now, samples, toolCallCounts.ThirtyDays)
         ];
 
     private static DashboardContextSavingsWindowResult BuildContextSavingsWindow(
@@ -787,7 +809,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
         string label,
         DateTimeOffset startedAt,
         DateTimeOffset endedAt,
-        IReadOnlyList<ContextSavingsTelemetrySample> samples)
+        IReadOnlyList<ContextSavingsTelemetrySample> samples,
+        long actualToolCallCount)
     {
         var windowSamples = samples
             .Where(x => x.CreatedAt >= startedAt && x.CreatedAt <= endedAt)
@@ -808,7 +831,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 0d,
                 startedAt,
                 endedAt,
-                null);
+                null,
+                ActualToolCallCount: actualToolCallCount);
         }
 
         var baseline = windowSamples.Sum(x => Math.Max(0, x.Savings!.BaselineTokenEstimate));
@@ -838,7 +862,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
             endedAt,
             windowSamples[^1].CreatedAt,
             Math.Round(exactCoveragePercent, 2),
-            tokenCountingMode);
+            tokenCountingMode,
+            actualToolCallCount);
     }
 
     private static IReadOnlyList<DashboardContextSavingsTrendPointResult> BuildContextSavingsTrend(
@@ -944,9 +969,10 @@ public sealed class DashboardSnapshotCollectorHostedService(
             false,
             null,
             "24H",
-            windows ?? BuildContextSavingsWindows(now, []),
+            windows ?? BuildContextSavingsWindows(now, [], new McpToolCallWindowCounts(0, 0, 0, 0)),
             0d,
-            TokenCountingModes.Approximate);
+            TokenCountingModes.Approximate,
+            windows?.FirstOrDefault()?.ActualToolCallCount ?? 0);
 
     private static ContextSavingsEstimateResult? TryReadSavingsEstimate(string metadataJson)
     {
@@ -1453,6 +1479,12 @@ public sealed class DashboardSnapshotCollectorHostedService(
         DateTimeOffset CreatedAt,
         bool CacheHit,
         string MetadataJson);
+
+    internal sealed record McpToolCallWindowCounts(
+        long TwentyFourHours,
+        long ThreeDays,
+        long SevenDays,
+        long ThirtyDays);
 
     internal sealed record DiscussionActivityMessage(
         string HostProjectId,

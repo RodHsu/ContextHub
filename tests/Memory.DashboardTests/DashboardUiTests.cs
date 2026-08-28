@@ -317,10 +317,14 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().Contain("3D 節省量 / 快取命中率");
         overviewHtml.Should().Contain("7D 節省量 / 快取命中率");
         overviewHtml.Should().Contain("30D 節省量 / 快取命中率");
-        overviewHtml.Should().Contain("呼叫次數：18 次");
-        overviewHtml.Should().Contain("呼叫次數：54 次");
-        overviewHtml.Should().Contain("呼叫次數：126 次");
-        overviewHtml.Should().Contain("呼叫次數：540 次");
+        overviewHtml.Should().Contain("有效樣本：18 次");
+        overviewHtml.Should().Contain("有效樣本：54 次");
+        overviewHtml.Should().Contain("有效樣本：126 次");
+        overviewHtml.Should().Contain("有效樣本：540 次");
+        overviewHtml.Should().Contain("實際呼叫次數：96 次");
+        overviewHtml.Should().Contain("實際呼叫次數：280 次");
+        overviewHtml.Should().Contain("實際呼叫次數：640 次");
+        overviewHtml.Should().Contain("實際呼叫次數：2,500 次");
         overviewHtml.Should().Contain("精準 token");
         overviewHtml.Should().NotContain("context-savings-panel");
         overviewHtml.Should().Contain("contexthub-redis-1");
@@ -401,10 +405,14 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("3D 節省量 / 快取命中率");
         monitoringHtml.Should().Contain("7D 節省量 / 快取命中率");
         monitoringHtml.Should().Contain("30D 節省量 / 快取命中率");
-        monitoringHtml.Should().Contain("呼叫次數：18 次");
-        monitoringHtml.Should().Contain("呼叫次數：54 次");
-        monitoringHtml.Should().Contain("呼叫次數：126 次");
-        monitoringHtml.Should().Contain("呼叫次數：540 次");
+        monitoringHtml.Should().Contain("有效樣本：18 次");
+        monitoringHtml.Should().Contain("有效樣本：54 次");
+        monitoringHtml.Should().Contain("有效樣本：126 次");
+        monitoringHtml.Should().Contain("有效樣本：540 次");
+        monitoringHtml.Should().Contain("實際呼叫次數：96 次");
+        monitoringHtml.Should().Contain("實際呼叫次數：280 次");
+        monitoringHtml.Should().Contain("實際呼叫次數：640 次");
+        monitoringHtml.Should().Contain("實際呼叫次數：2,500 次");
         monitoringHtml.Should().Contain("精準 token");
         monitoringHtml.Should().NotContain("24H 樣本");
         monitoringHtml.Should().Contain("來源覆蓋率");
@@ -1010,10 +1018,14 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
 
     private static void AssertContextSavingsCallCounts(string html)
     {
-        html.Should().Contain("呼叫次數：18 次");
-        html.Should().Contain("呼叫次數：54 次");
-        html.Should().Contain("呼叫次數：126 次");
-        html.Should().Contain("呼叫次數：540 次");
+        html.Should().Contain("有效樣本：18 次");
+        html.Should().Contain("有效樣本：54 次");
+        html.Should().Contain("有效樣本：126 次");
+        html.Should().Contain("有效樣本：540 次");
+        html.Should().Contain("實際呼叫次數：96 次");
+        html.Should().Contain("實際呼叫次數：280 次");
+        html.Should().Contain("實際呼叫次數：640 次");
+        html.Should().Contain("實際呼叫次數：2,500 次");
     }
 
     private static string ExtractAntiforgeryToken(string html)
@@ -1355,10 +1367,10 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             .ToArray();
         var windows = new[]
         {
-            new DashboardContextSavingsWindowResult("24h", "24H", true, 18, 52_400, 11_680, 40_720, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddHours(-24), now, now.AddMinutes(-3), 88.9d, TokenCountingModes.Exact),
-            new DashboardContextSavingsWindowResult("3d", "3D", true, 54, 157_200, 35_040, 122_160, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddDays(-3), now, now.AddMinutes(-3), 88.9d, TokenCountingModes.Exact),
-            new DashboardContextSavingsWindowResult("7d", "7D", true, 126, 366_800, 81_760, 285_040, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddDays(-7), now, now.AddMinutes(-3), 88.9d, TokenCountingModes.Exact),
-            new DashboardContextSavingsWindowResult("30d", "30D", true, 540, 1_572_000, 350_400, 1_221_600, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddDays(-30), now, now.AddMinutes(-3), 88.9d, TokenCountingModes.Exact)
+            new DashboardContextSavingsWindowResult("24h", "24H", true, 18, 52_400, 11_680, 40_720, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddHours(-24), now, now.AddMinutes(-3), 88.9d, TokenCountingModes.Exact, 96),
+            new DashboardContextSavingsWindowResult("3d", "3D", true, 54, 157_200, 35_040, 122_160, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddDays(-3), now, now.AddMinutes(-3), 88.9d, TokenCountingModes.Exact, 280),
+            new DashboardContextSavingsWindowResult("7d", "7D", true, 126, 366_800, 81_760, 285_040, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddDays(-7), now, now.AddMinutes(-3), 88.9d, TokenCountingModes.Exact, 640),
+            new DashboardContextSavingsWindowResult("30d", "30D", true, 540, 1_572_000, 350_400, 1_221_600, 77.71d, ContextSavingsEstimator.HighConfidence, 88.9d, 55.6d, now.AddDays(-30), now, now.AddMinutes(-3), 88.9d, TokenCountingModes.Exact, 2_500)
         };
 
         return new DashboardContextSavingsResult(

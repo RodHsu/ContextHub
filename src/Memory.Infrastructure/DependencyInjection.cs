@@ -78,6 +78,7 @@ public static class DependencyInjection
         services.AddScoped<IVectorStore, NpgsqlSearchStore>();
         services.AddScoped<IStorageExplorerStore, NpgsqlStorageExplorerStore>();
         services.AddScoped<IRetrievalTelemetryService, DatabaseRetrievalTelemetryService>();
+        services.AddScoped<IMcpToolCallTelemetryService, DatabaseMcpToolCallTelemetryService>();
         services.AddScoped<IAgentConnectivityService, AgentConnectivityService>();
         services.AddSingleton<IEmbeddingUsageTelemetry, DatabaseEmbeddingUsageTelemetry>();
         services.AddSingleton<IProjectArtifactObjectStore, S3CompatibleProjectArtifactObjectStore>();

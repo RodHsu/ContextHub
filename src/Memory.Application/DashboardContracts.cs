@@ -155,7 +155,8 @@ public sealed record DashboardContextSavingsResult(
     string WindowLabel = "最近 24 小時",
     IReadOnlyList<DashboardContextSavingsWindowResult>? Windows = null,
     double ExactCoveragePercent = 0d,
-    string TokenCountingMode = TokenCountingModes.Approximate);
+    string TokenCountingMode = TokenCountingModes.Approximate,
+    long ActualToolCallCount = 0);
 
 public sealed record DashboardContextSavingsWindowResult(
     string Key,
@@ -173,7 +174,8 @@ public sealed record DashboardContextSavingsWindowResult(
     DateTimeOffset WindowEndedAtUtc,
     DateTimeOffset? LastSampleAtUtc,
     double ExactCoveragePercent = 0d,
-    string TokenCountingMode = TokenCountingModes.Approximate);
+    string TokenCountingMode = TokenCountingModes.Approximate,
+    long ActualToolCallCount = 0);
 
 public sealed record DashboardContextSavingsTrendPointResult(
     DateTimeOffset TimestampUtc,

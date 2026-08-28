@@ -97,6 +97,12 @@ public sealed class NpgsqlStorageExplorerStore(NpgsqlDataSource dataSource) : IS
                 "created_at DESC, id DESC",
                 ["id", "project_id", "service_name", "category", "level", "message", "exception", "trace_id", "request_id", "payload_json", "created_at"],
                 ["project_id", "service_name", "category", "level", "message", "exception", "trace_id", "request_id", "payload_json"]),
+            ["mcp_tool_call_events"] = new(
+                "mcp_tool_call_events",
+                "MCP 與 ChatGPT Gateway 實際工具呼叫 telemetry",
+                "created_at DESC, id DESC",
+                ["id", "tenant_id", "owner_user_id", "project_id", "service_name", "tool_name", "success", "duration_ms", "created_at"],
+                ["id", "tenant_id", "owner_user_id", "project_id", "service_name", "tool_name"]),
             ["retrieval_events"] = new(
                 "retrieval_events",
                 "檢索事件摘要與查詢條件",

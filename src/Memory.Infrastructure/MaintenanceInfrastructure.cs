@@ -605,6 +605,7 @@ public sealed class RetrievalTelemetryRetentionService(
         "embedding_usage_hourly",
         "security_audit_events",
         "runtime_log_entries",
+        "mcp_tool_call_events",
         "maintenance_runs"
     ];
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
@@ -834,6 +835,7 @@ public sealed class RetrievalTelemetryRetentionService(
                     deletedHitSummaryRows: progress.DeletedHitSummaryRows,
                     deletedSecurityAuditEvents: progress.DeletedSecurityAuditEvents,
                     deletedRuntimeLogEntries: progress.DeletedRuntimeLogEntries,
+                    deletedMcpToolCallEvents: progress.DeletedMcpToolCallEvents,
                     deletedMaintenanceRuns: progress.DeletedMaintenanceRuns,
                     deletedEmbeddingUsageBuckets: progress.DeletedEmbeddingUsageBuckets,
                     droppedHitPartitions: progress.DroppedHitPartitions,
@@ -907,6 +909,7 @@ public sealed class RetrievalTelemetryRetentionService(
                 deletedHitSummaryRows: progress.DeletedHitSummaryRows,
                 deletedSecurityAuditEvents: progress.DeletedSecurityAuditEvents,
                 deletedRuntimeLogEntries: progress.DeletedRuntimeLogEntries,
+                deletedMcpToolCallEvents: progress.DeletedMcpToolCallEvents,
                 deletedMaintenanceRuns: progress.DeletedMaintenanceRuns,
                 deletedEmbeddingUsageBuckets: progress.DeletedEmbeddingUsageBuckets,
                 droppedHitPartitions: progress.DroppedHitPartitions,
@@ -953,6 +956,7 @@ public sealed class RetrievalTelemetryRetentionService(
                 deletedHitSummaryRows: progress?.DeletedHitSummaryRows ?? 0,
                 deletedSecurityAuditEvents: progress?.DeletedSecurityAuditEvents ?? 0,
                 deletedRuntimeLogEntries: progress?.DeletedRuntimeLogEntries ?? 0,
+                deletedMcpToolCallEvents: progress?.DeletedMcpToolCallEvents ?? 0,
                 deletedMaintenanceRuns: progress?.DeletedMaintenanceRuns ?? 0,
                 deletedEmbeddingUsageBuckets: progress?.DeletedEmbeddingUsageBuckets ?? 0,
                 droppedHitPartitions: progress?.DroppedHitPartitions ?? 0,
@@ -1736,6 +1740,13 @@ public sealed class RetrievalTelemetryRetentionService(
             timeProvider.GetUtcNow().AddDays(-progress.Policy.RuntimeLogRetentionDays),
             progress.Policy,
             cancellationToken);
+        progress.DeletedMcpToolCallEvents += await DeleteOlderThanAsync(
+            connection,
+            "mcp_tool_call_events",
+            "created_at",
+            timeProvider.GetUtcNow().AddDays(-progress.Policy.SummaryRetentionDays),
+            progress.Policy,
+            cancellationToken);
         progress.DeletedEmbeddingUsageBuckets += await DeleteOlderThanAsync(
             connection,
             "embedding_usage_hourly",
@@ -2022,6 +2033,7 @@ public sealed class RetrievalTelemetryRetentionService(
                 'embedding_usage_hourly',
                 'security_audit_events',
                 'runtime_log_entries',
+                'mcp_tool_call_events',
                 'maintenance_runs')
             ORDER BY relname;
             """;
@@ -2057,6 +2069,7 @@ public sealed class RetrievalTelemetryRetentionService(
             deletedHitSummaryRows: progress.DeletedHitSummaryRows,
             deletedSecurityAuditEvents: progress.DeletedSecurityAuditEvents,
             deletedRuntimeLogEntries: progress.DeletedRuntimeLogEntries,
+            deletedMcpToolCallEvents: progress.DeletedMcpToolCallEvents,
             deletedMaintenanceRuns: progress.DeletedMaintenanceRuns,
             deletedEmbeddingUsageBuckets: progress.DeletedEmbeddingUsageBuckets,
             droppedHitPartitions: progress.DroppedHitPartitions,
@@ -2124,6 +2137,7 @@ public sealed class RetrievalTelemetryRetentionService(
         long deletedHitSummaryRows = 0,
         long deletedSecurityAuditEvents = 0,
         long deletedRuntimeLogEntries = 0,
+        long deletedMcpToolCallEvents = 0,
         long deletedMaintenanceRuns = 0,
         long deletedEmbeddingUsageBuckets = 0,
         int droppedHitPartitions = 0,
@@ -2163,6 +2177,7 @@ public sealed class RetrievalTelemetryRetentionService(
             {
                 deletedSecurityAuditEvents,
                 deletedRuntimeLogEntries,
+                deletedMcpToolCallEvents,
                 deletedMaintenanceRuns,
                 deletedEmbeddingUsageBuckets
             },
@@ -2229,6 +2244,7 @@ public sealed class RetrievalTelemetryRetentionService(
         public long DeletedHitSummaryRows { get; set; }
         public long DeletedSecurityAuditEvents { get; set; }
         public long DeletedRuntimeLogEntries { get; set; }
+        public long DeletedMcpToolCallEvents { get; set; }
         public long DeletedMaintenanceRuns { get; set; }
         public long DeletedEmbeddingUsageBuckets { get; set; }
         public int DroppedHitPartitions { get; set; }

@@ -24,7 +24,8 @@ public sealed class DashboardContextSavingsAggregatorTests
                 CreateEvent(now.AddDays(-5), baseline: 700, returned: 350, coveragePercent: 40d, cacheHit: false),
                 CreateEvent(now.AddDays(-20), baseline: 600, returned: 100, coveragePercent: 100d, cacheHit: true),
                 CreateEvent(now.AddDays(-45), baseline: 10_000, returned: 0, coveragePercent: 100d, cacheHit: true)
-            ]);
+            ],
+            new DashboardSnapshotCollectorHostedService.McpToolCallWindowCounts(12, 34, 56, 78));
 
         result.WindowLabel.Should().Be("24H");
         result.Windows.Should().NotBeNull();
@@ -32,6 +33,7 @@ public sealed class DashboardContextSavingsAggregatorTests
 
         var twentyFourHours = result.Windows.Single(x => x.Key == "24h");
         twentyFourHours.SampleCount.Should().Be(2);
+        twentyFourHours.ActualToolCallCount.Should().Be(12);
         twentyFourHours.BaselineTokenEstimate.Should().Be(200);
         twentyFourHours.ReturnedTokenEstimate.Should().Be(200);
         twentyFourHours.EstimatedSavedTokens.Should().Be(100);
@@ -40,19 +42,38 @@ public sealed class DashboardContextSavingsAggregatorTests
 
         var threeDays = result.Windows.Single(x => x.Key == "3d");
         threeDays.SampleCount.Should().Be(3);
+        threeDays.ActualToolCallCount.Should().Be(34);
         threeDays.EstimatedSavedTokens.Should().Be(250);
 
         var sevenDays = result.Windows.Single(x => x.Key == "7d");
         sevenDays.SampleCount.Should().Be(4);
+        sevenDays.ActualToolCallCount.Should().Be(56);
         sevenDays.EstimatedSavedTokens.Should().Be(600);
         sevenDays.SavingPercent.Should().Be(50d);
 
         var thirtyDays = result.Windows.Single(x => x.Key == "30d");
         thirtyDays.SampleCount.Should().Be(5);
+        thirtyDays.ActualToolCallCount.Should().Be(78);
         thirtyDays.EstimatedSavedTokens.Should().Be(1_100);
         thirtyDays.SavingPercent.Should().Be(61.11d);
         thirtyDays.ExactCoveragePercent.Should().Be(0d);
         thirtyDays.TokenCountingMode.Should().Be(TokenCountingModes.Approximate);
+    }
+
+    [Fact]
+    public void BuildContextSavings_Should_Keep_Actual_Call_Counts_When_No_Savings_Samples_Exist()
+    {
+        var now = new DateTimeOffset(2026, 6, 20, 8, 0, 0, TimeSpan.Zero);
+
+        var result = DashboardSnapshotCollectorHostedService.BuildContextSavings(
+            now,
+            now.AddDays(-30),
+            [],
+            new DashboardSnapshotCollectorHostedService.McpToolCallWindowCounts(7, 15, 31, 120));
+
+        result.HasData.Should().BeFalse();
+        result.ActualToolCallCount.Should().Be(7);
+        result.Windows!.Select(x => x.ActualToolCallCount).Should().Equal(7, 15, 31, 120);
     }
 
     [Fact]

@@ -569,6 +569,19 @@ public sealed class RetrievalEvent
     public List<RetrievalHit> Hits { get; set; } = [];
 }
 
+public sealed class McpToolCallEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = "default";
+    public string ServiceName { get; set; } = string.Empty;
+    public string ToolName { get; set; } = string.Empty;
+    public bool Success { get; set; }
+    public double DurationMs { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
 public sealed class RetrievalHit
 {
     public Guid Id { get; set; } = Guid.NewGuid();

@@ -280,6 +280,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     [DockerRequiredFact]
     public async Task Raw_Http_Tools_List_And_Call_Should_Work_With_Modern_Stateless_Protocol()
     {
+        var toolCallStartedAt = DateTimeOffset.UtcNow;
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
             UseBootstrapActor(scope.ServiceProvider);
@@ -476,6 +477,25 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         userPreferencePayload.Should().Contain("preferred-language");
         ExtractToolJsonField(userPreferenceUpdatePayload, "content").Should().Contain("技術名詞保留英文");
         contextPayload.Should().Contain("userPreferences");
+
+        using var verificationScope = environment.GetFactory().Services.CreateScope();
+        var recordedToolCalls = await verificationScope.ServiceProvider
+            .GetRequiredService<MemoryDbContext>()
+            .McpToolCallEvents
+            .AsNoTracking()
+            .Where(x => x.CreatedAt >= toolCallStartedAt && x.ServiceName == "mcp-server")
+            .ToListAsync();
+        recordedToolCalls.Should().HaveCount(7);
+        recordedToolCalls.Should().OnlyContain(x => x.Success);
+        recordedToolCalls.Select(x => x.ToolName).Should().Contain([
+            "describe_context_hub",
+            "memory_search",
+            "log_search",
+            "user_preference_upsert",
+            "build_working_context"
+        ]);
+        recordedToolCalls.Should().Contain(x =>
+            x.ToolName == "describe_context_hub" && x.ProjectId == "ContextHub");
 
     }
 

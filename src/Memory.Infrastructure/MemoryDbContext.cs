@@ -34,6 +34,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<MemoryJob> MemoryJobs => Set<MemoryJob>();
     public DbSet<MaintenanceRun> MaintenanceRuns => Set<MaintenanceRun>();
     public DbSet<RuntimeLogEntry> RuntimeLogEntries => Set<RuntimeLogEntry>();
+    public DbSet<McpToolCallEvent> McpToolCallEvents => Set<McpToolCallEvent>();
     public DbSet<RetrievalEvent> RetrievalEvents => Set<RetrievalEvent>();
     public DbSet<RetrievalHit> RetrievalHits => Set<RetrievalHit>();
     public DbSet<RetrievalTelemetryDailySummary> RetrievalTelemetryDailySummaries => Set<RetrievalTelemetryDailySummary>();
@@ -376,6 +377,24 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.RequestId).HasColumnName("request_id");
             entity.Property(x => x.PayloadJson).HasColumnName("payload_json");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+        });
+
+        modelBuilder.Entity<McpToolCallEvent>(entity =>
+        {
+            entity.ToTable("mcp_tool_call_events");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ServiceName).HasColumnName("service_name");
+            entity.Property(x => x.ToolName).HasColumnName("tool_name");
+            entity.Property(x => x.Success).HasColumnName("success");
+            entity.Property(x => x.DurationMs).HasColumnName("duration_ms");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => x.CreatedAt);
+            entity.HasIndex(x => new { x.TenantId, x.CreatedAt });
+            entity.HasIndex(x => new { x.ProjectId, x.CreatedAt });
         });
 
         modelBuilder.Entity<RetrievalEvent>(entity =>

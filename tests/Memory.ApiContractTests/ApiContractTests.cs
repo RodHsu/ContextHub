@@ -1483,6 +1483,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         tables.Should().Contain(x => x.Name == "maintenance_runs");
         tables.Should().Contain(x => x.Name == "retrieval_telemetry_daily_summaries");
         tables.Should().Contain(x => x.Name == "retrieval_telemetry_daily_hit_summaries");
+        tables.Should().Contain(x => x.Name == "mcp_tool_call_events");
         rows.Should().NotBeNull();
         rows!.Table.Should().Be("memory_items");
         rows.Description.Should().NotBeNullOrWhiteSpace();

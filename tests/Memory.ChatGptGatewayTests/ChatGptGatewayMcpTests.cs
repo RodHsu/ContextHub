@@ -1654,6 +1654,37 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Tool_Call_Should_Record_Durable_Gateway_Invocation_Telemetry()
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+        using var client = CreateAuthorizedClient(environment.GetFactory());
+
+        var payload = await SendMcpAsync(client, string.Empty, 201, "tools/call", new
+        {
+            name = "memory_search",
+            arguments = new
+            {
+                query = "gateway telemetry verification",
+                projectId = ProjectId,
+                limit = 1
+            }
+        });
+
+        ExtractSseJson(payload).TryGetProperty("result", out _).Should().BeTrue();
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var events = await scope.ServiceProvider.GetRequiredService<MemoryDbContext>()
+            .McpToolCallEvents
+            .AsNoTracking()
+            .Where(x => x.CreatedAt >= startedAt &&
+                        x.ServiceName == "chatgpt-gateway" &&
+                        x.ToolName == "memory_search" &&
+                        x.ProjectId == ProjectId)
+            .ToListAsync();
+        events.Should().ContainSingle();
+        events.Single().Success.Should().BeTrue();
+    }
+
+    [DockerRequiredFact]
     public async Task Proposal_Approval_Should_Bridge_ChatGpt_And_Codex_Read_Paths()
     {
         var externalKey = $"chatgpt-gateway:{Guid.NewGuid():N}";

@@ -315,7 +315,8 @@
                             <small>
                                 <span>@FormatTokenCount(window.EstimatedSavedTokens)</span>
                                 <span>快取 @DashboardFormatting.Percent(window.CacheHitPercent)</span>
-                                <span class="context-savings-call-count">呼叫次數：@DashboardFormatting.Integer(window.SampleCount) 次</span>
+                                <span class="context-savings-call-count">有效樣本：@DashboardFormatting.Integer(window.SampleCount) 次</span>
+                                <span class="context-savings-call-count">實際呼叫次數：@DashboardFormatting.Integer(window.ActualToolCallCount) 次</span>
                             </small>
                         </article>
                     }
@@ -714,12 +715,16 @@
             TokenCountingModes.Approximate);
 
     private static string ContextSavingsTokenModeTooltip(DashboardContextSavingsWindowResult window)
-        => window.TokenCountingMode switch
+    {
+        var tokenMode = window.TokenCountingMode switch
         {
             TokenCountingModes.Exact => $"使用 tokenizer 精準 token 計算，exact coverage {DashboardFormatting.Percent(window.ExactCoveragePercent)}。",
             TokenCountingModes.Mixed => $"部分樣本使用 tokenizer 精準 token，exact coverage {DashboardFormatting.Percent(window.ExactCoveragePercent)}，不足部分採估算 token。",
             _ => "目前使用低成本估算 token；embedding tokenizer 無可用精準覆蓋。"
         };
+
+        return $"{tokenMode} 有效樣本只包含可計算節省量的成功 working-context；實際呼叫次數包含 MCP 與 ChatGPT Gateway 的成功及失敗工具 invocation。";
+    }
 
     private static string ContextSavingsStateText(DashboardContextSavingsResult savings)
         => savings.HasRecentData
