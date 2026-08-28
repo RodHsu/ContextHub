@@ -36,12 +36,14 @@ public sealed class DurableMemoryGovernanceService(
 
         var existing = await dbContext.KnowledgeGovernanceSnapshots
             .AsNoTracking()
-            .FirstOrDefaultAsync(x =>
+            .Where(x =>
                 x.TenantId == tenantId &&
                 x.OwnerUserId == ownerUserId &&
                 x.GovernanceRunId == governanceRunId &&
-                x.IsReReview == isReReview,
-                cancellationToken);
+                x.IsReReview == isReReview)
+            .OrderByDescending(x => x.Generation)
+            .FirstOrDefaultAsync(cancellationToken);
+        var generation = isReReview ? 1 : 0;
         if (existing is not null)
         {
             if (!string.Equals(existing.ProjectSetHash, projectSetHash, StringComparison.Ordinal))
@@ -49,7 +51,13 @@ public sealed class DurableMemoryGovernanceService(
                 throw new InvalidOperationException("GovernanceRunId cannot be replayed with a different authorized ProjectId set.");
             }
 
-            return await ApplyLiveLifecycleOverlayAsync(Deserialize(existing.ResultJson), cancellationToken);
+            if (!isReReview || !await HasCompletedExecutionAfterAsync(
+                    tenantId, ownerUserId, governanceRunId, existing.CompletedAt, cancellationToken))
+            {
+                return await ApplyLiveLifecycleOverlayAsync(Deserialize(existing.ResultJson), cancellationToken);
+            }
+
+            generation = checked(existing.Generation + 1);
         }
 
         foreach (var projectId in normalizedProjects)
@@ -89,7 +97,7 @@ public sealed class DurableMemoryGovernanceService(
         var sharedCandidates = candidates.Where(x => ProjectContext.IsShared(x.ProjectId)).ToArray();
         var snapshotId = Guid.NewGuid();
         var now = clock.UtcNow;
-        var token = $"kg:{snapshotId:N}:{projectSetHash[..16]}:{(isReReview ? "r" : "i")}";
+        var token = $"kg:{snapshotId:N}:{projectSetHash[..16]}:{(isReReview ? $"r{generation}" : "i0")}";
         var coverage = new KnowledgeGovernanceCoverageResult(
             snapshotId,
             token,
@@ -118,6 +126,7 @@ public sealed class DurableMemoryGovernanceService(
             OwnerUserId = ownerUserId,
             GovernanceRunId = governanceRunId,
             IsReReview = isReReview,
+            Generation = generation,
             ProjectSetHash = projectSetHash,
             ProjectIdsJson = JsonSerializer.Serialize(normalizedProjects, JsonOptions),
             ResultJson = resultJson,
@@ -141,7 +150,8 @@ public sealed class DurableMemoryGovernanceService(
                     x.TenantId == tenantId &&
                     x.OwnerUserId == ownerUserId &&
                     x.GovernanceRunId == governanceRunId &&
-                    x.IsReReview == isReReview,
+                    x.IsReReview == isReReview &&
+                    x.Generation == generation,
                     cancellationToken);
             if (winner is null || !string.Equals(winner.ProjectSetHash, projectSetHash, StringComparison.Ordinal))
             {
@@ -151,6 +161,23 @@ public sealed class DurableMemoryGovernanceService(
             return await ApplyLiveLifecycleOverlayAsync(Deserialize(winner.ResultJson), cancellationToken);
         }
     }
+
+    private Task<bool> HasCompletedExecutionAfterAsync(
+        Guid tenantId,
+        Guid ownerUserId,
+        string governanceRunId,
+        DateTimeOffset snapshotCompletedAt,
+        CancellationToken cancellationToken)
+        => dbContext.GovernanceBatchExecutions
+            .AsNoTracking()
+            .AnyAsync(x =>
+                x.Status == "Completed" &&
+                x.CompletedAt > snapshotCompletedAt &&
+                x.Run != null &&
+                x.Run.TenantId == tenantId &&
+                x.Run.OwnerUserId == ownerUserId &&
+                x.Run.GovernanceRunId == governanceRunId,
+                cancellationToken);
 
     private async Task<DurableMemoryGovernanceSnapshotResult> ApplyLiveLifecycleOverlayAsync(
         DurableMemoryGovernanceSnapshotResult snapshot,

@@ -793,6 +793,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
             entity.Property(x => x.IsReReview).HasColumnName("is_re_review");
+            entity.Property(x => x.Generation).HasColumnName("generation");
             entity.Property(x => x.ProjectSetHash).HasColumnName("project_set_hash");
             entity.Property(x => x.ProjectIdsJson).HasColumnName("project_ids_json").HasColumnType("jsonb");
             entity.Property(x => x.ResultJson).HasColumnName("result_json").HasColumnType("jsonb");
@@ -801,7 +802,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CoverageComplete).HasColumnName("coverage_complete");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
-            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunId, x.IsReReview }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunId, x.IsReReview, x.Generation }).IsUnique();
         });
 
         modelBuilder.Entity<GovernanceBatchRun>(entity =>

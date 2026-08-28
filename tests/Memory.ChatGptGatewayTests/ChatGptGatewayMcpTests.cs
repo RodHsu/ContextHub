@@ -1747,7 +1747,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         catchUp.RequiresUserDecisionCount.Should().Be(1);
         var finalReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
             [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        finalReview.DurableMemoryCoverage!.SnapshotToken.Should().NotBe(reReview.DurableMemoryCoverage!.SnapshotToken);
         finalReview.Pagination.HighSignalConversationInsights.TotalCount.Should().Be(0);
+        var finalReviewReplay = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        finalReviewReplay.DurableMemoryCoverage!.SnapshotToken.Should().Be(finalReview.DurableMemoryCoverage.SnapshotToken);
         reReview.Convergence.RequiresUserDecisionCount.Should().BeGreaterThanOrEqualTo(2000);
         var unchangedWorkItem = (await workItems.ListAsync(new ProjectWorkItemListRequest(projectId, IncludeArchived: true), CancellationToken.None))
             .Single(x => x.Id == businessWorkItem.Id);

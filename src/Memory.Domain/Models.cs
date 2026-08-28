@@ -892,6 +892,7 @@ public sealed class KnowledgeGovernanceSnapshot
     public Guid OwnerUserId { get; set; }
     public string GovernanceRunId { get; set; } = string.Empty;
     public bool IsReReview { get; set; }
+    public int Generation { get; set; }
     public string ProjectSetHash { get; set; } = string.Empty;
     public string ProjectIdsJson { get; set; } = "[]";
     public string ResultJson { get; set; } = "{}";

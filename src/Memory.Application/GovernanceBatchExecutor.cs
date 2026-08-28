@@ -62,6 +62,45 @@ public sealed class GovernanceBatchExecutor(
                 policyHash,
                 cancellationToken);
         }
+        var suppliedSnapshotToken = request.SnapshotToken?.Trim() ?? string.Empty;
+        if (!string.IsNullOrEmpty(suppliedSnapshotToken))
+        {
+            var suppliedRequestJson = JsonSerializer.Serialize(
+                Canonicalize(request, suppliedSnapshotToken, projectIds), JsonOptions);
+            var suppliedRequestHash = Hash(suppliedRequestJson);
+            var suppliedLogicalRunIds = await dbContext.GovernanceBatchRuns.AsNoTracking()
+                .Where(x => x.TenantId == tenantId &&
+                            x.OwnerUserId == ownerUserId &&
+                            x.GovernanceRunId == request.GovernanceRunId.Trim() &&
+                            x.ProjectSetHash == projectSetHash)
+                .Select(x => x.Id)
+                .ToListAsync(cancellationToken);
+            var suppliedPrior = await dbContext.GovernanceBatchExecutions.AsNoTracking()
+                .FirstOrDefaultAsync(x => suppliedLogicalRunIds.Contains(x.GovernanceBatchRunId) &&
+                                          x.RequestHash == suppliedRequestHash, cancellationToken);
+            if (suppliedPrior is not null)
+            {
+                var replay = DeserializeResult(suppliedPrior.ResultJson);
+                return string.Equals(suppliedPrior.Status, "Completed", StringComparison.Ordinal)
+                    ? replay with { IsReplay = true }
+                    : replay with { IsReplay = true, StoppedReason = "UnknownResult", RequiresReReview = true };
+            }
+
+            if (!string.IsNullOrEmpty(cursorBefore))
+            {
+                var suppliedConflicts = await dbContext.GovernanceBatchExecutions.AsNoTracking()
+                    .Where(x => suppliedLogicalRunIds.Contains(x.GovernanceBatchRunId) &&
+                                x.CursorBefore == cursorBefore &&
+                                x.RequestHash != suppliedRequestHash)
+                    .Select(x => x.RequestJson)
+                    .ToListAsync(cancellationToken);
+                if (suppliedConflicts.Any(x => !IsDryRunRequest(x)))
+                {
+                    throw new GovernanceBatchException(GovernanceBatchErrorCode.ReplayPayloadMismatch,
+                        "Execution payload does not match the payload already recorded for this governance cursor.");
+                }
+            }
+        }
         var snapshot = await durableGovernance.GetOrCreateSnapshotAsync(
             projectIds,
             request.GovernanceRunId.Trim(),
