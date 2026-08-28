@@ -8,6 +8,9 @@ namespace ContextHub.McpStdioBridge;
 
 public sealed class RemoteMcpClient
 {
+    private const string ModernProtocolVersion = "2026-07-28";
+    private const string PreferredLegacyProtocolVersion = "2025-11-25";
+
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = false
@@ -17,6 +20,8 @@ public sealed class RemoteMcpClient
     private readonly BridgeOptions options;
     private readonly BridgeLogger logger;
     private readonly IAgentConnectivityTelemetrySink telemetry;
+    private RemoteProtocolMode remoteProtocolMode;
+    private string? remoteProtocolVersion;
     private string? remoteSessionId;
     private long nextRemoteRequestId = 1;
 
@@ -38,18 +43,22 @@ public sealed class RemoteMcpClient
         bool allowReconnectRetry,
         CancellationToken cancellationToken = default)
     {
-        var payload = CreateForwardPayload(method, localMessage);
         var maxAttempts = options.ReconnectOnError && allowReconnectRetry ? 2 : 1;
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             var stopwatch = Stopwatch.StartNew();
-            var sessionWasInitialized = string.IsNullOrWhiteSpace(remoteSessionId);
+            var protocolWasNegotiated = remoteProtocolMode == RemoteProtocolMode.Unknown;
             try
             {
                 logger.Log($"forwarding {method} to {options.Endpoint}; attempt {attempt}");
-                await EnsureRemoteSessionAsync(cancellationToken);
-                var response = await SendRemoteJsonRpcAsync(payload, requireSession: true, cancellationToken);
+                await EnsureRemoteProtocolAsync(cancellationToken);
+                var payload = CreateForwardPayload(method, localMessage, remoteProtocolMode);
+                var response = await SendRemoteJsonRpcAsync(
+                    payload,
+                    remoteProtocolVersion ?? throw new InvalidOperationException("Remote MCP protocol version was not negotiated."),
+                    requireSession: remoteProtocolMode == RemoteProtocolMode.Legacy,
+                    cancellationToken);
                 logger.Log($"completed {method}");
                 await RecordTelemetryAsync(
                     method,
@@ -59,7 +68,7 @@ public sealed class RemoteMcpClient
                     statusCode: null,
                     errorKind: null,
                     stopwatch.Elapsed.TotalMilliseconds,
-                    sessionWasInitialized,
+                    protocolWasNegotiated,
                     reconnectAttempted: attempt > 1,
                     cancellationToken);
                 return response;
@@ -74,11 +83,11 @@ public sealed class RemoteMcpClient
                     ex.StatusCode,
                     ClassifyError(ex),
                     stopwatch.Elapsed.TotalMilliseconds,
-                    sessionWasInitialized,
+                    protocolWasNegotiated,
                     reconnectAttempted: true,
                     cancellationToken);
-                logger.Log($"remote {method} failed with reconnectable error: {ex.Message}; rebuilding remote MCP session");
-                ClearRemoteSession();
+                logger.Log($"remote {method} failed with reconnectable error: {ex.Message}; renegotiating remote MCP protocol");
+                ClearRemoteProtocol();
                 await Task.Delay(options.RetryDelay, cancellationToken);
             }
             catch (RemoteMcpRequestException ex)
@@ -91,7 +100,7 @@ public sealed class RemoteMcpClient
                     ex.StatusCode,
                     ClassifyError(ex),
                     stopwatch.Elapsed.TotalMilliseconds,
-                    sessionWasInitialized,
+                    protocolWasNegotiated,
                     reconnectAttempted: attempt > 1,
                     cancellationToken);
                 throw;
@@ -106,7 +115,7 @@ public sealed class RemoteMcpClient
                     statusCode: null,
                     ex is OperationCanceledException ? "timeout" : "unknown",
                     stopwatch.Elapsed.TotalMilliseconds,
-                    sessionWasInitialized,
+                    protocolWasNegotiated,
                     reconnectAttempted: attempt > 1,
                     cancellationToken);
                 throw;
@@ -178,13 +187,24 @@ public sealed class RemoteMcpClient
             _ => "remote"
         };
 
-    private JsonObject CreateForwardPayload(string method, JsonElement localMessage)
+    private JsonObject CreateForwardPayload(
+        string method,
+        JsonElement localMessage,
+        RemoteProtocolMode protocolMode)
     {
-        JsonNode? parameters = null;
+        JsonObject parameters = new();
         if (localMessage.TryGetProperty("params", out var paramsElement) &&
             paramsElement.ValueKind is not JsonValueKind.Undefined and not JsonValueKind.Null)
         {
-            parameters = JsonNode.Parse(paramsElement.GetRawText());
+            parameters = JsonNode.Parse(paramsElement.GetRawText()) as JsonObject
+                ?? throw new RemoteMcpRequestException(
+                    "MCP request params must be a JSON object.",
+                    canReconnectRetry: false);
+        }
+
+        if (protocolMode == RemoteProtocolMode.Modern)
+        {
+            parameters["_meta"] = CreateModernRequestMeta();
         }
 
         return new JsonObject
@@ -192,15 +212,53 @@ public sealed class RemoteMcpClient
             ["jsonrpc"] = "2.0",
             ["id"] = Interlocked.Increment(ref nextRemoteRequestId),
             ["method"] = method,
-            ["params"] = parameters ?? new JsonObject()
+            ["params"] = parameters
         };
     }
 
-    private async Task EnsureRemoteSessionAsync(CancellationToken cancellationToken)
+    private async Task EnsureRemoteProtocolAsync(CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(remoteSessionId))
+        if (remoteProtocolMode != RemoteProtocolMode.Unknown)
         {
             return;
+        }
+
+        try
+        {
+            var discoverPayload = new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = Interlocked.Increment(ref nextRemoteRequestId),
+                ["method"] = "server/discover",
+                ["params"] = new JsonObject
+                {
+                    ["_meta"] = CreateModernRequestMeta()
+                }
+            };
+            using var discoverResponse = await SendRemoteJsonRpcAsync(
+                discoverPayload,
+                ModernProtocolVersion,
+                requireSession: false,
+                cancellationToken);
+            if (SupportsModernProtocol(discoverResponse.RootElement))
+            {
+                remoteProtocolMode = RemoteProtocolMode.Modern;
+                remoteProtocolVersion = ModernProtocolVersion;
+                remoteSessionId = null;
+                logger.Log($"negotiated remote MCP protocol {ModernProtocolVersion}");
+                return;
+            }
+
+            if (!IsLegacyDiscoveryResponse(discoverResponse.RootElement))
+            {
+                throw new RemoteMcpRequestException(
+                    "Remote MCP server/discover response did not advertise a supported protocol version.",
+                    canReconnectRetry: false);
+            }
+        }
+        catch (RemoteMcpRequestException ex) when (CanFallbackToLegacy(ex))
+        {
+            logger.Log($"remote MCP discovery is unavailable ({ex.Message}); falling back to initialize");
         }
 
         var initializePayload = new JsonObject
@@ -210,7 +268,7 @@ public sealed class RemoteMcpClient
             ["method"] = "initialize",
             ["params"] = new JsonObject
             {
-                ["protocolVersion"] = "2025-06-18",
+                ["protocolVersion"] = PreferredLegacyProtocolVersion,
                 ["capabilities"] = new JsonObject(),
                 ["clientInfo"] = new JsonObject
                 {
@@ -220,17 +278,27 @@ public sealed class RemoteMcpClient
             }
         };
 
-        _ = await SendRemoteJsonRpcAsync(initializePayload, requireSession: false, cancellationToken);
-        if (string.IsNullOrWhiteSpace(remoteSessionId))
+        using var initializeResponse = await SendRemoteJsonRpcAsync(
+            initializePayload,
+            PreferredLegacyProtocolVersion,
+            requireSession: false,
+            cancellationToken);
+        if (initializeResponse.RootElement.TryGetProperty("error", out var error))
         {
             throw new RemoteMcpRequestException(
-                "Remote ContextHub MCP initialize did not return Mcp-Session-Id.",
+                $"Remote ContextHub MCP initialize failed: {TrimForError(error.GetRawText())}",
                 canReconnectRetry: false);
         }
+
+        remoteProtocolMode = RemoteProtocolMode.Legacy;
+        remoteProtocolVersion = ReadNegotiatedLegacyVersion(initializeResponse.RootElement);
+        logger.Log($"negotiated legacy remote MCP protocol {remoteProtocolVersion}" +
+            (string.IsNullOrWhiteSpace(remoteSessionId) ? " without a transport session" : " with a transport session"));
     }
 
     private async Task<JsonDocument> SendRemoteJsonRpcAsync(
         JsonObject payload,
+        string protocolVersion,
         bool requireSession,
         CancellationToken cancellationToken)
     {
@@ -242,7 +310,11 @@ public sealed class RemoteMcpClient
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Token);
             request.Headers.Accept.ParseAdd("application/json");
             request.Headers.Accept.ParseAdd("text/event-stream");
-            request.Headers.Add("MCP-Protocol-Version", "2025-06-18");
+            request.Headers.Add("MCP-Protocol-Version", protocolVersion);
+            if (string.Equals(protocolVersion, ModernProtocolVersion, StringComparison.Ordinal))
+            {
+                AddModernRoutingHeaders(request, payload);
+            }
             if (requireSession && !string.IsNullOrWhiteSpace(remoteSessionId))
             {
                 request.Headers.Add("Mcp-Session-Id", remoteSessionId);
@@ -261,7 +333,8 @@ public sealed class RemoteMcpClient
                 throw CreateStatusException((int)response.StatusCode, content);
             }
 
-            if (string.IsNullOrWhiteSpace(remoteSessionId) &&
+            if (!string.Equals(protocolVersion, ModernProtocolVersion, StringComparison.Ordinal) &&
+                string.IsNullOrWhiteSpace(remoteSessionId) &&
                 response.Headers.TryGetValues("Mcp-Session-Id", out var sessionValues))
             {
                 remoteSessionId = sessionValues.FirstOrDefault();
@@ -312,14 +385,105 @@ public sealed class RemoteMcpClient
         return new RemoteMcpRequestException(message, canReconnectRetry, statusCode);
     }
 
-    private void ClearRemoteSession()
+    private void ClearRemoteProtocol()
     {
         if (!string.IsNullOrWhiteSpace(remoteSessionId))
         {
-            logger.Log("clearing remote MCP session id before reconnect");
+            logger.Log("clearing legacy remote MCP session id before reconnect");
         }
 
+        remoteProtocolMode = RemoteProtocolMode.Unknown;
+        remoteProtocolVersion = null;
         remoteSessionId = null;
+    }
+
+    private static JsonObject CreateModernRequestMeta()
+        => new()
+        {
+            ["io.modelcontextprotocol/protocolVersion"] = ModernProtocolVersion,
+            ["io.modelcontextprotocol/clientInfo"] = new JsonObject
+            {
+                ["name"] = "ContextHub.McpStdioBridge",
+                ["version"] = BridgeOptions.BridgeVersion
+            },
+            ["io.modelcontextprotocol/clientCapabilities"] = new JsonObject()
+        };
+
+    private static void AddModernRoutingHeaders(HttpRequestMessage request, JsonObject payload)
+    {
+        if (payload["method"]?.GetValue<string>() is not { Length: > 0 } method)
+        {
+            return;
+        }
+
+        request.Headers.Add("Mcp-Method", EncodeRoutingHeaderValue(method));
+        if (GetModernRoutingName(method, payload["params"] as JsonObject) is { Length: > 0 } name)
+        {
+            request.Headers.Add("Mcp-Name", EncodeRoutingHeaderValue(name));
+        }
+    }
+
+    private static string? GetModernRoutingName(string method, JsonObject? parameters)
+        => method switch
+        {
+            "resources/read" => parameters?["uri"]?.GetValue<string>(),
+            "prompts/get" or "tools/call" => parameters?["name"]?.GetValue<string>(),
+            _ => null
+        };
+
+    private static string EncodeRoutingHeaderValue(string value)
+    {
+        var requiresEncoding = value.Length > 0 &&
+            (char.IsWhiteSpace(value[0]) ||
+             char.IsWhiteSpace(value[^1]) ||
+             value.StartsWith("=?base64?", StringComparison.OrdinalIgnoreCase) ||
+             value.Any(character => character is < '\u0020' or > '\u007e'));
+
+        return requiresEncoding
+            ? $"=?base64?{Convert.ToBase64String(Encoding.UTF8.GetBytes(value))}?="
+            : value;
+    }
+
+    private static bool SupportsModernProtocol(JsonElement response)
+    {
+        if (!response.TryGetProperty("result", out var result) ||
+            !result.TryGetProperty("supportedVersions", out var versions) ||
+            versions.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        return versions.EnumerateArray().Any(version =>
+            version.ValueKind == JsonValueKind.String &&
+            string.Equals(version.GetString(), ModernProtocolVersion, StringComparison.Ordinal));
+    }
+
+    private static bool IsLegacyDiscoveryResponse(JsonElement response)
+    {
+        if (!response.TryGetProperty("error", out var error))
+        {
+            return response.TryGetProperty("result", out _);
+        }
+
+        return error.TryGetProperty("code", out var code) &&
+               code.TryGetInt32(out var value) &&
+               value is -32020 or -32601 or -32602;
+    }
+
+    private static bool CanFallbackToLegacy(RemoteMcpRequestException exception)
+        => exception.StatusCode is 400 or 404 or 405;
+
+    private static string ReadNegotiatedLegacyVersion(JsonElement response)
+    {
+        if (response.TryGetProperty("result", out var result) &&
+            result.TryGetProperty("protocolVersion", out var protocolVersion) &&
+            protocolVersion.ValueKind == JsonValueKind.String &&
+            protocolVersion.GetString() is { Length: > 0 } value)
+        {
+            return value;
+        }
+
+        return PreferredLegacyProtocolVersion;
     }
 
     private static string ExtractJsonPayload(string content)
@@ -366,4 +530,11 @@ public sealed class RemoteMcpClient
 
     private static string TrimForError(string value)
         => value.Length <= 500 ? value : value[..500];
+
+    private enum RemoteProtocolMode
+    {
+        Unknown,
+        Modern,
+        Legacy
+    }
 }

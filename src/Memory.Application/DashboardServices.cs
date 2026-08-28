@@ -600,9 +600,10 @@ public sealed class DashboardQueryService(
 
     public async Task<PagedResult<JobListItemResult>> GetJobsAsync(JobListRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         var normalized = Normalize(request.Page, request.PageSize, 100);
         var normalizedRequest = request with { Page = normalized.Page, PageSize = normalized.PageSize };
-        if (!request.Status.HasValue && !request.JobType.HasValue && normalized.Page == 1)
+        if (!actor.HasUser && !request.Status.HasValue && !request.JobType.HasValue && normalized.Page == 1)
         {
             var snapshot = await snapshotStore.GetAsync<DashboardJobsSnapshotPayload>(
                 DashboardSnapshotKeys.DashboardJobs,
@@ -619,16 +620,19 @@ public sealed class DashboardQueryService(
 
         var jobVersion = await cacheStore.GetJobVersionAsync(cancellationToken);
         var cacheKey = RedisCacheKeyBuilder.DashboardJobs(jobVersion, normalizedRequest);
-        var cached = await objectCache.GetAsync<PagedResult<JobListItemResult>>(
-            cacheKey,
-            "dashboard-jobs",
-            cancellationToken);
-        if (cached.Hit && cached.Value is not null)
+        if (!actor.HasUser)
         {
-            return cached.Value;
+            var cached = await objectCache.GetAsync<PagedResult<JobListItemResult>>(
+                cacheKey,
+                "dashboard-jobs",
+                cancellationToken);
+            if (cached.Hit && cached.Value is not null)
+            {
+                return cached.Value;
+            }
         }
 
-        var query = dbContext.MemoryJobs.AsNoTracking().AsQueryable();
+        var query = dbContext.MemoryJobs.AsNoTracking().ForActor(actor);
 
         if (request.Status.HasValue)
         {
@@ -658,7 +662,10 @@ public sealed class DashboardQueryService(
             .ToListAsync(cancellationToken);
 
         var result = new PagedResult<JobListItemResult>(items, normalized.Page, normalized.PageSize, totalCount);
-        await objectCache.SetAsync(cacheKey, "dashboard-jobs", result, TimeSpan.FromSeconds(15), cancellationToken);
+        if (!actor.HasUser)
+        {
+            await objectCache.SetAsync(cacheKey, "dashboard-jobs", result, TimeSpan.FromSeconds(15), cancellationToken);
+        }
         return result;
     }
 

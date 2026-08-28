@@ -23,7 +23,7 @@ public sealed class SuggestedActionService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var projectId = ProjectContext.Normalize(request.ProjectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-        var query = dbContext.SuggestedActions.AsNoTracking().Where(x => x.ProjectId == projectId);
+        var query = dbContext.SuggestedActions.AsNoTracking().ForActor(actor).Where(x => x.ProjectId == projectId);
 
         if (request.Status.HasValue)
         {
@@ -48,6 +48,7 @@ public sealed class SuggestedActionService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var entity = await dbContext.SuggestedActions
+            .ForActor(actor)
             .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new InvalidOperationException($"Suggested action '{id}' was not found.");
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
@@ -95,7 +96,9 @@ public sealed class SuggestedActionService(
                 case SuggestedActionType.ReviewConflictCandidate:
                     if (TryReadString(payload, "findingId") is { } findingKey)
                     {
-                        var finding = await dbContext.GovernanceFindings.FirstOrDefaultAsync(x => x.DedupKey == findingKey, cancellationToken);
+                        var finding = await dbContext.GovernanceFindings
+                            .ForActor(actor)
+                            .FirstOrDefaultAsync(x => x.DedupKey == findingKey, cancellationToken);
                         if (finding is not null)
                         {
                             if (entity.Type == SuggestedActionType.MergeDuplicateCandidate)
@@ -140,6 +143,7 @@ public sealed class SuggestedActionService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var entity = await dbContext.SuggestedActions
+            .ForActor(actor)
             .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new InvalidOperationException($"Suggested action '{id}' was not found.");
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
@@ -167,6 +171,8 @@ public sealed class SuggestedActionService(
     {
         var job = new MemoryJob
         {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
             ProjectId = projectId,
             JobType = jobType,
             Status = MemoryJobStatus.Pending,
@@ -179,7 +185,9 @@ public sealed class SuggestedActionService(
 
     private async Task ArchiveMemoryAsync(Guid id, CancellationToken cancellationToken)
     {
-        var entity = await dbContext.MemoryItems.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+        var entity = await dbContext.MemoryItems
+            .ForActor(actorAccessor.Current)
+            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
         if (entity is null || entity.Status == MemoryStatus.Archived)
         {
             return;

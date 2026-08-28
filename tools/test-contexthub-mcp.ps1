@@ -29,20 +29,36 @@ function Get-ContextHubToken {
 }
 
 function New-McpHeaders {
-    param([string]$Token, [string]$SessionId)
+    param(
+        [string]$Token,
+        [string]$Method,
+        [string]$Name
+    )
 
     $headers = @{
         Authorization = "Bearer $Token"
         Accept = "application/json, text/event-stream"
         "Content-Type" = "application/json"
-        "MCP-Protocol-Version" = "2025-06-18"
+        "MCP-Protocol-Version" = "2026-07-28"
+        "Mcp-Method" = $Method
     }
 
-    if ($SessionId) {
-        $headers["Mcp-Session-Id"] = $SessionId
+    if ($Name) {
+        $headers["Mcp-Name"] = $Name
     }
 
     return $headers
+}
+
+function New-ModernMcpMeta {
+    return @{
+        "io.modelcontextprotocol/protocolVersion" = "2026-07-28"
+        "io.modelcontextprotocol/clientInfo" = @{
+            name = "contexthub-diagnostics"
+            version = "1.0"
+        }
+        "io.modelcontextprotocol/clientCapabilities" = @{}
+    }
 }
 
 function Invoke-McpJsonRpc {
@@ -202,15 +218,15 @@ function Read-SseDataJson {
     param([string]$Content)
 
     $line = $Content -split "(`r`n|`n|`r)" | Where-Object { $_ -like "data: *" } | Select-Object -First 1
-    if (-not $line) {
-        throw "MCP response did not contain an SSE data line."
+    if ($line) {
+        return $line.Substring(6) | ConvertFrom-Json
     }
 
-    return $line.Substring(6) | ConvertFrom-Json
+    return $Content | ConvertFrom-Json
 }
 
 $token = Get-ContextHubToken
-$baseHeaders = New-McpHeaders -Token $token
+$baseHeaders = New-McpHeaders -Token $token -Method "server/discover"
 
 Write-Host "1/7 codex mcp get contexthub"
 codex mcp get contexthub
@@ -235,37 +251,36 @@ if (-not $unauthResponse.Headers["CF-RAY"]) {
 Assert-NoBrowserChallenge -Response $unauthResponse
 Write-Host "Unauthenticated request returned 401 with Cache-Control no-store and CF-Cache-Status $cfCacheStatus."
 
-Write-Host "4/7 initialize MCP session"
+Write-Host "4/7 discover MCP 2026-07-28 stateless capabilities"
 $initPayload = @{
     jsonrpc = "2.0"
     id = 1
-    method = "initialize"
+    method = "server/discover"
     params = @{
-        protocolVersion = "2025-06-18"
-        capabilities = @{}
-        clientInfo = @{
-            name = "contexthub-diagnostics"
-            version = "1.0"
-        }
+        _meta = New-ModernMcpMeta
     }
 }
 $initResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $baseHeaders -Payload $initPayload
-$sessionId = [string]$initResponse.Headers["Mcp-Session-Id"]
-if (-not $sessionId) {
-    throw "MCP initialize did not return Mcp-Session-Id."
-}
 $initJson = Read-SseDataJson -Content $initResponse.Content
-Write-Host "Initialized $($initJson.result.serverInfo.name) $($initJson.result.serverInfo.version)."
+if (@($initJson.result.supportedVersions) -notcontains "2026-07-28") {
+    throw "MCP server/discover did not advertise 2026-07-28."
+}
+if ($initResponse.Headers["Mcp-Session-Id"]) {
+    throw "Modern MCP discovery must not return Mcp-Session-Id."
+}
+Write-Host "MCP 2026-07-28 discovery succeeded."
 
 Write-Host "5/7 tools/list should expose ContextHub tools"
-$sessionHeaders = New-McpHeaders -Token $token -SessionId $sessionId
+$toolsHeaders = New-McpHeaders -Token $token -Method "tools/list"
 $toolsPayload = @{
     jsonrpc = "2.0"
     id = 2
     method = "tools/list"
-    params = @{}
+    params = @{
+        _meta = New-ModernMcpMeta
+    }
 }
-$toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload $toolsPayload
+$toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $toolsHeaders -Payload $toolsPayload
 $toolsJson = Read-SseDataJson -Content $toolsResponse.Content
 $toolNames = @($toolsJson.result.tools | ForEach-Object { $_.name })
 foreach ($requiredTool in @("memory_search", "build_working_context", "conversation_ingest")) {
@@ -282,6 +297,7 @@ $contextPayload = @{
     method = "tools/call"
     params = @{
         name = "build_working_context"
+        _meta = New-ModernMcpMeta
         arguments = @{
             request = @{
                 projectId = $ProjectId
@@ -292,7 +308,8 @@ $contextPayload = @{
         }
     }
 }
-$contextResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload $contextPayload
+$contextHeaders = New-McpHeaders -Token $token -Method "tools/call" -Name "build_working_context"
+$contextResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $contextHeaders -Payload $contextPayload
 $contextJson = Read-SseDataJson -Content $contextResponse.Content
 $contextText = [string]$contextJson.result.content[0].text
 if ($contextText -notmatch "userPreferences|facts|decisions|recentLogs") {

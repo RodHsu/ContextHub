@@ -661,6 +661,8 @@ public sealed class LogIngestionCheckpoint
 public sealed class SourceConnection
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ProjectId { get; set; } = "default";
     public string Name { get; set; } = string.Empty;
     public SourceKind SourceKind { get; set; }
@@ -696,6 +698,8 @@ public sealed class SourceSyncRun
 public sealed class GovernanceFinding
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ProjectId { get; set; } = "default";
     public Guid? SourceConnectionId { get; set; }
     public Guid? PrimaryMemoryId { get; set; }
@@ -718,6 +722,8 @@ public sealed class GovernanceFinding
 public sealed class EvaluationSuite
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ProjectId { get; set; } = "default";
     public string Name { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
@@ -787,6 +793,8 @@ public sealed class EvaluationRunItem
 public sealed class SuggestedAction
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public string ProjectId { get; set; } = "default";
     public SuggestedActionType Type { get; set; }
     public SuggestedActionStatus Status { get; set; } = SuggestedActionStatus.Pending;

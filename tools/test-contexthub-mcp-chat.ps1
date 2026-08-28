@@ -50,20 +50,36 @@ function Get-OptionalBearerToken {
 }
 
 function New-McpHeaders {
-    param([string]$Token, [string]$SessionId)
+    param(
+        [string]$Token,
+        [string]$Method,
+        [string]$Name
+    )
 
     $headers = @{
         Authorization = "Bearer $Token"
         Accept = "application/json, text/event-stream"
         "Content-Type" = "application/json"
-        "MCP-Protocol-Version" = "2025-06-18"
+        "MCP-Protocol-Version" = "2026-07-28"
+        "Mcp-Method" = $Method
     }
 
-    if ($SessionId) {
-        $headers["Mcp-Session-Id"] = $SessionId
+    if ($Name) {
+        $headers["Mcp-Name"] = $Name
     }
 
     return $headers
+}
+
+function New-ModernMcpMeta {
+    return @{
+        "io.modelcontextprotocol/protocolVersion" = "2026-07-28"
+        "io.modelcontextprotocol/clientInfo" = @{
+            name = "contexthub-mcp-chat-diagnostics"
+            version = "1.0"
+        }
+        "io.modelcontextprotocol/clientCapabilities" = @{}
+    }
 }
 
 function ConvertTo-HeaderMap {
@@ -460,15 +476,33 @@ function Invoke-McpJsonRpc {
     Invoke-WebRequest -Uri $Endpoint -Method Post -Headers $Headers -Body $body -UseBasicParsing -TimeoutSec 45
 }
 
+function Invoke-ModernMcpJsonRpc {
+    param(
+        [string]$Endpoint,
+        [string]$Token,
+        [hashtable]$Payload
+    )
+
+    if (-not $Payload.params) {
+        $Payload.params = @{}
+    }
+
+    $Payload.params["_meta"] = New-ModernMcpMeta
+    $method = [string]$Payload.method
+    $name = [string]$Payload.params.name
+    $headers = New-McpHeaders -Token $Token -Method $method -Name $name
+    Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $headers -Payload $Payload
+}
+
 function Read-SseDataJson {
     param([string]$Content)
 
     $line = $Content -split "(`r`n|`n|`r)" | Where-Object { $_ -like "data: *" } | Select-Object -First 1
-    if (-not $line) {
-        throw "MCP response did not contain an SSE data line."
+    if ($line) {
+        return $line.Substring(6) | ConvertFrom-Json
     }
 
-    return $line.Substring(6) | ConvertFrom-Json
+    return $Content | ConvertFrom-Json
 }
 
 function Assert-HeaderContains {
@@ -716,7 +750,7 @@ if ([string]::IsNullOrWhiteSpace($token)) {
     return
 }
 
-$baseHeaders = New-McpHeaders -Token $token
+$baseHeaders = New-McpHeaders -Token $token -Method "server/discover"
 
 Write-Host "8/12 userinfo should accept the OAuth bearer token"
 $userInfoResponse = Invoke-WebRequestAllowError -Uri $UserInfoUrl -Method Get -Headers @{ Authorization = "Bearer $token"; Accept = "application/json" } -TimeoutSec 15
@@ -730,32 +764,32 @@ if (-not $userInfo.sub) {
     throw "Userinfo response must include sub."
 }
 
-Write-Host "9/12 initialize MCP chat gateway session"
+Write-Host "9/12 discover MCP chat gateway 2026-07-28 capabilities"
 $initResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $baseHeaders -Payload @{
     jsonrpc = "2.0"
     id = 1
-    method = "initialize"
+    method = "server/discover"
     params = @{
-        protocolVersion = "2025-06-18"
-        capabilities = @{}
-        clientInfo = @{
-            name = "contexthub-mcp-chat-diagnostics"
-            version = "1.0"
-        }
+        _meta = New-ModernMcpMeta
     }
 }
-$sessionId = [string]$initResponse.Headers["Mcp-Session-Id"]
-if (-not $sessionId) {
-    throw "MCP chat initialize did not return Mcp-Session-Id."
+$initJson = Read-SseDataJson -Content $initResponse.Content
+if (@($initJson.result.supportedVersions) -notcontains "2026-07-28") {
+    throw "MCP chat server/discover did not advertise 2026-07-28."
 }
-$sessionHeaders = New-McpHeaders -Token $token -SessionId $sessionId
+if ($initResponse.Headers["Mcp-Session-Id"]) {
+    throw "Modern MCP chat discovery must not return Mcp-Session-Id."
+}
 
 Write-Host "10/12 tools/list should expose only restricted chat gateway tools"
-$toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+$toolsHeaders = New-McpHeaders -Token $token -Method "tools/list"
+$toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $toolsHeaders -Payload @{
     jsonrpc = "2.0"
     id = 2
     method = "tools/list"
-    params = @{}
+    params = @{
+        _meta = New-ModernMcpMeta
+    }
 }
 $toolsJson = Read-SseDataJson -Content $toolsResponse.Content
 $toolNames = @($toolsJson.result.tools | ForEach-Object { $_.name })
@@ -831,7 +865,7 @@ foreach ($property in @("workItemId", "projectId", "governanceRunId", "reason"))
 Write-Host "Restricted tool allowlist verified ($($toolNames.Count) tools)."
 
 Write-Host "11/12 authorized read tools should work for allowed project"
-$contextResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+$contextResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
     jsonrpc = "2.0"
     id = 3
     method = "tools/call"
@@ -848,7 +882,7 @@ $contextResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeader
 $contextJson = Read-SseDataJson -Content $contextResponse.Content
 Assert-ToolCallSucceeded -Json $contextJson -ToolName "build_working_context"
 
-$searchResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+$searchResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
     jsonrpc = "2.0"
     id = 4
     method = "tools/call"
@@ -864,7 +898,7 @@ $searchResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders
 $searchJson = Read-SseDataJson -Content $searchResponse.Content
 Assert-ToolCallSucceeded -Json $searchJson -ToolName "memory_search"
 
-$dailyReviewResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+$dailyReviewResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
     jsonrpc = "2.0"
     id = 10
     method = "tools/call"
@@ -882,7 +916,7 @@ if ($SkipUnauthorizedProjectCheck) {
     Write-Warning "Unauthorized-project check skipped because this OAuth token has unrestricted project access."
 }
 else {
-    $deniedProjectResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+    $deniedProjectResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
         jsonrpc = "2.0"
         id = 5
         method = "tools/call"
@@ -899,7 +933,7 @@ else {
     Assert-ToolCallRejected -Json $deniedProjectJson -Scenario "unauthorized project '$UnauthorizedProjectId'"
 }
 
-$unknownToolResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+$unknownToolResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
     jsonrpc = "2.0"
     id = 6
     method = "tools/call"
@@ -921,7 +955,7 @@ if (-not $RunProposalSmoke) {
 
 Write-Host "Proposal smoke: proposal write should create pending proposal and allow rejection"
 $proposalKey = "mcp-chat-smoke-" + (Get-Date -Format "yyyyMMddHHmmss")
-$proposalResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+$proposalResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
     jsonrpc = "2.0"
     id = 7
     method = "tools/call"
@@ -952,7 +986,7 @@ Assert-ToolCallSucceeded -Json $proposalJson -ToolName "memory_upsert proposal"
 $proposalText = @($proposalJson.result.content | ForEach-Object { $_.text }) -join "`n"
 $proposalId = [regex]::Match($proposalText, "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").Value
 if (-not $proposalId) {
-    $proposalListResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+    $proposalListResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
         jsonrpc = "2.0"
         id = 8
         method = "tools/call"
@@ -977,7 +1011,7 @@ if (-not $proposalId) {
     throw "Could not resolve pending proposal id for '$proposalKey'."
 }
 
-$rejectResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+$rejectResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
     jsonrpc = "2.0"
     id = 9
     method = "tools/call"

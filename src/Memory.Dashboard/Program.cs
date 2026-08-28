@@ -12,12 +12,14 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http.Json;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using Pgvector.EntityFrameworkCore;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 LocalDotEnvConfiguration.AddFallbacks(
@@ -43,11 +45,26 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
                                ForwardedHeaders.XForwardedHost |
                                ForwardedHeaders.XForwardedProto;
-    options.KnownIPNetworks.Clear();
-    options.KnownProxies.Clear();
+    options.ForwardLimit = 1;
+    options.RequireHeaderSymmetry = true;
+    AddTrustedForwarders(options, builder.Configuration);
 });
 
 builder.Services.AddProblemDetails();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    var loginPermitLimit = useBrowserTestDoubles || builder.Environment.IsEnvironment("Testing") ? 10_000 : 10;
+    options.AddPolicy("dashboard-login", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = loginPermitLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+});
 builder.Services.AddOptions<DashboardOptions>()
     .Bind(builder.Configuration.GetSection(DashboardOptions.SectionName))
     .PostConfigure(options =>
@@ -152,6 +169,8 @@ var app = builder.Build();
 await ValidateProductionDashboardCredentialsAsync(app.Services, app.Environment, CancellationToken.None);
 
 app.UseForwardedHeaders();
+app.UseRouting();
+app.UseRateLimiter();
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
@@ -224,7 +243,7 @@ app.MapGet("/health/ready", async (HttpContext context, IOptions<DashboardOption
     }
 });
 
-app.MapPost("/account/login", async (
+var loginEndpoint = app.MapPost("/account/login", async (
     [FromForm] DashboardLoginForm form,
     HttpContext context,
     IInstanceSettingsService instanceSettingsService,
@@ -286,6 +305,10 @@ app.MapPost("/account/login", async (
 
     return await SignInLegacyAdminAsync(context, settings, form.ReturnUrl);
 });
+if (!useBrowserTestDoubles && !builder.Environment.IsEnvironment("Testing"))
+{
+    loginEndpoint.RequireRateLimiting("dashboard-login");
+}
 
 app.MapPost("/account/logout", async (HttpContext context) =>
 {
@@ -493,6 +516,39 @@ string NormalizeUserReturnUrl(string returnUrl)
     => returnUrl is "/memories" or "/graph" or "/preferences" or "/account/tokens"
         ? returnUrl
         : "/memories";
+
+static void AddTrustedForwarders(ForwardedHeadersOptions options, IConfiguration configuration)
+{
+    foreach (var value in configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            continue;
+        }
+
+        if (!System.Net.IPAddress.TryParse(value, out var address))
+        {
+            throw new InvalidOperationException($"ForwardedHeaders:KnownProxies contains invalid IP address '{value}'.");
+        }
+
+        options.KnownProxies.Add(address);
+    }
+
+    foreach (var value in configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            continue;
+        }
+
+        if (!System.Net.IPNetwork.TryParse(value, out var network))
+        {
+            throw new InvalidOperationException($"ForwardedHeaders:KnownNetworks contains invalid CIDR '{value}'.");
+        }
+
+        options.KnownIPNetworks.Add(network);
+    }
+}
 
 public partial class Program;
 

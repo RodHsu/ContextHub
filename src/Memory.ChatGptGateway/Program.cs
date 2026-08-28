@@ -7,12 +7,14 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using System.Text.Json.Serialization;
 using System.Net;
 using System.Security.Claims;
 using System.Text;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,11 +24,19 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
                                ForwardedHeaders.XForwardedHost |
                                ForwardedHeaders.XForwardedProto;
-    options.KnownIPNetworks.Clear();
-    options.KnownProxies.Clear();
+    options.ForwardLimit = 1;
+    options.RequireHeaderSymmetry = true;
+    AddTrustedForwarders(options, builder.Configuration);
 });
 
 builder.Services.AddProblemDetails();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("oauth-login", context => FixedWindowByRemoteIp(context, 10, TimeSpan.FromMinutes(1)));
+    options.AddPolicy("oauth-register", context => FixedWindowByRemoteIp(context, 10, TimeSpan.FromHours(1)));
+    options.AddPolicy("oauth-token", context => FixedWindowByRemoteIp(context, 60, TimeSpan.FromMinutes(1)));
+});
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IPasswordHasher<object>, PasswordHasher<object>>();
@@ -39,6 +49,12 @@ builder.Services.AddSingleton<PostgresOAuthClientStore>();
 builder.Services.AddSingleton<PostgresOAuthTokenStateStore>();
 
 var gatewayOptions = builder.Configuration.GetSection("ChatGptGateway").Get<ChatGptGatewayOptions>() ?? new ChatGptGatewayOptions();
+if (builder.Environment.IsProduction())
+{
+    RequireAbsoluteHttpsUrl(gatewayOptions.PublicMcpUrl, "ChatGptGateway:PublicMcpUrl");
+    RequireAbsoluteHttpsUrl(gatewayOptions.PublicResourceMetadataUrl, "ChatGptGateway:PublicResourceMetadataUrl");
+}
+
 var rsaSigningCredentials = gatewayOptions.OAuth.SelfHosted && !string.IsNullOrWhiteSpace(gatewayOptions.OAuth.SelfHostedRsaPrivateKey)
     ? new SelfHostedOAuthSigningCredentials(builder.Configuration)
     : null;
@@ -107,7 +123,7 @@ else
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<ChatGptGatewayTools>();
 builder.Services.AddMcpServer()
-    .WithHttpTransport()
+    .WithHttpTransport(options => options.Stateless = true)
     .WithTools<ChatGptGatewayTools>()
     .WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult
     {
@@ -115,8 +131,25 @@ builder.Services.AddMcpServer()
     }));
 
 var app = builder.Build();
+var allowedMcpOrigins = ResolveAllowedOrigins(
+    builder.Configuration.GetSection("ChatGptGateway:AllowedMcpOrigins").Get<string[]>(),
+    gatewayOptions.PublicMcpUrl);
 
 app.UseForwardedHeaders();
+app.UseRouting();
+app.UseRateLimiter();
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) &&
+        !IsAllowedMcpOrigin(context.Request, allowedMcpOrigins))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsync("Forbidden MCP Origin.", context.RequestAborted);
+        return;
+    }
+
+    await next();
+});
 app.Use(async (context, next) =>
 {
     if (IsChatGptOAuthCorsPath(context.Request.Path))
@@ -250,7 +283,7 @@ app.MapGet("/oauth/chat/authorize", async (
     }
 
     return Results.Content(RenderOAuthLogin(validation.Request, string.Empty), "text/html", Encoding.UTF8);
-}).AllowAnonymous();
+}).AllowAnonymous().RequireRateLimiting("oauth-login");
 
 app.MapPost("/oauth/chat/authorize", async (
     HttpContext context,
@@ -274,7 +307,7 @@ app.MapPost("/oauth/chat/authorize", async (
     }
 
     return Results.Redirect(result.RedirectUri, permanent: false, preserveMethod: false);
-}).AllowAnonymous();
+}).AllowAnonymous().RequireRateLimiting("oauth-login");
 
 app.MapPost("/oauth/chat/register", async (
     HttpContext context,
@@ -304,7 +337,7 @@ app.MapPost("/oauth/chat/register", async (
     }
 
     return Results.Json(result.Registration, statusCode: StatusCodes.Status201Created);
-}).AllowAnonymous();
+}).AllowAnonymous().RequireRateLimiting("oauth-register");
 
 app.MapPost("/oauth/chat/token", async (
     HttpContext context,
@@ -348,13 +381,104 @@ app.MapPost("/oauth/chat/token", async (
         "Bearer",
         result.ExpiresIn,
         result.Scope));
-}).AllowAnonymous();
+}).AllowAnonymous().RequireRateLimiting("oauth-token");
 
 app.MapGet("/userinfo", (ClaimsPrincipal user) => Results.Json(CreateUserInfo(user))).RequireAuthorization();
 
 app.MapMcp("/mcp").RequireAuthorization();
 
 app.Run();
+
+static RateLimitPartition<string> FixedWindowByRemoteIp(
+    HttpContext context,
+    int permitLimit,
+    TimeSpan window)
+    => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = permitLimit,
+            Window = window,
+            QueueLimit = 0,
+            AutoReplenishment = true
+        });
+
+static void AddTrustedForwarders(ForwardedHeadersOptions options, IConfiguration configuration)
+{
+    foreach (var value in configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            continue;
+        }
+
+        if (!IPAddress.TryParse(value, out var address))
+        {
+            throw new InvalidOperationException($"ForwardedHeaders:KnownProxies contains invalid IP address '{value}'.");
+        }
+
+        options.KnownProxies.Add(address);
+    }
+
+    foreach (var value in configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            continue;
+        }
+
+        if (!System.Net.IPNetwork.TryParse(value, out var network))
+        {
+            throw new InvalidOperationException($"ForwardedHeaders:KnownNetworks contains invalid CIDR '{value}'.");
+        }
+
+        options.KnownIPNetworks.Add(network);
+    }
+}
+
+static HashSet<string> ResolveAllowedOrigins(IEnumerable<string>? configuredValues, params string[] publicUrls)
+{
+    var origins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var value in (configuredValues ?? []).Concat(publicUrls))
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            continue;
+        }
+
+        if (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp) ||
+            !string.IsNullOrEmpty(uri.UserInfo))
+        {
+            throw new InvalidOperationException($"ChatGptGateway MCP origin configuration contains invalid URL '{value}'.");
+        }
+
+        origins.Add(uri.GetLeftPart(UriPartial.Authority));
+    }
+
+    return origins;
+}
+
+static bool IsAllowedMcpOrigin(HttpRequest request, IReadOnlySet<string> allowedOrigins)
+{
+    if (!request.Headers.TryGetValue("Origin", out var values))
+    {
+        return true;
+    }
+
+    if (values.Count != 1 ||
+        !Uri.TryCreate(values[0], UriKind.Absolute, out var origin) ||
+        (origin.Scheme != Uri.UriSchemeHttps && origin.Scheme != Uri.UriSchemeHttp) ||
+        !string.IsNullOrEmpty(origin.UserInfo) ||
+        origin.AbsolutePath != "/" ||
+        !string.IsNullOrEmpty(origin.Query) ||
+        !string.IsNullOrEmpty(origin.Fragment))
+    {
+        return false;
+    }
+
+    return allowedOrigins.Contains(origin.GetLeftPart(UriPartial.Authority));
+}
 
 static bool IsPublicPath(PathString path)
 {
@@ -428,6 +552,17 @@ static string Required(string value, string key)
     => string.IsNullOrWhiteSpace(value)
         ? throw new InvalidOperationException($"{key} is required when ChatGptGateway:OAuth:TestMode is false.")
         : value.Trim();
+
+static void RequireAbsoluteHttpsUrl(string? value, string key)
+{
+    if (string.IsNullOrWhiteSpace(value) ||
+        !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
+        !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+        string.IsNullOrWhiteSpace(uri.Host))
+    {
+        throw new InvalidOperationException($"{key} must be an absolute HTTPS URL in Production.");
+    }
+}
 
 static string[] ResolveSelfHostedAudiences(ChatGptGatewayOptions options)
 {

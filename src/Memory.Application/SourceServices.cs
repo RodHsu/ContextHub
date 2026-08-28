@@ -11,15 +11,19 @@ public sealed class SourceConnectionService(
     IApplicationDbContext dbContext,
     IClock clock,
     IBackgroundJobQueue jobQueue,
-    ISecretProtector secretProtector) : ISourceConnectionService
+    ISecretProtector secretProtector,
+    IRequestActorAccessor actorAccessor) : ISourceConnectionService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<IReadOnlyList<SourceConnectionResult>> ListAsync(SourceListRequest request, CancellationToken cancellationToken)
     {
         var projectId = ProjectContext.Normalize(request.ProjectId);
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
         var query = dbContext.SourceConnections
             .AsNoTracking()
+            .ForActor(actor)
             .Where(x => x.ProjectId == projectId);
 
         if (request.Enabled.HasValue)
@@ -40,10 +44,13 @@ public sealed class SourceConnectionService(
 
     public async Task<SourceConnectionResult> CreateAsync(SourceConnectionCreateRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         ValidateJson(request.ConfigJson, "ConfigJson");
 
         var entity = new SourceConnection
         {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
             ProjectId = ProjectContext.Normalize(request.ProjectId),
             Name = request.Name.Trim(),
             SourceKind = request.SourceKind,
@@ -56,6 +63,7 @@ public sealed class SourceConnectionService(
             UpdatedAt = clock.UtcNow
         };
 
+        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
         ValidateSourceConfig(entity.SourceKind, entity.ConfigJson);
         await dbContext.SourceConnections.AddAsync(entity, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -64,7 +72,9 @@ public sealed class SourceConnectionService(
 
     public async Task<SourceConnectionResult> UpdateAsync(SourceConnectionUpdateRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         var entity = await dbContext.SourceConnections
+            .ForActor(actor)
             .FirstOrDefaultAsync(x => x.Id == request.Id, cancellationToken)
             ?? throw new InvalidOperationException($"Source connection '{request.Id}' was not found.");
 
@@ -97,6 +107,7 @@ public sealed class SourceConnectionService(
         }
 
         ValidateSourceConfig(entity.SourceKind, entity.ConfigJson);
+        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
         entity.UpdatedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
         return Map(entity);
@@ -104,8 +115,10 @@ public sealed class SourceConnectionService(
 
     public async Task<EnqueueSourceSyncResult> EnqueueSyncAsync(SourceSyncRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         var source = await dbContext.SourceConnections
             .AsNoTracking()
+            .ForActor(actor)
             .FirstOrDefaultAsync(x => x.Id == request.SourceConnectionId, cancellationToken)
             ?? throw new InvalidOperationException($"Source connection '{request.SourceConnectionId}' was not found.");
 
@@ -114,6 +127,8 @@ public sealed class SourceConnectionService(
             JsonOptions);
         var job = new MemoryJob
         {
+            TenantId = source.TenantId,
+            OwnerUserId = source.OwnerUserId,
             ProjectId = source.ProjectId,
             JobType = MemoryJobType.SyncSource,
             Status = MemoryJobStatus.Pending,
@@ -127,10 +142,14 @@ public sealed class SourceConnectionService(
 
     public async Task<IReadOnlyList<SourceSyncRunResult>> ListRunsAsync(Guid sourceConnectionId, string? projectId, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         var normalizedProjectId = projectId is null ? null : ProjectContext.Normalize(projectId);
         var query = dbContext.SourceSyncRuns
             .AsNoTracking()
-            .Where(x => x.SourceConnectionId == sourceConnectionId);
+            .Where(x => x.SourceConnectionId == sourceConnectionId)
+            .Where(x => dbContext.SourceConnections
+                .ForActor(actor)
+                .Any(source => source.Id == x.SourceConnectionId));
 
         if (normalizedProjectId is not null)
         {
@@ -237,7 +256,8 @@ public sealed class SourceSyncService(
     ICacheVersionStore cacheStore,
     IBackgroundJobQueue jobQueue,
     IClock clock,
-    ISecretProtector secretProtector) : ISourceSyncService
+    ISecretProtector secretProtector,
+    IRequestActorAccessor actorAccessor) : ISourceSyncService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly string[] DefaultRepoExtensions = [".cs", ".md", ".json", ".yml", ".yaml", ".sql"];
@@ -246,11 +266,13 @@ public sealed class SourceSyncService(
     public async Task ProcessSyncJobAsync(Guid jobId, CancellationToken cancellationToken)
     {
         var job = await dbContext.MemoryJobs
+            .ForActor(actorAccessor.Current)
             .FirstOrDefaultAsync(x => x.Id == jobId, cancellationToken)
             ?? throw new InvalidOperationException($"Sync job '{jobId}' was not found.");
         var payload = JsonSerializer.Deserialize<SyncSourceJobPayload>(job.PayloadJson, JsonOptions)
             ?? throw new InvalidOperationException("Sync source job payload is invalid.");
         var source = await dbContext.SourceConnections
+            .ForActor(actorAccessor.Current)
             .FirstOrDefaultAsync(x => x.Id == payload.SourceConnectionId, cancellationToken)
             ?? throw new InvalidOperationException($"Source connection '{payload.SourceConnectionId}' was not found.");
 
@@ -569,6 +591,7 @@ public sealed class SourceSyncService(
         CancellationToken cancellationToken)
     {
         var entity = await dbContext.MemoryItems
+            .ForActor(actorAccessor.Current)
             .FirstOrDefaultAsync(x => x.ProjectId == source.ProjectId && x.ExternalKey == externalKey, cancellationToken);
         var created = entity is null;
         var changed = created;
@@ -577,6 +600,8 @@ public sealed class SourceSyncService(
         {
             entity = new MemoryItem
             {
+                TenantId = source.TenantId,
+                OwnerUserId = source.OwnerUserId,
                 ProjectId = source.ProjectId,
                 ExternalKey = externalKey,
                 Scope = scope,
@@ -669,6 +694,7 @@ public sealed class SourceSyncService(
     {
         var marker = $"\"connectorId\":\"{source.Id}\"";
         var existing = await dbContext.MemoryItems
+            .ForActor(actorAccessor.Current)
             .Where(x => x.ProjectId == source.ProjectId)
             .Where(x => x.SourceType == source.SourceKind.ToString())
             .Where(x => x.MetadataJson.Contains(marker))
@@ -707,6 +733,8 @@ public sealed class SourceSyncService(
     {
         await jobQueue.EnqueueAsync(new MemoryJob
         {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
             ProjectId = projectId,
             JobType = jobType,
             Status = MemoryJobStatus.Pending,

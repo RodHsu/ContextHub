@@ -150,6 +150,7 @@ public sealed class MemoryApplicationFactory(string postgresConnectionString, st
         builder.UseSetting("ContextHub:Security:BootstrapTenantSlug", "contract-tests");
         builder.UseSetting("ContextHub:Security:BootstrapUsername", "contract-test-admin");
         builder.UseSetting("ContextHub:Security:BootstrapAllowedProjectIds", ProjectContext.AllProjectIdsSentinel);
+        builder.UseSetting("ContextHub:Security:AllowedMcpOrigins:0", "https://trusted-mcp.example.test");
         builder.ConfigureAppConfiguration((_, config) =>
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
@@ -167,7 +168,8 @@ public sealed class MemoryApplicationFactory(string postgresConnectionString, st
                 ["ContextHub:Security:BootstrapToken"] = TestBootstrapToken,
                 ["ContextHub:Security:BootstrapTenantSlug"] = "contract-tests",
                 ["ContextHub:Security:BootstrapUsername"] = "contract-test-admin",
-                ["ContextHub:Security:BootstrapAllowedProjectIds"] = ProjectContext.AllProjectIdsSentinel
+                ["ContextHub:Security:BootstrapAllowedProjectIds"] = ProjectContext.AllProjectIdsSentinel,
+                ["ContextHub:Security:AllowedMcpOrigins:0"] = "https://trusted-mcp.example.test"
             });
         });
     }

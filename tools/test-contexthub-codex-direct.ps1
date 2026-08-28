@@ -34,20 +34,36 @@ function Get-ContextHubToken {
 }
 
 function Get-McpHeader {
-    param([string]$Token, [string]$SessionId)
+    param(
+        [string]$Token,
+        [string]$Method,
+        [string]$Name
+    )
 
     $headers = @{
         Authorization = "Bearer $Token"
         Accept = "application/json, text/event-stream"
         "Content-Type" = "application/json"
-        "MCP-Protocol-Version" = "2025-06-18"
+        "MCP-Protocol-Version" = "2026-07-28"
+        "Mcp-Method" = $Method
     }
 
-    if ($SessionId) {
-        $headers["Mcp-Session-Id"] = $SessionId
+    if ($Name) {
+        $headers["Mcp-Name"] = $Name
     }
 
     return $headers
+}
+
+function New-ModernMcpMeta {
+    return @{
+        "io.modelcontextprotocol/protocolVersion" = "2026-07-28"
+        "io.modelcontextprotocol/clientInfo" = @{
+            name = "contexthub-codex-direct-diagnostics"
+            version = "1.0"
+        }
+        "io.modelcontextprotocol/clientCapabilities" = @{}
+    }
 }
 
 function ConvertTo-HeaderMap {
@@ -140,11 +156,11 @@ function Read-SseDataJson {
     param([string]$Content)
 
     $line = $Content -split "(`r`n|`n|`r)" | Where-Object { $_ -like "data: *" } | Select-Object -First 1
-    if (-not $line) {
-        throw "MCP response did not contain an SSE data line."
+    if ($line) {
+        return $line.Substring(6) | ConvertFrom-Json
     }
 
-    return $line.Substring(6) | ConvertFrom-Json
+    return $Content | ConvertFrom-Json
 }
 
 function Invoke-McpJsonRpc {
@@ -199,7 +215,7 @@ function Assert-CodexMcpCallSucceeded {
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $token = Get-ContextHubToken
-$baseHeaders = Get-McpHeader -Token $token
+$baseHeaders = Get-McpHeader -Token $token -Method "server/discover"
 
 Write-Output "1/5 unauthenticated remote MCP should return 401 without browser challenge"
 $unauthResponse = Invoke-WebRequestAllowError -Uri $Endpoint -Method Get -TimeoutSec 15
@@ -209,32 +225,32 @@ if ([int]$unauthResponse.StatusCode -ne 401) {
 Assert-NoBrowserChallenge -Response $unauthResponse
 Write-Output "Remote MCP returned 401 as expected."
 
-Write-Output "2/5 raw remote MCP initialize and tools/list"
+Write-Output "2/5 raw remote MCP 2026-07-28 discovery and tools/list"
 $initPayload = @{
     jsonrpc = "2.0"
     id = 1
-    method = "initialize"
+    method = "server/discover"
     params = @{
-        protocolVersion = "2025-06-18"
-        capabilities = @{}
-        clientInfo = @{
-            name = "contexthub-codex-direct-diagnostics"
-            version = "1.0"
-        }
+        _meta = New-ModernMcpMeta
     }
 }
 $initResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $baseHeaders -Payload $initPayload
-$sessionId = [string]$initResponse.Headers["Mcp-Session-Id"]
-if (-not $sessionId) {
-    throw "MCP initialize did not return Mcp-Session-Id."
+$initJson = Read-SseDataJson -Content $initResponse.Content
+if (@($initJson.result.supportedVersions) -notcontains "2026-07-28") {
+    throw "Remote MCP server/discover did not advertise 2026-07-28."
 }
-$sessionHeaders = Get-McpHeader -Token $token -SessionId $sessionId
+if ($initResponse.Headers["Mcp-Session-Id"]) {
+    throw "Modern remote MCP discovery must not return Mcp-Session-Id."
+}
 
-$toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+$toolsHeaders = Get-McpHeader -Token $token -Method "tools/list"
+$toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $toolsHeaders -Payload @{
     jsonrpc = "2.0"
     id = 2
     method = "tools/list"
-    params = @{}
+    params = @{
+        _meta = New-ModernMcpMeta
+    }
 }
 $toolsJson = Read-SseDataJson -Content $toolsResponse.Content
 $toolNames = @($toolsJson.result.tools | ForEach-Object { $_.name })
@@ -246,12 +262,14 @@ foreach ($requiredTool in @("memory_search", "build_working_context", "conversat
 Write-Output "Raw remote MCP tools/list succeeded."
 
 Write-Output "3/5 raw remote MCP build_working_context"
-$contextResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders -Payload @{
+$contextHeaders = Get-McpHeader -Token $token -Method "tools/call" -Name "build_working_context"
+$contextResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $contextHeaders -Payload @{
     jsonrpc = "2.0"
     id = 3
     method = "tools/call"
     params = @{
         name = "build_working_context"
+        _meta = New-ModernMcpMeta
         arguments = @{
             request = @{
                 projectId = $ProjectId

@@ -18,6 +18,39 @@ https://context-hub.example.com/mcp
 https://context-hub.example.com/mcp-chat
 ```
 
+## Protocol Lifecycle
+
+ContextHub targets MCP `2026-07-28` on both endpoints. The HTTP transport is stateless:
+
+- modern clients may call `server/discover` and then send self-describing requests
+- every modern request carries the protocol version and client capabilities in `_meta`
+- HTTP requests carry `MCP-Protocol-Version` and `Mcp-Method`; named calls such as `tools/call` also carry `Mcp-Name`
+- the server does not issue or require `Mcp-Session-Id`
+- a response may still stream within one request; stateless does not mean that response streaming is disabled
+
+The same endpoints retain legacy Streamable HTTP compatibility. A legacy client may send `initialize` and then call tools, but it must not require a server-issued session id. Clients whose implementation treats `Mcp-Session-Id` as mandatory must upgrade or use the maintained ContextHub stdio bridge, which negotiates modern MCP first and falls back to legacy initialization when needed.
+
+Application-level ContextHub conversation sessions are durable product data and are independent of the removed MCP transport-session concept.
+
+The specification's twelve-month retention rule applies to entries in its deprecated-features registry; it is not a blanket guarantee that the removed transport-session lifecycle remains supported for twelve months. ContextHub's legacy fallback is therefore an explicit migration runway. Remove it only after managed-client inventory and legacy probes show no remaining dependency.
+
+### Protocol Validation
+
+The automated suite covers modern discovery, per-request metadata and routing headers, version mismatch rejection, stateless tool calls, legacy initialization without a transport session, bridge fallback, retry safety, and authentication on every request.
+
+See the complete requirement mapping and security evidence in [MCP 2026-07-28 compliance](mcp-2026-07-28-compliance.md).
+
+The official conformance package can additionally exercise the isolated stateless lifecycle. Run it only against a local endpoint with authentication deliberately disabled; never expose an unauthenticated conformance target publicly:
+
+```powershell
+npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.11 server `
+  --url http://localhost:8092/mcp `
+  --scenario server-stateless `
+  --spec-version 2026-07-28
+```
+
+Pin the package version in CI and review upgrades. The full conformance requirements suite includes fixture-specific tools and content types that are intended for SDK conformance servers, so ContextHub uses the applicable transport scenario plus its own public-contract black-box tests.
+
 ## Core Principles
 
 ### Read Context Before Acting

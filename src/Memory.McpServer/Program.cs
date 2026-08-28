@@ -32,8 +32,9 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
                                ForwardedHeaders.XForwardedHost |
                                ForwardedHeaders.XForwardedProto;
-    options.KnownIPNetworks.Clear();
-    options.KnownProxies.Clear();
+    options.ForwardLimit = 1;
+    options.RequireHeaderSymmetry = true;
+    AddTrustedForwarders(options, builder.Configuration);
 });
 
 builder.Services.AddProblemDetails();
@@ -48,7 +49,7 @@ builder.Services.AddHostedService<InProcessMaintenanceRunRecoveryHostedService>(
 builder.Services.AddHostedService<DashboardSnapshotCollectorHostedService>();
 builder.Services.AddScoped<MemoryMcpTools>();
 builder.Services.AddMcpServer()
-    .WithHttpTransport()
+    .WithHttpTransport(options => options.Stateless = true)
     .WithTools<MemoryMcpTools>()
     .WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult
     {
@@ -59,8 +60,22 @@ builder.Services.AddMcpServer()
 
 var app = builder.Build();
 const bool requireAuthentication = true;
+var allowedMcpOrigins = ResolveAllowedOrigins(
+    builder.Configuration.GetSection("ContextHub:Security:AllowedMcpOrigins").Get<string[]>());
 
 app.UseForwardedHeaders();
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) &&
+        !IsAllowedMcpOrigin(context.Request, allowedMcpOrigins))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsync("Forbidden MCP Origin.", context.RequestAborted);
+        return;
+    }
+
+    await next();
+});
 app.UseExceptionHandler();
 app.Use(async (context, next) =>
 {
@@ -1944,6 +1959,83 @@ agentConnectivity.MapPost("/observations", async (
 app.MapMcp("/mcp").RequireAuthIfEnabled(requireAuthentication);
 
 app.Run();
+
+static void AddTrustedForwarders(ForwardedHeadersOptions options, IConfiguration configuration)
+{
+    foreach (var value in configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            continue;
+        }
+
+        if (!System.Net.IPAddress.TryParse(value, out var address))
+        {
+            throw new InvalidOperationException($"ForwardedHeaders:KnownProxies contains invalid IP address '{value}'.");
+        }
+
+        options.KnownProxies.Add(address);
+    }
+
+    foreach (var value in configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            continue;
+        }
+
+        if (!System.Net.IPNetwork.TryParse(value, out var network))
+        {
+            throw new InvalidOperationException($"ForwardedHeaders:KnownNetworks contains invalid CIDR '{value}'.");
+        }
+
+        options.KnownIPNetworks.Add(network);
+    }
+}
+
+static HashSet<string> ResolveAllowedOrigins(IEnumerable<string>? configuredValues)
+{
+    var origins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var value in configuredValues ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            continue;
+        }
+
+        if (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp) ||
+            !string.IsNullOrEmpty(uri.UserInfo))
+        {
+            throw new InvalidOperationException($"ContextHub:Security:AllowedMcpOrigins contains invalid origin '{value}'.");
+        }
+
+        origins.Add(uri.GetLeftPart(UriPartial.Authority));
+    }
+
+    return origins;
+}
+
+static bool IsAllowedMcpOrigin(HttpRequest request, IReadOnlySet<string> allowedOrigins)
+{
+    if (!request.Headers.TryGetValue("Origin", out var values))
+    {
+        return true;
+    }
+
+    if (values.Count != 1 ||
+        !Uri.TryCreate(values[0], UriKind.Absolute, out var origin) ||
+        (origin.Scheme != Uri.UriSchemeHttps && origin.Scheme != Uri.UriSchemeHttp) ||
+        !string.IsNullOrEmpty(origin.UserInfo) ||
+        origin.AbsolutePath != "/" ||
+        !string.IsNullOrEmpty(origin.Query) ||
+        !string.IsNullOrEmpty(origin.Fragment))
+    {
+        return false;
+    }
+
+    return allowedOrigins.Contains(origin.GetLeftPart(UriPartial.Authority));
+}
 
 public partial class Program;
 

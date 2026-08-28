@@ -166,7 +166,7 @@ GET /health/ready for dashboard and mcp-server
 GET /api/status
 GET /api/dashboard/monitoring
 Dashboard /login
-MCP initialize and tools/list
+MCP server/discover, stateless tools/list, and legacy initialize fallback
 ```
 
 Monitoring data should not remain indefinitely in unavailable or zero-refresh states after a healthy deployment. If the dashboard loads but monitoring sections remain unavailable, verify that all services were updated together and that the dashboard and `mcp-server` versions are compatible.

@@ -75,6 +75,56 @@ x-project-artifact-object-storage-config: &project-artifact-object-storage-confi
   ProjectArtifacts__ObjectStorage__MaxObjectBytes: ${PROJECT_ARTIFACT_OBJECT_STORAGE_MAX_OBJECT_BYTES:-10485760}
 
 services:
+  mcp-docker-proxy:
+    image: contexthub-docker-socket-proxy:latest
+    build:
+      context: deploy/docker-socket-proxy
+      dockerfile: Dockerfile
+    command: ["-f", "/usr/local/etc/haproxy/custom.cfg"]
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/docker-socket-proxy/mcp-readonly.cfg:/usr/local/etc/haproxy/custom.cfg:ro
+    networks:
+      - mcp-docker-api
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+      - /var/lib/haproxy
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  dashboard-docker-proxy:
+    image: contexthub-docker-socket-proxy:latest
+    build:
+      context: deploy/docker-socket-proxy
+      dockerfile: Dockerfile
+    command: ["-f", "/usr/local/etc/haproxy/custom.cfg"]
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/docker-socket-proxy/dashboard.cfg:/usr/local/etc/haproxy/custom.cfg:ro
+    networks:
+      - dashboard-docker-api
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+      - /var/lib/haproxy
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   embedding-service:
     image: contexthub-embedding-service:latest
     build:
@@ -102,7 +152,10 @@ services:
         max-file: "3"
 
   postgres:
-    image: pgvector/pgvector:pg17
+    image: contexthub-postgres:latest
+    build:
+      context: deploy/postgres
+      dockerfile: Dockerfile
     restart: always
     environment:
       POSTGRES_DB: contexthub
@@ -160,11 +213,13 @@ services:
       ContextHub__Security__BootstrapTenantSlug: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TENANT_SLUG:-context-team}
       ContextHub__Security__BootstrapUsername: ${CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME:-dashboard-service}
       ContextHub__Security__BootstrapAllowedProjectIds: ${CONTEXTHUB_SECURITY_BOOTSTRAP_ALLOWED_PROJECT_IDS:-ContextHub}
+      ContextHub__Security__AllowedMcpOrigins__0: ${CONTEXTHUB_ALLOWED_MCP_ORIGIN:-}
+      ForwardedHeaders__KnownNetworks__0: ${TRUSTED_PROXY_NETWORK:-}
       <<: [*embedding-config, *telemetry-retention-config, *project-artifact-object-storage-config]
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
       Dashboard__ComposeProject: ${DASHBOARD_COMPOSE_PROJECT:-contexthub}
-      Dashboard__DockerEndpoint: unix:///var/run/docker.sock
+      Dashboard__DockerEndpoint: http://mcp-docker-proxy:2375
       ASPNETCORE_URLS: http://0.0.0.0:8080
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
       ConnectionStrings__Redis: redis:6379
@@ -177,10 +232,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mcp-docker-proxy:
+        condition: service_started
     ports:
       - "${MCP_SERVER_HOST_BIND:-127.0.0.1}:${MCP_SERVER_HOST_PORT:-8092}:8080"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - default
+      - mcp-docker-api
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $$CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN\" http://localhost:8080/health/ready"]
       interval: 10s
@@ -208,6 +266,8 @@ services:
       ContextHub__Security__BootstrapTenantSlug: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TENANT_SLUG:-context-team}
       ContextHub__Security__BootstrapUsername: ${CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME:-dashboard-service}
       <<: [*embedding-config, *telemetry-retention-config, *chatgpt-gateway-config, *project-artifact-object-storage-config]
+      ChatGptGateway__AllowedMcpOrigins__0: ${CHATGPT_GATEWAY_ALLOWED_MCP_ORIGIN:-}
+      ForwardedHeaders__KnownNetworks__0: ${TRUSTED_PROXY_NETWORK:-}
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
       ASPNETCORE_URLS: http://0.0.0.0:8083
@@ -283,20 +343,25 @@ services:
     environment:
       ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
       <<: *dashboard-config
+      ForwardedHeaders__KnownNetworks__0: ${TRUSTED_PROXY_NETWORK:-}
       ASPNETCORE_URLS: http://0.0.0.0:8088
       Dashboard__BaseUrl: http://mcp-server:8080
-      Dashboard__DockerEndpoint: unix:///var/run/docker.sock
+      Dashboard__DockerEndpoint: http://dashboard-docker-proxy:2375
       Dashboard__DataProtectionPath: /var/lib/contexthub-dashboard/keys
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
       Memory__Namespace: contexthub
     depends_on:
       mcp-server:
         condition: service_healthy
+      dashboard-docker-proxy:
+        condition: service_started
     ports:
       - "${DASHBOARD_HOST_BIND:-127.0.0.1}:${DASHBOARD_HOST_PORT:-8091}:8088"
     volumes:
       - dashboard-data-protection:/var/lib/contexthub-dashboard/keys
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - default
+      - dashboard-docker-api
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $$Dashboard__ApiToken\" http://localhost:8088/health/ready"]
       interval: 10s
@@ -314,3 +379,9 @@ volumes:
   redis-data:
   embedding-model-cache:
   dashboard-data-protection:
+
+networks:
+  mcp-docker-api:
+    internal: true
+  dashboard-docker-api:
+    internal: true

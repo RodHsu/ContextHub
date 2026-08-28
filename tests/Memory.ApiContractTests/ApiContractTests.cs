@@ -102,6 +102,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                     Confidence: 0.9m,
                     ProjectId: projectA),
                 CancellationToken.None);
+
             await memoryService.UpsertAsync(
                 new MemoryUpsertRequest(
                     ExternalKey: $"search-scope:b:{Guid.NewGuid():N}",
@@ -300,8 +301,11 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         {
             UseBootstrapActor(scope.ServiceProvider);
             var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
             var suite = new EvaluationSuite
             {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
                 ProjectId = "ContextHub",
                 Name = "Broken Suite",
                 Description = "Contains invalid case payload.",
@@ -344,6 +348,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
             dbContext.SourceConnections.Add(new SourceConnection
             {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
                 ProjectId = ProjectContext.DefaultProjectId,
                 Name = "Stale repo source",
                 SourceKind = SourceKind.LocalRepo,
@@ -2606,6 +2612,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         {
             UseBootstrapActor(scope.ServiceProvider);
             var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+            var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
+            var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
 
             await memoryService.UpsertAsync(
                 new MemoryUpsertRequest(
@@ -2636,6 +2644,38 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                     Importance: 0.7m,
                     Confidence: 0.9m),
                 CancellationToken.None);
+
+            var otherUserId = Guid.NewGuid();
+            dbContext.TenantUsers.Add(new TenantUser
+            {
+                Id = otherUserId,
+                TenantId = actor.TenantId!.Value,
+                Username = $"transfer-other-{otherUserId:N}"[..28],
+                DisplayName = "Transfer Other User",
+                Role = TenantUserRole.Member,
+                Status = TenantUserStatus.Active,
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow
+            });
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+            dbContext.MemoryItems.Add(new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = otherUserId,
+                ProjectId = ProjectContext.DefaultProjectId,
+                ExternalKey = "repo:transfer:1",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Fact,
+                Title = "Other user's confidential conflict title",
+                Content = "This row must not participate in another user's import preview.",
+                Summary = "Other user's confidential conflict",
+                SourceType = "test",
+                SourceRef = "ownership-regression",
+                Status = MemoryStatus.Active,
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow
+            });
+            await dbContext.SaveChangesAsync(CancellationToken.None);
         }
 
         using var client = environment.GetFactory().CreateClient();
@@ -2658,6 +2698,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         preview.Should().NotBeNull();
         preview!.ConflictItems.Should().Be(2);
         preview.Conflicts.Should().Contain(x => x.ExternalKey == "repo:transfer:1");
+        preview.Conflicts.Should().NotContain(x => x.ExistingTitle == "Other user's confidential conflict title");
 
         using var applyRejectedResponse = await client.PostAsJsonAsync("/api/memories/import/apply", new MemoryImportRequest(exported.PayloadBase64, "secret-passphrase"));
         applyRejectedResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
@@ -2674,6 +2715,16 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var verifyMemories = await verifyMemoriesResponse.Content.ReadFromJsonAsync<PagedResult<MemoryListItemResult>>();
         verifyMemories.Should().NotBeNull();
         verifyMemories!.Items.Should().HaveCount(2);
+
+        using (var cleanupScope = environment.GetFactory().Services.CreateScope())
+        {
+            var cleanupDbContext = cleanupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var crossOwnerFixtures = await cleanupDbContext.MemoryItems
+                .Where(x => x.Title == "Other user's confidential conflict title")
+                .ToListAsync(CancellationToken.None);
+            cleanupDbContext.MemoryItems.RemoveRange(crossOwnerFixtures);
+            await cleanupDbContext.SaveChangesAsync(CancellationToken.None);
+        }
     }
 
     private static async Task EnsureAdminOwnerAsync(MemoryDbContext dbContext, Guid adminTenantId, Guid adminUserId, DateTimeOffset now)

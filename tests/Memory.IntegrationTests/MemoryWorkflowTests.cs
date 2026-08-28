@@ -13,6 +13,137 @@ namespace Memory.IntegrationTests;
 public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Hub_Workflow_Resources_Should_Not_Cross_Owner_Boundaries()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var ownerActor = actorAccessor.Current;
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var sourceService = scope.ServiceProvider.GetRequiredService<ISourceConnectionService>();
+        var governanceService = scope.ServiceProvider.GetRequiredService<IGovernanceService>();
+        var evaluationService = scope.ServiceProvider.GetRequiredService<IEvaluationService>();
+        var actionService = scope.ServiceProvider.GetRequiredService<ISuggestedActionService>();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var projectId = $"OwnerBoundary_{Guid.NewGuid():N}"[..28];
+        var now = DateTimeOffset.UtcNow;
+        var source = new SourceConnection
+        {
+            TenantId = ownerActor.TenantId,
+            OwnerUserId = ownerActor.UserId,
+            ProjectId = projectId,
+            Name = "Owner source",
+            SourceKind = SourceKind.LocalDocs,
+            ConfigJson = """{"rootPath":"."}""",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var finding = new GovernanceFinding
+        {
+            TenantId = ownerActor.TenantId,
+            OwnerUserId = ownerActor.UserId,
+            ProjectId = projectId,
+            Type = GovernanceFindingType.StaleSource,
+            Status = GovernanceFindingStatus.Open,
+            Title = "Owner finding",
+            Summary = "Owner finding",
+            DedupKey = $"owner-finding:{Guid.NewGuid():N}",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var suite = new EvaluationSuite
+        {
+            TenantId = ownerActor.TenantId,
+            OwnerUserId = ownerActor.UserId,
+            ProjectId = projectId,
+            Name = "Owner suite",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var run = new EvaluationRun
+        {
+            SuiteId = suite.Id,
+            ProjectId = projectId,
+            Status = EvaluationRunStatus.Completed,
+            QueryMode = MemoryQueryMode.CurrentOnly.ToString(),
+            CreatedAt = now,
+            StartedAt = now,
+            CompletedAt = now
+        };
+        var action = new SuggestedAction
+        {
+            TenantId = ownerActor.TenantId,
+            OwnerUserId = ownerActor.UserId,
+            ProjectId = projectId,
+            Type = SuggestedActionType.ReindexProject,
+            Status = SuggestedActionStatus.Pending,
+            Title = "Owner action",
+            Summary = "Owner action",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var job = new MemoryJob
+        {
+            TenantId = ownerActor.TenantId,
+            OwnerUserId = ownerActor.UserId,
+            ProjectId = projectId,
+            JobType = MemoryJobType.Reindex,
+            Status = MemoryJobStatus.Pending,
+            CreatedAt = now
+        };
+        dbContext.AddRange(source, finding, suite, run, action, job);
+
+        var otherTenantId = Guid.NewGuid();
+        var otherUserId = Guid.NewGuid();
+        dbContext.Tenants.Add(new Tenant
+        {
+            Id = otherTenantId,
+            Slug = $"owner-boundary-{otherTenantId:N}"[..28],
+            DisplayName = "Other Tenant",
+            Status = TenantStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        dbContext.TenantUsers.Add(new TenantUser
+        {
+            Id = otherUserId,
+            TenantId = otherTenantId,
+            Username = $"owner-boundary-{otherUserId:N}"[..28],
+            DisplayName = "Other Admin",
+            Role = TenantUserRole.Admin,
+            Status = TenantUserStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await dbContext.SaveChangesAsync(CancellationToken.None);
+
+        actorAccessor.Current = new ContextHubRequestActor(
+            otherTenantId,
+            otherUserId,
+            "other-admin",
+            TenantUserRole.Admin,
+            [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite],
+            [projectId],
+            true);
+
+        (await sourceService.ListAsync(new SourceListRequest(projectId), CancellationToken.None)).Should().BeEmpty();
+        (await governanceService.ListAsync(new GovernanceFindingListRequest(projectId), CancellationToken.None)).Should().BeEmpty();
+        (await evaluationService.ListSuitesAsync(projectId, CancellationToken.None)).Should().BeEmpty();
+        (await actionService.ListAsync(new SuggestedActionListRequest(projectId), CancellationToken.None)).Should().BeEmpty();
+        (await memoryService.GetJobAsync(job.Id, CancellationToken.None)).Should().BeNull();
+        (await evaluationService.GetRunAsync(run.Id, CancellationToken.None)).Should().BeNull();
+
+        await FluentActions.Invoking(() => sourceService.UpdateAsync(
+                new SourceConnectionUpdateRequest(source.Id, Name: "Cross-owner update"),
+                CancellationToken.None))
+            .Should().ThrowAsync<InvalidOperationException>();
+        await FluentActions.Invoking(() => governanceService.AcceptAsync(finding.Id, CancellationToken.None))
+            .Should().ThrowAsync<InvalidOperationException>();
+        await FluentActions.Invoking(() => actionService.DismissAsync(action.Id, CancellationToken.None))
+            .Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [DockerRequiredFact]
     public async Task Upsert_ProcessJob_And_Search_Should_Return_Result()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

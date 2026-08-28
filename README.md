@@ -122,15 +122,17 @@ Local compose defaults:
 - MCP endpoint: `http://localhost:8092/mcp`
 - Restricted chat-agent MCP endpoint: `http://localhost:8094/mcp`
 
-Do not treat a running container as a complete readiness signal. For agent usage, verify health, `/api/status`, MCP `initialize`, and MCP `tools/list`.
+Do not treat a running container as a complete readiness signal. For agent usage, verify health, `/api/status`, MCP `server/discover`, and a stateless MCP `tools/list` call. Also keep one legacy `initialize` compatibility probe until all managed clients have migrated.
 
 ## MCP Tools
 
 The main MCP endpoint is:
 
 ```text
-POST/GET /mcp
+POST /mcp
 ```
+
+ContextHub targets MCP `2026-07-28`: requests are stateless and self-describing, and the server does not issue `Mcp-Session-Id`. Modern clients use `server/discover` or call tools directly with per-request metadata. Legacy Streamable HTTP clients may still use `initialize`, but must tolerate a server that does not create a transport session.
 
 Primary tools:
 
@@ -293,4 +295,7 @@ Notes:
 - Keep `/mcp`, `/mcp-chat`, `/api/*`, `/_blazor*`, `/health*`, `/login*`, and `/account*` uncached.
 - Use bearer tokens or OAuth/OIDC for external agent access.
 - Treat Docker socket access as privileged, even when mounted read-only.
+- Compose routes Docker API access through isolated, repo-built policy proxies based on a digest-pinned Alpine image; do not publish their port or replace them with direct socket mounts.
 - Never commit `.env`, tokens, password hashes, OAuth secrets, signing keys, or private keys.
+
+The current MCP requirement matrix and security review are documented in [MCP 2026-07-28 compliance](docs/mcp-2026-07-28-compliance.md).

@@ -14,6 +14,8 @@ Public HTTPS hostname
 
 Keep PostgreSQL, Redis, `embedding-service`, and `worker` on private networks.
 
+Set `TRUSTED_PROXY_NETWORK` to this reverse proxy's exact Docker-network CIDR. ContextHub ignores forwarded headers from all other addresses. Also set both MCP allowed-origin variables to the public origin, for example `https://context-hub.example.com`; do not include `/mcp` or `/mcp-chat` in the origin value.
+
 ## Public Routes
 
 | Route | Upstream | Purpose |
@@ -106,6 +108,12 @@ server {
         proxy_request_buffering off;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Origin $http_origin;
+        proxy_set_header Accept $http_accept;
+        proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
+        proxy_set_header Mcp-Method $http_mcp_method;
+        proxy_set_header Mcp-Name $http_mcp_name;
         proxy_pass http://contexthub_mcp;
     }
 
@@ -120,9 +128,11 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_set_header Authorization $http_authorization;
+        proxy_set_header Origin $http_origin;
         proxy_set_header Accept $http_accept;
-        proxy_set_header Mcp-Session-Id $http_mcp_session_id;
         proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
+        proxy_set_header Mcp-Method $http_mcp_method;
+        proxy_set_header Mcp-Name $http_mcp_name;
         proxy_pass http://contexthub_chat_gateway/mcp;
     }
 

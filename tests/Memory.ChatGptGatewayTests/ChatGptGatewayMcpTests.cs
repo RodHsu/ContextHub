@@ -6,6 +6,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using FluentAssertions;
 using Memory.Application;
 using Memory.ChatGptGateway;
@@ -56,6 +57,22 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
         response.Headers.WwwAuthenticate.Select(x => x.ToString())
             .Should().Contain(x => x.Contains($"resource_metadata=\"{PublicResourceMetadataUrl}\"", StringComparison.Ordinal));
+    }
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Mcp_Should_Reject_Untrusted_Origin_And_Accept_Public_Mcp_Origin()
+    {
+        using var client = CreateAuthorizedClient(environment.GetFactory());
+
+        using var rejectedRequest = CreateModernMcpRequest("tools/list");
+        rejectedRequest.Headers.Add("Origin", "https://attacker.example.test");
+        using var rejectedResponse = await client.SendAsync(rejectedRequest);
+        rejectedResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Forbidden);
+
+        using var acceptedRequest = CreateModernMcpRequest("tools/list");
+        acceptedRequest.Headers.Add("Origin", "https://context-hub.example.test");
+        using var acceptedResponse = await client.SendAsync(acceptedRequest);
+        acceptedResponse.EnsureSuccessStatusCode();
     }
 
     [DockerRequiredFact]
@@ -156,6 +173,30 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         key.GetProperty("kid").GetString().Should().NotBeNullOrWhiteSpace();
         key.GetProperty("n").GetString().Should().HaveLength(512);
         key.GetProperty("e").GetString().Should().Be("AQAB");
+    }
+
+    [DockerRequiredFact]
+    public async Task SelfHosted_OAuth_Registration_Should_Rate_Limit_Repeated_Requests()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true,
+            selfHostedRsaPrivateKey: SelfHostedRsaPrivateKey.Value);
+        using var client = factory.CreateClient();
+
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            using var response = await client.PostAsync(
+                "/oauth/chat/register",
+                new StringContent("{}", Encoding.UTF8, "application/json"));
+            response.StatusCode.Should().NotBe(System.Net.HttpStatusCode.TooManyRequests);
+        }
+
+        using var limited = await client.PostAsync(
+            "/oauth/chat/register",
+            new StringContent("{}", Encoding.UTF8, "application/json"));
+        limited.StatusCode.Should().Be(System.Net.HttpStatusCode.TooManyRequests);
     }
 
     [DockerRequiredFact]
@@ -330,7 +371,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         initializeRequest.Headers.Accept.ParseAdd("text/event-stream");
         using var initializeResponse = await mcpClient.SendAsync(initializeRequest);
         initializeResponse.EnsureSuccessStatusCode();
-        initializeResponse.Headers.TryGetValues("Mcp-Session-Id", out var sessionValues).Should().BeTrue();
+        initializeResponse.Headers.Contains("Mcp-Session-Id").Should().BeFalse();
     }
 
     [DockerRequiredFact]
@@ -769,8 +810,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         }, chatClient);
         await using var chatMcp = await McpClient.CreateAsync(transport);
         _ = await chatMcp.ListToolsAsync();
+        chatMcp.NegotiatedProtocolVersion.Should().Be("2026-07-28");
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull();
 
         // MCP to MCP: direct MCP creates and replies to the same thread.
         var mcpToMcp = await UseDirectMcpAsync(mcp => mcp.discussion_thread_create(new(
@@ -1632,7 +1674,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         await using var mcpClient = await McpClient.CreateAsync(transport);
         _ = await mcpClient.ListToolsAsync();
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull();
 
         var toolsPayload = await SendMcpAsync(client, sessionId!, 2, "tools/list", new { });
         var listedTools = ExtractSseJson(toolsPayload).GetProperty("result").GetProperty("tools");
@@ -2434,20 +2476,74 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         return client;
     }
 
-    private static async Task<string> SendMcpAsync(HttpClient client, string sessionId, int id, string method, object @params)
+    private static HttpRequestMessage CreateModernMcpRequest(string method)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
         {
             Content = JsonContent.Create(new
             {
                 jsonrpc = "2.0",
-                id,
+                id = Guid.NewGuid().ToString("N"),
                 method,
-                @params
+                @params = new
+                {
+                    _meta = new Dictionary<string, object>
+                    {
+                        ["io.modelcontextprotocol/protocolVersion"] = "2026-07-28",
+                        ["io.modelcontextprotocol/clientInfo"] = new { name = "gateway-security-test", version = "1.0" },
+                        ["io.modelcontextprotocol/clientCapabilities"] = new { }
+                    }
+                }
             })
         };
-        request.Headers.Add("Mcp-Session-Id", sessionId);
-        request.Headers.Add("MCP-Protocol-Version", "2025-03-26");
+        request.Headers.Add("MCP-Protocol-Version", "2026-07-28");
+        request.Headers.Add("Mcp-Method", method);
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+        return request;
+    }
+
+    private static async Task<string> SendMcpAsync(HttpClient client, string? sessionId, int id, string method, object @params)
+    {
+        var parameters = JsonSerializer.SerializeToNode(@params) as JsonObject ?? new JsonObject();
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            parameters["_meta"] = new JsonObject
+            {
+                ["io.modelcontextprotocol/protocolVersion"] = "2026-07-28",
+                ["io.modelcontextprotocol/clientInfo"] = new JsonObject
+                {
+                    ["name"] = "ContextHub.ChatGptGatewayTests",
+                    ["version"] = "1.0"
+                },
+                ["io.modelcontextprotocol/clientCapabilities"] = new JsonObject()
+            };
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = JsonContent.Create(new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = id,
+                ["method"] = method,
+                ["params"] = parameters
+            })
+        };
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            request.Headers.Add("MCP-Protocol-Version", "2026-07-28");
+            request.Headers.Add("Mcp-Method", method);
+            if (parameters["name"]?.GetValue<string>() is { Length: > 0 } name)
+            {
+                request.Headers.Add("Mcp-Name", name);
+            }
+        }
+        else
+        {
+            request.Headers.Add("Mcp-Session-Id", sessionId);
+            request.Headers.Add("MCP-Protocol-Version", "2025-03-26");
+        }
         request.Headers.Accept.ParseAdd("application/json");
         request.Headers.Accept.ParseAdd("text/event-stream");
 
@@ -2498,6 +2594,12 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
     private static JsonElement ExtractSseJson(string payload)
     {
+        if (payload.TrimStart().StartsWith('{'))
+        {
+            using var jsonDocument = JsonDocument.Parse(payload);
+            return jsonDocument.RootElement.Clone();
+        }
+
         var dataLine = payload
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
             .FirstOrDefault(line => line.StartsWith("data: ", StringComparison.Ordinal))

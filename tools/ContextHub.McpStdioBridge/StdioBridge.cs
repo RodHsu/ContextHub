@@ -69,6 +69,9 @@ public sealed class StdioBridge
         {
             switch (method)
             {
+                case "server/discover":
+                    await WriteResponseAsync(output, id, result: CreateDiscoverResult(), cancellationToken: cancellationToken);
+                    break;
                 case "initialize":
                     await WriteResponseAsync(output, id, result: CreateInitializeResult(message), cancellationToken: cancellationToken);
                     break;
@@ -131,6 +134,30 @@ public sealed class StdioBridge
             }
         };
     }
+
+    private static JsonObject CreateDiscoverResult()
+        => new()
+        {
+            ["resultType"] = "complete",
+            ["supportedVersions"] = new JsonArray("2026-07-28", "2025-11-25", "2025-06-18"),
+            ["capabilities"] = new JsonObject
+            {
+                ["tools"] = new JsonObject
+                {
+                    ["listChanged"] = true
+                },
+                ["resources"] = new JsonObject(),
+                ["prompts"] = new JsonObject()
+            },
+            ["_meta"] = new JsonObject
+            {
+                ["io.modelcontextprotocol/serverInfo"] = new JsonObject
+                {
+                    ["name"] = "ContextHub.McpStdioBridge",
+                    ["version"] = BridgeOptions.BridgeVersion
+                }
+            }
+        };
 
     private static JsonDocument RemoveNonStandardToolMetadata(JsonDocument response)
     {

@@ -1489,7 +1489,9 @@ public sealed class MemoryService(
 
     public async Task<JobResult?> GetJobAsync(Guid id, CancellationToken cancellationToken)
     {
-        var job = await dbContext.MemoryJobs.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+        var job = await dbContext.MemoryJobs
+            .ForActor(actorAccessor.Current)
+            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
         return job is null ? null : Map(job);
     }
 

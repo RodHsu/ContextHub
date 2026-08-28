@@ -804,6 +804,8 @@ Compose `mem_limit` 是可選保護機制，不是主要調整手段。
 驗證：
 
 - `/mcp` Streamable HTTP
+- MCP `2026-07-28` stateless request/response lifecycle with per-request protocol metadata
+- legacy `initialize` compatibility without server-side transport sessions
 - `tools/list`
 - `tools/call`
 - `user_preference_*`

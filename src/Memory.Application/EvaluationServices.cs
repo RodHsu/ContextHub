@@ -9,15 +9,19 @@ public sealed class EvaluationService(
     IApplicationDbContext dbContext,
     IMemoryService memoryService,
     IEmbeddingProvider embeddingProvider,
-    IClock clock) : IEvaluationService
+    IClock clock,
+    IRequestActorAccessor actorAccessor) : IEvaluationService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<IReadOnlyList<EvaluationSuiteResult>> ListSuitesAsync(string projectId, CancellationToken cancellationToken)
     {
         var normalizedProjectId = ProjectContext.Normalize(projectId);
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: false);
         var suites = await dbContext.EvaluationSuites
             .AsNoTracking()
+            .ForActor(actor)
             .Include(x => x.Cases)
             .Where(x => x.ProjectId == normalizedProjectId)
             .OrderByDescending(x => x.UpdatedAt)
@@ -27,6 +31,7 @@ public sealed class EvaluationService(
 
     public async Task<EvaluationSuiteResult> CreateSuiteAsync(EvaluationSuiteCreateRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         var suiteName = NormalizeRequiredValue(request.Name, "Evaluation suite name");
         var suiteDescription = request.Description.Trim();
 
@@ -41,12 +46,15 @@ public sealed class EvaluationService(
 
         var suite = new EvaluationSuite
         {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
             ProjectId = ProjectContext.Normalize(request.ProjectId),
             Name = suiteName,
             Description = suiteDescription,
             CreatedAt = clock.UtcNow,
             UpdatedAt = clock.UtcNow
         };
+        ActorAuthorization.EnsureProjectAllowed(actor, suite.ProjectId, write: true);
         await dbContext.EvaluationSuites.AddAsync(suite, cancellationToken);
 
         foreach (var draft in normalizedCases)
@@ -67,6 +75,7 @@ public sealed class EvaluationService(
         await dbContext.SaveChangesAsync(cancellationToken);
         var created = await dbContext.EvaluationSuites
             .AsNoTracking()
+            .ForActor(actor)
             .Include(x => x.Cases)
             .FirstAsync(x => x.Id == suite.Id, cancellationToken);
         return MapSuite(created);
@@ -74,10 +83,13 @@ public sealed class EvaluationService(
 
     public async Task<EvaluationRunResult> RunAsync(EvaluationRunRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         var suite = await dbContext.EvaluationSuites
+            .ForActor(actor)
             .Include(x => x.Cases)
             .FirstOrDefaultAsync(x => x.Id == request.SuiteId, cancellationToken)
             ?? throw new InvalidOperationException($"Evaluation suite '{request.SuiteId}' was not found.");
+        ActorAuthorization.EnsureProjectAllowed(actor, suite.ProjectId, write: true);
         if (suite.Cases.Count == 0)
         {
             throw new InvalidOperationException("Evaluation suite does not contain any cases.");
@@ -121,6 +133,7 @@ public sealed class EvaluationService(
                 {
                     var resolvedIds = await dbContext.MemoryItems
                         .AsNoTracking()
+                        .ForActor(actor)
                         .Where(x => x.ProjectId == suite.ProjectId)
                         .Where(x => evaluationCase.ExpectedExternalKeys.Contains(x.ExternalKey))
                         .Select(x => x.Id)
@@ -169,6 +182,7 @@ public sealed class EvaluationService(
                 var hitIds = hits.Select(x => x.MemoryId).ToArray();
                 var hitExternalKeys = await dbContext.MemoryItems
                     .AsNoTracking()
+                    .ForActor(actor)
                     .Where(x => hitIds.Contains(x.Id))
                     .OrderByDescending(x => x.UpdatedAt)
                     .Select(x => x.ExternalKey)
@@ -217,19 +231,30 @@ public sealed class EvaluationService(
 
     public async Task<EvaluationRunResult?> GetRunAsync(Guid id, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         var run = await dbContext.EvaluationRuns
             .AsNoTracking()
             .Include(x => x.Items)
-            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            .FirstOrDefaultAsync(
+                x => x.Id == id && dbContext.EvaluationSuites
+                    .ForActor(actor)
+                    .Any(suite => suite.Id == x.SuiteId),
+                cancellationToken);
         return run is null ? null : MapRun(run);
     }
 
     public async Task<EvaluationRunResult?> GetLatestRunAsync(string projectId, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        var normalizedProjectId = ProjectContext.Normalize(projectId);
+        ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: false);
         var run = await dbContext.EvaluationRuns
             .AsNoTracking()
             .Include(x => x.Items)
-            .Where(x => x.ProjectId == ProjectContext.Normalize(projectId))
+            .Where(x => x.ProjectId == normalizedProjectId)
+            .Where(x => dbContext.EvaluationSuites
+                .ForActor(actor)
+                .Any(suite => suite.Id == x.SuiteId))
             .OrderByDescending(x => x.StartedAt)
             .FirstOrDefaultAsync(cancellationToken);
         return run is null ? null : MapRun(run);
@@ -258,7 +283,9 @@ public sealed class EvaluationService(
 
         var dedupKey = $"evaluation-regression:{suite.ProjectId}:{suite.Id}:{currentRun.Id}";
         var exists = await dbContext.SuggestedActions.AnyAsync(
-            x => x.ProjectId == suite.ProjectId &&
+            x => x.TenantId == suite.TenantId &&
+                 x.OwnerUserId == suite.OwnerUserId &&
+                 x.ProjectId == suite.ProjectId &&
                  x.Status == SuggestedActionStatus.Pending &&
                  x.PayloadJson.Contains(dedupKey),
             cancellationToken);
@@ -269,6 +296,8 @@ public sealed class EvaluationService(
 
         await dbContext.SuggestedActions.AddAsync(new SuggestedAction
         {
+            TenantId = suite.TenantId,
+            OwnerUserId = suite.OwnerUserId,
             ProjectId = suite.ProjectId,
             Type = SuggestedActionType.ReindexProject,
             Status = SuggestedActionStatus.Pending,

@@ -18,7 +18,9 @@ public sealed class GovernanceService(
     public async Task<IReadOnlyList<GovernanceFindingResult>> ListAsync(GovernanceFindingListRequest request, CancellationToken cancellationToken)
     {
         var projectId = ProjectContext.Normalize(request.ProjectId);
-        var query = dbContext.GovernanceFindings.AsNoTracking().Where(x => x.ProjectId == projectId);
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
+        var query = dbContext.GovernanceFindings.AsNoTracking().ForActor(actor).Where(x => x.ProjectId == projectId);
 
         if (request.Type.HasValue)
         {
@@ -40,6 +42,7 @@ public sealed class GovernanceService(
     public async Task<GovernanceFindingResult> AcceptAsync(Guid id, CancellationToken cancellationToken)
     {
         var entity = await GetRequiredAsync(id, cancellationToken);
+        ActorAuthorization.EnsureProjectAllowed(actorAccessor.Current, entity.ProjectId, write: true);
         entity.Status = GovernanceFindingStatus.Accepted;
         entity.UpdatedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -49,6 +52,7 @@ public sealed class GovernanceService(
     public async Task<GovernanceFindingResult> DismissAsync(Guid id, CancellationToken cancellationToken)
     {
         var entity = await GetRequiredAsync(id, cancellationToken);
+        ActorAuthorization.EnsureProjectAllowed(actorAccessor.Current, entity.ProjectId, write: true);
         entity.Status = GovernanceFindingStatus.Dismissed;
         entity.UpdatedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -122,9 +126,10 @@ public sealed class GovernanceService(
     public async Task AnalyzeAsync(string projectId, CancellationToken cancellationToken)
     {
         var normalizedProjectId = ProjectContext.Normalize(projectId);
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: true);
         var now = clock.UtcNow;
         var findings = new List<GovernanceDraft>();
-        var actor = actorAccessor.Current;
         if (actor.HasUser)
         {
             ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
@@ -439,6 +444,7 @@ public sealed class GovernanceService(
 
         var vectorCandidateQuery = dbContext.MemoryItems
             .AsNoTracking()
+            .ForActor(actor)
             .Include(x => x.Chunks)
                 .ThenInclude(x => x.Vectors)
             .Where(x => x.ProjectId == normalizedProjectId)
@@ -488,6 +494,8 @@ public sealed class GovernanceService(
             {
                 entity = new GovernanceFinding
                 {
+                    TenantId = actor.TenantId,
+                    OwnerUserId = actor.UserId,
                     ProjectId = normalizedProjectId,
                     Status = GovernanceFindingStatus.Open,
                     CreatedAt = clock.UtcNow
@@ -594,6 +602,7 @@ public sealed class GovernanceService(
 
         var dedupKey = BuildSuggestedActionDedupKey(actionType.Value, draft);
         var matchingActions = await dbContext.SuggestedActions
+            .ForActor(actorAccessor.Current)
             .Where(x => x.ProjectId == projectId && x.Type == actionType.Value)
             .ToListAsync(cancellationToken);
         var probe = new SuggestedAction
@@ -631,6 +640,8 @@ public sealed class GovernanceService(
 
         await dbContext.SuggestedActions.AddAsync(new SuggestedAction
         {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
             ProjectId = projectId,
             Type = actionType.Value,
             Status = SuggestedActionStatus.Pending,
@@ -652,7 +663,9 @@ public sealed class GovernanceService(
     }
 
     private async Task<GovernanceFinding> GetRequiredAsync(Guid id, CancellationToken cancellationToken)
-        => await dbContext.GovernanceFindings.FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
+        => await dbContext.GovernanceFindings
+            .ForActor(actorAccessor.Current)
+            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new InvalidOperationException($"Governance finding '{id}' was not found.");
 
     private static bool IsMissingSourceCandidate(MemoryItem entity)

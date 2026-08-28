@@ -111,6 +111,39 @@ public static class ActorAuthorization
     }
 }
 
+public static class ActorDataScope
+{
+    public static IQueryable<SourceConnection> ForActor(this IQueryable<SourceConnection> query, ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query;
+
+    public static IQueryable<GovernanceFinding> ForActor(this IQueryable<GovernanceFinding> query, ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query;
+
+    public static IQueryable<EvaluationSuite> ForActor(this IQueryable<EvaluationSuite> query, ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query;
+
+    public static IQueryable<SuggestedAction> ForActor(this IQueryable<SuggestedAction> query, ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query;
+
+    public static IQueryable<MemoryItem> ForActor(this IQueryable<MemoryItem> query, ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query;
+
+    public static IQueryable<MemoryJob> ForActor(this IQueryable<MemoryJob> query, ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query;
+}
+
 public interface IRequestActorAccessor
 {
     ContextHubRequestActor Current { get; set; }

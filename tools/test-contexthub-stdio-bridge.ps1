@@ -94,8 +94,9 @@ try {
         Write-Host "2/6 reconnect regression tests skipped. Re-run with -RunReconnectRegression to validate retry/no-retry behavior."
     }
 
-    Write-Host "3/6 initialize bridge and list tools"
+    Write-Host "3/6 discover modern bridge capabilities, initialize legacy compatibility, and list tools"
     $messages = @(
+        '{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"stdio-bridge-diagnostics","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}',
         '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"stdio-bridge-diagnostics","version":"1.0"}}}',
         '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
         '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
@@ -104,6 +105,9 @@ try {
     $responseText = $responseLines -join "`n"
     if ($responseText -notmatch "ContextHub\.McpStdioBridge") {
         throw "Bridge initialize response did not include ContextHub.McpStdioBridge."
+    }
+    if ($responseText -notmatch "2026-07-28") {
+        throw "Bridge server/discover response did not advertise MCP 2026-07-28."
     }
 
     foreach ($requiredTool in @("memory_search", "build_working_context", "conversation_ingest")) {

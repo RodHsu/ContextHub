@@ -524,6 +524,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.ToTable("source_connections");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.Name).HasColumnName("name");
             entity.Property(x => x.SourceKind).HasColumnName("source_kind").HasConversion<string>();
@@ -537,7 +539,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.LastSuccessfulSyncAt).HasColumnName("last_successful_sync_at");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
-            entity.HasIndex(x => new { x.ProjectId, x.Name }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Name }).IsUnique();
             entity.HasMany(x => x.SyncRuns).WithOne(x => x.SourceConnection).HasForeignKey(x => x.SourceConnectionId).OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -566,6 +568,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.ToTable("governance_findings");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.SourceConnectionId).HasColumnName("source_connection_id");
             entity.Property(x => x.PrimaryMemoryId).HasColumnName("primary_memory_id");
@@ -586,7 +590,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.GovernanceUpdatedAt).HasColumnName("governance_updated_at");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
-            entity.HasIndex(x => x.DedupKey).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.DedupKey }).IsUnique();
         });
 
         modelBuilder.Entity<EvaluationSuite>(entity =>
@@ -594,6 +598,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.ToTable("evaluation_suites");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.Name).HasColumnName("name");
             entity.Property(x => x.Description).HasColumnName("description");
@@ -667,6 +673,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.ToTable("suggested_actions");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.Type).HasColumnName("type").HasConversion<string>();
             entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();

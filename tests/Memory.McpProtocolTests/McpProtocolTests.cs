@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
@@ -30,7 +31,254 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
-    public async Task Raw_Http_Tools_List_And_Call_Should_Work_After_Sdk_Session_Initialization()
+    public async Task Raw_Http_Server_Discover_Should_Advertise_Modern_Protocol_Without_Transport_Session()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            MemoryApplicationFactory.TestBootstrapToken);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = JsonContent.Create(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "server/discover",
+                @params = new
+                {
+                    _meta = new Dictionary<string, object>
+                    {
+                        ["io.modelcontextprotocol/protocolVersion"] = "2026-07-28",
+                        ["io.modelcontextprotocol/clientInfo"] = new { name = "raw-discovery-test", version = "1.0" },
+                        ["io.modelcontextprotocol/clientCapabilities"] = new { }
+                    }
+                }
+            })
+        };
+        request.Headers.Add("MCP-Protocol-Version", "2026-07-28");
+        request.Headers.Add("Mcp-Method", "server/discover");
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+
+        using var response = await client.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        response.Headers.Contains("Mcp-Session-Id").Should().BeFalse();
+        var result = ExtractSseJson(await response.Content.ReadAsStringAsync()).GetProperty("result");
+        result.GetProperty("supportedVersions").EnumerateArray()
+            .Select(static version => version.GetString())
+            .Should()
+            .Contain("2026-07-28");
+        result.GetProperty("_meta")
+            .GetProperty("io.modelcontextprotocol/serverInfo")
+            .GetProperty("name")
+            .GetString()
+            .Should()
+            .NotBeNullOrWhiteSpace();
+    }
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Mcp_Should_Reject_Untrusted_Origin_And_Accept_Configured_Origin()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            MemoryApplicationFactory.TestBootstrapToken);
+
+        using var rejectedRequest = CreateModernRequest("tools/list");
+        rejectedRequest.Headers.Add("Origin", "https://attacker.example.test");
+        using var rejectedResponse = await client.SendAsync(rejectedRequest);
+        rejectedResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Forbidden);
+
+        using var acceptedRequest = CreateModernRequest("tools/list");
+        acceptedRequest.Headers.Add("Origin", "https://trusted-mcp.example.test");
+        using var acceptedResponse = await client.SendAsync(acceptedRequest);
+        acceptedResponse.EnsureSuccessStatusCode();
+    }
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Modern_Request_Should_Reject_Missing_Or_Mismatched_Routing_Headers()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            MemoryApplicationFactory.TestBootstrapToken);
+
+        using var missingHeaderRequest = CreateModernRequest("tools/list", includeRoutingHeaders: false);
+        using var missingHeaderResponse = await client.SendAsync(missingHeaderRequest);
+        missingHeaderResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        (await missingHeaderResponse.Content.ReadAsStringAsync()).Should().Contain("-32020");
+
+        using var mismatchedMethodRequest = CreateModernRequest("tools/list");
+        mismatchedMethodRequest.Headers.Remove("Mcp-Method");
+        mismatchedMethodRequest.Headers.Add("Mcp-Method", "tools/call");
+        using var mismatchedMethodResponse = await client.SendAsync(mismatchedMethodRequest);
+        mismatchedMethodResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        (await mismatchedMethodResponse.Content.ReadAsStringAsync()).Should().Contain("-32020");
+
+        using var mismatchedNameRequest = CreateModernRequest("tools/call", "memory_search", new { query = "security" });
+        mismatchedNameRequest.Headers.Remove("Mcp-Name");
+        mismatchedNameRequest.Headers.Add("Mcp-Name", "memory_upsert");
+        using var mismatchedNameResponse = await client.SendAsync(mismatchedNameRequest);
+        mismatchedNameResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        (await mismatchedNameResponse.Content.ReadAsStringAsync()).Should().Contain("-32020");
+    }
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Modern_Endpoint_Should_Reject_Legacy_Stream_Methods_And_Ignore_Session_Headers()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            MemoryApplicationFactory.TestBootstrapToken);
+
+        using var getResponse = await client.GetAsync("/mcp");
+        getResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.MethodNotAllowed);
+
+        using var deleteResponse = await client.DeleteAsync("/mcp");
+        deleteResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.MethodNotAllowed);
+
+        using var request = CreateModernRequest("tools/list");
+        request.Headers.Add("Mcp-Session-Id", "attacker-controlled-session");
+        request.Headers.Add("Last-Event-ID", "stale-event");
+        using var response = await client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        response.Headers.Contains("Mcp-Session-Id").Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Legacy_Initialize_And_Tools_List_Should_Work_Without_Transport_Session()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            MemoryApplicationFactory.TestBootstrapToken);
+
+        using var initializeRequest = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = JsonContent.Create(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2025-11-25",
+                    capabilities = new { },
+                    clientInfo = new { name = "legacy-compatibility-test", version = "1.0" }
+                }
+            })
+        };
+        initializeRequest.Headers.Add("MCP-Protocol-Version", "2025-11-25");
+        initializeRequest.Headers.Accept.ParseAdd("application/json");
+        initializeRequest.Headers.Accept.ParseAdd("text/event-stream");
+
+        using var initializeResponse = await client.SendAsync(initializeRequest);
+        initializeResponse.EnsureSuccessStatusCode();
+        initializeResponse.Headers.Contains("Mcp-Session-Id").Should().BeFalse();
+
+        using var listRequest = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = JsonContent.Create(new
+            {
+                jsonrpc = "2.0",
+                id = 2,
+                method = "tools/list",
+                @params = new { }
+            })
+        };
+        listRequest.Headers.Add("MCP-Protocol-Version", "2025-11-25");
+        listRequest.Headers.Accept.ParseAdd("application/json");
+        listRequest.Headers.Accept.ParseAdd("text/event-stream");
+
+        using var listResponse = await client.SendAsync(listRequest);
+        listResponse.EnsureSuccessStatusCode();
+        (await listResponse.Content.ReadAsStringAsync()).Should().Contain("memory_search");
+    }
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Modern_Request_Should_Reject_Header_And_Meta_Version_Mismatch()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            MemoryApplicationFactory.TestBootstrapToken);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = JsonContent.Create(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "tools/list",
+                @params = new
+                {
+                    _meta = new Dictionary<string, object>
+                    {
+                        ["io.modelcontextprotocol/protocolVersion"] = "2025-11-25",
+                        ["io.modelcontextprotocol/clientCapabilities"] = new { }
+                    }
+                }
+            })
+        };
+        request.Headers.Add("MCP-Protocol-Version", "2026-07-28");
+        request.Headers.Add("Mcp-Method", "tools/list");
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("-32020");
+    }
+
+    private static HttpRequestMessage CreateModernRequest(
+        string method,
+        string? name = null,
+        object? arguments = null,
+        bool includeRoutingHeaders = true)
+    {
+        var parameters = new Dictionary<string, object?>
+        {
+            ["_meta"] = new Dictionary<string, object>
+            {
+                ["io.modelcontextprotocol/protocolVersion"] = "2026-07-28",
+                ["io.modelcontextprotocol/clientInfo"] = new { name = "security-contract-test", version = "1.0" },
+                ["io.modelcontextprotocol/clientCapabilities"] = new { }
+            }
+        };
+        if (name is not null)
+        {
+            parameters["name"] = name;
+            parameters["arguments"] = arguments ?? new { };
+        }
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = JsonContent.Create(new
+            {
+                jsonrpc = "2.0",
+                id = Guid.NewGuid().ToString("N"),
+                method,
+                @params = parameters
+            })
+        };
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+        request.Headers.Add("MCP-Protocol-Version", "2026-07-28");
+        if (includeRoutingHeaders)
+        {
+            request.Headers.Add("Mcp-Method", method);
+            if (name is not null)
+            {
+                request.Headers.Add("Mcp-Name", name);
+            }
+        }
+
+        return request;
+    }
+
+    [DockerRequiredFact]
+    public async Task Raw_Http_Tools_List_And_Call_Should_Work_With_Modern_Stateless_Protocol()
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
@@ -99,9 +347,10 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         await using var mcpClient = await McpClient.CreateAsync(transport);
         var tools = await mcpClient.ListToolsAsync();
         tools.Should().NotBeEmpty();
+        mcpClient.NegotiatedProtocolVersion.Should().Be("2026-07-28");
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull();
 
         var toolsPayload = await SendMcpAsync(client, sessionId!, 2, "tools/list", new { });
         var bootstrapPayload = await SendMcpAsync(client, sessionId!, 3, "tools/call", new
@@ -227,6 +476,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         userPreferencePayload.Should().Contain("preferred-language");
         ExtractToolJsonField(userPreferenceUpdatePayload, "content").Should().Contain("技術名詞保留英文");
         contextPayload.Should().Contain("userPreferences");
+
     }
 
     [DockerRequiredFact]
@@ -380,7 +630,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         _ = await mcpClient.ListResourceTemplatesAsync();
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull();
 
         var escapedProjectId = Uri.EscapeDataString(projectId);
         var escapedQuery = Uri.EscapeDataString(query);
@@ -503,7 +753,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         });
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull();
 
         var ingestPayload = await SendMcpAsync(client, sessionId!, 2, "tools/call", new
         {
@@ -572,7 +822,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         _ = await mcpClient.ListToolsAsync();
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull();
 
         var upsertPayload = await SendMcpAsync(client, sessionId!, 2, "tools/call", new
         {
@@ -631,20 +881,47 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         }
     }
 
-    private static async Task<string> SendMcpAsync(HttpClient client, string sessionId, int id, string method, object @params)
+    private static async Task<string> SendMcpAsync(HttpClient client, string? sessionId, int id, string method, object @params)
     {
+        var parameters = JsonSerializer.SerializeToNode(@params) as JsonObject ?? new JsonObject();
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            parameters["_meta"] = new JsonObject
+            {
+                ["io.modelcontextprotocol/protocolVersion"] = "2026-07-28",
+                ["io.modelcontextprotocol/clientInfo"] = new JsonObject
+                {
+                    ["name"] = "ContextHub.McpProtocolTests",
+                    ["version"] = "1.0"
+                },
+                ["io.modelcontextprotocol/clientCapabilities"] = new JsonObject()
+            };
+        }
+
         using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
         {
-            Content = JsonContent.Create(new
+            Content = JsonContent.Create(new JsonObject
             {
-                jsonrpc = "2.0",
-                id,
-                method,
-                @params
+                ["jsonrpc"] = "2.0",
+                ["id"] = id,
+                ["method"] = method,
+                ["params"] = parameters
             })
         };
-        request.Headers.Add("Mcp-Session-Id", sessionId);
-        request.Headers.Add("MCP-Protocol-Version", "2025-03-26");
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            request.Headers.Add("MCP-Protocol-Version", "2026-07-28");
+            request.Headers.Add("Mcp-Method", method);
+            if (GetModernRoutingName(method, parameters) is { Length: > 0 } name)
+            {
+                request.Headers.Add("Mcp-Name", name);
+            }
+        }
+        else
+        {
+            request.Headers.Add("Mcp-Session-Id", sessionId);
+            request.Headers.Add("MCP-Protocol-Version", "2025-03-26");
+        }
         request.Headers.Accept.ParseAdd("application/json");
         request.Headers.Accept.ParseAdd("text/event-stream");
 
@@ -652,6 +929,15 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStringAsync();
     }
+
+    private static string? GetModernRoutingName(string method, JsonObject parameters)
+        => method switch
+        {
+            "resources/read" or "resources/subscribe" or "resources/unsubscribe" =>
+                parameters["uri"]?.GetValue<string>(),
+            "prompts/get" or "tools/call" => parameters["name"]?.GetValue<string>(),
+            _ => null
+        };
 
     private static void UseBootstrapActor(IServiceProvider services)
     {
@@ -717,6 +1003,12 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
 
     private static JsonElement ExtractSseJson(string payload)
     {
+        if (payload.TrimStart().StartsWith('{'))
+        {
+            using var jsonDocument = JsonDocument.Parse(payload);
+            return jsonDocument.RootElement.Clone();
+        }
+
         var dataLine = payload
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
             .FirstOrDefault(line => line.StartsWith("data: ", StringComparison.Ordinal))

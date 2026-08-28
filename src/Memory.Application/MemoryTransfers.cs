@@ -167,6 +167,7 @@ public sealed class MemoryTransferService(
 
     private async Task<ParsedImportPreview> ParsePreviewAsync(MemoryImportRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
         var package = ParsePackage(request.PackageBase64);
         var bundle = ParseBundle(package, request.Passphrase);
         var externalKeys = bundle.Items
@@ -176,6 +177,7 @@ public sealed class MemoryTransferService(
 
         var existing = await dbContext.MemoryItems
             .AsNoTracking()
+            .ForActor(actor)
             .Where(x => externalKeys.Contains(x.ExternalKey))
             .Select(x => new
             {

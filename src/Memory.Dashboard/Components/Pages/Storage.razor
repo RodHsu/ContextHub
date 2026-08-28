@@ -205,7 +205,7 @@
     private MarkupString AppliedColumnText
         => string.IsNullOrWhiteSpace(_rows?.AppliedColumn)
             ? new MarkupString(string.Empty)
-            : new MarkupString($"/ 欄位 <code>{_rows.AppliedColumn}</code>");
+            : new MarkupString($"/ 欄位 <code>{System.Text.Encodings.Web.HtmlEncoder.Default.Encode(_rows.AppliedColumn)}</code>");
 
     private async Task ReloadAsync()
     {
