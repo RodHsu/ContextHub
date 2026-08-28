@@ -1328,6 +1328,129 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Governance_Batch_Should_Retry_Prior_Generation_NoOp_When_ReReview_Still_Finds_Item_Actionable()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var owner = actorAccessor.Current;
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"noop-rereview-{Guid.NewGuid():N}";
+        var governanceRunId = $"noop-rereview-run-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var session = new ConversationSession
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = $"noop-rereview-{Guid.NewGuid():N}",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = "noop-rereview-fixture",
+            LastTurnId = "turn-1",
+            StartedAt = now,
+            LastCheckpointAt = now,
+            UpdatedAt = now
+        };
+        var checkpoint = new ConversationCheckpoint
+        {
+            Session = session,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = "fixture:noop-rereview",
+            DedupKey = $"noop-rereview:{Guid.NewGuid():N}",
+            CreatedAt = now
+        };
+        var insights = Enumerable.Range(0, 6).Select(index => new ConversationInsight
+        {
+            Session = session,
+            Checkpoint = checkpoint,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = $"fixture:noop-rereview:{index}",
+            SourceKind = ConversationSourceKind.AgentSupplemental,
+            InsightType = ConversationInsightType.Episode,
+            Title = $"NoOp re-review insight {index}",
+            Content = $"Low-risk insight {index} requires a durable disposition.",
+            Summary = "A prior-generation NoOp must not suppress a still-actionable item.",
+            Importance = .2m,
+            Confidence = .5m,
+            DedupKey = $"noop-rereview:{projectId}:{index}",
+            PromotionStatus = ConversationPromotionStatus.Pending,
+            MetadataJson = "{}",
+            CreatedAt = now.AddMilliseconds(index),
+            UpdatedAt = now.AddMilliseconds(index)
+        }).ToArray();
+        await dbContext.ConversationInsights.AddRangeAsync(insights);
+        await dbContext.SaveChangesAsync();
+
+        var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId), CancellationToken.None);
+        var orderedInsightKeys = review.GovernancePlan
+            .Where(x => x.ItemKind == GovernanceItemKind.ConversationInsight)
+            .Select(x => x.ItemKey)
+            .ToArray();
+        orderedInsightKeys.Should().HaveCount(6);
+        var requestA = new GovernanceBatchExecuteRequest(
+            governanceRunId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 1,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var batchStart = await gatewayTools.governance_batch_execute(requestA, CancellationToken.None);
+        batchStart.Items.Should().ContainSingle(x => x.ItemKey == orderedInsightKeys[0] && x.Disposition == GovernanceBatchItemDisposition.Deferred);
+        batchStart.NextCursor.Should().NotBeNullOrWhiteSpace();
+
+        var retriedInsightId = Guid.ParseExact(orderedInsightKeys[1]["insight:".Length..], "N");
+        var retriedInsight = await dbContext.ConversationInsights.SingleAsync(x => x.Id == retriedInsightId);
+        retriedInsight.PromotionStatus = ConversationPromotionStatus.Deferred;
+        retriedInsight.GovernanceReason = "Synthetic state change after immutable execution plan.";
+        retriedInsight.UpdatedAt = DateTimeOffset.UtcNow;
+        dbContext.ConversationInsights.Update(retriedInsight);
+        await dbContext.SaveChangesAsync();
+
+        var batchA = await gatewayTools.governance_batch_execute(requestA with { Cursor = batchStart.NextCursor }, CancellationToken.None);
+        batchA.Items.Should().Contain(x => x.ItemKey == orderedInsightKeys[1] && x.Disposition == GovernanceBatchItemDisposition.NoOp);
+        batchA.NextCursor.Should().NotBeNullOrWhiteSpace();
+
+        retriedInsight = await dbContext.ConversationInsights.SingleAsync(x => x.Id == retriedInsightId);
+        retriedInsight.PromotionStatus = ConversationPromotionStatus.Pending;
+        retriedInsight.GovernanceReason = string.Empty;
+        retriedInsight.GovernanceRunId = string.Empty;
+        retriedInsight.GovernanceUpdatedAt = null;
+        retriedInsight.UpdatedAt = DateTimeOffset.UtcNow;
+        dbContext.ConversationInsights.Update(retriedInsight);
+        await dbContext.SaveChangesAsync();
+        var reReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        reReview.GovernancePlan.Should().Contain(x => x.ItemKey == orderedInsightKeys[1]);
+
+        var batchB = await gatewayTools.governance_batch_execute(requestA with
+        {
+            SnapshotToken = reReview.DurableMemoryCoverage!.SnapshotToken,
+            Cursor = batchA.NextCursor,
+            IsReReview = true
+        }, CancellationToken.None);
+        batchB.Items.Should().Contain(x => x.ItemKey == orderedInsightKeys[1] && x.Disposition == GovernanceBatchItemDisposition.Deferred);
+        (await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == retriedInsightId))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.Deferred);
+    }
+
+    [DockerRequiredFact]
     public async Task Full_Governance_Should_Cover_Mixed_Surfaces_And_Aggregate_100k_Logs_Server_Side()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

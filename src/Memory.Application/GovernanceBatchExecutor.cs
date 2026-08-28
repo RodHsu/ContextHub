@@ -225,7 +225,11 @@ public sealed class GovernanceBatchExecutor(
 
         var planItems = JsonSerializer.Deserialize<List<BatchPlanItem>>(run.PlanJson, JsonOptions)
             ?? throw new InvalidOperationException("Persisted governance batch plan is invalid.");
-        var terminalItemKeys = await GetTerminalItemKeysAsync(logicalRunIds, cancellationToken);
+        var terminalItemKeys = await GetTerminalItemKeysAsync(
+            logicalRunIds,
+            run.Id,
+            planItems.Select(x => x.Key).ToHashSet(StringComparer.Ordinal),
+            cancellationToken);
         var executablePlanItems = planItems.Where(x => !terminalItemKeys.Contains(x.Key)).ToList();
         var index = 0;
         var lastItemKey = cursorPayload?.ItemKey ?? string.Empty;
@@ -1035,11 +1039,13 @@ public sealed class GovernanceBatchExecutor(
 
     private async Task<HashSet<string>> GetTerminalItemKeysAsync(
         IReadOnlyCollection<Guid> logicalRunIds,
+        Guid currentRunId,
+        IReadOnlySet<string> currentPlanItemKeys,
         CancellationToken cancellationToken)
     {
         var executions = await dbContext.GovernanceBatchExecutions.AsNoTracking()
             .Where(x => logicalRunIds.Contains(x.GovernanceBatchRunId) && x.Status == "Completed")
-            .Select(x => new { x.RequestJson, x.ResultJson })
+            .Select(x => new { x.GovernanceBatchRunId, x.RequestJson, x.ResultJson })
             .ToListAsync(cancellationToken);
         var terminal = new HashSet<string>(StringComparer.Ordinal);
         foreach (var execution in executions.Where(x => !IsDryRunRequest(x.RequestJson)))
@@ -1047,12 +1053,21 @@ public sealed class GovernanceBatchExecutor(
             GovernanceBatchExecuteResult result;
             try { result = DeserializeResult(execution.ResultJson); }
             catch (InvalidOperationException) { continue; }
-            foreach (var item in result.Items.Where(x => x.Disposition is
-                         GovernanceBatchItemDisposition.Applied or
-                         GovernanceBatchItemDisposition.NoOp or
-                         GovernanceBatchItemDisposition.Deferred or
-                         GovernanceBatchItemDisposition.RequiresUserDecision))
-                terminal.Add(item.ItemKey);
+            foreach (var item in result.Items)
+            {
+                var isTerminal = item.Disposition is
+                    GovernanceBatchItemDisposition.Applied or
+                    GovernanceBatchItemDisposition.Deferred or
+                    GovernanceBatchItemDisposition.RequiresUserDecision;
+                var isCurrentGenerationNoOp = item.Disposition == GovernanceBatchItemDisposition.NoOp &&
+                                              execution.GovernanceBatchRunId == currentRunId;
+                var isReconciledPriorGenerationNoOp = item.Disposition == GovernanceBatchItemDisposition.NoOp &&
+                                                       !currentPlanItemKeys.Contains(item.ItemKey);
+                if (isTerminal || isCurrentGenerationNoOp || isReconciledPriorGenerationNoOp)
+                {
+                    terminal.Add(item.ItemKey);
+                }
+            }
         }
         return terminal;
     }
