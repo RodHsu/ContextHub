@@ -236,8 +236,17 @@ public sealed class MemoryMcpTools(
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Execute one persisted, bounded governance batch from a full-review snapshot. Scheduled mode is low-risk, proposal-first, archive-first, replay-idempotent, and never hard-deletes. Returns compact per-item read-back evidence, audit ids, and a saved continuation cursor.")]
-    public Task<GovernanceBatchExecuteResult> governance_batch_execute(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken = default)
-        => governanceBatchExecutor.ExecuteAsync(request, cancellationToken);
+    public async Task<GovernanceBatchExecuteResult> governance_batch_execute(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await governanceBatchExecutor.ExecuteAsync(request, cancellationToken);
+        }
+        catch (GovernanceBatchException ex)
+        {
+            return GovernanceBatchExecuteResult.Failure(request, ex);
+        }
+    }
 
     [McpServerTool(UseStructuredContent = true), Description("Idempotently classify a durable-memory governance finding as Deferred, RequiresUserDecision, or HostBlocked with an audited reason and governanceRunId.")]
     public Task<GovernanceFindingResult> governance_finding_set_disposition(GovernanceFindingDispositionRequest request, CancellationToken cancellationToken = default)

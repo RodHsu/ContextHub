@@ -13,6 +13,8 @@ public sealed class ChatGptProposalService(
     IMemoryService memoryService,
     IProjectInformationService projectInformationService,
     IProjectArtifactExchangeService artifactExchangeService,
+    IProjectDiscussionService projectDiscussionService,
+    IProjectWorkItemService projectWorkItemService,
     ISuggestedActionService suggestedActionService,
     IRequestActorAccessor actorAccessor,
     IClock clock,
@@ -42,6 +44,9 @@ public sealed class ChatGptProposalService(
         "project_artifact_upload_object",
         "project_information_upsert",
         "project_information_update_lifecycle",
+        "project_hierarchy_set_children",
+        "discussion_thread_archive",
+        "project_work_item_archive",
         "enqueue_reindex"
     };
 
@@ -287,6 +292,16 @@ public sealed class ChatGptProposalService(
             "project_artifact_upload_object" => (await artifactExchangeService.UploadManagedObjectAsync(Deserialize<ProjectArtifactManagedObjectPublishRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_information_upsert" => (await projectInformationService.UpdateFromAgentAsync(Deserialize<ProjectInformationAgentUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_information_update_lifecycle" => (await projectInformationService.UpdateLifecycleAsync(Deserialize<ProjectLifecycleUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
+            "project_hierarchy_set_children" => DeterministicProjectHierarchyResultId(
+                await projectDiscussionService.SetChildrenAsync(Deserialize<ProjectHierarchySetChildrenRequest>(payloadJson), cancellationToken)),
+            "discussion_thread_archive" => (await projectDiscussionService.SetThreadArchivedAsync(
+                Deserialize<DiscussionThreadArchiveRequest>(payloadJson).ThreadId,
+                Deserialize<DiscussionThreadArchiveRequest>(payloadJson).Archived,
+                cancellationToken))?.Id,
+            "project_work_item_archive" => (await projectWorkItemService.SetArchivedAsync(
+                Deserialize<ProjectWorkItemArchiveRequest>(payloadJson).WorkItemId,
+                Deserialize<ProjectWorkItemArchiveRequest>(payloadJson).Archived,
+                cancellationToken)).Id,
             "enqueue_reindex" => (await memoryService.EnqueueReindexAsync(Deserialize<EnqueueReindexRequest>(payloadJson), cancellationToken)).JobId,
             _ => throw new InvalidOperationException($"Tool '{toolName}' is not supported for proposal approval.")
         };
@@ -332,6 +347,9 @@ public sealed class ChatGptProposalService(
             case "project_artifact_upload_object": _ = DeserializeStrict<ProjectArtifactManagedObjectPublishRequest>(payloadJson); break;
             case "project_information_upsert": _ = DeserializeStrict<ProjectInformationAgentUpdateRequest>(payloadJson); break;
             case "project_information_update_lifecycle": _ = DeserializeStrict<ProjectLifecycleUpdateRequest>(payloadJson); break;
+            case "project_hierarchy_set_children": _ = DeserializeStrict<ProjectHierarchySetChildrenRequest>(payloadJson); break;
+            case "discussion_thread_archive": EnsureId(DeserializeStrict<DiscussionThreadArchiveRequest>(payloadJson).ThreadId, "ThreadId"); break;
+            case "project_work_item_archive": EnsureId(DeserializeStrict<ProjectWorkItemArchiveRequest>(payloadJson).WorkItemId, "WorkItemId"); break;
             case "enqueue_reindex":
                 {
                     var request = DeserializeStrict<EnqueueReindexRequest>(payloadJson);
@@ -352,6 +370,12 @@ public sealed class ChatGptProposalService(
     private static void EnsureId(Guid id, string propertyName)
     {
         if (id == Guid.Empty) throw new InvalidOperationException($"Proposal payload field '{propertyName}' must be a non-empty UUID.");
+    }
+
+    private static Guid DeterministicProjectHierarchyResultId(ProjectHierarchyResult result)
+    {
+        var identity = $"{result.ParentProjectId}\n{string.Join('\n', result.ChildProjectIds.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))}";
+        return new Guid(SHA256.HashData(Encoding.UTF8.GetBytes(identity)).AsSpan(0, 16));
     }
 
     private static T DeserializeStrict<T>(string json)

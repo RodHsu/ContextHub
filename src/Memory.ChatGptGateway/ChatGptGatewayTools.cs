@@ -46,8 +46,17 @@ public sealed class ChatGptGatewayTools(
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Execute one server-side bounded governance batch from the saved full-review snapshot. Scheduled mode only applies low-risk proposal-first actions, performs resource read-back, never hard-deletes, and returns replay-safe continuation and audit references.")]
-    public Task<GovernanceBatchExecuteResult> governance_batch_execute(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken = default)
-        => governanceBatchExecutor.ExecuteAsync(request, cancellationToken);
+    public async Task<GovernanceBatchExecuteResult> governance_batch_execute(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await governanceBatchExecutor.ExecuteAsync(request, cancellationToken);
+        }
+        catch (GovernanceBatchException ex)
+        {
+            return GovernanceBatchExecuteResult.Failure(request, ex);
+        }
+    }
 
     [McpServerTool(UseStructuredContent = true), Description("Idempotently classify a durable-memory governance finding as Deferred, RequiresUserDecision, or HostBlocked with an audited reason and governanceRunId. The finding remains in full coverage but is excluded from actionable convergence counts.")]
     public Task<GovernanceFindingResult> governance_finding_set_disposition(GovernanceFindingDispositionRequest request, CancellationToken cancellationToken = default)

@@ -12,6 +12,7 @@ public sealed class KnowledgeReviewService(
     IProjectDiscussionService discussions,
     IProjectWorkItemService workItems,
     IDurableMemoryGovernanceService durableGovernance,
+    IFullGovernancePlanService fullGovernance,
     IRequestActorAccessor actorAccessor) : IKnowledgeReviewService
 {
     private const int PageSize = 200;
@@ -56,6 +57,7 @@ public sealed class KnowledgeReviewService(
         // Materialize semantic findings before reading execution queues so findings produced by
         // this review are executable in the same Review -> Execute cycle.
         var governanceSnapshot = await durableGovernance.GetOrCreateSnapshotAsync(ids, governanceRunId, request.IsReReview, cancellationToken);
+        var fullGovernancePlan = await fullGovernance.BuildAsync(ids, governanceRunId, governanceSnapshot, cancellationToken);
         foreach (var project in projects.Where(x => !ProjectContext.IsShared(x.ProjectId) && !ProjectContext.IsUser(x.ProjectId)))
         {
             var projectId = project.ProjectId;
@@ -140,14 +142,12 @@ public sealed class KnowledgeReviewService(
             .ToArray();
         var workItemGovernanceActionCount = orderedWorkItems.Count(x =>
             IsWorkItemActionable(x) && !excludedGovernanceTrackers.Any(excluded => excluded.Id == x.Id));
-        var semanticActionableCount = governanceSnapshot.ProjectCandidates.Count + governanceSnapshot.SharedCandidates.Count;
-        var actionableCount = (int)Math.Min(
-            int.MaxValue,
-            (long)semanticActionableCount + workItemGovernanceActionCount + orderedInsights.Length + orderedActions.Length + orderedProposals.Length);
+        var actionableCount = fullGovernancePlan.GovernanceActionableCount;
         var deferredCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.Deferred) + governanceSnapshot.DeferredCount;
-        var userDecisionCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision) + governanceSnapshot.RequiresUserDecisionCount;
+        var userDecisionCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision) +
+                                governanceSnapshot.RequiresUserDecisionCount + fullGovernancePlan.GovernedExceptionCount;
         var hostBlockedCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.HostBlocked) + governanceSnapshot.HostBlockedCount;
-        var coverageComplete = governanceSnapshot.Coverage.CoverageComplete && !governanceSnapshot.Coverage.HasMore;
+        var coverageComplete = fullGovernancePlan.Coverage.CoverageComplete && !fullGovernancePlan.Coverage.HasMore;
         var convergence = BuildConvergence(
             request.IsReReview,
             coverageComplete,
@@ -176,7 +176,15 @@ public sealed class KnowledgeReviewService(
         {
             DurableMemoryCoverage = governanceSnapshot.Coverage,
             ProjectKnowledgeGovernance = new KnowledgeGovernanceSectionResult(projectGovernancePage, projectGovernancePageInfo),
-            SharedKnowledgeGovernance = new KnowledgeGovernanceSectionResult(sharedGovernancePage, sharedGovernancePageInfo)
+            SharedKnowledgeGovernance = new KnowledgeGovernanceSectionResult(sharedGovernancePage, sharedGovernancePageInfo),
+            GovernancePlan = fullGovernancePlan.Items,
+            GovernanceCoverage = fullGovernancePlan.Coverage,
+            Convergence = convergence with
+            {
+                GovernanceActionableCount = fullGovernancePlan.GovernanceActionableCount,
+                BusinessWorkItemActionableCount = fullGovernancePlan.BusinessWorkItemActionableCount,
+                GovernedExceptionCount = fullGovernancePlan.GovernedExceptionCount
+            }
         };
     }
 
@@ -216,13 +224,15 @@ public sealed class KnowledgeReviewService(
         int requiresUserDecisionCount,
         int hostBlockedCount,
         int workItemActionableCount = 0,
-        int excludedGovernanceTrackerCount = 0)
+        int excludedGovernanceTrackerCount = 0,
+        int? governanceActionableCount = null)
     {
         var exceptionCount = deferredCount + requiresUserDecisionCount + hostBlockedCount;
-        var converged = isReReview && coverageComplete && !hasMore && actionableItemCount == 0;
+        var convergenceActionableCount = governanceActionableCount ?? actionableItemCount;
+        var converged = isReReview && coverageComplete && !hasMore && convergenceActionableCount == 0;
         var status = converged
             ? exceptionCount > 0 ? "ConvergedWithExceptions" : "Converged"
-            : actionableItemCount > 0
+            : convergenceActionableCount > 0
                 ? "ExecutionRequired"
                 : !coverageComplete || hasMore
                     ? "CoverageIncomplete"

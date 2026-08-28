@@ -2879,6 +2879,18 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         review.DurableMemoryCoverage.Should().NotBeNull();
         review.DurableMemoryCoverage!.CoverageComplete.Should().BeTrue();
         review.DurableMemoryCoverage.ScannedCount.Should().Be(review.DurableMemoryCoverage.TotalCount);
+        review.GovernanceCoverage.Should().NotBeNull();
+        review.GovernanceCoverage!.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.ProjectCoverage.ScannedCount.Should().Be(review.GovernanceCoverage.ProjectCoverage.TotalCount);
+        review.GovernanceCoverage.HierarchyCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.PreferenceCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.ArtifactCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.DiscussionCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.WorkItemCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.InsightCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.SuggestedActionCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.ProposalCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.LogCoverage.CoverageComplete.Should().BeTrue();
     }
 
     [DockerRequiredFact]
@@ -2912,7 +2924,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         after.Convergence.WorkItemActionableCount.Should().Be(0);
         after.Convergence.ExcludedGovernanceTrackerCount.Should().Be(1);
         after.Convergence.ActionableItemCount.Should().Be(0);
-        after.Convergence.Status.Should().Be("Converged");
+        after.Convergence.Status.Should().Be("ConvergedWithExceptions");
+        after.Convergence.GovernedExceptionCount.Should().BeGreaterThan(0);
     }
 
     [DockerRequiredFact]
@@ -2949,7 +2962,10 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             GovernanceRunId = $"wrong-run-{Guid.NewGuid():N}",
             SnapshotToken = review.DurableMemoryCoverage.SnapshotToken
         });
-        mismatchResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        mismatchResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
+        using var mismatchProblem = JsonDocument.Parse(await mismatchResponse.Content.ReadAsStringAsync());
+        mismatchProblem.RootElement.GetProperty("code").GetString()
+            .Should().Be(nameof(GovernanceBatchErrorCode.CursorSnapshotMismatch));
     }
 
     private static async Task CompleteActiveMaintenanceLeasesAsync(HttpClient client)

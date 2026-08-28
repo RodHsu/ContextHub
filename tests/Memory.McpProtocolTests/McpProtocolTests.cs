@@ -211,7 +211,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             ]);
         governanceBatchTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
             "scannedCount", "attemptedCount", "appliedCount", "noOpCount", "failedCount", "deferredCount",
-            "requiresUserDecisionCount", "nextCursor", "hasMore", "items", "auditIds", "stoppedReason"
+            "requiresUserDecisionCount", "nextCursor", "hasMore", "items", "auditIds", "stoppedReason", "errorCode", "succeeded"
         ]);
         bootstrapTool.GetProperty("outputSchema").GetProperty("type").GetString().Should().Be("object");
         trackerExclusionTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")

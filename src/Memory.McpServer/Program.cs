@@ -1454,6 +1454,14 @@ knowledgeReviews.MapPost("/execute", async (GovernanceBatchExecuteRequest reques
         {
             return Results.Ok(await service.ExecuteAsync(request, cancellationToken));
         }
+        catch (GovernanceBatchException ex)
+        {
+            return Results.Problem(
+                statusCode: StatusCodes.Status409Conflict,
+                title: "Governance batch continuation rejected",
+                detail: ex.Message,
+                extensions: new Dictionary<string, object?> { ["code"] = ex.Code.ToString() });
+        }
         catch (InvalidOperationException ex)
         {
             return Results.ValidationProblem(new Dictionary<string, string[]> { ["governanceBatch"] = [ex.Message] });

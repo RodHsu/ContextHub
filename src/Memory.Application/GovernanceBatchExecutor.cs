@@ -15,12 +15,14 @@ public sealed class GovernanceBatchExecutor(
     IMemoryService memoryService,
     IGovernanceService governanceService,
     IConversationAutomationService conversationService,
+    IFullGovernancePlanService fullGovernance,
     IRequestActorAccessor actorAccessor,
     IClock clock) : IGovernanceBatchExecutor
 {
     private const int MaximumMutations = 500;
     private const int MaximumDurationSeconds = 900;
     private const int MaximumPlanItems = 100_000;
+    private const int CursorVersion = 2;
     private static readonly TimeSpan SnapshotLifetime = TimeSpan.FromHours(24);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -39,6 +41,27 @@ public sealed class GovernanceBatchExecutor(
         var tenantId = actor.TenantId ?? throw new UnauthorizedAccessException("Governance batch execution requires a tenant actor.");
         var ownerUserId = actor.UserId ?? throw new UnauthorizedAccessException("Governance batch execution requires a tenant user.");
         var projectIds = await ResolveProjectIdsAsync(request.ProjectIds, actor, cancellationToken);
+        var actorHash = Hash($"{tenantId:N}\n{ownerUserId:N}");
+        var projectSetHash = Hash(string.Join('\n', projectIds.Append(ProjectContext.SharedProjectId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .Select(x => x.ToLowerInvariant())));
+        var policyHash = BuildPolicyHash(request, projectIds);
+        var cursorBefore = request.Cursor?.Trim() ?? string.Empty;
+        var cursorPayload = string.IsNullOrEmpty(cursorBefore) ? null : ParseCursor(cursorBefore);
+        if (cursorPayload is not null)
+        {
+            await ValidateIssuedCursorAsync(
+                cursorBefore,
+                cursorPayload,
+                tenantId,
+                ownerUserId,
+                request.GovernanceRunId.Trim(),
+                actorHash,
+                projectSetHash,
+                policyHash,
+                cancellationToken);
+        }
         var snapshot = await durableGovernance.GetOrCreateSnapshotAsync(
             projectIds,
             request.GovernanceRunId.Trim(),
@@ -47,14 +70,12 @@ public sealed class GovernanceBatchExecutor(
         if (!string.IsNullOrWhiteSpace(request.SnapshotToken) &&
             !string.Equals(request.SnapshotToken.Trim(), snapshot.Coverage.SnapshotToken, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("SnapshotToken does not match the governance run snapshot.");
+            throw new GovernanceBatchException(
+                cursorPayload is null ? GovernanceBatchErrorCode.CursorSnapshotMismatch : GovernanceBatchErrorCode.ReReviewRequired,
+                "SnapshotToken does not match the requested governance review generation.");
         }
 
         var snapshotToken = snapshot.Coverage.SnapshotToken;
-        var projectSetHash = Hash(string.Join('\n', projectIds.Append(ProjectContext.SharedProjectId)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-            .Select(x => x.ToLowerInvariant())));
         var run = await dbContext.GovernanceBatchRuns
             .FirstOrDefaultAsync(x =>
                 x.TenantId == tenantId &&
@@ -104,11 +125,13 @@ public sealed class GovernanceBatchExecutor(
 
         if (!string.Equals(run.ProjectSetHash, projectSetHash, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("GovernanceRunId and SnapshotToken cannot be replayed with a different ProjectId scope.");
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorScopeMismatch,
+                "GovernanceRunId and SnapshotToken cannot be replayed with a different ProjectId scope.");
         }
         if (run.ExpiresAt <= clock.UtcNow)
         {
-            throw new InvalidOperationException("Governance batch snapshot has expired; perform a fresh review.");
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorExpired,
+                "Governance batch snapshot has expired; perform a fresh review.");
         }
 
         var canonicalRequest = Canonicalize(request, snapshotToken, projectIds);
@@ -132,23 +155,42 @@ public sealed class GovernanceBatchExecutor(
             };
         }
 
-        var cursorBefore = request.Cursor?.Trim() ?? string.Empty;
+        var logicalRunIds = await dbContext.GovernanceBatchRuns.AsNoTracking()
+            .Where(x => x.TenantId == tenantId &&
+                        x.OwnerUserId == ownerUserId &&
+                        x.GovernanceRunId == request.GovernanceRunId.Trim() &&
+                        x.ProjectSetHash == projectSetHash)
+            .Select(x => x.Id)
+            .ToListAsync(cancellationToken);
+        IReadOnlyList<Guid> conflictRunIds = string.IsNullOrEmpty(cursorBefore) ? [run.Id] : logicalRunIds;
         var conflictingExecutions = await dbContext.GovernanceBatchExecutions.AsNoTracking()
-            .Where(x => x.GovernanceBatchRunId == run.Id && x.CursorBefore == cursorBefore && x.RequestHash != requestHash)
+            .Where(x => conflictRunIds.Contains(x.GovernanceBatchRunId) && x.CursorBefore == cursorBefore && x.RequestHash != requestHash)
             .Select(x => x.RequestJson)
             .ToListAsync(cancellationToken);
         if (conflictingExecutions.Any(x => !IsDryRunRequest(x)))
         {
-            throw new InvalidOperationException("Execution payload does not match the payload already recorded for this governance cursor.");
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.ReplayPayloadMismatch,
+                "Execution payload does not match the payload already recorded for this governance cursor.");
         }
-        if (!string.Equals(cursorBefore, run.LastCursor, StringComparison.Ordinal))
+        if (cursorPayload is not null && cursorPayload.RunId == run.Id &&
+            !string.Equals(cursorBefore, run.LastCursor, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("Cursor is invalid, stale, or does not match the saved continuation.");
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.InvalidCursor,
+                "Cursor is stale or does not match the latest saved continuation for this snapshot.");
+        }
+        if (cursorPayload is null && !string.IsNullOrEmpty(run.LastCursor))
+        {
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.InvalidCursor,
+                "A continuation cursor is required for this snapshot generation.");
         }
 
         var planItems = JsonSerializer.Deserialize<List<BatchPlanItem>>(run.PlanJson, JsonOptions)
             ?? throw new InvalidOperationException("Persisted governance batch plan is invalid.");
-        var index = ParseCursor(cursorBefore, run, planItems.Count);
+        var terminalItemKeys = await GetTerminalItemKeysAsync(logicalRunIds, cancellationToken);
+        var executablePlanItems = planItems.Where(x => !terminalItemKeys.Contains(x.Key)).ToList();
+        var index = 0;
+        var lastItemKey = cursorPayload?.ItemKey ?? string.Empty;
+        var logicalPositionBase = terminalItemKeys.Count;
         var execution = new GovernanceBatchExecution
         {
             GovernanceBatchRunId = run.Id,
@@ -159,7 +201,7 @@ public sealed class GovernanceBatchExecutor(
             CreatedAt = clock.UtcNow,
             UpdatedAt = clock.UtcNow
         };
-        var initial = EmptyResult(request.GovernanceRunId.Trim(), snapshotToken, cursorBefore, index < planItems.Count);
+        var initial = EmptyResult(request.GovernanceRunId.Trim(), snapshotToken, cursorBefore, index < executablePlanItems.Count);
         execution.ResultJson = JsonSerializer.Serialize(initial, JsonOptions);
         await dbContext.GovernanceBatchExecutions.AddAsync(execution, cancellationToken);
         try
@@ -188,7 +230,7 @@ public sealed class GovernanceBatchExecutor(
             : Enum.GetValues<GovernanceBatchActionType>()).ToHashSet();
         var stoppedReason = "Completed";
 
-        while (index < planItems.Count)
+        while (index < executablePlanItems.Count)
         {
             if (accumulator.AttemptedCount >= request.MaxMutations)
             {
@@ -211,7 +253,7 @@ public sealed class GovernanceBatchExecutor(
                 break;
             }
 
-            var item = planItems[index];
+            var item = executablePlanItems[index];
             accumulator.ScannedCount++;
             GovernanceBatchItemResult itemResult;
             if (request.DryRun)
@@ -237,8 +279,9 @@ public sealed class GovernanceBatchExecutor(
                 };
                 accumulator.Add(itemResult);
                 stoppedReason = "UnknownResult";
-                await PersistProgressAsync(run, execution, accumulator, index, planItems.Count, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
-                return accumulator.ToResult(run.LastCursor, index < planItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
+                await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
+                    executablePlanItems.Count - index, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
+                return accumulator.ToResult(execution.CursorAfter, index < executablePlanItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
             }
             catch (Exception ex)
             {
@@ -247,26 +290,30 @@ public sealed class GovernanceBatchExecutor(
                 itemResult = Failed(item, ex.Message, retryable: true, "NotAdvancedRetryable") with { AuditIds = [failureAudit] };
                 accumulator.Add(itemResult);
                 stoppedReason = "ItemFailed";
-                await PersistProgressAsync(run, execution, accumulator, index, planItems.Count, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
-                return accumulator.ToResult(run.LastCursor, index < planItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
+                await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
+                    executablePlanItems.Count - index, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
+                return accumulator.ToResult(execution.CursorAfter, index < executablePlanItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
             }
 
             accumulator.Add(itemResult);
             if (itemResult.Disposition is GovernanceBatchItemDisposition.Failed or GovernanceBatchItemDisposition.UnknownResult)
             {
                 stoppedReason = itemResult.Disposition == GovernanceBatchItemDisposition.UnknownResult ? "UnknownResult" : "ItemFailed";
-                await PersistProgressAsync(run, execution, accumulator, index, planItems.Count, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
-                return accumulator.ToResult(run.LastCursor, index < planItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
+                await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
+                    executablePlanItems.Count - index, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
+                return accumulator.ToResult(execution.CursorAfter, index < executablePlanItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
             }
 
             index++;
-            await PersistProgressAsync(run, execution, accumulator, index, planItems.Count, stopwatch, "Running", advance: true, cancellationToken);
+            lastItemKey = item.Key;
+            await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
+                executablePlanItems.Count - index, stopwatch, "Running", advance: true, cancellationToken);
         }
 
-        var hasMore = index < planItems.Count;
+        var hasMore = index < executablePlanItems.Count;
         var nextCursor = request.DryRun
             ? (string.IsNullOrWhiteSpace(run.LastCursor) ? null : run.LastCursor)
-            : hasMore ? BuildCursor(run, index) : null;
+            : hasMore ? BuildCursor(run, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash) : null;
         if (!request.DryRun)
         {
             run.LastCursor = nextCursor ?? string.Empty;
@@ -302,8 +349,90 @@ public sealed class GovernanceBatchExecutor(
             "SuggestedAction" => await ProcessSuggestedActionAsync(item, request, allowed, actor, cancellationToken),
             "ConversationInsight" => await ProcessInsightAsync(item, request, allowed, actor, cancellationToken),
             "Proposal" => await ProcessPendingProposalAsync(item, request, actor, cancellationToken),
+            _ when Enum.TryParse<GovernanceItemKind>(item.Kind, out _) =>
+                await ProcessTypedSurfaceAsync(item, request, allowed, actor, cancellationToken),
             _ => throw new InvalidOperationException($"Unsupported governance plan item kind '{item.Kind}'.")
         };
+    }
+
+    private async Task<GovernanceBatchItemResult> ProcessTypedSurfaceAsync(
+        BatchPlanItem item,
+        GovernanceBatchExecuteRequest request,
+        IReadOnlySet<GovernanceBatchActionType> allowed,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        ActorAuthorization.EnsureProjectAllowed(actor, item.ProjectId, write: true);
+        if (item.Kind == nameof(GovernanceItemKind.ProjectHierarchy) && item.RequiresExplicitApproval)
+        {
+            var rows = await dbContext.ProjectHierarchies.AsNoTracking()
+                .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && x.ParentProjectId == item.ProjectId)
+                .OrderBy(x => x.ChildProjectId)
+                .ThenBy(x => x.Id)
+                .ToListAsync(cancellationToken);
+            var proposedChildren = rows.Where(x => x.Id != item.Id)
+                .Select(x => x.ChildProjectId)
+                .Where(x => !string.Equals(x, item.ProjectId, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var proposal = await proposalService.CreateAsync(new ChatGptProposalCreateRequest(
+                "project_hierarchy_set_children",
+                item.ProjectId,
+                JsonSerializer.Serialize(new ProjectHierarchySetChildrenRequest(item.ProjectId, proposedChildren), JsonOptions),
+                "Review hierarchy reconciliation",
+                $"{item.Classification} requires explicit approval; Scheduled mode did not mutate the project tree.",
+                actor.UserId?.ToString("D") ?? actor.Username,
+                string.Empty,
+                actor.Username,
+                request.GovernanceRunId), cancellationToken);
+            return await AuditedResultAsync(item, GovernanceBatchActionType.HierarchyReconcile,
+                GovernanceBatchItemDisposition.RequiresUserDecision,
+                "A schema-validated hierarchy proposal was created; no hierarchy mutation occurred.", [proposal.Id],
+                item.RelatedResourceIds, actor, cancellationToken);
+        }
+        if (item.RequiresExplicitApproval || item.RiskLevel > request.MaxRiskLevel)
+        {
+            return await AuditedResultAsync(item, ParseRecommendedAction(item.RecommendedAction),
+                GovernanceBatchItemDisposition.RequiresUserDecision,
+                $"{item.Classification} requires explicit authority or exceeds this batch risk policy.", [],
+                item.RelatedResourceIds, actor, cancellationToken);
+        }
+
+        if (item.Kind == nameof(GovernanceItemKind.Discussion) &&
+            item.Classification == "CompletedDiscussion" &&
+            allowed.Contains(GovernanceBatchActionType.DiscussionReconcile))
+        {
+            var proposal = await CreateAndApplyProposalAsync("discussion_thread_archive", item.ProjectId,
+                "Archive completed discussion", "Archive a closed discussion while retaining its complete history and audit chain.",
+                new DiscussionThreadArchiveRequest(item.Id), request.GovernanceRunId, cancellationToken);
+            var readBack = await dbContext.DiscussionThreads.AsNoTracking().SingleOrDefaultAsync(x => x.Id == item.Id, cancellationToken);
+            if (readBack?.ArchivedAt is null) throw new InvalidOperationException("Discussion archive proposal applied without resource read-back.");
+            return await AuditedResultAsync(item, GovernanceBatchActionType.DiscussionReconcile, GovernanceBatchItemDisposition.Applied,
+                "Closed discussion was proposal-applied, archived, and read back; history was retained.", [proposal.Id], [item.Id], actor, cancellationToken);
+        }
+
+        if (item.Kind == nameof(GovernanceItemKind.WorkItem) &&
+            item.Classification == "CompletedHistoricalWorkItem" &&
+            allowed.Contains(GovernanceBatchActionType.WorkItemReconcile))
+        {
+            var proposal = await CreateAndApplyProposalAsync("project_work_item_archive", item.ProjectId,
+                "Archive terminal historical work item", "Archive a completed or cancelled historical work item without changing business status.",
+                new ProjectWorkItemArchiveRequest(item.Id), request.GovernanceRunId, cancellationToken);
+            var readBack = await dbContext.ProjectWorkItems.AsNoTracking().SingleOrDefaultAsync(x => x.Id == item.Id, cancellationToken);
+            if (readBack?.ArchivedAt is null) throw new InvalidOperationException("Work item archive proposal applied without resource read-back.");
+            return await AuditedResultAsync(item, GovernanceBatchActionType.WorkItemReconcile, GovernanceBatchItemDisposition.Applied,
+                "Terminal work item was proposal-applied, archived, and read back; business status was not changed.", [proposal.Id], [item.Id], actor, cancellationToken);
+        }
+
+        var disposition = item.Kind is nameof(GovernanceItemKind.LogPartition) or nameof(GovernanceItemKind.LogCandidate)
+            ? GovernanceBatchItemDisposition.Deferred
+            : GovernanceBatchItemDisposition.RequiresUserDecision;
+        return await AuditedResultAsync(item, ParseRecommendedAction(item.RecommendedAction), disposition,
+            item.Kind.StartsWith("Log", StringComparison.Ordinal)
+                ? "Log candidate was classified server-side; Scheduled mode performed no purge or unredacted promotion."
+                : "Typed governance candidate requires a proposal or deterministic authority evidence before mutation.",
+            [], item.RelatedResourceIds, actor, cancellationToken);
     }
 
     private async Task<GovernanceBatchItemResult> ProcessFindingAsync(
@@ -720,32 +849,27 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
-        var plan = snapshot.ProjectCandidates.Concat(snapshot.SharedCandidates)
-            .Select(x => new BatchPlanItem($"finding:{x.FindingId:N}", "Finding", x.FindingId, x.ProjectId, snapshot.Coverage.SnapshotToken, governanceRunId))
-            .ToList();
-        var scopedProjects = projectIds.Append(ProjectContext.SharedProjectId).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var actions = await dbContext.SuggestedActions.AsNoTracking()
-            .Where(x => scopedProjects.Contains(x.ProjectId) && x.Status == SuggestedActionStatus.Pending)
-            .Select(x => new { x.Id, x.ProjectId })
-            .ToListAsync(cancellationToken);
-        plan.AddRange(actions.Select(x => new BatchPlanItem($"action:{x.Id:N}", "SuggestedAction", x.Id, x.ProjectId, snapshot.Coverage.SnapshotToken, governanceRunId)));
-        var insights = await dbContext.ConversationInsights.AsNoTracking()
-            .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
-            .Where(x => projectIds.Contains(x.ProjectId))
-            .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending || x.PromotionStatus == ConversationPromotionStatus.Failed)
-            .ToListAsync(cancellationToken);
-        foreach (var insight in insights)
-        {
-            var proposal = insight.SourceSystem == ChatGptProposalService.SourceSystem && insight.Tags.Contains("chatgpt-proposal");
-            plan.Add(new BatchPlanItem(
-                $"{(proposal ? "proposal" : "insight")}:{insight.Id:N}",
-                proposal ? "Proposal" : "ConversationInsight",
-                insight.Id,
-                insight.ProjectId,
+        var fullPlan = await fullGovernance.BuildAsync(projectIds, governanceRunId, snapshot, cancellationToken);
+        return fullPlan.Items.Select(x => new BatchPlanItem(
+                x.ItemKey,
+                x.ItemKind switch
+                {
+                    GovernanceItemKind.Memory => "Finding",
+                    GovernanceItemKind.SuggestedAction => "SuggestedAction",
+                    GovernanceItemKind.ConversationInsight => "ConversationInsight",
+                    GovernanceItemKind.Proposal => "Proposal",
+                    _ => x.ItemKind.ToString()
+                },
+                ParseItemId(x.ItemKey, x.AuthorityResourceId),
+                x.ProjectId,
                 snapshot.Coverage.SnapshotToken,
-                governanceRunId));
-        }
-        return plan.OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Id).ToList();
+                governanceRunId,
+                x.Classification,
+                x.RecommendedAction,
+                x.RiskLevel,
+                x.RequiresExplicitApproval,
+                x.RelatedResourceIds))
+            .OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Key, StringComparer.Ordinal).ToList();
     }
 
     private async Task<IReadOnlyList<string>> ResolveProjectIdsAsync(
@@ -769,24 +893,30 @@ public sealed class GovernanceBatchExecutor(
         GovernanceBatchRun run,
         GovernanceBatchExecution execution,
         BatchAccumulator accumulator,
-        int index,
-        int total,
+        int logicalPosition,
+        string lastItemKey,
+        string actorHash,
+        string projectSetHash,
+        string policyHash,
+        int remainingCount,
         Stopwatch stopwatch,
         string stoppedReason,
         bool advance,
         CancellationToken cancellationToken)
     {
-        var cursor = index < total ? BuildCursor(run, index) : string.Empty;
+        var cursor = remainingCount > 0
+            ? BuildCursor(run, logicalPosition, lastItemKey, actorHash, projectSetHash, policyHash)
+            : string.Empty;
         if (advance)
         {
             run.LastCursor = cursor;
             run.UpdatedAt = clock.UtcNow;
+            execution.CursorAfter = cursor;
         }
-        execution.CursorAfter = run.LastCursor;
         execution.UpdatedAt = clock.UtcNow;
         execution.ResultJson = JsonSerializer.Serialize(accumulator.ToResult(
-            string.IsNullOrEmpty(run.LastCursor) ? null : run.LastCursor,
-            index < total,
+            string.IsNullOrEmpty(execution.CursorAfter) ? null : execution.CursorAfter,
+            remainingCount > 0,
             stopwatch.ElapsedMilliseconds,
             stoppedReason), JsonOptions);
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -825,19 +955,120 @@ public sealed class GovernanceBatchExecutor(
             request.ExecutionMode
         };
 
-    private static int ParseCursor(string cursor, GovernanceBatchRun run, int planCount)
+    private async Task ValidateIssuedCursorAsync(
+        string cursor,
+        CursorPayload payload,
+        Guid tenantId,
+        Guid ownerUserId,
+        string governanceRunId,
+        string actorHash,
+        string projectSetHash,
+        string policyHash,
+        CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(cursor)) return 0;
-        var parts = cursor.Split(':');
-        if (parts.Length != 4 || parts[0] != "gb" || !Guid.TryParseExact(parts[1], "N", out var runId) || runId != run.Id ||
-            !int.TryParse(parts[2], out var index) || index < 0 || index > planCount ||
-            !string.Equals(parts[3], Hash(run.PlanJson)[..16], StringComparison.Ordinal))
-            throw new InvalidOperationException("Cursor is invalid for this governance batch plan.");
-        return index;
+        if (!string.Equals(payload.ActorHash, actorHash[..16], StringComparison.Ordinal))
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorActorMismatch, "Cursor belongs to a different tenant actor.");
+        if (!string.Equals(payload.ScopeHash, projectSetHash[..16], StringComparison.Ordinal))
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorScopeMismatch, "Cursor belongs to a different authorized ProjectId scope.");
+        if (!string.Equals(payload.PolicyHash, policyHash[..16], StringComparison.Ordinal))
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorPolicyMismatch, "Cursor belongs to a different governance execution policy.");
+        if (payload.ExpiresAtUnixSeconds <= clock.UtcNow.ToUnixTimeSeconds())
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorExpired, "Cursor has expired; perform a fresh review.");
+
+        var cursorRun = await dbContext.GovernanceBatchRuns.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == payload.RunId, cancellationToken);
+        if (cursorRun is null || !string.Equals(cursorRun.GovernanceRunId, governanceRunId, StringComparison.Ordinal))
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.InvalidCursor, "Cursor does not identify this governance run.");
+        if (cursorRun.TenantId != tenantId || cursorRun.OwnerUserId != ownerUserId)
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorActorMismatch, "Cursor belongs to a different tenant actor.");
+        if (!string.Equals(cursorRun.ProjectSetHash, projectSetHash, StringComparison.Ordinal))
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorScopeMismatch, "Cursor belongs to a different authorized ProjectId scope.");
+        if (cursorRun.ExpiresAt <= clock.UtcNow)
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorExpired, "Cursor has expired; perform a fresh review.");
+
+        var issued = await dbContext.GovernanceBatchExecutions.AsNoTracking()
+            .AnyAsync(x => x.GovernanceBatchRunId == cursorRun.Id &&
+                           x.CursorAfter == cursor &&
+                           x.Status == "Completed", cancellationToken);
+        if (!issued)
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.InvalidCursor, "Cursor was not issued by a completed governance batch.");
     }
 
-    private static string BuildCursor(GovernanceBatchRun run, int index)
-        => $"gb:{run.Id:N}:{index}:{Hash(run.PlanJson)[..16]}";
+    private async Task<HashSet<string>> GetTerminalItemKeysAsync(
+        IReadOnlyCollection<Guid> logicalRunIds,
+        CancellationToken cancellationToken)
+    {
+        var executions = await dbContext.GovernanceBatchExecutions.AsNoTracking()
+            .Where(x => logicalRunIds.Contains(x.GovernanceBatchRunId) && x.Status == "Completed")
+            .Select(x => new { x.RequestJson, x.ResultJson })
+            .ToListAsync(cancellationToken);
+        var terminal = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var execution in executions.Where(x => !IsDryRunRequest(x.RequestJson)))
+        {
+            GovernanceBatchExecuteResult result;
+            try { result = DeserializeResult(execution.ResultJson); }
+            catch (InvalidOperationException) { continue; }
+            foreach (var item in result.Items.Where(x => x.Disposition is
+                         GovernanceBatchItemDisposition.Applied or
+                         GovernanceBatchItemDisposition.NoOp or
+                         GovernanceBatchItemDisposition.Deferred or
+                         GovernanceBatchItemDisposition.RequiresUserDecision))
+                terminal.Add(item.ItemKey);
+        }
+        return terminal;
+    }
+
+    private static string BuildPolicyHash(GovernanceBatchExecuteRequest request, IReadOnlyList<string> projectIds)
+        => Hash(JsonSerializer.Serialize(new
+        {
+            projectIds = projectIds.OrderBy(x => x, StringComparer.OrdinalIgnoreCase),
+            request.MaxMutations,
+            request.MaxDurationSeconds,
+            allowedActionTypes = (request.AllowedActionTypes ?? []).Distinct().OrderBy(x => x).ToArray(),
+            request.MaxRiskLevel,
+            allowHardDelete = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled ? false : request.AllowHardDelete,
+            request.ExecutionMode
+        }, JsonOptions));
+
+    private static CursorPayload ParseCursor(string cursor)
+    {
+        try
+        {
+            if (!cursor.StartsWith("gb2.", StringComparison.Ordinal)) throw new FormatException();
+            var encoded = cursor[4..].Replace('-', '+').Replace('_', '/');
+            encoded = encoded.PadRight(encoded.Length + ((4 - encoded.Length % 4) % 4), '=');
+            var payload = JsonSerializer.Deserialize<CursorPayload>(Convert.FromBase64String(encoded), JsonOptions);
+            if (payload is null || payload.Version != CursorVersion || payload.RunId == Guid.Empty || payload.Position < 0 ||
+                string.IsNullOrWhiteSpace(payload.ActorHash) || string.IsNullOrWhiteSpace(payload.ScopeHash) ||
+                string.IsNullOrWhiteSpace(payload.PolicyHash)) throw new FormatException();
+            return payload;
+        }
+        catch (Exception ex) when (ex is FormatException or JsonException)
+        {
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.InvalidCursor, "Cursor format or version is invalid.");
+        }
+    }
+
+    private static string BuildCursor(
+        GovernanceBatchRun run,
+        int logicalPosition,
+        string lastItemKey,
+        string actorHash,
+        string projectSetHash,
+        string policyHash)
+    {
+        var payload = new CursorPayload(
+            CursorVersion,
+            run.Id,
+            logicalPosition,
+            lastItemKey,
+            actorHash[..16],
+            projectSetHash[..16],
+            policyHash[..16],
+            run.ExpiresAt.ToUnixTimeSeconds());
+        return "gb2." + Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
 
     private static Guid DeterministicReplacementLinkId(Guid replacedId, Guid authoritativeId)
     {
@@ -960,10 +1191,56 @@ public sealed class GovernanceBatchExecutor(
     private static string Normalize(string value)
         => string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
 
+    private static Guid ParseItemId(string itemKey, Guid? fallback)
+    {
+        var separator = itemKey.IndexOf(':');
+        if (separator >= 0)
+        {
+            var suffix = itemKey[(separator + 1)..];
+            var nextSeparator = suffix.IndexOf(':');
+            if (nextSeparator >= 0) suffix = suffix[..nextSeparator];
+            if (Guid.TryParse(suffix, out var parsed)) return parsed;
+        }
+        return fallback ?? DeterministicItemId(itemKey);
+    }
+
+    private static GovernanceBatchActionType? ParseRecommendedAction(string value)
+        => Enum.TryParse<GovernanceBatchActionType>(value, ignoreCase: true, out var action) ? action : null;
+
+    private static Guid DeterministicItemId(string value)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        return new Guid(bytes.AsSpan(0, 16));
+    }
+
     private static string Hash(string value)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
-    private sealed record BatchPlanItem(string Key, string Kind, Guid Id, string ProjectId, string SnapshotToken, string GovernanceRunId);
+    private sealed record CursorPayload(
+        int Version,
+        Guid RunId,
+        int Position,
+        string ItemKey,
+        string ActorHash,
+        string ScopeHash,
+        string PolicyHash,
+        long ExpiresAtUnixSeconds);
+
+    private sealed record BatchPlanItem(
+        string Key,
+        string Kind,
+        Guid Id,
+        string ProjectId,
+        string SnapshotToken,
+        string GovernanceRunId,
+        string Classification = "",
+        string RecommendedAction = "",
+        GovernanceBatchRiskLevel RiskLevel = GovernanceBatchRiskLevel.Low,
+        bool RequiresExplicitApproval = false,
+        IReadOnlyList<Guid>? RelatedIds = null)
+    {
+        public IReadOnlyList<Guid> RelatedResourceIds => RelatedIds ?? [];
+    }
 
     private sealed class BatchAccumulator(string governanceRunId, string snapshotToken)
     {
