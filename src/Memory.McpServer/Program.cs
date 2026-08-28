@@ -2,6 +2,7 @@ using Memory.Application;
 using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.McpServer;
+using Memory.McpTransport;
 using ModelContextProtocol.Protocol;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -48,7 +49,7 @@ builder.Services.AddHostedService<InProcessMaintenanceRunRecoveryHostedService>(
 builder.Services.AddHostedService<DashboardSnapshotCollectorHostedService>();
 builder.Services.AddScoped<MemoryMcpTools>();
 builder.Services.AddMcpServer()
-    .WithHttpTransport()
+    .WithHttpTransport(options => options.Stateless = true)
     .WithTools<MemoryMcpTools>()
     .WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult
     {
@@ -116,6 +117,7 @@ app.Use(async (context, next) =>
 });
 app.UseAuthorization();
 app.UseMiddleware<RequestActorMiddleware>();
+app.UseMcpProtocolCompatibility();
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path;

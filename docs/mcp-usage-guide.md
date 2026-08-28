@@ -18,6 +18,12 @@ https://context-hub.example.com/mcp
 https://context-hub.example.com/mcp-chat
 ```
 
+### Protocol Negotiation
+
+Both endpoints use the same stateless Streamable HTTP protocol boundary and support the legacy initialize era as well as MCP `2026-07-28` per-request metadata. A `2026-07-28` request must carry matching protocol declarations in the `MCP-Protocol-Version` header and `_meta/io.modelcontextprotocol/protocolVersion`, plus per-request client capabilities. Header, initialize, and metadata version conflicts fail closed.
+
+During the ChatGPT transition period, ContextHub normalizes one version-limited compatibility shape: when the effective protocol is a supported pre-`2026-07-28` revision, the transport adapter removes only the three newer reserved per-request metadata fields before the validated MCP core receives the request. It also discards a stale legacy `Mcp-Session-Id` after a stateless server upgrade. Ordinary `_meta` fields are preserved, and a request that actually declares conflicting protocol versions is rejected rather than rewritten.
+
 ## Core Principles
 
 ### Read Context Before Acting

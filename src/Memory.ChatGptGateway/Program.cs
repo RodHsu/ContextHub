@@ -1,6 +1,7 @@
 using Memory.Application;
 using Memory.ChatGptGateway;
 using Memory.Infrastructure;
+using Memory.McpTransport;
 using ModelContextProtocol.Protocol;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Identity;
@@ -107,7 +108,7 @@ else
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<ChatGptGatewayTools>();
 builder.Services.AddMcpServer()
-    .WithHttpTransport()
+    .WithHttpTransport(options => options.Stateless = true)
     .WithTools<ChatGptGatewayTools>()
     .WithListResourcesHandler((_, _) => ValueTask.FromResult(new ListResourcesResult
     {
@@ -202,6 +203,7 @@ app.Use(async (context, next) =>
 });
 app.UseAuthorization();
 app.UseMiddleware<ChatGptGatewayActorMiddleware>();
+app.UseMcpProtocolCompatibility();
 
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {

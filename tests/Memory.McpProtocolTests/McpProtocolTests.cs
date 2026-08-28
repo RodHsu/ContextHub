@@ -30,6 +30,48 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Raw_Http_Should_Normalize_ChatGpt_Legacy_Metadata_And_Preserve_Modern_Metadata()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
+
+        using var legacyRequest = CreateRawProtocolRequest(
+            "2025-11-25",
+            """
+            {"jsonrpc":"2.0","id":"legacy-chatgpt","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientInfo":{"name":"ChatGPT","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+            """,
+            staleSessionId: "stale-session-from-prior-release");
+        using var legacyResponse = await client.SendAsync(legacyRequest);
+        var legacyPayload = await legacyResponse.Content.ReadAsStringAsync();
+
+        legacyResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK, legacyPayload);
+        legacyPayload.Should().Contain("tools");
+        legacyPayload.Should().NotContain("The reserved per-request metadata key '_meta/io.modelcontextprotocol/clientCapabilities' is not valid with protocol version '2025-11-25'.");
+
+        using var modernRequest = CreateRawProtocolRequest(
+            "2026-07-28",
+            """
+            {"jsonrpc":"2.0","id":"modern","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"protocol-test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+            """);
+        using var modernResponse = await client.SendAsync(modernRequest);
+        var modernPayload = await modernResponse.Content.ReadAsStringAsync();
+
+        modernResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK, modernPayload);
+        modernPayload.Should().Contain("tools");
+
+        using var mismatchRequest = CreateRawProtocolRequest(
+            "2025-11-25",
+            """
+            {"jsonrpc":"2.0","id":"mismatch","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+            """);
+        using var mismatchResponse = await client.SendAsync(mismatchRequest);
+        var mismatchPayload = await mismatchResponse.Content.ReadAsStringAsync();
+
+        mismatchResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        mismatchPayload.Should().Contain("protocol version mismatch");
+    }
+
+    [DockerRequiredFact]
     public async Task Raw_Http_Tools_List_And_Call_Should_Work_After_Sdk_Session_Initialization()
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
@@ -101,7 +143,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         tools.Should().NotBeEmpty();
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var toolsPayload = await SendMcpAsync(client, sessionId!, 2, "tools/list", new { });
         var bootstrapPayload = await SendMcpAsync(client, sessionId!, 3, "tools/call", new
@@ -405,7 +447,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         _ = await mcpClient.ListResourceTemplatesAsync();
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var escapedProjectId = Uri.EscapeDataString(projectId);
         var escapedQuery = Uri.EscapeDataString(query);
@@ -528,7 +570,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         });
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var ingestPayload = await SendMcpAsync(client, sessionId!, 2, "tools/call", new
         {
@@ -597,7 +639,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         _ = await mcpClient.ListToolsAsync();
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var upsertPayload = await SendMcpAsync(client, sessionId!, 2, "tools/call", new
         {
@@ -656,7 +698,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         }
     }
 
-    private static async Task<string> SendMcpAsync(HttpClient client, string sessionId, int id, string method, object @params)
+    private static async Task<string> SendMcpAsync(HttpClient client, string? sessionId, int id, string method, object @params)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
         {
@@ -668,7 +710,10 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
                 @params
             })
         };
-        request.Headers.Add("Mcp-Session-Id", sessionId);
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            request.Headers.Add("Mcp-Session-Id", sessionId);
+        }
         request.Headers.Add("MCP-Protocol-Version", "2025-03-26");
         request.Headers.Accept.ParseAdd("application/json");
         request.Headers.Accept.ParseAdd("text/event-stream");
@@ -676,6 +721,27 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         using var response = await client.SendAsync(request);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStringAsync();
+    }
+
+    private static HttpRequestMessage CreateRawProtocolRequest(string protocolVersion, string json, string? staleSessionId = null)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("MCP-Protocol-Version", protocolVersion);
+        if (string.Equals(protocolVersion, "2026-07-28", StringComparison.Ordinal))
+        {
+            request.Headers.Add("Mcp-Method", "tools/list");
+        }
+        if (!string.IsNullOrWhiteSpace(staleSessionId))
+        {
+            request.Headers.Add("Mcp-Session-Id", staleSessionId);
+        }
+
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+        return request;
     }
 
     private static void UseBootstrapActor(IServiceProvider services)

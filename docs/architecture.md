@@ -87,6 +87,8 @@ Memory.Dashboard
 - 實作核心業務邏輯
 - 直接操作向量或背景 job 流程
 
+`Memory.McpServer` 與 `Memory.ChatGptGateway` 共同引用 `Memory.McpTransport`，以單一 middleware 建立 canonical protocol negotiation boundary。此層只處理 HTTP/JSON-RPC transport 相容性：支援 MCP legacy initialize 與 `2026-07-28` stateless per-request metadata、對已知 ChatGPT legacy 混合形狀做版本限定 normalization，並讓真正的 header/meta mismatch fail closed。它不依賴或修改 governance、retention、OAuth、ACL 或 application/domain 邏輯。
+
 ### 3.2 `Memory.Application`
 
 職責：

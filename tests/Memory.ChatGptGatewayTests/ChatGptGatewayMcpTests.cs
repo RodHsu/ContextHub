@@ -59,6 +59,36 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Gateway_Mcp_Should_Normalize_ChatGpt_Legacy_Metadata_And_Preserve_Modern_Metadata()
+    {
+        using var client = CreateAuthorizedClient(environment.GetFactory());
+
+        using var legacyRequest = CreateRawProtocolRequest(
+            "2025-11-25",
+            """
+            {"jsonrpc":"2.0","id":"legacy-chatgpt","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientInfo":{"name":"ChatGPT","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+            """,
+            staleSessionId: "stale-session-from-prior-release");
+        using var legacyResponse = await client.SendAsync(legacyRequest);
+        var legacyPayload = await legacyResponse.Content.ReadAsStringAsync();
+
+        legacyResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK, legacyPayload);
+        legacyPayload.Should().Contain("governance_batch_execute");
+        legacyPayload.Should().NotContain("The reserved per-request metadata key '_meta/io.modelcontextprotocol/clientCapabilities' is not valid with protocol version '2025-11-25'.");
+
+        using var modernRequest = CreateRawProtocolRequest(
+            "2026-07-28",
+            """
+            {"jsonrpc":"2.0","id":"modern","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"protocol-test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+            """);
+        using var modernResponse = await client.SendAsync(modernRequest);
+        var modernPayload = await modernResponse.Content.ReadAsStringAsync();
+
+        modernResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK, modernPayload);
+        modernPayload.Should().Contain("governance_batch_execute");
+    }
+
+    [DockerRequiredFact]
     public async Task OAuth_Protected_Resource_Metadata_Should_Describe_Public_Chat_Gateway()
     {
         using var client = environment.GetFactory().CreateClient();
@@ -330,7 +360,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         initializeRequest.Headers.Accept.ParseAdd("text/event-stream");
         using var initializeResponse = await mcpClient.SendAsync(initializeRequest);
         initializeResponse.EnsureSuccessStatusCode();
-        initializeResponse.Headers.TryGetValues("Mcp-Session-Id", out var sessionValues).Should().BeTrue();
+        initializeResponse.Headers.TryGetValues("Mcp-Session-Id", out _).Should().BeFalse(
+            "the upgraded MCP transport is stateless while OAuth authorization remains enforced");
     }
 
     [DockerRequiredFact]
@@ -770,7 +801,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         await using var chatMcp = await McpClient.CreateAsync(transport);
         _ = await chatMcp.ListToolsAsync();
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         // MCP to MCP: direct MCP creates and replies to the same thread.
         var mcpToMcp = await UseDirectMcpAsync(mcp => mcp.discussion_thread_create(new(
@@ -2902,7 +2933,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         await using var mcpClient = await McpClient.CreateAsync(transport);
         _ = await mcpClient.ListToolsAsync();
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().NotBeNullOrWhiteSpace();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var toolsPayload = await SendMcpAsync(client, sessionId!, 2, "tools/list", new { });
         var listedTools = ExtractSseJson(toolsPayload).GetProperty("result").GetProperty("tools");
@@ -3745,7 +3776,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         return client;
     }
 
-    private static async Task<string> SendMcpAsync(HttpClient client, string sessionId, int id, string method, object @params)
+    private static async Task<string> SendMcpAsync(HttpClient client, string? sessionId, int id, string method, object @params)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
         {
@@ -3757,7 +3788,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 @params
             })
         };
-        request.Headers.Add("Mcp-Session-Id", sessionId);
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            request.Headers.Add("Mcp-Session-Id", sessionId);
+        }
         request.Headers.Add("MCP-Protocol-Version", "2025-03-26");
         request.Headers.Accept.ParseAdd("application/json");
         request.Headers.Accept.ParseAdd("text/event-stream");
@@ -3765,6 +3799,27 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         using var response = await client.SendAsync(request);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStringAsync();
+    }
+
+    private static HttpRequestMessage CreateRawProtocolRequest(string protocolVersion, string json, string? staleSessionId = null)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("MCP-Protocol-Version", protocolVersion);
+        if (string.Equals(protocolVersion, "2026-07-28", StringComparison.Ordinal))
+        {
+            request.Headers.Add("Mcp-Method", "tools/list");
+        }
+        if (!string.IsNullOrWhiteSpace(staleSessionId))
+        {
+            request.Headers.Add("Mcp-Session-Id", staleSessionId);
+        }
+
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+        return request;
     }
 
     private static void UseGatewayActor(IServiceProvider services)
