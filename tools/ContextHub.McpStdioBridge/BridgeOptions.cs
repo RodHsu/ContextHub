@@ -22,8 +22,11 @@ public sealed record BridgeOptions(
 
     public static BridgeOptions FromEnvironment()
     {
-        var endpoint = Environment.GetEnvironmentVariable("CONTEXTHUB_MCP_ENDPOINT")
-                       ?? "https://context-hub.wjcy.org/mcp";
+        var endpoint = Environment.GetEnvironmentVariable("CONTEXTHUB_MCP_ENDPOINT");
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            throw new InvalidOperationException("CONTEXTHUB_MCP_ENDPOINT must be set to the target MCP endpoint.");
+        }
 
         return new BridgeOptions(
             new Uri(endpoint),

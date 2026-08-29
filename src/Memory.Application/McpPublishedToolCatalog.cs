@@ -2,7 +2,7 @@ namespace Memory.Application;
 
 public static class McpPublishedToolCatalog
 {
-    public const string AppFacingCatalogVersion = "2026-08-29-v4";
+    public const string AppFacingCatalogVersion = "2026-08-29-v5";
 
     public static IReadOnlySet<string> RestrictedToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {

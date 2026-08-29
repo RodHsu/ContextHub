@@ -1047,6 +1047,8 @@ public sealed class GovernanceRunReceipt
     public string Status { get; set; } = string.Empty;
     public bool LatestBatchReceived { get; set; }
     public string RequestIdentityHash { get; set; } = string.Empty;
+    public string RequestHash { get; set; } = string.Empty;
+    public string FailurePhase { get; set; } = string.Empty;
     public string AuditIdsJson { get; set; } = "[]";
     public string ProjectIdsJson { get; set; } = "[]";
     public bool IsReplay { get; set; }

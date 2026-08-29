@@ -970,6 +970,78 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Governance_Batch_Should_Bind_Global_Review_Snapshot_Scope_And_Replay_PreExecution_Failures()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var originalActor = actorAccessor.Current;
+        var projectId = $"scope-binding-{Guid.NewGuid():N}";
+        actorAccessor.Current = originalActor with { AllowedProjectIds = [ProjectContext.DefaultProjectId, projectId] };
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await dbContext.MemoryItems.AddAsync(new MemoryItem
+        {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
+            ProjectId = ProjectContext.DefaultProjectId,
+            ExternalKey = $"scope-binding:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Artifact,
+            Title = "Default scope binding fixture",
+            Content = "Durable memory proving that the hidden default project remains in global governance.",
+            Summary = "Default scope binding fixture.",
+            SourceType = "governance-test",
+            SourceRef = "fixture:scope-binding",
+            Status = MemoryStatus.Active,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        await dbContext.SaveChangesAsync();
+
+        var reviewService = scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>();
+        var executor = scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>();
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"scope-binding-run-{Guid.NewGuid():N}";
+        var review = await reviewService.ReviewAsync(
+            new KnowledgeReviewRequest(ProjectIds: null, GovernanceRunId: runId), CancellationToken.None);
+        review.DurableMemoryCoverage!.GovernanceProjectIds.Should().Contain(ProjectContext.DefaultProjectId);
+        review.DurableMemoryCoverage.GovernanceProjectIds.Should().Contain(ProjectContext.SharedProjectId);
+        review.DurableMemoryCoverage.GovernanceProjectIds.Should().NotContain(ProjectContext.UserProjectId);
+
+        var request = new GovernanceBatchExecuteRequest(
+            runId,
+            ProjectIds: null,
+            SnapshotToken: review.DurableMemoryCoverage.SnapshotToken,
+            MaxMutations: 10,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.Reindex],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: true,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var result = await executor.ExecuteAsync(request, CancellationToken.None);
+        result.ErrorCode.Should().Be(GovernanceBatchErrorCode.None);
+        var replay = await executor.ExecuteAsync(request, CancellationToken.None);
+        replay.IsReplay.Should().BeTrue();
+        var receipt = await receipts.GetAsync(runId, CancellationToken.None);
+        receipt!.LatestBatch!.Executed.Should().BeTrue();
+        receipt.LatestBatch.RequestHash.Should().MatchRegex("^[a-f0-9]{64}$");
+
+        var mismatchRequest = request with { ProjectIds = [projectId] };
+        var mismatch = await executor.ExecuteAsync(mismatchRequest, CancellationToken.None);
+        mismatch.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorScopeMismatch);
+        var mismatchReplay = await executor.ExecuteAsync(mismatchRequest, CancellationToken.None);
+        mismatchReplay.IsReplay.Should().BeTrue();
+        mismatchReplay.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorScopeMismatch);
+        var mismatchReceipt = await receipts.GetAsync(runId, CancellationToken.None);
+        mismatchReceipt!.LatestBatch!.FailurePhase.Should().Be("PreExecutionScopeValidation");
+
+        actorAccessor.Current = originalActor with { AllowedProjectIds = [projectId] };
+        var revoked = await executor.ExecuteAsync(request, CancellationToken.None);
+        revoked.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorScopeMismatch);
+    }
+
+    [DockerRequiredFact]
     public async Task Governance_Batch_Should_Fail_Closed_For_Scheduled_Delete_Invalid_Cursor_Expired_Snapshot_And_NonAdmin()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -1017,18 +1089,20 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         payloadMismatch.ErrorCode.Should().Be(GovernanceBatchErrorCode.ReplayPayloadMismatch);
         var invalidCursor = await executor.ExecuteAsync(request with { Cursor = "invalid-cursor", MaxMutations = 11 }, CancellationToken.None);
         invalidCursor.ErrorCode.Should().Be(GovernanceBatchErrorCode.InvalidCursor);
-        var wrongProject = () => executor.ExecuteAsync(request with
+        var wrongProject = await executor.ExecuteAsync(request with
         {
             ProjectIds = [projectId, $"wrong-project-{Guid.NewGuid():N}"],
             SnapshotToken = first.SnapshotToken
         }, CancellationToken.None);
-        await wrongProject.Should().ThrowAsync<InvalidOperationException>().WithMessage("*ProjectId*");
+        wrongProject.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorScopeMismatch);
 
         var run = await dbContext.GovernanceBatchRuns.SingleAsync(x => x.GovernanceRunId == runId);
         run.ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
         await dbContext.SaveChangesAsync();
         var expired = await executor.ExecuteAsync(request with { SnapshotToken = first.SnapshotToken, MaxDurationSeconds = 31 }, CancellationToken.None);
-        expired.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorExpired);
+        expired.ErrorCode.Should().Be(GovernanceBatchErrorCode.ReplayPayloadMismatch,
+            "an exact terminal pre-execution failure is replayed before re-entering the expired execution path");
+        expired.IsReplay.Should().BeTrue();
 
         actorAccessor.Current = admin with { Role = TenantUserRole.Member };
         var nonAdmin = () => executor.ExecuteAsync(request with { GovernanceRunId = $"member-{Guid.NewGuid():N}" }, CancellationToken.None);
@@ -1242,23 +1316,24 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         running.LatestBatch.Should().NotBeNull();
         running.LatestBatch!.Received.Should().BeTrue();
         running.LatestBatch.Executed.Should().BeFalse();
-        running.LatestBatch.RequestHash.Should().BeEmpty();
+        running.LatestBatch.RequestHash.Should().MatchRegex("^[a-f0-9]{64}$");
         running.LatestBatch.CursorBefore.Should().BeEmpty();
         running.LatestBatch.RequiresReReview.Should().BeTrue();
 
         await receipts.RecordExecutionStoppedAsync(
-            request, startedAt, "Stopped", "RequestCancelledOutcomeUnknown", CancellationToken.None);
+            request, startedAt, "Stopped", "RequestCancelledOutcomeUnknown", "OutcomeUnknown", CancellationToken.None);
         var stopped = await receipts.GetAsync(runId, CancellationToken.None);
         stopped!.Status.Should().Be("Stopped");
         stopped.StoppedReason.Should().Be("RequestCancelledOutcomeUnknown");
         stopped.LatestBatch!.Executed.Should().BeFalse();
         stopped.LatestBatch.Status.Should().Be("Stopped");
+        stopped.LatestBatch.FailurePhase.Should().Be("OutcomeUnknown");
 
         var failedRunId = $"receipt-failed-run-{Guid.NewGuid():N}";
         var failedRequest = request with { GovernanceRunId = failedRunId };
         await receipts.RecordExecutionStartedAsync(failedRequest, startedAt, CancellationToken.None);
         await receipts.RecordExecutionStoppedAsync(
-            failedRequest, startedAt, "Failed", "UnhandledExecutionFailure", CancellationToken.None);
+            failedRequest, startedAt, "Failed", "UnhandledExecutionFailure", "PreExecutionUnhandled", CancellationToken.None);
         (await receipts.GetAsync(failedRunId, CancellationToken.None))!.Status.Should().Be("Failed");
 
         actorAccessor.Current = originalActor with { AllowedProjectIds = ["different-project"] };
@@ -1418,7 +1493,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         blockedReceipt.LatestBatch.Should().NotBeNull();
         blockedReceipt.LatestBatch!.Executed.Should().BeFalse(
             "the prior quarantine execution must not be attributed to the later host-blocked request");
-        blockedReceipt.LatestBatch.RequestHash.Should().BeEmpty();
+        blockedReceipt.LatestBatch.RequestHash.Should().MatchRegex("^[a-f0-9]{64}$");
 
         var internalExecutor = scope.ServiceProvider.GetRequiredService<IInternalMaturedDeleteExecutor>();
         var workerResult = await internalExecutor.ExecuteNextBatchAsync(CancellationToken.None);
@@ -3617,7 +3692,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var codexExternalArtifact = await PublishCodexExternalArtifactAsync(
             "Codex R2 pointer artifact",
             "Codex published an R2 object pointer for ChatGPT readers.",
-            "wjcy-context-artifacts",
+            "example-context-artifacts",
             $"chatgpt-gateway-tests/{Guid.NewGuid():N}.md",
             DateTimeOffset.UtcNow.AddHours(1));
 
@@ -3639,7 +3714,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         });
         var codexArtifactListText = ExtractToolText(gatewayCodexArtifactList);
         codexArtifactListText.Should().Contain("Codex R2 pointer artifact");
-        codexArtifactListText.Should().Contain("wjcy-context-artifacts");
+        codexArtifactListText.Should().Contain("example-context-artifacts");
 
         var gatewayCodexArtifactGet = await SendMcpAsync(client, sessionId!, 13, "tools/call", new
         {

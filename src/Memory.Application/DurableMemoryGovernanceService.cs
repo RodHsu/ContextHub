@@ -24,13 +24,7 @@ public sealed class DurableMemoryGovernanceService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var tenantId = actor.TenantId ?? throw new UnauthorizedAccessException("Knowledge governance requires a tenant actor.");
         var ownerUserId = actor.UserId ?? throw new UnauthorizedAccessException("Knowledge governance requires a tenant user.");
-        var normalizedProjects = projectIds
-            .Append(ProjectContext.SharedProjectId)
-            .Where(x => !ProjectContext.IsUser(x))
-            .Select(x => ProjectContext.Normalize(x))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        var normalizedProjects = DurableMemoryGovernancePolicy.NormalizeGovernanceProjectIds(projectIds);
         ActorAuthorization.EnsureProjectsAllowed(actor, normalizedProjects, write: false);
         var projectSetHash = Hash(string.Join('\n', normalizedProjects).ToLowerInvariant());
 
@@ -170,6 +164,56 @@ public sealed class DurableMemoryGovernanceService(
         }
     }
 
+    public async Task<DurableMemoryGovernanceSnapshotResult> GetSnapshotAsync(
+        string governanceRunId,
+        string snapshotToken,
+        bool isReReview,
+        bool requireWriteAuthorization,
+        CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        if (requireWriteAuthorization)
+        {
+            ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        }
+
+        var tenantId = actor.TenantId ?? throw new UnauthorizedAccessException("Knowledge governance requires a tenant actor.");
+        var ownerUserId = actor.UserId ?? throw new UnauthorizedAccessException("Knowledge governance requires a tenant user.");
+        var normalizedRunId = governanceRunId.Trim();
+        var normalizedToken = snapshotToken.Trim();
+        var snapshot = await dbContext.KnowledgeGovernanceSnapshots.AsNoTracking()
+            .Where(x => x.TenantId == tenantId &&
+                        x.OwnerUserId == ownerUserId &&
+                        x.GovernanceRunId == normalizedRunId &&
+                        x.IsReReview == isReReview)
+            .OrderByDescending(x => x.Generation)
+            .ThenByDescending(x => x.CompletedAt)
+            .ToListAsync(cancellationToken);
+        var match = snapshot.FirstOrDefault(x => string.Equals(
+            Deserialize(x.ResultJson).Coverage.SnapshotToken, normalizedToken, StringComparison.Ordinal));
+        if (match is null)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.CursorSnapshotMismatch,
+                "SnapshotToken does not identify an immutable review snapshot for this governance run and generation.");
+        }
+
+        var projectIds = DeserializeProjects(match.ProjectIdsJson);
+        try
+        {
+            ActorAuthorization.EnsureProjectsAllowed(actor, projectIds, write: requireWriteAuthorization);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.CursorScopeMismatch,
+                $"Authorization changed after the governance review snapshot was created: {ex.Message}");
+        }
+
+        return await ApplyLiveLifecycleOverlayAsync(Deserialize(match.ResultJson), cancellationToken);
+    }
+
     private Task<bool> HasCompletedExecutionAfterAsync(
         Guid tenantId,
         Guid ownerUserId,
@@ -231,6 +275,21 @@ public sealed class DurableMemoryGovernanceService(
             RequiresUserDecisionCount = requiresUserDecisionCount,
             HostBlockedCount = hostBlockedCount
         };
+    }
+
+    private static IReadOnlyList<string> DeserializeProjects(string json)
+    {
+        try
+        {
+            return DurableMemoryGovernancePolicy.NormalizeGovernanceProjectIds(
+                JsonSerializer.Deserialize<string[]>(json, JsonOptions) ?? []);
+        }
+        catch (JsonException)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.CursorScopeMismatch,
+                "The persisted governance snapshot ProjectId scope is invalid.");
+        }
     }
 
     private static DurableMemoryGovernanceSnapshotResult Deserialize(string resultJson)

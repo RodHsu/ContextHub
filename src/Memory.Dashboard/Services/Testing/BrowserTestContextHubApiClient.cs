@@ -773,7 +773,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 ? []
                 :
                 [
-                    new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, "Local Repo", SourceKind.LocalRepo, true, """{"rootPath":"W:/Repositories/WJCY/ContextHub"}""", false, string.Empty, DateTimeOffset.UtcNow.AddMinutes(-10), DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow)
+                    new SourceConnectionResult(Guid.NewGuid(), request.ProjectId, "Local Repo", SourceKind.LocalRepo, true, """{"rootPath":"C:/Repositories/Example/ContextHub"}""", false, string.Empty, DateTimeOffset.UtcNow.AddMinutes(-10), DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow)
                 ]);
 
     private static MaintenanceStatusResult BuildInactiveMaintenanceStatus()

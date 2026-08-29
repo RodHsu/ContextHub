@@ -56,6 +56,7 @@ public sealed class GovernanceRunReceiptService(
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(request.GovernanceRunId);
         var requestIdentity = RequestIdentity(request);
+        var requestHash = RequestHash(request);
         var previous = await LatestAsync(runId, actor, cancellationToken);
         var receipt = NewReceipt(
             actor, runId, Hash($"batch-received\n{runId}\n{requestIdentity}"),
@@ -63,6 +64,7 @@ public sealed class GovernanceRunReceiptService(
         CopyCumulative(previous, receipt);
         receipt.LatestBatchReceived = true;
         receipt.RequestIdentityHash = requestIdentity;
+        receipt.RequestHash = requestHash;
         receipt.FinalSnapshotToken = request.SnapshotToken ?? previous?.FinalSnapshotToken ?? string.Empty;
         receipt.ProjectIdsJson = JsonSerializer.Serialize(
             request.ProjectIds ?? DeserializeStrings(previous?.ProjectIdsJson), JsonOptions);
@@ -79,6 +81,7 @@ public sealed class GovernanceRunReceiptService(
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(request.GovernanceRunId);
         var requestIdentity = RequestIdentity(request);
+        var requestHash = RequestHash(request);
         var previous = await LatestAsync(runId, actor, cancellationToken);
         var status = ResolveTerminalStatus(result);
         var eventKind = result.IsReplay ? "BatchReplay" : "BatchCompleted";
@@ -88,6 +91,8 @@ public sealed class GovernanceRunReceiptService(
         var add = result.IsReplay ? 0 : 1;
         receipt.LatestBatchReceived = true;
         receipt.RequestIdentityHash = requestIdentity;
+        receipt.RequestHash = requestHash;
+        receipt.FailurePhase = ResolveFailurePhase(result);
         receipt.InitialSnapshotToken = previous?.InitialSnapshotToken ?? result.SnapshotToken;
         receipt.FinalSnapshotToken = result.SnapshotToken;
         receipt.Applied += result.AppliedCount * add;
@@ -118,11 +123,13 @@ public sealed class GovernanceRunReceiptService(
         DateTimeOffset startedAt,
         string status,
         string stoppedReason,
+        string failurePhase,
         CancellationToken cancellationToken)
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(request.GovernanceRunId);
         var requestIdentity = RequestIdentity(request);
+        var requestHash = RequestHash(request);
         var previous = await LatestAsync(runId, actor, cancellationToken);
         var normalizedStatus = string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase) ? "Failed" : "Stopped";
         var receipt = NewReceipt(
@@ -131,12 +138,44 @@ public sealed class GovernanceRunReceiptService(
         CopyCumulative(previous, receipt);
         receipt.LatestBatchReceived = true;
         receipt.RequestIdentityHash = requestIdentity;
+        receipt.RequestHash = requestHash;
+        receipt.FailurePhase = failurePhase;
         receipt.FinalSnapshotToken = request.SnapshotToken ?? previous?.FinalSnapshotToken ?? string.Empty;
         receipt.ProjectIdsJson = JsonSerializer.Serialize(
             request.ProjectIds ?? DeserializeStrings(previous?.ProjectIdsJson), JsonOptions);
         receipt.StoppedReason = stoppedReason;
         receipt.FinalConvergenceStatus = normalizedStatus;
         await InsertImmutableAsync(receipt, cancellationToken);
+    }
+
+    public async Task<GovernanceBatchExecuteResult?> GetTerminalPreExecutionReplayAsync(
+        GovernanceBatchExecuteRequest request,
+        CancellationToken cancellationToken)
+    {
+        var actor = RequireActor(SecurityScopes.MemoryRead);
+        var runId = RequireGovernanceRunId(request.GovernanceRunId);
+        var requestHash = RequestHash(request);
+        var receipt = await dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId &&
+                        x.OwnerUserId == actor.UserId &&
+                        x.GovernanceRunId == runId &&
+                        x.RequestHash == requestHash &&
+                        x.LatestBatchReceived &&
+                        x.FailurePhase.StartsWith("PreExecution") &&
+                        (x.Status == "Failed" || x.Status == "Stopped"))
+            .OrderByDescending(x => x.EventSequence)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (receipt is null || !Enum.TryParse<GovernanceBatchErrorCode>(receipt.StoppedReason, out var errorCode))
+        {
+            return null;
+        }
+
+        return GovernanceBatchExecuteResult.Failure(
+            request,
+            new GovernanceBatchException(errorCode, receipt.StoppedReason)) with
+        {
+            IsReplay = true
+        };
     }
 
     public async Task RecordInternalRetentionAsync(
@@ -343,8 +382,9 @@ public sealed class GovernanceRunReceiptService(
             Received: batchReceipt is not null || execution is not null,
             Executed: executed,
             RequestIdentityHash: batchReceipt?.RequestIdentityHash ?? string.Empty,
-            RequestHash: execution?.RequestHash ?? string.Empty,
+            RequestHash: execution?.RequestHash ?? batchReceipt?.RequestHash ?? string.Empty,
             Status: status,
+            FailurePhase: batchReceipt?.FailurePhase ?? string.Empty,
             ReceivedAt: receivedAt,
             StartedAt: execution?.CreatedAt ?? batchReceipt?.StartedAt,
             CompletedAt: execution?.CompletedAt,
@@ -438,6 +478,8 @@ public sealed class GovernanceRunReceiptService(
         receipt.BusinessWorkItemActionable = previous.BusinessWorkItemActionable;
         receipt.FinalConvergenceStatus = previous.FinalConvergenceStatus;
         receipt.StoppedReason = previous.StoppedReason;
+        receipt.RequestHash = previous.RequestHash;
+        receipt.FailurePhase = previous.FailurePhase;
         receipt.AuditIdsJson = previous.AuditIdsJson;
         receipt.ProjectIdsJson = previous.ProjectIdsJson;
     }
@@ -476,6 +518,14 @@ public sealed class GovernanceRunReceiptService(
                 ? "Stopped"
                 : "Failed";
 
+    private static string ResolveFailurePhase(GovernanceBatchExecuteResult result)
+        => result.ErrorCode is GovernanceBatchErrorCode.CursorScopeMismatch or
+            GovernanceBatchErrorCode.CursorSnapshotMismatch
+            ? "PreExecutionScopeValidation"
+            : result.ErrorCode != GovernanceBatchErrorCode.None
+                ? "PreExecutionValidation"
+                : result.FailedCount > 0 ? "ItemExecution" : string.Empty;
+
     private static string InferLegacyStatus(GovernanceRunReceipt receipt)
         => receipt.FinalConvergenceStatus.Contains("Failed", StringComparison.OrdinalIgnoreCase)
             ? "Failed"
@@ -494,6 +544,19 @@ public sealed class GovernanceRunReceiptService(
                 AllowedActionTypes = request.AllowedActionTypes?.Distinct().Order().ToArray(),
                 ToolContractVersion = null,
                 SchemaHash = null
+            }, JsonOptions));
+
+    private static string RequestHash(GovernanceBatchExecuteRequest request)
+        => Hash(JsonSerializer.Serialize(
+            request with
+            {
+                GovernanceRunId = request.GovernanceRunId.Trim(),
+                ProjectIds = request.ProjectIds?.Select(x => ProjectContext.Normalize(x)).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+                SnapshotToken = request.SnapshotToken?.Trim(),
+                Cursor = request.Cursor?.Trim(),
+                AllowedActionTypes = request.AllowedActionTypes?.Distinct().Order().ToArray(),
+                ToolContractVersion = request.ToolContractVersion?.Trim(),
+                SchemaHash = request.SchemaHash?.Trim().ToLowerInvariant()
             }, JsonOptions));
 
     private static string ExecutionIdentity(GovernanceBatchExecution execution)

@@ -1700,6 +1700,7 @@ public sealed record GovernanceBatchOutcomeResult(
     string RequestIdentityHash,
     string RequestHash,
     string Status,
+    string FailurePhase,
     DateTimeOffset ReceivedAt,
     DateTimeOffset? StartedAt,
     DateTimeOffset? CompletedAt,
@@ -2356,7 +2357,8 @@ public interface IGovernanceRunReceiptService
     Task RecordReviewAsync(KnowledgeReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task RecordExecutionStartedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task RecordExecutionAsync(GovernanceBatchExecuteRequest request, GovernanceBatchExecuteResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
-    Task RecordExecutionStoppedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, string status, string stoppedReason, CancellationToken cancellationToken);
+    Task RecordExecutionStoppedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, CancellationToken cancellationToken);
+    Task<GovernanceBatchExecuteResult?> GetTerminalPreExecutionReplayAsync(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken);
     Task RecordInternalRetentionAsync(InternalMaturedDeleteBatchResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task<GovernanceRunReceiptResult?> GetAsync(string governanceRunId, CancellationToken cancellationToken);
     Task<IReadOnlyList<GovernanceRunReceiptResult>> ListAsync(GovernanceRunReceiptListRequest request, CancellationToken cancellationToken);
@@ -2368,6 +2370,12 @@ public interface IDurableMemoryGovernanceService
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         bool isReReview,
+        CancellationToken cancellationToken);
+    Task<DurableMemoryGovernanceSnapshotResult> GetSnapshotAsync(
+        string governanceRunId,
+        string snapshotToken,
+        bool isReReview,
+        bool requireWriteAuthorization,
         CancellationToken cancellationToken);
 }
 

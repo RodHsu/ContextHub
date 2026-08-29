@@ -972,6 +972,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Status).HasColumnName("status");
             entity.Property(x => x.LatestBatchReceived).HasColumnName("latest_batch_received");
             entity.Property(x => x.RequestIdentityHash).HasColumnName("request_identity_hash");
+            entity.Property(x => x.RequestHash).HasColumnName("request_hash");
+            entity.Property(x => x.FailurePhase).HasColumnName("failure_phase");
             entity.Property(x => x.AuditIdsJson).HasColumnName("audit_ids_json").HasColumnType("jsonb");
             entity.Property(x => x.ProjectIdsJson).HasColumnName("project_ids_json").HasColumnType("jsonb");
             entity.Property(x => x.IsReplay).HasColumnName("is_replay");

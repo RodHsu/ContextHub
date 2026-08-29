@@ -357,7 +357,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 Name = "Stale repo source",
                 SourceKind = SourceKind.LocalRepo,
                 Enabled = true,
-                ConfigJson = """{"rootPath":"W:/Repositories/WJCY/ContextHub"}""",
+                ConfigJson = """{"rootPath":"C:/Repositories/Example/ContextHub"}""",
                 SecretJsonProtected = string.Empty,
                 LastSuccessfulSyncAt = null,
                 CreatedAt = DateTimeOffset.UtcNow.AddDays(-2),

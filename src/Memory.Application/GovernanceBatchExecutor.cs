@@ -9,7 +9,7 @@ namespace Memory.Application;
 
 public sealed class GovernanceBatchExecutor(
     IApplicationDbContext dbContext,
-    IAccessibleProjectService accessibleProjects,
+    IGovernanceProjectScopeResolver governanceScope,
     IDurableMemoryGovernanceService durableGovernance,
     IChatGptProposalService proposalService,
     IMemoryService memoryService,
@@ -45,6 +45,19 @@ public sealed class GovernanceBatchExecutor(
                     "External MaturedDelete is fail-closed. Observe policy-bound internal retention through governance run receipts and tombstones.");
             }
 
+            var terminalReplay = await runReceipts.GetTerminalPreExecutionReplayAsync(request, cancellationToken);
+            if (terminalReplay is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(request.SnapshotToken))
+                {
+                    _ = await durableGovernance.GetSnapshotAsync(
+                        request.GovernanceRunId.Trim(), request.SnapshotToken.Trim(), request.IsReReview,
+                        requireWriteAuthorization: true, cancellationToken);
+                }
+                await runReceipts.RecordExecutionAsync(request, terminalReplay, startedAt, CancellationToken.None);
+                return terminalReplay;
+            }
+
             await runReceipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
             var result = await ExecuteCoreAsync(request, cancellationToken);
             await runReceipts.RecordExecutionAsync(request, result, startedAt, CancellationToken.None);
@@ -59,13 +72,13 @@ public sealed class GovernanceBatchExecutor(
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             await runReceipts.RecordExecutionStoppedAsync(
-                request, startedAt, "Stopped", "RequestCancelledOutcomeUnknown", CancellationToken.None);
+                request, startedAt, "Stopped", "RequestCancelledOutcomeUnknown", "OutcomeUnknown", CancellationToken.None);
             throw;
         }
         catch
         {
             await runReceipts.RecordExecutionStoppedAsync(
-                request, startedAt, "Failed", "UnhandledExecutionFailure", CancellationToken.None);
+                request, startedAt, "Failed", "UnhandledExecutionFailure", "PreExecutionUnhandled", CancellationToken.None);
             throw;
         }
     }
@@ -84,15 +97,43 @@ public sealed class GovernanceBatchExecutor(
         }
         var tenantId = actor.TenantId ?? throw new UnauthorizedAccessException("Governance batch execution requires a tenant actor.");
         var ownerUserId = actor.UserId ?? throw new UnauthorizedAccessException("Governance batch execution requires a tenant user.");
-        var projectIds = await ResolveProjectIdsAsync(request.ProjectIds, actor, cancellationToken);
         var actorHash = Hash($"{tenantId:N}\n{ownerUserId:N}");
+        var cursorBefore = request.Cursor?.Trim() ?? string.Empty;
+        var cursorPayload = string.IsNullOrEmpty(cursorBefore) ? null : ParseCursor(cursorBefore);
+        if (cursorPayload is not null &&
+            !string.Equals(cursorPayload.ActorHash, actorHash[..16], StringComparison.Ordinal))
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.CursorActorMismatch,
+                "Cursor belongs to a different tenant actor.");
+        }
+        DurableMemoryGovernanceSnapshotResult snapshot;
+        IReadOnlyList<string> projectIds;
+        if (!string.IsNullOrWhiteSpace(request.SnapshotToken))
+        {
+            snapshot = await durableGovernance.GetSnapshotAsync(
+                request.GovernanceRunId.Trim(),
+                request.SnapshotToken.Trim(),
+                request.IsReReview,
+                requireWriteAuthorization: true,
+                cancellationToken);
+            projectIds = DurableMemoryGovernancePolicy.ToExecutionProjectIds(snapshot.Coverage.GovernanceProjectIds);
+            EnsureExplicitScopeMatchesSnapshot(request.ProjectIds, projectIds);
+        }
+        else
+        {
+            projectIds = await ResolveProjectIdsAsync(request.ProjectIds, actor, cancellationToken);
+            snapshot = await durableGovernance.GetOrCreateSnapshotAsync(
+                projectIds,
+                request.GovernanceRunId.Trim(),
+                request.IsReReview,
+                cancellationToken);
+        }
         var projectSetHash = Hash(string.Join('\n', projectIds.Append(ProjectContext.SharedProjectId)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
             .Select(x => x.ToLowerInvariant())));
         var policyHash = BuildPolicyHash(request, projectIds);
-        var cursorBefore = request.Cursor?.Trim() ?? string.Empty;
-        var cursorPayload = string.IsNullOrEmpty(cursorBefore) ? null : ParseCursor(cursorBefore);
         if (cursorPayload is not null)
         {
             await ValidateIssuedCursorAsync(
@@ -145,11 +186,6 @@ public sealed class GovernanceBatchExecutor(
                 }
             }
         }
-        var snapshot = await durableGovernance.GetOrCreateSnapshotAsync(
-            projectIds,
-            request.GovernanceRunId.Trim(),
-            request.IsReReview,
-            cancellationToken);
         if (!string.IsNullOrWhiteSpace(request.SnapshotToken) &&
             !string.Equals(request.SnapshotToken.Trim(), snapshot.Coverage.SnapshotToken, StringComparison.Ordinal))
         {
@@ -1113,7 +1149,9 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
-        var available = (await accessibleProjects.ListAsync(0, cancellationToken)).Where(x => x.CanRead && x.CanWrite).ToArray();
+        var available = (await governanceScope.ResolveAsync(requested, cancellationToken))
+            .Where(x => x.CanRead && x.CanWrite)
+            .ToArray();
         var normalized = requested?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => ProjectContext.Normalize(x))
             .Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -1123,6 +1161,24 @@ public sealed class GovernanceBatchExecutor(
         if (result.Length == 0) throw new InvalidOperationException("At least one authorized ProjectId is required.");
         ActorAuthorization.EnsureProjectsAllowed(actor, result, write: true);
         return result.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static void EnsureExplicitScopeMatchesSnapshot(
+        IReadOnlyList<string>? requested,
+        IReadOnlyList<string> snapshotExecutionProjectIds)
+    {
+        if (requested is not { Count: > 0 })
+        {
+            return;
+        }
+
+        var requestedExecutionProjectIds = DurableMemoryGovernancePolicy.ToExecutionProjectIds(requested);
+        if (!requestedExecutionProjectIds.SequenceEqual(snapshotExecutionProjectIds, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.CursorScopeMismatch,
+                "Explicit ProjectIds do not match the immutable governance review snapshot scope.");
+        }
     }
 
     private async Task PersistProgressAsync(
