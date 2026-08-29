@@ -56,12 +56,14 @@ public static class ChatGptAppCatalogProjection
             invalidReasons.Add("missing-description");
         }
 
-        if (!tool.TryGetProperty("inputSchema", out var inputSchema) || inputSchema.ValueKind != JsonValueKind.Object)
+        if (!tool.TryGetProperty("inputSchema", out var inputSchema) ||
+            !HasSupportedSchemaType(inputSchema, allowArray: false))
         {
             invalidReasons.Add("invalid-input-schema");
         }
 
-        if (!tool.TryGetProperty("outputSchema", out var outputSchema) || outputSchema.ValueKind != JsonValueKind.Object)
+        if (!tool.TryGetProperty("outputSchema", out var outputSchema) ||
+            !HasSupportedSchemaType(outputSchema, allowArray: true))
         {
             invalidReasons.Add("invalid-output-schema");
         }
@@ -88,6 +90,18 @@ public static class ChatGptAppCatalogProjection
             isRequiredReadOnlyTool,
             ["model", "app"],
             invalidReasons);
+    }
+
+    private static bool HasSupportedSchemaType(JsonElement schema, bool allowArray)
+    {
+        if (schema.ValueKind != JsonValueKind.Object ||
+            !schema.TryGetProperty("type", out var type) ||
+            type.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        return type.GetString() is "object" || (allowArray && type.GetString() is "array");
     }
 
     private static void RequireBoolean(

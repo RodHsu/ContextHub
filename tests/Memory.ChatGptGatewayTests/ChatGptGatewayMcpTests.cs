@@ -3069,6 +3069,37 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         events.Single().Success.Should().BeTrue();
     }
 
+    [Fact]
+    public void App_Catalog_Projection_Should_Accept_Array_Output_Schema_And_Reject_Scalar_Output_Schema()
+    {
+        using var validCatalog = JsonDocument.Parse("""
+            [{
+              "name":"governance_runs_list",
+              "description":"List governance run receipts.",
+              "inputSchema":{"type":"object"},
+              "outputSchema":{"type":"array","items":{"type":"object"}},
+              "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false,"idempotentHint":true}
+            }]
+            """);
+        using var invalidCatalog = JsonDocument.Parse("""
+            [{
+              "name":"governance_runs_list",
+              "description":"List governance run receipts.",
+              "inputSchema":{"type":"object"},
+              "outputSchema":{"type":"string"},
+              "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false,"idempotentHint":true}
+            }]
+            """);
+
+        var validTool = ChatGptAppCatalogProjection.Project(validCatalog.RootElement).Tools.Single();
+        validTool.IsAppCallable.Should().BeTrue();
+        validTool.InvalidReasons.Should().BeEmpty();
+
+        var invalidTool = ChatGptAppCatalogProjection.Project(invalidCatalog.RootElement).Tools.Single();
+        invalidTool.IsAppCallable.Should().BeFalse();
+        invalidTool.InvalidReasons.Should().ContainSingle("invalid-output-schema");
+    }
+
     [DockerRequiredFact]
     public async Task Proposal_Approval_Should_Bridge_ChatGpt_And_Codex_Read_Paths()
     {

@@ -811,7 +811,8 @@ foreach ($tool in @($toolsJson.result.tools)) {
     if (-not $tool.inputSchema -or [string]$tool.inputSchema.type -ne "object") {
         $invalidReasons.Add("invalid-input-schema")
     }
-    if (-not $tool.outputSchema -or [string]$tool.outputSchema.type -ne "object") {
+    $outputSchemaType = [string]$tool.outputSchema.type
+    if (-not $tool.outputSchema -or $outputSchemaType -notin @("object", "array")) {
         $invalidReasons.Add("invalid-output-schema")
     }
 
