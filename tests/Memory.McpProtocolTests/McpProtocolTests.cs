@@ -268,6 +268,16 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         PublishedToolSchemaHash.Compute(governanceBatchTool).Should().Be(GovernanceToolContract.SchemaHash);
         var runGetTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_run_get");
+        foreach (var toolName in new[] { "governance_contract_get", "governance_run_get", "governance_runs_list" })
+        {
+            var annotations = listedTools.EnumerateArray()
+                .Single(tool => tool.GetProperty("name").GetString() == toolName)
+                .GetProperty("annotations");
+            annotations.GetProperty("readOnlyHint").GetBoolean().Should().BeTrue();
+            annotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("idempotentHint").GetBoolean().Should().BeTrue();
+        }
         runGetTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
             "runExists", "status", "latestBatchReceived", "requestIdentityHash", "latestBatch",
             "auditIds", "finalSnapshotToken", "finalConvergenceStatus", "stoppedReason"

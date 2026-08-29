@@ -758,6 +758,53 @@ $toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $sessionHeaders 
 }
 $toolsJson = Read-SseDataJson -Content $toolsResponse.Content
 $toolNames = @($toolsJson.result.tools | ForEach-Object { $_.name })
+$canonicalRestrictedToolCount = 65
+$requiredAppFacingReadTools = @(
+    "governance_contract_get",
+    "governance_run_get",
+    "governance_runs_list"
+)
+$appFacingInvalidTools = [System.Collections.Generic.List[string]]::new()
+foreach ($tool in @($toolsJson.result.tools)) {
+    $invalidReasons = [System.Collections.Generic.List[string]]::new()
+    if ([string]::IsNullOrWhiteSpace([string]$tool.name)) {
+        $invalidReasons.Add("missing-name")
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$tool.description)) {
+        $invalidReasons.Add("missing-description")
+    }
+    if (-not $tool.inputSchema -or [string]$tool.inputSchema.type -ne "object") {
+        $invalidReasons.Add("invalid-input-schema")
+    }
+    if (-not $tool.outputSchema -or [string]$tool.outputSchema.type -ne "object") {
+        $invalidReasons.Add("invalid-output-schema")
+    }
+
+    if ($requiredAppFacingReadTools -contains [string]$tool.name) {
+        if (-not $tool.annotations) {
+            $invalidReasons.Add("missing-read-only-annotations")
+        }
+        else {
+            if ($tool.annotations.readOnlyHint -ne $true) { $invalidReasons.Add("readOnlyHint-must-be-true") }
+            if ($tool.annotations.destructiveHint -ne $false) { $invalidReasons.Add("destructiveHint-must-be-false") }
+            if ($tool.annotations.openWorldHint -ne $false) { $invalidReasons.Add("openWorldHint-must-be-false") }
+            if ($tool.annotations.idempotentHint -ne $true) { $invalidReasons.Add("idempotentHint-must-be-true") }
+        }
+    }
+
+    if ($invalidReasons.Count -gt 0) {
+        $appFacingInvalidTools.Add("$($tool.name):$($invalidReasons -join ',')")
+    }
+}
+
+if ($toolNames.Count -ne $canonicalRestrictedToolCount -or $appFacingInvalidTools.Count -gt 0) {
+    throw "App-facing catalog projection failed: published=$($toolNames.Count), expected=$canonicalRestrictedToolCount, invalid=$($appFacingInvalidTools -join ';')."
+}
+$missingRequiredAppFacingTools = @($requiredAppFacingReadTools | Where-Object { $toolNames -notcontains $_ })
+if ($missingRequiredAppFacingTools.Count -gt 0) {
+    throw "App-facing catalog is missing: $($missingRequiredAppFacingTools -join ', ')."
+}
+Write-Host "App-facing catalog projection verified ($canonicalRestrictedToolCount callable tools; set difference=0)."
 $requiredTools = @(
     "describe_context_hub",
     "build_working_context",

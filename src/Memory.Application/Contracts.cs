@@ -381,9 +381,19 @@ public sealed record ContextHubBootstrapResult(
     ContextHubBootstrapServiceInfo Service,
     ContextHubBootstrapProjectInfo Project,
     ContextHubBootstrapCapabilities Capabilities,
+    ContextHubBootstrapToolCatalogInfo ToolCatalog,
     IReadOnlyList<string> RecommendedStartupFlow,
     ContextHubBootstrapUserPreferencesInfo UserPreferences,
     IReadOnlyList<string> Warnings);
+
+public sealed record ContextHubBootstrapToolCatalogInfo(
+    int BackendToolCount,
+    int AppFacingToolCount,
+    int QueryToolCount,
+    int MutationToolCount,
+    int DeleteCapableToolCount,
+    int ProposalGatedToolCount,
+    string PublishedCatalogVersion);
 
 public sealed record ContextHubBootstrapServiceInfo(
     string Name,
