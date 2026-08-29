@@ -13,6 +13,14 @@ This file contains repository-specific instructions that are safe to keep in the
   - Health: `/health/live`, `/health/ready`
   - Performance probe: `POST /api/performance/measure`
 
+## Git Branch Convention
+
+- `main` is the only Production release authority. Every full-service Production image must be built from a commit already contained in `origin/main`.
+- `dev` is the long-lived integration branch for verified work that is not yet ready for `main`.
+- Use short-lived `dev-<topic>` branches for isolated changes, for example `dev-mcp-protocol` or `dev-governance-retention`.
+- Do not create new `codex/*` branches. Existing published branches may be removed only after ancestry and worktree checks prove that `origin/main` contains them and no uncommitted work depends on them.
+- Do not force-push shared release history. Merge or fast-forward verified work through `dev` and then `main` with an auditable commit lineage.
+
 ## ContextHub Usage
 
 - The canonical `ProjectId` for this repository is `ContextHub`.

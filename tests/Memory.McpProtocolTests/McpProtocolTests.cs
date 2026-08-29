@@ -167,7 +167,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
-    public async Task Raw_Http_Modern_Endpoint_Should_Reject_Legacy_Stream_Methods_And_Ignore_Session_Headers()
+    public async Task Raw_Http_Modern_Endpoint_Should_Reject_Legacy_Stream_Methods_And_Stale_Session_Headers()
     {
         using var client = environment.GetFactory().CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
@@ -184,8 +184,8 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         request.Headers.Add("Mcp-Session-Id", "attacker-controlled-session");
         request.Headers.Add("Last-Event-ID", "stale-event");
         using var response = await client.SendAsync(request);
-        response.EnsureSuccessStatusCode();
-        response.Headers.Contains("Mcp-Session-Id").Should().BeFalse();
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("Mcp-Session-Id is not valid with stateless MCP protocol version");
     }
 
     [DockerRequiredFact]
@@ -270,7 +270,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         using var response = await client.SendAsync(request);
 
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
-        (await response.Content.ReadAsStringAsync()).Should().Contain("-32020");
+        (await response.Content.ReadAsStringAsync()).Should().Contain("protocol version mismatch");
     }
 
     private static HttpRequestMessage CreateModernRequest(

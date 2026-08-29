@@ -9596,6 +9596,18 @@ a.button-like {
 }
 
 @media (max-width: 640px) {
+    .mcp-catalog-summary-panel .panel-heading-row {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .mcp-catalog-summary-panel .panel-heading-row > :first-child,
+    .mcp-catalog-summary-panel .status-badge {
+        min-width: 0;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+    }
+
     .mcp-tools-page-stack {
         width: calc(100% - 1rem);
     }
