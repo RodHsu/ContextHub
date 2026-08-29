@@ -1257,7 +1257,19 @@ public sealed record KnowledgeGovernanceCoverageResult(
     int SharedKnowledgeCount,
     bool CoverageComplete,
     bool HasMore,
-    string? Continuation);
+    string? Continuation)
+{
+    public int AuthorizedGovernanceDurableMemoryCount { get; init; }
+    public int GovernanceCoveredDurableMemoryCount { get; init; }
+    public int SystemMetadataCount { get; init; }
+    public int NonRetrievalSystemMetadataCount { get; init; }
+    public string ScopeContractVersion { get; init; } = DurableMemoryGovernancePolicy.ScopeContractVersion;
+    public IReadOnlyList<string> GovernanceProjectIds { get; init; } = [];
+    public bool CountInvariantSatisfied =>
+        ScannedCount == TotalCount &&
+        GovernanceCoveredDurableMemoryCount == AuthorizedGovernanceDurableMemoryCount &&
+        GovernanceCoveredDurableMemoryCount == TotalCount;
+}
 
 public sealed record KnowledgeGovernanceSectionResult(
     IReadOnlyList<KnowledgeGovernanceCandidateResult> Candidates,
@@ -2250,6 +2262,13 @@ public interface IProjectInformationService
 public interface IAccessibleProjectService
 {
     Task<IReadOnlyList<AccessibleProjectResult>> ListAsync(int limit, CancellationToken cancellationToken);
+}
+
+public interface IGovernanceProjectScopeResolver
+{
+    Task<IReadOnlyList<AccessibleProjectResult>> ResolveAsync(
+        IReadOnlyList<string>? requestedProjectIds,
+        CancellationToken cancellationToken);
 }
 
 public sealed record ProjectHierarchySetChildrenRequest(string ParentProjectId, IReadOnlyList<string> ChildProjectIds);

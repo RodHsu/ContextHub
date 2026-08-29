@@ -2268,6 +2268,113 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Global_Governance_Should_Include_Default_And_Classify_Empty_Project_Metadata_As_NonRetrieval()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var actor = actorAccessor.Current;
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var metadataProjectId = $"hidden-metadata-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var defaultActive = NewCoverageMemory(ProjectContext.DefaultProjectId, "default-active", MemoryStatus.Active);
+        var defaultArchived = NewCoverageMemory(ProjectContext.DefaultProjectId, "default-archived", MemoryStatus.Archived);
+        var projectInformation = new MemoryItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = metadataProjectId,
+            ExternalKey = DurableMemoryGovernancePolicy.ProjectInformationExternalKey,
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Artifact,
+            Title = metadataProjectId,
+            Content = string.Empty,
+            Summary = string.Empty,
+            SourceType = "project-information",
+            SourceRef = metadataProjectId,
+            Tags = ["project-information", "project-hidden"],
+            Importance = 1m,
+            Confidence = 1m,
+            MetadataJson = JsonSerializer.Serialize(new { isHidden = true }),
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        await dbContext.MemoryItems.AddRangeAsync(defaultActive, defaultArchived, projectInformation);
+        await dbContext.SaveChangesAsync();
+
+        var expectedGlobalCount = await dbContext.MemoryItems.AsNoTracking()
+            .CountAsync(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
+                             x.ProjectId != ProjectContext.UserProjectId);
+        var global = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest(GovernanceRunId: $"global-default-{Guid.NewGuid():N}"),
+            CancellationToken.None);
+
+        global.Projects.Should().Contain(x => x.ProjectId == ProjectContext.DefaultProjectId);
+        global.Projects.Should().Contain(x => x.ProjectId == metadataProjectId);
+        global.DurableMemoryCoverage.Should().NotBeNull();
+        global.DurableMemoryCoverage!.TotalCount.Should().Be(expectedGlobalCount);
+        global.DurableMemoryCoverage.ScannedCount.Should().Be(expectedGlobalCount);
+        global.DurableMemoryCoverage.AuthorizedGovernanceDurableMemoryCount.Should().Be(expectedGlobalCount);
+        global.DurableMemoryCoverage.GovernanceCoveredDurableMemoryCount.Should().Be(expectedGlobalCount);
+        global.DurableMemoryCoverage.CountInvariantSatisfied.Should().BeTrue();
+        global.DurableMemoryCoverage.GovernanceProjectIds.Should().Contain(ProjectContext.DefaultProjectId);
+        global.DurableMemoryCoverage.SystemMetadataCount.Should().BeGreaterThan(0);
+        global.DurableMemoryCoverage.NonRetrievalSystemMetadataCount.Should().BeGreaterThan(0);
+        global.DurableMemoryCoverage.ActiveCount.Should().BeGreaterThan(0);
+        global.DurableMemoryCoverage.ArchivedCount.Should().BeGreaterThan(0);
+        global.ProtectedRetentionCount.Should().BeGreaterThan(0);
+        global.ProjectKnowledgeGovernance!.Candidates.Should().NotContain(x =>
+            x.MemoryId == projectInformation.Id &&
+            (x.Classification == GovernanceFindingType.InvalidMemoryCandidate ||
+             x.Classification == GovernanceFindingType.ReindexRequired));
+        global.GovernancePlan.Should().NotContain(x =>
+            x.AuthorityResourceId == projectInformation.Id && x.Classification == "InvalidProjectMetadata");
+
+        var explicitReview = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest([metadataProjectId], GovernanceRunId: $"explicit-scope-{Guid.NewGuid():N}"),
+            CancellationToken.None);
+        var expectedExplicitCount = await dbContext.MemoryItems.AsNoTracking()
+            .CountAsync(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
+                             (x.ProjectId == metadataProjectId || x.ProjectId == ProjectContext.SharedProjectId));
+        explicitReview.DurableMemoryCoverage!.TotalCount.Should().Be(expectedExplicitCount);
+        explicitReview.DurableMemoryCoverage.GovernanceProjectIds.Should().BeEquivalentTo(
+            [metadataProjectId, ProjectContext.SharedProjectId]);
+        explicitReview.Projects.Should().ContainSingle(x => x.ProjectId == metadataProjectId);
+        explicitReview.Projects.Should().NotContain(x => x.ProjectId == ProjectContext.DefaultProjectId);
+
+        actorAccessor.Current = actor with { AllowedProjectIds = [metadataProjectId] };
+        var restrictedGlobal = await gatewayTools.knowledge_review(
+            new KnowledgeReviewRequest(GovernanceRunId: $"restricted-global-{Guid.NewGuid():N}"),
+            CancellationToken.None);
+        restrictedGlobal.Projects.Should().ContainSingle(x => x.ProjectId == metadataProjectId);
+        restrictedGlobal.Projects.Should().NotContain(x => x.ProjectId == ProjectContext.DefaultProjectId);
+        restrictedGlobal.DurableMemoryCoverage!.GovernanceProjectIds.Should().BeEquivalentTo(
+            [metadataProjectId, ProjectContext.SharedProjectId]);
+
+        MemoryItem NewCoverageMemory(string projectId, string externalKey, MemoryStatus status) => new()
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"{externalKey}:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Fact,
+            Title = externalKey,
+            Content = $"Coverage fixture {externalKey}.",
+            Summary = $"Coverage fixture {externalKey}.",
+            SourceType = "test",
+            SourceRef = "governance-scope-regression",
+            Importance = .9m,
+            Confidence = .95m,
+            Status = status,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+    }
+
+    [DockerRequiredFact]
     public async Task Full_Governance_Should_Snapshot_More_Than_One_Page_Without_Gaps_Or_Replay_Drift()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

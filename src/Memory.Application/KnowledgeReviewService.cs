@@ -3,7 +3,7 @@ using Memory.Domain;
 namespace Memory.Application;
 
 public sealed class KnowledgeReviewService(
-    IAccessibleProjectService accessibleProjects,
+    IGovernanceProjectScopeResolver governanceScope,
     IMemoryDataRetentionService retentionService,
     IConversationAutomationService conversationService,
     ISuggestedActionService suggestedActions,
@@ -24,17 +24,7 @@ public sealed class KnowledgeReviewService(
         var startedAt = clock.UtcNow;
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
-        var available = await accessibleProjects.ListAsync(200, cancellationToken);
-        var readable = available.Where(x => x.CanRead).ToArray();
-        var requested = request.ProjectIds?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => ProjectContext.Normalize(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var projects = requested is { Length: > 0 }
-            ? requested.Select(projectId =>
-            {
-                ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-                return readable.FirstOrDefault(x => string.Equals(x.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
-                    ?? new AccessibleProjectResult(projectId, CanRead: true, CanWrite: actor.AllowedProjectIds.Count == 0);
-            }).ToArray()
-            : readable;
+        var projects = (await governanceScope.ResolveAsync(request.ProjectIds, cancellationToken)).ToArray();
         if (projects.Length == 0) throw new InvalidOperationException("No readable ProjectId is available for the knowledge review.");
 
         var tenantId = actor.TenantId ?? throw new InvalidOperationException("Knowledge review requires an authenticated tenant actor.");

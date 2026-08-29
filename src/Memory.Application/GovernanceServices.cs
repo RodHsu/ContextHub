@@ -201,6 +201,7 @@ public sealed class GovernanceService(
         var activeArtifacts = memories
             .Where(x => x.Status == MemoryStatus.Active)
             .Where(x => x.MemoryType == MemoryType.Artifact)
+            .Where(x => !DurableMemoryGovernancePolicy.IsSystemProjectMetadata(x))
             .ToArray();
 
         foreach (var group in activeArtifacts.GroupBy(x => NormalizeKey(x.Title)).Where(group => group.Count() > 1))
@@ -453,7 +454,9 @@ public sealed class GovernanceService(
                 .ThenInclude(x => x.Vectors)
             .Where(x => x.ProjectId == normalizedProjectId)
             .Where(x => x.Status == MemoryStatus.Active)
-            .Where(x => x.MemoryType == MemoryType.Artifact);
+            .Where(x => x.MemoryType == MemoryType.Artifact)
+            .Where(x => x.ExternalKey != DurableMemoryGovernancePolicy.ProjectInformationExternalKey)
+            .Where(x => x.Content != string.Empty || x.Summary != string.Empty);
         if (actor.HasUser)
         {
             vectorCandidateQuery = vectorCandidateQuery.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
@@ -764,7 +767,8 @@ public sealed class GovernanceService(
     private static bool IsInvalidMemoryCandidate(MemoryItem memory, out string reason)
     {
         if (string.IsNullOrWhiteSpace(memory.Title) ||
-            (string.IsNullOrWhiteSpace(memory.Content) && string.IsNullOrWhiteSpace(memory.Summary)))
+            (DurableMemoryGovernancePolicy.RequiresKnowledgeBody(memory) &&
+             string.IsNullOrWhiteSpace(memory.Content) && string.IsNullOrWhiteSpace(memory.Summary)))
         {
             reason = "title 或 knowledge body/summary 為空。";
             return true;
