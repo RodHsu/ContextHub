@@ -3103,8 +3103,45 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
         listedToolNames.Should().HaveCount(65);
+        var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
+        appFacingProjection.IsValid.Should().BeTrue();
+        appFacingProjection.PublishedToolCount.Should().Be(65);
+        appFacingProjection.AppCallableToolCount.Should().Be(65);
+        appFacingProjection.MissingPublishedTools.Should().BeEmpty();
+        appFacingProjection.UnexpectedPublishedTools.Should().BeEmpty();
+        appFacingProjection.MissingAppCallableTools.Should().BeEmpty();
+        var receiptAndContractTools = new[]
+        {
+            "governance_contract_get",
+            "governance_run_get",
+            "governance_runs_list"
+        };
+        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(62);
+        foreach (var toolName in receiptAndContractTools)
+        {
+            var projectedTool = appFacingProjection.Tools.Single(tool => tool.Name == toolName);
+            projectedTool.IsAppCallable.Should().BeTrue();
+            projectedTool.IsRequiredReadOnlyTool.Should().BeTrue();
+            projectedTool.EffectiveVisibility.Should().BeEquivalentTo("model", "app");
+            projectedTool.InvalidReasons.Should().BeEmpty();
+
+            var annotations = listedTools.EnumerateArray()
+                .Single(tool => tool.GetProperty("name").GetString() == toolName)
+                .GetProperty("annotations");
+            annotations.GetProperty("readOnlyHint").GetBoolean().Should().BeTrue();
+            annotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("idempotentHint").GetBoolean().Should().BeTrue();
+        }
+        McpPublishedToolCatalog.QueryToolNames.Should().BeSubsetOf(ChatGptGatewayToolCatalog.PublishedToolNames);
+        McpPublishedToolCatalog.ProposalWriteToolNames.Should().BeSubsetOf(ChatGptGatewayToolCatalog.PublishedToolNames);
+        McpPublishedToolCatalog.DirectMutationToolNames.Should().BeSubsetOf(ChatGptGatewayToolCatalog.PublishedToolNames);
+        McpPublishedToolCatalog.QueryToolNames
+            .Concat(McpPublishedToolCatalog.ProposalWriteToolNames)
+            .Concat(McpPublishedToolCatalog.DirectMutationToolNames)
+            .Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
         ChatGptGatewayToolCatalog.PublishedCatalogHash.Should().MatchRegex("^[a-f0-9]{64}$");
-        ChatGptGatewayToolCatalog.PublicationIdentity.Should().Contain(GovernanceToolContract.PublishedCatalogVersion);
+        ChatGptGatewayToolCatalog.PublicationIdentity.Should().Contain(ChatGptGatewayToolCatalog.PublishedCatalogVersion);
         listedToolNames.Should().Contain([
             "knowledge_review",
             "governance_contract_get",

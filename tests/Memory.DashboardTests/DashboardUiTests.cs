@@ -534,6 +534,13 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("專案待辦事項");
         mcpToolsHtml.Should().Contain("suggested_actions_list");
         mcpToolsHtml.Should().Contain("連線面總覽");
+        mcpToolsHtml.Should().Contain("目前發布數量");
+        mcpToolsHtml.Should().Contain("Direct MCP");
+        mcpToolsHtml.Should().Contain("66</strong> 支工具");
+        mcpToolsHtml.Should().Contain("ChatGPT App-facing");
+        mcpToolsHtml.Should().Contain("65</strong> 支工具");
+        mcpToolsHtml.Should().Contain("可能刪除");
+        mcpToolsHtml.Should().Contain("3</strong> 支工具");
         mcpToolsHtml.Should().Contain("Direct MCP 工具");
         mcpToolsHtml.Should().Contain("ChatGPT Gateway 工具");
         mcpToolsHtml.Should().Contain("REST API 摘要");

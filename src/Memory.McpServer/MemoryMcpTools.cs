@@ -250,15 +250,15 @@ public sealed class MemoryMcpTools(
         }
     }
 
-    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Idempotent = true, OpenWorld = false), Description("Read the canonical governance tool contract version, schema hash, published catalog version, and supported actions.")]
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Read the canonical governance tool contract version, schema hash, published catalog version, and supported actions.")]
     public GovernanceToolContractResult governance_contract_get()
         => GovernanceToolContract.Describe();
 
-    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Idempotent = true, OpenWorld = false), Description("Read the latest immutable governance run receipt and outcome-recovery state for the current actor and GovernanceRunId. A null result means the run was not received for this actor.")]
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Read the latest immutable governance run receipt and outcome-recovery state for the current actor and GovernanceRunId. A null result means the run was not received for this actor.")]
     public Task<GovernanceRunReceiptResult?> governance_run_get(string governanceRunId, CancellationToken cancellationToken = default)
         => governanceRunReceipts.GetAsync(governanceRunId, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Idempotent = true, OpenWorld = false), Description("List a bounded page of latest immutable governance run receipts with outcome-recovery state for the current actor, optionally filtered by ProjectId.")]
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("List a bounded page of latest immutable governance run receipts with outcome-recovery state for the current actor, optionally filtered by ProjectId.")]
     public Task<IReadOnlyList<GovernanceRunReceiptResult>> governance_runs_list(GovernanceRunReceiptListRequest request, CancellationToken cancellationToken = default)
         => governanceRunReceipts.ListAsync(request, cancellationToken);
 

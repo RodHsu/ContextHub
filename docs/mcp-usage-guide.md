@@ -176,6 +176,8 @@ Do not write:
 
 The Dashboard also exposes this catalog in Traditional Chinese at `/mcp-tools`.
 
+The catalog summary is generated from the same canonical policy used by `/mcp-chat`, rather than a second configuration allowlist. In v1.1.85 it reports 66 backend `/mcp` tools and 65 ChatGPT App-facing tools, together with query/read, mutation, delete-capable, and proposal-gated counts. Production smoke validates the final host-compatible projection, including complete non-destructive read-only annotations for `governance_contract_get`, `governance_run_get`, and `governance_runs_list`.
+
 ## Cross-Project Discussions
 
 Use discussions for questions and replies that must remain separate from durable knowledge, memory, and conversation-checkpoint promotion. A discussion has one `hostProjectId` that identifies the main repo under discussion and an explicit participant list.

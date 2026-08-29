@@ -71,6 +71,24 @@
             <section class="panel">
                 <div class="panel-heading-row">
                     <div>
+                        <div class="panel-title">目前發布數量</div>
+                        <div class="panel-heading-meta panel-heading-meta-left">以下統計由 canonical catalog 產生；刪除能力包含在 mutation 數量內，proposal-gated 也包含在 mutation 數量內。</div>
+                    </div>
+                    <span class="status-badge ok">@Catalog.PublishedCatalogVersion</span>
+                </div>
+                <div class="mcp-capability-grid">
+                    <article class="mcp-capability-card"><div class="stack-item-title">Direct MCP</div><p><strong>@Catalog.BackendToolCount</strong> 支工具</p><div class="panel-heading-meta">可信 agent 的完整 `/mcp` 工具面。</div></article>
+                    <article class="mcp-capability-card"><div class="stack-item-title">ChatGPT App-facing</div><p><strong>@Catalog.AppFacingToolCount</strong> 支工具</p><div class="panel-heading-meta">OAuth `/mcp-chat` 最終 restricted catalog。</div></article>
+                    <article class="mcp-capability-card"><div class="stack-item-title">查詢／讀取</div><p><strong>@Catalog.QueryToolCount</strong> 支工具</p><div class="panel-heading-meta">取得、搜尋、列出、說明或預覽資料。</div></article>
+                    <article class="mcp-capability-card"><div class="stack-item-title">寫入／治理</div><p><strong>@Catalog.MutationToolCount</strong> 支工具</p><div class="panel-heading-meta">直接 mutation 或建立待核准 proposal。</div></article>
+                    <article class="mcp-capability-card"><div class="stack-item-title">可能刪除</div><p><strong>@Catalog.DeleteCapableToolCount</strong> 支工具</p><div class="panel-heading-meta">受安全閘門、proposal 或 matured retention policy 約束。</div></article>
+                    <article class="mcp-capability-card"><div class="stack-item-title">Proposal-gated</div><p><strong>@Catalog.ProposalGatedToolCount</strong> 支工具</p><div class="panel-heading-meta">ChatGPT 不直接套用 durable mutation。</div></article>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-heading-row">
+                    <div>
                         <div class="panel-title">Direct MCP 工具</div>
                         <div class="panel-heading-meta panel-heading-meta-left">供 Codex 或內部自動化使用。寫入工具會直接改變 ContextHub durable knowledge，需帶明確 ProjectId 並遵守 repo 規則。</div>
                     </div>
@@ -194,6 +212,7 @@
     private static readonly IReadOnlyList<ToolDoc> DirectTools =
     [
         new("describe_context_hub", "說明 ContextHub 的用途、啟動流程與 ProjectId 使用方式。", "讀取", "neutral", "適合 agent 第一次連線時使用。"),
+        new("governance_contract_get / governance_run_get / governance_runs_list", "讀取治理契約與 immutable run receipt，支援 timeout／502 outcome recovery。", "讀取", "neutral", "App-facing descriptor 明確標示 read-only、non-destructive、closed-world、idempotent。"),
         new("build_working_context", "依 task query 組合專案 working context、相關記憶與最近訊號。", "讀取", "neutral", "新任務、切換 repo、恢復壓縮後都應先呼叫。"),
         new("memory_search / memory_get", "搜尋或讀取既有 facts、decisions、artifacts、episodes。", "讀取", "neutral", "支援 explicit ProjectId、includedProjectIds、summary layer 與 archived filter。"),
         new("memory_upsert / memory_update", "建立、替換或修正 durable memory。", "直接寫入", "warn", "只寫穩定可重用的結論、規則、部署結果或決策。"),
@@ -220,6 +239,7 @@
     [
         new("projects_list", "列出目前 OAuth actor 可讀取的 ProjectId。", "讀取", "neutral", "不回傳 default，降低誤用預設專案的機率。"),
         new("daily_memory_review", "回傳每日遠端記憶治理檢查摘要。", "讀取", "neutral", "server-side scoping，不改記憶、偏好或 action。"),
+        new("governance_contract_get / governance_run_get / governance_runs_list", "讀取 canonical governance contract 與 run receipt outcome。", "讀取", "neutral", "三支工具走與既有 catalog 相同的 App-facing registration，且不修改治理資料。"),
         new("memory_retention_preview / project_cleanup_preview", "分類 retention 或 project cleanup 候選。", "讀取", "neutral", "預覽不刪除、不封存。"),
         new("build_working_context / memory_search / memory_get", "讓 ChatGPT 取得授權範圍內的 working context 與記憶內容。", "讀取", "neutral", "適合查詢、彙整、規劃。"),
         new("user_preferences_list / conversation_insights_list / suggested_actions_list", "檢視全域偏好、conversation insights 與 suggested actions。", "讀取", "neutral", "用於整理排程與人工審核前分析。"),
@@ -251,6 +271,8 @@
         new("資料庫檢視", "/api/storage/tables, /api/storage/{table}", "供 Dashboard storage explorer 檢視資料表與分頁資料。"),
         new("ChatGPT OAuth", "/.well-known/*, /oauth/chat/*, /userinfo", "提供 `/mcp-chat` 所需的 OAuth/OIDC metadata、DCR、authorize、token 與 userinfo。")
     ];
+
+    private static readonly ContextHubBootstrapToolCatalogInfo Catalog = McpPublishedToolCatalog.Describe();
 
     private sealed record EndpointDoc(string Path, string Audience, string Badge, string BadgeClass, string Description);
 

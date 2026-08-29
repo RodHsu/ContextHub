@@ -30,6 +30,7 @@ public sealed class ContextHubBootstrapService : IContextHubBootstrapService
                 UserPreferences: true,
                 RuntimeLogs: true,
                 MaintenanceStatus: true),
+            McpPublishedToolCatalog.Describe(),
             [
                 "Call describe_context_hub without projectId during first MCP onboarding.",
                 "Resolve projectId from repo rules or repo root name.",

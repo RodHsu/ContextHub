@@ -6,9 +6,6 @@ public sealed class ChatGptGatewayOptions
     public ContextHubGatewayOptions ContextHub { get; set; } = new();
     public string PublicMcpUrl { get; set; } = string.Empty;
     public string PublicResourceMetadataUrl { get; set; } = string.Empty;
-    public string[] ReadTools { get; set; } = [];
-    public string[] DirectWriteTools { get; set; } = [];
-    public string[] ProposalWriteTools { get; set; } = [];
     public int MaxResponseCharacters { get; set; } = 120_000;
 }
 
