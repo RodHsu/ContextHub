@@ -76,7 +76,8 @@ public sealed class DashboardQueryService(
             resourceChart?.Payload.Samples ?? [],
             evaluationSummary?.Payload.Summary,
             contextSavings?.Payload.Savings ?? CreateEmptyContextSavings(now),
-            discussionActivity?.Payload.Activity);
+            discussionActivity?.Payload.Activity,
+            operations?.MemoryInventory);
     }
 
     public async Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken)

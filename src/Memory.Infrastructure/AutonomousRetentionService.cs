@@ -436,6 +436,8 @@ public sealed class AutonomousRetentionService(
     {
         var tags = memory.Tags.Select(x => x.ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
         var source = memory.SourceType.ToLowerInvariant();
+        if (DurableMemoryGovernancePolicy.IsSystemProjectMetadata(memory))
+            return new("system-metadata", "SystemMetadataProtected", 0, false, true, false, "systemMetadataProtected");
         if (memory.MemoryType is MemoryType.Decision or MemoryType.Fact or MemoryType.Preference ||
             HasAny(tags, "security", "audit", "formal", "authoritative", "governance-acceptance"))
             return new("protected", "ProtectedRetention", 0, false, true, false, "protectedRetention");

@@ -17,7 +17,37 @@ public sealed record DashboardOverviewMetricResult(
     string Key,
     string Label,
     long Value,
-    string Unit);
+    string Unit,
+    string CountingScope = "OperationalMetric",
+    string Definition = "");
+
+public sealed record DashboardMemoryInventoryCompositionResult(
+    string MetricKey,
+    string CountingScope,
+    long TotalMemoryItemRows,
+    long OwnedMemoryItemRows,
+    long LegacyOwnerlessMemoryItemRows,
+    long DefaultProjectRows,
+    long SharedProjectRows,
+    long UserProjectRows,
+    long RegularProjectRows,
+    IReadOnlyDictionary<string, long> ScopeCounts,
+    IReadOnlyDictionary<string, long> MemoryTypeCounts,
+    IReadOnlyDictionary<string, long> StatusCounts,
+    long SystemProjectInformationRows,
+    long ArtifactExchangeRows,
+    long TombstoneRows,
+    long RevisionRows,
+    long ChunkRows,
+    long VectorRows,
+    long ConversationInsightRows)
+{
+    public bool ProjectPartitionInvariantSatisfied =>
+        TotalMemoryItemRows == DefaultProjectRows + SharedProjectRows + UserProjectRows + RegularProjectRows;
+
+    public bool OwnershipInvariantSatisfied =>
+        TotalMemoryItemRows == OwnedMemoryItemRows + LegacyOwnerlessMemoryItemRows;
+}
 
 public sealed record DashboardSnapshotSectionStatusResult(
     string Key,
@@ -117,7 +147,8 @@ public sealed record DashboardOverviewResult(
     IReadOnlyList<DashboardResourceSampleResult>? ResourceSamples = null,
     DashboardEvaluationSummaryResult? EvaluationSummary = null,
     DashboardContextSavingsResult? ContextSavings = null,
-    DashboardDiscussionActivityResult? DiscussionActivity = null);
+    DashboardDiscussionActivityResult? DiscussionActivity = null,
+    DashboardMemoryInventoryCompositionResult? MemoryInventory = null);
 
 public sealed record DashboardDiscussionActivityResult(
     long ThreadCount,

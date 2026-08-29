@@ -1456,7 +1456,17 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         overview.Should().NotBeNull();
         overview!.BuildVersion.Should().NotBeNullOrWhiteSpace();
         overview!.Metrics.Should().Contain(x => x.Key == "memoryItems");
+        overview.Metrics.Single(x => x.Key == "memoryItems").CountingScope.Should().Be("InstanceInventory");
+        overview.Metrics.Single(x => x.Key == "memoryItems").Label.Should().Be("全 Instance 記憶資料列");
         overview.Metrics.Should().Contain(x => x.Key == "defaultProjectMemoryItems");
+        overview.MemoryInventory.Should().NotBeNull();
+        overview.MemoryInventory!.MetricKey.Should().Be("memoryItemRows");
+        overview.MemoryInventory.CountingScope.Should().Be("InstanceInventory");
+        overview.MemoryInventory.ProjectPartitionInvariantSatisfied.Should().BeTrue();
+        overview.MemoryInventory.OwnershipInvariantSatisfied.Should().BeTrue();
+        overview.MemoryInventory.ScopeCounts.Values.Sum().Should().Be(overview.MemoryInventory.TotalMemoryItemRows);
+        overview.MemoryInventory.MemoryTypeCounts.Values.Sum().Should().Be(overview.MemoryInventory.TotalMemoryItemRows);
+        overview.MemoryInventory.StatusCounts.Values.Sum().Should().Be(overview.MemoryInventory.TotalMemoryItemRows);
         runtime.Should().NotBeNull();
         runtime!.BuildVersion.Should().NotBeNullOrWhiteSpace();
         runtime!.EmbeddingProfile.Should().Be("compact");

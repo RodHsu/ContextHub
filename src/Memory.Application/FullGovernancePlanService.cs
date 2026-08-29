@@ -10,7 +10,7 @@ public sealed class FullGovernancePlanService(
     IAutonomousRetentionService autonomousRetention,
     IClock clock) : IFullGovernancePlanService
 {
-    private const string ProjectInformationExternalKey = "system:project-information";
+    private const string ProjectInformationExternalKey = DurableMemoryGovernancePolicy.ProjectInformationExternalKey;
     private const string ProposalSourceSystem = ChatGptProposalService.SourceSystem;
     private const int MaximumLogPartitions = 10_000;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -91,7 +91,7 @@ public sealed class FullGovernancePlanService(
         {
             var information = projectInformation.OrderByDescending(x => x.UpdatedAt)
                 .FirstOrDefault(x => string.Equals(x.ProjectId, projectId, StringComparison.OrdinalIgnoreCase));
-            if (information is null || string.IsNullOrWhiteSpace(information.Content) || !IsValidJson(information.MetadataJson))
+            if (information is null || !IsValidJson(information.MetadataJson))
             {
                 items.Add(Item($"project:{projectId.ToLowerInvariant()}", GovernanceItemKind.Project, projectId,
                     information is null ? "MissingProjectInformation" : "InvalidProjectMetadata",

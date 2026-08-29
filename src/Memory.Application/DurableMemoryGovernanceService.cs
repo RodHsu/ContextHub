@@ -74,7 +74,7 @@ public sealed class DurableMemoryGovernanceService(
             .OrderBy(x => x.ProjectId)
             .ThenBy(x => x.CreatedAt)
             .ThenBy(x => x.Id)
-            .Select(x => new CoverageMemory(x.Id, x.ProjectId, x.Status))
+            .Select(x => new CoverageMemory(x.Id, x.ProjectId, x.Status, x.ExternalKey, x.Content, x.Summary))
             .ToListAsync(cancellationToken);
         var memoryIds = memories.Select(x => x.Id).ToArray();
         var findings = memoryIds.Length == 0
@@ -110,7 +110,15 @@ public sealed class DurableMemoryGovernanceService(
             memories.Count(x => ProjectContext.IsShared(x.ProjectId)),
             CoverageComplete: true,
             HasMore: false,
-            Continuation: null);
+            Continuation: null)
+        {
+            AuthorizedGovernanceDurableMemoryCount = memories.Count,
+            GovernanceCoveredDurableMemoryCount = memories.Count,
+            SystemMetadataCount = memories.Count(x => x.IsSystemMetadata),
+            NonRetrievalSystemMetadataCount = memories.Count(x => x.IsSystemMetadata && !x.HasKnowledgeBody),
+            ScopeContractVersion = DurableMemoryGovernancePolicy.ScopeContractVersion,
+            GovernanceProjectIds = normalizedProjects
+        };
         var result = new DurableMemoryGovernanceSnapshotResult(coverage, projectCandidates, sharedCandidates)
         {
             DeferredCount = findings.Count(x => x.Status == GovernanceFindingStatus.Deferred),
@@ -295,5 +303,19 @@ public sealed class DurableMemoryGovernanceService(
     private static string Hash(string value)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
-    private sealed record CoverageMemory(Guid Id, string ProjectId, MemoryStatus Status);
+    private sealed record CoverageMemory(
+        Guid Id,
+        string ProjectId,
+        MemoryStatus Status,
+        string ExternalKey,
+        string Content,
+        string Summary)
+    {
+        public bool IsSystemMetadata => string.Equals(
+            ExternalKey,
+            DurableMemoryGovernancePolicy.ProjectInformationExternalKey,
+            StringComparison.Ordinal);
+
+        public bool HasKnowledgeBody => !string.IsNullOrWhiteSpace(Content) || !string.IsNullOrWhiteSpace(Summary);
+    }
 }
