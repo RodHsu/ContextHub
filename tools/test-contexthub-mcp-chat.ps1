@@ -804,6 +804,11 @@ $requiredTools = @(
     "projects_list",
     "daily_memory_review",
     "knowledge_review",
+    "governance_contract_get",
+    "governance_run_get",
+    "governance_runs_list",
+    "governance_tombstone_get",
+    "governance_batch_execute",
     "governance_finding_set_disposition",
     "governance_finding_reopen",
     "user_preferences_list",
@@ -844,6 +849,32 @@ foreach ($name in $forbiddenTools) {
     }
 }
 
+$governanceBatchTool = @($toolsJson.result.tools | Where-Object { $_.name -eq "governance_batch_execute" })
+if ($governanceBatchTool.Count -ne 1) {
+    throw "Expected exactly one canonical governance_batch_execute schema."
+}
+
+$governanceDescription = [string]$governanceBatchTool[0].description
+$expectedGovernanceSchemaHash = "6aea349c2ff0a10279603ae1d40d5c3f21c03e58d7a93d10186e6fcf19ebaa86"
+if ($governanceDescription -notmatch "SchemaHash=$expectedGovernanceSchemaHash") {
+    throw "governance_batch_execute did not publish expected SchemaHash=$expectedGovernanceSchemaHash."
+}
+
+$governanceRequestSchema = $governanceBatchTool[0].inputSchema.properties.request
+$governanceRequestProperties = @($governanceRequestSchema.properties.psobject.Properties.Name)
+foreach ($property in @("allowMaturedDelete", "semanticAutoResolutionConfidenceThreshold")) {
+    if ($governanceRequestProperties -notcontains $property) {
+        throw "governance_batch_execute schema is missing '$property'."
+    }
+}
+
+$governanceSchemaJson = $governanceRequestSchema | ConvertTo-Json -Depth 30 -Compress
+foreach ($action in @("Quarantine", "MaturedDelete", "SemanticReevaluate")) {
+    if ($governanceSchemaJson -notmatch [regex]::Escape($action)) {
+        throw "governance_batch_execute schema is missing action '$action'."
+    }
+}
+
 $trackerExclusionTool = @($toolsJson.result.tools | Where-Object { $_.name -eq "project_work_item_set_governance_exclusion" })
 if ($trackerExclusionTool.Count -ne 1) {
     throw "Expected exactly one project_work_item_set_governance_exclusion schema."
@@ -862,7 +893,7 @@ foreach ($property in @("workItemId", "projectId", "governanceRunId", "reason"))
         throw "Governance tracker exclusion schema must require '$property'."
     }
 }
-Write-Host "Restricted tool allowlist verified ($($toolNames.Count) tools)."
+Write-Host "Restricted tool allowlist and governance schema verified ($($toolNames.Count) tools, SchemaHash=$expectedGovernanceSchemaHash)."
 
 Write-Host "11/12 authorized read tools should work for allowed project"
 $contextResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{

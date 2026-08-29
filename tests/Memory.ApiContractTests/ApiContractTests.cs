@@ -1823,7 +1823,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
-    public async Task Memory_Data_Retention_Run_Should_Preview_Then_Delete_Archived_Memory_Data()
+    public async Task Memory_Data_Retention_Run_Should_Preview_Then_Reject_Legacy_Direct_Delete()
     {
         var projectId = $"MemoryRetention_{Guid.NewGuid():N}";
         var autoDeleteId = Guid.Empty;
@@ -2027,13 +2027,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 DelayBetweenBatchesMs: 0,
                 CommandTimeoutSeconds: 30,
                 MaxDurationMinutes: 5));
-        applyResponse.EnsureSuccessStatusCode();
-        var apply = await applyResponse.Content.ReadFromJsonAsync<MemoryDataRetentionRunResult>();
-        apply.Should().NotBeNull();
-        apply!.Mode.Should().Be(MemoryDataRetentionRunMode.ApplyAutoDelete);
-        apply.AffectedProjectIds.Should().Contain(projectId);
-        apply.DeletedMemoryItems.Should().Be(1);
-        apply.DeletedVectors.Should().BeGreaterThanOrEqualTo(1);
+        applyResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        (await applyResponse.Content.ReadAsStringAsync()).Should().Contain("quarantine").And.Contain("matured-delete");
 
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
@@ -2043,22 +2038,13 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
             var afterApplyStamp = await cacheStore.GetVersionStampAsync([projectId], actor, includeShared: false, CancellationToken.None);
 
-            (await dbContext.MemoryItems.AnyAsync(x => x.Id == autoDeleteId)).Should().BeFalse();
-            (await dbContext.MemoryItemChunks.AnyAsync(x => x.MemoryItemId == autoDeleteId)).Should().BeFalse();
-            (await dbContext.MemoryLinks.AnyAsync(x => x.FromId == autoDeleteId || x.ToId == autoDeleteId)).Should().BeFalse();
+            (await dbContext.MemoryItems.AnyAsync(x => x.Id == autoDeleteId)).Should().BeTrue();
+            (await dbContext.MemoryItemChunks.AnyAsync(x => x.MemoryItemId == autoDeleteId)).Should().BeTrue();
             (await dbContext.MemoryItems.AnyAsync(x => x.Id == reviewArchivedId)).Should().BeTrue();
             (await dbContext.MemoryItems.AnyAsync(x => x.Id == activeId)).Should().BeTrue();
             (await dbContext.MemoryItems.AnyAsync(x => x.Id == reviewActiveId)).Should().BeTrue();
-            afterApplyStamp.ProjectVersions[projectId].Should().BeGreaterThan(beforePreviewStamp.ProjectVersions[projectId]);
-
-            var run = await dbContext.MaintenanceRuns.SingleAsync(x => x.Id == apply.RunId);
-            using var policyDocument = JsonDocument.Parse(run.PolicyJson);
-            policyDocument.RootElement.GetProperty("mode").GetInt32().Should().Be((int)MemoryDataRetentionRunMode.ApplyAutoDelete);
-            using var resultDocument = JsonDocument.Parse(run.ResultJson);
-            resultDocument.RootElement.GetProperty("deletedVectors").GetInt64().Should().BeGreaterThanOrEqualTo(1);
-            resultDocument.RootElement.GetProperty("autoDeleteCandidateCount").GetInt64().Should().BeGreaterThanOrEqualTo(1);
-            resultDocument.RootElement.GetProperty("reviewCandidateCount").GetInt64().Should().BeGreaterThanOrEqualTo(2);
-            resultDocument.RootElement.GetProperty("affectedProjectIds").EnumerateArray().Select(x => x.GetString()).Should().Contain(projectId);
+            afterApplyStamp.ProjectVersions[projectId].Should().Be(beforePreviewStamp.ProjectVersions[projectId]);
+            (await dbContext.MaintenanceRuns.AnyAsync(x => x.TriggeredBy == "memory-retention-apply-test")).Should().BeFalse();
         }
     }
 
@@ -2931,6 +2917,18 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         review.DurableMemoryCoverage.Should().NotBeNull();
         review.DurableMemoryCoverage!.CoverageComplete.Should().BeTrue();
         review.DurableMemoryCoverage.ScannedCount.Should().Be(review.DurableMemoryCoverage.TotalCount);
+        review.GovernanceCoverage.Should().NotBeNull();
+        review.GovernanceCoverage!.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.ProjectCoverage.ScannedCount.Should().Be(review.GovernanceCoverage.ProjectCoverage.TotalCount);
+        review.GovernanceCoverage.HierarchyCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.PreferenceCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.ArtifactCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.DiscussionCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.WorkItemCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.InsightCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.SuggestedActionCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.ProposalCoverage.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.LogCoverage.CoverageComplete.Should().BeTrue();
     }
 
     [DockerRequiredFact]
@@ -2964,7 +2962,52 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         after.Convergence.WorkItemActionableCount.Should().Be(0);
         after.Convergence.ExcludedGovernanceTrackerCount.Should().Be(1);
         after.Convergence.ActionableItemCount.Should().Be(0);
-        after.Convergence.Status.Should().Be("Converged");
+        after.Convergence.Status.Should().Be("ConvergedWithExceptions");
+        after.Convergence.GovernedExceptionCount.Should().BeGreaterThan(0);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Batch_Execute_Endpoint_Should_Expose_Contract_And_Fail_Closed_On_Snapshot_Mismatch()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        var projectId = $"api-governance-batch-{Guid.NewGuid():N}";
+        var governanceRunId = $"api-governance-run-{Guid.NewGuid():N}";
+        using var reviewResponse = await client.PostAsJsonAsync("/api/knowledge-reviews", new KnowledgeReviewRequest(
+            [projectId], GovernanceRunId: governanceRunId));
+        reviewResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var review = (await reviewResponse.Content.ReadFromJsonAsync<KnowledgeReviewResult>())!;
+
+        var request = new GovernanceBatchExecuteRequest(
+            governanceRunId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 10,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.Reindex],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: false,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        using var executeResponse = await client.PostAsJsonAsync("/api/knowledge-reviews/execute", request);
+        executeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var result = await executeResponse.Content.ReadFromJsonAsync<GovernanceBatchExecuteResult>();
+        result.Should().NotBeNull();
+        result!.GovernanceRunId.Should().Be(governanceRunId);
+        result.SnapshotToken.Should().Be(review.DurableMemoryCoverage.SnapshotToken);
+
+        using var mismatchResponse = await client.PostAsJsonAsync("/api/knowledge-reviews/execute", request with
+        {
+            GovernanceRunId = $"wrong-run-{Guid.NewGuid():N}",
+            SnapshotToken = review.DurableMemoryCoverage.SnapshotToken
+        });
+        mismatchResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
+        using var mismatchProblem = JsonDocument.Parse(await mismatchResponse.Content.ReadAsStringAsync());
+        mismatchProblem.RootElement.GetProperty("code").GetString()
+            .Should().Be(nameof(GovernanceBatchErrorCode.CursorSnapshotMismatch));
+
+        using var missingTombstone = await client.GetAsync(
+            $"/api/knowledge-reviews/tombstones/{Guid.NewGuid():D}?projectId={Uri.EscapeDataString(projectId)}");
+        missingTombstone.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
     }
 
     private static async Task CompleteActiveMaintenanceLeasesAsync(HttpClient client)

@@ -31,6 +31,48 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Raw_Http_Should_Normalize_ChatGpt_Legacy_Metadata_And_Preserve_Modern_Metadata()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
+
+        using var legacyRequest = CreateRawProtocolRequest(
+            "2025-11-25",
+            """
+            {"jsonrpc":"2.0","id":"legacy-chatgpt","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientInfo":{"name":"ChatGPT","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+            """,
+            staleSessionId: "stale-session-from-prior-release");
+        using var legacyResponse = await client.SendAsync(legacyRequest);
+        var legacyPayload = await legacyResponse.Content.ReadAsStringAsync();
+
+        legacyResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK, legacyPayload);
+        legacyPayload.Should().Contain("tools");
+        legacyPayload.Should().NotContain("The reserved per-request metadata key '_meta/io.modelcontextprotocol/clientCapabilities' is not valid with protocol version '2025-11-25'.");
+
+        using var modernRequest = CreateRawProtocolRequest(
+            "2026-07-28",
+            """
+            {"jsonrpc":"2.0","id":"modern","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"protocol-test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+            """);
+        using var modernResponse = await client.SendAsync(modernRequest);
+        var modernPayload = await modernResponse.Content.ReadAsStringAsync();
+
+        modernResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK, modernPayload);
+        modernPayload.Should().Contain("tools");
+
+        using var mismatchRequest = CreateRawProtocolRequest(
+            "2025-11-25",
+            """
+            {"jsonrpc":"2.0","id":"mismatch","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+            """);
+        using var mismatchResponse = await client.SendAsync(mismatchRequest);
+        var mismatchPayload = await mismatchResponse.Content.ReadAsStringAsync();
+
+        mismatchResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        mismatchPayload.Should().Contain("protocol version mismatch");
+    }
+
+    [DockerRequiredFact]
     public async Task Raw_Http_Server_Discover_Should_Advertise_Modern_Protocol_Without_Transport_Session()
     {
         using var client = environment.GetFactory().CreateClient();
@@ -351,7 +393,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         mcpClient.NegotiatedProtocolVersion.Should().Be("2026-07-28");
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().BeNull();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var toolsPayload = await SendMcpAsync(client, sessionId!, 2, "tools/list", new { });
         var bootstrapPayload = await SendMcpAsync(client, sessionId!, 3, "tools/call", new
@@ -446,12 +488,44 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .Single(tool => tool.GetProperty("name").GetString() == "describe_context_hub");
         var trackerExclusionTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_set_governance_exclusion");
+        var governanceBatchTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
+        listedTools.GetArrayLength().Should().Be(66);
         var bootstrapResult = ExtractSseJson(bootstrapPayload).GetProperty("result");
 
         toolsPayload.Should().Contain("describe_context_hub");
         toolsPayload.Should().Contain("memory_search");
         toolsPayload.Should().Contain("log_search");
         toolsPayload.Should().Contain("user_preference_upsert");
+        toolsPayload.Should().Contain("governance_contract_get");
+        toolsPayload.Should().Contain("governance_run_get");
+        toolsPayload.Should().Contain("governance_runs_list");
+        toolsPayload.Should().Contain(GovernanceToolContract.SchemaHash);
+        governanceBatchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+                "governanceRunId", "projectIds", "snapshotToken", "cursor", "maxMutations", "maxDurationSeconds",
+                "allowedActionTypes", "maxRiskLevel", "dryRun", "allowHardDelete", "allowMaturedDelete",
+                "semanticAutoResolutionConfidenceThreshold", "toolContractVersion", "schemaHash", "isReReview", "executionMode"
+            ]);
+        governanceBatchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties").GetProperty("allowedActionTypes").GetProperty("items").GetProperty("enum")
+            .EnumerateArray().Select(x => x.GetString()).Should().Contain([
+                nameof(GovernanceBatchActionType.Quarantine),
+                nameof(GovernanceBatchActionType.MaturedDelete),
+                nameof(GovernanceBatchActionType.SemanticReevaluate)
+            ]);
+        governanceBatchTool.GetProperty("description").GetString().Should().Contain(GovernanceToolContract.SchemaHash);
+        PublishedToolSchemaHash.Compute(governanceBatchTool).Should().Be(GovernanceToolContract.SchemaHash);
+        var runGetTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "governance_run_get");
+        runGetTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "runExists", "status", "latestBatchReceived", "requestIdentityHash", "latestBatch",
+            "auditIds", "finalSnapshotToken", "finalConvergenceStatus", "stoppedReason"
+        ]);
+        governanceBatchTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "scannedCount", "attemptedCount", "appliedCount", "noOpCount", "failedCount", "deferredCount",
+            "requiresUserDecisionCount", "nextCursor", "hasMore", "items", "auditIds", "stoppedReason", "errorCode", "succeeded"
+        ]);
         bootstrapTool.GetProperty("outputSchema").GetProperty("type").GetString().Should().Be("object");
         trackerExclusionTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
             .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
@@ -650,7 +724,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         _ = await mcpClient.ListResourceTemplatesAsync();
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().BeNull();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var escapedProjectId = Uri.EscapeDataString(projectId);
         var escapedQuery = Uri.EscapeDataString(query);
@@ -773,7 +847,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         });
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().BeNull();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var ingestPayload = await SendMcpAsync(client, sessionId!, 2, "tools/call", new
         {
@@ -842,7 +916,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
         _ = await mcpClient.ListToolsAsync();
 
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().BeNull();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var upsertPayload = await SendMcpAsync(client, sessionId!, 2, "tools/call", new
         {
@@ -958,6 +1032,27 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             "prompts/get" or "tools/call" => parameters["name"]?.GetValue<string>(),
             _ => null
         };
+
+    private static HttpRequestMessage CreateRawProtocolRequest(string protocolVersion, string json, string? staleSessionId = null)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("MCP-Protocol-Version", protocolVersion);
+        if (string.Equals(protocolVersion, "2026-07-28", StringComparison.Ordinal))
+        {
+            request.Headers.Add("Mcp-Method", "tools/list");
+        }
+        if (!string.IsNullOrWhiteSpace(staleSessionId))
+        {
+            request.Headers.Add("Mcp-Session-Id", staleSessionId);
+        }
+
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+        return request;
+    }
 
     private static void UseBootstrapActor(IServiceProvider services)
     {

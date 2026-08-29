@@ -268,7 +268,9 @@ public enum SecurityAuditEventType
     ApiTokenProjectDenied,
     ProjectDisplayNameUpdated,
     ConversationInsightGovernanceUpdated,
-    ProjectWorkItemGovernanceExclusionUpdated
+    ProjectWorkItemGovernanceExclusionUpdated,
+    GovernanceBatchItemProcessed,
+    GovernanceBatchExecutionCompleted
 }
 
 public enum AgentConnectivityStatus
@@ -728,6 +730,8 @@ public sealed class GovernanceFinding
     public string GovernanceActor { get; set; } = string.Empty;
     public int GovernanceRetryCount { get; set; }
     public DateTimeOffset? GovernanceUpdatedAt { get; set; }
+    public string GovernanceEvidenceFingerprint { get; set; } = string.Empty;
+    public string GovernancePolicyVersion { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
@@ -897,6 +901,8 @@ public sealed class ConversationInsight
     public string GovernanceRunId { get; set; } = string.Empty;
     public int GovernanceRetryCount { get; set; }
     public DateTimeOffset? GovernanceUpdatedAt { get; set; }
+    public string GovernanceEvidenceFingerprint { get; set; } = string.Empty;
+    public string GovernancePolicyVersion { get; set; } = string.Empty;
     public string MetadataJson { get; set; } = "{}";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -911,6 +917,7 @@ public sealed class KnowledgeGovernanceSnapshot
     public Guid OwnerUserId { get; set; }
     public string GovernanceRunId { get; set; } = string.Empty;
     public bool IsReReview { get; set; }
+    public int Generation { get; set; }
     public string ProjectSetHash { get; set; } = string.Empty;
     public string ProjectIdsJson { get; set; } = "[]";
     public string ResultJson { get; set; } = "{}";
@@ -919,6 +926,131 @@ public sealed class KnowledgeGovernanceSnapshot
     public bool CoverageComplete { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset CompletedAt { get; set; }
+}
+
+public sealed class GovernanceBatchRun
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public string SnapshotToken { get; set; } = string.Empty;
+    public string ProjectSetHash { get; set; } = string.Empty;
+    public string ProjectIdsJson { get; set; } = "[]";
+    public string PlanJson { get; set; } = "[]";
+    public string LastCursor { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public List<GovernanceBatchExecution> Executions { get; set; } = [];
+}
+
+public sealed class GovernanceBatchExecution
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid GovernanceBatchRunId { get; set; }
+    public string RequestHash { get; set; } = string.Empty;
+    public string RequestJson { get; set; } = "{}";
+    public string CursorBefore { get; set; } = string.Empty;
+    public string CursorAfter { get; set; } = string.Empty;
+    public string Status { get; set; } = "Running";
+    public string ResultJson { get; set; } = "{}";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public GovernanceBatchRun? Run { get; set; }
+}
+
+public sealed class MemoryRetentionState
+{
+    public Guid ResourceId { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public string ResourceType { get; set; } = nameof(MemoryItem);
+    public string Classification { get; set; } = string.Empty;
+    public string PolicyKind { get; set; } = string.Empty;
+    public string PolicyVersion { get; set; } = string.Empty;
+    public int GracePeriodDays { get; set; }
+    public string LifecycleStatus { get; set; } = "Candidate";
+    public DateTimeOffset? QuarantinedAt { get; set; }
+    public DateTimeOffset? DeleteEligibleAt { get; set; }
+    public DateTimeOffset? LastRevalidatedAt { get; set; }
+    public string EvidenceFingerprint { get; set; } = string.Empty;
+    public string ReasonCodesJson { get; set; } = "[]";
+    public string BlockedReasonsJson { get; set; } = "[]";
+    public Guid? ReplacementResourceId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class ResourceTombstone
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ResourceId { get; set; }
+    public string ResourceType { get; set; } = nameof(MemoryItem);
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public string ContentHash { get; set; } = string.Empty;
+    public string Classification { get; set; } = string.Empty;
+    public DateTimeOffset ArchivedAt { get; set; }
+    public DateTimeOffset DeletedAt { get; set; }
+    public string RetentionPolicyVersion { get; set; } = string.Empty;
+    public string ReasonCodesJson { get; set; } = "[]";
+    public Guid? ReplacementResourceId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public Guid AuditId { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public sealed class GovernanceRunReceipt
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public long EventSequence { get; set; }
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public string EventKey { get; set; } = string.Empty;
+    public string Actor { get; set; } = string.Empty;
+    public string ExecutionMode { get; set; } = string.Empty;
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset CompletedAt { get; set; }
+    public string ToolContractVersion { get; set; } = string.Empty;
+    public string SchemaHash { get; set; } = string.Empty;
+    public string PublishedCatalogVersion { get; set; } = string.Empty;
+    public string InitialSnapshotToken { get; set; } = string.Empty;
+    public string FinalSnapshotToken { get; set; } = string.Empty;
+    public bool CoverageComplete { get; set; }
+    public int InitialGovernanceActionable { get; set; }
+    public int FinalGovernanceActionable { get; set; }
+    public int CandidateCount { get; set; }
+    public int ExecutionActionableCount { get; set; }
+    public int GovernedExceptionCount { get; set; }
+    public int Applied { get; set; }
+    public int Failed { get; set; }
+    public int Deferred { get; set; }
+    public int RequiresUserDecision { get; set; }
+    public int HostBlocked { get; set; }
+    public int Quarantined { get; set; }
+    public int DeleteEligible { get; set; }
+    public int DeleteMatured { get; set; }
+    public int AutoDeleted { get; set; }
+    public int DeleteCancelled { get; set; }
+    public int Tombstoned { get; set; }
+    public int SemanticAutoResolved { get; set; }
+    public int BusinessWorkItemActionable { get; set; }
+    public string FinalConvergenceStatus { get; set; } = string.Empty;
+    public string StoppedReason { get; set; } = string.Empty;
+    public string EventType { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public bool LatestBatchReceived { get; set; }
+    public string RequestIdentityHash { get; set; } = string.Empty;
+    public string AuditIdsJson { get; set; } = "[]";
+    public string ProjectIdsJson { get; set; } = "[]";
+    public bool IsReplay { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
 }
 
 public sealed class ProjectHierarchy

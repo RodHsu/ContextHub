@@ -4,10 +4,11 @@
     <ProjectReference Include="..\Memory.Application\Memory.Application.csproj" />
     <ProjectReference Include="..\Memory.Infrastructure\Memory.Infrastructure.csproj" />
     <ProjectReference Include="..\Memory.Domain\Memory.Domain.csproj" />
+    <ProjectReference Include="..\Memory.McpTransport\Memory.McpTransport.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.1.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
   </ItemGroup>
 
   <ItemGroup>

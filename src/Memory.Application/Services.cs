@@ -1511,6 +1511,11 @@ public sealed class MemoryService(
                 ProjectId: projectId),
             cancellationToken);
 
+        if (logs.Any(ContainsSensitiveLogMaterial))
+        {
+            throw new InvalidOperationException("The selected log slice contains security-sensitive material and cannot be promoted to ordinary durable memory. Use the secure redaction/removal workflow.");
+        }
+
         var content = string.Join(Environment.NewLine, logs.Select(x => $"[{x.CreatedAt:O}] {x.ServiceName} {x.Level}: {x.Message} {x.Exception}".Trim()));
         var upsert = new MemoryUpsertRequest(
             ExternalKey: $"log-promoted:{Sha(projectId + request.Title + content)}",
@@ -1527,6 +1532,16 @@ public sealed class MemoryService(
             ProjectId: projectId);
 
         return await UpsertAsync(upsert, cancellationToken);
+    }
+
+    private static bool ContainsSensitiveLogMaterial(LogEntryResult entry)
+    {
+        var text = $"{entry.Message}\n{entry.Exception}\n{entry.PayloadJson}";
+        return text.Contains("private key", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("password", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("token=", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("authorization:", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<UserPreferenceResult> UpsertUserPreferenceAsync(UserPreferenceUpsertRequest request, CancellationToken cancellationToken)
@@ -2537,6 +2552,8 @@ public static class DependencyInjection
         services.AddScoped<IAccessibleProjectService, AccessibleProjectService>();
         services.AddScoped<IDailyMemoryReviewService, DailyMemoryReviewService>();
         services.AddScoped<IKnowledgeReviewService, KnowledgeReviewService>();
+        services.AddScoped<IFullGovernancePlanService, FullGovernancePlanService>();
+        services.AddScoped<IGovernanceBatchExecutor, GovernanceBatchExecutor>();
         services.AddScoped<IDurableMemoryGovernanceService, DurableMemoryGovernanceService>();
         services.AddScoped<IProjectInformationService, ProjectInformationService>();
         services.AddScoped<IProjectDiscussionService, ProjectDiscussionService>();

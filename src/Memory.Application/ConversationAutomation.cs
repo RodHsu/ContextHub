@@ -429,6 +429,11 @@ public sealed class ConversationAutomationService(
         insight.GovernanceUpdatedAt = clock.UtcNow;
         insight.Error = reason;
         insight.UpdatedAt = clock.UtcNow;
+        insight.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+        insight.GovernanceEvidenceFingerprint = await GovernanceEvidenceFingerprint.BuildAsync(
+            dbContext, insight.ProjectId, insight.PromotedMemoryId, null, insight.Id,
+            GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
+            [insight.Id.ToString("D"), insight.Title]);
         await AddInsightGovernanceAuditAsync(insight, request.Disposition.ToString(), cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return MapInsight(insight);

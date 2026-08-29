@@ -149,3 +149,33 @@ public sealed class MemoryDataRetentionOptions
     public int CommandTimeoutSeconds { get; set; } = 300;
     public int MaxDurationMinutes { get; set; } = 20;
 }
+
+public sealed class AutonomousGovernanceOptions
+{
+    public const string SectionName = "AutonomousGovernance";
+    public string RetentionPolicyVersion { get; set; } = "2026-08-28-v1";
+    public int MachineExecutionEvidenceGraceDays { get; set; } = 7;
+    public int RuntimeNoiseGraceDays { get; set; } = 14;
+    public int AutomatedEpisodeGraceDays { get; set; } = 30;
+    public int TemporaryArtifactGraceDays { get; set; } = 30;
+    public int HitWindowDays { get; set; } = 30;
+    public long MaxRecentHitCount { get; set; }
+    public int MaxLinkDegree { get; set; }
+    public decimal MaxImportance { get; set; } = 0.35m;
+    public decimal MaxConfidence { get; set; } = 0.60m;
+    public bool InternalMaturedDeleteEnabled { get; set; } = true;
+    public int InternalMaturedDeleteBatchSize { get; set; } = 50;
+    public int InternalMaturedDeletePollSeconds { get; set; } = 60;
+
+    public int NormalizedMachineExecutionEvidenceGraceDays => Math.Clamp(MachineExecutionEvidenceGraceDays, 1, 3650);
+    public int NormalizedRuntimeNoiseGraceDays => Math.Clamp(RuntimeNoiseGraceDays, 1, 3650);
+    public int NormalizedAutomatedEpisodeGraceDays => Math.Clamp(AutomatedEpisodeGraceDays, 1, 3650);
+    public int NormalizedTemporaryArtifactGraceDays => Math.Clamp(TemporaryArtifactGraceDays, 1, 3650);
+    public int NormalizedHitWindowDays => Math.Clamp(HitWindowDays, 1, 3650);
+    public long NormalizedMaxRecentHitCount => Math.Max(0, MaxRecentHitCount);
+    public int NormalizedMaxLinkDegree => Math.Max(0, MaxLinkDegree);
+    public decimal NormalizedMaxImportance => Math.Clamp(MaxImportance, 0m, 1m);
+    public decimal NormalizedMaxConfidence => Math.Clamp(MaxConfidence, 0m, 1m);
+    public int NormalizedInternalMaturedDeleteBatchSize => Math.Clamp(InternalMaturedDeleteBatchSize, 1, 500);
+    public int NormalizedInternalMaturedDeletePollSeconds => Math.Clamp(InternalMaturedDeletePollSeconds, 5, 3600);
+}

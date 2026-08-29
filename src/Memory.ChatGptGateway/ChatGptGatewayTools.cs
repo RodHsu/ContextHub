@@ -17,6 +17,9 @@ public sealed class ChatGptGatewayTools(
     IAccessibleProjectService accessibleProjectService,
     IDailyMemoryReviewService dailyMemoryReviewService,
     IKnowledgeReviewService knowledgeReviewService,
+    IGovernanceBatchExecutor governanceBatchExecutor,
+    IAutonomousRetentionService autonomousRetentionService,
+    IGovernanceRunReceiptService governanceRunReceipts,
     IGovernanceService governanceService,
     ISuggestedActionService suggestedActionService,
     IMemoryDataRetentionService retentionService,
@@ -43,6 +46,35 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Run server-side full-coverage governance across every authorized active/archived Project and Shared durable memory, then return compact stable-snapshot candidate pages plus the other governance surfaces. Completion requires coverageComplete, no additional pages, and zero actionable items; governed exceptions return ConvergedWithExceptions.")]
     public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)
         => knowledgeReviewService.ReviewAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description(GovernanceToolContract.ExecuteDescription)]
+    public async Task<GovernanceBatchExecuteResult> governance_batch_execute(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await governanceBatchExecutor.ExecuteAsync(request, cancellationToken);
+        }
+        catch (GovernanceBatchException ex)
+        {
+            return GovernanceBatchExecuteResult.Failure(request, ex);
+        }
+    }
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Idempotent = true, OpenWorld = false), Description("Read the canonical governance tool contract version, schema hash, published catalog version, and supported actions.")]
+    public GovernanceToolContractResult governance_contract_get()
+        => GovernanceToolContract.Describe();
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Idempotent = true, OpenWorld = false), Description("Read the latest immutable governance run receipt and outcome-recovery state for the current actor and GovernanceRunId. A null result means the run was not received for this actor.")]
+    public Task<GovernanceRunReceiptResult?> governance_run_get(string governanceRunId, CancellationToken cancellationToken = default)
+        => governanceRunReceipts.GetAsync(governanceRunId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Idempotent = true, OpenWorld = false), Description("List a bounded page of latest immutable governance run receipts with outcome-recovery state for the current actor, optionally filtered by ProjectId.")]
+    public Task<IReadOnlyList<GovernanceRunReceiptResult>> governance_runs_list(GovernanceRunReceiptListRequest request, CancellationToken cancellationToken = default)
+        => governanceRunReceipts.ListAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Read the immutable minimal tombstone for a hard-deleted resource without returning original content, chunks, vectors, revisions, or payloads.")]
+    public Task<ResourceTombstoneResult?> governance_tombstone_get(Guid resourceId, string? projectId = null, CancellationToken cancellationToken = default)
+        => autonomousRetentionService.GetTombstoneAsync(resourceId, projectId, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Idempotently classify a durable-memory governance finding as Deferred, RequiresUserDecision, or HostBlocked with an audited reason and governanceRunId. The finding remains in full coverage but is excluded from actionable convergence counts.")]
     public Task<GovernanceFindingResult> governance_finding_set_disposition(GovernanceFindingDispositionRequest request, CancellationToken cancellationToken = default)

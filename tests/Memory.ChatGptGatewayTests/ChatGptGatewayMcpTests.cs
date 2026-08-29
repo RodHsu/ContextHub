@@ -76,6 +76,36 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Gateway_Mcp_Should_Normalize_ChatGpt_Legacy_Metadata_And_Preserve_Modern_Metadata()
+    {
+        using var client = CreateAuthorizedClient(environment.GetFactory());
+
+        using var legacyRequest = CreateRawProtocolRequest(
+            "2025-11-25",
+            """
+            {"jsonrpc":"2.0","id":"legacy-chatgpt","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientInfo":{"name":"ChatGPT","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+            """,
+            staleSessionId: "stale-session-from-prior-release");
+        using var legacyResponse = await client.SendAsync(legacyRequest);
+        var legacyPayload = await legacyResponse.Content.ReadAsStringAsync();
+
+        legacyResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK, legacyPayload);
+        legacyPayload.Should().Contain("governance_batch_execute");
+        legacyPayload.Should().NotContain("The reserved per-request metadata key '_meta/io.modelcontextprotocol/clientCapabilities' is not valid with protocol version '2025-11-25'.");
+
+        using var modernRequest = CreateRawProtocolRequest(
+            "2026-07-28",
+            """
+            {"jsonrpc":"2.0","id":"modern","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"protocol-test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+            """);
+        using var modernResponse = await client.SendAsync(modernRequest);
+        var modernPayload = await modernResponse.Content.ReadAsStringAsync();
+
+        modernResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK, modernPayload);
+        modernPayload.Should().Contain("governance_batch_execute");
+    }
+
+    [DockerRequiredFact]
     public async Task OAuth_Protected_Resource_Metadata_Should_Describe_Public_Chat_Gateway()
     {
         using var client = environment.GetFactory().CreateClient();
@@ -371,7 +401,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         initializeRequest.Headers.Accept.ParseAdd("text/event-stream");
         using var initializeResponse = await mcpClient.SendAsync(initializeRequest);
         initializeResponse.EnsureSuccessStatusCode();
-        initializeResponse.Headers.Contains("Mcp-Session-Id").Should().BeFalse();
+        initializeResponse.Headers.TryGetValues("Mcp-Session-Id", out _).Should().BeFalse(
+            "the upgraded MCP transport is stateless while OAuth authorization remains enforced");
     }
 
     [DockerRequiredFact]
@@ -812,7 +843,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         _ = await chatMcp.ListToolsAsync();
         chatMcp.NegotiatedProtocolVersion.Should().Be("2026-07-28");
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().BeNull();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         // MCP to MCP: direct MCP creates and replies to the same thread.
         var mcpToMcp = await UseDirectMcpAsync(mcp => mcp.discussion_thread_create(new(
@@ -895,6 +926,1345 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         });
         ExtractToolJson(restorePayload).GetProperty("status").GetString().Should().Be("Closed");
         ExtractToolJson(restorePayload).GetProperty("isArchived").GetBoolean().Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Proposal_Payload_Should_Reject_Request_Wrapper_And_Unknown_Fields()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var proposals = scope.ServiceProvider.GetRequiredService<IChatGptProposalService>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"strict-proposal-{Guid.NewGuid():N}";
+        var memoryId = Guid.NewGuid();
+        var before = await dbContext.ConversationInsights.CountAsync();
+
+        var wrapped = () => proposals.CreateAsync(new ChatGptProposalCreateRequest(
+            "memory_archive",
+            projectId,
+            JsonSerializer.Serialize(new { request = new { id = memoryId, projectId, archived = true } }),
+            "Invalid wrapped payload",
+            "The payload must be direct target-tool arguments.",
+            GovernanceRunId: $"strict-{Guid.NewGuid():N}"), CancellationToken.None);
+        var unknown = () => proposals.CreateAsync(new ChatGptProposalCreateRequest(
+            "memory_archive",
+            projectId,
+            JsonSerializer.Serialize(new { id = memoryId, projectId, archived = true, unknownField = "blocked" }),
+            "Invalid unknown field",
+            "Unknown fields must fail closed.",
+            GovernanceRunId: $"strict-{Guid.NewGuid():N}"), CancellationToken.None);
+        var missingRequired = () => proposals.CreateAsync(new ChatGptProposalCreateRequest(
+            "memory_move",
+            projectId,
+            JsonSerializer.Serialize(new { id = memoryId }),
+            "Invalid missing target",
+            "Required targetProjectId must fail closed.",
+            GovernanceRunId: $"strict-{Guid.NewGuid():N}"), CancellationToken.None);
+
+        await wrapped.Should().ThrowAsync<InvalidOperationException>().WithMessage("*schema*");
+        await unknown.Should().ThrowAsync<InvalidOperationException>().WithMessage("*schema*");
+        await missingRequired.Should().ThrowAsync<InvalidOperationException>().WithMessage("*targetProjectId*");
+        (await dbContext.ConversationInsights.CountAsync()).Should().Be(before);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Batch_Should_Fail_Closed_For_Scheduled_Delete_Invalid_Cursor_Expired_Snapshot_And_NonAdmin()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var admin = actorAccessor.Current;
+        var executor = scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>();
+        var reviewService = scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"batch-closed-{Guid.NewGuid():N}";
+        var runId = $"batch-closed-run-{Guid.NewGuid():N}";
+        var review = await reviewService.ReviewAsync(new KnowledgeReviewRequest([projectId], GovernanceRunId: runId), CancellationToken.None);
+        var request = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 10,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.Reindex],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: false,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+
+        var hardDelete = () => executor.ExecuteAsync(request with { AllowHardDelete = true }, CancellationToken.None);
+        await hardDelete.Should().ThrowAsync<InvalidOperationException>().WithMessage("*AllowHardDelete=false*");
+        var missingSnapshot = () => executor.ExecuteAsync(request with { SnapshotToken = null }, CancellationToken.None);
+        await missingSnapshot.Should().ThrowAsync<InvalidOperationException>().WithMessage("*snapshotToken*");
+        var invalidMutations = () => executor.ExecuteAsync(request with { MaxMutations = 0 }, CancellationToken.None);
+        await invalidMutations.Should().ThrowAsync<InvalidOperationException>().WithMessage("*MaxMutations*");
+        var invalidDuration = () => executor.ExecuteAsync(request with { MaxDurationSeconds = 0 }, CancellationToken.None);
+        await invalidDuration.Should().ThrowAsync<InvalidOperationException>().WithMessage("*MaxDurationSeconds*");
+
+        using (var cancelled = new CancellationTokenSource())
+        {
+            cancelled.Cancel();
+            var cancelledExecution = () => executor.ExecuteAsync(
+                request with { GovernanceRunId = $"cancelled-{Guid.NewGuid():N}" }, cancelled.Token);
+            await cancelledExecution.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        var first = await executor.ExecuteAsync(request, CancellationToken.None);
+        var payloadMismatch = await executor.ExecuteAsync(request with { MaxDurationSeconds = 31 }, CancellationToken.None);
+        payloadMismatch.ErrorCode.Should().Be(GovernanceBatchErrorCode.ReplayPayloadMismatch);
+        var invalidCursor = await executor.ExecuteAsync(request with { Cursor = "invalid-cursor", MaxMutations = 11 }, CancellationToken.None);
+        invalidCursor.ErrorCode.Should().Be(GovernanceBatchErrorCode.InvalidCursor);
+        var wrongProject = () => executor.ExecuteAsync(request with
+        {
+            ProjectIds = [projectId, $"wrong-project-{Guid.NewGuid():N}"],
+            SnapshotToken = first.SnapshotToken
+        }, CancellationToken.None);
+        await wrongProject.Should().ThrowAsync<InvalidOperationException>().WithMessage("*ProjectId*");
+
+        var run = await dbContext.GovernanceBatchRuns.SingleAsync(x => x.GovernanceRunId == runId);
+        run.ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        await dbContext.SaveChangesAsync();
+        var expired = await executor.ExecuteAsync(request with { SnapshotToken = first.SnapshotToken, MaxDurationSeconds = 31 }, CancellationToken.None);
+        expired.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorExpired);
+
+        actorAccessor.Current = admin with { Role = TenantUserRole.Member };
+        var nonAdmin = () => executor.ExecuteAsync(request with { GovernanceRunId = $"member-{Guid.NewGuid():N}" }, CancellationToken.None);
+        await nonAdmin.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*administrator*");
+
+        actorAccessor.Current = admin with { Scopes = [SecurityScopes.MemoryRead] };
+        var missingScope = () => executor.ExecuteAsync(request with { GovernanceRunId = $"scope-{Guid.NewGuid():N}" }, CancellationToken.None);
+        await missingScope.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*memory:write*");
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Batch_Should_Preserve_Completed_Items_And_Replay_When_A_Later_Item_Fails()
+    {
+        var projectId = $"batch-isolation-{Guid.NewGuid():N}";
+        await SeedInsightOnlyProjectAsync(projectId);
+        await SeedInsightOnlyProjectAsync(projectId);
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var executor = scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>();
+        var reviewService = scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var runId = $"batch-isolation-run-{Guid.NewGuid():N}";
+        var review = await reviewService.ReviewAsync(new KnowledgeReviewRequest([projectId], GovernanceRunId: runId), CancellationToken.None);
+        var request = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 10,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: true,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        _ = await executor.ExecuteAsync(request, CancellationToken.None);
+
+        var run = await dbContext.GovernanceBatchRuns.SingleAsync(x => x.GovernanceRunId == request.GovernanceRunId);
+        const string marker = "\"kind\":\"ConversationInsight\"";
+        var lastMarker = run.PlanJson.LastIndexOf(marker, StringComparison.Ordinal);
+        lastMarker.Should().BeGreaterThan(0);
+        run.PlanJson = run.PlanJson[..lastMarker] + "\"kind\":\"Unsupported\"" + run.PlanJson[(lastMarker + marker.Length)..];
+        await dbContext.SaveChangesAsync();
+
+        var executeRequest = request with { DryRun = false };
+        var result = await executor.ExecuteAsync(executeRequest, CancellationToken.None);
+        result.StoppedReason.Should().Be("ItemFailed");
+        result.RequiresUserDecisionCount.Should().Be(1);
+        result.FailedCount.Should().Be(1);
+        result.Items.Should().ContainSingle(x => x.CursorDisposition == "Advanced");
+        result.Items.Should().ContainSingle(x => x.CursorDisposition == "NotAdvancedRetryable" && x.Retryable);
+        (await dbContext.ConversationInsights.CountAsync(x => x.ProjectId == projectId && x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision)).Should().Be(1);
+        (await dbContext.ConversationInsights.CountAsync(x => x.ProjectId == projectId && x.PromotionStatus == ConversationPromotionStatus.Pending)).Should().Be(1);
+
+        var replay = await executor.ExecuteAsync(executeRequest, CancellationToken.None);
+        replay.IsReplay.Should().BeTrue();
+        replay.Items.Select(x => (x.ItemKey, x.Disposition, x.CursorDisposition, x.Error))
+            .Should().Equal(result.Items.Select(x => (x.ItemKey, x.Disposition, x.CursorDisposition, x.Error)));
+        replay.AuditIds.Should().Equal(result.AuditIds);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Batch_Should_Merge_Exact_Duplicate_Read_Back_Replacement_Chain_Then_Archive_Secondary()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var owner = actorAccessor.Current;
+        var projectId = $"batch-merge-{Guid.NewGuid():N}";
+        var runId = $"batch-merge-run-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var primary = new MemoryItem
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"merge-primary:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Artifact,
+            Title = "Exact governed duplicate",
+            Content = "Identical execution evidence for a deterministic governed merge.",
+            Summary = "Identical governed merge fixture.",
+            SourceType = "batch-fixture",
+            SourceRef = "fixture:authoritative",
+            Tags = ["authoritative"],
+            Importance = .7m,
+            Confidence = .8m,
+            Status = MemoryStatus.Active,
+            MetadataJson = "{\"source\":\"primary\"}",
+            CreatedAt = now.AddMinutes(-2),
+            UpdatedAt = now
+        };
+        var secondary = new MemoryItem
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"merge-secondary:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Artifact,
+            Title = primary.Title,
+            Content = primary.Content,
+            Summary = primary.Summary,
+            SourceType = "batch-fixture",
+            SourceRef = "fixture:secondary",
+            Tags = ["execution-evidence"],
+            Importance = .4m,
+            Confidence = .5m,
+            Status = MemoryStatus.Active,
+            MetadataJson = "{\"source\":\"secondary\"}",
+            CreatedAt = now.AddMinutes(-1),
+            UpdatedAt = now
+        };
+        await dbContext.MemoryItems.AddRangeAsync(primary, secondary);
+        await dbContext.SaveChangesAsync();
+
+        var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: runId), CancellationToken.None);
+        review.ProjectKnowledgeGovernance!.Candidates.Select(x => x.Classification).Intersect([
+            GovernanceFindingType.DuplicateCandidate,
+            GovernanceFindingType.DuplicateMemoryCandidate,
+            GovernanceFindingType.MergeMemoryCandidate
+        ]).Should().NotBeEmpty();
+        var request = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 100,
+            MaxDurationSeconds: 60,
+            AllowedActionTypes: [GovernanceBatchActionType.Merge, GovernanceBatchActionType.Archive],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: false,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var result = await gatewayTools.governance_batch_execute(request, CancellationToken.None);
+        result.MergedCount.Should().BeGreaterThan(0, JsonSerializer.Serialize(result));
+        result.ArchivedCount.Should().BeGreaterThan(0);
+        result.DeleteProposalCount.Should().Be(0);
+
+        var primaryReadBack = (await memoryService.GetAsync(primary.Id, CancellationToken.None))!;
+        var secondaryReadBack = (await memoryService.GetAsync(secondary.Id, CancellationToken.None))!;
+        primaryReadBack.Status.Should().Be(MemoryStatus.Active);
+        secondaryReadBack.Status.Should().Be(MemoryStatus.Archived);
+        using var primaryMetadata = JsonDocument.Parse(primaryReadBack.MetadataJson);
+        primaryMetadata.RootElement.GetProperty("mergedFromMemoryIds").EnumerateArray()
+            .Select(x => x.GetString()).Should().Contain(secondary.Id.ToString("D"));
+        using var secondaryMetadata = JsonDocument.Parse(secondaryReadBack.MetadataJson);
+        secondaryMetadata.RootElement.GetProperty("supersededByMemoryId").GetString().Should().Be(primary.Id.ToString("D"));
+        (await dbContext.MemoryLinks.AnyAsync(x => x.LinkType == "replaced_by" && x.FromId == secondary.Id && x.ToId == primary.Id)).Should().BeTrue();
+
+        var replay = await gatewayTools.governance_batch_execute(request, CancellationToken.None);
+        replay.IsReplay.Should().BeTrue();
+        (await dbContext.MemoryItems.CountAsync(x => x.ProjectId == projectId && x.Status == MemoryStatus.Archived)).Should().Be(1);
+        var replayReceipt = await gatewayTools.governance_run_get(runId, CancellationToken.None);
+        replayReceipt.Should().NotBeNull();
+        replayReceipt!.IsReplay.Should().BeTrue();
+        replayReceipt.Applied.Should().Be(result.AppliedCount);
+        replayReceipt.AuditIds.Should().BeEquivalentTo(result.AuditIds);
+        replayReceipt.RunExists.Should().BeTrue();
+        replayReceipt.Status.Should().Be("Completed");
+        replayReceipt.LatestBatchReceived.Should().BeTrue();
+        replayReceipt.RequestIdentityHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        replayReceipt.LatestBatch.Should().NotBeNull();
+        replayReceipt.LatestBatch!.Executed.Should().BeTrue();
+        replayReceipt.LatestBatch.RequestHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        replayReceipt.LatestBatch.Applied.Should().Be(result.AppliedCount);
+        replayReceipt.LatestBatch.AuditIds.Should().BeEquivalentTo(result.AuditIds);
+        replayReceipt.LatestBatch.NextCursor.Should().Be(result.NextCursor);
+        replayReceipt.LatestBatch.RequiresReReview.Should().Be(result.RequiresReReview);
+        replayReceipt.LatestBatch.SnapshotGeneration.Should().Be(0);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Run_Receipt_Should_Recover_Unknown_Outcome_And_Enforce_Project_And_Tenant_Isolation()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var originalActor = actorAccessor.Current;
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var projectId = $"receipt-recovery-{Guid.NewGuid():N}";
+        var runId = $"receipt-recovery-run-{Guid.NewGuid():N}";
+        var request = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            $"kg:{Guid.NewGuid():N}:0123456789abcdef:i0",
+            Cursor: "opaque-cursor",
+            MaxMutations: 10,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.Archive],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: false,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var startedAt = DateTimeOffset.UtcNow;
+
+        await receipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
+
+        var running = await receipts.GetAsync(runId, CancellationToken.None);
+        running.Should().NotBeNull();
+        running!.RunExists.Should().BeTrue();
+        running.Status.Should().Be("Running");
+        running.LatestBatchReceived.Should().BeTrue();
+        running.RequestIdentityHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        running.LatestBatch.Should().NotBeNull();
+        running.LatestBatch!.Received.Should().BeTrue();
+        running.LatestBatch.Executed.Should().BeFalse();
+        running.LatestBatch.RequestHash.Should().BeEmpty();
+        running.LatestBatch.CursorBefore.Should().BeEmpty();
+        running.LatestBatch.RequiresReReview.Should().BeTrue();
+
+        await receipts.RecordExecutionStoppedAsync(
+            request, startedAt, "Stopped", "RequestCancelledOutcomeUnknown", CancellationToken.None);
+        var stopped = await receipts.GetAsync(runId, CancellationToken.None);
+        stopped!.Status.Should().Be("Stopped");
+        stopped.StoppedReason.Should().Be("RequestCancelledOutcomeUnknown");
+        stopped.LatestBatch!.Executed.Should().BeFalse();
+        stopped.LatestBatch.Status.Should().Be("Stopped");
+
+        var failedRunId = $"receipt-failed-run-{Guid.NewGuid():N}";
+        var failedRequest = request with { GovernanceRunId = failedRunId };
+        await receipts.RecordExecutionStartedAsync(failedRequest, startedAt, CancellationToken.None);
+        await receipts.RecordExecutionStoppedAsync(
+            failedRequest, startedAt, "Failed", "UnhandledExecutionFailure", CancellationToken.None);
+        (await receipts.GetAsync(failedRunId, CancellationToken.None))!.Status.Should().Be("Failed");
+
+        actorAccessor.Current = originalActor with { AllowedProjectIds = ["different-project"] };
+        var deniedGet = () => receipts.GetAsync(runId, CancellationToken.None);
+        await deniedGet.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await receipts.ListAsync(new GovernanceRunReceiptListRequest(Limit: 100), CancellationToken.None))
+            .Should().NotContain(x => x.GovernanceRunId == runId);
+
+        actorAccessor.Current = originalActor with { TenantId = Guid.NewGuid(), AllowedProjectIds = [] };
+        (await receipts.GetAsync(runId, CancellationToken.None)).Should().BeNull();
+        (await receipts.ListAsync(new GovernanceRunReceiptListRequest(Limit: 100), CancellationToken.None))
+            .Should().NotContain(x => x.GovernanceRunId == runId);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Batch_Should_Create_Direct_Payload_Delete_Proposal_Without_Hard_Delete()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var proposals = scope.ServiceProvider.GetRequiredService<IChatGptProposalService>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var owner = actorAccessor.Current;
+        var projectId = $"batch-delete-proposal-{Guid.NewGuid():N}";
+        var runId = $"batch-delete-proposal-run-{Guid.NewGuid():N}";
+        var memory = new MemoryItem
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"obsolete:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Artifact,
+            Title = "Obsolete memory retaining audit value",
+            Content = "Deletion requires an explicit per-memory proposal and user decision.",
+            Summary = "Scheduled governance must not hard-delete this memory.",
+            SourceType = "batch-fixture",
+            SourceRef = "fixture:delete-proposal",
+            Tags = ["obsolete"],
+            Importance = .6m,
+            Confidence = .7m,
+            Status = MemoryStatus.Active,
+            MetadataJson = "{}",
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        await dbContext.MemoryItems.AddAsync(memory);
+        await dbContext.SaveChangesAsync();
+
+        var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: runId), CancellationToken.None);
+        var result = await gatewayTools.governance_batch_execute(new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 100,
+            MaxDurationSeconds: 60,
+            AllowedActionTypes: [GovernanceBatchActionType.DeleteProposal],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: false,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled), CancellationToken.None);
+        result.DeleteProposalCount.Should().BeGreaterThan(0);
+        result.ArchivedCount.Should().Be(0);
+        result.RequiresUserDecisionCount.Should().BeGreaterThan(0);
+        (await dbContext.MemoryItems.SingleAsync(x => x.Id == memory.Id)).Status.Should().Be(MemoryStatus.Active);
+        var proposal = (await proposals.ListAsync(new ChatGptProposalListRequest(projectId, ChatGptProposalStatus.Pending, 100), CancellationToken.None))
+            .Single(x => x.ToolName == "memory_delete");
+        using var payload = JsonDocument.Parse(proposal.PayloadJson);
+        payload.RootElement.TryGetProperty("request", out _).Should().BeFalse();
+        payload.RootElement.GetProperty("id").GetGuid().Should().Be(memory.Id);
+    }
+
+    [DockerRequiredFact]
+    public async Task Internal_Worker_Should_Delete_Only_Revalidated_Matured_Quarantine_And_External_Call_Should_Fail_Closed()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var owner = actorAccessor.Current;
+        var projectId = $"scheduled-matured-delete-{Guid.NewGuid():N}";
+        var runId = $"scheduled-matured-delete-run-{Guid.NewGuid():N}";
+        var memory = new MemoryItem
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"synthetic-disposable:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Episode,
+            Title = "Disposable tool execution evidence",
+            Content = "Synthetic production-safe governance fixture.",
+            Summary = "Disposable execution evidence.",
+            SourceType = "tool-execution",
+            SourceRef = "synthetic-governance-fixture",
+            Tags = ["execution-evidence", "synthetic-disposable", "low-value"],
+            Importance = .1m,
+            Confidence = .2m,
+            Status = MemoryStatus.Active,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        dbContext.MemoryItems.Add(memory);
+        await dbContext.SaveChangesAsync();
+
+        var initialReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: runId), CancellationToken.None);
+        var quarantineRequest = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            initialReview.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 20,
+            MaxDurationSeconds: 60,
+            AllowedActionTypes: [GovernanceBatchActionType.Quarantine],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            AllowHardDelete: false,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var quarantined = await gatewayTools.governance_batch_execute(quarantineRequest, CancellationToken.None);
+        quarantined.QuarantinedCount.Should().Be(1, JsonSerializer.Serialize(quarantined));
+        (await dbContext.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id)).Status.Should().Be(MemoryStatus.Archived);
+
+        var state = await dbContext.MemoryRetentionStates.SingleAsync(x => x.ResourceId == memory.Id);
+        state.QuarantinedAt = DateTimeOffset.UtcNow.AddDays(-8);
+        state.DeleteEligibleAt = DateTimeOffset.UtcNow.AddDays(-1);
+        await dbContext.SaveChangesAsync();
+
+        var maturedReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: runId, IsReReview: true), CancellationToken.None);
+        var deleteRequest = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            maturedReview.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 20,
+            MaxDurationSeconds: 60,
+            AllowedActionTypes: [GovernanceBatchActionType.MaturedDelete],
+            MaxRiskLevel: GovernanceBatchRiskLevel.High,
+            AllowHardDelete: false,
+            AllowMaturedDelete: true,
+            IsReReview: true,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var deleted = await gatewayTools.governance_batch_execute(deleteRequest, CancellationToken.None);
+        deleted.Succeeded.Should().BeFalse();
+        deleted.ErrorCode.Should().Be(GovernanceBatchErrorCode.HostBlockedMaturedDelete);
+        deleted.AutoDeletedCount.Should().Be(0);
+        (await dbContext.MemoryItems.AnyAsync(x => x.Id == memory.Id)).Should().BeTrue();
+
+        var blockedReceipt = await gatewayTools.governance_run_get(runId, CancellationToken.None);
+        blockedReceipt.Should().NotBeNull();
+        blockedReceipt!.StoppedReason.Should().Be(nameof(GovernanceBatchErrorCode.HostBlockedMaturedDelete));
+        blockedReceipt.HostBlocked.Should().BeGreaterThan(0);
+        blockedReceipt.Status.Should().Be("Stopped");
+        blockedReceipt.LatestBatch.Should().NotBeNull();
+        blockedReceipt.LatestBatch!.Executed.Should().BeFalse(
+            "the prior quarantine execution must not be attributed to the later host-blocked request");
+        blockedReceipt.LatestBatch.RequestHash.Should().BeEmpty();
+
+        var internalExecutor = scope.ServiceProvider.GetRequiredService<IInternalMaturedDeleteExecutor>();
+        var workerResult = await internalExecutor.ExecuteNextBatchAsync(CancellationToken.None);
+        workerResult.DeletedCount.Should().BeGreaterThan(0, JsonSerializer.Serialize(workerResult));
+        (await dbContext.MemoryItems.AnyAsync(x => x.Id == memory.Id)).Should().BeFalse();
+        (await dbContext.ResourceTombstones.CountAsync(x => x.ResourceId == memory.Id)).Should().Be(1);
+
+        var replay = await internalExecutor.ExecuteNextBatchAsync(CancellationToken.None);
+        replay.DeletedCount.Should().Be(0);
+        (await dbContext.ResourceTombstones.CountAsync(x => x.ResourceId == memory.Id)).Should().Be(1);
+
+        var workerReceipt = await gatewayTools.governance_run_get(workerResult.GovernanceRunId, CancellationToken.None);
+        workerReceipt.Should().NotBeNull();
+        workerReceipt!.ExecutionMode.Should().Be("InternalRetentionWorker");
+        workerReceipt.AutoDeleted.Should().Be(workerResult.DeletedCount);
+        workerReceipt.Tombstoned.Should().Be(workerResult.TombstoneIds.Count);
+        var receipts = await gatewayTools.governance_runs_list(
+            new GovernanceRunReceiptListRequest(projectId, Limit: 20), CancellationToken.None);
+        receipts.Should().Contain(x => x.GovernanceRunId == runId
+            && x.StoppedReason == nameof(GovernanceBatchErrorCode.HostBlockedMaturedDelete));
+        receipts.Should().Contain(x => x.GovernanceRunId == workerResult.GovernanceRunId
+            && x.ExecutionMode == "InternalRetentionWorker");
+        var storedReceipt = await dbContext.GovernanceRunReceipts.SingleAsync(x =>
+            x.GovernanceRunId == workerResult.GovernanceRunId);
+        storedReceipt.StoppedReason = "tampered";
+        var mutateReceipt = () => dbContext.SaveChangesAsync();
+        var immutableError = await mutateReceipt.Should().ThrowAsync<DbUpdateException>();
+        immutableError.Which.InnerException!.Message.Should().Contain("append-only");
+        dbContext.ChangeTracker.Clear();
+    }
+
+    [DockerRequiredFact]
+    public async Task Scheduled_Governance_Should_AutoResolve_Reversible_Semantic_Candidate_With_Exact_Durable_Evidence()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var owner = actorAccessor.Current;
+        var projectId = $"semantic-auto-resolution-{Guid.NewGuid():N}";
+        var runId = $"semantic-auto-resolution-run-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var durable = new MemoryItem
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"semantic-authority:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Artifact,
+            Title = "Verified reversible semantic evidence",
+            Content = "Durable evidence already contains the candidate meaning.",
+            Summary = "Exact durable semantic evidence.",
+            SourceType = "verified-fixture",
+            SourceRef = "synthetic-governance-fixture",
+            Importance = .7m,
+            Confidence = .99m,
+            Status = MemoryStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var session = new ConversationSession
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = $"semantic-auto:{Guid.NewGuid():N}",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = "semantic-fixture",
+            LastTurnId = "turn-1",
+            StartedAt = now,
+            LastCheckpointAt = now,
+            UpdatedAt = now
+        };
+        var checkpoint = new ConversationCheckpoint
+        {
+            Session = session,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = "semantic-fixture",
+            DedupKey = $"semantic-auto:{Guid.NewGuid():N}",
+            CreatedAt = now
+        };
+        var insight = new ConversationInsight
+        {
+            Session = session,
+            Checkpoint = checkpoint,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = "semantic-fixture",
+            SourceKind = ConversationSourceKind.AgentSupplemental,
+            InsightType = ConversationInsightType.Episode,
+            Title = durable.Title,
+            Content = durable.Content,
+            Summary = durable.Summary,
+            Importance = .6m,
+            Confidence = .96m,
+            DedupKey = $"semantic-auto-insight:{Guid.NewGuid():N}",
+            PromotionStatus = ConversationPromotionStatus.Pending,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        dbContext.MemoryItems.Add(durable);
+        dbContext.ConversationInsights.Add(insight);
+        await dbContext.SaveChangesAsync();
+
+        var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: runId), CancellationToken.None);
+        var result = await gatewayTools.governance_batch_execute(new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 20,
+            MaxDurationSeconds: 60,
+            AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition, GovernanceBatchActionType.SemanticReevaluate],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Medium,
+            SemanticAutoResolutionConfidenceThreshold: .90m,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled), CancellationToken.None);
+
+        result.SemanticAutoResolvedCount.Should().Be(1, JsonSerializer.Serialize(result));
+        result.Items.Should().ContainSingle(x => x.ResourceId == insight.Id && x.SemanticAutoResolved);
+        (await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Batch_Cursor_Should_Continue_Across_ReReview_And_Return_Stable_Error_Codes()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"cursor-rereview-{Guid.NewGuid():N}";
+        var governanceRunId = $"cursor-rereview-run-{Guid.NewGuid():N}";
+        var owner = actorAccessor.Current;
+        var now = DateTimeOffset.UtcNow;
+        var session = new ConversationSession
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = $"cursor-rereview-{Guid.NewGuid():N}",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = "cursor-rereview-fixture",
+            LastTurnId = "turn-1",
+            StartedAt = now,
+            LastCheckpointAt = now,
+            UpdatedAt = now
+        };
+        var checkpoint = new ConversationCheckpoint
+        {
+            Session = session,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = "fixture:cursor-rereview",
+            DedupKey = $"cursor-rereview:{Guid.NewGuid():N}",
+            CreatedAt = now
+        };
+        var insights = Enumerable.Range(0, 3).Select(index => new ConversationInsight
+        {
+            Session = session,
+            Checkpoint = checkpoint,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = $"fixture:cursor-rereview:{index}",
+            SourceKind = ConversationSourceKind.AgentSupplemental,
+            InsightType = ConversationInsightType.Fact,
+            Title = $"Cursor re-review insight {index}",
+            Content = $"Protected insight {index} requires a user decision.",
+            Summary = "Cross-snapshot continuation fixture.",
+            Importance = .9m,
+            Confidence = .9m,
+            DedupKey = $"cursor-rereview:{projectId}:{index}",
+            PromotionStatus = ConversationPromotionStatus.Pending,
+            MetadataJson = "{}",
+            CreatedAt = now.AddMilliseconds(index),
+            UpdatedAt = now.AddMilliseconds(index)
+        }).ToArray();
+        await dbContext.ConversationInsights.AddRangeAsync(insights);
+        await dbContext.SaveChangesAsync();
+
+        var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], GovernanceRunId: governanceRunId), CancellationToken.None);
+        var requestA = new GovernanceBatchExecuteRequest(
+            governanceRunId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 1,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var batchA = await gatewayTools.governance_batch_execute(requestA, CancellationToken.None);
+        batchA.Succeeded.Should().BeTrue();
+        batchA.RequiresUserDecisionCount.Should().Be(1);
+        batchA.HasMore.Should().BeTrue();
+        batchA.NextCursor.Should().NotBeNullOrWhiteSpace();
+        var itemA = batchA.Items.Should().ContainSingle().Subject.ResourceId;
+
+        var replay = await gatewayTools.governance_batch_execute(requestA, CancellationToken.None);
+        replay.IsReplay.Should().BeTrue();
+        replay.Items.Select(x => x.ResourceId).Should().Equal(batchA.Items.Select(x => x.ResourceId));
+        replay.AuditIds.Should().Equal(batchA.AuditIds);
+
+        var reReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        reReview.DurableMemoryCoverage!.SnapshotToken.Should().NotBe(review.DurableMemoryCoverage.SnapshotToken);
+        var requestB = requestA with
+        {
+            SnapshotToken = reReview.DurableMemoryCoverage.SnapshotToken,
+            Cursor = batchA.NextCursor,
+            IsReReview = true
+        };
+        var batchB = await gatewayTools.governance_batch_execute(requestB, CancellationToken.None);
+        batchB.Succeeded.Should().BeTrue();
+        batchB.RequiresUserDecisionCount.Should().Be(1);
+        batchB.Items.Should().ContainSingle();
+        batchB.Items[0].ResourceId.Should().NotBe(itemA);
+        batchB.NextCursor.Should().NotBe(batchA.NextCursor);
+
+        var policyMismatch = await gatewayTools.governance_batch_execute(requestB with
+        {
+            MaxRiskLevel = GovernanceBatchRiskLevel.Medium
+        }, CancellationToken.None);
+        policyMismatch.Succeeded.Should().BeFalse();
+        policyMismatch.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorPolicyMismatch);
+        policyMismatch.StoppedReason.Should().Be(nameof(GovernanceBatchErrorCode.CursorPolicyMismatch));
+
+        var scopeMismatch = await gatewayTools.governance_batch_execute(requestB with
+        {
+            ProjectIds = [projectId, $"{projectId}-other"]
+        }, CancellationToken.None);
+        scopeMismatch.Succeeded.Should().BeFalse();
+        scopeMismatch.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorScopeMismatch);
+
+        var payloadMismatch = await gatewayTools.governance_batch_execute(requestB with
+        {
+            DryRun = true
+        }, CancellationToken.None);
+        payloadMismatch.Succeeded.Should().BeFalse();
+        payloadMismatch.ErrorCode.Should().Be(GovernanceBatchErrorCode.ReplayPayloadMismatch);
+
+        var invalid = await gatewayTools.governance_batch_execute(requestB with { Cursor = "gb2.invalid" }, CancellationToken.None);
+        invalid.Succeeded.Should().BeFalse();
+        invalid.ErrorCode.Should().Be(GovernanceBatchErrorCode.InvalidCursor);
+
+        var otherActor = owner with { UserId = Guid.NewGuid() };
+        actorAccessor.Current = otherActor;
+        var actorMismatch = await gatewayTools.governance_batch_execute(requestB, CancellationToken.None);
+        actorMismatch.Succeeded.Should().BeFalse();
+        actorMismatch.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorActorMismatch);
+
+        actorAccessor.Current = owner;
+        var sourceRun = await dbContext.GovernanceBatchRuns.SingleAsync(x =>
+            x.GovernanceRunId == governanceRunId &&
+            x.SnapshotToken == review.DurableMemoryCoverage.SnapshotToken);
+        sourceRun.ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        await dbContext.SaveChangesAsync();
+        var expired = await gatewayTools.governance_batch_execute(requestB, CancellationToken.None);
+        expired.Succeeded.Should().BeFalse();
+        expired.ErrorCode.Should().Be(GovernanceBatchErrorCode.CursorExpired);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Batch_Should_Retry_Prior_Generation_NoOp_When_ReReview_Still_Finds_Item_Actionable()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var owner = actorAccessor.Current;
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"noop-rereview-{Guid.NewGuid():N}";
+        var governanceRunId = $"noop-rereview-run-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var session = new ConversationSession
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = $"noop-rereview-{Guid.NewGuid():N}",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = "noop-rereview-fixture",
+            LastTurnId = "turn-1",
+            StartedAt = now,
+            LastCheckpointAt = now,
+            UpdatedAt = now
+        };
+        var checkpoint = new ConversationCheckpoint
+        {
+            Session = session,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = "fixture:noop-rereview",
+            DedupKey = $"noop-rereview:{Guid.NewGuid():N}",
+            CreatedAt = now
+        };
+        var insights = Enumerable.Range(0, 6).Select(index => new ConversationInsight
+        {
+            Session = session,
+            Checkpoint = checkpoint,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = $"fixture:noop-rereview:{index}",
+            SourceKind = ConversationSourceKind.AgentSupplemental,
+            InsightType = ConversationInsightType.Episode,
+            Title = $"NoOp re-review insight {index}",
+            Content = $"Low-risk insight {index} requires a durable disposition.",
+            Summary = "A prior-generation NoOp must not suppress a still-actionable item.",
+            Importance = .2m,
+            Confidence = .5m,
+            DedupKey = $"noop-rereview:{projectId}:{index}",
+            PromotionStatus = ConversationPromotionStatus.Pending,
+            MetadataJson = "{}",
+            CreatedAt = now.AddMilliseconds(index),
+            UpdatedAt = now.AddMilliseconds(index)
+        }).ToArray();
+        await dbContext.ConversationInsights.AddRangeAsync(insights);
+        await dbContext.SaveChangesAsync();
+
+        var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId), CancellationToken.None);
+        var orderedInsightKeys = review.GovernancePlan
+            .Where(x => x.ItemKind == GovernanceItemKind.ConversationInsight)
+            .Select(x => x.ItemKey)
+            .ToArray();
+        orderedInsightKeys.Should().HaveCount(6);
+        var firstInsightId = Guid.ParseExact(orderedInsightKeys[0].Split(':')[1], "N");
+        var requestA = new GovernanceBatchExecuteRequest(
+            governanceRunId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 1,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+        var batchStart = await gatewayTools.governance_batch_execute(requestA, CancellationToken.None);
+        batchStart.Items.Should().ContainSingle(x => x.ResourceId == firstInsightId && x.Disposition == GovernanceBatchItemDisposition.Deferred,
+            JsonSerializer.Serialize(batchStart));
+        batchStart.NextCursor.Should().NotBeNullOrWhiteSpace();
+
+        var retriedInsightId = Guid.ParseExact(orderedInsightKeys[1].Split(':')[1], "N");
+        var retriedInsight = await dbContext.ConversationInsights.SingleAsync(x => x.Id == retriedInsightId);
+        retriedInsight.PromotionStatus = ConversationPromotionStatus.Deferred;
+        retriedInsight.GovernanceReason = "Synthetic state change after immutable execution plan.";
+        retriedInsight.UpdatedAt = DateTimeOffset.UtcNow;
+        dbContext.ConversationInsights.Update(retriedInsight);
+        await dbContext.SaveChangesAsync();
+
+        var batchA = await gatewayTools.governance_batch_execute(requestA with { Cursor = batchStart.NextCursor }, CancellationToken.None);
+        batchA.Items.Should().Contain(x => x.ItemKey == orderedInsightKeys[1] && x.Disposition == GovernanceBatchItemDisposition.NoOp);
+        batchA.NextCursor.Should().NotBeNullOrWhiteSpace();
+
+        retriedInsight = await dbContext.ConversationInsights.SingleAsync(x => x.Id == retriedInsightId);
+        retriedInsight.PromotionStatus = ConversationPromotionStatus.Pending;
+        retriedInsight.GovernanceReason = string.Empty;
+        retriedInsight.GovernanceRunId = string.Empty;
+        retriedInsight.GovernanceUpdatedAt = null;
+        retriedInsight.UpdatedAt = DateTimeOffset.UtcNow;
+        dbContext.ConversationInsights.Update(retriedInsight);
+        await dbContext.SaveChangesAsync();
+        var reReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        var reopenedInsightKey = reReview.GovernancePlan.Single(x =>
+            x.ItemKind == GovernanceItemKind.ConversationInsight && x.AuthorityResourceId == retriedInsightId).ItemKey;
+        reopenedInsightKey.Should().NotBe(orderedInsightKeys[1], "evidence-versioned keys must make reopened items executable in a new generation");
+
+        var batchB = await gatewayTools.governance_batch_execute(requestA with
+        {
+            SnapshotToken = reReview.DurableMemoryCoverage!.SnapshotToken,
+            Cursor = batchA.NextCursor,
+            IsReReview = true
+        }, CancellationToken.None);
+        batchB.Items.Should().Contain(x => x.ItemKey == reopenedInsightKey && x.Disposition == GovernanceBatchItemDisposition.Deferred);
+        (await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == retriedInsightId))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.Deferred);
+    }
+
+    [DockerRequiredFact]
+    public async Task Full_Governance_Should_Cover_Mixed_Surfaces_And_Aggregate_100k_Logs_Server_Side()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var actor = actorAccessor.Current;
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var workItemService = scope.ServiceProvider.GetRequiredService<IProjectWorkItemService>();
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var projectId = $"full-governance-{Guid.NewGuid():N}";
+        var childProjectId = $"full-governance-child-{Guid.NewGuid():N}";
+        var danglingProjectId = $"missing-{Guid.NewGuid():N}";
+        var governanceRunId = $"full-governance-run-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+
+        dbContext.MemoryItems.AddRange(
+            new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = projectId,
+                ExternalKey = "system:project-information",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Artifact,
+                Title = "Protected display name",
+                Content = "Primary synthetic governance project.",
+                Summary = "Primary project.",
+                SourceType = "project-information",
+                SourceRef = projectId,
+                Importance = 1m,
+                Confidence = 1m,
+                MetadataJson = "{}",
+                CreatedAt = now,
+                UpdatedAt = now
+            },
+            new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = childProjectId,
+                ExternalKey = "system:project-information",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Artifact,
+                Title = "Child display name",
+                Content = "Child synthetic governance project.",
+                Summary = "Child project.",
+                SourceType = "project-information",
+                SourceRef = childProjectId,
+                Importance = 1m,
+                Confidence = 1m,
+                MetadataJson = "{}",
+                CreatedAt = now,
+                UpdatedAt = now
+            },
+            new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = ProjectContext.UserProjectId,
+                ExternalKey = $"user-preference:fixture-a-{Guid.NewGuid():N}",
+                Scope = MemoryScope.User,
+                MemoryType = MemoryType.Preference,
+                Title = "Duplicate preference fixture",
+                Content = "Use deterministic governance evidence.",
+                Summary = "Fixture.",
+                SourceType = "user-preference",
+                SourceRef = "fixture-a",
+                Importance = .95m,
+                Confidence = .95m,
+                MetadataJson = "{\"kind\":1,\"rationale\":\"fixture\"}",
+                CreatedAt = now,
+                UpdatedAt = now
+            },
+            new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = ProjectContext.UserProjectId,
+                ExternalKey = $"user-preference:fixture-b-{Guid.NewGuid():N}",
+                Scope = MemoryScope.User,
+                MemoryType = MemoryType.Preference,
+                Title = "Duplicate preference fixture",
+                Content = "Use deterministic governance evidence.",
+                Summary = "Fixture.",
+                SourceType = "user-preference",
+                SourceRef = "fixture-b",
+                Importance = .9m,
+                Confidence = .9m,
+                MetadataJson = "{\"kind\":1,\"rationale\":\"fixture\"}",
+                CreatedAt = now,
+                UpdatedAt = now
+            },
+            new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = projectId,
+                ExternalKey = $"artifact-a-{Guid.NewGuid():N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Artifact,
+                Title = "Duplicate artifact fixture",
+                Content = "Identical release evidence.",
+                Summary = "Fixture.",
+                SourceType = ProjectArtifactExchangeService.SourceType,
+                SourceRef = "fixture-a",
+                Importance = .7m,
+                Confidence = .8m,
+                MetadataJson = "{}",
+                CreatedAt = now,
+                UpdatedAt = now
+            },
+            new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = projectId,
+                ExternalKey = $"artifact-b-{Guid.NewGuid():N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Artifact,
+                Title = "Duplicate artifact fixture",
+                Content = "Identical release evidence.",
+                Summary = "Fixture.",
+                SourceType = ProjectArtifactExchangeService.SourceType,
+                SourceRef = "fixture-b",
+                Importance = .65m,
+                Confidence = .75m,
+                MetadataJson = "{}",
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+        dbContext.ProjectHierarchies.AddRange(
+            new ProjectHierarchy { TenantId = actor.TenantId, OwnerUserId = actor.UserId, ParentProjectId = projectId, ChildProjectId = childProjectId, CreatedAt = now, UpdatedAt = now },
+            new ProjectHierarchy { TenantId = actor.TenantId, OwnerUserId = actor.UserId, ParentProjectId = childProjectId, ChildProjectId = projectId, CreatedAt = now, UpdatedAt = now },
+            new ProjectHierarchy { TenantId = actor.TenantId, OwnerUserId = actor.UserId, ParentProjectId = projectId, ChildProjectId = danglingProjectId, CreatedAt = now, UpdatedAt = now });
+        var completedDiscussion = new DiscussionThread
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            HostProjectId = projectId,
+            Title = "Completed discussion retention fixture",
+            Status = "Closed",
+            CreatedAt = now.AddDays(-60),
+            UpdatedAt = now.AddDays(-45)
+        };
+        completedDiscussion.Participants =
+        [
+            new DiscussionParticipant { ThreadId = completedDiscussion.Id, ProjectId = projectId, LastReadAt = now.AddDays(-45) },
+            new DiscussionParticipant { ThreadId = completedDiscussion.Id, ProjectId = childProjectId, LastReadAt = now.AddDays(-45) }
+        ];
+        dbContext.DiscussionThreads.Add(completedDiscussion);
+        await dbContext.SaveChangesAsync();
+
+        var businessWorkItem = await workItemService.CreateAsync(new ProjectWorkItemCreateRequest(projectId, "Normal business work remains active"), CancellationToken.None);
+        businessWorkItem = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(businessWorkItem.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+        var historical = await workItemService.CreateAsync(new ProjectWorkItemCreateRequest(projectId, "Completed historical fixture"), CancellationToken.None);
+        historical = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(historical.Id, Status: ProjectWorkItemStatus.Completed), CancellationToken.None);
+        var historicalEntity = await dbContext.ProjectWorkItems.SingleAsync(x => x.Id == historical.Id);
+        historicalEntity.UpdatedAt = now.AddDays(-120);
+        await dbContext.SaveChangesAsync();
+
+        await dbContext.Database.ExecuteSqlInterpolatedAsync($$"""
+            INSERT INTO runtime_log_entries
+                (project_id, service_name, category, level, message, exception, trace_id, request_id, payload_json, created_at)
+            SELECT {{projectId}}, 'synthetic-governance', 'fixture', 'Information', 'bounded log fixture', '', '', '', '{}', {{now.AddDays(-45)}}
+            FROM generate_series(1, 100001)
+            """);
+        dbContext.RuntimeLogEntries.Add(new RuntimeLogEntry
+        {
+            ProjectId = projectId,
+            ServiceName = "synthetic-sensitive",
+            Category = "fixture",
+            Level = "Error",
+            Message = "password=[REDACTED]",
+            PayloadJson = "{}",
+            CreatedAt = now.AddDays(-45)
+        });
+        await dbContext.SaveChangesAsync();
+
+        var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId, childProjectId], GovernanceRunId: governanceRunId), CancellationToken.None);
+
+        review.GovernanceCoverage.Should().NotBeNull();
+        review.GovernanceCoverage!.CoverageComplete.Should().BeTrue();
+        review.GovernanceCoverage.HierarchyCoverage.CandidateCount.Should().BeGreaterThanOrEqualTo(3);
+        review.GovernanceCoverage.PreferenceCoverage.CandidateCount.Should().BeGreaterThan(0);
+        review.GovernanceCoverage.ArtifactCoverage.CandidateCount.Should().BeGreaterThan(0);
+        review.GovernanceCoverage.DiscussionCoverage.CandidateCount.Should().Be(1);
+        review.GovernanceCoverage.WorkItemCoverage.CandidateCount.Should().Be(1);
+        review.GovernanceCoverage.LogCoverage.TotalCount.Should().BeGreaterThan(100_000);
+        review.GovernanceCoverage.LogCoverage.ScannedCount.Should().BeGreaterThan(100_000);
+        review.GovernanceCoverage.LogCoverage.CandidateCount.Should().Be(2);
+        review.Convergence.BusinessWorkItemActionableCount.Should().Be(1);
+        review.GovernancePlan.Should().Contain(x => x.ItemKind == GovernanceItemKind.ProjectHierarchy && x.ReasonCodes.Contains("HIERARCHY_CYCLE"));
+        review.GovernancePlan.Should().Contain(x => x.ItemKind == GovernanceItemKind.ProjectHierarchy && x.ReasonCodes.Contains("HIERARCHY_DANGLING_PROJECT"));
+        review.GovernancePlan.Should().Contain(x => x.ItemKind == GovernanceItemKind.LogPartition && x.RecommendedAction == "LogRetentionProposal");
+        review.GovernancePlan.Should().Contain(x => x.ItemKind == GovernanceItemKind.LogPartition &&
+                                                     x.ReasonCodes.Contains("LOG_PROMOTION_PROHIBITED"));
+        var sensitivePromotion = () => memoryService.PromoteLogSliceAsync(new PromoteLogSliceRequest(
+            "Must not promote", ServiceName: "synthetic-sensitive", ProjectId: projectId), CancellationToken.None);
+        await sensitivePromotion.Should().ThrowAsync<InvalidOperationException>().WithMessage("*security-sensitive*");
+
+        var execute = await gatewayTools.governance_batch_execute(new GovernanceBatchExecuteRequest(
+            governanceRunId, [projectId, childProjectId], review.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 100, MaxDurationSeconds: 120,
+            AllowedActionTypes: [GovernanceBatchActionType.DiscussionReconcile, GovernanceBatchActionType.WorkItemReconcile],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled), CancellationToken.None);
+        execute.Succeeded.Should().BeTrue();
+        execute.Items.Should().Contain(x => x.ItemKind == nameof(GovernanceItemKind.WorkItem) && x.Disposition == GovernanceBatchItemDisposition.Applied);
+        execute.Items.Should().Contain(x => x.ItemKind == nameof(GovernanceItemKind.Discussion) && x.Disposition == GovernanceBatchItemDisposition.Applied);
+        execute.Items.Should().Contain(x => x.ItemKind == nameof(GovernanceItemKind.ProjectHierarchy) &&
+                                            x.Disposition == GovernanceBatchItemDisposition.RequiresUserDecision && x.ProposalIds.Count > 0);
+        (await dbContext.DiscussionThreads.AsNoTracking().SingleAsync(x => x.Id == completedDiscussion.Id)).ArchivedAt.Should().NotBeNull();
+        (await dbContext.ProjectWorkItems.AsNoTracking().SingleAsync(x => x.Id == historical.Id)).ArchivedAt.Should().NotBeNull();
+        (await dbContext.ProjectWorkItems.AsNoTracking().SingleAsync(x => x.Id == businessWorkItem.Id)).Status.Should().Be(ProjectWorkItemStatus.InProgress);
+        (await dbContext.MemoryItems.AsNoTracking().SingleAsync(x => x.ProjectId == projectId && x.ExternalKey == "system:project-information")).Title
+            .Should().Be("Protected display name");
+        execute.Items.Should().NotContain(x => x.ActionType == GovernanceBatchActionType.DeleteProposal && x.Disposition == GovernanceBatchItemDisposition.Applied);
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_Batch_Should_Drain_2000_Plus_Actionables_With_Cursor_Replay_And_Audited_Exceptions()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseGatewayActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [] };
+        var gatewayTools = ActivatorUtilities.CreateInstance<ChatGptGatewayTools>(scope.ServiceProvider);
+        var workItems = scope.ServiceProvider.GetRequiredService<IProjectWorkItemService>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"batch-2000-{Guid.NewGuid():N}";
+        var governanceRunId = $"batch-run-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var owner = actorAccessor.Current;
+        var memories = new[] { new MemoryItem
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"reindex:{Guid.NewGuid():N}",
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Artifact,
+            Title = "Low-risk reindex fixture",
+            Content = "Artifact content requiring deterministic reindex.",
+            Summary = "Artifact has no current vector and is safe to reindex.",
+            SourceType = "batch-fixture",
+            SourceRef = "fixture:reindex",
+            Importance = .5m,
+            Confidence = .7m,
+            Status = MemoryStatus.Active,
+            MetadataJson = "{}",
+            CreatedAt = now,
+            UpdatedAt = now
+        } };
+        var session = new ConversationSession
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = $"batch-2000-{Guid.NewGuid():N}",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = "batch-fixture",
+            LastTurnId = "turn-2000",
+            StartedAt = now,
+            LastCheckpointAt = now,
+            UpdatedAt = now
+        };
+        var checkpoint = new ConversationCheckpoint
+        {
+            Session = session,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-2000",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = "batch-fixture",
+            SourceRef = "fixture:checkpoint",
+            DedupKey = $"batch-checkpoint:{Guid.NewGuid():N}",
+            CreatedAt = now
+        };
+        var insights = Enumerable.Range(0, 2000).Select(index => new ConversationInsight
+        {
+            Session = session,
+            Checkpoint = checkpoint,
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.UserId,
+            ConversationId = session.ConversationId,
+            TurnId = "turn-2000",
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = "batch-fixture",
+            SourceRef = $"fixture:insight:{index:D4}",
+            SourceKind = ConversationSourceKind.AgentSupplemental,
+            InsightType = ConversationInsightType.Fact,
+            Title = $"Protected insight {index:D4}",
+            Content = $"Insight {index:D4} requires an explicit user decision.",
+            Summary = "High-signal Fact must not be auto-promoted by Scheduled governance.",
+            Importance = .9m,
+            Confidence = .9m,
+            DedupKey = $"batch-insight:{projectId}:{index:D4}",
+            PromotionStatus = ConversationPromotionStatus.Pending,
+            MetadataJson = "{}",
+            CreatedAt = now.AddMilliseconds(index),
+            UpdatedAt = now.AddMilliseconds(index)
+        }).ToArray();
+        await dbContext.MemoryItems.AddRangeAsync(memories);
+        await dbContext.ConversationInsights.AddRangeAsync(insights);
+        await dbContext.SaveChangesAsync();
+        var businessWorkItem = await workItems.CreateAsync(new ProjectWorkItemCreateRequest(
+            projectId,
+            "Business item must remain unchanged"), CancellationToken.None);
+        businessWorkItem = await workItems.UpdateAsync(new ProjectWorkItemUpdateRequest(
+            businessWorkItem.Id,
+            Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+
+        var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 1, GovernanceRunId: governanceRunId), CancellationToken.None);
+        review.DurableMemoryCoverage!.CoverageComplete.Should().BeTrue();
+        review.ProjectKnowledgeGovernance!.Pagination.TotalCount.Should().Be(1);
+        review.Pagination.HighSignalConversationInsights.TotalCount.Should().Be(2000);
+        var initialCandidateCount = review.GovernancePlan.Count;
+        initialCandidateCount.Should().BeGreaterThan(2000);
+        review.Convergence.GovernedExceptionCount.Should().BeGreaterThanOrEqualTo(2000);
+
+        string? cursor = null;
+        var batches = new List<GovernanceBatchExecuteResult>();
+        GovernanceBatchExecuteRequest? firstRequest = null;
+        for (var batchIndex = 0; batchIndex < 30; batchIndex++)
+        {
+            var request = new GovernanceBatchExecuteRequest(
+                governanceRunId,
+                [projectId],
+                review.DurableMemoryCoverage.SnapshotToken,
+                cursor,
+                MaxMutations: 300,
+                MaxDurationSeconds: 900,
+                AllowedActionTypes: [GovernanceBatchActionType.Reindex, GovernanceBatchActionType.ConversationInsightDisposition, GovernanceBatchActionType.SuggestedActionReconcile],
+                MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+                DryRun: false,
+                AllowHardDelete: false,
+                IsReReview: false,
+                ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+            firstRequest ??= request;
+            var batch = await gatewayTools.governance_batch_execute(request, CancellationToken.None);
+            batches.Add(batch);
+            batch.FailedCount.Should().Be(0);
+            batch.Items.Should().OnlyContain(x => x.CursorDisposition == "Advanced");
+            if (batchIndex == 0)
+            {
+                await dbContext.ConversationInsights.AddAsync(new ConversationInsight
+                {
+                    Session = session,
+                    Checkpoint = checkpoint,
+                    TenantId = owner.TenantId,
+                    OwnerUserId = owner.UserId,
+                    ConversationId = session.ConversationId,
+                    TurnId = "turn-after-snapshot",
+                    ProjectId = projectId,
+                    ProjectName = projectId,
+                    SourceSystem = "batch-fixture",
+                    SourceRef = "fixture:after-snapshot",
+                    SourceKind = ConversationSourceKind.AgentSupplemental,
+                    InsightType = ConversationInsightType.Fact,
+                    Title = "Insight created after the immutable snapshot",
+                    Content = "A same-run re-review must discover this post-snapshot actionable.",
+                    Summary = "Post-snapshot mutation coverage fixture.",
+                    Importance = .9m,
+                    Confidence = .9m,
+                    DedupKey = $"batch-insight-after-snapshot:{projectId}",
+                    PromotionStatus = ConversationPromotionStatus.Pending,
+                    MetadataJson = "{}",
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    UpdatedAt = DateTimeOffset.UtcNow
+                });
+                await dbContext.SaveChangesAsync();
+            }
+            if (!batch.HasMore) break;
+            batch.NextCursor.Should().NotBeNullOrWhiteSpace().And.NotBe(cursor);
+            cursor = batch.NextCursor;
+        }
+
+        batches.Should().NotBeEmpty();
+        batches[^1].HasMore.Should().BeFalse();
+        batches.Sum(x => x.AppliedCount).Should().BeGreaterThan(0);
+        batches.Sum(x => x.RequiresUserDecisionCount).Should().BeGreaterThanOrEqualTo(2000);
+        batches.Sum(x => x.DeleteProposalCount).Should().Be(0);
+        batches.SelectMany(x => x.AuditIds).Should().OnlyHaveUniqueItems();
+
+        var jobsBeforeReplay = await dbContext.MemoryJobs.CountAsync(x => x.ProjectId == projectId && x.JobType == MemoryJobType.Reindex);
+        jobsBeforeReplay.Should().BeGreaterThan(0);
+        var replay = await gatewayTools.governance_batch_execute(firstRequest!, CancellationToken.None);
+        replay.IsReplay.Should().BeTrue();
+        replay.AuditIds.Should().Equal(batches[0].AuditIds);
+        var appliedJobCount = await dbContext.MemoryJobs.CountAsync(x => x.ProjectId == projectId && x.JobType == MemoryJobType.Reindex);
+        appliedJobCount.Should().Be(jobsBeforeReplay);
+
+        var reReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        reReview.GovernancePlan.Count.Should().BeLessThan(initialCandidateCount);
+        reReview.ProjectKnowledgeGovernance!.Pagination.TotalCount.Should().Be(0);
+        reReview.Pagination.HighSignalConversationInsights.TotalCount.Should().Be(1);
+        var catchUp = await gatewayTools.governance_batch_execute(new GovernanceBatchExecuteRequest(
+            governanceRunId,
+            [projectId],
+            reReview.DurableMemoryCoverage!.SnapshotToken,
+            MaxMutations: 10,
+            MaxDurationSeconds: 30,
+            AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition],
+            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+            DryRun: false,
+            AllowHardDelete: false,
+            IsReReview: true,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled), CancellationToken.None);
+        catchUp.RequiresUserDecisionCount.Should().Be(1);
+        var finalReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        finalReview.DurableMemoryCoverage!.SnapshotToken.Should().NotBe(reReview.DurableMemoryCoverage!.SnapshotToken);
+        finalReview.Pagination.HighSignalConversationInsights.TotalCount.Should().Be(0);
+        var finalReviewReplay = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
+            [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
+        finalReviewReplay.DurableMemoryCoverage!.SnapshotToken.Should().Be(finalReview.DurableMemoryCoverage.SnapshotToken);
+        reReview.Convergence.RequiresUserDecisionCount.Should().BeGreaterThanOrEqualTo(2000);
+        var unchangedWorkItem = (await workItems.ListAsync(new ProjectWorkItemListRequest(projectId, IncludeArchived: true), CancellationToken.None))
+            .Single(x => x.Id == businessWorkItem.Id);
+        unchangedWorkItem.Status.Should().Be(ProjectWorkItemStatus.InProgress);
+        unchangedWorkItem.IsArchived.Should().BeFalse();
+        (await dbContext.SecurityAuditEvents.CountAsync(x => x.EventType == SecurityAuditEventType.GovernanceBatchItemProcessed))
+            .Should().BeGreaterThanOrEqualTo(2001);
     }
 
     [DockerRequiredFact]
@@ -1347,7 +2717,19 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var pendingProposal = await proposals.CreateAsync(new ChatGptProposalCreateRequest(
             "memory_upsert",
             projectId,
-            "{}",
+            JsonSerializer.Serialize(new MemoryUpsertRequest(
+                $"live-overlay:{Guid.NewGuid():N}",
+                MemoryScope.Project,
+                MemoryType.Fact,
+                "Live proposal overlay",
+                "Valid direct target-tool arguments retained as a pending proposal.",
+                "Verify terminal proposal state is read live.",
+                "test",
+                "fixture:live-overlay",
+                ["governance"],
+                .7m,
+                .8m,
+                ProjectId: projectId)),
             "Live proposal overlay",
             "Verify terminal proposal state is read live.",
             actorAccessor.Current.Username,
@@ -1434,6 +2816,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         initial.WorkItems.Should().Contain(x => x.Id == completed.Id && x.Status == ProjectWorkItemStatus.Completed);
         initial.WorkItems.Should().Contain(x => x.Id == cancelled.Id && x.Status == ProjectWorkItemStatus.Cancelled);
         initial.Convergence.WorkItemActionableCount.Should().Be(4);
+        initial.Convergence.BusinessWorkItemActionableCount.Should().Be(4);
+        initial.Convergence.ActionableItemCount.Should().Be(0);
         initial.Convergence.ExcludedGovernanceTrackerCount.Should().Be(0);
 
         var exclusionRequest = new ProjectWorkItemGovernanceExclusionRequest(
@@ -1446,7 +2830,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             new KnowledgeReviewRequest([projectId], GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
         reReview.Convergence.WorkItemActionableCount.Should().Be(3);
         reReview.Convergence.ExcludedGovernanceTrackerCount.Should().Be(1);
-        reReview.Convergence.ActionableItemCount.Should().BeGreaterThanOrEqualTo(1);
+        reReview.Convergence.BusinessWorkItemActionableCount.Should().Be(3);
+        reReview.Convergence.ActionableItemCount.Should().Be(0);
 
         var otherRun = $"tracker-other-{Guid.NewGuid():N}";
         var otherReview = await gatewayTools.knowledge_review(
@@ -1705,7 +3090,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         await using var mcpClient = await McpClient.CreateAsync(transport);
         _ = await mcpClient.ListToolsAsync();
         var sessionId = captureHandler.SessionId;
-        sessionId.Should().BeNull();
+        sessionId.Should().BeNull("MCP 2026-07-28 uses stateless Streamable HTTP");
 
         var toolsPayload = await SendMcpAsync(client, sessionId!, 2, "tools/list", new { });
         var listedTools = ExtractSseJson(toolsPayload).GetProperty("result").GetProperty("tools");
@@ -1717,8 +3102,16 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
+        listedToolNames.Should().HaveCount(65);
+        ChatGptGatewayToolCatalog.PublishedCatalogHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        ChatGptGatewayToolCatalog.PublicationIdentity.Should().Contain(GovernanceToolContract.PublishedCatalogVersion);
         listedToolNames.Should().Contain([
             "knowledge_review",
+            "governance_contract_get",
+            "governance_batch_execute",
+            "governance_run_get",
+            "governance_runs_list",
+            "governance_tombstone_get",
             "project_work_items_list",
             "project_work_item_create",
             "project_work_item_update",
@@ -1734,6 +3127,49 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_finding_reopen",
             "chatgpt_governance_proposal_create"
         ]);
+        var batchTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
+        var reviewTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "knowledge_review");
+        reviewTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "governancePlan", "governanceCoverage", "convergence", "quarantinedCount", "deleteEligibleCount",
+            "deleteMaturedCount", "autoDeletedCount", "deleteCancelledCount", "tombstonedCount",
+            "semanticAutoResolvedCount", "remainingHumanDecisionCount", "protectedRetentionCount",
+            "candidateCount", "executionActionableCount", "governedExceptionCount"
+        ]);
+        var batchRequestSchema = batchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request");
+        batchRequestSchema.GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "governanceRunId", "projectIds", "snapshotToken", "cursor", "maxMutations", "maxDurationSeconds",
+            "allowedActionTypes", "maxRiskLevel", "dryRun", "allowHardDelete", "allowMaturedDelete",
+            "semanticAutoResolutionConfidenceThreshold", "toolContractVersion", "schemaHash", "isReReview", "executionMode"
+        ]);
+        batchRequestSchema.GetProperty("properties").GetProperty("allowedActionTypes")
+            .GetProperty("items").GetProperty("enum").EnumerateArray().Select(x => x.GetString()).Should().Contain([
+                nameof(GovernanceBatchActionType.Quarantine),
+                nameof(GovernanceBatchActionType.MaturedDelete),
+                nameof(GovernanceBatchActionType.SemanticReevaluate)
+            ]);
+        batchTool.GetProperty("description").GetString().Should().Contain(GovernanceToolContract.SchemaHash);
+        PublishedToolSchemaHash.Compute(batchTool).Should().Be(GovernanceToolContract.SchemaHash);
+        batchTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "scannedCount", "attemptedCount", "appliedCount", "noOpCount", "failedCount", "deferredCount",
+            "requiresUserDecisionCount", "mergedCount", "updatedCount", "movedCount", "archivedCount",
+            "reindexedCount", "deleteProposalCount", "nextCursor", "hasMore", "requiresReReview", "items",
+            "auditIds", "snapshotToken", "stoppedReason", "errorCode", "succeeded", "quarantinedCount",
+            "deleteEligibleCount", "deleteMaturedCount", "autoDeletedCount", "deleteCancelledCount",
+            "tombstonedCount", "semanticAutoResolvedCount", "remainingHumanDecisionCount", "protectedRetentionCount"
+        ]);
+        var runGetTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "governance_run_get");
+        runGetTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+            "runExists", "status", "latestBatchReceived", "requestIdentityHash", "latestBatch",
+            "auditIds", "finalSnapshotToken", "finalConvergenceStatus", "stoppedReason"
+        ]);
+        runGetTool.GetProperty("outputSchema").GetProperty("properties").GetProperty("latestBatch")
+            .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
+                "received", "executed", "requestIdentityHash", "requestHash", "status", "snapshotGeneration",
+                "nextCursor", "requiresReReview", "stoppedReason", "auditIds"
+            ]);
         var exclusionTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_set_governance_exclusion");
         var exclusionRequestSchema = exclusionTool.GetProperty("inputSchema")
@@ -1760,6 +3196,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .Should().BeEquivalentTo(ChatGptGatewayToolCatalog.BackendOnlyToolNames);
         gatewayDeclaredTools.Except(backendDeclaredTools, StringComparer.Ordinal)
             .Should().BeEquivalentTo(ChatGptGatewayToolCatalog.GatewayOnlyToolNames);
+        typeof(ChatGptGatewayTools).GetMethod(nameof(ChatGptGatewayTools.governance_batch_execute))!.GetParameters()[0].ParameterType
+            .Should().Be(typeof(GovernanceBatchExecuteRequest));
+        typeof(MemoryMcpTools).GetMethod(nameof(MemoryMcpTools.governance_batch_execute))!.GetParameters()[0].ParameterType
+            .Should().Be(typeof(GovernanceBatchExecuteRequest));
 
         var projectsPayload = await SendMcpAsync(client, sessionId!, 21, "tools/call", new
         {
@@ -2581,6 +4021,27 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         using var response = await client.SendAsync(request);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStringAsync();
+    }
+
+    private static HttpRequestMessage CreateRawProtocolRequest(string protocolVersion, string json, string? staleSessionId = null)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("MCP-Protocol-Version", protocolVersion);
+        if (string.Equals(protocolVersion, "2026-07-28", StringComparison.Ordinal))
+        {
+            request.Headers.Add("Mcp-Method", "tools/list");
+        }
+        if (!string.IsNullOrWhiteSpace(staleSessionId))
+        {
+            request.Headers.Add("Mcp-Session-Id", staleSessionId);
+        }
+
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+        return request;
     }
 
     private static void UseGatewayActor(IServiceProvider services)

@@ -3013,6 +3013,11 @@ public sealed class MemoryDataRetentionService(
     {
         var policy = MemoryDataRetentionPolicy.Create(_options, request);
         var mode = ResolveMode(request, policy);
+        if (mode == MemoryDataRetentionRunMode.ApplyAutoDelete)
+        {
+            throw new InvalidOperationException(
+                "Direct retention ApplyAutoDelete is disabled. Use governance quarantine, typed grace, revalidation, and the explicit matured-delete executor.");
+        }
         if (request.ProjectIds is { Count: > 0 } && mode != MemoryDataRetentionRunMode.Classify)
         {
             throw new InvalidOperationException("ProjectIds is only supported for Classify retention runs.");
@@ -3880,9 +3885,7 @@ public sealed class MemoryDataRetentionService(
             return MemoryDataRetentionRunMode.PreviewDelete;
         }
 
-        return policy.AutoApplyEnabled
-            ? MemoryDataRetentionRunMode.ApplyAutoDelete
-            : MemoryDataRetentionRunMode.Classify;
+        return MemoryDataRetentionRunMode.Classify;
     }
 
     private static void AddPolicyParameters(NpgsqlCommand command, MemoryDataRetentionPolicy policy, DateOnly hitWindowStart)

@@ -1253,6 +1253,89 @@ public sealed record KnowledgeGovernanceSectionResult(
     IReadOnlyList<KnowledgeGovernanceCandidateResult> Candidates,
     KnowledgeReviewPageResult Pagination);
 
+public enum GovernanceItemKind
+{
+    Project,
+    ProjectHierarchy,
+    Memory,
+    UserPreference,
+    Artifact,
+    Discussion,
+    WorkItem,
+    ConversationInsight,
+    SuggestedAction,
+    Proposal,
+    LogPartition,
+    LogCandidate,
+    Retention
+}
+
+public sealed record GovernanceReviewItem(
+    string ItemKey,
+    GovernanceItemKind ItemKind,
+    string ProjectId,
+    string Classification,
+    string RecommendedAction,
+    GovernanceBatchRiskLevel RiskLevel,
+    bool RequiresExplicitApproval,
+    Guid? AuthorityResourceId,
+    IReadOnlyList<Guid> RelatedResourceIds,
+    IReadOnlyList<string> ReasonCodes,
+    string GovernanceRunId)
+{
+    public decimal SemanticConfidence { get; init; }
+    public bool IsReversible { get; init; }
+    public string RetentionPolicyVersion { get; init; } = string.Empty;
+    public DateTimeOffset? DeleteEligibleAt { get; init; }
+}
+
+public sealed record GovernanceSurfaceCoverageResult(
+    int TotalCount,
+    int ScannedCount,
+    int CandidateCount,
+    int ActionableCount,
+    int DeferredCount,
+    int RequiresUserDecisionCount,
+    int HostBlockedCount,
+    bool HasMore,
+    bool CoverageComplete);
+
+public sealed record FullGovernanceCoverageResult(
+    GovernanceSurfaceCoverageResult ProjectCoverage,
+    GovernanceSurfaceCoverageResult HierarchyCoverage,
+    GovernanceSurfaceCoverageResult MemoryCoverage,
+    GovernanceSurfaceCoverageResult PreferenceCoverage,
+    GovernanceSurfaceCoverageResult ArtifactCoverage,
+    GovernanceSurfaceCoverageResult DiscussionCoverage,
+    GovernanceSurfaceCoverageResult WorkItemCoverage,
+    GovernanceSurfaceCoverageResult InsightCoverage,
+    GovernanceSurfaceCoverageResult SuggestedActionCoverage,
+    GovernanceSurfaceCoverageResult ProposalCoverage,
+    GovernanceSurfaceCoverageResult LogCoverage)
+{
+    public bool HasMore => Surfaces.Any(x => x.HasMore);
+    public bool CoverageComplete => Surfaces.All(x => x.CoverageComplete && !x.HasMore);
+
+    private IReadOnlyList<GovernanceSurfaceCoverageResult> Surfaces =>
+    [
+        ProjectCoverage, HierarchyCoverage, MemoryCoverage, PreferenceCoverage, ArtifactCoverage,
+        DiscussionCoverage, WorkItemCoverage, InsightCoverage, SuggestedActionCoverage,
+        ProposalCoverage, LogCoverage
+    ];
+}
+
+public sealed record FullGovernancePlanResult(
+    IReadOnlyList<GovernanceReviewItem> Items,
+    FullGovernanceCoverageResult Coverage,
+    int GovernanceActionableCount,
+    int BusinessWorkItemActionableCount,
+    int GovernedExceptionCount)
+{
+    public AutonomousRetentionReviewResult Retention { get; init; } = AutonomousRetentionReviewResult.Empty;
+    public int SemanticAutoResolvableCount { get; init; }
+    public int RemainingHumanDecisionCount { get; init; }
+}
+
 public sealed record KnowledgeReviewPaginationResult(
     KnowledgeReviewPageResult ProjectKnowledgeCandidates,
     KnowledgeReviewPageResult SharedKnowledgeCandidates,
@@ -1285,6 +1368,11 @@ public sealed record KnowledgeReviewConvergenceResult(
     public int RequiresUserDecisionCount { get; init; }
     public int HostBlockedCount { get; init; }
     public int WorkItemActionableCount { get; init; }
+    public int GovernanceActionableCount { get; init; }
+    public int BusinessWorkItemActionableCount { get; init; }
+    public int GovernedExceptionCount { get; init; }
+    public int CandidateCount { get; init; }
+    public int ExecutionActionableCount { get; init; }
     public int ExcludedGovernanceTrackerCount { get; init; }
     public int ExceptionCount => DeferredCount + RequiresUserDecisionCount + HostBlockedCount;
 }
@@ -1307,7 +1395,334 @@ public sealed record KnowledgeReviewResult(
     public KnowledgeGovernanceCoverageResult? DurableMemoryCoverage { get; init; }
     public KnowledgeGovernanceSectionResult? ProjectKnowledgeGovernance { get; init; }
     public KnowledgeGovernanceSectionResult? SharedKnowledgeGovernance { get; init; }
+    public IReadOnlyList<GovernanceReviewItem> GovernancePlan { get; init; } = [];
+    public FullGovernanceCoverageResult? GovernanceCoverage { get; init; }
+    public int QuarantinedCount { get; init; }
+    public int DeleteEligibleCount { get; init; }
+    public int DeleteMaturedCount { get; init; }
+    public int AutoDeletedCount { get; init; }
+    public int DeleteCancelledCount { get; init; }
+    public int TombstonedCount { get; init; }
+    public int SemanticAutoResolvedCount { get; init; }
+    public int RemainingHumanDecisionCount { get; init; }
+    public int ProtectedRetentionCount { get; init; }
+    public int CandidateCount { get; init; }
+    public int ExecutionActionableCount { get; init; }
+    public int GovernedExceptionCount { get; init; }
 }
+
+public enum GovernanceBatchExecutionMode
+{
+    Scheduled,
+    Interactive,
+    Manual
+}
+
+public enum GovernanceBatchRiskLevel
+{
+    Low,
+    Medium,
+    High,
+    Critical
+}
+
+public enum GovernanceBatchActionType
+{
+    Merge,
+    Update,
+    Move,
+    Archive,
+    Reindex,
+    DeleteProposal,
+    SuggestedActionReconcile,
+    ConversationInsightDisposition,
+    ProposalApply,
+    Restore,
+    LifecycleReconcile,
+    HierarchyReconcile,
+    PreferenceReconcile,
+    ArtifactReconcile,
+    DiscussionReconcile,
+    WorkItemReconcile,
+    LogPromote,
+    LogArchive,
+    LogRetentionProposal,
+    Quarantine,
+    MaturedDelete,
+    SemanticReevaluate
+}
+
+public enum GovernanceBatchItemDisposition
+{
+    Applied,
+    NoOp,
+    Failed,
+    Deferred,
+    RequiresUserDecision,
+    UnknownResult
+}
+
+public enum GovernanceBatchErrorCode
+{
+    None,
+    ReReviewRequired,
+    InvalidCursor,
+    CursorExpired,
+    CursorActorMismatch,
+    CursorScopeMismatch,
+    CursorPolicyMismatch,
+    CursorSnapshotMismatch,
+    ReplayPayloadMismatch,
+    SchemaCapabilityMismatch,
+    HostBlockedMaturedDelete
+}
+
+public sealed class GovernanceBatchException(GovernanceBatchErrorCode code, string message) : InvalidOperationException(message)
+{
+    public GovernanceBatchErrorCode Code { get; } = code;
+}
+
+public sealed record GovernanceBatchExecuteRequest(
+    string GovernanceRunId,
+    IReadOnlyList<string>? ProjectIds = null,
+    string? SnapshotToken = null,
+    string? Cursor = null,
+    int MaxMutations = 100,
+    int MaxDurationSeconds = 120,
+    IReadOnlyList<GovernanceBatchActionType>? AllowedActionTypes = null,
+    GovernanceBatchRiskLevel MaxRiskLevel = GovernanceBatchRiskLevel.Low,
+    bool DryRun = false,
+    bool AllowHardDelete = false,
+    bool IsReReview = false,
+    GovernanceBatchExecutionMode ExecutionMode = GovernanceBatchExecutionMode.Scheduled,
+    bool AllowMaturedDelete = false,
+    decimal SemanticAutoResolutionConfidenceThreshold = 0.90m,
+    string? ToolContractVersion = null,
+    string? SchemaHash = null);
+
+public sealed record GovernanceToolContractResult(
+    string ToolName,
+    string ToolContractVersion,
+    string SchemaHash,
+    string PublishedCatalogVersion,
+    IReadOnlyList<string> SupportedActions);
+
+public sealed record GovernanceBatchItemResult(
+    string ItemKey,
+    string ItemKind,
+    Guid ResourceId,
+    string ProjectId,
+    GovernanceBatchActionType? ActionType,
+    GovernanceBatchItemDisposition Disposition,
+    string Summary,
+    string Error,
+    bool Retryable,
+    string CursorDisposition,
+    IReadOnlyList<Guid> AuditIds,
+    IReadOnlyList<Guid> ProposalIds,
+    IReadOnlyList<Guid> ResourceIds)
+{
+    public bool IsReplay { get; init; }
+    public bool SemanticAutoResolved { get; init; }
+    public Guid? TombstoneId { get; init; }
+}
+
+public sealed record GovernanceBatchExecuteResult(
+    int ScannedCount,
+    int AttemptedCount,
+    int AppliedCount,
+    int NoOpCount,
+    int FailedCount,
+    int DeferredCount,
+    int RequiresUserDecisionCount,
+    int MergedCount,
+    int UpdatedCount,
+    int MovedCount,
+    int ArchivedCount,
+    int ReindexedCount,
+    int DeleteProposalCount,
+    string? NextCursor,
+    bool HasMore,
+    bool RequiresReReview,
+    IReadOnlyList<GovernanceBatchItemResult> Items,
+    IReadOnlyList<Guid> AuditIds,
+    string SnapshotToken,
+    string StoppedReason)
+{
+    public bool IsReplay { get; init; }
+    public string GovernanceRunId { get; init; } = string.Empty;
+    public long ElapsedMilliseconds { get; init; }
+    public GovernanceBatchErrorCode ErrorCode { get; init; }
+    public int QuarantinedCount { get; init; }
+    public int DeleteEligibleCount { get; init; }
+    public int DeleteMaturedCount { get; init; }
+    public int AutoDeletedCount { get; init; }
+    public int DeleteCancelledCount { get; init; }
+    public int TombstonedCount { get; init; }
+    public int SemanticAutoResolvedCount { get; init; }
+    public int RemainingHumanDecisionCount { get; init; }
+    public int ProtectedRetentionCount { get; init; }
+    public bool Succeeded => ErrorCode == GovernanceBatchErrorCode.None;
+
+    public static GovernanceBatchExecuteResult Failure(
+        GovernanceBatchExecuteRequest request,
+        GovernanceBatchException exception)
+        => new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            request.Cursor, true, exception.Code == GovernanceBatchErrorCode.ReReviewRequired,
+            [], [], request.SnapshotToken ?? string.Empty, exception.Code.ToString())
+        {
+            GovernanceRunId = request.GovernanceRunId,
+            ErrorCode = exception.Code
+        };
+}
+
+public sealed record AutonomousRetentionCandidateResult(
+    Guid ResourceId,
+    string ProjectId,
+    string Classification,
+    string RecommendedAction,
+    string PolicyKind,
+    string PolicyVersion,
+    int GracePeriodDays,
+    DateTimeOffset? QuarantinedAt,
+    DateTimeOffset? DeleteEligibleAt,
+    bool DeleteEligible,
+    bool Matured,
+    Guid? ReplacementResourceId,
+    IReadOnlyList<string> ReasonCodes,
+    IReadOnlyList<string> BlockedReasons);
+
+public sealed record AutonomousRetentionReviewResult(
+    IReadOnlyList<AutonomousRetentionCandidateResult> Candidates,
+    int QuarantinedCount,
+    int DeleteEligibleCount,
+    int DeleteMaturedCount,
+    int DeleteCancelledCount,
+    int ProtectedRetentionCount)
+{
+    public static AutonomousRetentionReviewResult Empty { get; } = new([], 0, 0, 0, 0, 0);
+}
+
+public sealed record MaturedDeleteResult(
+    Guid ResourceId,
+    string ProjectId,
+    bool Deleted,
+    bool IsReplay,
+    Guid TombstoneId,
+    Guid AuditId,
+    long DeletedRevisionCount,
+    long DeletedChunkCount,
+    long DeletedVectorCount,
+    IReadOnlyList<string> ReasonCodes);
+
+public sealed record ResourceTombstoneResult(
+    Guid TombstoneId,
+    Guid ResourceId,
+    string ResourceType,
+    string ProjectId,
+    string ContentHash,
+    string Classification,
+    DateTimeOffset ArchivedAt,
+    DateTimeOffset DeletedAt,
+    string RetentionPolicyVersion,
+    IReadOnlyList<string> ReasonCodes,
+    Guid? ReplacementResourceId,
+    string GovernanceRunId,
+    Guid AuditId);
+
+public sealed record GovernanceRunReceiptResult(
+    Guid ReceiptId,
+    string GovernanceRunId,
+    string Actor,
+    string ExecutionMode,
+    DateTimeOffset StartedAt,
+    DateTimeOffset CompletedAt,
+    string ToolContractVersion,
+    string SchemaHash,
+    string PublishedCatalogVersion,
+    string InitialSnapshotToken,
+    string FinalSnapshotToken,
+    bool CoverageComplete,
+    int InitialGovernanceActionable,
+    int FinalGovernanceActionable,
+    int CandidateCount,
+    int ExecutionActionableCount,
+    int GovernedExceptionCount,
+    int Applied,
+    int Failed,
+    int Deferred,
+    int RequiresUserDecision,
+    int HostBlocked,
+    int Quarantined,
+    int DeleteEligible,
+    int DeleteMatured,
+    int AutoDeleted,
+    int DeleteCancelled,
+    int Tombstoned,
+    int SemanticAutoResolved,
+    int BusinessWorkItemActionable,
+    string FinalConvergenceStatus,
+    string StoppedReason,
+    IReadOnlyList<Guid> AuditIds,
+    IReadOnlyList<string> ProjectIds,
+    bool IsReplay,
+    bool RunExists,
+    string Status,
+    bool LatestBatchReceived,
+    string RequestIdentityHash,
+    GovernanceBatchOutcomeResult? LatestBatch);
+
+public sealed record GovernanceBatchOutcomeResult(
+    bool Received,
+    bool Executed,
+    string RequestIdentityHash,
+    string RequestHash,
+    string Status,
+    DateTimeOffset ReceivedAt,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? CompletedAt,
+    string SnapshotToken,
+    int SnapshotGeneration,
+    bool IsReReview,
+    string CursorBefore,
+    string? NextCursor,
+    bool HasMore,
+    bool RequiresReReview,
+    string StoppedReason,
+    int Scanned,
+    int Attempted,
+    int Applied,
+    int NoOp,
+    int Failed,
+    int Deferred,
+    int RequiresUserDecision,
+    int Quarantined,
+    int DeleteEligible,
+    int DeleteMatured,
+    int AutoDeleted,
+    int DeleteCancelled,
+    int Tombstoned,
+    int SemanticAutoResolved,
+    int RemainingHumanDecision,
+    int ProtectedRetention,
+    IReadOnlyList<Guid> AuditIds,
+    bool IsReplay);
+
+public sealed record GovernanceRunReceiptListRequest(
+    string? ProjectId = null,
+    int Limit = 50,
+    int Offset = 0);
+
+public sealed record InternalMaturedDeleteBatchResult(
+    string GovernanceRunId,
+    int ScannedCount,
+    int DeletedCount,
+    int CancelledCount,
+    int FailedCount,
+    IReadOnlyList<Guid> TombstoneIds,
+    IReadOnlyList<Guid> AuditIds,
+    IReadOnlyList<string> ProjectIds,
+    string StoppedReason);
 
 public sealed record ConversationCheckpointSearchRequest(
     string? Query = null,
@@ -1633,6 +2048,11 @@ public interface IApplicationDbContext
     DbSet<ConversationCheckpoint> ConversationCheckpoints { get; }
     DbSet<ConversationInsight> ConversationInsights { get; }
     DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots { get; }
+    DbSet<GovernanceBatchRun> GovernanceBatchRuns { get; }
+    DbSet<GovernanceBatchExecution> GovernanceBatchExecutions { get; }
+    DbSet<MemoryRetentionState> MemoryRetentionStates { get; }
+    DbSet<ResourceTombstone> ResourceTombstones { get; }
+    DbSet<GovernanceRunReceipt> GovernanceRunReceipts { get; }
     DbSet<ProjectHierarchy> ProjectHierarchies { get; }
     DbSet<DiscussionThread> DiscussionThreads { get; }
     DbSet<DiscussionParticipant> DiscussionParticipants { get; }
@@ -1828,6 +2248,7 @@ public sealed record ProjectHierarchyResult(string ParentProjectId, IReadOnlyLis
 public sealed record DiscussionThreadCreateRequest(string HostProjectId, string SenderProjectId, string Title, IReadOnlyList<string> ParticipantProjectIds, string InitialMessage);
 public sealed record DiscussionMessageCreateRequest(Guid ThreadId, string SenderProjectId, string Content);
 public sealed record DiscussionThreadListRequest(string? ProjectId = null, string? HostProjectId = null, string? Status = null, int Limit = 50, bool IncludeArchived = false, int Offset = 0);
+public sealed record DiscussionThreadArchiveRequest(Guid ThreadId, bool Archived = true);
 public sealed record DiscussionMessageResult(Guid Id, string SenderProjectId, string Content, DateTimeOffset CreatedAt);
 public sealed record DiscussionThreadResult(Guid Id, string HostProjectId, string Title, string Status, IReadOnlyList<string> ParticipantProjectIds, int UnreadCount, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? ArchivedAt = null)
 {
@@ -1846,6 +2267,7 @@ public sealed record ProjectWorkItemGovernanceExclusionResult(string GovernanceR
     public bool IsActive => RevokedAt is null;
 }
 public sealed record ProjectWorkItemListRequest(string ProjectId, ProjectWorkItemStatus? Status = null, int Limit = 100, bool IncludeArchived = false, int Offset = 0);
+public sealed record ProjectWorkItemArchiveRequest(Guid WorkItemId, bool Archived = true);
 public sealed record ProjectWorkItemChecklistItemResult(Guid Id, string Content, bool IsCompleted, int SortOrder);
 public sealed record ProjectWorkItemResult(Guid Id, string ProjectId, string Title, string Description, IReadOnlyList<string> Tags, IReadOnlyList<ProjectWorkItemChecklistItemResult> ChecklistItems, ProjectWorkItemStatus Status, int Priority, DateTimeOffset? DueAt, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? CompletedAt, DateTimeOffset? ArchivedAt = null)
 {
@@ -1884,6 +2306,31 @@ public interface IDailyMemoryReviewService
 public interface IKnowledgeReviewService
 {
     Task<KnowledgeReviewResult> ReviewAsync(KnowledgeReviewRequest request, CancellationToken cancellationToken);
+}
+
+public interface IFullGovernancePlanService
+{
+    Task<FullGovernancePlanResult> BuildAsync(
+        IReadOnlyList<string> projectIds,
+        string governanceRunId,
+        DurableMemoryGovernanceSnapshotResult memorySnapshot,
+        CancellationToken cancellationToken);
+}
+
+public interface IGovernanceBatchExecutor
+{
+    Task<GovernanceBatchExecuteResult> ExecuteAsync(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken);
+}
+
+public interface IGovernanceRunReceiptService
+{
+    Task RecordReviewAsync(KnowledgeReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
+    Task RecordExecutionStartedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, CancellationToken cancellationToken);
+    Task RecordExecutionAsync(GovernanceBatchExecuteRequest request, GovernanceBatchExecuteResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
+    Task RecordExecutionStoppedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, string status, string stoppedReason, CancellationToken cancellationToken);
+    Task RecordInternalRetentionAsync(InternalMaturedDeleteBatchResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
+    Task<GovernanceRunReceiptResult?> GetAsync(string governanceRunId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<GovernanceRunReceiptResult>> ListAsync(GovernanceRunReceiptListRequest request, CancellationToken cancellationToken);
 }
 
 public interface IDurableMemoryGovernanceService
@@ -2017,6 +2464,33 @@ public interface IMemoryDataRetentionService
 {
     Task<MemoryDataRetentionRunResult> RunAsync(string triggeredBy, CancellationToken cancellationToken);
     Task<MemoryDataRetentionRunResult> RunAsync(MemoryDataRetentionRunRequest request, string fallbackTriggeredBy, CancellationToken cancellationToken);
+}
+
+public interface IAutonomousRetentionService
+{
+    Task<AutonomousRetentionReviewResult> ReviewAsync(
+        IReadOnlyList<string> projectIds,
+        string governanceRunId,
+        CancellationToken cancellationToken);
+    Task<AutonomousRetentionCandidateResult> QuarantineAsync(
+        Guid resourceId,
+        string projectId,
+        string governanceRunId,
+        CancellationToken cancellationToken);
+    Task<MaturedDeleteResult> DeleteMaturedAsync(
+        Guid resourceId,
+        string projectId,
+        string governanceRunId,
+        CancellationToken cancellationToken);
+    Task<ResourceTombstoneResult?> GetTombstoneAsync(
+        Guid resourceId,
+        string? projectId,
+        CancellationToken cancellationToken);
+}
+
+public interface IInternalMaturedDeleteExecutor
+{
+    Task<InternalMaturedDeleteBatchResult> ExecuteNextBatchAsync(CancellationToken cancellationToken);
 }
 
 public interface IVacuumFullReclaimService

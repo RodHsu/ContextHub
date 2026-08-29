@@ -12,12 +12,16 @@ public sealed class KnowledgeReviewService(
     IProjectDiscussionService discussions,
     IProjectWorkItemService workItems,
     IDurableMemoryGovernanceService durableGovernance,
-    IRequestActorAccessor actorAccessor) : IKnowledgeReviewService
+    IFullGovernancePlanService fullGovernance,
+    IRequestActorAccessor actorAccessor,
+    IGovernanceRunReceiptService runReceipts,
+    IClock clock) : IKnowledgeReviewService
 {
     private const int PageSize = 200;
 
     public async Task<KnowledgeReviewResult> ReviewAsync(KnowledgeReviewRequest request, CancellationToken cancellationToken)
     {
+        var startedAt = clock.UtcNow;
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var available = await accessibleProjects.ListAsync(200, cancellationToken);
@@ -56,6 +60,7 @@ public sealed class KnowledgeReviewService(
         // Materialize semantic findings before reading execution queues so findings produced by
         // this review are executable in the same Review -> Execute cycle.
         var governanceSnapshot = await durableGovernance.GetOrCreateSnapshotAsync(ids, governanceRunId, request.IsReReview, cancellationToken);
+        var fullGovernancePlan = await fullGovernance.BuildAsync(ids, governanceRunId, governanceSnapshot, cancellationToken);
         foreach (var project in projects.Where(x => !ProjectContext.IsShared(x.ProjectId) && !ProjectContext.IsUser(x.ProjectId)))
         {
             var projectId = project.ProjectId;
@@ -140,14 +145,12 @@ public sealed class KnowledgeReviewService(
             .ToArray();
         var workItemGovernanceActionCount = orderedWorkItems.Count(x =>
             IsWorkItemActionable(x) && !excludedGovernanceTrackers.Any(excluded => excluded.Id == x.Id));
-        var semanticActionableCount = governanceSnapshot.ProjectCandidates.Count + governanceSnapshot.SharedCandidates.Count;
-        var actionableCount = (int)Math.Min(
-            int.MaxValue,
-            (long)semanticActionableCount + workItemGovernanceActionCount + orderedInsights.Length + orderedActions.Length + orderedProposals.Length);
+        var actionableCount = fullGovernancePlan.GovernanceActionableCount;
         var deferredCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.Deferred) + governanceSnapshot.DeferredCount;
-        var userDecisionCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision) + governanceSnapshot.RequiresUserDecisionCount;
+        var userDecisionCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision) +
+                                governanceSnapshot.RequiresUserDecisionCount + fullGovernancePlan.GovernedExceptionCount;
         var hostBlockedCount = insightResults.Count(x => x.PromotionStatus == ConversationPromotionStatus.HostBlocked) + governanceSnapshot.HostBlockedCount;
-        var coverageComplete = governanceSnapshot.Coverage.CoverageComplete && !governanceSnapshot.Coverage.HasMore;
+        var coverageComplete = fullGovernancePlan.Coverage.CoverageComplete && !fullGovernancePlan.Coverage.HasMore;
         var convergence = BuildConvergence(
             request.IsReReview,
             coverageComplete,
@@ -159,7 +162,8 @@ public sealed class KnowledgeReviewService(
             workItemGovernanceActionCount,
             excludedGovernanceTrackers.Length);
 
-        return new KnowledgeReviewResult(
+        var candidateCount = CountCandidates(fullGovernancePlan.Coverage);
+        var result = new KnowledgeReviewResult(
             projects,
             retention,
             sharedPage,
@@ -176,8 +180,32 @@ public sealed class KnowledgeReviewService(
         {
             DurableMemoryCoverage = governanceSnapshot.Coverage,
             ProjectKnowledgeGovernance = new KnowledgeGovernanceSectionResult(projectGovernancePage, projectGovernancePageInfo),
-            SharedKnowledgeGovernance = new KnowledgeGovernanceSectionResult(sharedGovernancePage, sharedGovernancePageInfo)
+            SharedKnowledgeGovernance = new KnowledgeGovernanceSectionResult(sharedGovernancePage, sharedGovernancePageInfo),
+            GovernancePlan = fullGovernancePlan.Items,
+            GovernanceCoverage = fullGovernancePlan.Coverage,
+            QuarantinedCount = fullGovernancePlan.Retention.QuarantinedCount,
+            DeleteEligibleCount = fullGovernancePlan.Retention.DeleteEligibleCount,
+            DeleteMaturedCount = fullGovernancePlan.Retention.DeleteMaturedCount,
+            AutoDeletedCount = 0,
+            DeleteCancelledCount = fullGovernancePlan.Retention.DeleteCancelledCount,
+            TombstonedCount = 0,
+            SemanticAutoResolvedCount = 0,
+            RemainingHumanDecisionCount = fullGovernancePlan.RemainingHumanDecisionCount,
+            ProtectedRetentionCount = fullGovernancePlan.Retention.ProtectedRetentionCount,
+            CandidateCount = candidateCount,
+            ExecutionActionableCount = fullGovernancePlan.GovernanceActionableCount,
+            GovernedExceptionCount = deferredCount + userDecisionCount + hostBlockedCount,
+            Convergence = convergence with
+            {
+                GovernanceActionableCount = fullGovernancePlan.GovernanceActionableCount,
+                BusinessWorkItemActionableCount = fullGovernancePlan.BusinessWorkItemActionableCount,
+                GovernedExceptionCount = deferredCount + userDecisionCount + hostBlockedCount,
+                CandidateCount = candidateCount,
+                ExecutionActionableCount = fullGovernancePlan.GovernanceActionableCount
+            }
         };
+        await runReceipts.RecordReviewAsync(result, startedAt, cancellationToken);
+        return result;
     }
 
     private static async Task<IReadOnlyList<T>> LoadAllAsync<T>(
@@ -207,6 +235,14 @@ public sealed class KnowledgeReviewService(
             ? $"{snapshotToken}:{section}:{offset + returnedCount}"
             : null;
 
+    private static int CountCandidates(FullGovernanceCoverageResult coverage)
+        => coverage.ProjectCoverage.CandidateCount + coverage.HierarchyCoverage.CandidateCount +
+           coverage.MemoryCoverage.CandidateCount + coverage.PreferenceCoverage.CandidateCount +
+           coverage.ArtifactCoverage.CandidateCount + coverage.DiscussionCoverage.CandidateCount +
+           coverage.WorkItemCoverage.CandidateCount + coverage.InsightCoverage.CandidateCount +
+           coverage.SuggestedActionCoverage.CandidateCount + coverage.ProposalCoverage.CandidateCount +
+           coverage.LogCoverage.CandidateCount;
+
     internal static KnowledgeReviewConvergenceResult BuildConvergence(
         bool isReReview,
         bool coverageComplete,
@@ -216,13 +252,15 @@ public sealed class KnowledgeReviewService(
         int requiresUserDecisionCount,
         int hostBlockedCount,
         int workItemActionableCount = 0,
-        int excludedGovernanceTrackerCount = 0)
+        int excludedGovernanceTrackerCount = 0,
+        int? governanceActionableCount = null)
     {
         var exceptionCount = deferredCount + requiresUserDecisionCount + hostBlockedCount;
-        var converged = isReReview && coverageComplete && !hasMore && actionableItemCount == 0;
+        var convergenceActionableCount = governanceActionableCount ?? actionableItemCount;
+        var converged = isReReview && coverageComplete && !hasMore && convergenceActionableCount == 0;
         var status = converged
             ? exceptionCount > 0 ? "ConvergedWithExceptions" : "Converged"
-            : actionableItemCount > 0
+            : convergenceActionableCount > 0
                 ? "ExecutionRequired"
                 : !coverageComplete || hasMore
                     ? "CoverageIncomplete"
@@ -234,6 +272,8 @@ public sealed class KnowledgeReviewService(
             RequiresUserDecisionCount = requiresUserDecisionCount,
             HostBlockedCount = hostBlockedCount,
             WorkItemActionableCount = workItemActionableCount,
+            ExecutionActionableCount = convergenceActionableCount,
+            GovernedExceptionCount = exceptionCount,
             ExcludedGovernanceTrackerCount = excludedGovernanceTrackerCount
         };
     }

@@ -8,6 +8,7 @@ COPY Directory.Build.props ./
 COPY src/Memory.Domain/Memory.Domain.csproj src/Memory.Domain/
 COPY src/Memory.Application/Memory.Application.csproj src/Memory.Application/
 COPY src/Memory.Infrastructure/Memory.Infrastructure.csproj src/Memory.Infrastructure/
+COPY src/Memory.McpTransport/Memory.McpTransport.csproj src/Memory.McpTransport/
 COPY src/Memory.McpServer/Memory.McpServer.csproj src/Memory.McpServer/
 
 RUN dotnet restore src/Memory.McpServer/Memory.McpServer.csproj

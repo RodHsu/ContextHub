@@ -2,6 +2,7 @@ using Memory.Application;
 using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.McpServer;
+using Memory.McpTransport;
 using ModelContextProtocol.Protocol;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -49,7 +50,11 @@ builder.Services.AddMemoryInfrastructure(builder.Configuration, "mcp-server");
 builder.Services.AddHostedService<InProcessMaintenanceRunRecoveryHostedService>();
 builder.Services.AddHostedService<DashboardSnapshotCollectorHostedService>();
 builder.Services.AddScoped<MemoryMcpTools>();
-builder.Services.AddMcpServer()
+builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
+{
+    Name = "Memory.McpServer",
+    Version = $"{BuildMetadata.Current.Version}+catalog.{GovernanceToolContract.PublishedCatalogVersion}"
+})
     .WithHttpTransport(options => options.Stateless = true)
     .WithTools<MemoryMcpTools>()
     .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (context, cancellationToken) =>
@@ -153,6 +158,7 @@ app.Use(async (context, next) =>
 });
 app.UseAuthorization();
 app.UseMiddleware<RequestActorMiddleware>();
+app.UseMcpProtocolCompatibility();
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path;
@@ -1484,6 +1490,41 @@ knowledgeReviews.RequireAuthIfEnabled(requireAuthentication);
 knowledgeReviews.MapPost(string.Empty, async (KnowledgeReviewRequest request, IKnowledgeReviewService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ReviewAsync(request, cancellationToken)))
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+knowledgeReviews.MapPost("/execute", async (GovernanceBatchExecuteRequest request, IGovernanceBatchExecutor service, CancellationToken cancellationToken)
+    =>
+    {
+        try
+        {
+            var result = await service.ExecuteAsync(request, cancellationToken);
+            return result.Succeeded
+                ? Results.Ok(result)
+                : Results.Problem(
+                    statusCode: StatusCodes.Status409Conflict,
+                    title: "Governance batch continuation rejected",
+                    detail: result.StoppedReason,
+                    extensions: new Dictionary<string, object?> { ["code"] = result.ErrorCode.ToString() });
+        }
+        catch (GovernanceBatchException ex)
+        {
+            return Results.Problem(
+                statusCode: StatusCodes.Status409Conflict,
+                title: "Governance batch continuation rejected",
+                detail: ex.Message,
+                extensions: new Dictionary<string, object?> { ["code"] = ex.Code.ToString() });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]> { ["governanceBatch"] = [ex.Message] });
+        }
+    })
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite)
+    .RequireAdminIfEnabled(requireAuthentication);
+knowledgeReviews.MapGet("/tombstones/{resourceId:guid}", async (Guid resourceId, string? projectId, IAutonomousRetentionService service, CancellationToken cancellationToken) =>
+    {
+        var tombstone = await service.GetTombstoneAsync(resourceId, projectId, cancellationToken);
+        return tombstone is null ? Results.NotFound() : Results.Ok(tombstone);
+    })
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
 var projectHierarchy = app.MapGroup("/api/projects/hierarchy");
 projectHierarchy.RequireAuthIfEnabled(requireAuthentication);
@@ -1800,11 +1841,18 @@ maintenance.MapPost("/memory-data-retention/run", async (
     IRequestActorAccessor actorAccessor,
     IHostApplicationLifetime applicationLifetime) =>
 {
-    var result = await service.RunAsync(
-        request,
-        MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor),
-        applicationLifetime.ApplicationStopping);
-    return Results.Ok(result);
+    try
+    {
+        var result = await service.RunAsync(
+            request,
+            MaintenanceApiHelpers.ResolveTriggeredBy(actorAccessor),
+            applicationLifetime.ApplicationStopping);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["memoryDataRetention"] = [ex.Message] });
+    }
 });
 
 maintenance.MapPost("/domain-owner-repair/preview", async (
