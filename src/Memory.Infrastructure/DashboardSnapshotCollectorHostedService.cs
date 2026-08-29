@@ -460,12 +460,59 @@ public sealed class DashboardSnapshotCollectorHostedService(
         var recentErrorCutoff = timeProvider.GetUtcNow().AddHours(-24);
 
         var memoryItemCount = await dbContext.MemoryItems.CountAsync(cancellationToken);
+        var ownedMemoryItemCount = await dbContext.MemoryItems.CountAsync(
+            x => x.TenantId != null && x.OwnerUserId != null,
+            cancellationToken);
+        var legacyOwnerlessMemoryItemCount = memoryItemCount - ownedMemoryItemCount;
         var defaultProjectMemoryItemCount = await dbContext.MemoryItems.CountAsync(
             x => x.ProjectId == ProjectContext.DefaultProjectId,
             cancellationToken);
+        var sharedProjectMemoryItemCount = await dbContext.MemoryItems.CountAsync(
+            x => x.ProjectId == ProjectContext.SharedProjectId,
+            cancellationToken);
+        var userProjectMemoryItemCount = await dbContext.MemoryItems.CountAsync(
+            x => x.ProjectId == ProjectContext.UserProjectId,
+            cancellationToken);
+        var regularProjectMemoryItemCount = memoryItemCount - defaultProjectMemoryItemCount -
+                                            sharedProjectMemoryItemCount - userProjectMemoryItemCount;
         var preferenceCount = await dbContext.MemoryItems.CountAsync(
             x => x.Scope == MemoryScope.User && x.MemoryType == MemoryType.Preference && x.Status == MemoryStatus.Active,
             cancellationToken);
+        var systemProjectInformationCount = await dbContext.MemoryItems.CountAsync(
+            x => x.ExternalKey == DurableMemoryGovernancePolicy.ProjectInformationExternalKey,
+            cancellationToken);
+        var artifactExchangeCount = await dbContext.MemoryItems.CountAsync(
+            x => x.SourceType == "project-artifact-exchange",
+            cancellationToken);
+        var scopeCounts = (await dbContext.MemoryItems.GroupBy(x => x.Scope)
+                .Select(x => new { Key = x.Key, Count = x.LongCount() }).ToListAsync(cancellationToken))
+            .ToDictionary(x => x.Key.ToString(), x => x.Count, StringComparer.Ordinal);
+        var memoryTypeCounts = (await dbContext.MemoryItems.GroupBy(x => x.MemoryType)
+                .Select(x => new { Key = x.Key, Count = x.LongCount() }).ToListAsync(cancellationToken))
+            .ToDictionary(x => x.Key.ToString(), x => x.Count, StringComparer.Ordinal);
+        var statusCounts = (await dbContext.MemoryItems.GroupBy(x => x.Status)
+                .Select(x => new { Key = x.Key, Count = x.LongCount() }).ToListAsync(cancellationToken))
+            .ToDictionary(x => x.Key.ToString(), x => x.Count, StringComparer.Ordinal);
+        var memoryInventory = new DashboardMemoryInventoryCompositionResult(
+            "memoryItemRows",
+            "InstanceInventory",
+            memoryItemCount,
+            ownedMemoryItemCount,
+            legacyOwnerlessMemoryItemCount,
+            defaultProjectMemoryItemCount,
+            sharedProjectMemoryItemCount,
+            userProjectMemoryItemCount,
+            regularProjectMemoryItemCount,
+            scopeCounts,
+            memoryTypeCounts,
+            statusCounts,
+            systemProjectInformationCount,
+            artifactExchangeCount,
+            await dbContext.ResourceTombstones.LongCountAsync(cancellationToken),
+            await dbContext.MemoryItemRevisions.LongCountAsync(cancellationToken),
+            await dbContext.MemoryItemChunks.LongCountAsync(cancellationToken),
+            await dbContext.MemoryChunkVectors.LongCountAsync(cancellationToken),
+            await dbContext.ConversationInsights.LongCountAsync(cancellationToken));
         var activeJobCount = await dbContext.MemoryJobs.CountAsync(
             x => x.Status == MemoryJobStatus.Pending || x.Status == MemoryJobStatus.Running,
             cancellationToken);
@@ -509,14 +556,21 @@ public sealed class DashboardSnapshotCollectorHostedService(
 
         var payload = new DashboardRecentOperationsSnapshotPayload(
             [
-                new DashboardOverviewMetricResult("memoryItems", "記憶條目", memoryItemCount, "items"),
+                new DashboardOverviewMetricResult(
+                    "memoryItems",
+                    "全 Instance 記憶資料列",
+                    memoryItemCount,
+                    "rows",
+                    "InstanceInventory",
+                    "memory_items 全表資料列；包含所有 owner、default/shared/user、active/archived，不等同 actor-scoped durable governance coverage。"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", defaultProjectMemoryItemCount, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", preferenceCount, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", activeJobCount, "jobs"),
                 new DashboardOverviewMetricResult("errorLogs", "近 24 小時錯誤", errorLogCount, "logs")
             ],
             activeJobs,
-            recentErrors);
+            recentErrors,
+            memoryInventory);
 
         await WriteSnapshotAsync(DashboardSnapshotKeys.RecentOperations, intervalSeconds, payload, cancellationToken);
     }

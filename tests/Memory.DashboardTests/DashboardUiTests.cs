@@ -292,7 +292,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         var overviewHtml = WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync());
         overviewHtml.Should().Contain("靜默訊號");
         overviewHtml.Should().Contain("維運與知識治理");
-        overviewHtml.Should().Contain("記憶條目");
+        overviewHtml.Should().Contain("全 Instance 記憶資料列");
         overviewHtml.Should().Contain("預設專案記憶");
         overviewHtml.Should().Contain("Docker 主機");
         overviewHtml.Should().Contain("評估摘要");
@@ -1334,7 +1334,7 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
                 new DashboardServiceHealthResult("embeddings", "Healthy", "")
             ],
             [
-                new DashboardOverviewMetricResult("memoryItems", "記憶條目", 24, "items"),
+                new DashboardOverviewMetricResult("memoryItems", "全 Instance 記憶資料列", 24, "rows", "InstanceInventory"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", 4, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", 3, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", 4, "jobs"),

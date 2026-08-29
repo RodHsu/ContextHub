@@ -73,7 +73,8 @@ public sealed record DashboardDependenciesHealthSnapshotPayload(
 public sealed record DashboardRecentOperationsSnapshotPayload(
     IReadOnlyList<DashboardOverviewMetricResult> Metrics,
     IReadOnlyList<JobListItemResult> ActiveJobs,
-    IReadOnlyList<LogEntryResult> RecentErrors);
+    IReadOnlyList<LogEntryResult> RecentErrors,
+    DashboardMemoryInventoryCompositionResult? MemoryInventory = null);
 
 public sealed record DashboardDiscussionActivitySnapshotPayload(
     DashboardDiscussionActivityResult Activity);

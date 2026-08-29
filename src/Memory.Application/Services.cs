@@ -2550,6 +2550,7 @@ public static class DependencyInjection
         services.AddScoped<IChunkingService, ChunkingService>();
         services.AddScoped<IContextHubBootstrapService, ContextHubBootstrapService>();
         services.AddScoped<IAccessibleProjectService, AccessibleProjectService>();
+        services.AddScoped<IGovernanceProjectScopeResolver, GovernanceProjectScopeResolver>();
         services.AddScoped<IDailyMemoryReviewService, DailyMemoryReviewService>();
         services.AddScoped<IKnowledgeReviewService, KnowledgeReviewService>();
         services.AddScoped<IFullGovernancePlanService, FullGovernancePlanService>();

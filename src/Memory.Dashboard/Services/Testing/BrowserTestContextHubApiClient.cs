@@ -1225,7 +1225,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         {
             DashboardBrowserTestProfile.Empty =>
             [
-                new DashboardOverviewMetricResult("memoryItems", "記憶條目", 0, "items"),
+                new DashboardOverviewMetricResult("memoryItems", "全 Instance 記憶資料列", 0, "rows", "InstanceInventory"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", 0, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", 0, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", 0, "jobs"),
@@ -1233,7 +1233,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             ],
             DashboardBrowserTestProfile.Dense =>
             [
-                new DashboardOverviewMetricResult("memoryItems", "記憶條目", 1248, "items"),
+                new DashboardOverviewMetricResult("memoryItems", "全 Instance 記憶資料列", 1248, "rows", "InstanceInventory"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", 314, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", 18, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", 7, "jobs"),
@@ -1241,7 +1241,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             ],
             _ =>
             [
-                new DashboardOverviewMetricResult("memoryItems", "記憶條目", 24, "items"),
+                new DashboardOverviewMetricResult("memoryItems", "全 Instance 記憶資料列", 24, "rows", "InstanceInventory"),
                 new DashboardOverviewMetricResult("defaultProjectMemoryItems", "預設專案記憶", 4, "items"),
                 new DashboardOverviewMetricResult("userPreferences", "使用者偏好", 3, "items"),
                 new DashboardOverviewMetricResult("activeJobs", "背景工作", 1, "jobs"),
