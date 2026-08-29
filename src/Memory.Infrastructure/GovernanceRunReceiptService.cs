@@ -294,13 +294,6 @@ public sealed class GovernanceRunReceiptService(
             .ThenByDescending(x => x.Id)
             .Take(100)
             .ToListAsync(cancellationToken);
-        var snapshot = await dbContext.KnowledgeGovernanceSnapshots.AsNoTracking()
-            .Where(x => x.TenantId == actor.TenantId &&
-                        x.OwnerUserId == actor.UserId &&
-                        x.GovernanceRunId == receipt.GovernanceRunId)
-            .OrderByDescending(x => x.Generation)
-            .ThenByDescending(x => x.CompletedAt)
-            .FirstOrDefaultAsync(cancellationToken);
         var batchReceipt = await dbContext.GovernanceRunReceipts.AsNoTracking()
             .Where(x => x.TenantId == actor.TenantId &&
                         x.OwnerUserId == actor.UserId &&
@@ -326,7 +319,7 @@ public sealed class GovernanceRunReceiptService(
               (receivedReceipt is null
                   ? null
                   : executions.FirstOrDefault(x => x.CreatedAt >= receivedReceipt.CreatedAt));
-        var latestBatch = BuildLatestBatch(batchReceipt, execution, snapshot);
+        var latestBatch = BuildLatestBatch(batchReceipt, execution);
         var readStatus = latestBatch?.Status ??
             (string.IsNullOrWhiteSpace(receipt.Status) ? InferLegacyStatus(receipt) : receipt.Status);
         var readStoppedReason = latestBatch is { Status: not "Running" } &&
@@ -354,8 +347,7 @@ public sealed class GovernanceRunReceiptService(
 
     private static GovernanceBatchOutcomeResult? BuildLatestBatch(
         GovernanceRunReceipt? batchReceipt,
-        GovernanceBatchExecution? execution,
-        KnowledgeGovernanceSnapshot? snapshot)
+        GovernanceBatchExecution? execution)
     {
         if (batchReceipt is null && execution is null)
         {
@@ -378,6 +370,7 @@ public sealed class GovernanceRunReceiptService(
                 : execution is null ? "Running" : "Stopped";
         var receivedAt = batchReceipt?.CreatedAt ?? execution?.CreatedAt ?? DateTimeOffset.MinValue;
         var snapshotToken = result?.SnapshotToken ?? execution?.Run?.SnapshotToken ?? batchReceipt?.FinalSnapshotToken ?? string.Empty;
+        var snapshotIdentity = ParseSnapshotIdentity(snapshotToken);
         return new GovernanceBatchOutcomeResult(
             Received: batchReceipt is not null || execution is not null,
             Executed: executed,
@@ -389,8 +382,8 @@ public sealed class GovernanceRunReceiptService(
             StartedAt: execution?.CreatedAt ?? batchReceipt?.StartedAt,
             CompletedAt: execution?.CompletedAt,
             SnapshotToken: snapshotToken,
-            SnapshotGeneration: snapshot?.Generation ?? 0,
-            IsReReview: snapshot?.IsReReview ?? false,
+            SnapshotGeneration: snapshotIdentity.Generation,
+            IsReReview: snapshotIdentity.IsReReview,
             CursorBefore: execution?.CursorBefore ?? string.Empty,
             NextCursor: result is null ? execution?.CursorAfter : result.NextCursor,
             HasMore: result?.HasMore ?? true,
@@ -413,7 +406,20 @@ public sealed class GovernanceRunReceiptService(
             RemainingHumanDecision: result?.RemainingHumanDecisionCount ?? 0,
             ProtectedRetention: result?.ProtectedRetentionCount ?? 0,
             AuditIds: result?.AuditIds ?? [],
-            IsReplay: result?.IsReplay ?? batchReceipt?.IsReplay ?? false);
+            IsReplay: batchReceipt?.IsReplay ?? result?.IsReplay ?? false);
+    }
+
+    private static (int Generation, bool IsReReview) ParseSnapshotIdentity(string snapshotToken)
+    {
+        var marker = snapshotToken.Split(':', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+        if (marker is { Length: > 1 } &&
+            (marker[0] == 'i' || marker[0] == 'r') &&
+            int.TryParse(marker.AsSpan(1), out var generation))
+        {
+            return (generation, marker[0] == 'r');
+        }
+
+        return (0, false);
     }
 
     private async Task InsertImmutableAsync(GovernanceRunReceipt receipt, CancellationToken cancellationToken)

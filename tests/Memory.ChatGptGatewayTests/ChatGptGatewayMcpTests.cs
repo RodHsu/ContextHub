@@ -1023,9 +1023,14 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         result.ErrorCode.Should().Be(GovernanceBatchErrorCode.None);
         var replay = await executor.ExecuteAsync(request, CancellationToken.None);
         replay.IsReplay.Should().BeTrue();
+        _ = await reviewService.ReviewAsync(
+            new KnowledgeReviewRequest(ProjectIds: null, GovernanceRunId: runId, IsReReview: true), CancellationToken.None);
         var receipt = await receipts.GetAsync(runId, CancellationToken.None);
         receipt!.LatestBatch!.Executed.Should().BeTrue();
         receipt.LatestBatch.RequestHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        receipt.LatestBatch.IsReplay.Should().BeTrue();
+        receipt.LatestBatch.SnapshotGeneration.Should().Be(0);
+        receipt.LatestBatch.IsReReview.Should().BeFalse();
 
         var mismatchRequest = request with { ProjectIds = [projectId] };
         var mismatch = await executor.ExecuteAsync(mismatchRequest, CancellationToken.None);
