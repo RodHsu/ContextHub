@@ -51,6 +51,7 @@ builder.Services.AddSingleton<PostgresOAuthClientStore>();
 builder.Services.AddSingleton<PostgresOAuthTokenStateStore>();
 
 var gatewayOptions = builder.Configuration.GetSection("ChatGptGateway").Get<ChatGptGatewayOptions>() ?? new ChatGptGatewayOptions();
+var gatewaySurface = ChatGptGatewaySurfaceResolver.Resolve(gatewayOptions.Surface);
 if (builder.Environment.IsProduction())
 {
     RequireAbsoluteHttpsUrl(gatewayOptions.PublicMcpUrl, "ChatGptGateway:PublicMcpUrl");
@@ -124,13 +125,17 @@ else
 
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<ChatGptGatewayTools>();
-builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
+builder.Services.AddScoped<ScheduledGovernanceTools>();
+var mcpServerBuilder = builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
 {
-    Name = "Memory.ChatGptGateway",
-    Version = ChatGptGatewayToolCatalog.PublicationIdentity
+    Name = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? "Memory.ScheduledGovernanceGateway"
+        : "Memory.ChatGptGateway",
+    Version = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceToolCatalog.PublicationIdentity
+        : ChatGptGatewayToolCatalog.PublicationIdentity
 })
     .WithHttpTransport(options => options.Stateless = true)
-    .WithTools<ChatGptGatewayTools>()
     .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (context, cancellationToken) =>
     {
         var startedAt = Stopwatch.GetTimestamp();
@@ -156,6 +161,14 @@ builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
     {
         Resources = []
     }));
+if (gatewaySurface == ChatGptGatewaySurface.Automation)
+{
+    mcpServerBuilder.WithTools<ScheduledGovernanceTools>();
+}
+else
+{
+    mcpServerBuilder.WithTools<ChatGptGatewayTools>();
+}
 
 var app = builder.Build();
 var allowedMcpOrigins = ResolveAllowedOrigins(
@@ -276,28 +289,51 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 app.MapGet("/api/status", (IOptions<ChatGptGatewayOptions> options) => Results.Ok(new
 {
-    service = "chatgpt-gateway",
+    service = gatewaySurface == ChatGptGatewaySurface.Automation ? "scheduled-governance-gateway" : "chatgpt-gateway",
+    surface = gatewaySurface.ToString(),
     oauthTestMode = options.Value.OAuth.TestMode,
     oauthSelfHosted = options.Value.OAuth.SelfHosted,
     publicMcpUrl = options.Value.PublicMcpUrl,
     publicResourceMetadataUrl = options.Value.PublicResourceMetadataUrl,
-    readTools = McpPublishedToolCatalog.QueryToolNames.Order(StringComparer.Ordinal),
-    directWriteTools = McpPublishedToolCatalog.DirectMutationToolNames.Order(StringComparer.Ordinal),
-    proposalWriteTools = McpPublishedToolCatalog.ProposalWriteToolNames.Order(StringComparer.Ordinal),
-    publishedTools = ChatGptGatewayToolCatalog.PublishedToolNames.Order(StringComparer.Ordinal),
-    backendOnlyTools = ChatGptGatewayToolCatalog.BackendOnlyToolNames.Order(StringComparer.Ordinal),
-    gatewayOnlyTools = ChatGptGatewayToolCatalog.GatewayOnlyToolNames.Order(StringComparer.Ordinal),
-    publishedCatalogVersion = ChatGptGatewayToolCatalog.PublishedCatalogVersion,
-    publishedCatalogHash = ChatGptGatewayToolCatalog.PublishedCatalogHash,
-    publishedCatalogToolCount = ChatGptGatewayToolCatalog.PublishedToolNames.Count,
-    appFacingExpectedToolCount = ChatGptGatewayToolCatalog.PublishedToolNames.Count,
-    queryToolCount = McpPublishedToolCatalog.QueryToolNames.Count,
-    mutationToolCount = ChatGptGatewayToolCatalog.PublishedToolNames.Count - McpPublishedToolCatalog.QueryToolNames.Count,
-    deleteCapableToolCount = McpPublishedToolCatalog.DeleteCapableToolNames.Count,
-    proposalGatedToolCount = McpPublishedToolCatalog.ProposalWriteToolNames.Count,
-    mcpPublicationIdentity = ChatGptGatewayToolCatalog.PublicationIdentity,
-    governanceToolContractVersion = GovernanceToolContract.ToolContractVersion,
-    governanceSchemaHash = GovernanceToolContract.SchemaHash
+    readTools = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceToolCatalog.PublishedToolNames.Where(x => x != ScheduledGovernanceContract.ExecuteToolName).Order(StringComparer.Ordinal)
+        : McpPublishedToolCatalog.QueryToolNames.Order(StringComparer.Ordinal),
+    directWriteTools = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? new[] { ScheduledGovernanceContract.ExecuteToolName }
+        : McpPublishedToolCatalog.DirectMutationToolNames.Order(StringComparer.Ordinal).ToArray(),
+    proposalWriteTools = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? Array.Empty<string>()
+        : McpPublishedToolCatalog.ProposalWriteToolNames.Order(StringComparer.Ordinal).ToArray(),
+    publishedTools = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceToolCatalog.PublishedToolNames.Order(StringComparer.Ordinal)
+        : ChatGptGatewayToolCatalog.PublishedToolNames.Order(StringComparer.Ordinal),
+    backendOnlyTools = gatewaySurface == ChatGptGatewaySurface.Automation ? Array.Empty<string>() : ChatGptGatewayToolCatalog.BackendOnlyToolNames.Order(StringComparer.Ordinal).ToArray(),
+    gatewayOnlyTools = gatewaySurface == ChatGptGatewaySurface.Automation ? Array.Empty<string>() : ChatGptGatewayToolCatalog.GatewayOnlyToolNames.Order(StringComparer.Ordinal).ToArray(),
+    publishedCatalogVersion = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceContract.PublishedCatalogVersion
+        : ChatGptGatewayToolCatalog.PublishedCatalogVersion,
+    publishedCatalogHash = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceToolCatalog.PublishedCatalogHash
+        : ChatGptGatewayToolCatalog.PublishedCatalogHash,
+    publishedCatalogToolCount = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceToolCatalog.PublishedToolNames.Count
+        : ChatGptGatewayToolCatalog.PublishedToolNames.Count,
+    appFacingExpectedToolCount = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceToolCatalog.PublishedToolNames.Count
+        : ChatGptGatewayToolCatalog.PublishedToolNames.Count,
+    queryToolCount = gatewaySurface == ChatGptGatewaySurface.Automation ? 3 : McpPublishedToolCatalog.QueryToolNames.Count,
+    mutationToolCount = gatewaySurface == ChatGptGatewaySurface.Automation ? 1 : ChatGptGatewayToolCatalog.PublishedToolNames.Count - McpPublishedToolCatalog.QueryToolNames.Count,
+    deleteCapableToolCount = gatewaySurface == ChatGptGatewaySurface.Automation ? 0 : McpPublishedToolCatalog.DeleteCapableToolNames.Count,
+    proposalGatedToolCount = gatewaySurface == ChatGptGatewaySurface.Automation ? 0 : McpPublishedToolCatalog.ProposalWriteToolNames.Count,
+    mcpPublicationIdentity = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceToolCatalog.PublicationIdentity
+        : ChatGptGatewayToolCatalog.PublicationIdentity,
+    governanceToolContractVersion = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceContract.ToolContractVersion
+        : GovernanceToolContract.ToolContractVersion,
+    governanceSchemaHash = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? ScheduledGovernanceContract.SchemaHash
+        : GovernanceToolContract.SchemaHash
 })).RequireAuthorization();
 
 app.MapGet("/.well-known/oauth-protected-resource/{resource?}", CreateProtectedResourceMetadata).AllowAnonymous();

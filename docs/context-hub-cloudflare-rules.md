@@ -9,9 +9,13 @@ ContextHub MCP clients are non-browser HTTP clients. They expect raw Streamable 
 ```text
 /mcp
 /mcp-chat
+/mcp-automation
 /.well-known/oauth-protected-resource/mcp-chat
+/.well-known/oauth-protected-resource/mcp-automation
 /.well-known/oauth-authorization-server/mcp-chat
+/.well-known/oauth-authorization-server/mcp-automation
 /.well-known/openid-configuration/mcp-chat
+/.well-known/openid-configuration/mcp-automation
 /oauth/chat/*
 /userinfo
 /api/*
@@ -29,9 +33,13 @@ For MCP and chat-agent gateway traffic:
 (http.host eq "context-hub.example.com" and (
   http.request.uri.path eq "/mcp" or
   http.request.uri.path eq "/mcp-chat" or
+  http.request.uri.path eq "/mcp-automation" or
   http.request.uri.path eq "/.well-known/oauth-protected-resource/mcp-chat" or
+  http.request.uri.path eq "/.well-known/oauth-protected-resource/mcp-automation" or
   http.request.uri.path eq "/.well-known/oauth-authorization-server/mcp-chat" or
+  http.request.uri.path eq "/.well-known/oauth-authorization-server/mcp-automation" or
   http.request.uri.path eq "/.well-known/openid-configuration/mcp-chat" or
+  http.request.uri.path eq "/.well-known/openid-configuration/mcp-automation" or
   http.request.uri.path eq "/userinfo" or
   starts_with(http.request.uri.path, "/oauth/chat/")
 ))

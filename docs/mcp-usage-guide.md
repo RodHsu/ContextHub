@@ -10,6 +10,7 @@ ContextHub is not a prompt dump. It is a structured knowledge system that lets a
 | --- | --- | --- |
 | `/mcp` | trusted coding agents and internal automation | Full ContextHub MCP tools |
 | `/mcp-chat` | chat agents and custom assistants | Restricted gateway with OAuth/OIDC, allowlists, audit, rate limits, and proposal-gated writes |
+| `/mcp-automation` | Scheduled Governance Automation only | Four-tool least-privilege gateway with full server-side review, fixed reversible execution, and receipt recovery; no irreversible deletion authority |
 
 Use your own hostname in remote configurations:
 
@@ -17,6 +18,14 @@ Use your own hostname in remote configurations:
 https://context-hub.example.com/mcp
 https://context-hub.example.com/mcp-chat
 ```
+
+Scheduled Governance uses a separate connector URL and must never fall back to the general connector:
+
+```text
+https://context-hub.example.com/mcp-automation
+```
+
+Its OAuth token must include `governance:scheduled`. The connector exposes only `scheduled_governance_contract_get`, `scheduled_governance_review`, `scheduled_governance_execute`, and `scheduled_governance_run_get`. Call review with a fresh `governanceRunId`; obey the returned server decision. Call execute only for `ReversibleExecutionRequired`, replay the exact request after an unknown outcome, and use receipt read-back before retrying. `NoOpConverged` is a valid successful run with zero mutation. `HumanDecisionOnly` and `CoverageIncomplete` stop unattended execution. Never switch to `/mcp-chat`, explicit ProjectIds, REST, DB, or admin endpoints to bypass a stop decision.
 
 ## Protocol Lifecycle
 
@@ -316,10 +325,24 @@ $env:CONTEXTHUB_MCP_CHAT_TOKEN = "<access-token>"
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -Endpoint https://context-hub.example.com/mcp-chat -RequireAuthorizationToken
 ```
 
+Scheduled Governance least-privilege catalog and controlled read-only review:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 `
+  -Surface Automation `
+  -Endpoint https://context-hub.example.com/mcp-automation `
+  -ResourceMetadataUrl https://context-hub.example.com/.well-known/oauth-protected-resource/mcp-automation `
+  -AuthorizationServerMetadataUrl https://context-hub.example.com/.well-known/oauth-authorization-server/mcp-automation `
+  -OpenIdConfigurationUrl https://context-hub.example.com/.well-known/openid-configuration/mcp-automation `
+  -RequireAuthorizationToken `
+  -RunControlledReview
+```
+
 Expected unauthenticated behavior:
 
 - `/mcp` returns `401`
 - `/mcp-chat` returns `401`
+- `/mcp-automation` returns `401`
 - neither endpoint returns a browser challenge page
 - dynamic responses are not cached
 

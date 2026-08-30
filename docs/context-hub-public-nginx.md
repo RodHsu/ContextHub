@@ -26,11 +26,13 @@ Set `TRUSTED_PROXY_NETWORK` to this reverse proxy's exact Docker-network CIDR. C
 | `/api/*` | `mcp-server:8080` | REST APIs |
 | `/mcp` | `mcp-server:8080` | Full ContextHub MCP endpoint |
 | `/mcp-chat` | `chatgpt-gateway:8083/mcp` | Restricted chat-agent MCP gateway |
+| `/mcp-automation` | `automation-gateway:8083/mcp` | Scheduled Governance four-tool least-privilege gateway |
 | `/.well-known/*/mcp-chat` | `chatgpt-gateway:8083` | OAuth/OIDC metadata for chat-agent gateway |
+| `/.well-known/*/mcp-automation` | `automation-gateway:8083` | OAuth/OIDC metadata with the automation resource audience |
 | `/oauth/chat/*` | `chatgpt-gateway:8083` | OAuth authorization code flow |
 | `/userinfo` | `chatgpt-gateway:8083` | OIDC userinfo |
 
-`/mcp-chat` must stay separate from `/mcp`. Chat agents should see only the gateway allowlist, project allowlist, OAuth/OIDC checks, rate limits, audit trails, and proposal-gated durable writes.
+`/mcp-chat` must stay separate from `/mcp`. `/mcp-automation` must also remain a distinct OAuth resource and upstream; do not proxy it to the broad chat gateway or use `/mcp-chat` as a fallback. Scheduled Automation sees only its four-tool catalog, while interactive chat agents retain the general restricted gateway.
 
 ## Cache Policy
 
@@ -40,6 +42,7 @@ Dynamic routes must not be cached:
 /api/*
 /mcp
 /mcp-chat
+/mcp-automation
 /.well-known/*
 /oauth/chat/*
 /userinfo
@@ -78,6 +81,11 @@ upstream contexthub_dashboard {
 
 upstream contexthub_chat_gateway {
     server context-hub-chatgpt-gateway:8083 max_fails=2 fail_timeout=10s;
+    keepalive 16;
+}
+
+upstream contexthub_automation_gateway {
+    server context-hub-automation-gateway:8083 max_fails=2 fail_timeout=10s;
     keepalive 16;
 }
 
@@ -136,6 +144,25 @@ server {
         proxy_pass http://contexthub_chat_gateway/mcp;
     }
 
+    location = /mcp-automation {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
+        add_header CDN-Cache-Control "no-store" always;
+        add_header X-Accel-Buffering "no" always;
+        gzip off;
+        proxy_cache off;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Origin $http_origin;
+        proxy_set_header Accept $http_accept;
+        proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
+        proxy_set_header Mcp-Method $http_mcp_method;
+        proxy_set_header Mcp-Name $http_mcp_name;
+        proxy_pass http://contexthub_automation_gateway/mcp;
+    }
+
     location ~ ^/\.well-known/(oauth-protected-resource|oauth-authorization-server|openid-configuration)/mcp-chat$ {
         add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
         add_header CDN-Cache-Control "no-store" always;
@@ -143,6 +170,15 @@ server {
         proxy_cache off;
         proxy_buffering off;
         proxy_pass http://contexthub_chat_gateway;
+    }
+
+    location ~ ^/\.well-known/(oauth-protected-resource|oauth-authorization-server|openid-configuration)/mcp-automation$ {
+        add_header Cache-Control "no-store, no-cache, max-age=0, must-revalidate, no-transform" always;
+        add_header CDN-Cache-Control "no-store" always;
+        add_header X-Accel-Buffering "no" always;
+        proxy_cache off;
+        proxy_buffering off;
+        proxy_pass http://contexthub_automation_gateway;
     }
 
     location /oauth/chat/ {

@@ -34,6 +34,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     private const string TestToken = ChatGptGatewayTestConstants.TestToken;
     internal const string PublicMcpUrl = "https://context-hub.example.test/mcp-chat";
     internal const string PublicResourceMetadataUrl = "https://context-hub.example.test/.well-known/oauth-protected-resource/mcp-chat";
+    internal const string AutomationPublicMcpUrl = "https://context-hub.example.test/mcp-automation";
+    internal const string AutomationPublicResourceMetadataUrl = "https://context-hub.example.test/.well-known/oauth-protected-resource/mcp-automation";
     internal const string TestAuthority = "https://oidc.example.test/context-hub";
     internal const string SelfHostedIssuer = "https://context-hub.example.test";
     internal const string SelfHostedClientId = "context-hub-chatgpt-self-hosted-test";
@@ -43,6 +45,57 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         using var rsa = RSA.Create(3072);
         return Convert.ToBase64String(rsa.ExportPkcs8PrivateKey());
     });
+
+    [DockerRequiredFact]
+    public async Task Automation_Surface_Should_Publish_Only_Four_Least_Privilege_Tools()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            surface: ChatGptGatewaySurface.Automation);
+        using var client = CreateAuthorizedClient(factory);
+
+        var payload = await SendMcpAsync(client, null, 1, "tools/list", new { });
+        var tools = ExtractSseJson(payload).GetProperty("result").GetProperty("tools");
+        var names = tools.EnumerateArray().Select(x => x.GetProperty("name").GetString()).ToArray();
+
+        names.Should().BeEquivalentTo(ScheduledGovernanceToolCatalog.PublishedToolNames);
+        names.Should().HaveCount(4);
+        names.Should().NotContain(["governance_batch_execute", "memory_delete", "project_cleanup_apply", "governance_tombstone_get"]);
+
+        foreach (var tool in tools.EnumerateArray())
+        {
+            var annotations = tool.GetProperty("annotations");
+            annotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("idempotentHint").GetBoolean().Should().BeTrue();
+            annotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
+        }
+
+        var execute = tools.EnumerateArray().Single(x =>
+            x.GetProperty("name").GetString() == ScheduledGovernanceContract.ExecuteToolName);
+        var requestSchema = execute.GetProperty("inputSchema").GetProperty("properties").GetProperty("request");
+        requestSchema.GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().BeEquivalentTo([
+            "governanceRunId", "snapshotToken", "cursor", "maxMutations", "maxDurationSeconds",
+            "isReReview", "toolContractVersion", "schemaHash"
+        ]);
+        execute.GetRawText().Should().NotContainAny(
+            "allowHardDelete", "allowMaturedDelete", "allowedActionTypes", "MaturedDelete", "memory_delete", "projectIds");
+        PublishedToolSchemaHash.Compute(execute).Should().Be(ScheduledGovernanceContract.SchemaHash);
+
+        using var metadataResponse = await client.GetAsync("/.well-known/oauth-protected-resource/mcp-automation");
+        metadataResponse.EnsureSuccessStatusCode();
+        var metadata = await metadataResponse.Content.ReadFromJsonAsync<JsonElement>();
+        metadata.GetProperty("resource").GetString().Should().Be(AutomationPublicMcpUrl);
+        metadata.GetProperty("scopes_supported").EnumerateArray().Select(x => x.GetString())
+            .Should().Contain(SecurityScopes.ScheduledGovernance);
+
+        using var statusResponse = await client.GetAsync("/api/status");
+        statusResponse.EnsureSuccessStatusCode();
+        var status = await statusResponse.Content.ReadFromJsonAsync<JsonElement>();
+        status.GetProperty("surface").GetString().Should().Be(nameof(ChatGptGatewaySurface.Automation));
+        status.GetProperty("deleteCapableToolCount").GetInt32().Should().Be(0);
+        status.GetProperty("publishedCatalogToolCount").GetInt32().Should().Be(4);
+    }
 
     [DockerRequiredFact]
     public async Task Raw_Http_Mcp_Should_Reject_Anonymous_Request()
@@ -4468,7 +4521,8 @@ public sealed class ChatGptGatewayApplicationFactory(
     bool selfHostedOAuth = false,
     IChatGptOAuthClientMetadataFetcher? clientMetadataFetcher = null,
     bool includeIssuerInAuthorizationResponse = false,
-    string? selfHostedRsaPrivateKey = null) : WebApplicationFactory<Program>
+    string? selfHostedRsaPrivateKey = null,
+    ChatGptGatewaySurface surface = ChatGptGatewaySurface.General) : WebApplicationFactory<Program>
 {
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -4488,6 +4542,8 @@ public sealed class ChatGptGatewayApplicationFactory(
         builder.UseSetting("ContextHub:Security:BootstrapUsername", "gateway-test-admin");
         builder.UseSetting("ContextHub:Security:BootstrapAllowedProjectIds", ProjectContext.AllProjectIdsSentinel);
         builder.UseSetting("ChatGptGateway:OAuth:TestMode", selfHostedOAuth ? "false" : "true");
+        builder.UseSetting("ChatGptGateway:Surface", surface.ToString());
+        builder.UseSetting("ChatGptGateway:OAuth:Scopes:4", surface == ChatGptGatewaySurface.Automation ? SecurityScopes.ScheduledGovernance : string.Empty);
         builder.UseSetting("ChatGptGateway:OAuth:Authority", selfHostedOAuth ? string.Empty : ChatGptGatewayMcpTests.TestAuthority);
         builder.UseSetting("ChatGptGateway:OAuth:SelfHosted", selfHostedOAuth ? "true" : "false");
         builder.UseSetting("ChatGptGateway:OAuth:SelfHostedIssuer", ChatGptGatewayMcpTests.SelfHostedIssuer);
@@ -4501,8 +4557,8 @@ public sealed class ChatGptGatewayApplicationFactory(
         builder.UseSetting("ChatGptGateway:OAuth:TestSubject", "chatgpt-gateway-test-subject");
         builder.UseSetting("ChatGptGateway:OAuth:TestEmail", "chatgpt-gateway@example.test");
         builder.UseSetting("ChatGptGateway:OAuth:TestName", "ChatGPT Gateway Test User");
-        builder.UseSetting("ChatGptGateway:PublicMcpUrl", ChatGptGatewayMcpTests.PublicMcpUrl);
-        builder.UseSetting("ChatGptGateway:PublicResourceMetadataUrl", ChatGptGatewayMcpTests.PublicResourceMetadataUrl);
+        builder.UseSetting("ChatGptGateway:PublicMcpUrl", surface == ChatGptGatewaySurface.Automation ? ChatGptGatewayMcpTests.AutomationPublicMcpUrl : ChatGptGatewayMcpTests.PublicMcpUrl);
+        builder.UseSetting("ChatGptGateway:PublicResourceMetadataUrl", surface == ChatGptGatewaySurface.Automation ? ChatGptGatewayMcpTests.AutomationPublicResourceMetadataUrl : ChatGptGatewayMcpTests.PublicResourceMetadataUrl);
         builder.ConfigureAppConfiguration((_, config) =>
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
@@ -4522,6 +4578,8 @@ public sealed class ChatGptGatewayApplicationFactory(
                 ["ContextHub:Security:BootstrapUsername"] = "gateway-test-admin",
                 ["ContextHub:Security:BootstrapAllowedProjectIds"] = ProjectContext.AllProjectIdsSentinel,
                 ["ChatGptGateway:OAuth:TestMode"] = selfHostedOAuth ? "false" : "true",
+                ["ChatGptGateway:Surface"] = surface.ToString(),
+                ["ChatGptGateway:OAuth:Scopes:4"] = surface == ChatGptGatewaySurface.Automation ? SecurityScopes.ScheduledGovernance : string.Empty,
                 ["ChatGptGateway:OAuth:Authority"] = selfHostedOAuth ? string.Empty : ChatGptGatewayMcpTests.TestAuthority,
                 ["ChatGptGateway:OAuth:SelfHosted"] = selfHostedOAuth ? "true" : "false",
                 ["ChatGptGateway:OAuth:SelfHostedIssuer"] = ChatGptGatewayMcpTests.SelfHostedIssuer,
@@ -4535,8 +4593,8 @@ public sealed class ChatGptGatewayApplicationFactory(
                 ["ChatGptGateway:OAuth:TestSubject"] = "chatgpt-gateway-test-subject",
                 ["ChatGptGateway:OAuth:TestEmail"] = "chatgpt-gateway@example.test",
                 ["ChatGptGateway:OAuth:TestName"] = "ChatGPT Gateway Test User",
-                ["ChatGptGateway:PublicMcpUrl"] = ChatGptGatewayMcpTests.PublicMcpUrl,
-                ["ChatGptGateway:PublicResourceMetadataUrl"] = ChatGptGatewayMcpTests.PublicResourceMetadataUrl
+                ["ChatGptGateway:PublicMcpUrl"] = surface == ChatGptGatewaySurface.Automation ? ChatGptGatewayMcpTests.AutomationPublicMcpUrl : ChatGptGatewayMcpTests.PublicMcpUrl,
+                ["ChatGptGateway:PublicResourceMetadataUrl"] = surface == ChatGptGatewaySurface.Automation ? ChatGptGatewayMcpTests.AutomationPublicResourceMetadataUrl : ChatGptGatewayMcpTests.PublicResourceMetadataUrl
             });
         });
         builder.ConfigureTestServices(services =>

@@ -19,10 +19,13 @@ param(
     [string]$OAuthUsernameEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_USERNAME",
     [string]$OAuthPasswordEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_PASSWORD",
     [string]$PredefinedClientId = "contexthub-chatgpt-gateway",
+    [ValidateSet("General", "Automation")]
+    [string]$Surface = "General",
     [switch]$RequireAuthorizationToken,
     [switch]$RunDynamicClientRegistrationSmoke,
     [switch]$RunPredefinedClientSmoke,
     [switch]$RunProposalSmoke,
+    [switch]$RunControlledReview,
     [switch]$SkipUnauthorizedProjectCheck
 )
 
@@ -793,6 +796,73 @@ $toolsResponse = Invoke-McpJsonRpc -Endpoint $Endpoint -Headers $toolsHeaders -P
 }
 $toolsJson = Read-SseDataJson -Content $toolsResponse.Content
 $toolNames = @($toolsJson.result.tools | ForEach-Object { $_.name })
+if ($Surface -eq "Automation") {
+    $expectedTools = @(
+        "scheduled_governance_contract_get",
+        "scheduled_governance_review",
+        "scheduled_governance_execute",
+        "scheduled_governance_run_get"
+    )
+    $missingTools = @($expectedTools | Where-Object { $toolNames -notcontains $_ })
+    $unexpectedTools = @($toolNames | Where-Object { $expectedTools -notcontains $_ })
+    if ($toolNames.Count -ne 4 -or $missingTools.Count -gt 0 -or $unexpectedTools.Count -gt 0) {
+        throw "Scheduled Governance catalog mismatch: count=$($toolNames.Count), missing=$($missingTools -join ','), unexpected=$($unexpectedTools -join ',')."
+    }
+
+    $catalogJson = $toolsJson.result.tools | ConvertTo-Json -Depth 40 -Compress
+    foreach ($forbidden in @(
+        "allowHardDelete", "allowMaturedDelete", "allowedActionTypes", "MaturedDelete",
+        "memory_delete", "executionMode", "maxRiskLevel", "dryRun", "autoDeleted",
+        "deleteEligible", "deleteMatured", "deleteCancelled", "tombstone"
+    )) {
+        if ($catalogJson -match [regex]::Escape($forbidden)) {
+            throw "Scheduled Governance catalog exposed forbidden authority token '$forbidden'."
+        }
+    }
+
+    foreach ($tool in @($toolsJson.result.tools)) {
+        $inputJson = $tool.inputSchema | ConvertTo-Json -Depth 20 -Compress
+        if ($inputJson -match 'projectIds') {
+            throw "Scheduled Governance tool '$($tool.name)' exposed projectIds input authority."
+        }
+    }
+
+    $contractResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
+        jsonrpc = "2.0"
+        id = 3
+        method = "tools/call"
+        params = @{
+            name = "scheduled_governance_contract_get"
+            arguments = @{}
+        }
+    }
+    $contractJson = Read-SseDataJson -Content $contractResponse.Content
+    Assert-ToolCallSucceeded -Json $contractJson -ToolName "scheduled_governance_contract_get"
+
+    if ($RunControlledReview) {
+        $governanceRunId = "production-controlled-$([Guid]::NewGuid().ToString('N'))"
+        $reviewResponse = Invoke-ModernMcpJsonRpc -Endpoint $Endpoint -Token $token -Payload @{
+            jsonrpc = "2.0"
+            id = 4
+            method = "tools/call"
+            params = @{
+                name = "scheduled_governance_review"
+                arguments = @{
+                    request = @{
+                        governanceRunId = $governanceRunId
+                        isReReview = $false
+                    }
+                }
+            }
+        }
+        $reviewJson = Read-SseDataJson -Content $reviewResponse.Content
+        Assert-ToolCallSucceeded -Json $reviewJson -ToolName "scheduled_governance_review"
+        Write-Host "Controlled read-only review accepted (GovernanceRunId=$governanceRunId)."
+    }
+
+    Write-Host "Scheduled Governance least-privilege catalog verified (4 tools; controlledReview=$RunControlledReview)."
+    return
+}
 $canonicalRestrictedToolCount = 65
 $requiredAppFacingReadTools = @(
     "governance_contract_get",

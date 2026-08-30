@@ -38,7 +38,8 @@ internal sealed class ChatGptTestAuthenticationHandler(
             new(GatewayAuthentication.SubjectClaim, oauth.TestSubject),
             new(ClaimTypes.NameIdentifier, oauth.TestSubject),
             new(ClaimTypes.Name, oauth.TestName),
-            new(ClaimTypes.Email, oauth.TestEmail)
+            new(ClaimTypes.Email, oauth.TestEmail),
+            new("scope", string.Join(' ', oauth.Scopes))
         };
         var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, GatewayAuthentication.TestScheme));
         return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(principal, GatewayAuthentication.TestScheme)));
@@ -67,6 +68,7 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
         }
 
         var oauth = gatewayOptions.Value.OAuth;
+        var surface = ChatGptGatewaySurfaceResolver.Resolve(gatewayOptions.Value.Surface);
         var subject = ReadClaim(context.User, GatewayAuthentication.SubjectClaim, ClaimTypes.NameIdentifier, oauth.SubjectClaim);
         if (string.IsNullOrWhiteSpace(subject))
         {
@@ -103,20 +105,36 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
             return;
         }
 
-        var previous = actorAccessor.Current;
-        actorAccessor.Current = new ContextHubRequestActor(
-            contextHubUser.TenantId,
-            contextHubUser.Id,
-            contextHubUser.Username,
-            contextHubUser.Role,
-            [
+        var grantedOAuthScopes = (context.User.FindFirstValue("scope") ?? string.Empty)
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.Ordinal);
+        if (surface == ChatGptGatewaySurface.Automation &&
+            !grantedOAuthScopes.Contains(SecurityScopes.ScheduledGovernance))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsync("Scheduled Governance OAuth scope is required.", context.RequestAborted);
+            return;
+        }
+
+        var applicationScopes = surface == ChatGptGatewaySurface.Automation
+            ? new[] { SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.ScheduledGovernance }
+            : new[]
+            {
                 SecurityScopes.MemoryRead,
                 SecurityScopes.MemoryWrite,
                 SecurityScopes.PreferencesRead,
                 SecurityScopes.PreferencesWrite,
                 SecurityScopes.LogsRead,
                 SecurityScopes.GovernanceTrackerManage
-            ],
+            };
+
+        var previous = actorAccessor.Current;
+        actorAccessor.Current = new ContextHubRequestActor(
+            contextHubUser.TenantId,
+            contextHubUser.Id,
+            contextHubUser.Username,
+            contextHubUser.Role,
+            applicationScopes,
             [],
             IsAuthenticated: true,
             IsServiceActor: false);

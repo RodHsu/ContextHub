@@ -495,6 +495,27 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
+        if (actor.HasScope(SecurityScopes.ScheduledGovernance))
+        {
+            var scheduledAction = ParseRecommendedAction(item.RecommendedAction);
+            if (!item.IsReversible ||
+                item.RequiresExplicitApproval ||
+                item.RiskLevel > GovernanceBatchRiskLevel.Low ||
+                !scheduledAction.HasValue ||
+                !allowed.Contains(scheduledAction.Value))
+            {
+                return await AuditedResultAsync(
+                    item,
+                    scheduledAction,
+                    GovernanceBatchItemDisposition.RequiresUserDecision,
+                    "The Scheduled Governance surface permits only fixed low-risk reversible actions; no governed resource was mutated.",
+                    [],
+                    item.RelatedResourceIds,
+                    actor,
+                    cancellationToken);
+            }
+        }
+
         return item.Kind switch
         {
             "Finding" => await ProcessFindingAsync(item, request, allowed, actor, cancellationToken),

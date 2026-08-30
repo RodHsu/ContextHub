@@ -2,6 +2,7 @@ namespace Memory.ChatGptGateway;
 
 public sealed class ChatGptGatewayOptions
 {
+    public string Surface { get; set; } = "General";
     public OAuthOptions OAuth { get; set; } = new();
     public ContextHubGatewayOptions ContextHub { get; set; } = new();
     public string PublicMcpUrl { get; set; } = string.Empty;

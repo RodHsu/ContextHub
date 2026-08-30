@@ -292,6 +292,51 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  automation-gateway:
+    image: contexthub-chatgpt-gateway:latest
+    build:
+      context: .
+      dockerfile: src/Memory.ChatGptGateway/Dockerfile
+      args:
+        APP_VERSION: ${CONTEXTHUB_BUILD_VERSION:-1.1.0}
+        BUILD_TIMESTAMP_UTC: ${CONTEXTHUB_BUILD_TIMESTAMP_UTC:-}
+    restart: always
+    environment:
+      ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
+      ContextHub__SecretKey: ${CONTEXTHUB_SECRET_KEY:-${DASHBOARD_SECRET_KEY:-}}
+      ContextHub__Security__BootstrapTenantSlug: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TENANT_SLUG:-context-team}
+      ContextHub__Security__BootstrapUsername: ${CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME:-dashboard-service}
+      <<: [*embedding-config, *telemetry-retention-config, *chatgpt-gateway-config, *project-artifact-object-storage-config]
+      ChatGptGateway__Surface: Automation
+      ChatGptGateway__OAuth__Scopes__4: governance:scheduled
+      ChatGptGateway__PublicMcpUrl: ${AUTOMATION_GATEWAY_PUBLIC_MCP_URL:-https://context-hub.example.com/mcp-automation}
+      ChatGptGateway__PublicResourceMetadataUrl: ${AUTOMATION_GATEWAY_PUBLIC_RESOURCE_METADATA_URL:-https://context-hub.example.com/.well-known/oauth-protected-resource/mcp-automation}
+      ChatGptGateway__AllowedMcpOrigins__0: ${CHATGPT_GATEWAY_ALLOWED_MCP_ORIGIN:-}
+      ForwardedHeaders__KnownNetworks__0: ${TRUSTED_PROXY_NETWORK:-}
+      Embeddings__Provider: Http
+      Embeddings__BaseUrl: http://embedding-service:8081
+      ASPNETCORE_URLS: http://0.0.0.0:8083
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      ConnectionStrings__Redis: redis:6379
+      Memory__Namespace: contexthub
+      DatabaseLogging__MinimumLevel: Warning
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    ports:
+      - "${AUTOMATION_GATEWAY_HOST_BIND:-127.0.0.1}:${AUTOMATION_GATEWAY_HOST_PORT:-8095}:8083"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/health/ready"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 90s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   worker:
     image: contexthub-worker:latest
     build:

@@ -2553,6 +2553,7 @@ public static class DependencyInjection
         services.AddScoped<IGovernanceProjectScopeResolver, GovernanceProjectScopeResolver>();
         services.AddScoped<IDailyMemoryReviewService, DailyMemoryReviewService>();
         services.AddScoped<IKnowledgeReviewService, KnowledgeReviewService>();
+        services.AddScoped<IScheduledGovernanceService, ScheduledGovernanceService>();
         services.AddScoped<IFullGovernancePlanService, FullGovernancePlanService>();
         services.AddScoped<IGovernanceBatchExecutor, GovernanceBatchExecutor>();
         services.AddScoped<IDurableMemoryGovernanceService, DurableMemoryGovernanceService>();

@@ -197,6 +197,14 @@ It is separate from `/mcp` and is intended for OAuth/OIDC-authenticated clients,
 
 Project workspace `DisplayName` is an interactive Dashboard-owned field. New projects and blank legacy values fall back to `ProjectId`; MCP, ChatGPT, scheduled/background governance, cleanup, retention, insights, suggested actions, and hierarchy synchronization can update project descriptions or lifecycle data but cannot change `DisplayName`.
 
+Scheduled ChatGPT governance connects to a separate least-privilege resource:
+
+```text
+/mcp-automation
+```
+
+This surface publishes exactly four tools: `scheduled_governance_contract_get`, `scheduled_governance_review`, `scheduled_governance_execute`, and `scheduled_governance_run_get`. Review resolves the actor's full authorized durable scope server-side and returns an immutable snapshot, count invariant, and one fixed decision (`NoOpConverged`, `ReversibleExecutionRequired`, `HumanDecisionOnly`, or `CoverageIncomplete`). Execute accepts no ProjectIds, action list, risk policy, hard-delete, matured-delete, dry-run, or execution-mode controls; it can run only the server's fixed low-risk reversible policy with snapshot/cursor binding and authorization revalidation. Irreversible matured retention remains exclusively owned by the internal Worker. General `/mcp` and `/mcp-chat` capabilities are unchanged.
+
 ## Embedding Profiles
 
 Most deployments should change only:
