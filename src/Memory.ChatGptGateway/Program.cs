@@ -227,7 +227,7 @@ app.Use(async (context, next) =>
 app.Use(CloudflareCacheHeaders.ApplyNoStorePolicyAsync);
 app.Use(async (context, next) =>
 {
-    if (IsProtectedResourceMetadataPath(context.Request.Path))
+    if (GatewayPublicPaths.IsProtectedResourceMetadata(context.Request.Path))
     {
         await CreateProtectedResourceMetadata(
             context,
@@ -235,7 +235,7 @@ app.Use(async (context, next) =>
         return;
     }
 
-    if (IsAuthorizationServerMetadataPath(context.Request.Path))
+    if (GatewayPublicPaths.IsAuthorizationServerMetadata(context.Request.Path))
     {
         await CreateAuthorizationServerMetadata(
             context,
@@ -243,7 +243,7 @@ app.Use(async (context, next) =>
         return;
     }
 
-    if (IsOpenIdConfigurationPath(context.Request.Path))
+    if (GatewayPublicPaths.IsOpenIdConfiguration(context.Request.Path))
     {
         await CreateOpenIdConfiguration(
             context,
@@ -560,9 +560,9 @@ static bool IsPublicPath(PathString path)
     var value = path.Value ?? string.Empty;
     return value.StartsWith("/health/live", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/health/ready", StringComparison.OrdinalIgnoreCase) ||
-           IsProtectedResourceMetadataPath(path) ||
-           IsAuthorizationServerMetadataPath(path) ||
-           IsOpenIdConfigurationPath(path) ||
+           GatewayPublicPaths.IsProtectedResourceMetadata(path) ||
+           GatewayPublicPaths.IsAuthorizationServerMetadata(path) ||
+           GatewayPublicPaths.IsOpenIdConfiguration(path) ||
            string.Equals(path.Value, "/.well-known/jwks.json", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/oauth/chat/authorize", StringComparison.OrdinalIgnoreCase) ||
            value.StartsWith("/oauth/chat/register", StringComparison.OrdinalIgnoreCase) ||
@@ -570,9 +570,9 @@ static bool IsPublicPath(PathString path)
 }
 
 static bool IsChatGptOAuthCorsPath(PathString path)
-    => IsProtectedResourceMetadataPath(path) ||
-       IsAuthorizationServerMetadataPath(path) ||
-       IsOpenIdConfigurationPath(path) ||
+    => GatewayPublicPaths.IsProtectedResourceMetadata(path) ||
+       GatewayPublicPaths.IsAuthorizationServerMetadata(path) ||
+       GatewayPublicPaths.IsOpenIdConfiguration(path) ||
        string.Equals(path.Value, "/.well-known/jwks.json", StringComparison.OrdinalIgnoreCase) ||
        (path.Value ?? string.Empty).StartsWith("/oauth/chat/", StringComparison.OrdinalIgnoreCase);
 
@@ -602,27 +602,6 @@ static bool IsAllowedChatGptOrigin(string origin)
            string.Equals(uri.Host, "chat.openai.com", StringComparison.OrdinalIgnoreCase);
 }
 
-static bool IsProtectedResourceMetadataPath(PathString path)
-{
-    var value = path.Value ?? string.Empty;
-    return string.Equals(value, "/.well-known/oauth-protected-resource", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(value, "/.well-known/oauth-protected-resource/mcp-chat", StringComparison.OrdinalIgnoreCase);
-}
-
-static bool IsAuthorizationServerMetadataPath(PathString path)
-{
-    var value = path.Value ?? string.Empty;
-    return string.Equals(value, "/.well-known/oauth-authorization-server", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(value, "/.well-known/oauth-authorization-server/mcp-chat", StringComparison.OrdinalIgnoreCase);
-}
-
-static bool IsOpenIdConfigurationPath(PathString path)
-{
-    var value = path.Value ?? string.Empty;
-    return string.Equals(value, "/.well-known/openid-configuration", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(value, "/.well-known/openid-configuration/mcp-chat", StringComparison.OrdinalIgnoreCase);
-}
-
 static string Required(string value, string key)
     => string.IsNullOrWhiteSpace(value)
         ? throw new InvalidOperationException($"{key} is required when ChatGptGateway:OAuth:TestMode is false.")
@@ -649,6 +628,10 @@ static string[] ResolveSelfHostedAudiences(ChatGptGatewayOptions options)
     {
         audiences.Add(options.PublicMcpUrl.Trim());
     }
+
+    audiences.AddRange(options.OAuth.AdditionalAudiences
+        .Where(audience => !string.IsNullOrWhiteSpace(audience))
+        .Select(audience => audience.Trim()));
 
     return audiences.Distinct(StringComparer.Ordinal).ToArray();
 }

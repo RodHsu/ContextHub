@@ -808,6 +808,32 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task General_OAuth_Server_Should_Issue_Audience_Bound_Scheduled_Governance_Token()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true);
+        await ConfigureSelfHostedUserAsync(factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
+
+        var token = await CompleteSelfHostedOAuthCodeFlowAsync(
+            client,
+            SelfHostedClientId,
+            "https://chatgpt.com/connector/oauth/scheduled-governance",
+            AutomationPublicMcpUrl,
+            "openid profile email offline_access governance:scheduled");
+
+        var jwt = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler().ReadJwtToken(token);
+        jwt.Audiences.Should().Contain(AutomationPublicMcpUrl);
+        jwt.Claims.Single(claim => claim.Type == "scope").Value.Split(' ')
+            .Should().Contain(SecurityScopes.ScheduledGovernance);
+    }
+
+    [DockerRequiredFact]
     public async Task Tool_Discovery_Should_Expose_Only_ChatGpt_Allowed_Tools()
     {
         using var httpClient = CreateAuthorizedClient(environment.GetFactory());
@@ -4193,11 +4219,12 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         HttpClient client,
         string clientId,
         string redirectUri,
-        string resource)
+        string resource,
+        string scope = "openid profile email offline_access")
     {
         var verifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
         var challenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(verifier)));
-        var authorizePath = BuildAuthorizePath(clientId, redirectUri, challenge, resource);
+        var authorizePath = BuildAuthorizePath(clientId, redirectUri, challenge, resource, scope);
 
         using var authorizePageResponse = await client.GetAsync(authorizePath);
         authorizePageResponse.EnsureSuccessStatusCode();
@@ -4233,13 +4260,14 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         string clientId,
         string redirectUri,
         string codeChallenge,
-        string resource)
+        string resource,
+        string scope = "openid profile email offline_access")
         => "/oauth/chat/authorize?" + string.Join('&', new Dictionary<string, string>
         {
             ["response_type"] = "code",
             ["client_id"] = clientId,
             ["redirect_uri"] = redirectUri,
-            ["scope"] = "openid profile email offline_access",
+            ["scope"] = scope,
             ["state"] = "state-123",
             ["code_challenge"] = codeChallenge,
             ["code_challenge_method"] = "S256",
@@ -4543,7 +4571,8 @@ public sealed class ChatGptGatewayApplicationFactory(
         builder.UseSetting("ContextHub:Security:BootstrapAllowedProjectIds", ProjectContext.AllProjectIdsSentinel);
         builder.UseSetting("ChatGptGateway:OAuth:TestMode", selfHostedOAuth ? "false" : "true");
         builder.UseSetting("ChatGptGateway:Surface", surface.ToString());
-        builder.UseSetting("ChatGptGateway:OAuth:Scopes:4", surface == ChatGptGatewaySurface.Automation ? SecurityScopes.ScheduledGovernance : string.Empty);
+        builder.UseSetting("ChatGptGateway:OAuth:Scopes:4", SecurityScopes.ScheduledGovernance);
+        builder.UseSetting("ChatGptGateway:OAuth:AdditionalAudiences:0", surface == ChatGptGatewaySurface.General ? ChatGptGatewayMcpTests.AutomationPublicMcpUrl : string.Empty);
         builder.UseSetting("ChatGptGateway:OAuth:Authority", selfHostedOAuth ? string.Empty : ChatGptGatewayMcpTests.TestAuthority);
         builder.UseSetting("ChatGptGateway:OAuth:SelfHosted", selfHostedOAuth ? "true" : "false");
         builder.UseSetting("ChatGptGateway:OAuth:SelfHostedIssuer", ChatGptGatewayMcpTests.SelfHostedIssuer);
@@ -4579,7 +4608,8 @@ public sealed class ChatGptGatewayApplicationFactory(
                 ["ContextHub:Security:BootstrapAllowedProjectIds"] = ProjectContext.AllProjectIdsSentinel,
                 ["ChatGptGateway:OAuth:TestMode"] = selfHostedOAuth ? "false" : "true",
                 ["ChatGptGateway:Surface"] = surface.ToString(),
-                ["ChatGptGateway:OAuth:Scopes:4"] = surface == ChatGptGatewaySurface.Automation ? SecurityScopes.ScheduledGovernance : string.Empty,
+                ["ChatGptGateway:OAuth:Scopes:4"] = SecurityScopes.ScheduledGovernance,
+                ["ChatGptGateway:OAuth:AdditionalAudiences:0"] = surface == ChatGptGatewaySurface.General ? ChatGptGatewayMcpTests.AutomationPublicMcpUrl : string.Empty,
                 ["ChatGptGateway:OAuth:Authority"] = selfHostedOAuth ? string.Empty : ChatGptGatewayMcpTests.TestAuthority,
                 ["ChatGptGateway:OAuth:SelfHosted"] = selfHostedOAuth ? "true" : "false",
                 ["ChatGptGateway:OAuth:SelfHostedIssuer"] = ChatGptGatewayMcpTests.SelfHostedIssuer,

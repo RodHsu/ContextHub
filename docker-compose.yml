@@ -49,6 +49,7 @@ x-chatgpt-gateway-config: &chatgpt-gateway-config
   ChatGptGateway__OAuth__Scopes__1: ${CHATGPT_GATEWAY_OAUTH_SCOPE_1:-profile}
   ChatGptGateway__OAuth__Scopes__2: ${CHATGPT_GATEWAY_OAUTH_SCOPE_2:-email}
   ChatGptGateway__OAuth__Scopes__3: ${CHATGPT_GATEWAY_OAUTH_SCOPE_3:-offline_access}
+  ChatGptGateway__OAuth__Scopes__4: governance:scheduled
   ChatGptGateway__OAuth__TestMode: ${CHATGPT_GATEWAY_OAUTH_TEST_MODE:-false}
   ChatGptGateway__OAuth__TestBearerToken: ${CHATGPT_GATEWAY_OAUTH_TEST_BEARER_TOKEN:-}
   ChatGptGateway__OAuth__SelfHosted: ${CHATGPT_GATEWAY_OAUTH_SELF_HOSTED:-false}
@@ -266,6 +267,7 @@ services:
       ContextHub__Security__BootstrapTenantSlug: ${CONTEXTHUB_SECURITY_BOOTSTRAP_TENANT_SLUG:-context-team}
       ContextHub__Security__BootstrapUsername: ${CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME:-dashboard-service}
       <<: [*embedding-config, *telemetry-retention-config, *chatgpt-gateway-config, *project-artifact-object-storage-config]
+      ChatGptGateway__OAuth__AdditionalAudiences__0: ${AUTOMATION_GATEWAY_PUBLIC_MCP_URL:-https://context-hub.example.com/mcp-automation}
       ChatGptGateway__AllowedMcpOrigins__0: ${CHATGPT_GATEWAY_ALLOWED_MCP_ORIGIN:-}
       ForwardedHeaders__KnownNetworks__0: ${TRUSTED_PROXY_NETWORK:-}
       Embeddings__Provider: Http
@@ -308,7 +310,6 @@ services:
       ContextHub__Security__BootstrapUsername: ${CONTEXTHUB_SECURITY_BOOTSTRAP_USERNAME:-dashboard-service}
       <<: [*embedding-config, *telemetry-retention-config, *chatgpt-gateway-config, *project-artifact-object-storage-config]
       ChatGptGateway__Surface: Automation
-      ChatGptGateway__OAuth__Scopes__4: governance:scheduled
       ChatGptGateway__PublicMcpUrl: ${AUTOMATION_GATEWAY_PUBLIC_MCP_URL:-https://context-hub.example.com/mcp-automation}
       ChatGptGateway__PublicResourceMetadataUrl: ${AUTOMATION_GATEWAY_PUBLIC_RESOURCE_METADATA_URL:-https://context-hub.example.com/.well-known/oauth-protected-resource/mcp-automation}
       ChatGptGateway__AllowedMcpOrigins__0: ${CHATGPT_GATEWAY_ALLOWED_MCP_ORIGIN:-}

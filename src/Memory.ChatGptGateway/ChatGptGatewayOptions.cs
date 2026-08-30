@@ -16,6 +16,7 @@ public sealed class OAuthOptions
     public string ClientId { get; set; } = string.Empty;
     public string ClientSecret { get; set; } = string.Empty;
     public string[] Scopes { get; set; } = ["openid", "profile", "email", "offline_access"];
+    public string[] AdditionalAudiences { get; set; } = [];
     public bool SelfHosted { get; set; }
     public string SelfHostedIssuer { get; set; } = string.Empty;
     public string SelfHostedSigningKey { get; set; } = string.Empty;
