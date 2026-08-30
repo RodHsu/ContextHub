@@ -708,6 +708,15 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
             await page.Locator(".memories-workspace-layout").WaitForAsync();
             var memoryTable = page.Locator(".memories-table-scroll-shell");
+            await page.WaitForFunctionAsync(
+                @"() => {
+                    const element = document.querySelector('.memories-table-scroll-shell');
+                    return element !== null &&
+                        element.clientHeight > 400 &&
+                        element.scrollHeight > element.clientHeight;
+                }",
+                null,
+                new PageWaitForFunctionOptions { Timeout = 15000 });
             var memoryTableMetrics = await memoryTable.EvaluateAsync<string>(
                 @"element => JSON.stringify({
                     clientHeight: element.clientHeight,
@@ -720,12 +729,25 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 memoryTableDocument.RootElement.GetProperty("clientHeight").GetDouble());
             memoryTableDocument.RootElement.GetProperty("overflowY").GetString().Should().Be("auto");
 
-            await memoryTable.EvaluateAsync("element => element.scrollTop = element.scrollHeight");
-            await memoryTable.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 80, Y = 180 } });
-            var pageScrollBefore = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+            var content = page.Locator(".content");
+            await content.EvaluateAsync("element => element.scrollTop = 0");
+            await InteractWithStableLocatorAsync(
+                memoryTable,
+                async locator =>
+                {
+                    await locator.EvaluateAsync("element => element.scrollTop = element.scrollHeight");
+                    await locator.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 80, Y = 180 } });
+                });
+            var pageScrollRange = await content.EvaluateAsync<double>("element => element.scrollHeight - element.clientHeight");
+            pageScrollRange.Should().BeGreaterThan(0, "the page scroll owner needs available range for scroll chaining");
+            var pageScrollBefore = await content.EvaluateAsync<double>("element => element.scrollTop");
+            pageScrollBefore.Should().BeLessThan(pageScrollRange, "downward scroll chaining needs remaining ancestor range");
             await page.Mouse.WheelAsync(0, 600);
-            await page.WaitForTimeoutAsync(150);
-            var pageScrollAfter = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+            await page.WaitForFunctionAsync(
+                "before => (document.querySelector('.content')?.scrollTop ?? 0) > before",
+                pageScrollBefore,
+                new PageWaitForFunctionOptions { Timeout = 15000 });
+            var pageScrollAfter = await content.EvaluateAsync<double>("element => element.scrollTop");
             pageScrollAfter.Should().BeGreaterThan(pageScrollBefore,
                 "wheel input at the end of the memory table must chain to the page scroll owner");
 

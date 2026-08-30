@@ -5,24 +5,30 @@
 )]
 param(
     [string]$Endpoint = "http://localhost:8094/mcp",
+    [string]$OAuthResource = "",
+    [string]$RootOAuthResource = "",
     [string]$ProjectId = "ContextHub",
     [string]$UnauthorizedProjectId = "ContextHubChatGptGatewayDenied",
     [string]$Query = "ContextHub MCP chat gateway diagnostics",
-    [string]$ResourceMetadataUrl = "http://localhost:8094/.well-known/oauth-protected-resource/mcp-chat",
-    [string]$RootResourceMetadataUrl = "http://localhost:8094/.well-known/oauth-protected-resource",
-    [string]$AuthorizationServerMetadataUrl = "http://localhost:8094/.well-known/oauth-authorization-server/mcp-chat",
-    [string]$RootAuthorizationServerMetadataUrl = "http://localhost:8094/.well-known/oauth-authorization-server",
-    [string]$OpenIdConfigurationUrl = "http://localhost:8094/.well-known/openid-configuration/mcp-chat",
-    [string]$RootOpenIdConfigurationUrl = "http://localhost:8094/.well-known/openid-configuration",
-    [string]$UserInfoUrl = "http://localhost:8094/userinfo",
+    [string]$ResourceMetadataUrl = "",
+    [string]$PublicResourceMetadataUrl = "",
+    [string]$RootResourceMetadataUrl = "",
+    [string]$AuthorizationServerMetadataUrl = "",
+    [string]$RootAuthorizationServerMetadataUrl = "",
+    [string]$OpenIdConfigurationUrl = "",
+    [string]$RootOpenIdConfigurationUrl = "",
+    [string]$UserInfoUrl = "",
     [string]$TokenEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_TOKEN",
     [string]$OAuthUsernameEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_USERNAME",
     [string]$OAuthPasswordEnvironmentVariable = "CONTEXTHUB_MCP_CHAT_PASSWORD",
     [string]$PredefinedClientId = "contexthub-chatgpt-gateway",
+    [string]$ClientIdMetadataDocumentUrl = "",
+    [string]$ClientIdMetadataRedirectUri = "",
     [ValidateSet("General", "Automation")]
     [string]$Surface = "General",
     [switch]$RequireAuthorizationToken,
     [switch]$RunDynamicClientRegistrationSmoke,
+    [switch]$RunClientIdMetadataDocumentSmoke,
     [switch]$RunPredefinedClientSmoke,
     [switch]$RunProposalSmoke,
     [switch]$RunControlledReview,
@@ -260,7 +266,8 @@ function Get-OAuthAccessTokenViaDcr {
         [string]$AuthorizationMetadataUrl,
         [string]$Resource,
         [string]$Username,
-        [string]$Password
+        [string]$Password,
+        [string]$Scopes
     )
 
     $metadataResponse = Invoke-WebRequestAllowError -Uri $AuthorizationMetadataUrl -Method Get -TimeoutSec 15
@@ -279,7 +286,7 @@ function Get-OAuthAccessTokenViaDcr {
         token_endpoint_auth_method = "none"
         grant_types = @("authorization_code", "refresh_token")
         response_types = @("code")
-        scope = "openid profile email offline_access"
+        scope = $Scopes
     } | ConvertTo-Json -Depth 10
 
     $registrationResponse = Invoke-WebRequestAllowError `
@@ -303,7 +310,7 @@ function Get-OAuthAccessTokenViaDcr {
         response_type = "code"
         client_id = [string]$registration.client_id
         redirect_uri = $redirectUri
-        scope = "openid profile email offline_access"
+        scope = $Scopes
         state = "mcp-chat-dcr-smoke"
         code_challenge = $challenge
         code_challenge_method = "S256"
@@ -340,6 +347,15 @@ function Get-OAuthAccessTokenViaDcr {
     if (-not $code) {
         throw "OAuth callback did not include authorization code."
     }
+    $state = Read-QueryParameter -Query $callback.Query -Name "state"
+    if ($state -ne "mcp-chat-dcr-smoke") {
+        throw "OAuth callback state mismatch during DCR smoke."
+    }
+    $issuer = Read-QueryParameter -Query $callback.Query -Name "iss"
+    if ($metadata.authorization_response_iss_parameter_supported -eq $true -and
+        -not [string]::Equals($issuer, [string]$metadata.issuer, [StringComparison]::Ordinal)) {
+        throw "OAuth callback issuer mismatch during DCR smoke."
+    }
 
     $tokenBody = New-QueryString -Values @{
         grant_type = "authorization_code"
@@ -374,7 +390,10 @@ function Get-OAuthAccessTokenViaPredefinedClient {
         [string]$Resource,
         [string]$ClientId,
         [string]$Username,
-        [string]$Password
+        [string]$Password,
+        [string]$Scopes,
+        [string]$RedirectUri = "",
+        [switch]$RequireCimd
     )
 
     $metadataResponse = Invoke-WebRequestAllowError -Uri $AuthorizationMetadataUrl -Method Get -TimeoutSec 15
@@ -391,14 +410,20 @@ function Get-OAuthAccessTokenViaPredefinedClient {
         throw "Predefined public client smoke requires token_endpoint_auth_methods_supported to include none."
     }
 
-    $redirectUri = "https://chatgpt.com/connector/oauth/contexthub-predefined-smoke-" + [Guid]::NewGuid().ToString("N")
+    if ($RequireCimd -and $metadata.client_id_metadata_document_supported -ne $true) {
+        throw "OAuth metadata must advertise client_id_metadata_document_supported=true for CIMD smoke."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($RedirectUri)) {
+        $RedirectUri = "https://chatgpt.com/connector/oauth/contexthub-predefined-smoke-" + [Guid]::NewGuid().ToString("N")
+    }
     $verifier = New-CodeVerifier
     $challenge = New-CodeChallenge -Verifier $verifier
     $authorizeUri = [string]$metadata.authorization_endpoint + "?" + (New-QueryString -Values @{
         response_type = "code"
         client_id = $ClientId
-        redirect_uri = $redirectUri
-        scope = "openid profile email offline_access"
+        redirect_uri = $RedirectUri
+        scope = $Scopes
         state = "mcp-chat-predefined-smoke"
         code_challenge = $challenge
         code_challenge_method = "S256"
@@ -435,17 +460,26 @@ function Get-OAuthAccessTokenViaPredefinedClient {
     if (-not $code) {
         throw "OAuth callback did not include authorization code."
     }
+    $state = Read-QueryParameter -Query $callback.Query -Name "state"
+    if ($state -ne "mcp-chat-predefined-smoke") {
+        throw "OAuth callback state mismatch during predefined/CIMD smoke."
+    }
 
     $issuer = Read-QueryParameter -Query $callback.Query -Name "iss"
-    if ($issuer) {
-        throw "OAuth callback included iss during predefined-client smoke; ChatGPT-compatible default should only return code and state."
+    if ($metadata.authorization_response_iss_parameter_supported -eq $true) {
+        if (-not [string]::Equals($issuer, [string]$metadata.issuer, [StringComparison]::Ordinal)) {
+            throw "OAuth callback issuer mismatch. Expected '$($metadata.issuer)', got '$issuer'."
+        }
+    }
+    elseif ($issuer -and -not [string]::Equals($issuer, [string]$metadata.issuer, [StringComparison]::Ordinal)) {
+        throw "OAuth callback returned an unexpected issuer '$issuer'."
     }
 
     $tokenBody = New-QueryString -Values @{
         grant_type = "authorization_code"
         client_id = $ClientId
         code = $code
-        redirect_uri = $redirectUri
+        redirect_uri = $RedirectUri
         code_verifier = $verifier
         resource = $Resource
     }
@@ -464,7 +498,8 @@ function Get-OAuthAccessTokenViaPredefinedClient {
         throw "OAuth token endpoint did not return access_token."
     }
 
-    Write-Host "Predefined public client OAuth token exchange completed."
+    $clientKind = if ($RequireCimd) { "CIMD" } else { "Predefined public client" }
+    Write-Host "$clientKind OAuth token exchange completed."
     return [string]$tokenJson.access_token
 }
 
@@ -560,6 +595,40 @@ function Assert-ToolCallRejected {
     throw "Expected rejection for $Scenario, but the call succeeded."
 }
 
+$endpointUri = [Uri]$Endpoint
+$endpointAuthority = $endpointUri.GetLeftPart([UriPartial]::Authority).TrimEnd('/')
+$metadataSuffix = if ($Surface -eq "Automation") { "mcp-automation" } else { "mcp-chat" }
+if ([string]::IsNullOrWhiteSpace($ResourceMetadataUrl)) {
+    $ResourceMetadataUrl = "$endpointAuthority/.well-known/oauth-protected-resource/$metadataSuffix"
+}
+if ([string]::IsNullOrWhiteSpace($RootResourceMetadataUrl)) {
+    $RootResourceMetadataUrl = "$endpointAuthority/.well-known/oauth-protected-resource"
+}
+if ([string]::IsNullOrWhiteSpace($AuthorizationServerMetadataUrl)) {
+    $AuthorizationServerMetadataUrl = "$endpointAuthority/.well-known/oauth-authorization-server/$metadataSuffix"
+}
+if ([string]::IsNullOrWhiteSpace($RootAuthorizationServerMetadataUrl)) {
+    $RootAuthorizationServerMetadataUrl = "$endpointAuthority/.well-known/oauth-authorization-server"
+}
+if ([string]::IsNullOrWhiteSpace($OpenIdConfigurationUrl)) {
+    $OpenIdConfigurationUrl = "$endpointAuthority/.well-known/openid-configuration/$metadataSuffix"
+}
+if ([string]::IsNullOrWhiteSpace($RootOpenIdConfigurationUrl)) {
+    $RootOpenIdConfigurationUrl = "$endpointAuthority/.well-known/openid-configuration"
+}
+if ([string]::IsNullOrWhiteSpace($UserInfoUrl)) {
+    $UserInfoUrl = "$endpointAuthority/userinfo"
+}
+if ([string]::IsNullOrWhiteSpace($OAuthResource)) {
+    $OAuthResource = $Endpoint
+}
+if ([string]::IsNullOrWhiteSpace($PublicResourceMetadataUrl)) {
+    $PublicResourceMetadataUrl = $ResourceMetadataUrl
+}
+if ([string]::IsNullOrWhiteSpace($RootOAuthResource) -and $Surface -eq "General") {
+    $RootOAuthResource = $OAuthResource
+}
+
 Write-Host "1/12 unauthenticated MCP chat gateway should return 401 without browser challenge"
 $unauthResponse = Invoke-WebRequestAllowError -Uri $Endpoint -Method Get -TimeoutSec 15
 if ([int]$unauthResponse.StatusCode -ne 401) {
@@ -567,7 +636,7 @@ if ([int]$unauthResponse.StatusCode -ne 401) {
 }
 
 Assert-HeaderContains -Response $unauthResponse -HeaderName "Cache-Control" -ExpectedValue "no-store"
-Assert-HeaderContains -Response $unauthResponse -HeaderName "WWW-Authenticate" -ExpectedValue "resource_metadata=`"$ResourceMetadataUrl`""
+Assert-HeaderContains -Response $unauthResponse -HeaderName "WWW-Authenticate" -ExpectedValue "resource_metadata=`"$PublicResourceMetadataUrl`""
 Assert-NoBrowserChallenge -Response $unauthResponse
 Write-Host "Unauthenticated /mcp-chat returned 401 with no-store."
 
@@ -579,8 +648,8 @@ if ([int]$metadataResponse.StatusCode -ne 200) {
 
 Assert-NoBrowserChallenge -Response $metadataResponse
 $metadata = $metadataResponse.Content | ConvertFrom-Json
-if ([string]$metadata.resource -ne $Endpoint) {
-    throw "Expected OAuth protected resource metadata resource '$Endpoint', got '$($metadata.resource)'."
+if ([string]$metadata.resource -ne $OAuthResource) {
+    throw "Expected OAuth protected resource metadata resource '$OAuthResource', got '$($metadata.resource)'."
 }
 
 if (-not $metadata.authorization_servers -or $metadata.authorization_servers.Count -lt 1) {
@@ -599,8 +668,15 @@ if ([int]$rootMetadataResponse.StatusCode -ne 200) {
 
 Assert-NoBrowserChallenge -Response $rootMetadataResponse
 $rootMetadata = $rootMetadataResponse.Content | ConvertFrom-Json
-if ([string]$rootMetadata.resource -ne $Endpoint) {
-    throw "Expected root OAuth protected resource metadata resource '$Endpoint', got '$($rootMetadata.resource)'."
+if ([string]::IsNullOrWhiteSpace([string]$rootMetadata.resource)) {
+    throw "Root OAuth protected resource metadata must publish a resource."
+}
+if (-not [string]::IsNullOrWhiteSpace($RootOAuthResource) -and
+    [string]$rootMetadata.resource -ne $RootOAuthResource) {
+    throw "Expected root OAuth protected resource metadata resource '$RootOAuthResource', got '$($rootMetadata.resource)'."
+}
+if ($Surface -eq "Automation" -and [string]$rootMetadata.resource -eq $OAuthResource) {
+    throw "Root OAuth metadata must not alias the automation resource; use the suffixed automation metadata endpoint."
 }
 
 Write-Host "4/12 OAuth authorization server metadata should expose authorization code endpoints"
@@ -712,8 +788,19 @@ if ([string]$rootOidcMetadata.userinfo_endpoint -ne [string]$oidcMetadata.userin
 }
 
 $token = Get-OptionalBearerToken -Name $TokenEnvironmentVariable
-if ($RunDynamicClientRegistrationSmoke -and $RunPredefinedClientSmoke) {
-    throw "Use only one OAuth smoke mode at a time: -RunDynamicClientRegistrationSmoke or -RunPredefinedClientSmoke."
+$oauthScopes = if ($Surface -eq "Automation") {
+    "openid profile email offline_access governance:scheduled"
+}
+else {
+    "openid profile email offline_access"
+}
+$oauthSmokeModeCount = @(
+    $RunDynamicClientRegistrationSmoke,
+    $RunClientIdMetadataDocumentSmoke,
+    $RunPredefinedClientSmoke
+).Where({ $_ }).Count
+if ($oauthSmokeModeCount -gt 1) {
+    throw "Use only one OAuth smoke mode at a time: DCR, CIMD, or predefined client."
 }
 
 if ($RunDynamicClientRegistrationSmoke) {
@@ -725,9 +812,30 @@ if ($RunDynamicClientRegistrationSmoke) {
 
     $token = Get-OAuthAccessTokenViaDcr `
         -AuthorizationMetadataUrl $AuthorizationServerMetadataUrl `
-        -Resource $Endpoint `
+        -Resource $OAuthResource `
         -Username $oauthUsername `
-        -Password $oauthPassword
+        -Password $oauthPassword `
+        -Scopes $oauthScopes
+}
+elseif ($RunClientIdMetadataDocumentSmoke) {
+    $oauthUsername = Get-OptionalBearerToken -Name $OAuthUsernameEnvironmentVariable
+    $oauthPassword = Get-OptionalBearerToken -Name $OAuthPasswordEnvironmentVariable
+    if ([string]::IsNullOrWhiteSpace($oauthUsername) -or [string]::IsNullOrWhiteSpace($oauthPassword)) {
+        throw "$OAuthUsernameEnvironmentVariable and $OAuthPasswordEnvironmentVariable are required when -RunClientIdMetadataDocumentSmoke is set."
+    }
+    if ([string]::IsNullOrWhiteSpace($ClientIdMetadataDocumentUrl) -or [string]::IsNullOrWhiteSpace($ClientIdMetadataRedirectUri)) {
+        throw "ClientIdMetadataDocumentUrl and ClientIdMetadataRedirectUri are required when -RunClientIdMetadataDocumentSmoke is set."
+    }
+
+    $token = Get-OAuthAccessTokenViaPredefinedClient `
+        -AuthorizationMetadataUrl $AuthorizationServerMetadataUrl `
+        -Resource $OAuthResource `
+        -ClientId $ClientIdMetadataDocumentUrl `
+        -Username $oauthUsername `
+        -Password $oauthPassword `
+        -Scopes $oauthScopes `
+        -RedirectUri $ClientIdMetadataRedirectUri `
+        -RequireCimd
 }
 elseif ($RunPredefinedClientSmoke) {
     $oauthUsername = Get-OptionalBearerToken -Name $OAuthUsernameEnvironmentVariable
@@ -738,10 +846,11 @@ elseif ($RunPredefinedClientSmoke) {
 
     $token = Get-OAuthAccessTokenViaPredefinedClient `
         -AuthorizationMetadataUrl $AuthorizationServerMetadataUrl `
-        -Resource $Endpoint `
+        -Resource $OAuthResource `
         -ClientId $PredefinedClientId `
         -Username $oauthUsername `
-        -Password $oauthPassword
+        -Password $oauthPassword `
+        -Scopes $oauthScopes
 }
 
 if ([string]::IsNullOrWhiteSpace($token)) {

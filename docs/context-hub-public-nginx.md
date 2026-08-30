@@ -29,10 +29,15 @@ Set `TRUSTED_PROXY_NETWORK` to this reverse proxy's exact Docker-network CIDR. C
 | `/mcp-automation` | `automation-gateway:8083/mcp` | Scheduled Governance four-tool least-privilege gateway |
 | `/.well-known/*/mcp-chat` | `chatgpt-gateway:8083` | OAuth/OIDC metadata for chat-agent gateway |
 | `/.well-known/*/mcp-automation` | `automation-gateway:8083` | OAuth/OIDC metadata with the automation resource audience |
-| `/oauth/chat/*` | `chatgpt-gateway:8083` | OAuth authorization code flow |
-| `/userinfo` | `chatgpt-gateway:8083` | OIDC userinfo |
+| `/oauth/chat/*` | `chatgpt-gateway:8083` | Shared OAuth issuer; authorization is bound to the exact general or automation resource |
+| `/userinfo` | `chatgpt-gateway:8083` | Shared-issuer OIDC identity endpoint; it does not grant `/mcp-chat` resource authority |
 
 `/mcp-chat` must stay separate from `/mcp`. `/mcp-automation` must also remain a distinct OAuth resource and upstream; do not proxy it to the broad chat gateway or use `/mcp-chat` as a fallback. Scheduled Automation sees only its four-tool catalog, while interactive chat agents retain the general restricted gateway.
+
+The shared issuer can issue a token for either explicitly configured MCP resource. Nginx must not
+rewrite the `resource` value or route `/mcp-automation` to the general MCP upstream. Each gateway
+enforces its own exact audience again at the resource endpoint, so an automation token can use
+shared `/userinfo` but receives `401` from general `/mcp-chat` and `/api/status`.
 
 ## Cache Policy
 

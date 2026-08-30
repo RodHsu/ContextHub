@@ -39,6 +39,7 @@ internal sealed class ChatGptTestAuthenticationHandler(
             new(ClaimTypes.NameIdentifier, oauth.TestSubject),
             new(ClaimTypes.Name, oauth.TestName),
             new(ClaimTypes.Email, oauth.TestEmail),
+            new("aud", gatewayOptions.Value.PublicMcpUrl),
             new("scope", string.Join(' ', oauth.Scopes))
         };
         var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, GatewayAuthentication.TestScheme));

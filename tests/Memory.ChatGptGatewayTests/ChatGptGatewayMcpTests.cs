@@ -88,6 +88,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         metadata.GetProperty("resource").GetString().Should().Be(AutomationPublicMcpUrl);
         metadata.GetProperty("scopes_supported").EnumerateArray().Select(x => x.GetString())
             .Should().Contain(SecurityScopes.ScheduledGovernance);
+        metadata.GetProperty("scopes_supported").EnumerateArray().Select(x => x.GetString())
+            .Should().Contain(["openid", "profile", "email", "offline_access"]);
 
         using var statusResponse = await client.GetAsync("/api/status");
         statusResponse.EnsureSuccessStatusCode();
@@ -108,8 +110,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             new StringContent("""{"jsonrpc":"2.0","id":"anonymous","method":"tools/list"}""", Encoding.UTF8, "application/json"));
 
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
-        response.Headers.WwwAuthenticate.Select(x => x.ToString())
-            .Should().Contain(x => x.Contains($"resource_metadata=\"{PublicResourceMetadataUrl}\"", StringComparison.Ordinal));
+        var challenges = response.Headers.WwwAuthenticate.Select(x => x.ToString()).ToArray();
+        challenges.Should().ContainSingle();
+        challenges[0].Should().Contain($"resource_metadata=\"{PublicResourceMetadataUrl}\"");
+        challenges[0].Should().Contain("scope=\"openid profile email offline_access\"");
     }
 
     [DockerRequiredFact]
@@ -178,6 +182,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         metadata.GetProperty("scopes_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain(["openid", "profile", "email", "offline_access"]);
+        metadata.GetProperty("scopes_supported").EnumerateArray()
+            .Select(x => x.GetString())
+            .Should().NotContain(SecurityScopes.ScheduledGovernance);
         metadata.GetProperty("bearer_methods_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("header");
@@ -196,7 +203,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         oidcMetadata.GetProperty("registration_endpoint").GetString().Should().Be($"{TestAuthority}/oauth/chat/register");
         oidcMetadata.GetProperty("userinfo_endpoint").GetString().Should().Be($"{TestAuthority}/userinfo");
         oidcMetadata.GetProperty("client_id_metadata_document_supported").GetBoolean().Should().BeTrue();
-        oidcMetadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeFalse();
+        oidcMetadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeTrue();
         oidcMetadata.GetProperty("code_challenge_methods_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("S256");
@@ -338,8 +345,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         metadata.GetProperty("token_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/token");
         metadata.GetProperty("registration_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/register");
         metadata.GetProperty("client_id_metadata_document_supported").GetBoolean().Should().BeTrue();
-        metadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeFalse();
-        oidcMetadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeFalse();
+        metadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeTrue();
+        oidcMetadata.GetProperty("authorization_response_iss_parameter_supported").GetBoolean().Should().BeTrue();
         metadata.GetProperty("token_endpoint_auth_methods_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("none");
@@ -373,7 +380,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var code = callbackQuery["code"].ToString();
         code.Should().NotBeNullOrWhiteSpace();
         callbackQuery["state"].ToString().Should().Be("state-123");
-        callbackQuery.Should().NotContainKey("iss");
+        callbackQuery["iss"].ToString().Should().Be(SelfHostedIssuer);
 
         using var tokenResponse = await client.PostAsync(
             "/oauth/chat/token",
@@ -576,6 +583,43 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task SelfHosted_OAuth_Should_Retain_Dcr_When_Cimd_Is_Disabled()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true,
+            clientIdMetadataDocumentEnabled: false);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+
+        var metadata = await (await client.GetAsync("/.well-known/oauth-authorization-server/mcp-chat"))
+            .Content.ReadFromJsonAsync<JsonElement>();
+        metadata.GetProperty("client_id_metadata_document_supported").GetBoolean().Should().BeFalse();
+        metadata.GetProperty("registration_endpoint").GetString().Should().Be($"{SelfHostedIssuer}/oauth/chat/register");
+
+        using var registration = await client.PostAsJsonAsync(
+            "/oauth/chat/register",
+            new
+            {
+                redirect_uris = new[] { "https://chatgpt.com/connector/oauth/dcr-fallback" },
+                token_endpoint_auth_method = "none",
+                grant_types = new[] { "authorization_code" },
+                response_types = new[] { "code" }
+            });
+        registration.StatusCode.Should().Be(System.Net.HttpStatusCode.Created);
+
+        var verifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+        var challenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(verifier)));
+        var cimdAuthorize = BuildAuthorizePath(
+            "https://chatgpt.com/oauth/client.json",
+            "https://chatgpt.com/connector/oauth/dcr-fallback",
+            challenge,
+            PublicMcpUrl);
+        using var cimdResponse = await client.GetAsync(cimdAuthorize);
+        cimdResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+    }
+
+    [DockerRequiredFact]
     public async Task SelfHosted_OAuth_Dynamic_Client_State_Should_Survive_Gateway_Restarts()
     {
         const string redirectUri = "https://chatgpt.com/connector/oauth/dcr-restart-callback";
@@ -722,7 +766,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 ["authorization_code", "refresh_token"],
                 ["code"],
                 "openid profile email offline_access",
-                ["none", "private_key_jwt"])));
+                ["none", "private_key_jwt"],
+                clientId,
+                "ChatGPT")));
         await ConfigureSelfHostedUserAsync(factory);
 
         using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
@@ -747,7 +793,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 "none",
                 ["authorization_code"],
                 ["code"],
-                "openid profile email")));
+                "openid profile email",
+                null,
+                "https://chatgpt.com/connector/context-hub/client.json",
+                "ChatGPT")));
         using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
@@ -808,7 +857,123 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
-    public async Task General_OAuth_Server_Should_Issue_Audience_Bound_Scheduled_Governance_Token()
+    public async Task SelfHosted_OAuth_Should_Reject_Pkce_Mismatch_Invalid_Code_And_Code_Replay()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true);
+        await ConfigureSelfHostedUserAsync(factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var verifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+        var challenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(verifier)));
+        var redirectUri = "https://chatgpt.com/connector/oauth/pkce-replay";
+        var authorizePath = BuildAuthorizePath(SelfHostedClientId, redirectUri, challenge, PublicMcpUrl);
+        using var authorizeResponse = await client.PostAsync(
+            authorizePath,
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["username"] = "gateway-test-admin",
+                ["password"] = "oauth-password"
+            }));
+        var code = Microsoft.AspNetCore.WebUtilities.QueryHelpers
+            .ParseQuery(authorizeResponse.Headers.Location!.Query)["code"].ToString();
+
+        async Task<HttpResponseMessage> ExchangeAsync(string candidateCode, string candidateVerifier)
+            => await client.PostAsync(
+                "/oauth/chat/token",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "authorization_code",
+                    ["client_id"] = SelfHostedClientId,
+                    ["code"] = candidateCode,
+                    ["redirect_uri"] = redirectUri,
+                    ["code_verifier"] = candidateVerifier,
+                    ["resource"] = PublicMcpUrl
+                }));
+
+        using var pkceMismatch = await ExchangeAsync(code, "wrong-verifier");
+        using var replayAfterFailure = await ExchangeAsync(code, verifier);
+        using var invalidCode = await ExchangeAsync("invalid-code", verifier);
+
+        pkceMismatch.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        replayAfterFailure.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        invalidCode.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+    }
+
+    [DockerRequiredFact]
+    public async Task SelfHosted_OAuth_Should_Reject_Missing_Resource_Unknown_Scope_And_Missing_Automation_Scope()
+    {
+        await using var generalFactory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true);
+        using var general = generalFactory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var verifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+        var challenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(verifier)));
+
+        using var missingResource = await general.GetAsync(BuildAuthorizePath(
+            SelfHostedClientId,
+            "https://chatgpt.com/connector/oauth/missing-resource",
+            challenge,
+            string.Empty));
+        missingResource.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+
+        using var unknownScope = await general.GetAsync(BuildAuthorizePath(
+            SelfHostedClientId,
+            "https://chatgpt.com/connector/oauth/unknown-scope",
+            challenge,
+            PublicMcpUrl,
+            "openid governance:scheduled"));
+        unknownScope.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+
+        await using var automationFactory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true,
+            surface: ChatGptGatewaySurface.Automation);
+        using var automation = automationFactory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        using var missingScheduledScope = await automation.GetAsync(BuildAuthorizePath(
+            SelfHostedClientId,
+            "https://chatgpt.com/connector/oauth/missing-scheduled-scope",
+            challenge,
+            AutomationPublicMcpUrl,
+            "openid profile email offline_access"));
+        missingScheduledScope.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+    }
+
+    [DockerRequiredFact]
+    public async Task Automation_Access_Token_Should_Not_Replay_On_General_Surface()
+    {
+        await using var automationFactory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true,
+            surface: ChatGptGatewaySurface.Automation);
+        await ConfigureSelfHostedUserAsync(automationFactory);
+        using var automation = automationFactory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var token = await CompleteSelfHostedOAuthCodeFlowAsync(
+            automation,
+            SelfHostedClientId,
+            "https://chatgpt.com/connector/oauth/audience-replay",
+            AutomationPublicMcpUrl,
+            "openid profile email offline_access governance:scheduled");
+
+        await using var generalFactory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true);
+        using var general = generalFactory.CreateClient();
+        general.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await general.PostAsync(
+            "/mcp",
+            new StringContent("""{"jsonrpc":"2.0","id":"replay","method":"tools/list"}""", Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+    }
+
+    [DockerRequiredFact]
+    public async Task Shared_OAuth_Issuer_Should_Issue_Automation_Token_Without_Granting_General_Audience()
     {
         await using var factory = new ChatGptGatewayApplicationFactory(
             environment.PostgresConnectionString,
@@ -826,9 +991,47 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "https://chatgpt.com/connector/oauth/scheduled-governance",
             AutomationPublicMcpUrl,
             "openid profile email offline_access governance:scheduled");
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+        jwt.Audiences.Should().ContainSingle(AutomationPublicMcpUrl);
 
-        var jwt = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler().ReadJwtToken(token);
-        jwt.Audiences.Should().Contain(AutomationPublicMcpUrl);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var generalResponse = await client.GetAsync("/api/status");
+        generalResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        using var userInfoResponse = await client.GetAsync("/userinfo");
+        userInfoResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK,
+            "the shared issuer identity endpoint must accept its automation-audience token");
+
+        await using var automationFactory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true,
+            surface: ChatGptGatewaySurface.Automation);
+        using var automation = automationFactory.CreateClient();
+        automation.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var automationResponse = await automation.GetAsync("/api/status");
+        automationResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+    }
+
+    [DockerRequiredFact]
+    public async Task Automation_OAuth_Server_Should_Issue_Audience_Bound_Scheduled_Governance_Token()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true,
+            surface: ChatGptGatewaySurface.Automation);
+        await ConfigureSelfHostedUserAsync(factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+
+        var token = await CompleteSelfHostedOAuthCodeFlowAsync(
+            client,
+            SelfHostedClientId,
+            "https://chatgpt.com/connector/oauth/scheduled-governance",
+            AutomationPublicMcpUrl,
+            "openid profile email offline_access governance:scheduled");
+
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+        jwt.Audiences.Should().ContainSingle(AutomationPublicMcpUrl);
         jwt.Claims.Single(claim => claim.Type == "scope").Value.Split(' ')
             .Should().Contain(SecurityScopes.ScheduledGovernance);
     }
@@ -4548,7 +4751,8 @@ public sealed class ChatGptGatewayApplicationFactory(
     string redisConnectionString,
     bool selfHostedOAuth = false,
     IChatGptOAuthClientMetadataFetcher? clientMetadataFetcher = null,
-    bool includeIssuerInAuthorizationResponse = false,
+    bool includeIssuerInAuthorizationResponse = true,
+    bool clientIdMetadataDocumentEnabled = true,
     string? selfHostedRsaPrivateKey = null,
     ChatGptGatewaySurface surface = ChatGptGatewaySurface.General) : WebApplicationFactory<Program>
 {
@@ -4572,14 +4776,15 @@ public sealed class ChatGptGatewayApplicationFactory(
         builder.UseSetting("ChatGptGateway:OAuth:TestMode", selfHostedOAuth ? "false" : "true");
         builder.UseSetting("ChatGptGateway:Surface", surface.ToString());
         builder.UseSetting("ChatGptGateway:OAuth:Scopes:4", SecurityScopes.ScheduledGovernance);
-        builder.UseSetting("ChatGptGateway:OAuth:AdditionalAudiences:0", surface == ChatGptGatewaySurface.General ? ChatGptGatewayMcpTests.AutomationPublicMcpUrl : string.Empty);
         builder.UseSetting("ChatGptGateway:OAuth:Authority", selfHostedOAuth ? string.Empty : ChatGptGatewayMcpTests.TestAuthority);
         builder.UseSetting("ChatGptGateway:OAuth:SelfHosted", selfHostedOAuth ? "true" : "false");
         builder.UseSetting("ChatGptGateway:OAuth:SelfHostedIssuer", ChatGptGatewayMcpTests.SelfHostedIssuer);
         builder.UseSetting("ChatGptGateway:OAuth:SelfHostedSigningKey", ChatGptGatewayMcpTests.SelfHostedSigningKey);
         builder.UseSetting("ChatGptGateway:OAuth:SelfHostedRsaPrivateKey", selfHostedRsaPrivateKey ?? string.Empty);
+        builder.UseSetting("ChatGptGateway:OAuth:ScheduledGovernanceResource", ChatGptGatewayMcpTests.AutomationPublicMcpUrl);
         builder.UseSetting("ChatGptGateway:OAuth:ClientId", selfHostedOAuth ? ChatGptGatewayMcpTests.SelfHostedClientId : "chatgpt-gateway-test-client");
         builder.UseSetting("ChatGptGateway:OAuth:IncludeIssuerInAuthorizationResponse", includeIssuerInAuthorizationResponse ? "true" : "false");
+        builder.UseSetting("ChatGptGateway:OAuth:ClientIdMetadataDocumentEnabled", clientIdMetadataDocumentEnabled ? "true" : "false");
         builder.UseSetting("ChatGptGateway:OAuth:AllowedRedirectUriPrefixes:0", "https://chatgpt.com/");
         builder.UseSetting("ChatGptGateway:OAuth:AllowedRedirectUriPrefixes:1", "https://chat.openai.com/");
         builder.UseSetting("ChatGptGateway:OAuth:TestBearerToken", ChatGptGatewayTestConstants.TestToken);
@@ -4609,14 +4814,15 @@ public sealed class ChatGptGatewayApplicationFactory(
                 ["ChatGptGateway:OAuth:TestMode"] = selfHostedOAuth ? "false" : "true",
                 ["ChatGptGateway:Surface"] = surface.ToString(),
                 ["ChatGptGateway:OAuth:Scopes:4"] = SecurityScopes.ScheduledGovernance,
-                ["ChatGptGateway:OAuth:AdditionalAudiences:0"] = surface == ChatGptGatewaySurface.General ? ChatGptGatewayMcpTests.AutomationPublicMcpUrl : string.Empty,
                 ["ChatGptGateway:OAuth:Authority"] = selfHostedOAuth ? string.Empty : ChatGptGatewayMcpTests.TestAuthority,
                 ["ChatGptGateway:OAuth:SelfHosted"] = selfHostedOAuth ? "true" : "false",
                 ["ChatGptGateway:OAuth:SelfHostedIssuer"] = ChatGptGatewayMcpTests.SelfHostedIssuer,
                 ["ChatGptGateway:OAuth:SelfHostedSigningKey"] = ChatGptGatewayMcpTests.SelfHostedSigningKey,
                 ["ChatGptGateway:OAuth:SelfHostedRsaPrivateKey"] = selfHostedRsaPrivateKey ?? string.Empty,
+                ["ChatGptGateway:OAuth:ScheduledGovernanceResource"] = ChatGptGatewayMcpTests.AutomationPublicMcpUrl,
                 ["ChatGptGateway:OAuth:ClientId"] = selfHostedOAuth ? ChatGptGatewayMcpTests.SelfHostedClientId : "chatgpt-gateway-test-client",
                 ["ChatGptGateway:OAuth:IncludeIssuerInAuthorizationResponse"] = includeIssuerInAuthorizationResponse ? "true" : "false",
+                ["ChatGptGateway:OAuth:ClientIdMetadataDocumentEnabled"] = clientIdMetadataDocumentEnabled ? "true" : "false",
                 ["ChatGptGateway:OAuth:AllowedRedirectUriPrefixes:0"] = "https://chatgpt.com/",
                 ["ChatGptGateway:OAuth:AllowedRedirectUriPrefixes:1"] = "https://chat.openai.com/",
                 ["ChatGptGateway:OAuth:TestBearerToken"] = ChatGptGatewayTestConstants.TestToken,

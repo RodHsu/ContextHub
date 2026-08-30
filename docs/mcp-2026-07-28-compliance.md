@@ -8,6 +8,10 @@ ContextHub implements the applicable `2026-07-28` stateless Streamable HTTP cont
 
 The twelve-month policy applies to features entered in MCP's deprecated-features registry. It is not a guarantee that removed session transport behavior remains valid for twelve months. ContextHub therefore treats the legacy bridge fallback as a locally managed migration runway, not as part of the modern protocol contract.
 
+The 2026-08-31 OAuth modernization makes Client ID Metadata Documents the preferred client
+registration mechanism. DCR remains an explicit compatibility fallback, and configured static
+clients remain supported. CIMD capability is advertised only when enabled.
+
 ## Compliance Matrix
 
 | Requirement | ContextHub implementation | Verification |
@@ -21,6 +25,8 @@ The twelve-month policy applies to features entered in MCP's deprecated-features
 | Removed stream methods | `GET` and `DELETE` on the MCP endpoint return 405 | Raw HTTP black-box tests |
 | Origin / DNS-rebinding defense | Requests without `Origin` are accepted; present origins must match configured HTTPS origins, otherwise 403 | MCP and gateway origin tests |
 | Authentication per request | `/mcp` bearer-token policy and `/mcp-chat` OAuth bearer validation run on every request | API contract, MCP protocol, and gateway tests |
+| CIMD-first OAuth registration | Hardened server-side HTTPS metadata fetch with exact identity/redirect binding; DCR and static clients remain compatible | Gateway OAuth integration and SSRF negative tests |
+| OAuth resource isolation | Shared issuer binds code/token to resource, scope, PKCE and issuer; each MCP resource rechecks its exact audience | General/automation metadata, token replay, userinfo, and audience tests |
 | Response streaming | A response may still use SSE within its one request; no long-lived server GET stream is used | Real Streamable HTTP tests |
 | Server discovery | `server/discover` advertises supported versions and capabilities | Discovery and bridge negotiation tests |
 | Legacy interoperability | Bridge negotiates modern first, falls back to legacy initialize, and only legacy mode retains an optional session id | Bridge fallback and retry tests |
@@ -45,8 +51,28 @@ The full upstream conformance catalog contains fixture-specific tools and conten
 | Medium | OAuth dynamic registration/token flows and Dashboard login lacked request throttling | Added IP-partitioned fixed-window limits for authorization, registration, token, and production Dashboard login endpoints |
 | Medium | The storage migration preview rendered a database-derived column name through `MarkupString` | HTML-encoded the value before rendering |
 | Medium | The default ChatGPT OAuth scope included instance-wide runtime-log access | Removed `logs:read` from the default OAuth actor scope; privileged callers must request it explicitly |
+| High | CIMD metadata fetch trusted a broad URL client ID without complete outbound-request controls | Added public-only DNS validation, validated-address connection pinning, proxy disablement, per-hop redirect checks, HTTPS/stable URL policy, bounded timeout/size/content type, and duplicate-field rejection |
+| High | The shared OAuth issuer and MCP resource-server audience boundaries were conflated | Added explicit automation resource authorization plus exact per-resource audience enforcement; automation tokens work with shared `userinfo` but receive `401` from general MCP/status endpoints |
+| Medium | OAuth challenges could contain duplicate `WWW-Authenticate` values | Consolidated challenge generation to one resource-metadata and scope-bearing challenge |
 
 ## Validation Evidence
+
+2026-08-31 v1.1.92 candidate validation:
+
+- Full `ContextHub.slnx` regression passed 401/401: API contract 42, ChatGPT gateway 95,
+  Compose smoke 1, Dashboard 106, integration 22, MCP protocol 21, and unit 114.
+- The SSRF-focused CIMD suite passed 36/36. It covers loopback/private/link-local/reserved IPv4
+  and IPv6, mixed DNS answers, redirect rebinding, timeout, oversize, wrong content type,
+  malformed/duplicate JSON, identity mismatch, and the current ChatGPT metadata shape.
+- An isolated v1.1.92 Compose stack reached healthy gateway/MCP dependencies. Raw HTTP simulation
+  fetched the official ChatGPT CIMD document, completed general and automation pre-login authorize
+  validation, retained DCR fallback, and rejected wrong scope, resource, and redirect cases.
+- `dotnet format ContextHub.slnx --verify-no-changes --no-restore`, both development and release
+  Compose validation, PowerShell parser validation, and `git diff --check` passed.
+- These results are pre-deployment source/image evidence. Production metadata, OAuth, edge routing,
+  and controlled ChatGPT App acceptance require separate post-deploy read-back.
+
+Historical 2026-08-12 validation:
 
 - All 294 automated tests passed across unit, MCP protocol, API contract, ChatGPT gateway, integration, Compose smoke, and Dashboard suites.
 - `dotnet build ContextHub.slnx --no-restore`, `dotnet format ContextHub.slnx --verify-no-changes --no-restore`, `git diff --check`, and `docker compose config --quiet` passed.

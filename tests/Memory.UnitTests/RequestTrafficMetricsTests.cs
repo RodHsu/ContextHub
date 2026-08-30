@@ -19,7 +19,7 @@ public sealed class RequestTrafficMetricsTests
         using var response = await client.GetAsync("http://localhost/health/ready");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(1, collector.GetRecentSamples(1).Single().OutboundRequests);
+        Assert.Equal(1, collector.GetRecentSampleTotal(2).OutboundRequests);
     }
 
     [Fact]
@@ -38,7 +38,7 @@ public sealed class RequestTrafficMetricsTests
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         }
 
-        Assert.Equal(0, collector.GetRecentSamples(1).Single().OutboundRequests);
+        Assert.Equal(0, collector.GetRecentSampleTotal(2).OutboundRequests);
     }
 
     [Fact]

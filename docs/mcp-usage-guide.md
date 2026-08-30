@@ -304,6 +304,20 @@ Recommended OAuth scopes:
 openid profile email offline_access
 ```
 
+The authorization server supports Client ID Metadata Documents (CIMD) as the preferred MCP
+`2026-07-28` client-registration path. A CIMD `client_id` must be an exact, stable HTTPS URL with
+a non-root path. ContextHub fetches it without credentials through an SSRF-hardened client,
+revalidates DNS and every redirect, and requires exact `client_id` and `redirect_uri` binding.
+Authorization and token requests must carry the exact MCP resource, PKCE `S256`, and only scopes
+published for that gateway surface. Dynamic Client Registration remains available only as a
+compatibility fallback, and configured static clients remain supported.
+
+The automation resource additionally requires `governance:scheduled`; that scope is neither
+advertised nor accepted for the general `/mcp-chat` resource. The shared issuer may issue an
+automation-audience token through `/oauth/chat/*`, and `/userinfo` may describe that identity, but
+the token cannot be replayed against general `/mcp-chat` or `/api/status` because each resource
+endpoint independently enforces its exact audience.
+
 ## Diagnostics
 
 Raw full MCP diagnostic:
@@ -316,6 +330,17 @@ Chat-agent gateway diagnostic:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 -Endpoint https://context-hub.example.com/mcp-chat
+```
+
+CIMD-first OAuth smoke (the metadata document must be hosted at the supplied `client_id` URL):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-contexthub-mcp-chat.ps1 `
+  -Endpoint https://context-hub.example.com/mcp-chat `
+  -RunClientIdMetadataDocumentSmoke `
+  -ClientIdMetadataDocumentUrl https://client.example.com/oauth/client.json `
+  -ClientIdMetadataRedirectUri https://chatgpt.com/connector_platform_oauth_redirect `
+  -RequireAuthorizationToken
 ```
 
 Authorized chat-agent simulation:

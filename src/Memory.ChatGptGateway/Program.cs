@@ -42,6 +42,8 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IPasswordHasher<object>, PasswordHasher<object>>();
+builder.Services.AddSingleton<IClientIdMetadataAddressResolver, DnsClientIdMetadataAddressResolver>();
+builder.Services.AddSingleton<IClientIdMetadataHttpClientFactory, PinnedClientIdMetadataHttpClientFactory>();
 builder.Services.AddSingleton<IChatGptOAuthClientMetadataFetcher, HttpChatGptOAuthClientMetadataFetcher>();
 builder.Services.AddMemoryApplication();
 builder.Services.AddMemoryInfrastructure(builder.Configuration, "chatgpt-gateway");
@@ -56,6 +58,12 @@ if (builder.Environment.IsProduction())
 {
     RequireAbsoluteHttpsUrl(gatewayOptions.PublicMcpUrl, "ChatGptGateway:PublicMcpUrl");
     RequireAbsoluteHttpsUrl(gatewayOptions.PublicResourceMetadataUrl, "ChatGptGateway:PublicResourceMetadataUrl");
+    if (!string.IsNullOrWhiteSpace(gatewayOptions.OAuth.ScheduledGovernanceResource))
+    {
+        RequireAbsoluteHttpsUrl(
+            gatewayOptions.OAuth.ScheduledGovernanceResource,
+            "ChatGptGateway:OAuth:ScheduledGovernanceResource");
+    }
 }
 
 var rsaSigningCredentials = gatewayOptions.OAuth.SelfHosted && !string.IsNullOrWhiteSpace(gatewayOptions.OAuth.SelfHostedRsaPrivateKey)
@@ -90,7 +98,8 @@ else if (gatewayOptions.OAuth.SelfHosted)
             {
                 OnChallenge = context =>
                 {
-                    AppendOAuthResourceChallenge(context.HttpContext);
+                    context.HandleResponse();
+                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     return Task.CompletedTask;
                 }
             };
@@ -116,7 +125,8 @@ else
             {
                 OnChallenge = context =>
                 {
-                    AppendOAuthResourceChallenge(context.HttpContext);
+                    context.HandleResponse();
+                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     return Task.CompletedTask;
                 }
             };
@@ -261,6 +271,19 @@ app.Use(async (context, next) =>
     await next();
 });
 app.UseAuthentication();
+app.Use(async (context, next) =>
+{
+    if (context.User.Identity?.IsAuthenticated == true &&
+        RequiresGatewayResourceAudience(context.Request.Path) &&
+        !HasExpectedAudience(context.User, gatewayOptions.PublicMcpUrl))
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        AppendOAuthResourceChallenge(context);
+        return;
+    }
+
+    await next();
+});
 app.Use(async (context, next) =>
 {
     if (IsPublicPath(context.Request.Path) ||
@@ -620,27 +643,42 @@ static void RequireAbsoluteHttpsUrl(string? value, string key)
 
 static string[] ResolveSelfHostedAudiences(ChatGptGatewayOptions options)
 {
-    var audiences = new List<string>
-    {
-        Required(options.OAuth.ClientId, "ChatGptGateway:OAuth:ClientId")
-    };
+    var audiences = new List<string>();
     if (!string.IsNullOrWhiteSpace(options.PublicMcpUrl))
     {
         audiences.Add(options.PublicMcpUrl.Trim());
+        if (ChatGptGatewaySurfaceResolver.Resolve(options.Surface) == ChatGptGatewaySurface.General &&
+            !string.IsNullOrWhiteSpace(options.OAuth.ScheduledGovernanceResource))
+        {
+            audiences.Add(options.OAuth.ScheduledGovernanceResource.Trim());
+        }
     }
 
-    audiences.AddRange(options.OAuth.AdditionalAudiences
-        .Where(audience => !string.IsNullOrWhiteSpace(audience))
-        .Select(audience => audience.Trim()));
+    else
+    {
+        audiences.Add(Required(options.OAuth.ClientId, "ChatGptGateway:OAuth:ClientId"));
+    }
 
     return audiences.Distinct(StringComparer.Ordinal).ToArray();
 }
+
+static bool RequiresGatewayResourceAudience(PathString path)
+    => path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) ||
+       string.Equals(path.Value, "/api/status", StringComparison.OrdinalIgnoreCase);
+
+static bool HasExpectedAudience(ClaimsPrincipal user, string expectedAudience)
+    => !string.IsNullOrWhiteSpace(expectedAudience) &&
+       user.FindAll("aud").Any(claim => string.Equals(
+           claim.Value,
+           expectedAudience.Trim(),
+           StringComparison.Ordinal));
 
 static void AppendOAuthResourceChallenge(HttpContext context)
 {
     var options = context.RequestServices.GetRequiredService<IOptions<ChatGptGatewayOptions>>().Value;
     var metadataUrl = ResolvePublicResourceMetadataUrl(context, options);
-    var challenge = $"Bearer resource_metadata=\"{metadataUrl}\"";
+    var requiredScopes = ChatGptGatewayOAuthPolicy.ResolveEffectiveScopes(options);
+    var challenge = $"Bearer resource_metadata=\"{metadataUrl}\", scope=\"{string.Join(' ', requiredScopes)}\"";
     context.Response.Headers.Append("WWW-Authenticate", challenge);
 }
 
@@ -672,7 +710,7 @@ static IResult CreateProtectedResourceMetadata(HttpContext context, IOptions<Cha
     var metadata = new OAuthProtectedResourceMetadata(
         publicMcpUrl,
         [authorizationServer],
-        NormalizeScopes(value.OAuth.Scopes),
+        ChatGptGatewayOAuthPolicy.ResolveEffectiveScopes(value),
         ["header"],
         "ContextHub MCP Chat Gateway");
 
@@ -692,9 +730,9 @@ static IResult CreateAuthorizationServerMetadata(HttpContext context, IOptions<C
         ["authorization_code", "refresh_token"],
         ["S256"],
         GetTokenEndpointAuthenticationMethods(value.OAuth),
-        true,
+        value.OAuth.ClientIdMetadataDocumentEnabled,
         value.OAuth.IncludeIssuerInAuthorizationResponse,
-        NormalizeScopes(value.OAuth.Scopes));
+        ChatGptGatewayOAuthPolicy.ResolveEffectiveScopes(value));
 
     return Results.Json(metadata);
 }
@@ -714,11 +752,11 @@ static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGa
         ["authorization_code", "refresh_token"],
         ["S256"],
         GetTokenEndpointAuthenticationMethods(value.OAuth),
-        true,
+        value.OAuth.ClientIdMetadataDocumentEnabled,
         value.OAuth.IncludeIssuerInAuthorizationResponse,
         ["public"],
         [string.IsNullOrWhiteSpace(value.OAuth.SelfHostedRsaPrivateKey) ? "HS256" : "RS256"],
-        NormalizeScopes(value.OAuth.Scopes),
+        ChatGptGatewayOAuthPolicy.ResolveEffectiveScopes(value),
         ["sub", "name", "email", "tenant_id", "tenant_user_id"]);
 
     return Results.Json(metadata);
@@ -744,13 +782,6 @@ static OpenIdUserInfo CreateUserInfo(ClaimsPrincipal user)
         user.FindFirstValue("tenant_id"),
         user.FindFirstValue("tenant_user_id"));
 }
-
-static string[] NormalizeScopes(IEnumerable<string> scopes)
-    => scopes
-        .Where(scope => !string.IsNullOrWhiteSpace(scope))
-        .Select(scope => scope.Trim())
-        .Distinct(StringComparer.Ordinal)
-        .ToArray();
 
 static string[] GetTokenEndpointAuthenticationMethods(OAuthOptions options)
     => string.IsNullOrWhiteSpace(options.ClientSecret)

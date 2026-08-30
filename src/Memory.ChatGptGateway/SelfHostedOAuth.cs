@@ -30,20 +30,33 @@ internal sealed class SelfHostedOAuthService(
         IQueryCollection query,
         CancellationToken cancellationToken)
     {
-        var options = gatewayOptions.Value.OAuth;
+        var gateway = gatewayOptions.Value;
+        var options = gateway.OAuth;
         var clientId = query["client_id"].ToString();
         var redirectUri = query["redirect_uri"].ToString();
         var responseType = query["response_type"].ToString();
         var codeChallenge = query["code_challenge"].ToString();
         var codeChallengeMethod = query["code_challenge_method"].ToString();
-        var scope = NormalizeScopes(query["scope"].ToString(), options.Scopes);
+        var requestedScope = query["scope"].ToString();
         var state = query["state"].ToString();
         var resource = query["resource"].ToString();
 
         if (!options.SelfHosted)
         {
-            LogOAuthAuthorizeValidation(clientId, redirectUri, scope, resource, "failed", "self_hosted_disabled");
+            LogOAuthAuthorizeValidation(clientId, redirectUri, requestedScope, resource, "failed", "self_hosted_disabled");
             return AuthorizeValidationResult.Fail("Self-hosted OAuth is not enabled.");
+        }
+
+        if (!ChatGptGatewayOAuthPolicy.IsExpectedResource(resource, gateway))
+        {
+            LogOAuthAuthorizeValidation(clientId, redirectUri, requestedScope, resource, "failed", "resource_mismatch");
+            return AuthorizeValidationResult.Fail("Invalid OAuth resource.");
+        }
+
+        if (!ChatGptGatewayOAuthPolicy.TryResolveRequestedScopes(requestedScope, resource, gateway, out var scope))
+        {
+            LogOAuthAuthorizeValidation(clientId, redirectUri, requestedScope, resource, "failed", "invalid_scope");
+            return AuthorizeValidationResult.Fail("Invalid OAuth scope.");
         }
 
         var clientValidation = await ValidateAuthorizeClientAsync(clientId, redirectUri, options, cancellationToken);
@@ -273,16 +286,6 @@ internal sealed class SelfHostedOAuthService(
             return OAuthTokenResult.Fail("OAuth resource binding mismatch.");
         }
 
-        if (string.IsNullOrWhiteSpace(resource) && !string.IsNullOrWhiteSpace(payload.Resource))
-        {
-            logger.LogWarning(
-                "ChatGPT OAuth token request omitted resource. event={Event} clientKind={ClientKind} resourcePresent={ResourcePresent} status={Status}",
-                "chatgpt_oauth_token",
-                GetClientKind(clientId),
-                false,
-                "legacy_accepted");
-        }
-
         if (!ValidatePkce(payload.CodeChallenge, codeVerifier))
         {
             LogOAuthToken(clientId, "authorization_code", resource, "failed", "invalid_pkce_verifier");
@@ -490,7 +493,8 @@ internal sealed class SelfHostedOAuthService(
                 : ClientValidationResult.Fail("registered_redirect_mismatch");
         }
 
-        if (!IsChatGptClientMetadataDocumentId(clientId))
+        if (!options.ClientIdMetadataDocumentEnabled ||
+            !ClientIdMetadataDocumentSecurity.TryValidateDocumentUrl(clientId, out _))
         {
             return ClientValidationResult.Fail("unknown_client");
         }
@@ -498,7 +502,10 @@ internal sealed class SelfHostedOAuthService(
         try
         {
             var metadata = await clientMetadataFetcher.FetchAsync(clientId, cancellationToken);
-            if (metadata?.RedirectUris is null ||
+            if (metadata is null ||
+                !string.Equals(metadata.ClientId, clientId, StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(metadata.ClientName) ||
+                metadata.RedirectUris is null ||
                 !metadata.RedirectUris.Contains(redirectUri, StringComparer.Ordinal))
             {
                 return ClientValidationResult.Fail("cimd_redirect_mismatch");
@@ -512,6 +519,18 @@ internal sealed class SelfHostedOAuthService(
             if (!supportsPublicClient)
             {
                 return ClientValidationResult.Fail("cimd_token_auth_method_unsupported");
+            }
+
+            if (metadata.GrantTypes is { Count: > 0 } &&
+                !metadata.GrantTypes.Contains("authorization_code", StringComparer.Ordinal))
+            {
+                return ClientValidationResult.Fail("cimd_authorization_code_unsupported");
+            }
+
+            if (metadata.ResponseTypes is { Count: > 0 } &&
+                !metadata.ResponseTypes.Contains("code", StringComparer.Ordinal))
+            {
+                return ClientValidationResult.Fail("cimd_code_response_unsupported");
             }
 
             return ClientValidationResult.Ok();
@@ -550,29 +569,18 @@ internal sealed class SelfHostedOAuthService(
         }
 
         return clientId.StartsWith("contexthub-chatgpt-dcr-", StringComparison.Ordinal) ||
-               IsChatGptClientMetadataDocumentId(clientId);
+               options.ClientIdMetadataDocumentEnabled &&
+               ClientIdMetadataDocumentSecurity.TryValidateDocumentUrl(clientId, out _);
     }
 
     private static bool IsTokenResourceAllowed(string codeResource, string? tokenResource)
     {
-        if (string.IsNullOrWhiteSpace(tokenResource))
-        {
-            return true;
-        }
-
-        if (string.IsNullOrWhiteSpace(codeResource))
+        if (string.IsNullOrWhiteSpace(tokenResource) || string.IsNullOrWhiteSpace(codeResource))
         {
             return false;
         }
 
         return string.Equals(codeResource, tokenResource.Trim(), StringComparison.Ordinal);
-    }
-
-    private static bool IsChatGptClientMetadataDocumentId(string clientId)
-    {
-        return Uri.TryCreate(clientId, UriKind.Absolute, out var uri) &&
-               uri.Scheme == Uri.UriSchemeHttps &&
-               string.Equals(uri.Host, "chatgpt.com", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string[] NormalizeRegistrationList(IReadOnlyList<string>? values, string[] defaults)
@@ -683,20 +691,6 @@ internal sealed class SelfHostedOAuthService(
 
     private static string GetHost(string value)
         => Uri.TryCreate(value, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
-
-    private static string NormalizeScopes(string requested, IReadOnlyList<string> supported)
-    {
-        var supportedSet = supported
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .Select(x => x.Trim())
-            .ToHashSet(StringComparer.Ordinal);
-        var requestedScopes = requested
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var accepted = requestedScopes.Length == 0
-            ? supportedSet
-            : requestedScopes.Where(supportedSet.Contains);
-        return string.Join(' ', accepted);
-    }
 
     private static bool ValidatePkce(string expectedChallenge, string codeVerifier)
         => string.Equals(expectedChallenge, Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(codeVerifier))), StringComparison.Ordinal);
