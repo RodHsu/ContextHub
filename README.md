@@ -205,6 +205,28 @@ Scheduled ChatGPT governance connects to a separate least-privilege resource:
 
 This surface publishes exactly four tools: `scheduled_governance_contract_get`, `scheduled_governance_review`, `scheduled_governance_execute`, and `scheduled_governance_run_get`. Review resolves the actor's full authorized durable scope server-side and returns an immutable snapshot, count invariant, and one fixed decision (`NoOpConverged`, `ReversibleExecutionRequired`, `HumanDecisionOnly`, or `CoverageIncomplete`). Execute accepts no ProjectIds, action list, risk policy, hard-delete, matured-delete, dry-run, or execution-mode controls; it can run only the server's fixed low-risk reversible policy with snapshot/cursor binding and authorization revalidation. Irreversible matured retention remains exclusively owned by the internal Worker. General `/mcp` and `/mcp-chat` capabilities are unchanged.
 
+### ChatGPT App connections
+
+Register the two resources as separate ChatGPT Apps. Do not replace the general connection with the governance connection, and do not use `/mcp-chat` as a fallback for scheduled-governance acceptance.
+
+| Field | General App | Scheduled Governance App |
+| --- | --- | --- |
+| Name | `ContextHub` | `ContextHub Governance` |
+| Description | `ContextHub project knowledge, collaboration, and governed write workflows.` | `Least-privilege scheduled governance for ContextHub with reversible bounded execution only.` |
+| MCP server URL | `https://context-hub.example.com/mcp-chat` | `https://context-hub.example.com/mcp-automation` |
+| Authentication | OAuth with CIMD | OAuth with CIMD |
+| Expected tool surface | The restricted general ChatGPT catalog | Exactly the four `scheduled_governance_*` tools listed above |
+
+Both MCP initialization responses publish the ContextHub title, description, website, and same-origin `/favicon.svg` icon. A client may cache connection metadata, so refresh or reconnect the App after a server release. If the connection is later packaged as an installable ChatGPT/Codex plugin, also put a PNG icon and logo under the plugin's `assets/` folder and declare `interface.composerIcon` and `interface.logo` in `.codex-plugin/plugin.json`; MCP `serverInfo.icons` and install-surface manifest assets are complementary.
+
+The linked identity comes from the ContextHub tenant user that actually signs in during OAuth, not from the user's ChatGPT account. ContextHub publishes that knowledge-base account as stable `sub`, `preferred_username`, and `name` claims. It publishes `email` only when the stored value is not a reserved placeholder such as `admin@example.com`; a placeholder must never override the connected knowledge-base username in the ChatGPT UI. An administrator can correct an existing user through the authenticated `PATCH /api/security/users/{userId}` application endpoint; do not update PostgreSQL directly. Disconnect and authorize both Apps again after an identity change because an existing OAuth connection can retain earlier claims.
+
+Verification ownership is split deliberately:
+
+- Codex verifies source changes, focused and full regression, Docker/HTTP/OAuth/MCP security simulations, deployment, and production metadata read-back.
+- The user performs the one-time ChatGPT UI installation or OAuth authorization when the host requires direct interaction, then confirms that the icon and linked account label are correct.
+- GPT, with the `ContextHub Governance` App connected, verifies that discovery returns exactly four tools and performs controlled acceptance with a fresh `governanceRunId`. Only after that pass may the existing four-hour governance Automation be migrated; manual runs do not count toward the six-natural-schedule reliability gate.
+
 ## Embedding Profiles
 
 Most deployments should change only:

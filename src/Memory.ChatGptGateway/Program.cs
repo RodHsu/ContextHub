@@ -136,14 +136,33 @@ else
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<ChatGptGatewayTools>();
 builder.Services.AddScoped<ScheduledGovernanceTools>();
+var publicMcpUri = ResolveConfiguredPublicMcpUri(gatewayOptions.PublicMcpUrl);
 var mcpServerBuilder = builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
 {
     Name = gatewaySurface == ChatGptGatewaySurface.Automation
         ? "Memory.ScheduledGovernanceGateway"
         : "Memory.ChatGptGateway",
+    Title = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? "ContextHub Governance"
+        : "ContextHub",
     Version = gatewaySurface == ChatGptGatewaySurface.Automation
         ? ScheduledGovernanceToolCatalog.PublicationIdentity
-        : ChatGptGatewayToolCatalog.PublicationIdentity
+        : ChatGptGatewayToolCatalog.PublicationIdentity,
+    Description = gatewaySurface == ChatGptGatewaySurface.Automation
+        ? "Least-privilege scheduled governance for ContextHub."
+        : "Project knowledge and collaboration gateway for ContextHub.",
+    WebsiteUrl = publicMcpUri is null ? null : new Uri(publicMcpUri, "/").AbsoluteUri,
+    Icons = publicMcpUri is null
+        ? null
+        :
+        [
+            new Icon
+            {
+                Source = new Uri(publicMcpUri, "/favicon.svg").AbsoluteUri,
+                MimeType = "image/svg+xml",
+                Sizes = ["any"]
+            }
+        ]
 })
     .WithHttpTransport(options => options.Stateless = true)
     .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (context, cancellationToken) =>
@@ -630,6 +649,12 @@ static string Required(string value, string key)
         ? throw new InvalidOperationException($"{key} is required when ChatGptGateway:OAuth:TestMode is false.")
         : value.Trim();
 
+static Uri? ResolveConfiguredPublicMcpUri(string? publicMcpUrl)
+    => Uri.TryCreate(publicMcpUrl?.Trim(), UriKind.Absolute, out var uri) &&
+       string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+        ? uri
+        : null;
+
 static void RequireAbsoluteHttpsUrl(string? value, string key)
 {
     if (string.IsNullOrWhiteSpace(value) ||
@@ -757,7 +782,7 @@ static IResult CreateOpenIdConfiguration(HttpContext context, IOptions<ChatGptGa
         ["public"],
         [string.IsNullOrWhiteSpace(value.OAuth.SelfHostedRsaPrivateKey) ? "HS256" : "RS256"],
         ChatGptGatewayOAuthPolicy.ResolveEffectiveScopes(value),
-        ["sub", "name", "email", "tenant_id", "tenant_user_id"]);
+        ["sub", "name", "preferred_username", "email", "tenant_id", "tenant_user_id"]);
 
     return Results.Json(metadata);
 }
@@ -771,13 +796,14 @@ static OpenIdUserInfo CreateUserInfo(ClaimsPrincipal user)
     var name = user.FindFirstValue("name") ??
                user.FindFirstValue(ClaimTypes.Name) ??
                subject;
-    var email = user.FindFirstValue("email") ??
-                user.FindFirstValue(ClaimTypes.Email) ??
-                string.Empty;
+    var preferredUsername = user.FindFirstValue("preferred_username") ?? subject;
+    var email = OAuthKnowledgeBaseIdentity.ResolvePublishedEmail(
+        user.FindFirstValue("email") ?? user.FindFirstValue(ClaimTypes.Email));
 
     return new OpenIdUserInfo(
         subject,
         name,
+        preferredUsername,
         email,
         user.FindFirstValue("tenant_id"),
         user.FindFirstValue("tenant_user_id"));
@@ -910,7 +936,10 @@ internal sealed record OAuthTokenResponse(
 internal sealed record OpenIdUserInfo(
     [property: JsonPropertyName("sub")] string Subject,
     [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("email")] string Email,
+    [property: JsonPropertyName("preferred_username")] string PreferredUsername,
+    [property: JsonPropertyName("email")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Email,
     [property: JsonPropertyName("tenant_id")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? TenantId,

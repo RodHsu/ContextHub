@@ -47,6 +47,41 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     });
 
     [DockerRequiredFact]
+    public async Task Gateway_Surfaces_Should_Publish_Branded_Server_Info()
+    {
+        static async Task<JsonElement> GetServerInfoAsync(ChatGptGatewayApplicationFactory factory)
+        {
+            using var client = CreateAuthorizedClient(factory);
+            var payload = await SendMcpAsync(client, null, 1, "tools/list", new { });
+            return ExtractSseJson(payload)
+                .GetProperty("result")
+                .GetProperty("_meta")
+                .GetProperty("io.modelcontextprotocol/serverInfo")
+                .Clone();
+        }
+
+        static void AssertBrand(JsonElement serverInfo, string expectedTitle)
+        {
+            serverInfo.GetProperty("title").GetString().Should().Be(expectedTitle);
+            serverInfo.GetProperty("websiteUrl").GetString().Should().Be("https://context-hub.example.test/");
+            var icon = serverInfo.GetProperty("icons").EnumerateArray().Should().ContainSingle().Subject;
+            icon.GetProperty("src").GetString().Should().Be("https://context-hub.example.test/favicon.svg");
+            icon.GetProperty("mimeType").GetString().Should().Be("image/svg+xml");
+            icon.GetProperty("sizes").EnumerateArray().Select(x => x.GetString()).Should().Equal("any");
+        }
+
+        var generalServerInfo = await GetServerInfoAsync(environment.GetFactory());
+        AssertBrand(generalServerInfo, "ContextHub");
+
+        await using var automationFactory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            surface: ChatGptGatewaySurface.Automation);
+        var automationServerInfo = await GetServerInfoAsync(automationFactory);
+        AssertBrand(automationServerInfo, "ContextHub Governance");
+    }
+
+    [DockerRequiredFact]
     public async Task Automation_Surface_Should_Publish_Only_Four_Least_Privilege_Tools()
     {
         await using var factory = new ChatGptGatewayApplicationFactory(
@@ -300,7 +335,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var dbContext = setupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var passwordHasher = setupScope.ServiceProvider.GetRequiredService<IPasswordHasher<object>>();
         var user = await dbContext.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
-        user.Email = "oauth-user@example.test";
+        user.Email = "oauth-test-user@wjcy.org";
         user.DisplayName = "OAuth Test User";
         user.PasswordHash = passwordHasher.HashPassword(new object(), "oauth-password");
         await dbContext.SaveChangesAsync();
@@ -405,6 +440,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         tokenJson.GetProperty("scope").GetString().Should().Contain("offline_access");
         new JwtSecurityTokenHandler().ReadJwtToken(accessToken)
             .Audiences.Should().Contain(PublicMcpUrl);
+        var parsedIdToken = new JwtSecurityTokenHandler().ReadJwtToken(idToken);
+        parsedIdToken.Claims.Should().Contain(x => x.Type == "preferred_username" && x.Value == "gateway-test-admin");
+        parsedIdToken.Claims.Should().Contain(x => x.Type == JwtRegisteredClaimNames.Email && x.Value == "oauth-test-user@wjcy.org");
 
         using var refreshResponse = await client.PostAsync(
             "/oauth/chat/token",
@@ -436,7 +474,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var userInfo = await userInfoResponse.Content.ReadFromJsonAsync<JsonElement>();
         userInfo.GetProperty("sub").GetString().Should().Be("gateway-test-admin");
         userInfo.GetProperty("name").GetString().Should().Be("OAuth Test User");
-        userInfo.GetProperty("email").GetString().Should().Be("oauth-user@example.test");
+        userInfo.GetProperty("preferred_username").GetString().Should().Be("gateway-test-admin");
+        userInfo.GetProperty("email").GetString().Should().Be("oauth-test-user@wjcy.org");
         userInfo.GetProperty("tenant_id").GetString().Should().NotBeNullOrWhiteSpace();
         userInfo.GetProperty("tenant_user_id").GetString().Should().NotBeNullOrWhiteSpace();
 
@@ -463,6 +502,54 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         initializeResponse.EnsureSuccessStatusCode();
         initializeResponse.Headers.TryGetValues("Mcp-Session-Id", out _).Should().BeFalse(
             "the upgraded MCP transport is stateless while OAuth authorization remains enforced");
+    }
+
+    [DockerRequiredFact]
+    public async Task SelfHosted_OAuth_UserInfo_Should_Publish_Connected_KnowledgeBase_Account_Without_Placeholder_Email()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true);
+        await ConfigureSelfHostedUserAsync(factory);
+
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var dbContext = setupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var user = await dbContext.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
+            user.Email = "admin@example.com";
+            await dbContext.SaveChangesAsync();
+        }
+
+        string accessToken;
+        try
+        {
+            using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+            accessToken = await CompleteSelfHostedOAuthCodeFlowAsync(
+                client,
+                SelfHostedClientId,
+                "https://chatgpt.com/connector/oauth/knowledge-base-account",
+                PublicMcpUrl);
+        }
+        finally
+        {
+            using var restoreScope = factory.Services.CreateScope();
+            var dbContext = restoreScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var user = await dbContext.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
+            user.Email = "oauth-test-user@wjcy.org";
+            await dbContext.SaveChangesAsync();
+        }
+
+        using var userInfoClient = factory.CreateClient();
+        userInfoClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using var userInfoResponse = await userInfoClient.GetAsync("/userinfo");
+        userInfoResponse.EnsureSuccessStatusCode();
+        var userInfo = await userInfoResponse.Content.ReadFromJsonAsync<JsonElement>();
+
+        userInfo.GetProperty("sub").GetString().Should().Be("gateway-test-admin");
+        userInfo.GetProperty("preferred_username").GetString().Should().Be("gateway-test-admin");
+        userInfo.GetProperty("name").GetString().Should().Be("OAuth Test User");
+        userInfo.TryGetProperty("email", out _).Should().BeFalse();
     }
 
     [DockerRequiredFact]
@@ -4419,7 +4506,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var dbContext = setupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var passwordHasher = setupScope.ServiceProvider.GetRequiredService<IPasswordHasher<object>>();
         var user = await dbContext.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
-        user.Email = "oauth-user@example.test";
+        user.Email = "oauth-test-user@wjcy.org";
         user.DisplayName = "OAuth Test User";
         user.PasswordHash = passwordHasher.HashPassword(new object(), "oauth-password");
         await dbContext.SaveChangesAsync();

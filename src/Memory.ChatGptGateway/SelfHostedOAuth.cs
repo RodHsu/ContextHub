@@ -395,16 +395,23 @@ internal sealed class SelfHostedOAuthService(
             ? throw new InvalidOperationException("ChatGptGateway:OAuth:SelfHostedIssuer is required when SelfHosted is true.")
             : options.SelfHostedIssuer.Trim().TrimEnd('/');
         var now = DateTime.UtcNow;
+        var accountName = OAuthKnowledgeBaseIdentity.ResolveAccountName(payload.Username, payload.DisplayName);
+        var publishedEmail = OAuthKnowledgeBaseIdentity.ResolvePublishedEmail(payload.Email);
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, payload.Username),
             new(ClaimTypes.NameIdentifier, payload.Username),
-            new(ClaimTypes.Name, string.IsNullOrWhiteSpace(payload.DisplayName) ? payload.Username : payload.DisplayName),
-            new(ClaimTypes.Email, payload.Email),
+            new(ClaimTypes.Name, accountName),
+            new("preferred_username", payload.Username),
             new("scope", payload.Scope),
             new("tenant_id", payload.TenantId.ToString("D")),
             new("tenant_user_id", payload.UserId.ToString("D"))
         };
+        if (publishedEmail is not null)
+        {
+            claims.Add(new Claim(ClaimTypes.Email, publishedEmail));
+        }
+
         var token = new JwtSecurityToken(
             issuer,
             string.IsNullOrWhiteSpace(payload.Resource) ? options.ClientId : payload.Resource,
@@ -421,15 +428,21 @@ internal sealed class SelfHostedOAuthService(
             ? throw new InvalidOperationException("ChatGptGateway:OAuth:SelfHostedIssuer is required when SelfHosted is true.")
             : options.SelfHostedIssuer.Trim().TrimEnd('/');
         var now = DateTime.UtcNow;
-        var displayName = string.IsNullOrWhiteSpace(payload.DisplayName) ? payload.Username : payload.DisplayName;
+        var accountName = OAuthKnowledgeBaseIdentity.ResolveAccountName(payload.Username, payload.DisplayName);
+        var publishedEmail = OAuthKnowledgeBaseIdentity.ResolvePublishedEmail(payload.Email);
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, payload.Username),
-            new(JwtRegisteredClaimNames.Email, payload.Email),
-            new(JwtRegisteredClaimNames.Name, displayName),
+            new(JwtRegisteredClaimNames.Name, accountName),
+            new("preferred_username", payload.Username),
             new("tenant_id", payload.TenantId.ToString("D")),
             new("tenant_user_id", payload.UserId.ToString("D"))
         };
+        if (publishedEmail is not null)
+        {
+            claims.Add(new Claim(JwtRegisteredClaimNames.Email, publishedEmail));
+        }
+
         var token = new JwtSecurityToken(
             issuer,
             payload.ClientId,
