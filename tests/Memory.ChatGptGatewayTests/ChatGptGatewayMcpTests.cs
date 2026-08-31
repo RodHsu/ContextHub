@@ -115,7 +115,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         ]);
         execute.GetRawText().Should().NotContainAny(
             "allowHardDelete", "allowMaturedDelete", "allowedActionTypes", "MaturedDelete", "memory_delete", "projectIds");
-        PublishedToolSchemaHash.Compute(execute).Should().Be(ScheduledGovernanceContract.SchemaHash);
+        var executeTool = tools.EnumerateArray().Single(tool =>
+            tool.GetProperty("name").GetString() == ScheduledGovernanceContract.ExecuteToolName);
+        PublishedToolSchemaHash.Compute(executeTool).Should().Be(ScheduledGovernanceContract.SchemaHash);
 
         using var metadataResponse = await client.GetAsync("/.well-known/oauth-protected-resource/mcp-automation");
         metadataResponse.EnsureSuccessStatusCode();
@@ -123,6 +125,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         metadata.GetProperty("resource").GetString().Should().Be(AutomationPublicMcpUrl);
         metadata.GetProperty("scopes_supported").EnumerateArray().Select(x => x.GetString())
             .Should().Contain(SecurityScopes.ScheduledGovernance);
+        metadata.GetProperty("scopes_supported").EnumerateArray().Select(x => x.GetString())
+            .Should().NotContain([SecurityScopes.PreferencesRead, SecurityScopes.PreferencesWrite]);
         metadata.GetProperty("scopes_supported").EnumerateArray().Select(x => x.GetString())
             .Should().Contain(["openid", "profile", "email", "offline_access"]);
 
@@ -132,6 +136,80 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         status.GetProperty("surface").GetString().Should().Be(nameof(ChatGptGatewaySurface.Automation));
         status.GetProperty("deleteCapableToolCount").GetInt32().Should().Be(0);
         status.GetProperty("publishedCatalogToolCount").GetInt32().Should().Be(4);
+    }
+
+    [DockerRequiredFact]
+    public async Task Automation_Review_Should_Reach_Handler_And_Publish_Recoverable_Receipt()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            surface: ChatGptGatewaySurface.Automation);
+        using var client = CreateAuthorizedClient(factory);
+
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var user = await db.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
+            db.MemoryItems.Add(new MemoryItem
+            {
+                TenantId = user.TenantId,
+                OwnerUserId = user.Id,
+                ProjectId = $"automation-review-fixture-{Guid.NewGuid():N}",
+                ExternalKey = $"automation-review:{Guid.NewGuid():N}",
+                Scope = MemoryScope.Project,
+                MemoryType = MemoryType.Artifact,
+                Title = "Scheduled governance black-box fixture",
+                Content = "Isolated deterministic fixture proving the automation review reaches the real handler.",
+                Summary = "Scheduled governance black-box fixture.",
+                SourceType = "integration-test",
+                SourceRef = "fixture:scheduled-governance-review",
+                Status = MemoryStatus.Active,
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var governanceRunId = $"automation-review-{Guid.NewGuid():N}";
+        var reviewPayload = await SendMcpAsync(client, null, 20, "tools/call", new
+        {
+            name = ScheduledGovernanceContract.ReviewToolName,
+            arguments = new
+            {
+                request = new { governanceRunId, isReReview = false }
+            }
+        });
+        var reviewResult = ExtractSseJson(reviewPayload).GetProperty("result");
+        reviewResult.TryGetProperty("isError", out var reviewError).Should().BeFalse();
+        var review = reviewResult.GetProperty("structuredContent");
+        review.GetProperty("governanceRunId").GetString().Should().Be(governanceRunId);
+        review.GetProperty("coverageComplete").ValueKind.Should().Be(JsonValueKind.True);
+
+        var receiptPayload = await SendMcpAsync(client, null, 21, "tools/call", new
+        {
+            name = ScheduledGovernanceContract.ReceiptToolName,
+            arguments = new { governanceRunId }
+        });
+        var receiptResult = ExtractSseJson(receiptPayload).GetProperty("result");
+        receiptResult.TryGetProperty("isError", out var receiptError).Should().BeFalse();
+        var receipt = receiptResult.GetProperty("structuredContent");
+        receipt.GetProperty("runExists").GetBoolean().Should().BeTrue();
+        receipt.GetProperty("received").GetBoolean().Should().BeTrue();
+        receipt.GetProperty("governanceRunId").GetString().Should().Be(governanceRunId);
+
+        var missingRunId = $"not-received-{Guid.NewGuid():N}";
+        var missingPayload = await SendMcpAsync(client, null, 22, "tools/call", new
+        {
+            name = ScheduledGovernanceContract.ReceiptToolName,
+            arguments = new { governanceRunId = missingRunId }
+        });
+        var missingResult = ExtractSseJson(missingPayload).GetProperty("result");
+        missingResult.TryGetProperty("isError", out var missingError).Should().BeFalse();
+        var missing = missingResult.GetProperty("structuredContent");
+        missing.GetProperty("runExists").GetBoolean().Should().BeFalse();
+        missing.GetProperty("received").GetBoolean().Should().BeFalse();
+        missing.GetProperty("status").GetString().Should().Be("NotReceived");
     }
 
     [DockerRequiredFact]

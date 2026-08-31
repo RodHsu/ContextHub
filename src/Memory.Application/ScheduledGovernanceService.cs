@@ -25,17 +25,52 @@ public sealed class ScheduledGovernanceService(
             throw new InvalidOperationException("GovernanceRunId is required.");
         }
 
-        var review = await knowledgeReview.ReviewAsync(
-            new KnowledgeReviewRequest(
-                ProjectIds: null,
-                LimitPerSection: 200,
-                Offset: 0,
-                GovernanceRunId: request.GovernanceRunId,
-                IsReReview: request.IsReReview)
-            {
-                ReceiptContractIdentity = ReceiptContractIdentity
-            },
+        var startedAt = DateTimeOffset.UtcNow;
+        await receipts.RecordReviewStartedAsync(
+            request.GovernanceRunId,
+            startedAt,
+            ReceiptContractIdentity,
             cancellationToken);
+
+        KnowledgeReviewResult review;
+        try
+        {
+            review = await knowledgeReview.ReviewAsync(
+                new KnowledgeReviewRequest(
+                    ProjectIds: null,
+                    LimitPerSection: 200,
+                    Offset: 0,
+                    GovernanceRunId: request.GovernanceRunId,
+                    IsReReview: request.IsReReview)
+                {
+                    ReceiptContractIdentity = ReceiptContractIdentity
+                },
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            await receipts.RecordReviewStoppedAsync(
+                request.GovernanceRunId,
+                startedAt,
+                "Stopped",
+                "OperationCanceled",
+                "KnowledgeReview",
+                ReceiptContractIdentity,
+                CancellationToken.None);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            await receipts.RecordReviewStoppedAsync(
+                request.GovernanceRunId,
+                startedAt,
+                "Failed",
+                ex.GetType().Name,
+                "KnowledgeReview",
+                ReceiptContractIdentity,
+                CancellationToken.None);
+            throw;
+        }
 
         var durableCoverage = review.DurableMemoryCoverage
             ?? throw new InvalidOperationException("Scheduled governance requires durable-memory coverage evidence.");
@@ -123,13 +158,18 @@ public sealed class ScheduledGovernanceService(
         return ToScheduledResult(result);
     }
 
-    public async Task<ScheduledGovernanceRunResult?> GetReceiptAsync(
+    public async Task<ScheduledGovernanceRunResult> GetReceiptAsync(
         string governanceRunId,
         CancellationToken cancellationToken)
     {
         EnsureScheduledAuthority();
         var receipt = await receipts.GetAsync(governanceRunId, cancellationToken);
-        return receipt is null ? null : new ScheduledGovernanceRunResult(
+        if (receipt is null)
+        {
+            return MissingRun(governanceRunId);
+        }
+
+        return new ScheduledGovernanceRunResult(
             receipt.ReceiptId,
             receipt.GovernanceRunId,
             receipt.StartedAt,
@@ -162,7 +202,82 @@ public sealed class ScheduledGovernanceService(
             receipt.LatestBatchReceived,
             receipt.RequestIdentityHash,
             receipt.ExceptionDelta,
-            ScheduledGovernanceContract.RuntimeIdentity);
+            ScheduledGovernanceContract.RuntimeIdentity)
+        {
+            Received = true,
+            Terminal = !string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase),
+            Decision = ResolveDecision(receipt),
+            Outcome = string.IsNullOrWhiteSpace(receipt.FinalConvergenceStatus)
+                ? receipt.Status
+                : receipt.FinalConvergenceStatus
+        };
+    }
+
+    private static ScheduledGovernanceRunResult MissingRun(string governanceRunId)
+        => new(
+            Guid.Empty,
+            governanceRunId?.Trim() ?? string.Empty,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch,
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion,
+            string.Empty,
+            string.Empty,
+            false,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "NotReceived",
+            "NotReceived",
+            [],
+            [],
+            false,
+            false,
+            "NotReceived",
+            false,
+            string.Empty,
+            new GovernanceExceptionDeltaResult(0, 0, 0, 0),
+            ScheduledGovernanceContract.RuntimeIdentity)
+        {
+            Received = false,
+            Terminal = false,
+            Decision = null,
+            Outcome = "NotReceived"
+        };
+
+    private static ScheduledGovernanceDecision? ResolveDecision(GovernanceRunReceiptResult receipt)
+    {
+        if (string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        if (!receipt.CoverageComplete)
+        {
+            return ScheduledGovernanceDecision.CoverageIncomplete;
+        }
+
+        if (receipt.ExecutionActionableCount > 0)
+        {
+            return ScheduledGovernanceDecision.ReversibleExecutionRequired;
+        }
+
+        if (receipt.CandidateCount > 0 || receipt.GovernedExceptionCount > 0)
+        {
+            return ScheduledGovernanceDecision.HumanDecisionOnly;
+        }
+
+        return ScheduledGovernanceDecision.NoOpConverged;
     }
 
     public static ScheduledGovernanceExecutionResult ToScheduledResult(GovernanceBatchExecuteResult result)

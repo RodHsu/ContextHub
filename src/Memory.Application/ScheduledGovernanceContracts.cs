@@ -144,7 +144,13 @@ public sealed record ScheduledGovernanceRunResult(
     bool LatestBatchReceived,
     string RequestIdentityHash,
     GovernanceExceptionDeltaResult? ExceptionDelta = null,
-    ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null);
+    ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null)
+{
+    public bool Received { get; init; } = true;
+    public bool Terminal { get; init; } = true;
+    public ScheduledGovernanceDecision? Decision { get; init; }
+    public string Outcome { get; init; } = string.Empty;
+}
 
 public sealed record ScheduledGovernanceContractResult(
     string ReviewToolName,
@@ -174,7 +180,7 @@ public interface IScheduledGovernanceService
         ScheduledGovernanceExecuteRequest request,
         CancellationToken cancellationToken);
 
-    Task<ScheduledGovernanceRunResult?> GetReceiptAsync(
+    Task<ScheduledGovernanceRunResult> GetReceiptAsync(
         string governanceRunId,
         CancellationToken cancellationToken);
 }

@@ -7,6 +7,39 @@ namespace Memory.UnitTests;
 public sealed class McpToolCallTelemetryTests
 {
     [Fact]
+    public void ResolveGovernanceRunId_Should_Read_TopLevel_And_Wrapped_Arguments()
+    {
+        var topLevel = new Dictionary<string, JsonElement>
+        {
+            ["governanceRunId"] = JsonSerializer.SerializeToElement("run-top")
+        };
+        var wrapped = new Dictionary<string, JsonElement>
+        {
+            ["request"] = JsonSerializer.SerializeToElement(new { governanceRunId = "run-wrapped" })
+        };
+
+        McpToolCallTelemetry.ResolveGovernanceRunId(topLevel).Should().Be("run-top");
+        McpToolCallTelemetry.ResolveGovernanceRunId(wrapped).Should().Be("run-wrapped");
+        McpToolCallTelemetry.ResolveGovernanceRunId(null).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void ResolveGovernanceRunId_Should_Not_Emit_Unbounded_Or_Control_Character_Input()
+    {
+        var controlCharacters = new Dictionary<string, JsonElement>
+        {
+            ["governanceRunId"] = JsonSerializer.SerializeToElement("run-ok\r\nforged-log=true")
+        };
+        var unbounded = new Dictionary<string, JsonElement>
+        {
+            ["governanceRunId"] = JsonSerializer.SerializeToElement(new string('a', 129))
+        };
+
+        McpToolCallTelemetry.ResolveGovernanceRunId(controlCharacters).Should().BeEmpty();
+        McpToolCallTelemetry.ResolveGovernanceRunId(unbounded).Should().BeEmpty();
+    }
+
+    [Fact]
     public void ResolveProjectId_Should_Read_Direct_ProjectId()
     {
         var arguments = ParseArguments("""{"projectId":"ContextHub"}""");

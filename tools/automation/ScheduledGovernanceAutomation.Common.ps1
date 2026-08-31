@@ -196,20 +196,20 @@ function Test-ScheduledGovernanceAutomationSpec {
     if ((Get-ScheduledGovernanceProperty $catalog "publishedCatalogHash") -cne $expectedCatalogHash) {
         Add-ScheduledGovernanceSpecError $errors "publishedCatalogHash does not match the canonical four-tool set."
     }
-    if ((Get-ScheduledGovernanceProperty $catalog "publishedCatalogVersion") -cne "2026-08-31-automation-v2") {
+    if ((Get-ScheduledGovernanceProperty $catalog "publishedCatalogVersion") -cne "2026-08-31-automation-v3") {
         Add-ScheduledGovernanceSpecError $errors "publishedCatalogVersion does not match the deployed automation contract."
     }
     $runtime = Get-ScheduledGovernanceProperty $catalog "runtimeIdentity"
     if ((Get-ScheduledGovernanceProperty $runtime "serverName") -cne "Memory.ScheduledGovernanceGateway") {
         Add-ScheduledGovernanceSpecError $errors "runtimeIdentity.serverName is not the scheduled gateway."
     }
-    if ((Get-ScheduledGovernanceProperty $runtime "serverVersion") -cne "2026-08-31-automation-v2+$($expectedCatalogHash.Substring(0, 12))") {
+    if ((Get-ScheduledGovernanceProperty $runtime "serverVersion") -cne "2026-08-31-automation-v3+$($expectedCatalogHash.Substring(0, 12))") {
         Add-ScheduledGovernanceSpecError $errors "runtimeIdentity.serverVersion does not match catalog identity."
     }
 
     $contract = Get-ScheduledGovernanceProperty $spec "contract"
-    if ((Get-ScheduledGovernanceProperty $contract "toolContractVersion") -cne "1.1") {
-        Add-ScheduledGovernanceSpecError $errors "Scheduled tool contract version must be 1.1."
+    if ((Get-ScheduledGovernanceProperty $contract "toolContractVersion") -cne "1.2") {
+        Add-ScheduledGovernanceSpecError $errors "Scheduled tool contract version must be 1.2."
     }
     if ((Get-ScheduledGovernanceProperty $contract "schemaHash") -cne "de1a67e9a2d6f5160d975fc3f4414c220ebbd7f68c6b66bc86e4e506b6244ee8") {
         Add-ScheduledGovernanceSpecError $errors "Scheduled execute schema hash does not match the canonical contract."

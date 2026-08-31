@@ -118,7 +118,13 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
         }
 
         var applicationScopes = surface == ChatGptGatewaySurface.Automation
-            ? new[] { SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.ScheduledGovernance }
+            ? new[]
+            {
+                SecurityScopes.MemoryRead,
+                SecurityScopes.MemoryWrite,
+                SecurityScopes.PreferencesRead,
+                SecurityScopes.ScheduledGovernance
+            }
             : new[]
             {
                 SecurityScopes.MemoryRead,

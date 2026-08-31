@@ -4,6 +4,46 @@ namespace Memory.Application;
 
 public static class McpToolCallTelemetry
 {
+    public static string ResolveGovernanceRunId(IDictionary<string, JsonElement>? arguments)
+    {
+        if (arguments is null)
+        {
+            return string.Empty;
+        }
+
+        if (TryReadString(arguments, "governanceRunId", out var governanceRunId))
+        {
+            return NormalizeGovernanceRunId(governanceRunId);
+        }
+
+        var request = arguments.FirstOrDefault(pair =>
+            string.Equals(pair.Key, "request", StringComparison.OrdinalIgnoreCase));
+        if (request.Value.ValueKind != JsonValueKind.Object)
+        {
+            return string.Empty;
+        }
+
+        foreach (var property in request.Value.EnumerateObject())
+        {
+            if (string.Equals(property.Name, "governanceRunId", StringComparison.OrdinalIgnoreCase) &&
+                property.Value.ValueKind == JsonValueKind.String)
+            {
+                return NormalizeGovernanceRunId(property.Value.GetString());
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static string NormalizeGovernanceRunId(string? value)
+    {
+        var normalized = value?.Trim() ?? string.Empty;
+        return normalized.Length <= 128 && normalized.All(character =>
+            char.IsLetterOrDigit(character) || character is '-' or '_' or '.' or ':')
+            ? normalized
+            : string.Empty;
+    }
+
     public static string ResolveProjectId(IDictionary<string, JsonElement>? arguments)
     {
         if (arguments is null)
@@ -72,15 +112,23 @@ public static class McpToolCallTelemetry
         IDictionary<string, JsonElement> arguments,
         out string? projectId)
     {
+        return TryReadString(arguments, "projectId", out projectId);
+    }
+
+    private static bool TryReadString(
+        IDictionary<string, JsonElement> arguments,
+        string name,
+        out string? value)
+    {
         var pair = arguments.FirstOrDefault(candidate =>
-            string.Equals(candidate.Key, "projectId", StringComparison.OrdinalIgnoreCase));
+            string.Equals(candidate.Key, name, StringComparison.OrdinalIgnoreCase));
         if (pair.Value.ValueKind == JsonValueKind.String)
         {
-            projectId = pair.Value.GetString();
+            value = pair.Value.GetString();
             return true;
         }
 
-        projectId = null;
+        value = null;
         return false;
     }
 }

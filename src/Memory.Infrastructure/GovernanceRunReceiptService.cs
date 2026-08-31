@@ -14,6 +14,30 @@ public sealed class GovernanceRunReceiptService(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    public async Task RecordReviewStartedAsync(
+        string governanceRunId,
+        DateTimeOffset startedAt,
+        GovernanceReceiptContractIdentity contractIdentity,
+        CancellationToken cancellationToken)
+    {
+        var actor = RequireActor(SecurityScopes.MemoryRead);
+        var runId = RequireGovernanceRunId(governanceRunId);
+        var previous = await LatestAsync(runId, actor, cancellationToken);
+        var receipt = NewReceipt(
+            actor,
+            runId,
+            Hash($"review-received\n{runId}"),
+            "Review",
+            "ReviewReceived",
+            "Running",
+            startedAt,
+            contractIdentity);
+        CopyCumulative(previous, receipt);
+        receipt.ProjectIdsJson = previous?.ProjectIdsJson ?? "[]";
+        receipt.StoppedReason = "ReviewReceived";
+        await InsertImmutableAsync(receipt, cancellationToken);
+    }
+
     public async Task RecordReviewAsync(
         KnowledgeReviewResult result,
         DateTimeOffset startedAt,
@@ -57,6 +81,40 @@ public sealed class GovernanceRunReceiptService(
         receipt.StoppedReason = "ReviewCompleted";
         receipt.ProjectIdsJson = JsonSerializer.Serialize(
             result.Projects.Select(x => x.ProjectId).Distinct(StringComparer.OrdinalIgnoreCase), JsonOptions);
+        await InsertImmutableAsync(receipt, cancellationToken);
+    }
+
+    public async Task RecordReviewStoppedAsync(
+        string governanceRunId,
+        DateTimeOffset startedAt,
+        string status,
+        string stoppedReason,
+        string failurePhase,
+        GovernanceReceiptContractIdentity contractIdentity,
+        CancellationToken cancellationToken)
+    {
+        var actor = RequireActor(SecurityScopes.MemoryRead);
+        var runId = RequireGovernanceRunId(governanceRunId);
+        var normalizedStatus = string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase)
+            ? "Failed"
+            : "Stopped";
+        var normalizedReason = string.IsNullOrWhiteSpace(stoppedReason) ? "ReviewStopped" : stoppedReason.Trim();
+        var normalizedPhase = string.IsNullOrWhiteSpace(failurePhase) ? "Review" : failurePhase.Trim();
+        var previous = await LatestAsync(runId, actor, cancellationToken);
+        var receipt = NewReceipt(
+            actor,
+            runId,
+            Hash($"review-stopped\n{runId}\n{normalizedStatus}\n{normalizedReason}\n{normalizedPhase}"),
+            "Review",
+            "ReviewStopped",
+            normalizedStatus,
+            startedAt,
+            contractIdentity);
+        CopyCumulative(previous, receipt);
+        receipt.ProjectIdsJson = previous?.ProjectIdsJson ?? "[]";
+        receipt.FailurePhase = normalizedPhase;
+        receipt.StoppedReason = normalizedReason;
+        receipt.FinalConvergenceStatus = normalizedStatus;
         await InsertImmutableAsync(receipt, cancellationToken);
     }
 

@@ -23,15 +23,15 @@
       "scheduled_governance_execute",
       "scheduled_governance_run_get"
     ],
-    "publishedCatalogVersion": "2026-08-31-automation-v2",
+    "publishedCatalogVersion": "2026-08-31-automation-v3",
     "publishedCatalogHash": "e1735f23777f85b9d56826ee32d7d1434ce3394801abb999889aa91a8b1a9c92",
     "runtimeIdentity": {
       "serverName": "Memory.ScheduledGovernanceGateway",
-      "serverVersion": "2026-08-31-automation-v2+e1735f23777f"
+      "serverVersion": "2026-08-31-automation-v3+e1735f23777f"
     }
   },
   "contract": {
-    "toolContractVersion": "1.1",
+    "toolContractVersion": "1.2",
     "schemaHash": "de1a67e9a2d6f5160d975fc3f4414c220ebbd7f68c6b66bc86e4e506b6244ee8",
     "decisions": [
       "NoOpConverged",

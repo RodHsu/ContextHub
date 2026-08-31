@@ -43,8 +43,8 @@ public sealed class ScheduledGovernanceTools(IScheduledGovernanceService governa
     }
 
     [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
-    [Description("Read the latest immutable receipt and replay/recovery state for one Scheduled Governance run. A null result means ContextHub did not receive that run for the current actor.")]
-    public Task<ScheduledGovernanceRunResult?> scheduled_governance_run_get(
+    [Description("Read the latest immutable receipt and replay/recovery state for one Scheduled Governance run. A structured runExists=false and received=false result means ContextHub did not receive that run for the current actor.")]
+    public Task<ScheduledGovernanceRunResult> scheduled_governance_run_get(
         string governanceRunId,
         CancellationToken cancellationToken = default)
         => governance.GetReceiptAsync(governanceRunId, cancellationToken);

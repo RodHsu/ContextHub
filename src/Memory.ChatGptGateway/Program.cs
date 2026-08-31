@@ -169,18 +169,45 @@ var mcpServerBuilder = builder.Services.AddMcpServer(options => options.ServerIn
     {
         var startedAt = Stopwatch.GetTimestamp();
         var success = false;
+        var toolName = context.Params?.Name ?? string.Empty;
+        var governanceRunId = McpToolCallTelemetry.ResolveGovernanceRunId(context.Params?.Arguments);
+        var traceId = Activity.Current?.TraceId.ToString() ?? string.Empty;
+        var logger = context.Services?.GetService<ILoggerFactory>()
+            ?.CreateLogger("Memory.ChatGptGateway.McpDispatch");
         try
         {
             var result = await next(context, cancellationToken);
             success = result.IsError is not true;
+            if (!success)
+            {
+                logger?.LogWarning(
+                    "MCP tool dispatch returned an error. ToolName={ToolName} GovernanceRunId={GovernanceRunId} Phase={Phase} TraceId={TraceId} DurationMs={DurationMs}",
+                    toolName,
+                    governanceRunId,
+                    "ToolInvocation",
+                    traceId,
+                    Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+            }
             return result;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(
+                "MCP tool dispatch threw an exception. ToolName={ToolName} GovernanceRunId={GovernanceRunId} Phase={Phase} FailureClass={FailureClass} TraceId={TraceId} DurationMs={DurationMs}",
+                toolName,
+                governanceRunId,
+                "ToolInvocation",
+                ex.GetType().Name,
+                traceId,
+                Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+            throw;
         }
         finally
         {
             await McpToolCallTelemetry.TryRecordAsync(
                 context.Services,
                 "chatgpt-gateway",
-                context.Params?.Name ?? string.Empty,
+                toolName,
                 context.Params?.Arguments,
                 success,
                 Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);

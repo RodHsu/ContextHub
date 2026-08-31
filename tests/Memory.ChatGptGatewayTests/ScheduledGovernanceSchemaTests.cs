@@ -31,6 +31,7 @@ public sealed class ScheduledGovernanceSchemaTests
                 "autoDeleted", "deleteEligible", "deleteMatured", "deleteCancelled", "tombstone");
             element.GetProperty("inputSchema").GetRawText().Should().NotContain("projectIds");
         }
+
     }
 
     [Fact]
@@ -56,6 +57,33 @@ public sealed class ScheduledGovernanceSchemaTests
         annotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
         annotations.GetProperty("idempotentHint").GetBoolean().Should().BeTrue();
         annotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
+    }
+
+    [Fact]
+    public void Review_And_Run_Get_Should_Publish_Explicit_ReadOnly_Recovery_Contracts()
+    {
+        var target = new ScheduledGovernanceTools(new StubScheduledGovernanceService());
+        var methods = typeof(ScheduledGovernanceTools).GetMethods()
+            .Where(method => method.GetCustomAttributes(typeof(McpServerToolAttribute), inherit: true).Length > 0)
+            .ToDictionary(method => method.Name, StringComparer.Ordinal);
+
+        var review = JsonSerializer.SerializeToElement(McpServerTool.Create(
+            methods[ScheduledGovernanceContract.ReviewToolName], target, new McpServerToolCreateOptions()).ProtocolTool);
+        review.GetProperty("description").GetString().Should().StartWith(
+            "Read a full-governance snapshot without modifying, moving, archiving, or deleting governed resources.");
+        var reviewAnnotations = review.GetProperty("annotations");
+        reviewAnnotations.GetProperty("readOnlyHint").GetBoolean().Should().BeTrue();
+        reviewAnnotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
+        reviewAnnotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
+
+        var runGet = JsonSerializer.SerializeToElement(McpServerTool.Create(
+            methods[ScheduledGovernanceContract.ReceiptToolName], target, new McpServerToolCreateOptions()).ProtocolTool);
+        var outputProperties = runGet.GetProperty("outputSchema").GetProperty("properties");
+        outputProperties.TryGetProperty("runExists", out _).Should().BeTrue();
+        outputProperties.TryGetProperty("received", out _).Should().BeTrue();
+        outputProperties.TryGetProperty("terminal", out _).Should().BeTrue();
+        outputProperties.TryGetProperty("decision", out _).Should().BeTrue();
+        outputProperties.TryGetProperty("outcome", out _).Should().BeTrue();
     }
 
     [Fact]
@@ -90,7 +118,7 @@ public sealed class ScheduledGovernanceSchemaTests
             ScheduledGovernanceExecuteRequest request,
             CancellationToken cancellationToken) => throw new NotSupportedException();
 
-        public Task<ScheduledGovernanceRunResult?> GetReceiptAsync(
+        public Task<ScheduledGovernanceRunResult> GetReceiptAsync(
             string governanceRunId,
             CancellationToken cancellationToken) => throw new NotSupportedException();
     }

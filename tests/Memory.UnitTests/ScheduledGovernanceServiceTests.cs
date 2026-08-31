@@ -17,7 +17,8 @@ public sealed class ScheduledGovernanceServiceTests
         };
         var knowledge = new StubKnowledgeReviewService(CreateReview([executable]));
         var executor = new CapturingExecutor();
-        var service = CreateService(knowledge, executor);
+        var receipts = new StubReceipts();
+        var service = CreateService(knowledge, executor, receipts);
 
         var result = await service.ReviewAsync(new ScheduledGovernanceReviewRequest("run-1"), CancellationToken.None);
 
@@ -39,6 +40,8 @@ public sealed class ScheduledGovernanceServiceTests
         result.GovernedRequiresUserDecisionExceptionCount.Should().Be(0);
         result.GovernedHostBlockedExceptionCount.Should().Be(0);
         result.GovernedDeferredExceptionCount.Should().Be(0);
+        receipts.ReviewStartedCount.Should().Be(1);
+        receipts.ReviewStoppedCount.Should().Be(0);
         executor.CallCount.Should().Be(0, "review must not execute governed-resource mutations");
     }
 
@@ -134,6 +137,40 @@ public sealed class ScheduledGovernanceServiceTests
         result!.ToolContractVersion.Should().Be("scheduled-0.9");
         result.SchemaHash.Should().Be("sha256:old");
         result.PublishedCatalogVersion.Should().Be("catalog-old");
+        result.Received.Should().BeTrue();
+        result.Terminal.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task GetReceipt_Should_Return_Structured_NotReceived_Result()
+    {
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(),
+            new StubReceipts());
+
+        var result = await service.GetReceiptAsync("missing-run", CancellationToken.None);
+
+        result.RunExists.Should().BeFalse();
+        result.Received.Should().BeFalse();
+        result.Terminal.Should().BeFalse();
+        result.Decision.Should().BeNull();
+        result.Status.Should().Be("NotReceived");
+        result.Outcome.Should().Be("NotReceived");
+        result.GovernanceRunId.Should().Be("missing-run");
+    }
+
+    [Fact]
+    public async Task Review_Should_Record_Failed_Receipt_After_Handler_Entry()
+    {
+        var receipts = new StubReceipts();
+        var service = CreateService(new ThrowingKnowledgeReviewService(), new CapturingExecutor(), receipts);
+
+        var action = () => service.ReviewAsync(new("run-failed"), CancellationToken.None);
+
+        await action.Should().ThrowAsync<InvalidOperationException>();
+        receipts.ReviewStartedCount.Should().Be(1);
+        receipts.ReviewStoppedCount.Should().Be(1);
     }
 
     [Fact]
@@ -266,6 +303,12 @@ public sealed class ScheduledGovernanceServiceTests
         }
     }
 
+    private sealed class ThrowingKnowledgeReviewService : IKnowledgeReviewService
+    {
+        public Task<KnowledgeReviewResult> ReviewAsync(KnowledgeReviewRequest request, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("fixture failure");
+    }
+
     private sealed class CapturingExecutor : IGovernanceBatchExecutor
     {
         public int CallCount { get; private set; }
@@ -282,7 +325,21 @@ public sealed class ScheduledGovernanceServiceTests
 
     private sealed class StubReceipts(GovernanceRunReceiptResult? receipt = null) : IGovernanceRunReceiptService
     {
+        public int ReviewStartedCount { get; private set; }
+        public int ReviewStoppedCount { get; private set; }
+
+        public Task RecordReviewStartedAsync(string governanceRunId, DateTimeOffset startedAt, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken)
+        {
+            ReviewStartedCount++;
+            return Task.CompletedTask;
+        }
+
         public Task RecordReviewAsync(KnowledgeReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken)
+        {
+            ReviewStoppedCount++;
+            return Task.CompletedTask;
+        }
         public Task RecordExecutionStartedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task RecordExecutionAsync(GovernanceBatchExecuteRequest request, GovernanceBatchExecuteResult result, DateTimeOffset startedAt, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task RecordExecutionStoppedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, CancellationToken cancellationToken) => Task.CompletedTask;

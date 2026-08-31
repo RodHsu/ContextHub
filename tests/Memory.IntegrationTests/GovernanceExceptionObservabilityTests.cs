@@ -198,6 +198,58 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
     }
 
     [DockerRequiredFact]
+    public async Task Review_Receipt_Should_Distinguish_Handler_Entry_From_Terminal_Failure_Idempotently()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"review-recovery-{Guid.NewGuid():N}";
+        var startedAt = DateTimeOffset.UtcNow;
+        var identity = new GovernanceReceiptContractIdentity(
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion);
+
+        await receipts.RecordReviewStartedAsync(runId, startedAt, identity, CancellationToken.None);
+        await receipts.RecordReviewStartedAsync(runId, startedAt, identity, CancellationToken.None);
+
+        var running = await receipts.GetAsync(runId, CancellationToken.None);
+        running.Should().NotBeNull();
+        running!.RunExists.Should().BeTrue();
+        running.Status.Should().Be("Running");
+        running.StoppedReason.Should().Be("ReviewReceived");
+
+        await receipts.RecordReviewStoppedAsync(
+            runId,
+            startedAt,
+            "Failed",
+            nameof(InvalidOperationException),
+            "KnowledgeReview",
+            identity,
+            CancellationToken.None);
+
+        var failed = await receipts.GetAsync(runId, CancellationToken.None);
+        failed.Should().NotBeNull();
+        failed!.Status.Should().Be("Failed");
+        failed.StoppedReason.Should().Be(nameof(InvalidOperationException));
+        failed.ToolContractVersion.Should().Be(identity.ToolContractVersion);
+
+        var terminalEntity = await db.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId &&
+                        x.OwnerUserId == actor.UserId &&
+                        x.GovernanceRunId == runId)
+            .OrderByDescending(x => x.EventSequence)
+            .FirstAsync();
+        terminalEntity.FailurePhase.Should().Be("KnowledgeReview");
+
+        (await db.GovernanceRunReceipts.CountAsync(x =>
+            x.TenantId == actor.TenantId &&
+            x.OwnerUserId == actor.UserId &&
+            x.GovernanceRunId == runId)).Should().Be(2);
+    }
+
+    [DockerRequiredFact]
     public async Task InternalRetentionWorker_Should_Claim_Concurrent_Batches_Without_Duplicate_Delete()
     {
         Guid memoryId;
