@@ -173,7 +173,7 @@ function Invoke-ScheduledGovernanceHttp {
         UseBasicParsing = $true
         TimeoutSec = $TimeoutSec
     }
-    if ($null -ne $Body) {
+    if (-not [string]::IsNullOrEmpty($Body)) {
         $parameters.Body = $Body
         $parameters.ContentType = "application/json"
     }
@@ -689,7 +689,12 @@ try {
         $evidence.oauthGate.discovery = $metadataEvidence
         if ($metadataResponse.TransportError -or $metadataResponse.StatusCode -ne 200 -or
             -not $metadataEvidence.resourceMatches -or -not $metadataEvidence.requiredScopePresent) {
-            $evidence.errors += "OAuth protected-resource discovery did not satisfy the automation resource contract."
+            if ($metadataResponse.TransportError) {
+                $evidence.errors += "OAuth protected-resource discovery transport failed: $($metadataResponse.Error)"
+            }
+            else {
+                $evidence.errors += "OAuth protected-resource discovery did not satisfy the automation resource contract."
+            }
             if ($null -eq $exitCode -or $exitCode -eq 0) { $exitCode = 1 }
         }
 
