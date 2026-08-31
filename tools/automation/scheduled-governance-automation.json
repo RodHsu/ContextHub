@@ -1,0 +1,184 @@
+{
+  "artifactKind": "ContextHub.ScheduledGovernanceAutomation",
+  "artifactVersion": "1.0",
+  "projectId": "ContextHub",
+  "surface": "/mcp-automation",
+  "oauth": {
+    "requiredScope": "governance:scheduled",
+    "resourceSuffix": "mcp-automation",
+    "missingTokenMode": "discovery-contract-readiness-only",
+    "tokenEnvironmentVariable": "CONTEXTHUB_MCP_AUTOMATION_TOKEN",
+    "tokenPersistence": "host-managed-only"
+  },
+  "cadence": {
+    "intervalHours": 4,
+    "reliabilityRuns": 6,
+    "reliabilityWindowHours": 24
+  },
+  "catalog": {
+    "toolCount": 4,
+    "toolNames": [
+      "scheduled_governance_contract_get",
+      "scheduled_governance_review",
+      "scheduled_governance_execute",
+      "scheduled_governance_run_get"
+    ],
+    "publishedCatalogVersion": "2026-08-31-automation-v2",
+    "publishedCatalogHash": "e1735f23777f85b9d56826ee32d7d1434ce3394801abb999889aa91a8b1a9c92",
+    "runtimeIdentity": {
+      "serverName": "Memory.ScheduledGovernanceGateway",
+      "serverVersion": "2026-08-31-automation-v2+e1735f23777f"
+    }
+  },
+  "contract": {
+    "toolContractVersion": "1.1",
+    "schemaHash": "de1a67e9a2d6f5160d975fc3f4414c220ebbd7f68c6b66bc86e4e506b6244ee8",
+    "decisions": [
+      "NoOpConverged",
+      "ReversibleExecutionRequired",
+      "HumanDecisionOnly",
+      "CoverageIncomplete"
+    ],
+    "fixedPolicy": {
+      "scopeResolution": "server-resolved-complete-authorized-scope",
+      "risk": "Low",
+      "maxMutations": 100,
+      "maxDurationSeconds": 120,
+      "reversibleOnly": true,
+      "irreversibleRetentionOwner": "ContextHubInternalRetentionWorker"
+    }
+  },
+  "catalogTools": [
+    {
+      "name": "scheduled_governance_contract_get",
+      "inputFields": [],
+      "readOnly": true
+    },
+    {
+      "name": "scheduled_governance_review",
+      "inputFields": ["governanceRunId", "isReReview"],
+      "readOnly": true
+    },
+    {
+      "name": "scheduled_governance_execute",
+      "inputFields": [
+        "governanceRunId",
+        "snapshotToken",
+        "cursor",
+        "maxMutations",
+        "maxDurationSeconds",
+        "isReReview",
+        "toolContractVersion",
+        "schemaHash"
+      ],
+      "readOnly": false
+    },
+    {
+      "name": "scheduled_governance_run_get",
+      "inputFields": ["governanceRunId"],
+      "readOnly": true
+    }
+  ],
+  "orchestration": {
+    "prompt": "At each scheduled run, obtain the published contract, create a new run identifier, review the complete server scope, and obey only the server decision. Use the reversible operation only when the decision authorizes it; then read the receipt, replay the identical request only after outcome recovery requires it, and perform a same-run review. Stop and report on a human-decision or incomplete-coverage decision. Never invent scope, endpoint, authority, or operation controls.",
+    "runIdPolicy": "fresh-per-schedule",
+    "scopePolicy": "server-resolved-complete-authorized-scope",
+    "projectSelection": "server-only",
+    "branches": [
+      {
+        "decision": "NoOpConverged",
+        "calls": ["scheduled_governance_run_get"],
+        "terminalAction": "read-receipt-and-finish"
+      },
+      {
+        "decision": "ReversibleExecutionRequired",
+        "calls": [
+          "scheduled_governance_execute",
+          "scheduled_governance_run_get",
+          "scheduled_governance_review",
+          "scheduled_governance_run_get"
+        ],
+        "terminalAction": "bounded-execute-recover-re-review"
+      },
+      {
+        "decision": "HumanDecisionOnly",
+        "calls": [],
+        "terminalAction": "stop-and-report"
+      },
+      {
+        "decision": "CoverageIncomplete",
+        "calls": [],
+        "terminalAction": "fail-closed-and-report"
+      }
+    ]
+  },
+  "acceptance": {
+    "a0": {
+      "freshRunRequired": true,
+      "executorCalls": 0,
+      "requiredDecision": "NoOpConverged",
+      "requiresFinalReviewAndReceipt": true,
+      "requiresProtectedInvariantReadback": true
+    },
+    "a1": {
+      "productionCandidateSource": "naturally-available-server-candidate-only",
+      "productionSyntheticFixtureCreation": false,
+      "isolatedSyntheticFixturesOnly": true,
+      "requiresSnapshotBinding": true,
+      "requiresAuthorizationRevalidation": true,
+      "requiresExactReplayEvidence": true,
+      "requiresOutcomeRecoveryBeforeRetry": true,
+      "requiresFinalReReview": true,
+      "requiresProtectedInvariantReadback": true
+    }
+  },
+  "evidence": {
+    "format": "compact-json",
+    "maxBytes": 12000,
+    "requiredFields": [
+      "observedAtUtc",
+      "mode",
+      "surface",
+      "oauthGate",
+      "catalog",
+      "contract",
+      "runtimeIdentity",
+      "governanceRunId",
+      "decision",
+      "coverage",
+      "receipt",
+      "replay",
+      "protectedInvariants",
+      "outcome"
+    ],
+    "protectedInvariantSource": "external-read-only-manifest",
+    "rawPayloads": false,
+    "rawLogs": false
+  },
+  "forbidden": {
+    "toolNames": [
+      "governance_batch_execute",
+      "memory_delete",
+      "project_cleanup_apply",
+      "governance_tombstone_get"
+    ],
+    "tokens": [
+      "/mcp-chat",
+      "governance_batch_execute",
+      "memory_delete",
+      "project_cleanup_apply",
+      "governance_tombstone_get",
+      "projectIds",
+      "explicitProjectId",
+      "alternateRunId",
+      "REST",
+      "DB",
+      "admin",
+      "direct delete",
+      "allowHardDelete",
+      "allowMaturedDelete",
+      "MaturedDelete"
+    ],
+    "liveAutomationMutation": "forbidden"
+  }
+}

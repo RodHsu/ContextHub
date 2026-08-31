@@ -614,6 +614,12 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.GovernanceUpdatedAt).HasColumnName("governance_updated_at");
             entity.Property(x => x.GovernanceEvidenceFingerprint).HasColumnName("governance_evidence_fingerprint");
             entity.Property(x => x.GovernancePolicyVersion).HasColumnName("governance_policy_version");
+            entity.Property(x => x.GovernanceBlockedAt).HasColumnName("governance_blocked_at");
+            entity.Property(x => x.GovernanceLastReevaluatedAt).HasColumnName("governance_last_reevaluated_at");
+            entity.Property(x => x.GovernanceBlockingLayer).HasColumnName("governance_blocking_layer");
+            entity.Property(x => x.GovernanceReasonClass).HasColumnName("governance_reason_class");
+            entity.Property(x => x.GovernanceRelatedTool).HasColumnName("governance_related_tool");
+            entity.Property(x => x.GovernanceEvidenceChangedSinceBlock).HasColumnName("governance_evidence_changed_since_block");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.DedupKey }).IsUnique();
@@ -809,6 +815,12 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.GovernanceUpdatedAt).HasColumnName("governance_updated_at");
             entity.Property(x => x.GovernanceEvidenceFingerprint).HasColumnName("governance_evidence_fingerprint");
             entity.Property(x => x.GovernancePolicyVersion).HasColumnName("governance_policy_version");
+            entity.Property(x => x.GovernanceBlockedAt).HasColumnName("governance_blocked_at");
+            entity.Property(x => x.GovernanceLastReevaluatedAt).HasColumnName("governance_last_reevaluated_at");
+            entity.Property(x => x.GovernanceBlockingLayer).HasColumnName("governance_blocking_layer");
+            entity.Property(x => x.GovernanceReasonClass).HasColumnName("governance_reason_class");
+            entity.Property(x => x.GovernanceRelatedTool).HasColumnName("governance_related_tool");
+            entity.Property(x => x.GovernanceEvidenceChangedSinceBlock).HasColumnName("governance_evidence_changed_since_block");
             entity.Property(x => x.MetadataJson)
                 .HasColumnName("metadata_json")
                 .HasColumnType("jsonb")
@@ -899,9 +911,14 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.BlockedReasonsJson).HasColumnName("blocked_reasons_json").HasColumnType("jsonb");
             entity.Property(x => x.ReplacementResourceId).HasColumnName("replacement_resource_id");
             entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
+            entity.Property(x => x.ClaimToken).HasColumnName("claim_token");
+            entity.Property(x => x.ClaimedAt).HasColumnName("claimed_at");
+            entity.Property(x => x.ClaimAttemptCount).HasColumnName("claim_attempt_count");
+            entity.Property(x => x.ClaimLastError).HasColumnName("claim_last_error");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.LifecycleStatus });
+            entity.HasIndex(x => new { x.LifecycleStatus, x.DeleteEligibleAt, x.ClaimedAt });
         });
 
         modelBuilder.Entity<ResourceTombstone>(entity =>
@@ -958,6 +975,11 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Deferred).HasColumnName("deferred");
             entity.Property(x => x.RequiresUserDecision).HasColumnName("requires_user_decision");
             entity.Property(x => x.HostBlocked).HasColumnName("host_blocked");
+            entity.Property(x => x.ExceptionNew).HasColumnName("exception_new");
+            entity.Property(x => x.ExceptionResolved).HasColumnName("exception_resolved");
+            entity.Property(x => x.ExceptionUnchanged).HasColumnName("exception_unchanged");
+            entity.Property(x => x.ExceptionEscalated).HasColumnName("exception_escalated");
+            entity.Property(x => x.GovernedExceptionStatesJson).HasColumnName("governed_exception_states_json").HasColumnType("jsonb");
             entity.Property(x => x.Quarantined).HasColumnName("quarantined");
             entity.Property(x => x.DeleteEligible).HasColumnName("delete_eligible");
             entity.Property(x => x.DeleteMatured).HasColumnName("delete_matured");

@@ -65,6 +65,7 @@ public sealed class GovernanceService(
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        var (tenantId, ownerUserId) = RequireActorIdentity(actor);
         var entity = await GetRequiredAsync(request.FindingId, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
         if (string.IsNullOrWhiteSpace(request.Reason))
@@ -88,17 +89,27 @@ public sealed class GovernanceService(
             return Map(entity);
         }
 
+        var now = clock.UtcNow;
         entity.Status = status;
         entity.GovernanceReason = reason;
         entity.GovernanceRunId = governanceRunId;
         entity.GovernanceActor = actor.Username;
-        entity.GovernanceUpdatedAt = clock.UtcNow;
+        entity.GovernanceUpdatedAt = now;
         entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
         entity.GovernanceEvidenceFingerprint = await GovernanceEvidenceFingerprint.BuildAsync(
-            dbContext, entity.ProjectId, entity.PrimaryMemoryId, entity.SecondaryMemoryId, null,
+            dbContext, entity.ProjectId, tenantId, ownerUserId,
+            entity.PrimaryMemoryId, entity.SecondaryMemoryId, null,
             GovernanceEvidenceFingerprint.FindingPayload(entity), cancellationToken);
-        entity.UpdatedAt = clock.UtcNow;
+        ApplyExceptionObservability(
+            entity,
+            status,
+            request.BlockingLayer,
+            request.ReasonClass,
+            request.RelatedTool,
+            now);
+        entity.UpdatedAt = now;
         await SupersedePendingActionsForFindingAsync(entity.ProjectId, entity.DedupKey, cancellationToken);
+        await AddFindingGovernanceAuditAsync(entity, request.Disposition.ToString(), cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return Map(entity);
     }
@@ -109,20 +120,42 @@ public sealed class GovernanceService(
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        var (tenantId, ownerUserId) = RequireActorIdentity(actor);
         var entity = await GetRequiredAsync(request.FindingId, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
         if (entity.Status is not (GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision or GovernanceFindingStatus.HostBlocked))
         {
             throw new InvalidOperationException($"Governance finding '{entity.Id}' is not in an exception disposition.");
         }
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            throw new InvalidOperationException("A governance reopen reason is required.");
+        }
+        var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        if (string.IsNullOrEmpty(governanceRunId))
+        {
+            throw new InvalidOperationException("GovernanceRunId is required for an explicit governance reopen.");
+        }
 
+        var now = clock.UtcNow;
+        var currentFingerprint = await GovernanceEvidenceFingerprint.BuildAsync(
+            dbContext, entity.ProjectId, tenantId, ownerUserId,
+            entity.PrimaryMemoryId, entity.SecondaryMemoryId, null,
+            GovernanceEvidenceFingerprint.FindingPayload(entity), cancellationToken);
         entity.Status = GovernanceFindingStatus.Open;
-        entity.GovernanceReason = string.IsNullOrWhiteSpace(request.Reason) ? "Reopened for governance review." : request.Reason.Trim();
-        entity.GovernanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        entity.GovernanceReason = request.Reason.Trim();
+        entity.GovernanceRunId = governanceRunId;
         entity.GovernanceActor = actor.Username;
         entity.GovernanceRetryCount += 1;
-        entity.GovernanceUpdatedAt = clock.UtcNow;
-        entity.UpdatedAt = clock.UtcNow;
+        entity.GovernanceUpdatedAt = now;
+        entity.GovernanceLastReevaluatedAt = now;
+        entity.GovernanceEvidenceChangedSinceBlock =
+            !string.Equals(entity.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal) ||
+            !string.Equals(entity.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal);
+        entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+        entity.GovernanceEvidenceFingerprint = currentFingerprint;
+        entity.UpdatedAt = now;
+        await AddFindingGovernanceAuditAsync(entity, "ManualReopen", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return Map(entity);
     }
@@ -132,6 +165,7 @@ public sealed class GovernanceService(
         var normalizedProjectId = ProjectContext.Normalize(projectId);
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: true);
+        var (tenantId, ownerUserId) = RequireActorIdentity(actor);
         var now = clock.UtcNow;
         var findings = new List<GovernanceDraft>();
         if (actor.HasUser)
@@ -140,7 +174,8 @@ public sealed class GovernanceService(
             ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: false);
         }
 
-        var sourceQuery = dbContext.SourceConnections.AsNoTracking().Where(x => x.ProjectId == normalizedProjectId);
+        var sourceQuery = dbContext.SourceConnections.AsNoTracking().ForActor(actor)
+            .Where(x => x.ProjectId == normalizedProjectId);
         var memoryQuery = dbContext.MemoryItems.AsNoTracking().Where(x => x.ProjectId == normalizedProjectId);
         if (actor.HasUser)
         {
@@ -481,7 +516,8 @@ public sealed class GovernanceService(
                 JsonSerializer.Serialize(new { expectedModelKey = embeddingProvider.ModelKey }, JsonOptions)));
         }
 
-        var existingQuery = dbContext.GovernanceFindings.Where(x => x.ProjectId == normalizedProjectId);
+        var existingQuery = dbContext.GovernanceFindings.ForActor(actor)
+            .Where(x => x.ProjectId == normalizedProjectId);
         if (actor.HasUser)
         {
             var memoryIds = memories.Select(x => x.Id).ToArray();
@@ -525,22 +561,34 @@ public sealed class GovernanceService(
             entity.DedupKey = draft.DedupKey;
             entity.UpdatedAt = clock.UtcNow;
 
-            if (entity.Status is GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision &&
+            if (entity.Status is GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision or GovernanceFindingStatus.HostBlocked &&
                 !string.IsNullOrWhiteSpace(entity.GovernanceEvidenceFingerprint))
             {
                 var currentFingerprint = await GovernanceEvidenceFingerprint.BuildAsync(
-                    dbContext, normalizedProjectId, entity.PrimaryMemoryId, entity.SecondaryMemoryId, null,
+                    dbContext, normalizedProjectId, tenantId, ownerUserId,
+                    entity.PrimaryMemoryId, entity.SecondaryMemoryId, null,
                     GovernanceEvidenceFingerprint.FindingPayload(entity), cancellationToken);
-                if (!string.Equals(entity.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal) ||
-                    !string.Equals(entity.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal))
+                var evidenceChanged =
+                    !string.Equals(entity.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal) ||
+                    !string.Equals(entity.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal);
+                entity.GovernanceLastReevaluatedAt = clock.UtcNow;
+                var hostBlocked = entity.Status == GovernanceFindingStatus.HostBlocked;
+                entity.GovernanceEvidenceChangedSinceBlock = hostBlocked
+                    ? entity.GovernanceEvidenceChangedSinceBlock || evidenceChanged
+                    : evidenceChanged;
+                if (evidenceChanged)
                 {
-                    entity.Status = GovernanceFindingStatus.Open;
-                    entity.GovernanceReason = "Automatically reopened because governance evidence or policy changed.";
-                    entity.GovernanceRunId = string.Empty;
-                    entity.GovernanceRetryCount += 1;
-                    entity.GovernanceUpdatedAt = clock.UtcNow;
-                    entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
-                    entity.GovernanceEvidenceFingerprint = currentFingerprint;
+                    if (!hostBlocked)
+                    {
+                        entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+                        entity.GovernanceEvidenceFingerprint = currentFingerprint;
+                        entity.Status = GovernanceFindingStatus.Open;
+                        entity.GovernanceReason = "Automatically reopened because governance evidence or policy changed.";
+                        entity.GovernanceRunId = string.Empty;
+                        entity.GovernanceRetryCount += 1;
+                        entity.GovernanceUpdatedAt = clock.UtcNow;
+                        await AddFindingGovernanceAuditAsync(entity, "EvidenceChangedReopen", cancellationToken);
+                    }
                 }
             }
 
@@ -645,7 +693,8 @@ public sealed class GovernanceService(
         };
         var identity = SuggestedActionEquivalence.GetIdentity(probe);
         var equivalents = matchingActions
-            .Concat(dbContext.SuggestedActions.Local.Where(x => x.ProjectId == projectId && x.Type == actionType.Value))
+            .Concat(ForActor(dbContext.SuggestedActions.Local, actorAccessor.Current)
+                .Where(x => x.ProjectId == projectId && x.Type == actionType.Value))
             .DistinctBy(x => x.Id)
             .Where(x => string.Equals(SuggestedActionEquivalence.GetIdentity(x), identity, StringComparison.Ordinal))
             .ToArray();
@@ -826,6 +875,7 @@ public sealed class GovernanceService(
 
         var executedActions = await dbContext.SuggestedActions
             .AsNoTracking()
+            .ForActor(actorAccessor.Current)
             .Where(x => x.ProjectId == projectId &&
                         x.Type == SuggestedActionType.MergeDuplicateCandidate &&
                         x.Status == SuggestedActionStatus.Executed)
@@ -843,6 +893,7 @@ public sealed class GovernanceService(
 
         var findings = await dbContext.GovernanceFindings
             .AsNoTracking()
+            .ForActor(actorAccessor.Current)
             .Where(x => findingKeys.Contains(x.DedupKey) &&
                         x.PrimaryMemoryId.HasValue &&
                         x.SecondaryMemoryId.HasValue)
@@ -885,6 +936,7 @@ public sealed class GovernanceService(
         CancellationToken cancellationToken)
     {
         var pending = await dbContext.SuggestedActions
+            .ForActor(actorAccessor.Current)
             .Where(x => x.ProjectId == projectId &&
                         (x.Status == SuggestedActionStatus.Pending || x.Status == SuggestedActionStatus.Accepted))
             .ToListAsync(cancellationToken);
@@ -898,10 +950,12 @@ public sealed class GovernanceService(
     private async Task SupersedePendingActionsWithTerminalEquivalentAsync(string projectId, CancellationToken cancellationToken)
     {
         var actions = await dbContext.SuggestedActions
+            .ForActor(actorAccessor.Current)
             .Where(x => x.ProjectId == projectId)
             .ToListAsync(cancellationToken);
         foreach (var group in actions
-                     .Concat(dbContext.SuggestedActions.Local.Where(x => x.ProjectId == projectId))
+                     .Concat(ForActor(dbContext.SuggestedActions.Local, actorAccessor.Current)
+                         .Where(x => x.ProjectId == projectId))
                      .DistinctBy(x => x.Id)
                      .Where(x => !string.IsNullOrWhiteSpace(SuggestedActionEquivalence.GetIdentity(x)))
                      .GroupBy(SuggestedActionEquivalence.GetIdentity, StringComparer.Ordinal))
@@ -1103,8 +1157,79 @@ public sealed class GovernanceService(
             GovernanceRunId = entity.GovernanceRunId,
             GovernanceActor = entity.GovernanceActor,
             GovernanceRetryCount = entity.GovernanceRetryCount,
-            GovernanceUpdatedAt = entity.GovernanceUpdatedAt
+            GovernanceUpdatedAt = entity.GovernanceUpdatedAt,
+            GovernanceBlockedAt = entity.GovernanceBlockedAt,
+            GovernanceLastReevaluatedAt = entity.GovernanceLastReevaluatedAt,
+            GovernanceBlockingLayer = entity.GovernanceBlockingLayer,
+            GovernanceReasonClass = entity.GovernanceReasonClass,
+            GovernanceRelatedTool = entity.GovernanceRelatedTool,
+            GovernanceEvidenceChangedSinceBlock = entity.GovernanceEvidenceChangedSinceBlock
         };
+
+    private static void ApplyExceptionObservability(
+        GovernanceFinding entity,
+        GovernanceFindingStatus status,
+        string? blockingLayer,
+        string? reasonClass,
+        string? relatedTool,
+        DateTimeOffset now)
+    {
+        entity.GovernanceLastReevaluatedAt = now;
+        entity.GovernanceEvidenceChangedSinceBlock = false;
+        if (status != GovernanceFindingStatus.HostBlocked)
+        {
+            entity.GovernanceBlockedAt = null;
+            entity.GovernanceBlockingLayer = string.Empty;
+            entity.GovernanceReasonClass = string.Empty;
+            entity.GovernanceRelatedTool = string.Empty;
+            return;
+        }
+
+        entity.GovernanceBlockedAt ??= now;
+        entity.GovernanceBlockingLayer = NormalizeTaxonomy(blockingLayer, "HostEnvironment");
+        entity.GovernanceReasonClass = NormalizeTaxonomy(reasonClass, "HostCapabilityUnavailable");
+        entity.GovernanceRelatedTool = NormalizeTaxonomy(relatedTool, string.Empty);
+    }
+
+    private static string NormalizeTaxonomy(string? value, string fallback)
+        => string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+    private static (Guid TenantId, Guid OwnerUserId) RequireActorIdentity(ContextHubRequestActor actor)
+        => (
+            actor.TenantId ?? throw new InvalidOperationException("Governance requires an authenticated tenant actor."),
+            actor.UserId ?? throw new InvalidOperationException("Governance requires an authenticated tenant user."));
+
+    private static IEnumerable<SuggestedAction> ForActor(
+        IEnumerable<SuggestedAction> actions,
+        ContextHubRequestActor actor)
+        => actor.HasUser
+            ? actions.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : actions;
+
+    private async ValueTask AddFindingGovernanceAuditAsync(
+        GovernanceFinding finding,
+        string action,
+        CancellationToken cancellationToken)
+    {
+        await dbContext.SecurityAuditEvents.AddAsync(new SecurityAuditEvent
+        {
+            TenantId = finding.TenantId,
+            ActorUserId = actorAccessor.Current.UserId,
+            EventType = SecurityAuditEventType.GovernanceFindingGovernanceUpdated,
+            Outcome = finding.Status.ToString(),
+            DetailsJson = JsonSerializer.Serialize(new
+            {
+                findingId = finding.Id,
+                finding.ProjectId,
+                action,
+                governanceRunId = finding.GovernanceRunId,
+                reason = finding.GovernanceReason,
+                retryCount = finding.GovernanceRetryCount,
+                evidenceChanged = finding.GovernanceEvidenceChangedSinceBlock
+            }, JsonOptions),
+            CreatedAt = clock.UtcNow
+        }, cancellationToken);
+    }
 
     private sealed record GovernanceDraft(
         string DedupKey,

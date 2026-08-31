@@ -58,6 +58,28 @@ public sealed class ScheduledGovernanceSchemaTests
         annotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
     }
 
+    [Fact]
+    public void Contract_Get_Should_Expose_Runtime_Build_Identity()
+    {
+        var target = new ScheduledGovernanceTools(new StubScheduledGovernanceService());
+
+        var contract = target.scheduled_governance_contract_get();
+        contract.RuntimeIdentity.Should().NotBeNull();
+        contract.RuntimeIdentity!.ServiceName.Should().Be(ScheduledGovernanceContract.RuntimeServiceName);
+        contract.RuntimeIdentity.BuildVersion.Should().Be(BuildMetadata.Current.Version);
+        contract.RuntimeIdentity.BuildTimestampUtc.Should().Be(BuildMetadata.Current.TimestampUtc);
+        contract.RuntimeIdentity.DerivedIdentity.Should().Contain(contract.RuntimeIdentity.BuildVersion);
+        contract.RuntimeIdentity.DerivedIdentity.Should().Contain(ScheduledGovernanceContract.PublishedCatalogVersion);
+
+        var json = JsonSerializer.SerializeToElement(contract, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        json.GetProperty("runtimeIdentity").GetProperty("buildVersion").GetString()
+            .Should().Be(BuildMetadata.Current.Version);
+        json.GetProperty("runtimeIdentity").GetProperty("buildTimestampUtc").GetDateTimeOffset()
+            .Should().Be(BuildMetadata.Current.TimestampUtc);
+        json.GetProperty("runtimeIdentity").GetProperty("derivedIdentity").GetString()
+            .Should().Be(contract.RuntimeIdentity.DerivedIdentity);
+    }
+
     private sealed class StubScheduledGovernanceService : IScheduledGovernanceService
     {
         public Task<ScheduledGovernanceReviewResult> ReviewAsync(

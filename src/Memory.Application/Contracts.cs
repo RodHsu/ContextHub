@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Memory.Domain;
+using System.Text.Json.Serialization;
 
 namespace Memory.Application;
 
@@ -1188,6 +1189,12 @@ public sealed record ConversationInsightResult(
     public string GovernanceRunId { get; init; } = string.Empty;
     public int GovernanceRetryCount { get; init; }
     public DateTimeOffset? GovernanceUpdatedAt { get; init; }
+    public DateTimeOffset? GovernanceBlockedAt { get; init; }
+    public DateTimeOffset? GovernanceLastReevaluatedAt { get; init; }
+    public string GovernanceBlockingLayer { get; init; } = string.Empty;
+    public string GovernanceReasonClass { get; init; } = string.Empty;
+    public string GovernanceRelatedTool { get; init; } = string.Empty;
+    public bool GovernanceEvidenceChangedSinceBlock { get; init; }
 }
 
 public sealed record ConversationInsightGovernanceRequest(
@@ -1199,7 +1206,10 @@ public sealed record ConversationInsightDispositionRequest(
     Guid InsightId,
     ConversationInsightDisposition Disposition,
     string Reason,
-    string? GovernanceRunId = null);
+    string? GovernanceRunId = null,
+    string? BlockingLayer = null,
+    string? ReasonClass = null,
+    string? RelatedTool = null);
 
 public sealed record AccessibleProjectResult(
     string ProjectId,
@@ -1219,7 +1229,11 @@ public sealed record KnowledgeReviewRequest(
     int LimitPerSection = 100,
     int Offset = 0,
     string? GovernanceRunId = null,
-    bool IsReReview = false);
+    bool IsReReview = false)
+{
+    [JsonIgnore]
+    public GovernanceReceiptContractIdentity? ReceiptContractIdentity { get; init; }
+}
 
 public sealed record KnowledgeReviewPageResult(
     int Offset,
@@ -1431,7 +1445,22 @@ public sealed record KnowledgeReviewResult(
     public int CandidateCount { get; init; }
     public int ExecutionActionableCount { get; init; }
     public int GovernedExceptionCount { get; init; }
+    public IReadOnlyList<GovernanceExceptionStateResult> GovernedExceptionStates { get; init; } = [];
+    [JsonIgnore]
+    public GovernanceReceiptContractIdentity? ReceiptContractIdentity { get; init; }
 }
+
+public sealed record GovernanceExceptionStateResult(
+    string Key,
+    string Kind,
+    string Disposition,
+    int Severity);
+
+public sealed record GovernanceExceptionDeltaResult(
+    int New,
+    int Resolved,
+    int Unchanged,
+    int Escalated);
 
 public enum GovernanceBatchExecutionMode
 {
@@ -1520,7 +1549,16 @@ public sealed record GovernanceBatchExecuteRequest(
     bool AllowMaturedDelete = false,
     decimal SemanticAutoResolutionConfidenceThreshold = 0.90m,
     string? ToolContractVersion = null,
-    string? SchemaHash = null);
+    string? SchemaHash = null)
+{
+    [JsonIgnore]
+    public GovernanceReceiptContractIdentity? ReceiptContractIdentity { get; init; }
+}
+
+public sealed record GovernanceReceiptContractIdentity(
+    string ToolContractVersion,
+    string SchemaHash,
+    string PublishedCatalogVersion);
 
 public sealed record GovernanceToolContractResult(
     string ToolName,
@@ -1692,7 +1730,11 @@ public sealed record GovernanceRunReceiptResult(
     string Status,
     bool LatestBatchReceived,
     string RequestIdentityHash,
-    GovernanceBatchOutcomeResult? LatestBatch);
+    GovernanceBatchOutcomeResult? LatestBatch)
+{
+    public GovernanceExceptionDeltaResult ExceptionDelta { get; init; } = new(0, 0, 0, 0);
+    public IReadOnlyList<GovernanceExceptionStateResult> GovernedExceptionStates { get; init; } = [];
+}
 
 public sealed record GovernanceBatchOutcomeResult(
     bool Received,
@@ -2388,6 +2430,7 @@ public sealed record DurableMemoryGovernanceSnapshotResult(
     public int RequiresUserDecisionCount { get; init; }
     public int HostBlockedCount { get; init; }
     public IReadOnlyList<Guid> FindingIds { get; init; } = [];
+    public IReadOnlyList<GovernanceExceptionStateResult> ExceptionStates { get; init; } = [];
 }
 
 public interface IProjectArtifactExchangeService

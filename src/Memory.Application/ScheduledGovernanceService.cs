@@ -10,6 +10,10 @@ public sealed class ScheduledGovernanceService(
 {
     private static readonly IReadOnlySet<GovernanceBatchActionType> AllowedActions =
         ScheduledGovernanceContract.FixedReversibleActions.ToHashSet();
+    private static readonly GovernanceReceiptContractIdentity ReceiptContractIdentity = new(
+        ScheduledGovernanceContract.ToolContractVersion,
+        ScheduledGovernanceContract.SchemaHash,
+        ScheduledGovernanceContract.PublishedCatalogVersion);
 
     public async Task<ScheduledGovernanceReviewResult> ReviewAsync(
         ScheduledGovernanceReviewRequest request,
@@ -27,7 +31,10 @@ public sealed class ScheduledGovernanceService(
                 LimitPerSection: 200,
                 Offset: 0,
                 GovernanceRunId: request.GovernanceRunId,
-                IsReReview: request.IsReReview),
+                IsReReview: request.IsReReview)
+            {
+                ReceiptContractIdentity = ReceiptContractIdentity
+            },
             cancellationToken);
 
         var durableCoverage = review.DurableMemoryCoverage
@@ -59,6 +66,7 @@ public sealed class ScheduledGovernanceService(
                     ? ScheduledGovernanceDecision.HumanDecisionOnly
                     : ScheduledGovernanceDecision.NoOpConverged;
 
+        var receipt = await receipts.GetAsync(review.GovernanceRunId, cancellationToken);
         return new ScheduledGovernanceReviewResult(
             review.GovernanceRunId,
             review.IsReReview,
@@ -74,7 +82,13 @@ public sealed class ScheduledGovernanceService(
             durableCoverage.GovernanceProjectIds,
             ScheduledGovernanceContract.ToolContractVersion,
             ScheduledGovernanceContract.SchemaHash,
-            ScheduledGovernanceContract.PublishedCatalogVersion);
+            ScheduledGovernanceContract.PublishedCatalogVersion,
+            humanDecision,
+            review.Convergence.RequiresUserDecisionCount,
+            review.Convergence.HostBlockedCount,
+            review.Convergence.DeferredCount,
+            receipt?.ExceptionDelta,
+            ScheduledGovernanceContract.RuntimeIdentity);
     }
 
     public async Task<ScheduledGovernanceExecutionResult> ExecuteAsync(
@@ -84,7 +98,7 @@ public sealed class ScheduledGovernanceService(
         EnsureScheduledAuthority();
         ValidateContract(request);
 
-        var result = await batchExecutor.ExecuteAsync(new GovernanceBatchExecuteRequest(
+        var batchRequest = new GovernanceBatchExecuteRequest(
             request.GovernanceRunId,
             ProjectIds: null,
             SnapshotToken: request.SnapshotToken,
@@ -100,7 +114,11 @@ public sealed class ScheduledGovernanceService(
             AllowMaturedDelete: false,
             SemanticAutoResolutionConfidenceThreshold: 0.90m,
             ToolContractVersion: GovernanceToolContract.ToolContractVersion,
-            SchemaHash: GovernanceToolContract.SchemaHash), cancellationToken);
+            SchemaHash: GovernanceToolContract.SchemaHash)
+        {
+            ReceiptContractIdentity = ReceiptContractIdentity
+        };
+        var result = await batchExecutor.ExecuteAsync(batchRequest, cancellationToken);
 
         return ToScheduledResult(result);
     }
@@ -142,7 +160,9 @@ public sealed class ScheduledGovernanceService(
             receipt.RunExists,
             receipt.Status,
             receipt.LatestBatchReceived,
-            receipt.RequestIdentityHash);
+            receipt.RequestIdentityHash,
+            receipt.ExceptionDelta,
+            ScheduledGovernanceContract.RuntimeIdentity);
     }
 
     public static ScheduledGovernanceExecutionResult ToScheduledResult(GovernanceBatchExecuteResult result)
@@ -182,7 +202,8 @@ public sealed class ScheduledGovernanceService(
             result.StoppedReason,
             result.IsReplay,
             result.ElapsedMilliseconds,
-            ToScheduledError(result.ErrorCode));
+            ToScheduledError(result.ErrorCode),
+            ScheduledGovernanceContract.RuntimeIdentity);
 
     private static ScheduledGovernanceExecutionError ToScheduledError(GovernanceBatchErrorCode error)
         => error switch

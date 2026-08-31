@@ -1,3 +1,4 @@
+using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -174,18 +175,20 @@ public sealed class AutonomousRetentionService(
         var actor = RequireActor(SecurityScopes.MemoryWrite);
         projectId = ProjectContext.Normalize(projectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+        await LockTextEvidenceWritersAsync(cancellationToken);
         var existing = await FindTombstoneAsync(resourceId, projectId, actor, cancellationToken);
         if (existing is not null)
         {
             return MapReplay(existing);
         }
 
-        var memory = await dbContext.MemoryItems.SingleOrDefaultAsync(x =>
-            x.Id == resourceId && x.ProjectId == projectId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
-            cancellationToken) ?? throw new InvalidOperationException("Matured delete cannot proceed without the original resource or its tombstone.");
-        var state = await dbContext.MemoryRetentionStates.SingleOrDefaultAsync(x =>
-            x.ResourceId == resourceId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
-            cancellationToken) ?? throw new InvalidOperationException("Matured delete requires a persisted quarantine lifecycle.");
+        var memory = await LoadMemoryForDeleteAsync(resourceId, projectId, actor, cancellationToken)
+            ?? throw new InvalidOperationException("Matured delete cannot proceed without the original resource or its tombstone.");
+        var state = await LoadRetentionStateForDeleteAsync(resourceId, actor, cancellationToken)
+            ?? throw new InvalidOperationException("Matured delete requires a persisted quarantine lifecycle.");
         var policy = ResolvePolicy(memory);
         var evidence = await LoadEvidenceAsync([resourceId], actor.TenantId!.Value, actor.UserId!.Value, [projectId], cancellationToken);
         var now = timeProvider.GetUtcNow();
@@ -194,6 +197,7 @@ public sealed class AutonomousRetentionService(
         if (state.LifecycleStatus != EligibleStatus || !state.DeleteEligibleAt.HasValue || state.DeleteEligibleAt > now)
         {
             await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             throw new InvalidOperationException("Matured delete failed closed because current eligibility or grace maturity was not revalidated.");
         }
 
@@ -247,9 +251,11 @@ public sealed class AutonomousRetentionService(
         try
         {
             await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
         catch (DbUpdateException)
         {
+            await transaction.RollbackAsync(cancellationToken);
             dbContext.ChangeTracker.Clear();
             var winner = await FindTombstoneAsync(resourceId, projectId, actor, cancellationToken);
             if (winner is null)
@@ -333,6 +339,7 @@ public sealed class AutonomousRetentionService(
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var activeWorkItems = await dbContext.ProjectWorkItems.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && evidenceProjectIds.Contains(x.ProjectId) &&
+                        x.ArchivedAt == null &&
                         (x.Status == ProjectWorkItemStatus.Pending || x.Status == ProjectWorkItemStatus.InProgress || x.Status == ProjectWorkItemStatus.Blocked))
             .Select(x => new { x.Id, x.Title, x.Description }).ToListAsync(cancellationToken);
         var activeWorkItemIds = activeWorkItems.Select(x => x.Id).ToArray();
@@ -344,7 +351,7 @@ public sealed class AutonomousRetentionService(
         var activeWorkItemTexts = activeWorkItems.SelectMany(x => new[] { x.Title, x.Description })
             .Concat(activeChecklistTexts).ToArray();
         var openThreads = await dbContext.DiscussionThreads.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && x.Status == "Open" &&
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && x.ArchivedAt == null && x.Status == "Open" &&
                         (evidenceProjectIds.Contains(x.HostProjectId) || x.Participants.Any(p => evidenceProjectIds.Contains(p.ProjectId))))
             .Select(x => new { x.Id, x.Title }).ToListAsync(cancellationToken);
         var openThreadIds = openThreads.Select(x => x.Id).ToArray();
@@ -356,6 +363,8 @@ public sealed class AutonomousRetentionService(
         openDiscussionTexts = openDiscussionTexts.Concat(openThreads.Select(x => x.Title)).ToList();
         var activeJobPayloads = await dbContext.MemoryJobs.AsNoTracking()
             .Where(x => evidenceProjectIds.Contains(x.ProjectId) &&
+                        ((!x.TenantId.HasValue || !x.OwnerUserId.HasValue) ||
+                         (x.TenantId == tenantId && x.OwnerUserId == ownerUserId)) &&
                         (x.Status == MemoryJobStatus.Pending || x.Status == MemoryJobStatus.Running))
             .Select(x => x.PayloadJson).ToListAsync(cancellationToken);
         var relationshipFingerprint = Hash(string.Join('|', hierarchy.OrderBy(x => x.ParentProjectId).ThenBy(x => x.ChildProjectId)
@@ -528,6 +537,85 @@ public sealed class AutonomousRetentionService(
         => dbContext.ResourceTombstones.AsNoTracking().SingleOrDefaultAsync(x =>
             x.ResourceId == resourceId && x.ProjectId == projectId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
             cancellationToken);
+
+    private Task LockTextEvidenceWritersAsync(CancellationToken cancellationToken)
+    {
+        if (!string.Equals(
+                dbContext.Database.ProviderName,
+                "Npgsql.EntityFrameworkCore.PostgreSQL",
+                StringComparison.Ordinal))
+        {
+            return Task.CompletedTask;
+        }
+
+        return dbContext.Database.ExecuteSqlRawAsync(
+            """
+            LOCK TABLE project_hierarchies,
+                       project_work_items,
+                       project_work_item_checklist_items,
+                       discussion_threads,
+                       discussion_participants,
+                       discussion_messages,
+                       memory_jobs
+            IN SHARE MODE
+            """,
+            cancellationToken);
+    }
+
+    private Task<MemoryItem?> LoadMemoryForDeleteAsync(
+        Guid resourceId,
+        string projectId,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(
+                dbContext.Database.ProviderName,
+                "Npgsql.EntityFrameworkCore.PostgreSQL",
+                StringComparison.Ordinal))
+        {
+            return dbContext.MemoryItems.SingleOrDefaultAsync(x =>
+                x.Id == resourceId && x.ProjectId == projectId &&
+                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
+                cancellationToken);
+        }
+
+        return dbContext.MemoryItems.FromSqlInterpolated($"""
+                SELECT *
+                FROM memory_items
+                WHERE id = {resourceId}
+                  AND project_id = {projectId}
+                  AND tenant_id = {actor.TenantId}
+                  AND owner_user_id = {actor.UserId}
+                FOR UPDATE
+                """)
+            .SingleOrDefaultAsync(cancellationToken);
+    }
+
+    private Task<MemoryRetentionState?> LoadRetentionStateForDeleteAsync(
+        Guid resourceId,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(
+                dbContext.Database.ProviderName,
+                "Npgsql.EntityFrameworkCore.PostgreSQL",
+                StringComparison.Ordinal))
+        {
+            return dbContext.MemoryRetentionStates.SingleOrDefaultAsync(x =>
+                x.ResourceId == resourceId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
+                cancellationToken);
+        }
+
+        return dbContext.MemoryRetentionStates.FromSqlInterpolated($"""
+                SELECT *
+                FROM memory_retention_states
+                WHERE resource_id = {resourceId}
+                  AND tenant_id = {actor.TenantId}
+                  AND owner_user_id = {actor.UserId}
+                FOR UPDATE
+                """)
+            .SingleOrDefaultAsync(cancellationToken);
+    }
 
     private static MaturedDeleteResult MapReplay(ResourceTombstone tombstone)
         => new(tombstone.ResourceId, tombstone.ProjectId, false, true, tombstone.Id, tombstone.AuditId,

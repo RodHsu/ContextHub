@@ -347,6 +347,14 @@ public sealed class ConversationAutomationService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         ValidateGovernanceRunId(request.GovernanceRunId);
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            throw new InvalidOperationException("A governance retry reason is required.");
+        }
+        if (string.IsNullOrWhiteSpace(request.GovernanceRunId))
+        {
+            throw new InvalidOperationException("GovernanceRunId is required for an explicit insight retry.");
+        }
         var insight = await LoadGovernableInsightAsync(request.InsightId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, insight.ProjectId, write: true);
         if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
@@ -354,13 +362,26 @@ public sealed class ConversationAutomationService(
             return MapInsight(insight);
         }
 
+        var now = clock.UtcNow;
+        var (tenantId, ownerUserId) = RequireInsightIdentity(insight);
+        var currentFingerprint = await GovernanceEvidenceFingerprint.BuildAsync(
+            dbContext, insight.ProjectId, tenantId, ownerUserId,
+            insight.PromotedMemoryId, null, insight.Id,
+            GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
+            [insight.Id.ToString("D"), insight.Title]);
         insight.PromotionStatus = ConversationPromotionStatus.Pending;
         insight.Error = string.Empty;
-        insight.GovernanceReason = string.IsNullOrWhiteSpace(request.Reason) ? "Manual governance retry." : request.Reason.Trim();
-        insight.GovernanceRunId = request.GovernanceRunId?.Trim() ?? string.Empty;
+        insight.GovernanceReason = request.Reason.Trim();
+        insight.GovernanceRunId = request.GovernanceRunId.Trim();
         insight.GovernanceRetryCount++;
-        insight.GovernanceUpdatedAt = clock.UtcNow;
-        insight.UpdatedAt = clock.UtcNow;
+        insight.GovernanceUpdatedAt = now;
+        insight.GovernanceLastReevaluatedAt = now;
+        insight.GovernanceEvidenceChangedSinceBlock =
+            !string.Equals(insight.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal) ||
+            !string.Equals(insight.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal);
+        insight.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+        insight.GovernanceEvidenceFingerprint = currentFingerprint;
+        insight.UpdatedAt = now;
         await AddInsightGovernanceAuditAsync(insight, "Retry", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         await EnqueuePromotionJobIfNeededAsync(insight.ConversationId, insight.ProjectId, cancellationToken);
@@ -423,15 +444,25 @@ public sealed class ConversationAutomationService(
             return MapInsight(insight);
         }
 
+        var now = clock.UtcNow;
         insight.PromotionStatus = status;
         insight.GovernanceReason = reason;
         insight.GovernanceRunId = runId;
-        insight.GovernanceUpdatedAt = clock.UtcNow;
+        insight.GovernanceUpdatedAt = now;
         insight.Error = reason;
-        insight.UpdatedAt = clock.UtcNow;
+        ApplyExceptionObservability(
+            insight,
+            status,
+            request.BlockingLayer,
+            request.ReasonClass,
+            request.RelatedTool,
+            now);
+        insight.UpdatedAt = now;
         insight.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+        var (tenantId, ownerUserId) = RequireInsightIdentity(insight);
         insight.GovernanceEvidenceFingerprint = await GovernanceEvidenceFingerprint.BuildAsync(
-            dbContext, insight.ProjectId, insight.PromotedMemoryId, null, insight.Id,
+            dbContext, insight.ProjectId, tenantId, ownerUserId,
+            insight.PromotedMemoryId, null, insight.Id,
             GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
             [insight.Id.ToString("D"), insight.Title]);
         await AddInsightGovernanceAuditAsync(insight, request.Disposition.ToString(), cancellationToken);
@@ -789,8 +820,47 @@ public sealed class ConversationAutomationService(
             GovernanceReason = x.GovernanceReason,
             GovernanceRunId = x.GovernanceRunId,
             GovernanceRetryCount = x.GovernanceRetryCount,
-            GovernanceUpdatedAt = x.GovernanceUpdatedAt
+            GovernanceUpdatedAt = x.GovernanceUpdatedAt,
+            GovernanceBlockedAt = x.GovernanceBlockedAt,
+            GovernanceLastReevaluatedAt = x.GovernanceLastReevaluatedAt,
+            GovernanceBlockingLayer = x.GovernanceBlockingLayer,
+            GovernanceReasonClass = x.GovernanceReasonClass,
+            GovernanceRelatedTool = x.GovernanceRelatedTool,
+            GovernanceEvidenceChangedSinceBlock = x.GovernanceEvidenceChangedSinceBlock
         };
+
+    private static void ApplyExceptionObservability(
+        ConversationInsight insight,
+        ConversationPromotionStatus status,
+        string? blockingLayer,
+        string? reasonClass,
+        string? relatedTool,
+        DateTimeOffset now)
+    {
+        insight.GovernanceLastReevaluatedAt = now;
+        insight.GovernanceEvidenceChangedSinceBlock = false;
+        if (status != ConversationPromotionStatus.HostBlocked)
+        {
+            insight.GovernanceBlockedAt = null;
+            insight.GovernanceBlockingLayer = string.Empty;
+            insight.GovernanceReasonClass = string.Empty;
+            insight.GovernanceRelatedTool = string.Empty;
+            return;
+        }
+
+        insight.GovernanceBlockedAt ??= now;
+        insight.GovernanceBlockingLayer = NormalizeTaxonomy(blockingLayer, "HostEnvironment");
+        insight.GovernanceReasonClass = NormalizeTaxonomy(reasonClass, "HostCapabilityUnavailable");
+        insight.GovernanceRelatedTool = NormalizeTaxonomy(relatedTool, string.Empty);
+    }
+
+    private static string NormalizeTaxonomy(string? value, string fallback)
+        => string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+    private static (Guid TenantId, Guid OwnerUserId) RequireInsightIdentity(ConversationInsight insight)
+        => (
+            insight.TenantId ?? throw new InvalidOperationException("Conversation insight governance requires a tenant identity."),
+            insight.OwnerUserId ?? throw new InvalidOperationException("Conversation insight governance requires an owner identity."));
 
     private async ValueTask AddInsightGovernanceAuditAsync(ConversationInsight insight, string action, CancellationToken cancellationToken)
     {

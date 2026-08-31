@@ -200,6 +200,162 @@ public sealed class AutonomousRetentionTests(ContainerTestEnvironment environmen
     }
 
     [DockerRequiredFact]
+    public async Task Archived_Work_Items_And_Discussions_Should_Not_Block_Revalidation()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var service = scope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>();
+        var projectId = $"RetentionArchivedReferences_{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+
+        var workItemMemory = CreateMemory(actor, projectId, MemoryType.Episode, ["machine-generated", "execution-evidence"]);
+        var discussionMemory = CreateMemory(actor, projectId, MemoryType.Episode, ["machine-generated", "execution-evidence"]);
+        db.MemoryItems.AddRange(workItemMemory, discussionMemory);
+        await db.SaveChangesAsync();
+        await service.QuarantineAsync(workItemMemory.Id, projectId, "archive-work-item-q", CancellationToken.None);
+        await service.QuarantineAsync(discussionMemory.Id, projectId, "archive-discussion-q", CancellationToken.None);
+
+        var workItem = new ProjectWorkItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = projectId,
+            Title = $"Investigate memory {workItemMemory.Id:D}",
+            Description = "Active work item reference fixture.",
+            Status = ProjectWorkItemStatus.InProgress,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var discussion = new DiscussionThread
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            HostProjectId = projectId,
+            Title = $"Discuss memory {discussionMemory.Id:D}",
+            Status = "Open",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.ProjectWorkItems.Add(workItem);
+        db.DiscussionThreads.Add(discussion);
+        db.DiscussionMessages.Add(new DiscussionMessage
+        {
+            ThreadId = discussion.Id,
+            SenderProjectId = projectId,
+            Content = $"Active discussion reference for memory {discussionMemory.Id:D}.",
+            CreatedAt = now
+        });
+        await db.SaveChangesAsync();
+
+        await service.ReviewAsync([projectId], "archive-references-active", CancellationToken.None);
+        var blockedWorkItemState = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == workItemMemory.Id);
+        var blockedDiscussionState = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == discussionMemory.Id);
+        blockedWorkItemState.BlockedReasonsJson.Should().Contain("activeWorkItemReference");
+        blockedDiscussionState.BlockedReasonsJson.Should().Contain("activeDiscussionReference");
+        blockedWorkItemState.DeleteEligibleAt.Should().BeNull();
+        blockedDiscussionState.DeleteEligibleAt.Should().BeNull();
+
+        workItem.ArchivedAt = now.AddMinutes(1);
+        workItem.UpdatedAt = now.AddMinutes(1);
+        discussion.ArchivedAt = now.AddMinutes(1);
+        discussion.UpdatedAt = now.AddMinutes(1);
+        await db.SaveChangesAsync();
+
+        await service.ReviewAsync([projectId], "archive-references-restored", CancellationToken.None);
+        var restoredWorkItemState = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == workItemMemory.Id);
+        var restoredDiscussionState = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == discussionMemory.Id);
+        restoredWorkItemState.BlockedReasonsJson.Should().NotContain("activeWorkItemReference");
+        restoredDiscussionState.BlockedReasonsJson.Should().NotContain("activeDiscussionReference");
+        restoredWorkItemState.DeleteEligibleAt.Should().NotBeNull();
+        restoredDiscussionState.DeleteEligibleAt.Should().NotBeNull();
+    }
+
+    [DockerRequiredFact]
+    public async Task Foreign_MemoryJobs_Should_Be_Isolated_And_Legacy_Unowned_Jobs_Should_Fail_Closed()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var service = scope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>();
+        var projectId = $"RetentionJobOwnership_{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var memory = CreateMemory(actor, projectId, MemoryType.Episode, ["machine-generated", "execution-evidence"]);
+        db.MemoryItems.Add(memory);
+        await db.SaveChangesAsync();
+        await service.QuarantineAsync(memory.Id, projectId, "job-ownership-q", CancellationToken.None);
+
+        var foreignTenantId = Guid.NewGuid();
+        var foreignUserId = Guid.NewGuid();
+        db.Tenants.Add(new Tenant
+        {
+            Id = foreignTenantId,
+            Slug = $"retention-job-{foreignTenantId:N}"[..28],
+            DisplayName = "Retention Job Foreign Tenant",
+            Status = TenantStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        db.TenantUsers.Add(new TenantUser
+        {
+            Id = foreignUserId,
+            TenantId = foreignTenantId,
+            Username = $"retention-job-{foreignUserId:N}"[..28],
+            DisplayName = "Retention Job Foreign User",
+            Role = TenantUserRole.Admin,
+            Status = TenantUserStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        var payload = $$"""{"memoryId":"{{memory.Id:D}}"}""";
+        var foreignJob = new MemoryJob
+        {
+            TenantId = foreignTenantId,
+            OwnerUserId = foreignUserId,
+            ProjectId = projectId,
+            JobType = MemoryJobType.Reindex,
+            Status = MemoryJobStatus.Pending,
+            PayloadJson = payload,
+            CreatedAt = now
+        };
+        var legacyTenantMissing = new MemoryJob
+        {
+            TenantId = null,
+            OwnerUserId = actor.UserId,
+            ProjectId = projectId,
+            JobType = MemoryJobType.Reindex,
+            Status = MemoryJobStatus.Running,
+            PayloadJson = payload,
+            CreatedAt = now
+        };
+        var legacyOwnerMissing = new MemoryJob
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = null,
+            ProjectId = projectId,
+            JobType = MemoryJobType.Reindex,
+            Status = MemoryJobStatus.Pending,
+            PayloadJson = payload,
+            CreatedAt = now
+        };
+        db.MemoryJobs.AddRange(foreignJob, legacyTenantMissing, legacyOwnerMissing);
+        await db.SaveChangesAsync();
+
+        await service.ReviewAsync([projectId], "job-ownership-revalidation", CancellationToken.None);
+        var state = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == memory.Id);
+        state.BlockedReasonsJson.Should().Contain("activeDependency");
+        state.DeleteEligibleAt.Should().BeNull();
+
+        db.MemoryJobs.RemoveRange(legacyTenantMissing, legacyOwnerMissing);
+        await db.SaveChangesAsync();
+        await service.ReviewAsync([projectId], "job-ownership-legacy-cleared", CancellationToken.None);
+        state = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == memory.Id);
+        state.BlockedReasonsJson.Should().NotContain("activeDependency");
+        state.DeleteEligibleAt.Should().NotBeNull();
+    }
+
+    [DockerRequiredFact]
     public async Task Protected_Types_And_Security_Audit_Evidence_Should_Not_Use_Short_AutoDelete()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

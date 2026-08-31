@@ -95,13 +95,22 @@ public sealed record GovernanceFindingResult(
     public string GovernanceActor { get; init; } = string.Empty;
     public int GovernanceRetryCount { get; init; }
     public DateTimeOffset? GovernanceUpdatedAt { get; init; }
+    public DateTimeOffset? GovernanceBlockedAt { get; init; }
+    public DateTimeOffset? GovernanceLastReevaluatedAt { get; init; }
+    public string GovernanceBlockingLayer { get; init; } = string.Empty;
+    public string GovernanceReasonClass { get; init; } = string.Empty;
+    public string GovernanceRelatedTool { get; init; } = string.Empty;
+    public bool GovernanceEvidenceChangedSinceBlock { get; init; }
 }
 
 public sealed record GovernanceFindingDispositionRequest(
     Guid FindingId,
     GovernanceFindingDisposition Disposition,
     string Reason,
-    string? GovernanceRunId = null);
+    string? GovernanceRunId = null,
+    string? BlockingLayer = null,
+    string? ReasonClass = null,
+    string? RelatedTool = null);
 
 public sealed record GovernanceFindingReopenRequest(
     Guid FindingId,

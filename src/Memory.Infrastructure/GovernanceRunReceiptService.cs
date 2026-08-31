@@ -24,7 +24,8 @@ public sealed class GovernanceRunReceiptService(
         var previous = await LatestAsync(runId, actor, cancellationToken);
         var snapshot = result.DurableMemoryCoverage?.SnapshotToken ?? string.Empty;
         var eventKey = Hash($"review\n{snapshot}\n{result.IsReReview}\n{result.Convergence.Status}\n{result.Convergence.GovernanceActionableCount}");
-        var receipt = NewReceipt(actor, runId, eventKey, "Review", "ReviewCompleted", "Completed", startedAt);
+        var receipt = NewReceipt(actor, runId, eventKey, "Review", "ReviewCompleted", "Completed", startedAt,
+            result.ReceiptContractIdentity);
         CopyCumulative(previous, receipt);
         receipt.InitialSnapshotToken = previous?.InitialSnapshotToken ?? snapshot;
         receipt.FinalSnapshotToken = snapshot;
@@ -37,6 +38,17 @@ public sealed class GovernanceRunReceiptService(
         receipt.Deferred = result.Convergence.DeferredCount;
         receipt.RequiresUserDecision = result.Convergence.RequiresUserDecisionCount;
         receipt.HostBlocked = result.Convergence.HostBlockedCount;
+        var currentExceptionStates = result.GovernedExceptionStates
+            .OrderBy(x => x.Key, StringComparer.Ordinal)
+            .ToArray();
+        var exceptionDelta = ComputeExceptionDelta(
+            DeserializeExceptionStates(previous?.GovernedExceptionStatesJson),
+            currentExceptionStates);
+        receipt.ExceptionNew = exceptionDelta.New;
+        receipt.ExceptionResolved = exceptionDelta.Resolved;
+        receipt.ExceptionUnchanged = exceptionDelta.Unchanged;
+        receipt.ExceptionEscalated = exceptionDelta.Escalated;
+        receipt.GovernedExceptionStatesJson = JsonSerializer.Serialize(currentExceptionStates, JsonOptions);
         receipt.DeleteEligible = result.DeleteEligibleCount;
         receipt.DeleteMatured = result.DeleteMaturedCount;
         receipt.DeleteCancelled = result.DeleteCancelledCount;
@@ -60,7 +72,8 @@ public sealed class GovernanceRunReceiptService(
         var previous = await LatestAsync(runId, actor, cancellationToken);
         var receipt = NewReceipt(
             actor, runId, Hash($"batch-received\n{runId}\n{requestIdentity}"),
-            request.ExecutionMode.ToString(), "BatchReceived", "Running", startedAt);
+            request.ExecutionMode.ToString(), "BatchReceived", "Running", startedAt,
+            request.ReceiptContractIdentity);
         CopyCumulative(previous, receipt);
         receipt.LatestBatchReceived = true;
         receipt.RequestIdentityHash = requestIdentity;
@@ -86,7 +99,8 @@ public sealed class GovernanceRunReceiptService(
         var status = ResolveTerminalStatus(result);
         var eventKind = result.IsReplay ? "BatchReplay" : "BatchCompleted";
         var eventKey = Hash($"{eventKind}\n{runId}\n{requestIdentity}\n{status}\n{result.StoppedReason}");
-        var receipt = NewReceipt(actor, runId, eventKey, request.ExecutionMode.ToString(), eventKind, status, startedAt);
+        var receipt = NewReceipt(actor, runId, eventKey, request.ExecutionMode.ToString(), eventKind, status, startedAt,
+            request.ReceiptContractIdentity);
         CopyCumulative(previous, receipt);
         var add = result.IsReplay ? 0 : 1;
         receipt.LatestBatchReceived = true;
@@ -134,7 +148,8 @@ public sealed class GovernanceRunReceiptService(
         var normalizedStatus = string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase) ? "Failed" : "Stopped";
         var receipt = NewReceipt(
             actor, runId, Hash($"batch-stopped\n{runId}\n{requestIdentity}\n{normalizedStatus}\n{stoppedReason}"),
-            request.ExecutionMode.ToString(), "BatchStopped", normalizedStatus, startedAt);
+            request.ExecutionMode.ToString(), "BatchStopped", normalizedStatus, startedAt,
+            request.ReceiptContractIdentity);
         CopyCumulative(previous, receipt);
         receipt.LatestBatchReceived = true;
         receipt.RequestIdentityHash = requestIdentity;
@@ -257,7 +272,8 @@ public sealed class GovernanceRunReceiptService(
         string executionMode,
         string eventType,
         string status,
-        DateTimeOffset startedAt)
+        DateTimeOffset startedAt,
+        GovernanceReceiptContractIdentity? contractIdentity = null)
     {
         var now = timeProvider.GetUtcNow();
         return new GovernanceRunReceipt
@@ -272,9 +288,9 @@ public sealed class GovernanceRunReceiptService(
             Status = status,
             StartedAt = startedAt,
             CompletedAt = now,
-            ToolContractVersion = GovernanceToolContract.ToolContractVersion,
-            SchemaHash = GovernanceToolContract.SchemaHash,
-            PublishedCatalogVersion = GovernanceToolContract.PublishedCatalogVersion,
+            ToolContractVersion = contractIdentity?.ToolContractVersion ?? GovernanceToolContract.ToolContractVersion,
+            SchemaHash = contractIdentity?.SchemaHash ?? GovernanceToolContract.SchemaHash,
+            PublishedCatalogVersion = contractIdentity?.PublishedCatalogVersion ?? GovernanceToolContract.PublishedCatalogVersion,
             CreatedAt = now
         };
     }
@@ -342,7 +358,15 @@ public sealed class GovernanceRunReceiptService(
             Status: readStatus,
             LatestBatchReceived: batchReceipt is not null,
             RequestIdentityHash: batchReceipt?.RequestIdentityHash ?? string.Empty,
-            LatestBatch: latestBatch);
+            LatestBatch: latestBatch)
+        {
+            ExceptionDelta = new GovernanceExceptionDeltaResult(
+                receipt.ExceptionNew,
+                receipt.ExceptionResolved,
+                receipt.ExceptionUnchanged,
+                receipt.ExceptionEscalated),
+            GovernedExceptionStates = DeserializeExceptionStates(receipt.GovernedExceptionStatesJson)
+        };
     }
 
     private static GovernanceBatchOutcomeResult? BuildLatestBatch(
@@ -474,6 +498,11 @@ public sealed class GovernanceRunReceiptService(
         receipt.Deferred = previous.Deferred;
         receipt.RequiresUserDecision = previous.RequiresUserDecision;
         receipt.HostBlocked = previous.HostBlocked;
+        receipt.ExceptionNew = previous.ExceptionNew;
+        receipt.ExceptionResolved = previous.ExceptionResolved;
+        receipt.ExceptionUnchanged = previous.ExceptionUnchanged;
+        receipt.ExceptionEscalated = previous.ExceptionEscalated;
+        receipt.GovernedExceptionStatesJson = previous.GovernedExceptionStatesJson;
         receipt.Quarantined = previous.Quarantined;
         receipt.DeleteEligible = previous.DeleteEligible;
         receipt.DeleteMatured = previous.DeleteMatured;
@@ -506,6 +535,34 @@ public sealed class GovernanceRunReceiptService(
             throw new UnauthorizedAccessException("The governance run receipt is outside the current project authorization boundary.");
         }
         ActorAuthorization.EnsureProjectsAllowed(actor, projectIds, write: false);
+    }
+
+    private static GovernanceExceptionDeltaResult ComputeExceptionDelta(
+        IReadOnlyList<GovernanceExceptionStateResult> previous,
+        IReadOnlyList<GovernanceExceptionStateResult> current)
+    {
+        var previousByKey = previous.ToDictionary(x => x.Key, StringComparer.Ordinal);
+        var currentByKey = current.ToDictionary(x => x.Key, StringComparer.Ordinal);
+        var added = currentByKey.Keys.Count(key => !previousByKey.ContainsKey(key));
+        var resolved = previousByKey.Keys.Count(key => !currentByKey.ContainsKey(key));
+        var escalated = currentByKey.Count(pair =>
+            previousByKey.TryGetValue(pair.Key, out var old) && pair.Value.Severity > old.Severity);
+        var unchanged = currentByKey.Count(pair =>
+            previousByKey.TryGetValue(pair.Key, out var old) && pair.Value.Severity == old.Severity);
+        return new GovernanceExceptionDeltaResult(added, resolved, unchanged, escalated);
+    }
+
+    private static IReadOnlyList<GovernanceExceptionStateResult> DeserializeExceptionStates(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        try
+        {
+            return JsonSerializer.Deserialize<GovernanceExceptionStateResult[]>(json, JsonOptions) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     private static int SumCandidates(FullGovernanceCoverageResult? coverage)

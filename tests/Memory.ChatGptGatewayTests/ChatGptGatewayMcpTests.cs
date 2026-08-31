@@ -3013,6 +3013,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             x.ProjectId == mergeProjectId && x.Type == SuggestedActionType.MergeDuplicateCandidate);
         var historicalAuthorityAction = new SuggestedAction
         {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
             ProjectId = mergeProjectId,
             Type = SuggestedActionType.ReviewConflictCandidate,
             Status = SuggestedActionStatus.Pending,
@@ -3041,6 +3043,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
         var historicalMergeAction = new SuggestedAction
         {
+            TenantId = actorAccessor.Current.TenantId,
+            OwnerUserId = actorAccessor.Current.UserId,
             ProjectId = mergeProjectId,
             Type = SuggestedActionType.MergeDuplicateCandidate,
             Status = SuggestedActionStatus.Pending,
@@ -3493,7 +3497,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         await dbContext.SaveChangesAsync();
 
         (await gatewayTools.conversation_insight_status(insight.Id, CancellationToken.None))!.PromotionStatus.Should().Be(ConversationPromotionStatus.Failed);
-        (await gatewayTools.conversation_insight_retry(new ConversationInsightGovernanceRequest(insight.Id, governanceRunId), CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.Pending);
+        (await gatewayTools.conversation_insight_retry(new ConversationInsightGovernanceRequest(
+            insight.Id,
+            governanceRunId,
+            "Retry after the recorded transient failure."), CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.Pending);
         var hostBlockedRequest = new ConversationInsightDispositionRequest(insight.Id, ConversationInsightDisposition.HostBlocked, "ChatGPT host safety gate blocked the mutation.", governanceRunId);
         (await gatewayTools.conversation_insight_set_disposition(hostBlockedRequest, CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.HostBlocked);
         (await gatewayTools.conversation_insight_set_disposition(hostBlockedRequest, CancellationToken.None)).PromotionStatus.Should().Be(ConversationPromotionStatus.HostBlocked);

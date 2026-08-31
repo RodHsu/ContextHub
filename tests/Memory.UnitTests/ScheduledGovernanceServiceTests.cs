@@ -25,13 +25,44 @@ public sealed class ScheduledGovernanceServiceTests
         knowledge.Request!.ProjectIds.Should().BeNull();
         knowledge.Request.LimitPerSection.Should().Be(200);
         knowledge.Request.Offset.Should().Be(0);
+        knowledge.Request.ReceiptContractIdentity.Should().Be(new GovernanceReceiptContractIdentity(
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion));
         result.Decision.Should().Be(ScheduledGovernanceDecision.ReversibleExecutionRequired);
         result.CountInvariant.Satisfied.Should().BeTrue();
         result.CountInvariant.SharedScopeOccurrences.Should().Be(1);
         result.CountInvariant.UserScopeOccurrences.Should().Be(0);
         result.CountInvariant.UserScopeHandledSeparately.Should().BeTrue();
         result.ReversibleExecutionCount.Should().Be(1);
+        result.CurrentReviewHumanDecisionCandidateCount.Should().Be(0);
+        result.GovernedRequiresUserDecisionExceptionCount.Should().Be(0);
+        result.GovernedHostBlockedExceptionCount.Should().Be(0);
+        result.GovernedDeferredExceptionCount.Should().Be(0);
         executor.CallCount.Should().Be(0, "review must not execute governed-resource mutations");
+    }
+
+    [Fact]
+    public async Task Review_Should_Separate_Current_Human_Candidates_From_Governed_Exception_Counters()
+    {
+        var human = new GovernanceReviewItem(
+            "finding:human", GovernanceItemKind.Memory, "ProjectA", "Ambiguous", "Merge",
+            GovernanceBatchRiskLevel.High, true, Guid.NewGuid(), [], ["HUMAN"], "run-human");
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview(
+                [human],
+                governedDeferred: 2,
+                governedRequiresUserDecision: 3,
+                governedHostBlocked: 4)),
+            new CapturingExecutor());
+
+        var result = await service.ReviewAsync(new("run-human"), CancellationToken.None);
+
+        result.HumanDecisionCount.Should().Be(1);
+        result.CurrentReviewHumanDecisionCandidateCount.Should().Be(1);
+        result.GovernedDeferredExceptionCount.Should().Be(2);
+        result.GovernedRequiresUserDecisionExceptionCount.Should().Be(3);
+        result.GovernedHostBlockedExceptionCount.Should().Be(4);
     }
 
     [Fact]
@@ -82,6 +113,27 @@ public sealed class ScheduledGovernanceServiceTests
         mapped.ExecutionMode.Should().Be(GovernanceBatchExecutionMode.Scheduled);
         mapped.ToolContractVersion.Should().Be(GovernanceToolContract.ToolContractVersion);
         mapped.SchemaHash.Should().Be(GovernanceToolContract.SchemaHash);
+        mapped.ReceiptContractIdentity.Should().Be(new GovernanceReceiptContractIdentity(
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion));
+    }
+
+    [Fact]
+    public async Task GetReceipt_Should_Return_Persisted_Contract_Identity_Not_Current_Constants()
+    {
+        var persisted = CreateReceipt("run-old", "scheduled-0.9", "sha256:old", "catalog-old");
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(),
+            new StubReceipts(persisted));
+
+        var result = await service.GetReceiptAsync("run-old", CancellationToken.None);
+
+        result.Should().NotBeNull();
+        result!.ToolContractVersion.Should().Be("scheduled-0.9");
+        result.SchemaHash.Should().Be("sha256:old");
+        result.PublishedCatalogVersion.Should().Be("catalog-old");
     }
 
     [Fact]
@@ -106,19 +158,70 @@ public sealed class ScheduledGovernanceServiceTests
 
     private static ScheduledGovernanceService CreateService(
         IKnowledgeReviewService knowledge,
-        IGovernanceBatchExecutor executor)
+        IGovernanceBatchExecutor executor,
+        IGovernanceRunReceiptService? receipts = null)
     {
         var actor = new RequestActorAccessor
         {
             Current = new ContextHubRequestActor(Guid.NewGuid(), Guid.NewGuid(), "admin", TenantUserRole.Admin,
                 [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.ScheduledGovernance], [], true)
         };
-        return new ScheduledGovernanceService(knowledge, executor, new StubReceipts(), actor);
+        return new ScheduledGovernanceService(knowledge, executor, receipts ?? new StubReceipts(), actor);
     }
+
+    private static GovernanceRunReceiptResult CreateReceipt(
+        string runId,
+        string toolContractVersion,
+        string schemaHash,
+        string publishedCatalogVersion)
+        => new(
+            ReceiptId: Guid.NewGuid(),
+            GovernanceRunId: runId,
+            Actor: "scheduled-governance",
+            ExecutionMode: "Scheduled",
+            StartedAt: DateTimeOffset.UtcNow.AddMinutes(-1),
+            CompletedAt: DateTimeOffset.UtcNow,
+            ToolContractVersion: toolContractVersion,
+            SchemaHash: schemaHash,
+            PublishedCatalogVersion: publishedCatalogVersion,
+            InitialSnapshotToken: "snapshot-old",
+            FinalSnapshotToken: "snapshot-old",
+            CoverageComplete: true,
+            InitialGovernanceActionable: 0,
+            FinalGovernanceActionable: 0,
+            CandidateCount: 0,
+            ExecutionActionableCount: 0,
+            GovernedExceptionCount: 0,
+            Applied: 0,
+            Failed: 0,
+            Deferred: 0,
+            RequiresUserDecision: 0,
+            HostBlocked: 0,
+            Quarantined: 0,
+            DeleteEligible: 0,
+            DeleteMatured: 0,
+            AutoDeleted: 0,
+            DeleteCancelled: 0,
+            Tombstoned: 0,
+            SemanticAutoResolved: 0,
+            BusinessWorkItemActionable: 0,
+            FinalConvergenceStatus: "NoOpConverged",
+            StoppedReason: string.Empty,
+            AuditIds: [],
+            ProjectIds: [],
+            IsReplay: false,
+            RunExists: true,
+            Status: "Completed",
+            LatestBatchReceived: false,
+            RequestIdentityHash: string.Empty,
+            LatestBatch: null);
 
     private static KnowledgeReviewResult CreateReview(
         IReadOnlyList<GovernanceReviewItem> items,
-        bool countInvariant = true)
+        bool countInvariant = true,
+        int governedDeferred = 0,
+        int governedRequiresUserDecision = 0,
+        int governedHostBlocked = 0)
     {
         var total = 2;
         var covered = countInvariant ? total : total - 1;
@@ -136,7 +239,10 @@ public sealed class ScheduledGovernanceServiceTests
         var pagination = new KnowledgeReviewPaginationResult(page, page, page, page, page, page, page, page);
         var convergence = new KnowledgeReviewConvergenceResult("Review", items.Count, true, false)
         {
-            BusinessWorkItemActionableCount = 3
+            BusinessWorkItemActionableCount = 3,
+            DeferredCount = governedDeferred,
+            RequiresUserDecisionCount = governedRequiresUserDecision,
+            HostBlockedCount = governedHostBlocked
         };
         return new KnowledgeReviewResult(
             [], null!, [], [], [], [], [], [], [], "run-1", false, pagination, convergence)
@@ -174,7 +280,7 @@ public sealed class ScheduledGovernanceServiceTests
         }
     }
 
-    private sealed class StubReceipts : IGovernanceRunReceiptService
+    private sealed class StubReceipts(GovernanceRunReceiptResult? receipt = null) : IGovernanceRunReceiptService
     {
         public Task RecordReviewAsync(KnowledgeReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task RecordExecutionStartedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, CancellationToken cancellationToken) => Task.CompletedTask;
@@ -182,7 +288,7 @@ public sealed class ScheduledGovernanceServiceTests
         public Task RecordExecutionStoppedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<GovernanceBatchExecuteResult?> GetTerminalPreExecutionReplayAsync(GovernanceBatchExecuteRequest request, CancellationToken cancellationToken) => Task.FromResult<GovernanceBatchExecuteResult?>(null);
         public Task RecordInternalRetentionAsync(InternalMaturedDeleteBatchResult result, DateTimeOffset startedAt, CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task<GovernanceRunReceiptResult?> GetAsync(string governanceRunId, CancellationToken cancellationToken) => Task.FromResult<GovernanceRunReceiptResult?>(null);
+        public Task<GovernanceRunReceiptResult?> GetAsync(string governanceRunId, CancellationToken cancellationToken) => Task.FromResult(receipt);
         public Task<IReadOnlyList<GovernanceRunReceiptResult>> ListAsync(GovernanceRunReceiptListRequest request, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<GovernanceRunReceiptResult>>([]);
     }
 }

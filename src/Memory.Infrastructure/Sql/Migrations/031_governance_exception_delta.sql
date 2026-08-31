@@ -1,0 +1,6 @@
+ALTER TABLE governance_run_receipts
+    ADD COLUMN IF NOT EXISTS exception_new INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS exception_resolved INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS exception_unchanged INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS exception_escalated INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS governed_exception_states_json JSONB NOT NULL DEFAULT '[]'::jsonb;

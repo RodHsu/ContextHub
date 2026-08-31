@@ -153,6 +153,31 @@ public sealed class KnowledgeReviewService(
             excludedGovernanceTrackers.Length);
 
         var candidateCount = CountCandidates(fullGovernancePlan.Coverage);
+        var exceptionStates = governanceSnapshot.ExceptionStates
+            .Concat(insightResults
+                .Where(x => x.PromotionStatus is ConversationPromotionStatus.Deferred or
+                    ConversationPromotionStatus.RequiresUserDecision or ConversationPromotionStatus.HostBlocked)
+                .Select(x => new GovernanceExceptionStateResult(
+                    $"insight:{x.Id:D}",
+                    "ConversationInsight",
+                    x.PromotionStatus.ToString(),
+                    x.PromotionStatus switch
+                    {
+                        ConversationPromotionStatus.HostBlocked => 3,
+                        ConversationPromotionStatus.RequiresUserDecision => 2,
+                        _ => 1
+                    })))
+            .Concat(fullGovernancePlan.Items
+                .Where(x => x.RequiresExplicitApproval)
+                .Select(x => new GovernanceExceptionStateResult(
+                    $"candidate:{x.ItemKey}",
+                    x.ItemKind.ToString(),
+                    "RequiresUserDecision",
+                    2)))
+            .GroupBy(x => x.Key, StringComparer.Ordinal)
+            .Select(group => group.OrderByDescending(x => x.Severity).First())
+            .OrderBy(x => x.Key, StringComparer.Ordinal)
+            .ToArray();
         var result = new KnowledgeReviewResult(
             projects,
             retention,
@@ -185,6 +210,8 @@ public sealed class KnowledgeReviewService(
             CandidateCount = candidateCount,
             ExecutionActionableCount = fullGovernancePlan.GovernanceActionableCount,
             GovernedExceptionCount = deferredCount + userDecisionCount + hostBlockedCount,
+            GovernedExceptionStates = exceptionStates,
+            ReceiptContractIdentity = request.ReceiptContractIdentity,
             Convergence = convergence with
             {
                 GovernanceActionableCount = fullGovernancePlan.GovernanceActionableCount,

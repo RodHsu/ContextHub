@@ -37,7 +37,13 @@ public sealed record ScheduledGovernanceReviewResult(
     IReadOnlyList<string> ResolvedProjectIds,
     string ToolContractVersion,
     string SchemaHash,
-    string PublishedCatalogVersion);
+    string PublishedCatalogVersion,
+    int CurrentReviewHumanDecisionCandidateCount = 0,
+    int GovernedRequiresUserDecisionExceptionCount = 0,
+    int GovernedHostBlockedExceptionCount = 0,
+    int GovernedDeferredExceptionCount = 0,
+    GovernanceExceptionDeltaResult? ExceptionDelta = null,
+    ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null);
 
 public sealed record ScheduledGovernanceExecuteRequest(
     string GovernanceRunId,
@@ -102,7 +108,8 @@ public sealed record ScheduledGovernanceExecutionResult(
     string StoppedReason,
     bool IsReplay,
     long ElapsedMilliseconds,
-    ScheduledGovernanceExecutionError ErrorCode);
+    ScheduledGovernanceExecutionError ErrorCode,
+    ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null);
 
 public sealed record ScheduledGovernanceRunResult(
     Guid ReceiptId,
@@ -135,7 +142,9 @@ public sealed record ScheduledGovernanceRunResult(
     bool RunExists,
     string Status,
     bool LatestBatchReceived,
-    string RequestIdentityHash);
+    string RequestIdentityHash,
+    GovernanceExceptionDeltaResult? ExceptionDelta = null,
+    ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null);
 
 public sealed record ScheduledGovernanceContractResult(
     string ReviewToolName,
@@ -146,7 +155,14 @@ public sealed record ScheduledGovernanceContractResult(
     string PublishedCatalogVersion,
     IReadOnlyList<string> FixedReversibleActions,
     IReadOnlyList<string> Decisions,
-    string IrreversibleRetentionOwner);
+    string IrreversibleRetentionOwner,
+    ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null);
+
+public sealed record ScheduledGovernanceRuntimeIdentity(
+    string ServiceName,
+    string BuildVersion,
+    DateTimeOffset BuildTimestampUtc,
+    string DerivedIdentity);
 
 public interface IScheduledGovernanceService
 {

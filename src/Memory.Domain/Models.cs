@@ -268,6 +268,7 @@ public enum SecurityAuditEventType
     ApiTokenProjectDenied,
     ProjectDisplayNameUpdated,
     ConversationInsightGovernanceUpdated,
+    GovernanceFindingGovernanceUpdated,
     ProjectWorkItemGovernanceExclusionUpdated,
     GovernanceBatchItemProcessed,
     GovernanceBatchExecutionCompleted
@@ -732,6 +733,12 @@ public sealed class GovernanceFinding
     public DateTimeOffset? GovernanceUpdatedAt { get; set; }
     public string GovernanceEvidenceFingerprint { get; set; } = string.Empty;
     public string GovernancePolicyVersion { get; set; } = string.Empty;
+    public DateTimeOffset? GovernanceBlockedAt { get; set; }
+    public DateTimeOffset? GovernanceLastReevaluatedAt { get; set; }
+    public string GovernanceBlockingLayer { get; set; } = string.Empty;
+    public string GovernanceReasonClass { get; set; } = string.Empty;
+    public string GovernanceRelatedTool { get; set; } = string.Empty;
+    public bool GovernanceEvidenceChangedSinceBlock { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
@@ -903,6 +910,12 @@ public sealed class ConversationInsight
     public DateTimeOffset? GovernanceUpdatedAt { get; set; }
     public string GovernanceEvidenceFingerprint { get; set; } = string.Empty;
     public string GovernancePolicyVersion { get; set; } = string.Empty;
+    public DateTimeOffset? GovernanceBlockedAt { get; set; }
+    public DateTimeOffset? GovernanceLastReevaluatedAt { get; set; }
+    public string GovernanceBlockingLayer { get; set; } = string.Empty;
+    public string GovernanceReasonClass { get; set; } = string.Empty;
+    public string GovernanceRelatedTool { get; set; } = string.Empty;
+    public bool GovernanceEvidenceChangedSinceBlock { get; set; }
     public string MetadataJson { get; set; } = "{}";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -981,6 +994,10 @@ public sealed class MemoryRetentionState
     public string BlockedReasonsJson { get; set; } = "[]";
     public Guid? ReplacementResourceId { get; set; }
     public string GovernanceRunId { get; set; } = string.Empty;
+    public string ClaimToken { get; set; } = string.Empty;
+    public DateTimeOffset? ClaimedAt { get; set; }
+    public int ClaimAttemptCount { get; set; }
+    public string ClaimLastError { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
@@ -1033,6 +1050,11 @@ public sealed class GovernanceRunReceipt
     public int Deferred { get; set; }
     public int RequiresUserDecision { get; set; }
     public int HostBlocked { get; set; }
+    public int ExceptionNew { get; set; }
+    public int ExceptionResolved { get; set; }
+    public int ExceptionUnchanged { get; set; }
+    public int ExceptionEscalated { get; set; }
+    public string GovernedExceptionStatesJson { get; set; } = "[]";
     public int Quarantined { get; set; }
     public int DeleteEligible { get; set; }
     public int DeleteMatured { get; set; }

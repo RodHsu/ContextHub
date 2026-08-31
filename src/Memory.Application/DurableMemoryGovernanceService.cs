@@ -75,6 +75,7 @@ public sealed class DurableMemoryGovernanceService(
             ? []
             : await dbContext.GovernanceFindings
                 .AsNoTracking()
+                .ForActor(actor)
                 .Where(x => x.PrimaryMemoryId.HasValue &&
                             memoryIds.Contains(x.PrimaryMemoryId.Value))
                 .OrderBy(x => x.ProjectId)
@@ -118,7 +119,8 @@ public sealed class DurableMemoryGovernanceService(
             DeferredCount = findings.Count(x => x.Status == GovernanceFindingStatus.Deferred),
             RequiresUserDecisionCount = findings.Count(x => x.Status == GovernanceFindingStatus.RequiresUserDecision),
             HostBlockedCount = findings.Count(x => x.Status == GovernanceFindingStatus.HostBlocked),
-            FindingIds = findings.Select(x => x.Id).ToArray()
+            FindingIds = findings.Select(x => x.Id).ToArray(),
+            ExceptionStates = findings.Where(IsGovernedException).Select(MapExceptionState).ToArray()
         };
         var resultJson = JsonSerializer.Serialize(result, JsonOptions);
         await dbContext.KnowledgeGovernanceSnapshots.AddAsync(new KnowledgeGovernanceSnapshot
@@ -273,9 +275,26 @@ public sealed class DurableMemoryGovernanceService(
             SharedCandidates = candidates.Where(x => ProjectContext.IsShared(x.ProjectId)).ToArray(),
             DeferredCount = deferredCount,
             RequiresUserDecisionCount = requiresUserDecisionCount,
-            HostBlockedCount = hostBlockedCount
+            HostBlockedCount = hostBlockedCount,
+            ExceptionStates = orderedLiveFindings.Where(IsGovernedException).Select(MapExceptionState).ToArray()
         };
     }
+
+    private static bool IsGovernedException(GovernanceFinding finding)
+        => finding.Status is GovernanceFindingStatus.Deferred or
+            GovernanceFindingStatus.RequiresUserDecision or GovernanceFindingStatus.HostBlocked;
+
+    private static GovernanceExceptionStateResult MapExceptionState(GovernanceFinding finding)
+        => new(
+            $"finding:{finding.Id:D}",
+            "GovernanceFinding",
+            finding.Status.ToString(),
+            finding.Status switch
+            {
+                GovernanceFindingStatus.HostBlocked => 3,
+                GovernanceFindingStatus.RequiresUserDecision => 2,
+                _ => 1
+            });
 
     private static IReadOnlyList<string> DeserializeProjects(string json)
     {

@@ -218,7 +218,8 @@ public sealed class FullGovernancePlanService(
         }
 
         var actions = await dbContext.SuggestedActions.AsNoTracking()
-            .Where(x => (projects.Contains(x.ProjectId) || x.ProjectId == ProjectContext.SharedProjectId) &&
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
+                        (projects.Contains(x.ProjectId) || x.ProjectId == ProjectContext.SharedProjectId) &&
                         x.Status == SuggestedActionStatus.Pending)
             .ToListAsync(cancellationToken);
         foreach (var action in actions)
@@ -319,30 +320,62 @@ public sealed class FullGovernancePlanService(
         var exceptions = await dbContext.ConversationInsights
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId) &&
                         (x.PromotionStatus == ConversationPromotionStatus.Deferred ||
-                         x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision))
+                         x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision ||
+                         x.PromotionStatus == ConversationPromotionStatus.HostBlocked))
             .ToListAsync(cancellationToken);
+        var reevaluated = false;
         foreach (var insight in exceptions.Where(x => !string.IsNullOrWhiteSpace(x.GovernanceEvidenceFingerprint)))
         {
             var current = await GovernanceEvidenceFingerprint.BuildAsync(
-                dbContext, insight.ProjectId, insight.PromotedMemoryId, null, insight.Id,
+                dbContext, insight.ProjectId, tenantId, ownerUserId,
+                insight.PromotedMemoryId, null, insight.Id,
                 GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
                 [insight.Id.ToString("D"), insight.Title]);
-            if (string.Equals(insight.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal) &&
-                string.Equals(insight.GovernanceEvidenceFingerprint, current, StringComparison.Ordinal))
+            var now = clock.UtcNow;
+            var evidenceChanged =
+                !string.Equals(insight.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal) ||
+                !string.Equals(insight.GovernanceEvidenceFingerprint, current, StringComparison.Ordinal);
+            insight.GovernanceLastReevaluatedAt = now;
+            var hostBlocked = insight.PromotionStatus == ConversationPromotionStatus.HostBlocked;
+            insight.GovernanceEvidenceChangedSinceBlock = hostBlocked
+                ? insight.GovernanceEvidenceChangedSinceBlock || evidenceChanged
+                : evidenceChanged;
+            reevaluated = true;
+            if (!evidenceChanged)
             {
                 continue;
             }
+            insight.UpdatedAt = now;
+            if (hostBlocked)
+            {
+                continue;
+            }
+            insight.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+            insight.GovernanceEvidenceFingerprint = current;
             insight.PromotionStatus = ConversationPromotionStatus.Pending;
             insight.GovernanceReason = "Automatically reopened because governance evidence or policy changed.";
             insight.GovernanceRunId = governanceRunId;
             insight.GovernanceRetryCount += 1;
-            insight.GovernanceUpdatedAt = clock.UtcNow;
-            insight.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
-            insight.GovernanceEvidenceFingerprint = current;
+            insight.GovernanceUpdatedAt = now;
             insight.Error = string.Empty;
-            insight.UpdatedAt = clock.UtcNow;
+            await dbContext.SecurityAuditEvents.AddAsync(new SecurityAuditEvent
+            {
+                TenantId = insight.TenantId,
+                ActorUserId = actorAccessor.Current.UserId,
+                EventType = SecurityAuditEventType.ConversationInsightGovernanceUpdated,
+                Outcome = insight.PromotionStatus.ToString(),
+                DetailsJson = JsonSerializer.Serialize(new
+                {
+                    insightId = insight.Id,
+                    insight.ProjectId,
+                    action = "EvidenceChangedReopen",
+                    governanceRunId,
+                    retryCount = insight.GovernanceRetryCount
+                }, JsonOptions),
+                CreatedAt = now
+            }, cancellationToken);
         }
-        if (exceptions.Any(x => x.PromotionStatus == ConversationPromotionStatus.Pending))
+        if (reevaluated)
         {
             await dbContext.SaveChangesAsync(cancellationToken);
         }

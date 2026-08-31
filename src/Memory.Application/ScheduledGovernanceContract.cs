@@ -6,9 +6,10 @@ public static class ScheduledGovernanceContract
     public const string ExecuteToolName = "scheduled_governance_execute";
     public const string ReceiptToolName = "scheduled_governance_run_get";
     public const string ContractToolName = "scheduled_governance_contract_get";
-    public const string ToolContractVersion = "1.0";
-    public const string PublishedCatalogVersion = "2026-08-30-automation-v1";
-    public const string SchemaHash = "3c9d010b230ae2366161a60658b273056f12fcd671ff4f70ffda8aad0ec41fcb";
+    public const string ToolContractVersion = "1.1";
+    public const string PublishedCatalogVersion = "2026-08-31-automation-v2";
+    public const string SchemaHash = "de1a67e9a2d6f5160d975fc3f4414c220ebbd7f68c6b66bc86e4e506b6244ee8";
+    public const string RuntimeServiceName = "Memory.ScheduledGovernanceGateway";
 
     public static IReadOnlyList<GovernanceBatchActionType> FixedReversibleActions { get; } =
     [
@@ -36,6 +37,19 @@ public static class ScheduledGovernanceContract
     public const string ExecuteDescription =
         "Execute a bounded idempotent batch of fixed low-risk reversible governance actions from the supplied immutable snapshot. The input cannot select projects, actions, risk, deletion, retention maturity, or execution mode. Irreversible retention is unavailable on this surface.";
 
+    public static ScheduledGovernanceRuntimeIdentity RuntimeIdentity
+    {
+        get
+        {
+            var build = BuildMetadata.Current;
+            return new(
+                RuntimeServiceName,
+                build.Version,
+                build.TimestampUtc,
+                $"{RuntimeServiceName}/{build.Version}+catalog.{PublishedCatalogVersion}.{SchemaHash[..12]}");
+        }
+    }
+
     public static ScheduledGovernanceContractResult Describe()
         => new(
             ReviewToolName,
@@ -46,5 +60,6 @@ public static class ScheduledGovernanceContract
             PublishedCatalogVersion,
             FixedReversibleActions.Select(x => x.ToString()).ToArray(),
             Enum.GetNames<ScheduledGovernanceDecision>(),
-            "ContextHubInternalRetentionWorker");
+            "ContextHubInternalRetentionWorker",
+            RuntimeIdentity);
 }
