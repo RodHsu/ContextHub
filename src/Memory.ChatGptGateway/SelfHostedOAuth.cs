@@ -200,6 +200,12 @@ internal sealed class SelfHostedOAuthService(
             return AuthorizeResult.Fail("Invalid username or password.");
         }
 
+        if (RequiresScheduledGovernanceAuthority(request.Scope) && !IsTenantAdministrator(user.Role))
+        {
+            LogOAuthAuthorizeLogin(request, "failed", "scheduled_governance_role_required");
+            return AuthorizeResult.Fail("Scheduled governance requires a ContextHub tenant owner or administrator account.");
+        }
+
         user.LastLoginAt = DateTimeOffset.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -292,6 +298,12 @@ internal sealed class SelfHostedOAuthService(
             return OAuthTokenResult.Fail("Invalid PKCE verifier.");
         }
 
+        if (!await HasCurrentScheduledGovernanceAuthorityAsync(payload, CancellationToken.None))
+        {
+            LogOAuthToken(clientId, "authorization_code", resource, "failed", "scheduled_governance_role_required");
+            return OAuthTokenResult.Fail("Scheduled governance requires a current ContextHub tenant owner or administrator account.");
+        }
+
         LogOAuthToken(clientId, "authorization_code", resource, "success", string.Empty);
         return await CreateTokenResultAsync(payload, options);
     }
@@ -332,6 +344,12 @@ internal sealed class SelfHostedOAuthService(
         {
             LogOAuthToken(clientId, "refresh_token", null, "failed", "refresh_binding_mismatch");
             return OAuthTokenResult.Fail("Refresh token binding mismatch.");
+        }
+
+        if (!await HasCurrentScheduledGovernanceAuthorityAsync(payload, CancellationToken.None))
+        {
+            LogOAuthToken(clientId, "refresh_token", payload.Resource, "failed", "scheduled_governance_role_required");
+            return OAuthTokenResult.Fail("Scheduled governance requires a current ContextHub tenant owner or administrator account.");
         }
 
         LogOAuthToken(clientId, "refresh_token", payload.Resource, "success", string.Empty);
@@ -463,6 +481,34 @@ internal sealed class SelfHostedOAuthService(
             CancellationToken.None);
         return refreshToken;
     }
+
+    private async Task<bool> HasCurrentScheduledGovernanceAuthorityAsync(
+        AuthorizationCodePayload payload,
+        CancellationToken cancellationToken)
+    {
+        if (!RequiresScheduledGovernanceAuthority(payload.Scope))
+        {
+            return true;
+        }
+
+        return await dbContext.TenantUsers
+            .AsNoTracking()
+            .AnyAsync(
+                user => user.Id == payload.UserId &&
+                        user.TenantId == payload.TenantId &&
+                        user.Status == TenantUserStatus.Active &&
+                        user.Tenant != null &&
+                        user.Tenant.Status == TenantStatus.Active &&
+                        (user.Role == TenantUserRole.Owner || user.Role == TenantUserRole.Admin),
+                cancellationToken);
+    }
+
+    private static bool RequiresScheduledGovernanceAuthority(string scope)
+        => scope.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Contains(SecurityScopes.ScheduledGovernance, StringComparer.Ordinal);
+
+    private static bool IsTenantAdministrator(TenantUserRole role)
+        => role is TenantUserRole.Owner or TenantUserRole.Admin;
 
     private static bool IsRedirectUriAllowed(string redirectUri, OAuthOptions options)
     {

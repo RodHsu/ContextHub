@@ -1202,6 +1202,219 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Automation_OAuth_Should_Reject_Member_Authorization_Code_And_Refresh()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true,
+            surface: ChatGptGatewaySurface.Automation);
+        await ConfigureSelfHostedUserAsync(factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var redirectUri = "https://chatgpt.com/connector/oauth/scheduled-governance-role";
+        var scope = "openid profile email offline_access governance:scheduled";
+
+        try
+        {
+            await SetSelfHostedUserRoleAsync(factory, TenantUserRole.Member);
+            var memberVerifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+            var memberChallenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(memberVerifier)));
+            var memberAuthorizePath = BuildAuthorizePath(
+                SelfHostedClientId,
+                redirectUri,
+                memberChallenge,
+                AutomationPublicMcpUrl,
+                scope);
+            using var memberAuthorize = await client.PostAsync(
+                memberAuthorizePath,
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["username"] = "gateway-test-admin",
+                    ["password"] = "oauth-password"
+                }));
+            memberAuthorize.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+            (await memberAuthorize.Content.ReadAsStringAsync())
+                .Should().Contain("tenant owner or administrator account");
+
+            await SetSelfHostedUserRoleAsync(factory, TenantUserRole.Owner);
+            var codeVerifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+            var codeChallenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(codeVerifier)));
+            var codeAuthorizePath = BuildAuthorizePath(
+                SelfHostedClientId,
+                redirectUri,
+                codeChallenge,
+                AutomationPublicMcpUrl,
+                scope);
+            using var codeAuthorize = await client.PostAsync(
+                codeAuthorizePath,
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["username"] = "gateway-test-admin",
+                    ["password"] = "oauth-password"
+                }));
+            codeAuthorize.StatusCode.Should().Be(System.Net.HttpStatusCode.Found);
+            var code = Microsoft.AspNetCore.WebUtilities.QueryHelpers
+                .ParseQuery(codeAuthorize.Headers.Location!.Query)["code"].ToString();
+
+            await SetSelfHostedUserRoleAsync(factory, TenantUserRole.Member);
+            using var rejectedCodeExchange = await client.PostAsync(
+                "/oauth/chat/token",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "authorization_code",
+                    ["client_id"] = SelfHostedClientId,
+                    ["code"] = code,
+                    ["redirect_uri"] = redirectUri,
+                    ["code_verifier"] = codeVerifier,
+                    ["resource"] = AutomationPublicMcpUrl
+                }));
+            rejectedCodeExchange.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+            (await rejectedCodeExchange.Content.ReadAsStringAsync())
+                .Should().Contain("current ContextHub tenant owner or administrator account");
+
+            await SetSelfHostedUserRoleAsync(factory, TenantUserRole.Owner);
+            var refreshVerifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+            var refreshChallenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(refreshVerifier)));
+            var refreshAuthorizePath = BuildAuthorizePath(
+                SelfHostedClientId,
+                redirectUri,
+                refreshChallenge,
+                AutomationPublicMcpUrl,
+                scope);
+            using var refreshAuthorize = await client.PostAsync(
+                refreshAuthorizePath,
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["username"] = "gateway-test-admin",
+                    ["password"] = "oauth-password"
+                }));
+            refreshAuthorize.StatusCode.Should().Be(System.Net.HttpStatusCode.Found);
+            var refreshCode = Microsoft.AspNetCore.WebUtilities.QueryHelpers
+                .ParseQuery(refreshAuthorize.Headers.Location!.Query)["code"].ToString();
+            using var initialToken = await client.PostAsync(
+                "/oauth/chat/token",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "authorization_code",
+                    ["client_id"] = SelfHostedClientId,
+                    ["code"] = refreshCode,
+                    ["redirect_uri"] = redirectUri,
+                    ["code_verifier"] = refreshVerifier,
+                    ["resource"] = AutomationPublicMcpUrl
+                }));
+            initialToken.EnsureSuccessStatusCode();
+            var tokenJson = await initialToken.Content.ReadFromJsonAsync<JsonElement>();
+            var refreshToken = tokenJson.GetProperty("refresh_token").GetString();
+            refreshToken.Should().NotBeNullOrWhiteSpace();
+
+            await SetSelfHostedUserRoleAsync(factory, TenantUserRole.Member);
+            using var rejectedRefresh = await client.PostAsync(
+                "/oauth/chat/token",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "refresh_token",
+                    ["client_id"] = SelfHostedClientId,
+                    ["refresh_token"] = refreshToken!
+                }));
+            rejectedRefresh.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+            (await rejectedRefresh.Content.ReadAsStringAsync())
+                .Should().Contain("current ContextHub tenant owner or administrator account");
+        }
+        finally
+        {
+            await SetSelfHostedUserRoleAsync(factory, TenantUserRole.Owner);
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task General_OAuth_Should_Remain_Available_To_Active_Member()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true);
+        await ConfigureSelfHostedUserAsync(factory);
+
+        try
+        {
+            await SetSelfHostedUserRoleAsync(factory, TenantUserRole.Member);
+            using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+            var token = await CompleteSelfHostedOAuthCodeFlowAsync(
+                client,
+                SelfHostedClientId,
+                "https://chatgpt.com/connector/oauth/general-member",
+                PublicMcpUrl);
+            token.Should().NotBeNullOrWhiteSpace();
+        }
+        finally
+        {
+            await SetSelfHostedUserRoleAsync(factory, TenantUserRole.Owner);
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Automation_OAuth_Refresh_Should_Reject_Disabled_User_And_Inactive_Tenant()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString,
+            environment.RedisConnectionString,
+            selfHostedOAuth: true,
+            surface: ChatGptGatewaySurface.Automation);
+        await ConfigureSelfHostedUserAsync(factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var redirectUri = "https://chatgpt.com/connector/oauth/scheduled-governance-active-state";
+        var scope = "openid profile email offline_access governance:scheduled";
+
+        try
+        {
+            var disabledUserToken = await CompleteSelfHostedOAuthTokenFlowAsync(
+                client,
+                SelfHostedClientId,
+                redirectUri,
+                AutomationPublicMcpUrl,
+                scope);
+            await SetSelfHostedUserStatusAsync(factory, TenantUserStatus.Disabled);
+            using var disabledUserRefresh = await client.PostAsync(
+                "/oauth/chat/token",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "refresh_token",
+                    ["client_id"] = SelfHostedClientId,
+                    ["refresh_token"] = disabledUserToken.GetProperty("refresh_token").GetString()!
+                }));
+            disabledUserRefresh.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+            (await disabledUserRefresh.Content.ReadAsStringAsync())
+                .Should().Contain("current ContextHub tenant owner or administrator account");
+
+            await SetSelfHostedUserStatusAsync(factory, TenantUserStatus.Active);
+            var inactiveTenantToken = await CompleteSelfHostedOAuthTokenFlowAsync(
+                client,
+                SelfHostedClientId,
+                redirectUri,
+                AutomationPublicMcpUrl,
+                scope);
+            await SetSelfHostedTenantStatusAsync(factory, TenantStatus.Suspended);
+            using var inactiveTenantRefresh = await client.PostAsync(
+                "/oauth/chat/token",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "refresh_token",
+                    ["client_id"] = SelfHostedClientId,
+                    ["refresh_token"] = inactiveTenantToken.GetProperty("refresh_token").GetString()!
+                }));
+            inactiveTenantRefresh.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+            (await inactiveTenantRefresh.Content.ReadAsStringAsync())
+                .Should().Contain("current ContextHub tenant owner or administrator account");
+        }
+        finally
+        {
+            await SetSelfHostedTenantStatusAsync(factory, TenantStatus.Active);
+            await SetSelfHostedUserStatusAsync(factory, TenantUserStatus.Active);
+            await SetSelfHostedUserRoleAsync(factory, TenantUserRole.Owner);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Tool_Discovery_Should_Expose_Only_ChatGpt_Allowed_Tools()
     {
         using var httpClient = CreateAuthorizedClient(environment.GetFactory());
@@ -4590,7 +4803,57 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         await dbContext.SaveChangesAsync();
     }
 
+    private static async Task SetSelfHostedUserRoleAsync(
+        ChatGptGatewayApplicationFactory factory,
+        TenantUserRole role)
+    {
+        using var setupScope = factory.Services.CreateScope();
+        var dbContext = setupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await dbContext.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
+        user.Role = role;
+        await dbContext.SaveChangesAsync();
+    }
+
+    private static async Task SetSelfHostedUserStatusAsync(
+        ChatGptGatewayApplicationFactory factory,
+        TenantUserStatus status)
+    {
+        using var setupScope = factory.Services.CreateScope();
+        var dbContext = setupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await dbContext.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
+        user.Status = status;
+        await dbContext.SaveChangesAsync();
+    }
+
+    private static async Task SetSelfHostedTenantStatusAsync(
+        ChatGptGatewayApplicationFactory factory,
+        TenantStatus status)
+    {
+        using var setupScope = factory.Services.CreateScope();
+        var dbContext = setupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await dbContext.TenantUsers.SingleAsync(x => x.Username == "gateway-test-admin");
+        var tenant = await dbContext.Tenants.SingleAsync(x => x.Id == user.TenantId);
+        tenant.Status = status;
+        await dbContext.SaveChangesAsync();
+    }
+
     private static async Task<string> CompleteSelfHostedOAuthCodeFlowAsync(
+        HttpClient client,
+        string clientId,
+        string redirectUri,
+        string resource,
+        string scope = "openid profile email offline_access")
+    {
+        var tokenJson = await CompleteSelfHostedOAuthTokenFlowAsync(
+            client,
+            clientId,
+            redirectUri,
+            resource,
+            scope);
+        return tokenJson.GetProperty("access_token").GetString()!;
+    }
+
+    private static async Task<JsonElement> CompleteSelfHostedOAuthTokenFlowAsync(
         HttpClient client,
         string clientId,
         string redirectUri,
@@ -4628,7 +4891,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             }));
         tokenResponse.EnsureSuccessStatusCode();
         var tokenJson = await tokenResponse.Content.ReadFromJsonAsync<JsonElement>();
-        return tokenJson.GetProperty("access_token").GetString()!;
+        return tokenJson;
     }
 
     private static string BuildAuthorizePath(
