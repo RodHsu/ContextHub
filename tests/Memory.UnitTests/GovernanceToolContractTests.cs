@@ -6,13 +6,21 @@ namespace Memory.UnitTests;
 public sealed class GovernanceToolContractTests
 {
     [Fact]
+    public void General_governance_request_defaults_to_interactive_mode()
+    {
+        var request = new GovernanceBatchExecuteRequest("contract-default");
+
+        request.ExecutionMode.Should().Be(GovernanceBatchExecutionMode.Interactive);
+    }
+
+    [Fact]
     public void Canonical_Governance_Contract_Should_Have_Stable_Hash_And_All_Published_Actions()
     {
         GovernanceToolContract.SchemaHash.Should().MatchRegex("^[a-f0-9]{64}$");
         var contract = GovernanceToolContract.Describe();
         contract.ToolName.Should().Be("governance_batch_execute");
-        contract.ToolContractVersion.Should().Be("2.0");
-        contract.PublishedCatalogVersion.Should().Be("2026-08-29-v4");
+        contract.ToolContractVersion.Should().Be("2.1");
+        contract.PublishedCatalogVersion.Should().Be("2026-09-08-v5");
         contract.SupportedActions.Should().BeEquivalentTo(Enum.GetNames<GovernanceBatchActionType>());
         contract.SupportedActions.Should().Contain([
             nameof(GovernanceBatchActionType.Quarantine),

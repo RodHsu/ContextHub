@@ -1,8 +1,10 @@
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using Memory.Application;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace Memory.Infrastructure;
@@ -58,12 +60,60 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<MemoryRetentionState> MemoryRetentionStates => Set<MemoryRetentionState>();
     public DbSet<ResourceTombstone> ResourceTombstones => Set<ResourceTombstone>();
     public DbSet<GovernanceRunReceipt> GovernanceRunReceipts => Set<GovernanceRunReceipt>();
+    public DbSet<ScheduledGovernanceReliabilityRun> ScheduledGovernanceReliabilityRuns => Set<ScheduledGovernanceReliabilityRun>();
     public DbSet<ProjectHierarchy> ProjectHierarchies => Set<ProjectHierarchy>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
     public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
     public DbSet<ProjectWorkItem> ProjectWorkItems => Set<ProjectWorkItem>();
     public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => Set<ProjectWorkItemChecklistItem>();
+
+    public async Task<IApplicationTransaction> BeginTransactionAsync(
+        IsolationLevel isolationLevel,
+        CancellationToken cancellationToken = default)
+    {
+        if (Database.CurrentTransaction is not null)
+        {
+            return ExistingApplicationTransaction.Instance;
+        }
+
+        return new ApplicationTransaction(
+            this,
+            await Database.BeginTransactionAsync(isolationLevel, cancellationToken));
+    }
+
+    private sealed class ApplicationTransaction(
+        MemoryDbContext owner,
+        IDbContextTransaction transaction) : IApplicationTransaction
+    {
+        private bool committed;
+
+        public async Task CommitAsync(CancellationToken cancellationToken = default)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            committed = true;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (!committed)
+            {
+                owner.ChangeTracker.Clear();
+            }
+
+            await transaction.DisposeAsync();
+        }
+    }
+
+    private sealed class ExistingApplicationTransaction : IApplicationTransaction
+    {
+        public static ExistingApplicationTransaction Instance { get; } = new();
+
+        public Task CommitAsync(CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
 
     public void ClearTrackedChanges()
         => ChangeTracker.Clear();
@@ -264,12 +314,54 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Confidence).HasColumnName("confidence");
             entity.Property(x => x.Version).HasColumnName("version");
             entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.AuthorityState).HasColumnName("authority_state").HasConversion<string>();
+            entity.Property(x => x.SupersedesId).HasColumnName("supersedes_id");
+            entity.Property(x => x.SupersededById).HasColumnName("superseded_by_id");
+            entity.Property(x => x.ValidFrom).HasColumnName("valid_from");
+            entity.Property(x => x.ValidUntil).HasColumnName("valid_until");
+            entity.Property(x => x.SuccessorEvidenceId).HasColumnName("successor_evidence_id");
+            entity.Property(x => x.SuccessorEvidenceRef).HasColumnName("successor_evidence_ref");
             entity.Property(x => x.IsReadOnly).HasColumnName("is_read_only");
             entity.Property(x => x.MetadataJson).HasColumnName("metadata_json");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => new { x.ProjectId, x.OwnerUserId, x.ExternalKey }).IsUnique();
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Status });
+            entity.HasIndex(x => new
+            {
+                x.TenantId,
+                x.OwnerUserId,
+                x.ProjectId,
+                x.AuthorityState,
+                x.ValidFrom,
+                x.ValidUntil
+            })
+                .HasDatabaseName("ix_memory_items_authority_window");
+            entity.HasIndex(x => x.SupersedesId)
+                .IsUnique()
+                .HasFilter("supersedes_id IS NOT NULL")
+                .HasDatabaseName("ux_memory_items_supersedes_id");
+            entity.HasIndex(x => x.SupersededById)
+                .IsUnique()
+                .HasFilter("superseded_by_id IS NOT NULL")
+                .HasDatabaseName("ux_memory_items_superseded_by_id");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.SuccessorEvidenceId })
+                .HasDatabaseName("ix_memory_items_successor_evidence");
+            entity.HasOne(x => x.Supersedes)
+                .WithMany()
+                .HasForeignKey(x => x.SupersedesId)
+                .OnDelete(DeleteBehavior.Restrict)
+                .HasConstraintName("fk_memory_items_supersedes");
+            entity.HasOne(x => x.SupersededBy)
+                .WithMany()
+                .HasForeignKey(x => x.SupersededById)
+                .OnDelete(DeleteBehavior.Restrict)
+                .HasConstraintName("fk_memory_items_superseded_by");
+            entity.HasOne(x => x.SuccessorEvidence)
+                .WithMany()
+                .HasForeignKey(x => x.SuccessorEvidenceId)
+                .OnDelete(DeleteBehavior.Restrict)
+                .HasConstraintName("fk_memory_items_successor_evidence");
             entity.HasMany(x => x.Revisions).WithOne(x => x.MemoryItem).HasForeignKey(x => x.MemoryItemId).OnDelete(DeleteBehavior.Cascade);
             entity.HasMany(x => x.Chunks).WithOne(x => x.MemoryItem).HasForeignKey(x => x.MemoryItemId).OnDelete(DeleteBehavior.Cascade);
         });
@@ -616,6 +708,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.GovernancePolicyVersion).HasColumnName("governance_policy_version");
             entity.Property(x => x.GovernanceBlockedAt).HasColumnName("governance_blocked_at");
             entity.Property(x => x.GovernanceLastReevaluatedAt).HasColumnName("governance_last_reevaluated_at");
+            entity.Property(x => x.GovernanceLastEvidenceChangedAt).HasColumnName("governance_last_evidence_changed_at");
             entity.Property(x => x.GovernanceBlockingLayer).HasColumnName("governance_blocking_layer");
             entity.Property(x => x.GovernanceReasonClass).HasColumnName("governance_reason_class");
             entity.Property(x => x.GovernanceRelatedTool).HasColumnName("governance_related_tool");
@@ -741,7 +834,10 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.StartedAt).HasColumnName("started_at");
             entity.Property(x => x.LastCheckpointAt).HasColumnName("last_checkpoint_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
-            entity.HasIndex(x => new { x.SourceSystem, x.ConversationId }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.SourceSystem, x.ConversationId })
+                .IsUnique()
+                .HasFilter("tenant_id IS NOT NULL AND owner_user_id IS NOT NULL")
+                .HasDatabaseName("ix_conversation_sessions_source_conversation");
             entity.HasMany(x => x.Checkpoints).WithOne(x => x.Session).HasForeignKey(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
             entity.HasMany(x => x.Insights).WithOne(x => x.Session).HasForeignKey(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
         });
@@ -777,7 +873,10 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
                 .HasColumnType("jsonb")
                 .HasConversion(JsonDocumentConverter, JsonStringComparer);
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
-            entity.HasIndex(x => x.DedupKey).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.DedupKey })
+                .IsUnique()
+                .HasFilter("tenant_id IS NOT NULL AND owner_user_id IS NOT NULL")
+                .HasDatabaseName("ix_conversation_checkpoints_dedup_key");
             entity.HasMany(x => x.Insights).WithOne(x => x.Checkpoint).HasForeignKey(x => x.CheckpointId).OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -817,6 +916,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.GovernancePolicyVersion).HasColumnName("governance_policy_version");
             entity.Property(x => x.GovernanceBlockedAt).HasColumnName("governance_blocked_at");
             entity.Property(x => x.GovernanceLastReevaluatedAt).HasColumnName("governance_last_reevaluated_at");
+            entity.Property(x => x.GovernanceLastEvidenceChangedAt).HasColumnName("governance_last_evidence_changed_at");
             entity.Property(x => x.GovernanceBlockingLayer).HasColumnName("governance_blocking_layer");
             entity.Property(x => x.GovernanceReasonClass).HasColumnName("governance_reason_class");
             entity.Property(x => x.GovernanceRelatedTool).HasColumnName("governance_related_tool");
@@ -827,7 +927,10 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
                 .HasConversion(JsonDocumentConverter, JsonStringComparer);
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
-            entity.HasIndex(x => x.DedupKey).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.DedupKey })
+                .IsUnique()
+                .HasFilter("tenant_id IS NOT NULL AND owner_user_id IS NOT NULL")
+                .HasDatabaseName("ix_conversation_insights_dedup_key");
         });
 
         modelBuilder.Entity<KnowledgeGovernanceSnapshot>(entity =>
@@ -1002,6 +1105,61 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunId, x.EventKey }).IsUnique();
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.CompletedAt });
+        });
+
+        modelBuilder.Entity<ScheduledGovernanceReliabilityRun>(entity =>
+        {
+            entity.ToTable("scheduled_governance_reliability_runs");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
+            entity.Property(x => x.ReceiptId).HasColumnName("receipt_id");
+            entity.Property(x => x.ExecutionMode).HasColumnName("execution_mode");
+            entity.Property(x => x.IsReplay).HasColumnName("is_replay");
+            entity.Property(x => x.ReplayProjectionCount).HasColumnName("replay_projection_count");
+            entity.Property(x => x.ReplayReceiptIdsJson)
+                .HasColumnName("replay_receipt_ids_json")
+                .HasColumnType("jsonb")
+                .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.ObservedAtUtc).HasColumnName("observed_at_utc");
+            entity.Property(x => x.ExpectedAtUtc).HasColumnName("expected_at_utc");
+            entity.Property(x => x.SignedDriftTicks).HasColumnName("signed_drift_ticks");
+            entity.Property(x => x.AbsoluteDriftTicks).HasColumnName("absolute_drift_ticks");
+            entity.Property(x => x.DriftWithinTolerance).HasColumnName("drift_within_tolerance");
+            entity.Property(x => x.CountedTowardGate).HasColumnName("counted_toward_gate");
+            entity.Property(x => x.Qualifies).HasColumnName("qualifies");
+            entity.Property(x => x.IsIgnored).HasColumnName("is_ignored");
+            entity.Property(x => x.IsFailed).HasColumnName("is_failed");
+            entity.Property(x => x.NaturalOriginStatus).HasColumnName("natural_origin_status");
+            entity.Property(x => x.PlatformSignedNaturalOriginAttested).HasColumnName("platform_signed_natural_origin_attested");
+            entity.Property(x => x.EvidenceBoundary).HasColumnName("evidence_boundary");
+            entity.Property(x => x.ReasonsJson)
+                .HasColumnName("reasons_json")
+                .HasColumnType("jsonb")
+                .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.ProjectionJson)
+                .HasColumnName("projection_json")
+                .HasColumnType("jsonb")
+                .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.IntendedTimeZoneId).HasColumnName("intended_time_zone_id");
+            entity.Property(x => x.SchedulerTimeZoneId).HasColumnName("scheduler_time_zone_id");
+            entity.Property(x => x.CadenceTicks).HasColumnName("cadence_ticks");
+            entity.Property(x => x.IntendedLocalRunTimesJson)
+                .HasColumnName("intended_local_run_times_json")
+                .HasColumnType("jsonb")
+                .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.SchedulerLocalRunTimesJson)
+                .HasColumnName("scheduler_local_run_times_json")
+                .HasColumnType("jsonb")
+                .HasConversion(JsonDocumentConverter, JsonStringComparer);
+            entity.Property(x => x.CompensationDescription).HasColumnName("compensation_description");
+            entity.Property(x => x.ResetReason).HasColumnName("reset_reason");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunId }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ObservedAtUtc });
         });
 
         modelBuilder.Entity<ProjectHierarchy>(entity =>

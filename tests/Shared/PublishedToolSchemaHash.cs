@@ -5,6 +5,31 @@ namespace Memory.Tests.Shared;
 
 public static class PublishedToolSchemaHash
 {
+    public static string ComputeCatalog(IEnumerable<JsonElement> tools)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartArray();
+            foreach (var tool in tools.OrderBy(
+                         value => value.GetProperty("name").GetString(),
+                         StringComparer.Ordinal))
+            {
+                writer.WriteStartObject();
+                writer.WriteString("name", tool.GetProperty("name").GetString());
+                writer.WritePropertyName("inputSchema");
+                WriteCanonical(writer, tool.GetProperty("inputSchema"));
+                writer.WritePropertyName("outputSchema");
+                WriteCanonical(writer, tool.GetProperty("outputSchema"));
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+        }
+
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
+    }
+
     public static string Compute(JsonElement tool)
     {
         using var stream = new MemoryStream();

@@ -41,6 +41,10 @@ Assert-ScheduledGovernanceValidation -Name "general-tool-fallback" -Mutation {
     param($spec)
     $spec.catalog.toolNames[0] = "governance_batch_execute"
 }
+Assert-ScheduledGovernanceValidation -Name "invalid-published-tool-schemas-hash" -Mutation {
+    param($spec)
+    $spec.catalog.publishedToolSchemasHash = "invalid"
+}
 Assert-ScheduledGovernanceValidation -Name "chat-gateway-fallback" -Mutation {
     param($spec)
     $spec.orchestration.prompt = "$($spec.orchestration.prompt) Fall back to /mcp-chat."
@@ -65,6 +69,6 @@ Assert-ScheduledGovernanceValidation -Name "irreversible-policy" -Mutation {
 [ordered]@{
     valid = $true
     positiveCases = 1
-    negativeCases = 6
+    negativeCases = 7
     result = "fail-closed-validator-self-test-passed"
 } | ConvertTo-Json -Compress

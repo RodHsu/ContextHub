@@ -590,6 +590,8 @@ public sealed class SourceSyncService(
         decimal confidence,
         CancellationToken cancellationToken)
     {
+        MemoryScoreContract.Validate(importance, confidence);
+        var now = clock.UtcNow;
         var entity = await dbContext.MemoryItems
             .ForActor(actorAccessor.Current)
             .FirstOrDefaultAsync(x => x.ProjectId == source.ProjectId && x.ExternalKey == externalKey, cancellationToken);
@@ -606,8 +608,9 @@ public sealed class SourceSyncService(
                 ExternalKey = externalKey,
                 Scope = scope,
                 MemoryType = MemoryType.Artifact,
-                CreatedAt = clock.UtcNow,
-                UpdatedAt = clock.UtcNow
+                CreatedAt = now,
+                UpdatedAt = now,
+                ValidFrom = now
             };
             await dbContext.MemoryItems.AddAsync(entity, cancellationToken);
         }
@@ -639,7 +642,7 @@ public sealed class SourceSyncService(
         entity.Status = MemoryStatus.Active;
         entity.IsReadOnly = true;
         entity.MetadataJson = metadataJson;
-        entity.UpdatedAt = clock.UtcNow;
+        entity.UpdatedAt = now;
         entity.Version = created ? 1 : (changed ? entity.Version + 1 : entity.Version);
 
         if (changed)

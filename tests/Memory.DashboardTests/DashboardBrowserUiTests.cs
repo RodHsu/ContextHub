@@ -2969,6 +2969,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/graph?uiProfile=dense");
+        await page.WaitForFunctionAsync("() => document.querySelectorAll('.graph-view-node').length >= 4");
 
         var panel = page.Locator(".graph-canvas-panel");
         await panel.WaitForAsync(new LocatorWaitForOptions
@@ -3910,28 +3911,31 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 await page.WaitForTimeoutAsync(500);
             }
 
-            for (var attempt = 0; attempt < 3; attempt++)
-            {
-                try
-                {
-                    await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-                    break;
-                }
-                catch (PlaywrightException ex) when (attempt < 2 && ex.Message.Contains("is interrupted by another navigation", StringComparison.OrdinalIgnoreCase))
-                {
-                    await page.WaitForTimeoutAsync(300);
-                }
-            }
-
-            await page.WaitForTimeoutAsync(400);
             if (!page.Url.Contains("/login", StringComparison.OrdinalIgnoreCase))
             {
+                var currentUri = new Uri(page.Url);
+                var targetUri = new Uri(targetUrl);
+                if (!string.Equals(currentUri.PathAndQuery, targetUri.PathAndQuery, StringComparison.Ordinal))
+                {
+                    await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Load });
+                }
+
+                await page.WaitForLoadStateAsync(LoadState.Load);
+                await page.Locator(".dashboard-shell[data-dashboard-interactive='true']").WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 15000
+                });
                 return;
             }
         }
 
-        await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await page.WaitForTimeoutAsync(400);
+        await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Load });
+        await page.Locator(".dashboard-shell[data-dashboard-interactive='true']").WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15000
+        });
     }
 
     private static async Task InteractWithStableLocatorAsync(

@@ -6,8 +6,8 @@ public static class ScheduledGovernanceContract
     public const string ExecuteToolName = "scheduled_governance_execute";
     public const string ReceiptToolName = "scheduled_governance_run_get";
     public const string ContractToolName = "scheduled_governance_contract_get";
-    public const string ToolContractVersion = "1.2";
-    public const string PublishedCatalogVersion = "2026-08-31-automation-v3";
+    public const string ToolContractVersion = "1.4";
+    public const string PublishedCatalogVersion = "2026-09-08-automation-v5";
     public const string SchemaHash = "de1a67e9a2d6f5160d975fc3f4414c220ebbd7f68c6b66bc86e4e506b6244ee8";
     public const string RuntimeServiceName = "Memory.ScheduledGovernanceGateway";
 
@@ -26,7 +26,6 @@ public static class ScheduledGovernanceContract
         GovernanceBatchActionType.PreferenceReconcile,
         GovernanceBatchActionType.ArtifactReconcile,
         GovernanceBatchActionType.DiscussionReconcile,
-        GovernanceBatchActionType.WorkItemReconcile,
         GovernanceBatchActionType.Quarantine,
         GovernanceBatchActionType.SemanticReevaluate
     ];

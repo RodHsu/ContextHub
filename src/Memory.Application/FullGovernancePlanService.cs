@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text.Json;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
@@ -11,7 +12,6 @@ public sealed class FullGovernancePlanService(
     IClock clock) : IFullGovernancePlanService
 {
     private const string ProjectInformationExternalKey = DurableMemoryGovernancePolicy.ProjectInformationExternalKey;
-    private const string ProposalSourceSystem = ChatGptProposalService.SourceSystem;
     private const int MaximumLogPartitions = 10_000;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -49,13 +49,19 @@ public sealed class FullGovernancePlanService(
 
         foreach (var candidate in memorySnapshot.ProjectCandidates.Concat(memorySnapshot.SharedCandidates))
         {
+            var successorArchive = candidate.Classification == GovernanceFindingType.SupersededMemoryCandidate &&
+                                   string.Equals(candidate.RecommendedAction, GovernanceBatchActionType.Archive.ToString(), StringComparison.Ordinal);
             items.Add(new GovernanceReviewItem(
                 $"finding:{candidate.FindingId:N}:{candidate.UpdatedAt.UtcTicks}", GovernanceItemKind.Memory, candidate.ProjectId,
                 candidate.Classification.ToString(), candidate.RecommendedAction,
                 candidate.RequiresExplicitApproval ? GovernanceBatchRiskLevel.High : GovernanceBatchRiskLevel.Low,
                 candidate.RequiresExplicitApproval, candidate.MemoryId,
                 candidate.RelatedMemoryId.HasValue ? [candidate.RelatedMemoryId.Value] : [],
-                candidate.ReasonCodes, governanceRunId));
+                candidate.ReasonCodes, governanceRunId)
+            {
+                IsReversible = successorArchive,
+                SemanticConfidence = successorArchive ? 0.99m : 0m
+            });
         }
 
         var scopedMemories = await dbContext.MemoryItems.AsNoTracking()
@@ -184,15 +190,11 @@ public sealed class FullGovernancePlanService(
         foreach (var workItem in workItems)
         {
             var inconsistent = workItem.Status == ProjectWorkItemStatus.Completed && workItem.ChecklistItems.Any(x => !x.IsCompleted);
-            var terminalRetention = workItem.Status is ProjectWorkItemStatus.Completed or ProjectWorkItemStatus.Cancelled &&
-                                    workItem.ArchivedAt is null && workItem.UpdatedAt < clock.UtcNow.AddDays(-90);
-            if (inconsistent || terminalRetention)
+            if (inconsistent)
             {
                 items.Add(Item($"workitem:{workItem.Id:N}", GovernanceItemKind.WorkItem, workItem.ProjectId,
-                    inconsistent ? "ChecklistStatusMismatch" : "CompletedHistoricalWorkItem",
-                    "WorkItemReconcile", inconsistent ? GovernanceBatchRiskLevel.High : GovernanceBatchRiskLevel.Low,
-                    inconsistent, workItem.Id,
-                    inconsistent ? ["WORK_ITEM_CHECKLIST_MISMATCH"] : ["WORK_ITEM_TERMINAL_RETENTION"], governanceRunId));
+                    "ChecklistStatusMismatch", "WorkItemReconcile", GovernanceBatchRiskLevel.High,
+                    true, workItem.Id, ["WORK_ITEM_CHECKLIST_MISMATCH"], governanceRunId));
             }
         }
 
@@ -201,14 +203,53 @@ public sealed class FullGovernancePlanService(
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId))
             .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending || x.PromotionStatus == ConversationPromotionStatus.Failed)
             .ToListAsync(cancellationToken);
-        var proposalInsights = insights.Where(IsProposal).ToArray();
-        foreach (var insight in insights.Where(x => !IsProposal(x)))
+        var now = clock.UtcNow;
+        var currentInsightEvidence = await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId))
+            .Where(x => x.Status == MemoryStatus.Active &&
+                        x.AuthorityState == MemoryAuthorityState.Current &&
+                        x.ValidFrom <= now &&
+                        (!x.ValidUntil.HasValue || x.ValidUntil > now))
+            .Select(x => new { x.Id, x.ProjectId, x.Title, x.Summary })
+            .ToListAsync(cancellationToken);
+        var exactInsightEvidence = currentInsightEvidence
+            .GroupBy(
+                x => $"{x.ProjectId}\n{GovernanceEvidenceFingerprint.NormalizeExactText(x.Title)}\n{GovernanceEvidenceFingerprint.NormalizeExactText(x.Summary)}",
+                StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() == 1)
+            .ToDictionary(group => group.Key, group => group.Single(), StringComparer.OrdinalIgnoreCase);
+        var proposalProjects = projects.Append(ProjectContext.SharedProjectId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var proposalInsights = await ChatGptProposalService.ApplyActorScope(
+                dbContext.ConversationInsights.AsNoTracking(), actor, proposalProjects, ChatGptProposalStatus.Pending)
+            .ToListAsync(cancellationToken);
+        foreach (var insight in insights.Where(x => !ChatGptProposalService.IsProposal(x)))
         {
-            items.Add(Item($"insight:{insight.Id:N}:{insight.UpdatedAt.UtcTicks}", GovernanceItemKind.ConversationInsight, insight.ProjectId,
-                "PendingConversationInsight", "ConversationInsightDisposition",
-                IsProtectedInsight(insight) ? GovernanceBatchRiskLevel.High : GovernanceBatchRiskLevel.Low,
-                IsProtectedInsight(insight), insight.Id,
-                IsProtectedInsight(insight) ? ["INSIGHT_SEMANTIC_AUTHORITY_REQUIRED"] : ["INSIGHT_DISPOSITION_REQUIRED"], governanceRunId));
+            var protectedInsight = IsProtectedInsight(insight);
+            var evidenceKey = $"{insight.ProjectId}\n{GovernanceEvidenceFingerprint.NormalizeExactText(insight.Title)}\n{GovernanceEvidenceFingerprint.NormalizeExactText(insight.Summary)}";
+            var evidence = exactInsightEvidence.GetValueOrDefault(evidenceKey);
+            var hasExactCurrentEvidence = !protectedInsight &&
+                                          insight.Confidence >= 0.90m &&
+                                          evidence is not null;
+            items.Add(new GovernanceReviewItem(
+                $"insight:{insight.Id:N}:{insight.UpdatedAt.UtcTicks}",
+                GovernanceItemKind.ConversationInsight,
+                insight.ProjectId,
+                hasExactCurrentEvidence ? "DuplicateConversationInsight" : "PendingConversationInsight",
+                "ConversationInsightDisposition",
+                protectedInsight ? GovernanceBatchRiskLevel.High : GovernanceBatchRiskLevel.Low,
+                protectedInsight,
+                insight.Id,
+                hasExactCurrentEvidence ? [evidence!.Id] : [],
+                hasExactCurrentEvidence
+                    ? ["INSIGHT_EXACT_DUPLICATE", "CURRENT_AUTHORITY_READBACK"]
+                    : protectedInsight ? ["INSIGHT_SEMANTIC_AUTHORITY_REQUIRED"] : ["INSIGHT_DISPOSITION_REQUIRED"],
+                governanceRunId)
+            {
+                IsReversible = !protectedInsight,
+                SemanticConfidence = insight.Confidence
+            });
         }
         foreach (var proposal in proposalInsights)
         {
@@ -278,9 +319,9 @@ public sealed class FullGovernancePlanService(
             Surface(artifacts.Length, artifacts.Length, ordered, GovernanceItemKind.Artifact),
             Surface(discussions.Count, discussions.Count, ordered, GovernanceItemKind.Discussion),
             Surface(workItems.Count, workItems.Count, ordered, GovernanceItemKind.WorkItem),
-            Surface(insights.Count(x => !IsProposal(x)), insights.Count(x => !IsProposal(x)), ordered, GovernanceItemKind.ConversationInsight),
+            Surface(insights.Count(x => !ChatGptProposalService.IsProposal(x)), insights.Count(x => !ChatGptProposalService.IsProposal(x)), ordered, GovernanceItemKind.ConversationInsight),
             Surface(actions.Count, actions.Count, ordered, GovernanceItemKind.SuggestedAction),
-            Surface(proposalInsights.Length, proposalInsights.Length, ordered, GovernanceItemKind.Proposal),
+            Surface(proposalInsights.Count, proposalInsights.Count, ordered, GovernanceItemKind.Proposal),
             Surface(checked((int)Math.Min(logTotal, int.MaxValue)), logPartitions.Take(MaximumLogPartitions).Sum(x => x.Count), ordered, GovernanceItemKind.LogPartition,
                 logHasMore, !logHasMore));
         var semanticAutoResolvable = ordered.Count(x => x.IsReversible && x.SemanticConfidence > 0m && !x.RequiresExplicitApproval);
@@ -303,9 +344,6 @@ public sealed class FullGovernancePlanService(
         return new(total, scanned, candidates.Length, candidates.Length, 0, candidates.Count(x => x.RequiresExplicitApproval), 0, hasMore, complete);
     }
 
-    private static bool IsProposal(ConversationInsight insight)
-        => insight.SourceSystem == ProposalSourceSystem && insight.Tags.Contains("chatgpt-proposal");
-
     private static bool IsProtectedInsight(ConversationInsight insight)
         => insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact ||
            insight.Importance >= .8m;
@@ -317,6 +355,13 @@ public sealed class FullGovernancePlanService(
         string governanceRunId,
         CancellationToken cancellationToken)
     {
+        // Re-evaluation reads the current exception state and writes both the
+        // lifecycle transition and its audit event. Keep that read/write set in
+        // one serializable transaction so a concurrent HostBlocked disposition
+        // cannot be lost by a stale automatic reopen.
+        await using var transaction = await dbContext.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
         var exceptions = await dbContext.ConversationInsights
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId) &&
                         (x.PromotionStatus == ConversationPromotionStatus.Deferred ||
@@ -324,18 +369,26 @@ public sealed class FullGovernancePlanService(
                          x.PromotionStatus == ConversationPromotionStatus.HostBlocked))
             .ToListAsync(cancellationToken);
         var reevaluated = false;
-        foreach (var insight in exceptions.Where(x => !string.IsNullOrWhiteSpace(x.GovernanceEvidenceFingerprint)))
+        foreach (var insight in exceptions)
         {
             var current = await GovernanceEvidenceFingerprint.BuildAsync(
                 dbContext, insight.ProjectId, tenantId, ownerUserId,
                 insight.PromotedMemoryId, null, insight.Id,
                 GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
-                [insight.Id.ToString("D"), insight.Title]);
+                [insight.Id.ToString("D"), insight.Title],
+                insight.Title,
+                insight.Summary);
             var now = clock.UtcNow;
-            var evidenceChanged =
+            var hasBaseline = !string.IsNullOrWhiteSpace(insight.GovernanceEvidenceFingerprint);
+            var evidenceChanged = hasBaseline && (
                 !string.Equals(insight.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal) ||
-                !string.Equals(insight.GovernanceEvidenceFingerprint, current, StringComparison.Ordinal);
+                !string.Equals(insight.GovernanceEvidenceFingerprint, current, StringComparison.Ordinal));
             insight.GovernanceLastReevaluatedAt = now;
+            if (!hasBaseline)
+            {
+                insight.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+                insight.GovernanceEvidenceFingerprint = current;
+            }
             var hostBlocked = insight.PromotionStatus == ConversationPromotionStatus.HostBlocked;
             insight.GovernanceEvidenceChangedSinceBlock = hostBlocked
                 ? insight.GovernanceEvidenceChangedSinceBlock || evidenceChanged
@@ -346,12 +399,30 @@ public sealed class FullGovernancePlanService(
                 continue;
             }
             insight.UpdatedAt = now;
-            if (hostBlocked)
-            {
-                continue;
-            }
+            insight.GovernanceLastEvidenceChangedAt = now;
             insight.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
             insight.GovernanceEvidenceFingerprint = current;
+            if (hostBlocked)
+            {
+                insight.GovernanceUpdatedAt = now;
+                await dbContext.SecurityAuditEvents.AddAsync(new SecurityAuditEvent
+                {
+                    TenantId = insight.TenantId,
+                    ActorUserId = actorAccessor.Current.UserId,
+                    EventType = SecurityAuditEventType.ConversationInsightGovernanceUpdated,
+                    Outcome = insight.PromotionStatus.ToString(),
+                    DetailsJson = JsonSerializer.Serialize(new
+                    {
+                        insightId = insight.Id,
+                        insight.ProjectId,
+                        action = "HostBlockedEvidenceChanged",
+                        governanceRunId,
+                        retryCount = insight.GovernanceRetryCount
+                    }, JsonOptions),
+                    CreatedAt = now
+                }, cancellationToken);
+                continue;
+            }
             insight.PromotionStatus = ConversationPromotionStatus.Pending;
             insight.GovernanceReason = "Automatically reopened because governance evidence or policy changed.";
             insight.GovernanceRunId = governanceRunId;
@@ -379,6 +450,7 @@ public sealed class FullGovernancePlanService(
         {
             await dbContext.SaveChangesAsync(cancellationToken);
         }
+        await transaction.CommitAsync(cancellationToken);
     }
 
     private static bool IsValidJson(string value)

@@ -623,10 +623,22 @@ userPreferences.MapGet(string.Empty, async (
     return Results.Ok(result);
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.PreferencesRead);
 
-userPreferences.MapPost(string.Empty, async (UserPreferenceUpsertRequest request, IMemoryService service, CancellationToken cancellationToken) =>
+userPreferences.MapPost(string.Empty, async (UserPreferenceUpsertToolRequest request, IMemoryService service, CancellationToken cancellationToken) =>
 {
-    var result = await service.UpsertUserPreferenceAsync(request, cancellationToken);
-    return Results.Ok(result);
+    try
+    {
+        var result = await service.UpsertUserPreferenceAsync(request.ToApplicationRequest(), cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (MemoryScoreValidationException ex)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            [ex.Field] = [ex.Message],
+            ["code"] = [ex.Code],
+            ["reasonClass"] = [ex.ReasonClass]
+        });
+    }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.PreferencesWrite);
 
 userPreferences.MapPatch("/{id:guid}", async (Guid id, UserPreferenceArchiveBody request, IMemoryService service, CancellationToken cancellationToken) =>

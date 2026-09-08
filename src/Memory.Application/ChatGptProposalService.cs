@@ -69,9 +69,9 @@ public sealed class ChatGptProposalService(
             : Hash(SourceSystem, actor.TenantId?.ToString("D") ?? string.Empty, actor.UserId?.ToString("D") ?? string.Empty, governanceRunId, request.ToolName.Trim(), projectId, request.PayloadJson.Trim());
         if (governanceRunId.Length > 0)
         {
-            var existing = await dbContext.ConversationInsights.AsNoTracking()
-                .Where(x => x.DedupKey == dedupKey && x.SourceSystem == SourceSystem && x.Tags.Contains(ProposalTag))
-                .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
+            var existing = await ApplyActorScope(
+                    dbContext.ConversationInsights.AsNoTracking(), actor, [projectId])
+                .Where(x => x.DedupKey == dedupKey)
                 .FirstOrDefaultAsync(cancellationToken);
             if (existing is not null)
             {
@@ -79,7 +79,8 @@ public sealed class ChatGptProposalService(
             }
         }
         var session = await dbContext.ConversationSessions.FirstOrDefaultAsync(
-            x => x.SourceSystem == SourceSystem && x.ConversationId == conversationId,
+            x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
+                 x.SourceSystem == SourceSystem && x.ConversationId == conversationId,
             cancellationToken);
 
         if (session is null)
@@ -171,6 +172,7 @@ public sealed class ChatGptProposalService(
             UpdatedAt = now
         };
         await dbContext.ConversationInsights.AddAsync(insight, cancellationToken);
+        await AddLifecycleAuditAsync(insight, null, insight.PromotionStatus, "Create", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return ToResult(insight);
     }
@@ -180,29 +182,17 @@ public sealed class ChatGptProposalService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
 
-        var query = dbContext.ConversationInsights.AsNoTracking()
-            .Where(x => x.SourceSystem == SourceSystem && x.Tags.Contains(ProposalTag));
-
-        if (actor.HasUser)
-        {
-            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
-        }
+        string[]? projectIds = null;
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
             ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-            query = query.Where(x => x.ProjectId == projectId);
-        }
-        else if (actor.HasUser && actor.AllowedProjectIds.Count > 0)
-        {
-            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            projectIds = [projectId];
         }
 
-        if (request.Status.HasValue)
-        {
-            query = query.Where(x => x.PromotionStatus == ToPromotionStatus(request.Status.Value));
-        }
+        var query = ApplyActorScope(
+            dbContext.ConversationInsights.AsNoTracking(), actor, projectIds, request.Status);
 
         var rows = await query
             .OrderByDescending(x => x.UpdatedAt)
@@ -217,7 +207,7 @@ public sealed class ChatGptProposalService(
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
-        var proposal = await LoadProposalForWriteAsync(request.ProposalId, cancellationToken);
+        var proposal = await LoadProposalForWriteAsync(request.ProposalId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, proposal.ProjectId, write: true);
         if (proposal.PromotionStatus == ConversationPromotionStatus.Promoted)
         {
@@ -228,15 +218,26 @@ public sealed class ChatGptProposalService(
             throw new InvalidOperationException($"Proposal '{request.ProposalId}' is not pending.");
         }
 
+        var previousStatus = proposal.PromotionStatus;
         var toolName = string.Empty;
         try
         {
             var metadata = ParseMetadata(proposal.MetadataJson);
             toolName = metadata.ToolName;
+            // Proposal payloads are persisted before approval, but their target
+            // write must still satisfy the canonical score contract before any
+            // application/domain use case can persist a resource. Do not let
+            // the generic apply-failure path turn a contract violation into a
+            // misleading Failed lifecycle state.
+            MemoryScoreContract.ValidateJsonPayload(metadata.PayloadJson);
             var appliedId = await ApplyAsync(metadata.ToolName, metadata.PayloadJson, cancellationToken);
             proposal.PromotionStatus = ConversationPromotionStatus.Promoted;
             proposal.PromotedMemoryId = appliedId;
             proposal.Error = string.Empty;
+        }
+        catch (MemoryScoreValidationException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -250,7 +251,11 @@ public sealed class ChatGptProposalService(
                 proposal.ProjectId);
         }
 
+        proposal.GovernanceReason = proposal.PromotionStatus == ConversationPromotionStatus.Failed
+            ? "Proposal approval failed while applying the proposed tool."
+            : string.IsNullOrWhiteSpace(request.Note) ? "Approved." : request.Note.Trim();
         proposal.UpdatedAt = clock.UtcNow;
+        await AddLifecycleAuditAsync(proposal, previousStatus, proposal.PromotionStatus, "Approve", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return ToResult(proposal);
     }
@@ -259,16 +264,23 @@ public sealed class ChatGptProposalService(
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
-        var proposal = await LoadProposalForWriteAsync(request.ProposalId, cancellationToken);
+        var proposal = await LoadProposalForWriteAsync(request.ProposalId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, proposal.ProjectId, write: true);
+        if (proposal.PromotionStatus == ConversationPromotionStatus.Skipped)
+        {
+            return ToResult(proposal);
+        }
         if (proposal.PromotionStatus != ConversationPromotionStatus.Pending)
         {
             throw new InvalidOperationException($"Proposal '{request.ProposalId}' is not pending.");
         }
 
+        var previousStatus = proposal.PromotionStatus;
         proposal.PromotionStatus = ConversationPromotionStatus.Skipped;
         proposal.Error = string.IsNullOrWhiteSpace(request.Note) ? "Rejected." : request.Note.Trim();
+        proposal.GovernanceReason = proposal.Error;
         proposal.UpdatedAt = clock.UtcNow;
+        await AddLifecycleAuditAsync(proposal, previousStatus, proposal.PromotionStatus, "Reject", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return ToResult(proposal);
     }
@@ -307,10 +319,99 @@ public sealed class ChatGptProposalService(
         };
     }
 
-    private async Task<ConversationInsight> LoadProposalForWriteAsync(Guid id, CancellationToken cancellationToken)
-        => await dbContext.ConversationInsights
-            .FirstOrDefaultAsync(x => x.Id == id && x.SourceSystem == SourceSystem && x.Tags.Contains(ProposalTag), cancellationToken)
+    private async Task<ConversationInsight> LoadProposalForWriteAsync(
+        Guid id,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+        => await ApplyActorScope(dbContext.ConversationInsights, actor)
+            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new InvalidOperationException($"ChatGPT proposal '{id}' was not found.");
+
+    /// <summary>
+    /// Canonical proposal source/status/actor/ACL projection. Pending governance candidates
+    /// must use this projection so terminal history remains auditable without becoming actionable.
+    /// </summary>
+    internal static IQueryable<ConversationInsight> ApplyActorScope(
+        IQueryable<ConversationInsight> query,
+        ContextHubRequestActor actor,
+        IReadOnlyList<string>? projectIds = null,
+        ChatGptProposalStatus? status = null)
+    {
+        // ConversationInsight has additional governance states, but they are not valid
+        // proposal lifecycle states. Exclude them rather than mapping an unknown state to
+        // Pending and accidentally creating an actionable zombie candidate.
+        query = query
+            .Where(x => x.SourceSystem == SourceSystem && x.Tags.Contains(ProposalTag))
+            .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending ||
+                        x.PromotionStatus == ConversationPromotionStatus.Promoted ||
+                        x.PromotionStatus == ConversationPromotionStatus.Skipped ||
+                        x.PromotionStatus == ConversationPromotionStatus.Failed);
+        if (!actor.HasUser)
+        {
+            // A caller may invoke this helper outside the public methods; never return
+            // legacy/unowned proposal rows to an unauthenticated or incomplete actor.
+            return query.Where(_ => false);
+        }
+
+        query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        if (projectIds is not null)
+        {
+            var scopedProjects = projectIds.ToArray();
+            query = query.Where(x => scopedProjects.Contains(x.ProjectId));
+        }
+        else if (actor.AllowedProjectIds.Count > 0)
+        {
+            var allowedProjects = actor.AllowedProjectIds.ToArray();
+            query = query.Where(x => allowedProjects.Contains(x.ProjectId) ||
+                                     x.ProjectId == ProjectContext.SharedProjectId ||
+                                     x.ProjectId == ProjectContext.UserProjectId);
+        }
+
+        if (status.HasValue)
+        {
+            query = query.Where(x => x.PromotionStatus == ToPromotionStatus(status.Value));
+        }
+
+        return query;
+    }
+
+    internal static bool IsProposal(ConversationInsight insight)
+        => insight.SourceSystem == SourceSystem && insight.Tags.Contains(ProposalTag);
+
+    internal static IQueryable<ConversationInsight> ExcludeProposals(IQueryable<ConversationInsight> query)
+        => query.Where(x => x.SourceSystem != SourceSystem || !x.Tags.Contains(ProposalTag));
+
+    private async Task AddLifecycleAuditAsync(
+        ConversationInsight proposal,
+        ConversationPromotionStatus? previousStatus,
+        ConversationPromotionStatus nextStatus,
+        string action,
+        CancellationToken cancellationToken)
+    {
+        var now = clock.UtcNow;
+        proposal.GovernanceUpdatedAt = now;
+        proposal.GovernanceLastReevaluatedAt = now;
+        proposal.GovernanceLastEvidenceChangedAt = now;
+        await dbContext.SecurityAuditEvents.AddAsync(new SecurityAuditEvent
+        {
+            TenantId = proposal.TenantId,
+            ActorUserId = actorAccessor.Current.UserId,
+            EventType = SecurityAuditEventType.ConversationInsightGovernanceUpdated,
+            Outcome = nextStatus.ToString(),
+            DetailsJson = JsonSerializer.Serialize(new
+            {
+                proposalId = proposal.Id,
+                proposal.ProjectId,
+                sourceSystem = SourceSystem,
+                action = "ProposalLifecycleTransition",
+                transition = action,
+                fromStatus = previousStatus?.ToString(),
+                toStatus = nextStatus.ToString(),
+                governanceRunId = ParseMetadata(proposal.MetadataJson).GovernanceRunId
+            }, JsonOptions),
+            CreatedAt = now
+        }, cancellationToken);
+    }
 
     private static void ValidateCreate(ChatGptProposalCreateRequest request)
     {
@@ -330,6 +431,7 @@ public sealed class ChatGptProposalService(
     private static void ValidatePayload(string toolName, string payloadJson)
     {
         _ = ParsePayload(payloadJson);
+        MemoryScoreContract.ValidateJsonPayload(payloadJson);
         switch (toolName)
         {
             case "memory_upsert": _ = DeserializeStrict<MemoryUpsertRequest>(payloadJson); break;

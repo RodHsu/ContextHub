@@ -73,10 +73,11 @@ public sealed class AutonomousRetentionService(
                 }
             }
 
-            if (state is null && evaluation.BlockedReasons.Count == 0 && policy.AutoDelete &&
+            if (state is null && policy.AutoDelete &&
                 memory.Status is MemoryStatus.Active or MemoryStatus.Archived)
             {
-                candidates.Add(MapCandidate(memory, policy, evaluation, null, "Quarantine"));
+                candidates.Add(MapCandidate(memory, policy, evaluation, null,
+                    evaluation.BlockedReasons.Count == 0 ? "Quarantine" : "NeedsReview"));
                 continue;
             }
 
@@ -172,7 +173,7 @@ public sealed class AutonomousRetentionService(
         string governanceRunId,
         CancellationToken cancellationToken)
     {
-        var actor = RequireActor(SecurityScopes.MemoryWrite);
+        var actor = RequireInternalRetentionActor();
         projectId = ProjectContext.Normalize(projectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
         await using var transaction = await dbContext.Database.BeginTransactionAsync(
@@ -190,10 +191,11 @@ public sealed class AutonomousRetentionService(
         var state = await LoadRetentionStateForDeleteAsync(resourceId, actor, cancellationToken)
             ?? throw new InvalidOperationException("Matured delete requires a persisted quarantine lifecycle.");
         var policy = ResolvePolicy(memory);
+        var policyChanged = !string.Equals(state.PolicyVersion, _options.RetentionPolicyVersion, StringComparison.Ordinal);
         var evidence = await LoadEvidenceAsync([resourceId], actor.TenantId!.Value, actor.UserId!.Value, [projectId], cancellationToken);
         var now = timeProvider.GetUtcNow();
         var evaluation = Evaluate(memory, policy, evidence, now);
-        ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged: false);
+        ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged);
         if (state.LifecycleStatus != EligibleStatus || !state.DeleteEligibleAt.HasValue || state.DeleteEligibleAt > now)
         {
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -314,10 +316,20 @@ public sealed class AutonomousRetentionService(
         {
             return EvidenceSnapshot.Empty;
         }
-        var hitStart = DateOnly.FromDateTime(timeProvider.GetUtcNow().AddDays(-_options.NormalizedHitWindowDays).UtcDateTime);
+        var hitStartUtc = timeProvider.GetUtcNow().AddDays(-_options.NormalizedHitWindowDays);
+        var hitStart = DateOnly.FromDateTime(hitStartUtc.UtcDateTime);
         var hits = await dbContext.RetrievalTelemetryDailyHitSummaries.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && memoryIds.Contains(x.MemoryId) && x.SummaryDate >= hitStart)
             .GroupBy(x => x.MemoryId).Select(x => new { MemoryId = x.Key, Count = x.Sum(v => v.HitCount) })
+            .ToDictionaryAsync(x => x.MemoryId, x => x.Count, cancellationToken);
+        var rawHits = await dbContext.RetrievalHits.AsNoTracking()
+            .Where(x => x.MemoryId.HasValue && memoryIds.Contains(x.MemoryId.Value) &&
+                        x.RetrievalEvent != null &&
+                        x.RetrievalEvent.TenantId == tenantId &&
+                        x.RetrievalEvent.OwnerUserId == ownerUserId &&
+                        x.RetrievalEvent.CreatedAt >= hitStartUtc)
+            .GroupBy(x => x.MemoryId!.Value)
+            .Select(x => new { MemoryId = x.Key, Count = x.LongCount() })
             .ToDictionaryAsync(x => x.MemoryId, x => x.Count, cancellationToken);
         var links = await dbContext.MemoryLinks.AsNoTracking()
             .Where(x => memoryIds.Contains(x.FromId) || memoryIds.Contains(x.ToId))
@@ -327,8 +339,11 @@ public sealed class AutonomousRetentionService(
         var targetIds = replacements.Values.SelectMany(x => x).Distinct().ToArray();
         var replacementTargets = targetIds.Length == 0
             ? new Dictionary<Guid, ReplacementTarget>()
-            : await dbContext.MemoryItems.AsNoTracking().Where(x => targetIds.Contains(x.Id))
-                .Select(x => new ReplacementTarget(x.Id, x.ProjectId, x.Status))
+            : await dbContext.MemoryItems.AsNoTracking()
+                .Where(x => targetIds.Contains(x.Id) &&
+                            x.TenantId == tenantId &&
+                            x.OwnerUserId == ownerUserId)
+                .Select(x => new ReplacementTarget(x.Id, x.ProjectId, x.Scope, x.Status))
                 .ToDictionaryAsync(x => x.Id, cancellationToken);
         var hierarchy = await dbContext.ProjectHierarchies.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
@@ -369,7 +384,7 @@ public sealed class AutonomousRetentionService(
             .Select(x => x.PayloadJson).ToListAsync(cancellationToken);
         var relationshipFingerprint = Hash(string.Join('|', hierarchy.OrderBy(x => x.ParentProjectId).ThenBy(x => x.ChildProjectId)
             .Select(x => $"{x.ParentProjectId}>{x.ChildProjectId}:{x.UpdatedAt:O}")));
-        return new EvidenceSnapshot(hits, links, replacements, replacementTargets, activeWorkItemTexts,
+        return new EvidenceSnapshot(hits, rawHits, links, replacements, replacementTargets, activeWorkItemTexts,
             openDiscussionTexts, activeJobPayloads, relationshipFingerprint);
     }
 
@@ -379,6 +394,7 @@ public sealed class AutonomousRetentionService(
         var blocked = new List<string>();
         var tags = memory.Tags.Select(x => x.ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
         var recentHits = evidence.Hits.GetValueOrDefault(memory.Id);
+        var recentRawHits = evidence.RawHits.GetValueOrDefault(memory.Id);
         var relatedLinks = evidence.Links.Where(x => x.FromId == memory.Id || x.ToId == memory.Id).ToArray();
         var linkedReplacements = evidence.Replacements.GetValueOrDefault(memory.Id) ?? [];
         var metadataReplacement = ReadGuid(memory.MetadataJson, "supersededByMemoryId") ?? ReadGuid(memory.MetadataJson, "replacedByMemoryId");
@@ -386,9 +402,17 @@ public sealed class AutonomousRetentionService(
             (metadataReplacement.HasValue && linkedReplacements.Any(x => x != metadataReplacement.Value));
         var replacementId = metadataReplacement ?? (linkedReplacements.Length == 1 ? linkedReplacements[0] : null);
         var needsReplacement = policy.RequiresReplacement || tags.Contains("superseded") || tags.Contains("replaced") || replacementId.HasValue;
+        var authorityChanged = memory.AuthorityState != MemoryAuthorityState.Current ||
+            memory.SupersededById.HasValue ||
+            memory.ValidFrom is { } validFrom && validFrom > now ||
+            memory.ValidUntil is { } validUntil && validUntil <= now ||
+            memory.SuccessorEvidenceId.HasValue ||
+            !string.IsNullOrWhiteSpace(memory.SuccessorEvidenceRef);
 
         if (policy.Protected || memory.MemoryType is MemoryType.Decision or MemoryType.Fact or MemoryType.Preference)
             blocked.Add("protectedType");
+        if (authorityChanged)
+            blocked.Add("authorityChanged");
         if (memory.IsReadOnly || HasAny(tags, "authoritative", "formal", "source-of-truth", "governance-acceptance"))
             blocked.Add("authoritativeSource");
         if (HasAny(tags, "legal-hold", "legalhold") || JsonFlag(memory.MetadataJson, "legalHold"))
@@ -397,7 +421,7 @@ public sealed class AutonomousRetentionService(
             blocked.Add("securityHold");
         if (HasAny(tags, "security", "audit", "credential", "secret", "private-key", "pii"))
             blocked.Add("secureRemovalPolicyRequired");
-        if (recentHits > _options.NormalizedMaxRecentHitCount)
+        if (recentHits > _options.NormalizedMaxRecentHitCount || recentRawHits > 0)
             blocked.Add("recentHits");
         else reasons.Add("lowRecentHits");
         if (relatedLinks.Length > _options.NormalizedMaxLinkDegree && !needsReplacement)
@@ -421,7 +445,9 @@ public sealed class AutonomousRetentionService(
             if (ambiguousReplacement)
                 blocked.Add("replacementChainAmbiguous");
             else if (!replacementId.HasValue || !evidence.ReplacementTargets.TryGetValue(replacementId.Value, out var target) ||
-                target.Status != MemoryStatus.Active || !string.Equals(target.ProjectId, memory.ProjectId, StringComparison.OrdinalIgnoreCase))
+                target.Status != MemoryStatus.Active ||
+                target.Scope != memory.Scope ||
+                !string.Equals(target.ProjectId, memory.ProjectId, StringComparison.OrdinalIgnoreCase))
                 blocked.Add("replacementChainIncomplete");
             else reasons.Add("replacementChainComplete");
         }
@@ -430,9 +456,17 @@ public sealed class AutonomousRetentionService(
         {
             _options.RetentionPolicyVersion,
             recentHits.ToString(),
+            recentRawHits.ToString(),
             relatedLinks.Length.ToString(),
             memory.Importance.ToString(System.Globalization.CultureInfo.InvariantCulture),
             memory.Confidence.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            memory.AuthorityState.ToString(),
+            memory.SupersedesId?.ToString("N") ?? string.Empty,
+            memory.SupersededById?.ToString("N") ?? string.Empty,
+            memory.ValidFrom?.UtcTicks.ToString() ?? string.Empty,
+            memory.ValidUntil?.UtcTicks.ToString() ?? string.Empty,
+            memory.SuccessorEvidenceId?.ToString("N") ?? string.Empty,
+            memory.SuccessorEvidenceRef,
             replacementId?.ToString("N") ?? string.Empty,
             evidence.ProjectRelationshipFingerprint,
             string.Join(',', blocked.Order(StringComparer.Ordinal))
@@ -533,6 +567,19 @@ public sealed class AutonomousRetentionService(
         return actor;
     }
 
+    private ContextHubRequestActor RequireInternalRetentionActor()
+    {
+        var actor = RequireActor(SecurityScopes.MemoryWrite);
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.InternalRetentionDelete);
+        if (!actor.IsServiceActor)
+        {
+            throw new UnauthorizedAccessException(
+                "Matured delete is restricted to the policy-bound internal retention worker.");
+        }
+
+        return actor;
+    }
+
     private Task<ResourceTombstone?> FindTombstoneAsync(Guid resourceId, string projectId, ContextHubRequestActor actor, CancellationToken cancellationToken)
         => dbContext.ResourceTombstones.AsNoTracking().SingleOrDefaultAsync(x =>
             x.ResourceId == resourceId && x.ProjectId == projectId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
@@ -556,7 +603,10 @@ public sealed class AutonomousRetentionService(
                        discussion_threads,
                        discussion_participants,
                        discussion_messages,
-                       memory_jobs
+                       memory_jobs,
+                       retrieval_events,
+                       retrieval_hits,
+                       retrieval_telemetry_daily_hit_summaries
             IN SHARE MODE
             """,
             cancellationToken);
@@ -676,9 +726,10 @@ public sealed class AutonomousRetentionService(
 
     private sealed record TypedPolicy(string Kind, string Classification, int GraceDays, bool AutoDelete, bool Protected, bool RequiresReplacement, string ReasonCode);
     private sealed record EligibilityEvaluation(IReadOnlyList<string> ReasonCodes, IReadOnlyList<string> BlockedReasons, Guid? ReplacementResourceId, string Fingerprint);
-    private sealed record ReplacementTarget(Guid Id, string ProjectId, MemoryStatus Status);
+    private sealed record ReplacementTarget(Guid Id, string ProjectId, MemoryScope Scope, MemoryStatus Status);
     private sealed record EvidenceSnapshot(
         IReadOnlyDictionary<Guid, long> Hits,
+        IReadOnlyDictionary<Guid, long> RawHits,
         IReadOnlyList<MemoryLink> Links,
         IReadOnlyDictionary<Guid, Guid[]> Replacements,
         IReadOnlyDictionary<Guid, ReplacementTarget> ReplacementTargets,
@@ -687,7 +738,7 @@ public sealed class AutonomousRetentionService(
         IReadOnlyList<string> ActiveJobPayloads,
         string ProjectRelationshipFingerprint)
     {
-        public static EvidenceSnapshot Empty { get; } = new(new Dictionary<Guid, long>(), [],
+        public static EvidenceSnapshot Empty { get; } = new(new Dictionary<Guid, long>(), new Dictionary<Guid, long>(), [],
             new Dictionary<Guid, Guid[]>(), new Dictionary<Guid, ReplacementTarget>(), [], [], [], string.Empty);
     }
 }

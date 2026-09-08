@@ -564,6 +564,50 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     }
 
     [DockerRequiredFact]
+    public async Task Build_Working_Context_Preference_Fallback_Should_Prefer_Current_Authority()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var bootstrap = actorAccessor.Current;
+        var owner = new TenantUser
+        {
+            TenantId = bootstrap.TenantId!.Value,
+            Username = $"preference-authority-{Guid.NewGuid():N}"[..28],
+            DisplayName = "Preference authority owner",
+            Role = TenantUserRole.Member,
+            Status = TenantUserStatus.Active,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        db.TenantUsers.Add(owner);
+        await db.SaveChangesAsync();
+        actorAccessor.Current = bootstrap with { UserId = owner.Id, Username = owner.Username };
+
+        var authorityKey = $"preference-authority-{Guid.NewGuid():N}";
+        var predecessor = CreatePreference(owner, $"predecessor-{Guid.NewGuid():N}", authorityKey, .99m, DateTimeOffset.UtcNow);
+        var successor = CreatePreference(owner, $"successor-{Guid.NewGuid():N}", authorityKey, .10m, DateTimeOffset.UtcNow.AddMinutes(-1));
+        db.MemoryItems.AddRange(predecessor, successor);
+        await db.SaveChangesAsync();
+        predecessor.AuthorityState = MemoryAuthorityState.Superseded;
+        predecessor.SupersededById = successor.Id;
+        successor.AuthorityState = MemoryAuthorityState.Current;
+        successor.SupersedesId = predecessor.Id;
+        await db.SaveChangesAsync();
+
+        var memoryService = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+        var context = await memoryService.BuildWorkingContextAsync(
+            new WorkingContextRequest($"no-index-hit-{Guid.NewGuid():N}", 1, 3),
+            CancellationToken.None);
+
+        context.UserPreferences.Should().NotBeEmpty();
+        context.UserPreferences[0].Id.Should().Be(successor.Id,
+            "fallback ranking must apply Current authority before importance or recency");
+        context.Citations[0].MemoryId.Should().Be(successor.Id);
+    }
+
+    [DockerRequiredFact]
     public async Task Search_Should_Write_Retrieval_Telemetry_Event_And_Hits()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -939,12 +983,13 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
         {
             await processor.ProcessNextAsync(cancellationToken);
 
-            var promoted = await dbContext.ConversationInsights.AnyAsync(
-                x => x.ConversationId == conversationId &&
-                     x.PromotionStatus == ConversationPromotionStatus.Promoted,
-                cancellationToken);
+            var promotionStates = await dbContext.ConversationInsights
+                .Where(x => x.ConversationId == conversationId)
+                .Select(x => x.PromotionStatus)
+                .ToListAsync(cancellationToken);
 
-            if (promoted)
+            if (promotionStates.Count > 0 &&
+                promotionStates.All(status => status != ConversationPromotionStatus.Pending))
             {
                 return;
             }
@@ -996,5 +1041,38 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             MetadataJson = "{}",
             CreatedAt = timestamp,
             UpdatedAt = timestamp
+        };
+
+    private static MemoryItem CreatePreference(
+        TenantUser owner,
+        string key,
+        string authorityKey,
+        decimal importance,
+        DateTimeOffset updatedAt)
+        => new()
+        {
+            TenantId = owner.TenantId,
+            OwnerUserId = owner.Id,
+            ProjectId = ProjectContext.UserProjectId,
+            ExternalKey = $"user-preference:{key}",
+            Scope = MemoryScope.User,
+            MemoryType = MemoryType.Preference,
+            Title = key,
+            Content = $"Preference content for {key}.",
+            Summary = key,
+            Tags = ["user-preference", nameof(UserPreferenceKind.EngineeringPrinciple)],
+            SourceType = "user-preference",
+            SourceRef = key,
+            Importance = importance,
+            Confidence = importance,
+            Status = MemoryStatus.Active,
+            MetadataJson = JsonSerializer.Serialize(new
+            {
+                kind = nameof(UserPreferenceKind.EngineeringPrinciple),
+                rationale = "Authority fallback integration fixture.",
+                authorityKey
+            }),
+            CreatedAt = updatedAt,
+            UpdatedAt = updatedAt
         };
 }

@@ -1,3 +1,4 @@
+using System.Data;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
@@ -928,12 +929,16 @@ public sealed class DashboardQueryServiceTests
         public DbSet<MemoryRetentionState> MemoryRetentionStates => throw new NotSupportedException();
         public DbSet<ResourceTombstone> ResourceTombstones => throw new NotSupportedException();
         public DbSet<GovernanceRunReceipt> GovernanceRunReceipts => throw new NotSupportedException();
+        public DbSet<ScheduledGovernanceReliabilityRun> ScheduledGovernanceReliabilityRuns => throw new NotSupportedException();
         public DbSet<ProjectHierarchy> ProjectHierarchies => throw new NotSupportedException();
         public DbSet<DiscussionThread> DiscussionThreads => throw new NotSupportedException();
         public DbSet<DiscussionParticipant> DiscussionParticipants => throw new NotSupportedException();
         public DbSet<DiscussionMessage> DiscussionMessages => throw new NotSupportedException();
         public DbSet<ProjectWorkItem> ProjectWorkItems => throw new NotSupportedException();
         public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => throw new NotSupportedException();
+
+        public Task<IApplicationTransaction> BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
 
         public void ClearTrackedChanges()
         {

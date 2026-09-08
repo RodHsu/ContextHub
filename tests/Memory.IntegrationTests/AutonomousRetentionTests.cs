@@ -61,6 +61,12 @@ public sealed class AutonomousRetentionTests(ContainerTestEnvironment environmen
         quarantined.DeleteEligibleAt.Should().BeAfter(DateTimeOffset.UtcNow.AddDays(6));
         (await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id)).Status.Should().Be(MemoryStatus.Archived);
 
+        var unauthorizedDelete = async () => await service.DeleteMaturedAsync(
+            memory.Id, projectId, "retention-external-delete", CancellationToken.None);
+        await unauthorizedDelete.Should().ThrowAsync<UnauthorizedAccessException>()
+            .WithMessage("*internal:retention-delete*");
+        UseInternalRetentionActor(scope.ServiceProvider, actor);
+
         var beforeMaturity = async () => await service.DeleteMaturedAsync(memory.Id, projectId, "retention-too-early", CancellationToken.None);
         await beforeMaturity.Should().ThrowAsync<InvalidOperationException>().WithMessage("*maturity*");
 
@@ -93,6 +99,45 @@ public sealed class AutonomousRetentionTests(ContainerTestEnvironment environmen
         replay.TombstoneId.Should().Be(deleted.TombstoneId);
         replay.AuditId.Should().Be(deleted.AuditId);
         (await db.ResourceTombstones.CountAsync(x => x.ResourceId == memory.Id)).Should().Be(1);
+    }
+
+    [DockerRequiredFact]
+    public async Task Replacement_Target_From_Another_Owner_Should_Fail_Closed()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var service = scope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>();
+        var projectId = $"RetentionReplacementScope_{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var otherOwner = new TenantUser
+        {
+            TenantId = actor.TenantId!.Value,
+            Username = $"retention-owner-{Guid.NewGuid():N}"[..28],
+            DisplayName = "Retention replacement boundary owner",
+            Role = TenantUserRole.Member,
+            Status = TenantUserStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.TenantUsers.Add(otherOwner);
+        await db.SaveChangesAsync();
+
+        var foreignTarget = CreateMemory(actor, projectId, MemoryType.Episode, ["machine-generated"]);
+        foreignTarget.OwnerUserId = otherOwner.Id;
+        var source = CreateMemory(actor, projectId, MemoryType.Episode,
+            ["machine-generated", "execution-evidence", "replaced"]);
+        source.MetadataJson = $$"""{"supersededByMemoryId":"{{foreignTarget.Id:D}}"}""";
+        db.MemoryItems.AddRange(source, foreignTarget);
+        await db.SaveChangesAsync();
+
+        var review = await service.ReviewAsync([projectId], "replacement-owner-boundary", CancellationToken.None);
+
+        review.Candidates.Should().ContainSingle(x =>
+            x.ResourceId == source.Id &&
+            x.RecommendedAction == "NeedsReview" &&
+            x.BlockedReasons.Contains("replacementChainIncomplete") &&
+            !x.ReasonCodes.Contains("replacementChainComplete"));
     }
 
     [DockerRequiredFact]
@@ -140,6 +185,34 @@ public sealed class AutonomousRetentionTests(ContainerTestEnvironment environmen
         await db.SaveChangesAsync();
         await service.ReviewAsync([projectId], "cancel-hit-r", CancellationToken.None);
         (await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == hit.Id)).BlockedReasonsJson.Should().Contain("recentHits");
+
+        var rawHit = CreateMemory(actor, projectId, MemoryType.Episode, ["machine-generated", "execution-evidence"]);
+        db.MemoryItems.Add(rawHit);
+        await db.SaveChangesAsync();
+        await service.QuarantineAsync(rawHit.Id, projectId, "cancel-raw-hit-q", CancellationToken.None);
+        var retrievalEvent = new RetrievalEvent
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = projectId,
+            EntryPoint = "retention-raw-hit-test",
+            Success = true,
+            ResultCount = 1,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+        retrievalEvent.Hits.Add(new RetrievalHit
+        {
+            RetrievalEventId = retrievalEvent.Id,
+            MemoryId = rawHit.Id,
+            Rank = 1,
+            ProjectId = projectId,
+            CreatedAt = retrievalEvent.CreatedAt
+        });
+        db.RetrievalEvents.Add(retrievalEvent);
+        await db.SaveChangesAsync();
+        await service.ReviewAsync([projectId], "cancel-raw-hit-r", CancellationToken.None);
+        (await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == rawHit.Id))
+            .BlockedReasonsJson.Should().Contain("recentHits");
 
         var held = CreateMemory(actor, projectId, MemoryType.Episode, ["machine-generated", "execution-evidence"]);
         db.MemoryItems.Add(held);
@@ -455,6 +528,19 @@ public sealed class AutonomousRetentionTests(ContainerTestEnvironment environmen
             [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.SecurityManage], [], true);
         services.GetRequiredService<IRequestActorAccessor>().Current = actor;
         return actor;
+    }
+
+    private static ContextHubRequestActor UseInternalRetentionActor(
+        IServiceProvider services,
+        ContextHubRequestActor actor)
+    {
+        var internalActor = actor with
+        {
+            Scopes = actor.Scopes.Append(SecurityScopes.InternalRetentionDelete).Distinct().ToArray(),
+            IsServiceActor = true
+        };
+        services.GetRequiredService<IRequestActorAccessor>().Current = internalActor;
+        return internalActor;
     }
 
     private static MemoryItem CreateMemory(ContextHubRequestActor actor, string projectId, MemoryType type, string[] tags)

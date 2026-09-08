@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -41,21 +42,49 @@ public sealed class GovernanceService(
 
     public async Task<GovernanceFindingResult> AcceptAsync(Guid id, CancellationToken cancellationToken)
     {
+        await using var transaction = await dbContext.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
         var entity = await GetRequiredAsync(id, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actorAccessor.Current, entity.ProjectId, write: true);
+        if (entity.Status == GovernanceFindingStatus.Accepted)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return Map(entity);
+        }
+        if (entity.Status != GovernanceFindingStatus.Open)
+        {
+            throw new InvalidOperationException(
+                $"Governance finding '{entity.Id}' cannot be accepted from governance state '{entity.Status}'. Only an open finding may be accepted.");
+        }
         entity.Status = GovernanceFindingStatus.Accepted;
         entity.UpdatedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return Map(entity);
     }
 
     public async Task<GovernanceFindingResult> DismissAsync(Guid id, CancellationToken cancellationToken)
     {
+        await using var transaction = await dbContext.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
         var entity = await GetRequiredAsync(id, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actorAccessor.Current, entity.ProjectId, write: true);
+        if (entity.Status == GovernanceFindingStatus.Dismissed)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return Map(entity);
+        }
+        if (entity.Status != GovernanceFindingStatus.Open)
+        {
+            throw new InvalidOperationException(
+                $"Governance finding '{entity.Id}' cannot be dismissed from governance state '{entity.Status}'. Only an open finding may be dismissed.");
+        }
         entity.Status = GovernanceFindingStatus.Dismissed;
         entity.UpdatedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return Map(entity);
     }
 
@@ -66,6 +95,9 @@ public sealed class GovernanceService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var (tenantId, ownerUserId) = RequireActorIdentity(actor);
+        await using var transaction = await dbContext.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
         var entity = await GetRequiredAsync(request.FindingId, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
         if (string.IsNullOrWhiteSpace(request.Reason))
@@ -111,6 +143,7 @@ public sealed class GovernanceService(
         await SupersedePendingActionsForFindingAsync(entity.ProjectId, entity.DedupKey, cancellationToken);
         await AddFindingGovernanceAuditAsync(entity, request.Disposition.ToString(), cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return Map(entity);
     }
 
@@ -121,8 +154,19 @@ public sealed class GovernanceService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var (tenantId, ownerUserId) = RequireActorIdentity(actor);
+        await using var transaction = await dbContext.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
         var entity = await GetRequiredAsync(request.FindingId, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
+        var normalizedReason = request.Reason?.Trim() ?? string.Empty;
+        var normalizedRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        if (entity.Status == GovernanceFindingStatus.Open &&
+            string.Equals(entity.GovernanceReason, normalizedReason, StringComparison.Ordinal) &&
+            string.Equals(entity.GovernanceRunId, normalizedRunId, StringComparison.Ordinal))
+        {
+            return Map(entity);
+        }
         if (entity.Status is not (GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision or GovernanceFindingStatus.HostBlocked))
         {
             throw new InvalidOperationException($"Governance finding '{entity.Id}' is not in an exception disposition.");
@@ -131,7 +175,7 @@ public sealed class GovernanceService(
         {
             throw new InvalidOperationException("A governance reopen reason is required.");
         }
-        var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        var governanceRunId = normalizedRunId;
         if (string.IsNullOrEmpty(governanceRunId))
         {
             throw new InvalidOperationException("GovernanceRunId is required for an explicit governance reopen.");
@@ -143,7 +187,7 @@ public sealed class GovernanceService(
             entity.PrimaryMemoryId, entity.SecondaryMemoryId, null,
             GovernanceEvidenceFingerprint.FindingPayload(entity), cancellationToken);
         entity.Status = GovernanceFindingStatus.Open;
-        entity.GovernanceReason = request.Reason.Trim();
+        entity.GovernanceReason = normalizedReason;
         entity.GovernanceRunId = governanceRunId;
         entity.GovernanceActor = actor.Username;
         entity.GovernanceRetryCount += 1;
@@ -152,11 +196,20 @@ public sealed class GovernanceService(
         entity.GovernanceEvidenceChangedSinceBlock =
             !string.Equals(entity.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal) ||
             !string.Equals(entity.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal);
+        if (entity.GovernanceEvidenceChangedSinceBlock)
+        {
+            entity.GovernanceLastEvidenceChangedAt = now;
+        }
         entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
         entity.GovernanceEvidenceFingerprint = currentFingerprint;
+        entity.GovernanceBlockedAt = null;
+        entity.GovernanceBlockingLayer = string.Empty;
+        entity.GovernanceReasonClass = string.Empty;
+        entity.GovernanceRelatedTool = string.Empty;
         entity.UpdatedAt = now;
         await AddFindingGovernanceAuditAsync(entity, "ManualReopen", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return Map(entity);
     }
 
@@ -184,6 +237,7 @@ public sealed class GovernanceService(
 
         var sources = await sourceQuery.ToListAsync(cancellationToken);
         var memories = await memoryQuery.ToListAsync(cancellationToken);
+        var successorEvidenceIndex = SuccessorEvidencePolicy.CreateIndex(memories);
         var memoryIdsForLinks = memories.Select(x => x.Id).ToArray();
         var replacementPairs = memoryIdsForLinks.Length == 0
             ? new HashSet<string>(StringComparer.Ordinal)
@@ -282,8 +336,10 @@ public sealed class GovernanceService(
             }
         }
 
-        foreach (var memory in memories.Where(memory => IsSupersededMemoryCandidate(memory, memories)))
+        foreach (var memory in memories.Where(memory => IsSupersededMemoryCandidate(memory, successorEvidenceIndex, now)))
         {
+            var successorEvidence = successorEvidenceIndex.Evaluate(memory, now);
+            var successorId = successorEvidence.Successor?.Id ?? TryGetSupersededByMemoryId(memory.MetadataJson);
             findings.Add(new GovernanceDraft(
                 $"superseded-memory:{normalizedProjectId}:{memory.Id}",
                 GovernanceFindingType.SupersededMemoryCandidate,
@@ -291,11 +347,24 @@ public sealed class GovernanceService(
                 "此 active memory 帶有 superseded / replaced 訊號，建議人工確認後再封存或改鏈結。",
                 TryGetConnectorId(memory.MetadataJson),
                 memory.Id,
-                TryGetSupersededByMemoryId(memory.MetadataJson),
-                JsonSerializer.Serialize(new { memory.Status, memory.UpdatedAt, memory.Tags }, JsonOptions)));
+                successorId,
+                JsonSerializer.Serialize(new
+                {
+                    memory.Status,
+                    memory.AuthorityState,
+                    memory.UpdatedAt,
+                    memory.Tags,
+                    successorId,
+                    successorEvidence = successorEvidence.IsStrong,
+                    successorEvidenceReason = successorEvidence.ReasonCode,
+                    successorEvidenceId = successorEvidence.Evidence?.Id,
+                    successorEvidenceRef = successorEvidence.Successor?.SuccessorEvidenceRef
+                }, JsonOptions)));
         }
 
-        foreach (var memory in memories.Where(memory => IsStaleMemoryCandidate(memory, now)))
+        foreach (var memory in memories.Where(memory =>
+                     IsStaleMemoryCandidate(memory, now) &&
+                     !successorEvidenceIndex.Evaluate(memory, now).IsStrong))
         {
             findings.Add(new GovernanceDraft(
                 $"stale-memory:{normalizedProjectId}:{memory.Id}",
@@ -323,6 +392,8 @@ public sealed class GovernanceService(
 
         foreach (var memory in memories)
         {
+            var successorEvidence = successorEvidenceIndex.Evaluate(memory, now);
+            var hasStrongSuccessorEvidence = successorEvidence.IsStrong;
             var expectedProjectId = TryGetMetadataString(memory.MetadataJson, "expectedProjectId") ??
                                     TryGetMetadataString(memory.MetadataJson, "targetProjectId");
             if (!string.IsNullOrWhiteSpace(expectedProjectId) &&
@@ -347,7 +418,8 @@ public sealed class GovernanceService(
                     new { targetProjectId, reasonCodes = new[] { "explicit-target-project" } }));
             }
 
-            if (memory.Status is MemoryStatus.Stale or MemoryStatus.Superseded || HasTag(memory, "obsolete") || HasTag(memory, "deprecated"))
+            if (!hasStrongSuccessorEvidence &&
+                (memory.Status is MemoryStatus.Stale or MemoryStatus.Superseded || HasTag(memory, "obsolete") || HasTag(memory, "deprecated")))
             {
                 findings.Add(CreateMemoryDraft(
                     normalizedProjectId,
@@ -359,7 +431,7 @@ public sealed class GovernanceService(
                     new { memory.Status, memory.Tags, reasonCodes = new[] { "lifecycle-obsolete-signal" } }));
             }
 
-            if (IsLifecycleCandidate(memory) && IsLowValueMemoryCandidate(memory))
+            if (!hasStrongSuccessorEvidence && IsLifecycleCandidate(memory) && IsLowValueMemoryCandidate(memory))
             {
                 findings.Add(CreateMemoryDraft(
                     normalizedProjectId,
@@ -383,8 +455,10 @@ public sealed class GovernanceService(
                     new { reasonCodes = new[] { "invalid-memory-contract" } }));
             }
 
-            if (memory.Status == MemoryStatus.Active &&
-                (IsStaleMemoryCandidate(memory, now) || IsLowValueMemoryCandidate(memory) || IsSupersededMemoryCandidate(memory, memories)))
+            if (!hasStrongSuccessorEvidence &&
+                memory.Status == MemoryStatus.Active &&
+                (IsStaleMemoryCandidate(memory, now) || IsLowValueMemoryCandidate(memory) ||
+                 IsSupersededMemoryCandidate(memory, successorEvidenceIndex, now)))
             {
                 findings.Add(CreateMemoryDraft(
                     normalizedProjectId,
@@ -423,7 +497,7 @@ public sealed class GovernanceService(
             }
 
             var successorId = TryGetSupersededByMemoryId(memory.MetadataJson);
-            if (successorId.HasValue)
+            if (!hasStrongSuccessorEvidence && successorId.HasValue)
             {
                 var successor = memories.FirstOrDefault(x => x.Id == successorId.Value);
                 var successorSuccessorId = successor is null ? null : TryGetSupersededByMemoryId(successor.MetadataJson);
@@ -516,6 +590,12 @@ public sealed class GovernanceService(
                 JsonSerializer.Serialize(new { expectedModelKey = embeddingProvider.ModelKey }, JsonOptions)));
         }
 
+        // The existing finding query and every status/audit mutation must share one
+        // serializable snapshot. Without this, a concurrent HostBlocked or
+        // RequiresUserDecision disposition can be overwritten by this stale analyze.
+        await using var transaction = await dbContext.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
         var existingQuery = dbContext.GovernanceFindings.ForActor(actor)
             .Where(x => x.ProjectId == normalizedProjectId);
         if (actor.HasUser)
@@ -561,33 +641,46 @@ public sealed class GovernanceService(
             entity.DedupKey = draft.DedupKey;
             entity.UpdatedAt = clock.UtcNow;
 
-            if (entity.Status is GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision or GovernanceFindingStatus.HostBlocked &&
-                !string.IsNullOrWhiteSpace(entity.GovernanceEvidenceFingerprint))
+            if (entity.Status is GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision or GovernanceFindingStatus.HostBlocked)
             {
                 var currentFingerprint = await GovernanceEvidenceFingerprint.BuildAsync(
                     dbContext, normalizedProjectId, tenantId, ownerUserId,
                     entity.PrimaryMemoryId, entity.SecondaryMemoryId, null,
                     GovernanceEvidenceFingerprint.FindingPayload(entity), cancellationToken);
-                var evidenceChanged =
+                var hasBaseline = !string.IsNullOrWhiteSpace(entity.GovernanceEvidenceFingerprint);
+                var evidenceChanged = hasBaseline && (
                     !string.Equals(entity.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal) ||
-                    !string.Equals(entity.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal);
-                entity.GovernanceLastReevaluatedAt = clock.UtcNow;
+                    !string.Equals(entity.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal));
+                var reevaluatedAt = clock.UtcNow;
+                entity.GovernanceLastReevaluatedAt = reevaluatedAt;
+                if (!hasBaseline)
+                {
+                    entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+                    entity.GovernanceEvidenceFingerprint = currentFingerprint;
+                }
                 var hostBlocked = entity.Status == GovernanceFindingStatus.HostBlocked;
                 entity.GovernanceEvidenceChangedSinceBlock = hostBlocked
                     ? entity.GovernanceEvidenceChangedSinceBlock || evidenceChanged
                     : evidenceChanged;
                 if (evidenceChanged)
                 {
+                    entity.GovernanceLastEvidenceChangedAt = reevaluatedAt;
+                    entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
+                    entity.GovernanceEvidenceFingerprint = currentFingerprint;
                     if (!hostBlocked)
                     {
-                        entity.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
-                        entity.GovernanceEvidenceFingerprint = currentFingerprint;
                         entity.Status = GovernanceFindingStatus.Open;
                         entity.GovernanceReason = "Automatically reopened because governance evidence or policy changed.";
                         entity.GovernanceRunId = string.Empty;
                         entity.GovernanceRetryCount += 1;
                         entity.GovernanceUpdatedAt = clock.UtcNow;
                         await AddFindingGovernanceAuditAsync(entity, "EvidenceChangedReopen", cancellationToken);
+                    }
+                    else
+                    {
+                        entity.GovernanceUpdatedAt = reevaluatedAt;
+                        entity.UpdatedAt = reevaluatedAt;
+                        await AddFindingGovernanceAuditAsync(entity, "HostBlockedEvidenceChanged", cancellationToken);
                     }
                 }
             }
@@ -607,8 +700,7 @@ public sealed class GovernanceService(
                                                     x.Status is GovernanceFindingStatus.Open or
                                                         GovernanceFindingStatus.Accepted or
                                                         GovernanceFindingStatus.Deferred or
-                                                        GovernanceFindingStatus.RequiresUserDecision or
-                                                        GovernanceFindingStatus.HostBlocked))
+                                                        GovernanceFindingStatus.RequiresUserDecision))
         {
             entity.Status = GovernanceFindingStatus.Resolved;
             entity.UpdatedAt = clock.UtcNow;
@@ -618,6 +710,7 @@ public sealed class GovernanceService(
         await SupersedePendingActionsWithTerminalEquivalentAsync(normalizedProjectId, cancellationToken);
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
     }
 
@@ -761,14 +854,26 @@ public sealed class GovernanceService(
            entity.UpdatedAt < now.AddDays(-30) &&
            (entity.Importance <= 0.55m || entity.Confidence <= 0.70m);
 
-    private static bool IsSupersededMemoryCandidate(MemoryItem entity, IReadOnlyList<MemoryItem> memories)
-        => IsLifecycleCandidate(entity) &&
-           (HasTag(entity, "superseded") ||
-            HasTag(entity, "replaced") ||
-            HasMetadataProperty(entity.MetadataJson, "supersededByMemoryId") ||
-            HasMetadataProperty(entity.MetadataJson, "replacedByMemoryId") ||
-            TryGetSupersededByMemoryId(entity.MetadataJson) is { } supersededById &&
-            memories.Any(memory => memory.Id == supersededById));
+    private static bool IsSupersededMemoryCandidate(
+        MemoryItem entity,
+        SuccessorEvidencePolicy.SuccessorEvidenceIndex successorEvidenceIndex,
+        DateTimeOffset now)
+    {
+        var successorEvidence = successorEvidenceIndex.Evaluate(entity, now);
+        if (successorEvidence.IsStrong &&
+            entity.Status != MemoryStatus.Archived &&
+            !HasTag(entity, "keep") &&
+            !HasTag(entity, "pinned"))
+        {
+            return true;
+        }
+
+        return IsLifecycleCandidate(entity) &&
+               (HasTag(entity, "superseded") ||
+                HasTag(entity, "replaced") ||
+                HasMetadataProperty(entity.MetadataJson, "supersededByMemoryId") ||
+                HasMetadataProperty(entity.MetadataJson, "replacedByMemoryId"));
+    }
 
     private static bool IsLifecycleCandidate(MemoryItem entity)
         => entity.Status == MemoryStatus.Active &&
@@ -1160,6 +1265,7 @@ public sealed class GovernanceService(
             GovernanceUpdatedAt = entity.GovernanceUpdatedAt,
             GovernanceBlockedAt = entity.GovernanceBlockedAt,
             GovernanceLastReevaluatedAt = entity.GovernanceLastReevaluatedAt,
+            GovernanceLastEvidenceChangedAt = entity.GovernanceLastEvidenceChangedAt,
             GovernanceBlockingLayer = entity.GovernanceBlockingLayer,
             GovernanceReasonClass = entity.GovernanceReasonClass,
             GovernanceRelatedTool = entity.GovernanceRelatedTool,
@@ -1176,6 +1282,7 @@ public sealed class GovernanceService(
     {
         entity.GovernanceLastReevaluatedAt = now;
         entity.GovernanceEvidenceChangedSinceBlock = false;
+        entity.GovernanceLastEvidenceChangedAt = null;
         if (status != GovernanceFindingStatus.HostBlocked)
         {
             entity.GovernanceBlockedAt = null;
@@ -1240,4 +1347,233 @@ public sealed class GovernanceService(
         Guid? PrimaryMemoryId,
         Guid? SecondaryMemoryId,
         string DetailsJson);
+}
+
+/// <summary>
+/// Evaluates the typed authority chain used by governance before a stale item
+/// can be moved through the reversible superseded/archive path.
+/// </summary>
+internal static class SuccessorEvidencePolicy
+{
+    private static readonly HashSet<string> HumanGateTags = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "critical",
+        "legal",
+        "legal-hold",
+        "privacy",
+        "business",
+        "business-critical",
+        "business-sensitive",
+        "protected",
+        "protected-destruction",
+        "irreversible",
+        "sensitive",
+        "privacy-sensitive",
+        "restricted",
+        "confidential",
+        "high-risk",
+        "security-sensitive",
+        "secret",
+        "authoritative",
+        "source-of-truth",
+        "formal",
+        "governance-acceptance"
+    };
+
+    public static SuccessorEvidenceIndex CreateIndex(IEnumerable<MemoryItem> memories)
+        => new(memories);
+
+    public static bool RequiresHumanDecision(MemoryItem memory)
+    {
+        if (memory.IsReadOnly)
+        {
+            return true;
+        }
+
+        if (memory.Tags.Any(tag => HumanGateTags.Contains(tag)))
+        {
+            return true;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(memory.MetadataJson) ? "{}" : memory.MetadataJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return true;
+            }
+
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                var propertyName = property.Name.Trim().ToLowerInvariant();
+                if (property.Value.ValueKind == JsonValueKind.True &&
+                    propertyName is "critical" or "legal" or "legalhold" or "privacy" or
+                    "business" or "businesscritical" or "protected" or "protecteddestruction" or "irreversible" or
+                    "requiresexplicitapproval" or "humanrequired")
+                {
+                    return true;
+                }
+
+                if ((propertyName is "risk" or "risklevel" or "classification" or "sensitivity") &&
+                    property.Value.ValueKind == JsonValueKind.String &&
+                    property.Value.GetString() is { } risk &&
+                    risk.Trim().ToLowerInvariant() is "critical" or "legal" or "privacy" or "business" or
+                    "irreversible" or "high" or "sensitive" or "restricted" or "confidential" or "protected")
+                {
+                    return true;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    internal sealed class SuccessorEvidenceIndex
+    {
+        private readonly IReadOnlyDictionary<Guid, MemoryItem> itemsById;
+        private readonly IReadOnlyDictionary<Guid, MemoryItem[]> successorsByPredecessorId;
+        private readonly IReadOnlyDictionary<Guid, MemoryItem[]> supersedersBySuccessorId;
+
+        internal SuccessorEvidenceIndex(IEnumerable<MemoryItem> memories)
+        {
+            var items = memories
+                .GroupBy(x => x.Id)
+                .Select(x => x.First())
+                .ToArray();
+            itemsById = items.ToDictionary(x => x.Id);
+            successorsByPredecessorId = items
+                .Where(x => x.SupersedesId.HasValue)
+                .GroupBy(x => x.SupersedesId!.Value)
+                .ToDictionary(x => x.Key, x => x.ToArray());
+            supersedersBySuccessorId = items
+                .Where(x => x.SupersededById.HasValue)
+                .GroupBy(x => x.SupersededById!.Value)
+                .ToDictionary(x => x.Key, x => x.ToArray());
+        }
+
+        public SuccessorEvidenceResult Evaluate(MemoryItem predecessor, DateTimeOffset now)
+        {
+            var hasTypedSignal = HasTypedSuccessorSignal(predecessor) ||
+                                  successorsByPredecessorId.ContainsKey(predecessor.Id) ||
+                                  supersedersBySuccessorId.ContainsKey(predecessor.Id);
+            if (predecessor.AuthorityState != MemoryAuthorityState.Superseded)
+            {
+                return Failure(hasTypedSignal, "predecessor-authority-not-superseded");
+            }
+
+            if (!predecessor.SupersededById.HasValue)
+            {
+                return Failure(true, "successor-link-missing");
+            }
+
+            if (!itemsById.TryGetValue(predecessor.SupersededById.Value, out var successor))
+            {
+                return Failure(true, "successor-not-found");
+            }
+
+            if (!IsSameAuthorityScope(predecessor, successor))
+            {
+                return Failure(true, "successor-scope-mismatch", successor);
+            }
+
+            if (successor.AuthorityState != MemoryAuthorityState.Current)
+            {
+                return Failure(true, "successor-authority-not-current", successor);
+            }
+
+            if (successor.Status != MemoryStatus.Active)
+            {
+                return Failure(true, "successor-not-active", successor);
+            }
+
+            if (successor.SupersedesId != predecessor.Id)
+            {
+                return Failure(true, "successor-predecessor-mismatch", successor);
+            }
+
+            if (!successorsByPredecessorId.TryGetValue(predecessor.Id, out var successors) || successors.Length != 1 ||
+                successors[0].Id != successor.Id ||
+                !supersedersBySuccessorId.TryGetValue(successor.Id, out var predecessors) || predecessors.Length != 1 ||
+                predecessors[0].Id != predecessor.Id)
+            {
+                return Failure(true, "successor-chain-ambiguous", successor);
+            }
+
+            if (predecessor.ValidFrom > now)
+            {
+                return Failure(true, "predecessor-not-effective", successor);
+            }
+
+            if (successor.ValidFrom > now || successor.ValidUntil <= now)
+            {
+                return Failure(true, "successor-not-effective", successor);
+            }
+
+            if (!successor.SuccessorEvidenceId.HasValue)
+            {
+                return Failure(true, "successor-evidence-missing", successor);
+            }
+
+            if (!itemsById.TryGetValue(successor.SuccessorEvidenceId.Value, out var evidence))
+            {
+                return Failure(true, "successor-evidence-not-found", successor);
+            }
+
+            if (evidence.Id == predecessor.Id || evidence.Id == successor.Id)
+            {
+                return Failure(true, "successor-evidence-self-reference", successor, evidence);
+            }
+
+            if (!IsSameAuthorityScope(predecessor, evidence))
+            {
+                return Failure(true, "successor-evidence-scope-mismatch", successor, evidence);
+            }
+
+            if (evidence.AuthorityState == MemoryAuthorityState.Pending)
+            {
+                return Failure(true, "successor-evidence-pending", successor, evidence);
+            }
+
+            return new SuccessorEvidenceResult(
+                true,
+                "strong-same-scope-successor-evidence",
+                successor,
+                evidence,
+                true);
+        }
+
+        private static SuccessorEvidenceResult Failure(
+            bool hasTypedSignal,
+            string reasonCode,
+            MemoryItem? successor = null,
+            MemoryItem? evidence = null)
+            => new(false, reasonCode, successor, evidence, hasTypedSignal);
+    }
+
+    internal sealed record SuccessorEvidenceResult(
+        bool IsStrong,
+        string ReasonCode,
+        MemoryItem? Successor,
+        MemoryItem? Evidence,
+        bool HasTypedSignal);
+
+    internal static bool HasTypedSuccessorSignal(MemoryItem memory)
+        => memory.AuthorityState != MemoryAuthorityState.Current ||
+           memory.SupersedesId.HasValue ||
+           memory.SupersededById.HasValue ||
+           memory.SuccessorEvidenceId.HasValue ||
+           !string.IsNullOrWhiteSpace(memory.SuccessorEvidenceRef);
+
+    internal static bool IsSameAuthorityScope(MemoryItem left, MemoryItem right)
+        => left.TenantId.HasValue && right.TenantId.HasValue && left.TenantId == right.TenantId &&
+           left.OwnerUserId.HasValue && right.OwnerUserId.HasValue && left.OwnerUserId == right.OwnerUserId &&
+           left.Scope == right.Scope &&
+           string.Equals(NormalizeProjectId(left.ProjectId), NormalizeProjectId(right.ProjectId), StringComparison.Ordinal);
+
+    private static string NormalizeProjectId(string? projectId)
+        => (projectId ?? string.Empty).Trim().ToLowerInvariant();
 }

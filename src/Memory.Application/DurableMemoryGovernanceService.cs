@@ -327,7 +327,7 @@ public sealed class DurableMemoryGovernanceService(
             finding.Type,
             finding.Title,
             finding.Summary,
-            RecommendedAction(finding.Type),
+            RecommendedAction(finding.Type, finding.DetailsJson),
             targetProjectId,
             reasonCodes,
             RequiresExplicitApproval: finding.Type is GovernanceFindingType.MoveMemoryCandidate or
@@ -337,16 +337,31 @@ public sealed class DurableMemoryGovernanceService(
             finding.UpdatedAt);
     }
 
-    private static string RecommendedAction(GovernanceFindingType type)
+    private static string RecommendedAction(GovernanceFindingType type, string detailsJson)
         => type switch
         {
             GovernanceFindingType.DuplicateCandidate or GovernanceFindingType.DuplicateMemoryCandidate or GovernanceFindingType.MergeMemoryCandidate => "ProposeMerge",
             GovernanceFindingType.MisplacedProjectCandidate or GovernanceFindingType.MoveMemoryCandidate or GovernanceFindingType.SharedKnowledgePromotionCandidate or GovernanceFindingType.SharedKnowledgeDemotionCandidate => "ProposeMove",
             GovernanceFindingType.StaleMemoryCandidate or GovernanceFindingType.LowSignalEpisodeCandidate or GovernanceFindingType.ObsoleteMemoryCandidate or GovernanceFindingType.LowValueMemoryCandidate or GovernanceFindingType.ArchiveMemoryCandidate => "ProposeArchive",
+            GovernanceFindingType.SupersededMemoryCandidate when ReadBoolean(detailsJson, "successorEvidence") => GovernanceBatchActionType.Archive.ToString(),
             GovernanceFindingType.SupersededMemoryCandidate or GovernanceFindingType.ReplacementChainCandidate or GovernanceFindingType.AuthoritativeSourceCandidate => "ReviewReplacementChain",
             GovernanceFindingType.ConflictCandidate or GovernanceFindingType.InvalidMemoryCandidate => "RequiresUserDecision",
             _ => "Review"
         };
+
+    private static bool ReadBoolean(string json, string propertyName)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty(propertyName, out var value) &&
+                   value.ValueKind is JsonValueKind.True;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 
     private static string? ReadString(string json, string propertyName)
     {

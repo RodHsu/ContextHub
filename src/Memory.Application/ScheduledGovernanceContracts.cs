@@ -43,7 +43,12 @@ public sealed record ScheduledGovernanceReviewResult(
     int GovernedHostBlockedExceptionCount = 0,
     int GovernedDeferredExceptionCount = 0,
     GovernanceExceptionDeltaResult? ExceptionDelta = null,
-    ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null);
+    ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null)
+{
+    public int AutomationActionableCount => ReversibleExecutionCount;
+
+    public int RequiresUserDecisionCount => HumanDecisionCount;
+}
 
 public sealed record ScheduledGovernanceExecuteRequest(
     string GovernanceRunId,
@@ -150,7 +155,85 @@ public sealed record ScheduledGovernanceRunResult(
     public bool Terminal { get; init; } = true;
     public ScheduledGovernanceDecision? Decision { get; init; }
     public string Outcome { get; init; } = string.Empty;
+    public ScheduledGovernanceReliabilitySummary? Reliability { get; init; }
 }
+
+/// <summary>
+/// Read-only reliability-window evidence returned as part of the existing
+/// scheduled governance receipt. The summary is server-derived; it is not a
+/// claim made by the ChatGPT caller.
+/// </summary>
+public sealed record ScheduledGovernanceReliabilitySummary(
+    int RequiredRuns,
+    int ConsecutiveQualifyingRuns,
+    bool GatePassed,
+    DateTimeOffset? FirstQualifyingAtUtc,
+    DateTimeOffset? LatestQualifyingAtUtc,
+    string? FirstQualifyingGovernanceRunId,
+    string? LatestQualifyingGovernanceRunId,
+    IReadOnlyList<ScheduledGovernanceReliabilityRunResult> Runs,
+    IReadOnlyList<ScheduledGovernanceReliabilityRunResult> QualifyingRuns,
+    IReadOnlyList<ScheduledGovernanceReliabilityRunResult> NonQualifyingRuns,
+    IReadOnlyList<ScheduledGovernanceReliabilityRunResult> FailedRuns,
+    IReadOnlyList<ScheduledGovernanceReliabilityResetResult> ResetEvents,
+    int IgnoredManualRunCount,
+    int IgnoredReplayProjectionCount,
+    int IgnoredNonScheduledRunCount,
+    ScheduledGovernanceReliabilityScheduleResult Schedule,
+    TimeSpan? MaximumAbsoluteDrift,
+    TimeSpan? LatestSignedDrift,
+    ScheduledGovernanceNaturalOriginEvidenceResult NaturalOriginEvidence,
+    bool RelevantDeploymentOrConfigurationChangeReset,
+    string? LatestResetReason)
+{
+    public bool ResetOccurred => ResetEvents.Count > 0;
+
+    /// <summary>
+    /// ContextHub observes scheduler metadata and cannot change the host
+    /// platform timezone configuration.
+    /// </summary>
+    public bool HostTimeZoneControlAvailable => false;
+
+    public string TimeZoneEvidenceBoundary =>
+        "ContextHub observes scheduler timezone metadata; it cannot change the host platform timezone configuration.";
+}
+
+public sealed record ScheduledGovernanceReliabilityRunResult(
+    string GovernanceRunId,
+    Guid ReceiptId,
+    string ObservedMode,
+    DateTimeOffset ObservedAtUtc,
+    DateTimeOffset? ExpectedAtUtc,
+    TimeSpan? SignedDrift,
+    TimeSpan? AbsoluteDrift,
+    bool? DriftWithinTolerance,
+    bool CountedTowardGate,
+    bool Qualifies,
+    bool IsIgnored,
+    bool IsFailed,
+    IReadOnlyList<string> Reasons,
+    string NaturalOriginStatus,
+    bool PlatformSignedNaturalOriginAttested,
+    string EvidenceBoundary);
+
+public sealed record ScheduledGovernanceReliabilityResetResult(
+    DateTimeOffset AtUtc,
+    string Reason,
+    string? GovernanceRunId,
+    int PreviousConsecutiveQualifyingRuns);
+
+public sealed record ScheduledGovernanceReliabilityScheduleResult(
+    string IntendedTimeZoneId,
+    string SchedulerTimeZoneId,
+    TimeSpan Cadence,
+    IReadOnlyList<TimeOnly> IntendedLocalRunTimes,
+    IReadOnlyList<TimeOnly> SchedulerLocalRunTimes,
+    string CompensationDescription);
+
+public sealed record ScheduledGovernanceNaturalOriginEvidenceResult(
+    bool PlatformSignedAttestationAvailable,
+    string Status,
+    string EvidenceBoundary);
 
 public sealed record ScheduledGovernanceContractResult(
     string ReviewToolName,
@@ -182,5 +265,15 @@ public interface IScheduledGovernanceService
 
     Task<ScheduledGovernanceRunResult> GetReceiptAsync(
         string governanceRunId,
+        CancellationToken cancellationToken);
+}
+
+public interface IScheduledGovernanceReliabilityService
+{
+    Task<ScheduledGovernanceReliabilitySummary> ObserveAsync(
+        GovernanceRunReceiptResult receipt,
+        CancellationToken cancellationToken);
+
+    Task<ScheduledGovernanceReliabilitySummary> GetAsync(
         CancellationToken cancellationToken);
 }

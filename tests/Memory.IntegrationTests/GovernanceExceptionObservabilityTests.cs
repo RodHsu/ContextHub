@@ -1,3 +1,4 @@
+using System.Data;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
@@ -41,6 +42,7 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         blocked.GovernanceReasonClass.Should().Be("UserActionRequired");
         blocked.GovernanceRelatedTool.Should().Be("scheduled_governance_review");
         blocked.GovernanceEvidenceChangedSinceBlock.Should().BeFalse();
+        blocked.GovernanceLastEvidenceChangedAt.Should().BeNull();
 
         var (otherTenant, otherUser) = CreateOtherOwner();
         db.AddRange(otherTenant, otherUser);
@@ -64,6 +66,7 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         unchanged.GovernanceRetryCount.Should().Be(0);
         unchanged.GovernanceLastReevaluatedAt.Should().NotBeNull();
         unchanged.GovernanceEvidenceChangedSinceBlock.Should().BeFalse();
+        unchanged.GovernanceLastEvidenceChangedAt.Should().BeNull();
 
         memory.MetadataJson = "{\"authority\":\"project-owner-confirmed\"}";
         memory.UpdatedAt = DateTimeOffset.UtcNow.AddMinutes(1);
@@ -74,6 +77,8 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         changed.Status.Should().Be(GovernanceFindingStatus.HostBlocked);
         changed.GovernanceRetryCount.Should().Be(0);
         changed.GovernanceEvidenceChangedSinceBlock.Should().BeTrue();
+        changed.GovernanceLastEvidenceChangedAt.Should().NotBeNull();
+        var evidenceChangedAt = changed.GovernanceLastEvidenceChangedAt;
 
         await governance.AnalyzeAsync(projectId, CancellationToken.None);
         var changedReadBack = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
@@ -81,6 +86,17 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         changedReadBack.GovernanceRetryCount.Should().Be(0);
         changedReadBack.GovernanceEvidenceChangedSinceBlock.Should().BeTrue(
             "evidenceChangedSinceBlock is a latched signal until an audited manual reopen");
+        changedReadBack.GovernanceLastEvidenceChangedAt.Should().Be(evidenceChangedAt,
+            "unchanged evidence must not move the stable aging timestamp");
+
+        memory.Importance = 1m;
+        memory.UpdatedAt = DateTimeOffset.UtcNow.AddMinutes(2);
+        await db.SaveChangesAsync();
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+        var disappeared = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        disappeared.Status.Should().Be(GovernanceFindingStatus.HostBlocked,
+            "candidate disappearance is evidence, not authorization to clear an audited host block");
+        disappeared.GovernanceRetryCount.Should().Be(0);
 
         var reopened = await governance.ReopenAsync(new GovernanceFindingReopenRequest(
             finding.Id,
@@ -88,6 +104,14 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
             $"manual-reopen-{Guid.NewGuid():N}"), CancellationToken.None);
         reopened.Status.Should().Be(GovernanceFindingStatus.Open);
         reopened.GovernanceRetryCount.Should().Be(1);
+        reopened.GovernanceBlockedAt.Should().BeNull();
+        reopened.GovernanceBlockingLayer.Should().BeEmpty();
+
+        var exactReplay = await governance.ReopenAsync(new GovernanceFindingReopenRequest(
+            finding.Id,
+            "OAuth was explicitly completed and controlled acceptance can resume.",
+            reopened.GovernanceRunId), CancellationToken.None);
+        exactReplay.GovernanceRetryCount.Should().Be(1);
 
         var audit = await db.SecurityAuditEvents.AsNoTracking()
             .Where(x => x.EventType == SecurityAuditEventType.GovernanceFindingGovernanceUpdated)
@@ -96,6 +120,480 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         audit.Should().NotBeNull();
         audit!.Outcome.Should().Be("Open");
         audit.DetailsJson.Should().Contain("ManualReopen");
+    }
+
+    [DockerRequiredFact]
+    public async Task Concurrent_Accept_Must_Fail_Closed_When_HostBlocked_Commits_First()
+    {
+        using var seedScope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(seedScope.ServiceProvider);
+        var seedDb = seedScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var governance = seedScope.ServiceProvider.GetRequiredService<IGovernanceService>();
+        var projectId = $"finding-accept-race-{Guid.NewGuid():N}";
+        var memory = CreateLowValueMemory(actor, projectId);
+        seedDb.MemoryItems.Add(memory);
+        await seedDb.SaveChangesAsync();
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+        var finding = await seedDb.GovernanceFindings.SingleAsync(x =>
+            x.ProjectId == projectId && x.PrimaryMemoryId == memory.Id &&
+            x.Type == GovernanceFindingType.LowValueMemoryCandidate);
+
+        using var blockerScope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(blockerScope.ServiceProvider);
+        var blockerDb = blockerScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await using var blockerTransaction = await blockerDb.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            CancellationToken.None);
+        var blocked = await blockerDb.GovernanceFindings.SingleAsync(x => x.Id == finding.Id);
+        var blockedAt = DateTimeOffset.UtcNow;
+        blocked.Status = GovernanceFindingStatus.HostBlocked;
+        blocked.GovernanceReason = "The host capability is unavailable.";
+        blocked.GovernanceRunId = $"accept-race-block-{Guid.NewGuid():N}";
+        blocked.GovernanceActor = "contract-test-admin";
+        blocked.GovernanceUpdatedAt = blockedAt;
+        blocked.GovernanceBlockedAt = blockedAt;
+        blocked.GovernanceBlockingLayer = "Host";
+        blocked.GovernanceReasonClass = "HostCapabilityUnavailable";
+        blocked.UpdatedAt = blockedAt;
+        blockerDb.SecurityAuditEvents.Add(new SecurityAuditEvent
+        {
+            TenantId = blocked.TenantId!.Value,
+            ActorUserId = blocked.OwnerUserId!.Value,
+            EventType = SecurityAuditEventType.GovernanceFindingGovernanceUpdated,
+            Outcome = GovernanceFindingStatus.HostBlocked.ToString(),
+            DetailsJson = "{\"action\":\"HostBlocked\"}",
+            CreatedAt = blockedAt
+        });
+        await blockerDb.SaveChangesAsync();
+
+        var acceptTask = Task.Run(async () =>
+        {
+            using var acceptScope = environment.GetFactory().Services.CreateScope();
+            UseBootstrapActor(acceptScope.ServiceProvider);
+            await acceptScope.ServiceProvider.GetRequiredService<IGovernanceService>()
+                .AcceptAsync(finding.Id, CancellationToken.None);
+        });
+        await Task.Delay(250);
+        acceptTask.IsCompleted.Should().BeFalse(
+            "the serializable accept must wait for the concurrent HostBlocked row writer");
+
+        await blockerTransaction.CommitAsync(CancellationToken.None);
+        var acceptException = await Record.ExceptionAsync(() => acceptTask);
+        acceptException.Should().NotBeNull(
+            "a stale accept must fail closed after the HostBlocked write commits");
+
+        seedDb.ChangeTracker.Clear();
+        var readBack = await seedDb.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        readBack.Status.Should().Be(GovernanceFindingStatus.HostBlocked);
+        readBack.GovernanceReasonClass.Should().Be("HostCapabilityUnavailable");
+    }
+
+    [DockerRequiredFact]
+    public async Task Concurrent_Analyze_EvidenceReopen_Must_Not_Overwrite_HostBlocked_Finding()
+    {
+        using var seedScope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(seedScope.ServiceProvider);
+        var seedDb = seedScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var governance = seedScope.ServiceProvider.GetRequiredService<IGovernanceService>();
+        var projectId = $"finding-reopen-race-{Guid.NewGuid():N}";
+        var memory = CreateLowValueMemory(actor, projectId);
+        seedDb.MemoryItems.Add(memory);
+        await seedDb.SaveChangesAsync();
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+        var finding = await seedDb.GovernanceFindings.SingleAsync(x =>
+            x.ProjectId == projectId && x.PrimaryMemoryId == memory.Id &&
+            x.Type == GovernanceFindingType.LowValueMemoryCandidate);
+        await governance.SetDispositionAsync(new GovernanceFindingDispositionRequest(
+            finding.Id,
+            GovernanceFindingDisposition.Deferred,
+            "Wait for new evidence.",
+            $"finding-reopen-race-deferred-{Guid.NewGuid():N}"),
+            CancellationToken.None);
+
+        memory.MetadataJson = "{\"evidence\":\"changed-before-reopen\"}";
+        memory.UpdatedAt = DateTimeOffset.UtcNow;
+        await seedDb.SaveChangesAsync();
+
+        using var blockerScope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(blockerScope.ServiceProvider);
+        var blockerDb = blockerScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await using var blockerTransaction = await blockerDb.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            CancellationToken.None);
+        var blocked = await blockerDb.GovernanceFindings.SingleAsync(x => x.Id == finding.Id);
+        var blockedAt = DateTimeOffset.UtcNow;
+        blocked.Status = GovernanceFindingStatus.HostBlocked;
+        blocked.GovernanceReason = "The host cannot evaluate the changed evidence.";
+        blocked.GovernanceRunId = $"finding-reopen-race-block-{Guid.NewGuid():N}";
+        blocked.GovernanceActor = "contract-test-admin";
+        blocked.GovernanceUpdatedAt = blockedAt;
+        blocked.GovernanceBlockedAt = blockedAt;
+        blocked.GovernanceBlockingLayer = "Host";
+        blocked.GovernanceReasonClass = "HostCapabilityUnavailable";
+        blocked.UpdatedAt = blockedAt;
+        blockerDb.SecurityAuditEvents.Add(new SecurityAuditEvent
+        {
+            TenantId = blocked.TenantId!.Value,
+            ActorUserId = blocked.OwnerUserId!.Value,
+            EventType = SecurityAuditEventType.GovernanceFindingGovernanceUpdated,
+            Outcome = GovernanceFindingStatus.HostBlocked.ToString(),
+            DetailsJson = "{\"action\":\"HostBlocked\"}",
+            CreatedAt = blockedAt
+        });
+        await blockerDb.SaveChangesAsync();
+
+        var analyzeTask = Task.Run(async () =>
+        {
+            using var analyzeScope = environment.GetFactory().Services.CreateScope();
+            UseBootstrapActor(analyzeScope.ServiceProvider);
+            await analyzeScope.ServiceProvider.GetRequiredService<IGovernanceService>()
+                .AnalyzeAsync(projectId, CancellationToken.None);
+        });
+        await Task.Delay(250);
+        analyzeTask.IsCompleted.Should().BeFalse(
+            "the serializable evidence re-evaluation must wait for the concurrent HostBlocked row writer");
+
+        await blockerTransaction.CommitAsync(CancellationToken.None);
+        var analyzeException = await Record.ExceptionAsync(() => analyzeTask);
+        analyzeException.Should().NotBeNull(
+            "a stale automatic reopen must fail closed after the HostBlocked write commits");
+
+        seedDb.ChangeTracker.Clear();
+        var readBack = await seedDb.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        readBack.Status.Should().Be(GovernanceFindingStatus.HostBlocked);
+        readBack.GovernanceReasonClass.Should().Be("HostCapabilityUnavailable");
+    }
+
+    [DockerRequiredFact]
+    public async Task Concurrent_FullGovernance_Reopen_Must_Not_Overwrite_HostBlocked_Insight()
+    {
+        using var seedScope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(seedScope.ServiceProvider);
+        var seedDb = seedScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"insight-reopen-race-{Guid.NewGuid():N}";
+        var insight = await SeedGovernanceInsightAsync(seedDb, actor, projectId);
+        var fullGovernance = seedScope.ServiceProvider.GetRequiredService<IFullGovernancePlanService>();
+        var baselineRunId = $"insight-reopen-race-baseline-{Guid.NewGuid():N}";
+        await fullGovernance.BuildAsync(
+            [projectId], baselineRunId, CreateEmptyGovernanceSnapshot(), CancellationToken.None);
+
+        insight.Summary = "Changed evidence must not clear a host block.";
+        insight.UpdatedAt = DateTimeOffset.UtcNow;
+        await seedDb.SaveChangesAsync();
+
+        using var blockerScope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(blockerScope.ServiceProvider);
+        var blockerDb = blockerScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await using var blockerTransaction = await blockerDb.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            CancellationToken.None);
+        var blocked = await blockerDb.ConversationInsights.SingleAsync(x => x.Id == insight.Id);
+        var blockedAt = DateTimeOffset.UtcNow;
+        blocked.PromotionStatus = ConversationPromotionStatus.HostBlocked;
+        blocked.GovernanceReason = "The host cannot evaluate the changed insight evidence.";
+        blocked.GovernanceRunId = $"insight-reopen-race-block-{Guid.NewGuid():N}";
+        blocked.GovernanceUpdatedAt = blockedAt;
+        blocked.GovernanceBlockedAt = blockedAt;
+        blocked.GovernanceBlockingLayer = "Host";
+        blocked.GovernanceReasonClass = "HostCapabilityUnavailable";
+        blocked.UpdatedAt = blockedAt;
+        blockerDb.SecurityAuditEvents.Add(new SecurityAuditEvent
+        {
+            TenantId = blocked.TenantId,
+            ActorUserId = blocked.OwnerUserId,
+            EventType = SecurityAuditEventType.ConversationInsightGovernanceUpdated,
+            Outcome = ConversationPromotionStatus.HostBlocked.ToString(),
+            DetailsJson = "{\"action\":\"HostBlocked\"}",
+            CreatedAt = blockedAt
+        });
+        await blockerDb.SaveChangesAsync();
+
+        var buildTask = Task.Run(async () =>
+        {
+            using var buildScope = environment.GetFactory().Services.CreateScope();
+            UseBootstrapActor(buildScope.ServiceProvider);
+            await buildScope.ServiceProvider.GetRequiredService<IFullGovernancePlanService>()
+                .BuildAsync(
+                    [projectId], $"insight-reopen-race-{Guid.NewGuid():N}",
+                    CreateEmptyGovernanceSnapshot(), CancellationToken.None);
+        });
+        await Task.Delay(250);
+        buildTask.IsCompleted.Should().BeFalse(
+            "the serializable insight re-evaluation must wait for the concurrent HostBlocked row writer");
+
+        await blockerTransaction.CommitAsync(CancellationToken.None);
+        var buildException = await Record.ExceptionAsync(() => buildTask);
+        buildException.Should().NotBeNull(
+            "a stale automatic insight reopen must fail closed after the HostBlocked write commits");
+
+        seedDb.ChangeTracker.Clear();
+        var readBack = await seedDb.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id);
+        readBack.PromotionStatus.Should().Be(ConversationPromotionStatus.HostBlocked);
+        readBack.GovernanceReasonClass.Should().Be("HostCapabilityUnavailable");
+    }
+
+    [DockerRequiredFact]
+    public async Task Deferred_Finding_Should_Reopen_For_Link_Hit_And_Retention_Evidence_Changes()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var governance = scope.ServiceProvider.GetRequiredService<IGovernanceService>();
+        var projectId = $"evidence-driven-reevaluate-{Guid.NewGuid():N}";
+        var memory = CreateLowValueMemory(actor, projectId);
+        var related = CreateLowValueMemory(actor, projectId);
+        memory.ExternalKey = $"evidence-primary:{memory.Id:N}";
+        related.ExternalKey = $"evidence-related:{related.Id:N}";
+        related.Title = "Related evidence";
+        db.MemoryItems.AddRange(memory, related);
+        await db.SaveChangesAsync();
+
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+        var finding = await db.GovernanceFindings.SingleAsync(x =>
+            x.ProjectId == projectId && x.PrimaryMemoryId == memory.Id &&
+            x.Type == GovernanceFindingType.LowValueMemoryCandidate);
+
+        async Task DeferAsync(string reason)
+        {
+            await governance.SetDispositionAsync(new GovernanceFindingDispositionRequest(
+                finding.Id,
+                GovernanceFindingDisposition.Deferred,
+                reason,
+                $"semantic-defer-{Guid.NewGuid():N}"), CancellationToken.None);
+        }
+
+        await DeferAsync("Wait for relationship evidence.");
+        finding.GovernanceEvidenceFingerprint = string.Empty;
+        finding.GovernancePolicyVersion = string.Empty;
+        await db.SaveChangesAsync();
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+        var backfilled = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        backfilled.Status.Should().Be(GovernanceFindingStatus.Deferred);
+        backfilled.GovernanceRetryCount.Should().Be(0);
+        backfilled.GovernanceEvidenceFingerprint.Should().NotBeEmpty();
+        backfilled.GovernanceLastEvidenceChangedAt.Should().BeNull();
+
+        db.MemoryLinks.Add(new MemoryLink
+        {
+            FromId = related.Id,
+            ToId = memory.Id,
+            LinkType = "supports",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync();
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+
+        var linkReopened = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        linkReopened.Status.Should().Be(GovernanceFindingStatus.Open);
+        linkReopened.GovernanceRetryCount.Should().Be(1);
+        linkReopened.GovernanceLastEvidenceChangedAt.Should().NotBeNull();
+
+        await DeferAsync("Wait for retrieval evidence.");
+        var now = DateTimeOffset.UtcNow;
+        var retrievalEvent = new RetrievalEvent
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = projectId,
+            EntryPoint = "semantic-reevaluate-test",
+            Success = true,
+            ResultCount = 1,
+            CreatedAt = now
+        };
+        retrievalEvent.Hits.Add(new RetrievalHit
+        {
+            RetrievalEventId = retrievalEvent.Id,
+            MemoryId = memory.Id,
+            Rank = 1,
+            ProjectId = projectId,
+            CreatedAt = now
+        });
+        db.RetrievalEvents.Add(retrievalEvent);
+        await db.SaveChangesAsync();
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+
+        var hitReopened = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        hitReopened.Status.Should().Be(GovernanceFindingStatus.Open);
+        hitReopened.GovernanceRetryCount.Should().Be(2);
+
+        await DeferAsync("Wait for retention-policy evidence.");
+        db.MemoryRetentionStates.Add(new MemoryRetentionState
+        {
+            ResourceId = memory.Id,
+            TenantId = actor.TenantId!.Value,
+            OwnerUserId = actor.UserId!.Value,
+            ProjectId = projectId,
+            Classification = "LowSignal",
+            PolicyKind = "semantic-test",
+            PolicyVersion = "semantic-test-v1",
+            LifecycleStatus = "Candidate",
+            EvidenceFingerprint = "retention-evidence-v1",
+            CreatedAt = now,
+            UpdatedAt = now.AddMinutes(1)
+        });
+        await db.SaveChangesAsync();
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+
+        var retentionReopened = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        retentionReopened.Status.Should().Be(GovernanceFindingStatus.Open);
+        retentionReopened.GovernanceRetryCount.Should().Be(3);
+        retentionReopened.GovernanceReason.Should().Contain("evidence or policy changed");
+
+        await DeferAsync("Wait for authority-chain evidence.");
+        memory.AuthorityState = MemoryAuthorityState.Superseded;
+        memory.SupersededById = related.Id;
+        related.SupersedesId = memory.Id;
+        memory.ValidUntil = now.AddMinutes(2);
+        memory.SuccessorEvidenceId = related.Id;
+        memory.SuccessorEvidenceRef = "authority-evidence-test";
+        memory.UpdatedAt = now.AddMinutes(2);
+        await db.SaveChangesAsync();
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+
+        var authorityReopened = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        authorityReopened.Status.Should().Be(GovernanceFindingStatus.Open);
+        authorityReopened.GovernanceRetryCount.Should().Be(4);
+        authorityReopened.GovernanceReason.Should().Contain("evidence or policy changed");
+    }
+
+    [DockerRequiredFact]
+    public async Task Invalid_successor_evidence_should_not_unlock_requires_decision_or_host_blocked_findings()
+    {
+        var cases = new[]
+        {
+            (Name: "future", Reason: "successor-not-effective", Mutate: (Action<MemoryItem>)(successor =>
+                successor.ValidFrom = DateTimeOffset.UtcNow.AddHours(1))),
+            (Name: "expired", Reason: "successor-not-effective", Mutate: (Action<MemoryItem>)(successor =>
+                successor.ValidUntil = DateTimeOffset.UtcNow.AddSeconds(-1))),
+            (Name: "missing", Reason: "successor-evidence-missing", Mutate: (Action<MemoryItem>)(successor =>
+                successor.SuccessorEvidenceId = null))
+        };
+
+        foreach (var testCase in cases)
+        {
+            using var scope = environment.GetFactory().Services.CreateScope();
+            var actor = UseBootstrapActor(scope.ServiceProvider);
+            var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var governance = scope.ServiceProvider.GetRequiredService<IGovernanceService>();
+            var projectId = $"invalid-successor-{testCase.Name}-{Guid.NewGuid():N}";
+            var now = DateTimeOffset.UtcNow;
+            var predecessor = CreateLowValueMemory(actor, projectId);
+            predecessor.Tags = ["superseded"];
+            predecessor.AuthorityState = MemoryAuthorityState.Superseded;
+            predecessor.ValidFrom = now.AddMinutes(-2);
+            var successor = CreateAuthorityMemory(actor, projectId, "Current authority", now.AddMinutes(-1));
+            var evidence = CreateAuthorityMemory(
+                actor,
+                projectId,
+                "Historical successor evidence",
+                now.AddMinutes(-1),
+                MemoryStatus.Archived,
+                MemoryAuthorityState.Historical);
+            db.MemoryItems.AddRange(predecessor, successor, evidence);
+            await db.SaveChangesAsync();
+
+            predecessor.SupersededById = successor.Id;
+            successor.SupersedesId = predecessor.Id;
+            successor.ValidFrom = now.AddMinutes(-1);
+            successor.ValidUntil = now.AddDays(1);
+            successor.SuccessorEvidenceId = evidence.Id;
+            testCase.Mutate(successor);
+            await db.SaveChangesAsync();
+
+            await governance.AnalyzeAsync(projectId, CancellationToken.None);
+            var evidenceFinding = await db.GovernanceFindings.SingleAsync(x =>
+                x.ProjectId == projectId &&
+                x.PrimaryMemoryId == predecessor.Id &&
+                x.Type == GovernanceFindingType.SupersededMemoryCandidate);
+            evidenceFinding.DetailsJson.Should().Contain(testCase.Reason);
+            var finding = await db.GovernanceFindings.SingleAsync(x =>
+                x.ProjectId == projectId &&
+                x.PrimaryMemoryId == predecessor.Id &&
+                x.Type == GovernanceFindingType.LowValueMemoryCandidate);
+
+            var decisionRequired = await governance.SetDispositionAsync(new GovernanceFindingDispositionRequest(
+                finding.Id,
+                GovernanceFindingDisposition.RequiresUserDecision,
+                $"Invalid {testCase.Name} successor evidence remains unresolved.",
+                $"invalid-successor-deferred-{Guid.NewGuid():N}"), CancellationToken.None);
+            decisionRequired.Status.Should().Be(GovernanceFindingStatus.RequiresUserDecision);
+
+            await governance.AnalyzeAsync(projectId, CancellationToken.None);
+            var decisionBlocked = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+            decisionBlocked.Status.Should().Be(GovernanceFindingStatus.RequiresUserDecision,
+                $"{testCase.Name} evidence must not resolve a user-gated finding");
+            decisionBlocked.GovernanceRetryCount.Should().Be(0);
+            decisionBlocked.GovernanceEvidenceChangedSinceBlock.Should().BeFalse();
+            decisionBlocked.GovernanceLastEvidenceChangedAt.Should().BeNull();
+
+            var hostBlocked = await governance.SetDispositionAsync(new GovernanceFindingDispositionRequest(
+                finding.Id,
+                GovernanceFindingDisposition.HostBlocked,
+                $"Host cannot validate {testCase.Name} successor evidence.",
+                $"invalid-successor-host-{Guid.NewGuid():N}",
+                BlockingLayer: "ChatGptAppOAuth",
+                ReasonClass: "UserActionRequired",
+                RelatedTool: "scheduled_governance_review"), CancellationToken.None);
+            hostBlocked.Status.Should().Be(GovernanceFindingStatus.HostBlocked);
+
+            await governance.AnalyzeAsync(projectId, CancellationToken.None);
+            var hostStillBlocked = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+            hostStillBlocked.Status.Should().Be(GovernanceFindingStatus.HostBlocked,
+                $"{testCase.Name} evidence must not clear a host block");
+            hostStillBlocked.GovernanceRetryCount.Should().Be(0);
+            hostStillBlocked.GovernanceEvidenceChangedSinceBlock.Should().BeFalse();
+            hostStillBlocked.GovernanceLastEvidenceChangedAt.Should().BeNull();
+            hostStillBlocked.GovernanceBlockingLayer.Should().Be("ChatGptAppOAuth");
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Exception_aging_without_new_evidence_should_not_reopen_or_retry()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var governance = scope.ServiceProvider.GetRequiredService<IGovernanceService>();
+        var projectId = $"exception-aging-{Guid.NewGuid():N}";
+        var memory = CreateLowValueMemory(actor, projectId);
+        db.MemoryItems.Add(memory);
+        await db.SaveChangesAsync();
+
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+        var finding = await db.GovernanceFindings.SingleAsync(x =>
+            x.ProjectId == projectId && x.PrimaryMemoryId == memory.Id &&
+            x.Type == GovernanceFindingType.LowValueMemoryCandidate);
+        await governance.SetDispositionAsync(new GovernanceFindingDispositionRequest(
+            finding.Id,
+            GovernanceFindingDisposition.Deferred,
+            "Keep deferred while evidence ages.",
+            $"exception-aging-{Guid.NewGuid():N}"), CancellationToken.None);
+
+        var agedAt = DateTimeOffset.UtcNow.AddDays(-31);
+        var persisted = await db.GovernanceFindings.SingleAsync(x => x.Id == finding.Id);
+        var baselineFingerprint = persisted.GovernanceEvidenceFingerprint;
+        persisted.GovernanceRetryCount = 7;
+        persisted.GovernanceLastReevaluatedAt = agedAt;
+        persisted.GovernanceLastEvidenceChangedAt = agedAt;
+        await db.SaveChangesAsync();
+
+        var beforeAnalyze = DateTimeOffset.UtcNow;
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+        var firstReadBack = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        firstReadBack.Status.Should().Be(GovernanceFindingStatus.Deferred,
+            "elapsed age alone is not new authorization evidence");
+        firstReadBack.GovernanceRetryCount.Should().Be(7,
+            "reevaluation without changed evidence must not create a retry");
+        firstReadBack.GovernanceEvidenceFingerprint.Should().Be(baselineFingerprint);
+        firstReadBack.GovernanceLastEvidenceChangedAt.Should().BeCloseTo(agedAt, TimeSpan.FromMilliseconds(1));
+        firstReadBack.GovernanceLastReevaluatedAt.Should().BeAfter(beforeAnalyze);
+
+        await governance.AnalyzeAsync(projectId, CancellationToken.None);
+        var secondReadBack = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        secondReadBack.Status.Should().Be(GovernanceFindingStatus.Deferred);
+        secondReadBack.GovernanceRetryCount.Should().Be(7,
+            "repeated reevaluation without changed evidence must not form a retry storm");
+        secondReadBack.GovernanceLastEvidenceChangedAt.Should().BeCloseTo(agedAt, TimeSpan.FromMilliseconds(1));
     }
 
     [DockerRequiredFact]
@@ -608,6 +1106,105 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         throw new TimeoutException($"Retention worker did not claim resource '{memoryId}' within the test bound.");
     }
 
+    private static DurableMemoryGovernanceSnapshotResult CreateEmptyGovernanceSnapshot()
+    {
+        var coverage = new KnowledgeGovernanceCoverageResult(
+            Guid.NewGuid(),
+            $"snapshot-{Guid.NewGuid():N}",
+            DateTimeOffset.UtcNow,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            CoverageComplete: true,
+            HasMore: false,
+            Continuation: null)
+        {
+            AuthorizedGovernanceDurableMemoryCount = 0,
+            GovernanceCoveredDurableMemoryCount = 0,
+            GovernanceProjectIds = [ProjectContext.SharedProjectId]
+        };
+        return new DurableMemoryGovernanceSnapshotResult(coverage, [], []);
+    }
+
+    private static async Task<ConversationInsight> SeedGovernanceInsightAsync(
+        MemoryDbContext db,
+        ContextHubRequestActor actor,
+        string projectId)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var conversationId = $"governance-race-conversation-{Guid.NewGuid():N}";
+        var sourceSystem = $"governance-race-{Guid.NewGuid():N}";
+        var session = new ConversationSession
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ConversationId = conversationId,
+            ProjectId = projectId,
+            ProjectName = "Governance race test",
+            SourceSystem = sourceSystem,
+            Status = "Active",
+            LastTurnId = "turn-1",
+            StartedAt = now,
+            LastCheckpointAt = now,
+            UpdatedAt = now
+        };
+        var checkpoint = new ConversationCheckpoint
+        {
+            SessionId = session.Id,
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ConversationId = conversationId,
+            TurnId = "turn-1",
+            ProjectId = projectId,
+            ProjectName = session.ProjectName,
+            SourceSystem = sourceSystem,
+            EventType = ConversationEventType.TurnCompleted,
+            SourceKind = ConversationSourceKind.HostEvent,
+            SourceRef = $"test://{conversationId}",
+            UserMessageSummary = "Governance race test",
+            AgentMessageSummary = "Governance race test",
+            SessionSummary = "Governance race test",
+            ShortExcerpt = "Governance race test",
+            DedupKey = $"governance-race-checkpoint:{Guid.NewGuid():N}",
+            MetadataJson = "{}",
+            CreatedAt = now
+        };
+        var insight = new ConversationInsight
+        {
+            SessionId = session.Id,
+            CheckpointId = checkpoint.Id,
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ConversationId = conversationId,
+            TurnId = checkpoint.TurnId,
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = sourceSystem,
+            SourceKind = ConversationSourceKind.HostEvent,
+            InsightType = ConversationInsightType.Fact,
+            Title = "Governance race test insight",
+            Content = "This insight exercises automatic evidence re-evaluation concurrency.",
+            Summary = "Initial governance race evidence.",
+            SourceRef = checkpoint.SourceRef,
+            Tags = ["governance-race-test"],
+            Importance = .5m,
+            Confidence = .5m,
+            DedupKey = $"governance-race-insight:{Guid.NewGuid():N}",
+            PromotionStatus = ConversationPromotionStatus.Deferred,
+            GovernanceReason = "Seeded exception for governance race test.",
+            GovernanceRunId = "governance-race-seed",
+            MetadataJson = "{}",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.AddRange(session, checkpoint, insight);
+        await db.SaveChangesAsync(CancellationToken.None);
+        return insight;
+    }
+
     private static MemoryItem CreateLowValueMemory(ContextHubRequestActor actor, string projectId)
         => new()
         {
@@ -628,5 +1225,35 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
             MetadataJson = "{}",
             CreatedAt = DateTimeOffset.UtcNow.AddDays(-90),
             UpdatedAt = DateTimeOffset.UtcNow.AddDays(-90)
+        };
+
+    private static MemoryItem CreateAuthorityMemory(
+        ContextHubRequestActor actor,
+        string projectId,
+        string title,
+        DateTimeOffset timestamp,
+        MemoryStatus status = MemoryStatus.Active,
+        MemoryAuthorityState authorityState = MemoryAuthorityState.Current)
+        => new()
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = projectId,
+            ExternalKey = $"authority:{projectId}:{Guid.NewGuid():N}",
+            MemoryType = MemoryType.Fact,
+            Scope = MemoryScope.Project,
+            Status = status,
+            AuthorityState = authorityState,
+            Title = title,
+            Content = title,
+            Summary = title,
+            SourceType = "test",
+            SourceRef = $"test://authority/{projectId}",
+            Tags = [],
+            Importance = .9m,
+            Confidence = .95m,
+            MetadataJson = "{}",
+            CreatedAt = timestamp,
+            UpdatedAt = timestamp
         };
 }

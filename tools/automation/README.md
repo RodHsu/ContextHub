@@ -9,7 +9,7 @@ pwsh -NoProfile -File tools/automation/validate-scheduled-governance-automation.
 pwsh -NoProfile -File tools/automation/test-scheduled-governance-automation-validator.ps1
 ```
 
-The validator enforces the exact four-tool catalog, `governance:scheduled` scope, `/mcp-automation` resource, four-hour cadence, six-run reliability window, fresh run identifiers, server-only scope resolution, all four server decisions, fixed reversible bounds, isolated-only synthetic fixtures, compact evidence, and forbidden fallback or authority controls. The self-test also proves that general-tool fallback, `/mcp-chat`, reused run identifiers, client-selected projects, Production synthetic fixtures, and irreversible policy changes fail closed.
+The validator enforces the exact four-tool catalog, the published aggregate input/output schema identity, `governance:scheduled` scope, `/mcp-automation` resource, four-hour cadence, six-run reliability window, fresh run identifiers, server-only scope resolution, all four server decisions, fixed reversible bounds, isolated-only synthetic fixtures, compact evidence, and forbidden fallback or authority controls. The self-test also proves that catalog/schema drift, general-tool fallback, `/mcp-chat`, reused run identifiers, client-selected projects, Production synthetic fixtures, and irreversible policy changes fail closed.
 
 After the Automation OAuth gate is available, run the black-box verifier. Without a token it performs only protected-resource discovery and offline contract readiness; it never attempts a different surface or an alternate transport.
 

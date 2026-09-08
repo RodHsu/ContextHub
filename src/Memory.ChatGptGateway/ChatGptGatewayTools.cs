@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Security.Claims;
 using System.Text.Json;
 using Memory.Application;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace Memory.ChatGptGateway;
@@ -339,26 +340,42 @@ public sealed class ChatGptGatewayTools(
         => proposalService.ListAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Create an idempotent proposal for a scheduled governance run. Reusing the same GovernanceRunId, tool, project, and payload returns the original proposal.")]
-    public Task<ChatGptProposalResult> chatgpt_governance_proposal_create(ChatGptGovernanceProposalRequest request, CancellationToken cancellationToken = default)
+    public async Task<ChatGptProposalResult> chatgpt_governance_proposal_create(ChatGptGovernanceProposalRequest request, CancellationToken cancellationToken = default)
     {
         var user = ResolveOAuthUser();
-        return proposalService.CreateAsync(
-            new ChatGptProposalCreateRequest(
-                request.ToolName,
-                request.ProjectId,
-                request.PayloadJson,
-                request.Title,
-                request.Summary,
-                user.Subject,
-                user.Email,
-                user.Name,
-                request.GovernanceRunId),
-            cancellationToken);
+        try
+        {
+            return await proposalService.CreateAsync(
+                new ChatGptProposalCreateRequest(
+                    request.ToolName,
+                    request.ProjectId,
+                    request.PayloadJson,
+                    request.Title,
+                    request.Summary,
+                    user.Subject,
+                    user.Email,
+                    user.Name,
+                    request.GovernanceRunId),
+                cancellationToken);
+        }
+        catch (MemoryScoreValidationException ex)
+        {
+            throw new McpException(ex.Message, ex);
+        }
     }
 
     [McpServerTool(UseStructuredContent = true), Description("Approve a ChatGPT write proposal and apply it through ContextHub write use cases.")]
-    public Task<ChatGptProposalResult> chatgpt_proposal_approve(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
-        => proposalService.ApproveAsync(request, cancellationToken);
+    public async Task<ChatGptProposalResult> chatgpt_proposal_approve(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await proposalService.ApproveAsync(request, cancellationToken);
+        }
+        catch (MemoryScoreValidationException ex)
+        {
+            throw new McpException(ex.Message, ex);
+        }
+    }
 
     [McpServerTool(UseStructuredContent = true), Description("Reject a pending ChatGPT write proposal without changing durable ContextHub memory.")]
     public Task<ChatGptProposalResult> chatgpt_proposal_reject(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
@@ -373,7 +390,7 @@ public sealed class ChatGptGatewayTools(
         CancellationToken cancellationToken)
         => CreateProposalAsync(toolName, projectId, title, summary, payload, null, cancellationToken);
 
-    private Task<ChatGptProposalResult> CreateProposalAsync<T>(
+    private async Task<ChatGptProposalResult> CreateProposalAsync<T>(
         string toolName,
         string projectId,
         string title,
@@ -383,18 +400,25 @@ public sealed class ChatGptGatewayTools(
         CancellationToken cancellationToken)
     {
         var user = ResolveOAuthUser();
-        return proposalService.CreateAsync(
-            new ChatGptProposalCreateRequest(
-                toolName,
-                projectId,
-                JsonSerializer.Serialize(payload, JsonOptions),
-                title,
-                summary,
-                user.Subject,
-                user.Email,
-                user.Name,
-                governanceRunId),
-            cancellationToken);
+        try
+        {
+            return await proposalService.CreateAsync(
+                new ChatGptProposalCreateRequest(
+                    toolName,
+                    projectId,
+                    JsonSerializer.Serialize(payload, JsonOptions),
+                    title,
+                    summary,
+                    user.Subject,
+                    user.Email,
+                    user.Name,
+                    governanceRunId),
+                cancellationToken);
+        }
+        catch (MemoryScoreValidationException ex)
+        {
+            throw new McpException(ex.Message, ex);
+        }
     }
 
     private OAuthUser ResolveOAuthUser()

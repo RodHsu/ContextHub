@@ -35,6 +35,18 @@ public enum MemoryStatus
     Archived
 }
 
+/// <summary>
+/// Durable authority state for status-like memory facts and decisions.
+/// <see cref="MemoryStatus"/> remains the legacy lifecycle status for compatibility.
+/// </summary>
+public enum MemoryAuthorityState
+{
+    Current,
+    Superseded,
+    Historical,
+    Pending
+}
+
 public enum ChunkKind
 {
     Document,
@@ -443,10 +455,24 @@ public sealed class MemoryItem
     public decimal Confidence { get; set; }
     public int Version { get; set; } = 1;
     public MemoryStatus Status { get; set; } = MemoryStatus.Active;
+    public MemoryAuthorityState AuthorityState { get; set; } = MemoryAuthorityState.Current;
+    /// <summary>References the predecessor replaced by this memory item.</summary>
+    public Guid? SupersedesId { get; set; }
+    /// <summary>References the successor that replaced this memory item.</summary>
+    public Guid? SupersededById { get; set; }
+    public DateTimeOffset? ValidFrom { get; set; }
+    public DateTimeOffset? ValidUntil { get; set; }
+    /// <summary>Optional durable memory item that evidences the successor relationship.</summary>
+    public Guid? SuccessorEvidenceId { get; set; }
+    /// <summary>Stable external evidence reference retained when evidence is not a memory item.</summary>
+    public string SuccessorEvidenceRef { get; set; } = string.Empty;
     public bool IsReadOnly { get; set; }
     public string MetadataJson { get; set; } = "{}";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+    public MemoryItem? Supersedes { get; set; }
+    public MemoryItem? SupersededBy { get; set; }
+    public MemoryItem? SuccessorEvidence { get; set; }
     public List<MemoryItemRevision> Revisions { get; set; } = [];
     public List<MemoryItemChunk> Chunks { get; set; } = [];
     public List<MemoryLink> OutgoingLinks { get; set; } = [];
@@ -735,6 +761,7 @@ public sealed class GovernanceFinding
     public string GovernancePolicyVersion { get; set; } = string.Empty;
     public DateTimeOffset? GovernanceBlockedAt { get; set; }
     public DateTimeOffset? GovernanceLastReevaluatedAt { get; set; }
+    public DateTimeOffset? GovernanceLastEvidenceChangedAt { get; set; }
     public string GovernanceBlockingLayer { get; set; } = string.Empty;
     public string GovernanceReasonClass { get; set; } = string.Empty;
     public string GovernanceRelatedTool { get; set; } = string.Empty;
@@ -912,6 +939,7 @@ public sealed class ConversationInsight
     public string GovernancePolicyVersion { get; set; } = string.Empty;
     public DateTimeOffset? GovernanceBlockedAt { get; set; }
     public DateTimeOffset? GovernanceLastReevaluatedAt { get; set; }
+    public DateTimeOffset? GovernanceLastEvidenceChangedAt { get; set; }
     public string GovernanceBlockingLayer { get; set; } = string.Empty;
     public string GovernanceReasonClass { get; set; } = string.Empty;
     public string GovernanceRelatedTool { get; set; } = string.Empty;
@@ -1075,6 +1103,48 @@ public sealed class GovernanceRunReceipt
     public string ProjectIdsJson { get; set; } = "[]";
     public bool IsReplay { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Durable, server-derived projection used by the scheduled-governance
+/// reliability read model. One canonical row is kept per governance run;
+/// replay receipt ids are retained separately so repeated read-back is
+/// idempotent without changing the immutable receipt history.
+/// </summary>
+public sealed class ScheduledGovernanceReliabilityRun
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public string GovernanceRunId { get; set; } = string.Empty;
+    public Guid ReceiptId { get; set; }
+    public string ExecutionMode { get; set; } = string.Empty;
+    public bool IsReplay { get; set; }
+    public int ReplayProjectionCount { get; set; }
+    public string ReplayReceiptIdsJson { get; set; } = "[]";
+    public DateTimeOffset ObservedAtUtc { get; set; }
+    public DateTimeOffset? ExpectedAtUtc { get; set; }
+    public long? SignedDriftTicks { get; set; }
+    public long? AbsoluteDriftTicks { get; set; }
+    public bool? DriftWithinTolerance { get; set; }
+    public bool CountedTowardGate { get; set; }
+    public bool Qualifies { get; set; }
+    public bool IsIgnored { get; set; }
+    public bool IsFailed { get; set; }
+    public string NaturalOriginStatus { get; set; } = "Unattested";
+    public bool PlatformSignedNaturalOriginAttested { get; set; }
+    public string EvidenceBoundary { get; set; } = string.Empty;
+    public string ReasonsJson { get; set; } = "[]";
+    public string ProjectionJson { get; set; } = "{}";
+    public string IntendedTimeZoneId { get; set; } = string.Empty;
+    public string SchedulerTimeZoneId { get; set; } = string.Empty;
+    public long CadenceTicks { get; set; }
+    public string IntendedLocalRunTimesJson { get; set; } = "[]";
+    public string SchedulerLocalRunTimesJson { get; set; } = "[]";
+    public string CompensationDescription { get; set; } = string.Empty;
+    public string? ResetReason { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }
 
 public sealed class ProjectHierarchy

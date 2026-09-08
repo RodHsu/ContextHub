@@ -6,7 +6,7 @@
         @{
             var isAdmin = IsDashboardAdmin(auth.User);
         }
-        <div class="dashboard-shell">
+        <div class="dashboard-shell" data-dashboard-interactive="@(_interactiveReady ? "true" : "false")">
             <div class="shell-progress-strip" aria-hidden="true"></div>
             <input id="dashboard-mobile-nav-toggle" class="mobile-nav-toggle" type="checkbox" aria-hidden="true" tabindex="-1" />
             <label class="mobile-nav-button" for="dashboard-mobile-nav-toggle" aria-label="切換主選單">
@@ -399,6 +399,7 @@
 
 @code {
     private bool _commandPaletteOpen;
+    private bool _interactiveReady;
 
     private static readonly IReadOnlyList<DashboardRouteItem> Routes =
     [
@@ -434,6 +435,17 @@
 
     private static IEnumerable<DashboardRouteItem> GetVisibleRoutes(bool isAdmin)
         => Routes.Where(route => isAdmin || !route.RequiresAdmin);
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        _interactiveReady = true;
+        StateHasChanged();
+    }
 
     private void OpenCommandPalette()
         => _commandPaletteOpen = true;

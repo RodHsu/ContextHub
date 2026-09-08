@@ -15,6 +15,7 @@ public static class RedisCacheKeyBuilder
         => string.Join(
             ':',
             "cache:search",
+            AuthorityAwareRetrievalReranker.RankingVersion,
             Hash(version.Value),
             Hash(request.Query),
             request.Limit,
@@ -34,6 +35,7 @@ public static class RedisCacheKeyBuilder
         => string.Join(
             ':',
             "cache:context",
+            AuthorityAwareRetrievalReranker.RankingVersion,
             Hash(version.Value),
             Hash(request.Query),
             request.Limit,

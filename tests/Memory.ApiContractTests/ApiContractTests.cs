@@ -3000,7 +3000,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             MaxRiskLevel: GovernanceBatchRiskLevel.Low,
             DryRun: false,
             AllowHardDelete: false,
-            ExecutionMode: GovernanceBatchExecutionMode.Scheduled);
+            ExecutionMode: GovernanceBatchExecutionMode.Interactive);
         using var executeResponse = await client.PostAsJsonAsync("/api/knowledge-reviews/execute", request);
         executeResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         var result = await executeResponse.Content.ReadFromJsonAsync<GovernanceBatchExecuteResult>();
@@ -3017,6 +3017,15 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         using var mismatchProblem = JsonDocument.Parse(await mismatchResponse.Content.ReadAsStringAsync());
         mismatchProblem.RootElement.GetProperty("code").GetString()
             .Should().Be(nameof(GovernanceBatchErrorCode.CursorSnapshotMismatch));
+
+        using var forgedScheduledResponse = await client.PostAsJsonAsync(
+            "/api/knowledge-reviews/execute",
+            request with { ExecutionMode = GovernanceBatchExecutionMode.Scheduled });
+        forgedScheduledResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
+        using var forgedScheduledProblem = JsonDocument.Parse(
+            await forgedScheduledResponse.Content.ReadAsStringAsync());
+        forgedScheduledProblem.RootElement.GetProperty("code").GetString()
+            .Should().Be(nameof(GovernanceBatchErrorCode.SchemaCapabilityMismatch));
 
         using var missingTombstone = await client.GetAsync(
             $"/api/knowledge-reviews/tombstones/{Guid.NewGuid():D}?projectId={Uri.EscapeDataString(projectId)}");

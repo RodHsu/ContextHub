@@ -17,7 +17,7 @@ internal static class HybridSearchComposer
         var keywordMax = NormalizeMax(keywordHits.Select(x => x.Score));
         var semanticMax = NormalizeMax(semanticHits.Select(x => x.Score));
 
-        return itemIds
+        var candidates = itemIds
             .Where(id => items.ContainsKey(id))
             .Where(id => includeArchived || items[id].Status == MemoryStatus.Active)
             .Select(id =>
@@ -31,21 +31,26 @@ internal static class HybridSearchComposer
                     ((item.Importance + item.Confidence) / 2m) * 0.1m;
 
                 var excerpt = semantic?.Excerpt ?? keyword?.Excerpt ?? item.Summary ?? item.Content[..Math.Min(item.Content.Length, 180)];
-                return new MemorySearchHit(
-                    item.Id,
-                    item.Title,
-                    item.MemoryType,
-                    item.Scope,
+                return new AuthorityAwareRetrievalReranker.RetrievalCandidate(
+                    item,
                     decimal.Round(score, 4),
-                    excerpt,
-                    item.SourceType,
-                    item.SourceRef,
-                    item.Tags,
-                    item.ProjectId,
-                    ContextSavingsEstimator.EstimateTextTokens(item.Content));
+                    excerpt);
             })
-            .OrderByDescending(x => x.Score)
-            .Take(limit)
+            .ToArray();
+
+        return AuthorityAwareRetrievalReranker.Rerank(candidates, limit)
+            .Select(candidate => new MemorySearchHit(
+                candidate.Item.Id,
+                candidate.Item.Title,
+                candidate.Item.MemoryType,
+                candidate.Item.Scope,
+                candidate.Score,
+                candidate.Excerpt,
+                candidate.Item.SourceType,
+                candidate.Item.SourceRef,
+                candidate.Item.Tags,
+                candidate.Item.ProjectId,
+                ContextSavingsEstimator.EstimateTextTokens(candidate.Item.Content)))
             .ToArray();
     }
 

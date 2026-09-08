@@ -98,7 +98,8 @@ public sealed class ProjectInformationService(
                 Tags = ["project-information"],
                 Importance = 1m,
                 Confidence = 1m,
-                CreatedAt = now
+                CreatedAt = now,
+                ValidFrom = now
             };
             await dbContext.MemoryItems.AddAsync(item, cancellationToken);
         }
@@ -172,7 +173,8 @@ public sealed class ProjectInformationService(
                 Importance = 1m,
                 Confidence = 1m,
                 Title = normalizedProjectId,
-                CreatedAt = now
+                CreatedAt = now,
+                ValidFrom = now
             };
             await dbContext.MemoryItems.AddAsync(item, cancellationToken);
         }

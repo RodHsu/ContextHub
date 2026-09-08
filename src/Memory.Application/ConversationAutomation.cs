@@ -1,3 +1,4 @@
+using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -78,8 +79,10 @@ public sealed class ConversationAutomationService(
 
         var effectiveProjectId = ProjectContext.Normalize(request.ProjectId, behavior.DefaultProjectId);
         ActorAuthorization.EnsureProjectAllowed(actor, effectiveProjectId, write: true);
+        EnsureToolCallProjectGrants(request.ToolCalls, effectiveProjectId, actor);
+        var (tenantId, ownerUserId) = RequireActorIdentity(actor);
         var projectName = request.ProjectName?.Trim() ?? string.Empty;
-        var session = await dbContext.ConversationSessions
+        var session = await ApplySessionActorScope(dbContext.ConversationSessions, actor)
             .FirstOrDefaultAsync(
                 x => x.ConversationId == request.ConversationId.Trim() &&
                      x.SourceSystem == request.SourceSystem.Trim(),
@@ -89,8 +92,8 @@ public sealed class ConversationAutomationService(
         {
             session = new ConversationSession
             {
-                TenantId = actor.TenantId,
-                OwnerUserId = actor.UserId,
+                TenantId = tenantId,
+                OwnerUserId = ownerUserId,
                 ConversationId = request.ConversationId.Trim(),
                 ProjectId = effectiveProjectId,
                 ProjectName = projectName,
@@ -107,8 +110,8 @@ public sealed class ConversationAutomationService(
         else
         {
             session.ProjectId = effectiveProjectId;
-            session.TenantId ??= actor.TenantId;
-            session.OwnerUserId ??= actor.UserId;
+            session.TenantId = tenantId;
+            session.OwnerUserId = ownerUserId;
             session.ProjectName = projectName;
             session.TaskId = request.TaskId?.Trim() ?? session.TaskId;
             session.LastTurnId = request.TurnId.Trim();
@@ -117,15 +120,20 @@ public sealed class ConversationAutomationService(
         }
 
         var checkpointDedupKey = Hash(
+            "conversation-checkpoint-v2",
+            tenantId.ToString("D"),
+            ownerUserId.ToString("D"),
             request.SourceSystem.Trim(),
             request.ConversationId.Trim(),
             request.TurnId.Trim(),
             request.EventType.ToString(),
             request.SourceKind.ToString());
 
-        var existingCheckpoint = await dbContext.ConversationCheckpoints
+        var existingCheckpoint = await ApplyCheckpointActorScope(dbContext.ConversationCheckpoints, actor)
             .AsNoTracking()
-            .FirstOrDefaultAsync(x => x.DedupKey == checkpointDedupKey, cancellationToken);
+            .FirstOrDefaultAsync(
+                x => x.DedupKey == checkpointDedupKey && x.SessionId == session.Id,
+                cancellationToken);
 
         if (existingCheckpoint is not null)
         {
@@ -147,8 +155,8 @@ public sealed class ConversationAutomationService(
         var checkpoint = new ConversationCheckpoint
         {
             SessionId = session.Id,
-            TenantId = actor.TenantId,
-            OwnerUserId = actor.UserId,
+            TenantId = tenantId,
+            OwnerUserId = ownerUserId,
             ConversationId = session.ConversationId,
             TurnId = request.TurnId.Trim(),
             ProjectId = effectiveProjectId,
@@ -175,8 +183,8 @@ public sealed class ConversationAutomationService(
         {
             var job = new MemoryJob
             {
-                TenantId = actor.TenantId,
-                OwnerUserId = actor.UserId,
+                TenantId = tenantId,
+                OwnerUserId = ownerUserId,
                 ProjectId = effectiveProjectId,
                 JobType = MemoryJobType.IngestConversation,
                 Status = MemoryJobStatus.Pending,
@@ -209,13 +217,10 @@ public sealed class ConversationAutomationService(
         var query = dbContext.ConversationSessions.AsNoTracking().AsQueryable();
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
-        if (actor.HasUser)
+        query = ApplySessionActorScope(query, actor);
+        if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
-            if (actor.AllowedProjectIds.Count > 0)
-            {
-                query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
-            }
+            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
         }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
@@ -258,13 +263,10 @@ public sealed class ConversationAutomationService(
         var query = dbContext.ConversationInsights.AsNoTracking().AsQueryable();
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
-        if (actor.HasUser)
+        query = ApplyInsightActorScope(query, actor);
+        if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
-            if (actor.AllowedProjectIds.Count > 0)
-            {
-                query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
-            }
+            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
         }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
@@ -332,6 +334,11 @@ public sealed class ConversationAutomationService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var query = ApplyInsightActorScope(dbContext.ConversationInsights.AsNoTracking(), actor);
+        if (actor.AllowedProjectIds.Count > 0)
+        {
+            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+        }
+
         var insight = await query.FirstOrDefaultAsync(x => x.Id == insightId, cancellationToken);
         if (insight is null)
         {
@@ -357,6 +364,22 @@ public sealed class ConversationAutomationService(
         }
         var insight = await LoadGovernableInsightAsync(request.InsightId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, insight.ProjectId, write: true);
+        var normalizedReason = request.Reason.Trim();
+        var normalizedRunId = request.GovernanceRunId.Trim();
+        if (insight.PromotionStatus == ConversationPromotionStatus.Pending &&
+            string.Equals(insight.GovernanceReason, normalizedReason, StringComparison.Ordinal) &&
+            string.Equals(insight.GovernanceRunId, normalizedRunId, StringComparison.Ordinal))
+        {
+            // Pending is not converged unless a durable promotion job still
+            // exists. The insight update and queue insert cannot share one
+            // transaction, so an exact replay must repair a missing job rather
+            // than permanently preserving an unprocessable zombie candidate.
+            await EnqueuePromotionJobIfNeededAsync(
+                insight.ConversationId,
+                insight.ProjectId,
+                cancellationToken);
+            return MapInsight(insight);
+        }
         if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
         {
             return MapInsight(insight);
@@ -368,19 +391,29 @@ public sealed class ConversationAutomationService(
             dbContext, insight.ProjectId, tenantId, ownerUserId,
             insight.PromotedMemoryId, null, insight.Id,
             GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
-            [insight.Id.ToString("D"), insight.Title]);
+            [insight.Id.ToString("D"), insight.Title],
+            insight.Title,
+            insight.Summary);
         insight.PromotionStatus = ConversationPromotionStatus.Pending;
         insight.Error = string.Empty;
-        insight.GovernanceReason = request.Reason.Trim();
-        insight.GovernanceRunId = request.GovernanceRunId.Trim();
+        insight.GovernanceReason = normalizedReason;
+        insight.GovernanceRunId = normalizedRunId;
         insight.GovernanceRetryCount++;
         insight.GovernanceUpdatedAt = now;
         insight.GovernanceLastReevaluatedAt = now;
         insight.GovernanceEvidenceChangedSinceBlock =
             !string.Equals(insight.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal) ||
             !string.Equals(insight.GovernancePolicyVersion, GovernanceEvidenceFingerprint.PolicyVersion, StringComparison.Ordinal);
+        if (insight.GovernanceEvidenceChangedSinceBlock)
+        {
+            insight.GovernanceLastEvidenceChangedAt = now;
+        }
         insight.GovernancePolicyVersion = GovernanceEvidenceFingerprint.PolicyVersion;
         insight.GovernanceEvidenceFingerprint = currentFingerprint;
+        insight.GovernanceBlockedAt = null;
+        insight.GovernanceBlockingLayer = string.Empty;
+        insight.GovernanceReasonClass = string.Empty;
+        insight.GovernanceRelatedTool = string.Empty;
         insight.UpdatedAt = now;
         await AddInsightGovernanceAuditAsync(insight, "Retry", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -393,11 +426,20 @@ public sealed class ConversationAutomationService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         ValidateGovernanceRunId(request.GovernanceRunId);
+        await using var transaction = await dbContext.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
         var insight = await LoadGovernableInsightAsync(request.InsightId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, insight.ProjectId, write: true);
         if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
         {
+            await transaction.CommitAsync(cancellationToken);
             return MapInsight(insight);
+        }
+        if (insight.PromotionStatus is not (ConversationPromotionStatus.Pending or ConversationPromotionStatus.Failed))
+        {
+            throw new InvalidOperationException(
+                $"Conversation insight '{insight.Id}' cannot be skipped from governance state '{insight.PromotionStatus}'. Use the explicit retry or disposition workflow.");
         }
 
         insight.PromotionStatus = ConversationPromotionStatus.Skipped;
@@ -408,6 +450,7 @@ public sealed class ConversationAutomationService(
         insight.UpdatedAt = clock.UtcNow;
         await AddInsightGovernanceAuditAsync(insight, "Skip", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return MapInsight(insight);
     }
 
@@ -421,10 +464,20 @@ public sealed class ConversationAutomationService(
             throw new InvalidOperationException("A governance reason is required for deferred, user-decision, or host-blocked insights.");
         }
 
+        await using var transaction = await dbContext.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
         var insight = await LoadGovernableInsightAsync(request.InsightId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, insight.ProjectId, write: true);
+        if (request.ExpectedPromotionStatus.HasValue &&
+            insight.PromotionStatus != request.ExpectedPromotionStatus.Value)
+        {
+            throw new InvalidOperationException(
+                $"Conversation insight '{insight.Id}' changed from expected governance state '{request.ExpectedPromotionStatus.Value}' to '{insight.PromotionStatus}'. Re-review before applying a disposition.");
+        }
         if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
         {
+            await transaction.CommitAsync(cancellationToken);
             return MapInsight(insight);
         }
 
@@ -441,6 +494,7 @@ public sealed class ConversationAutomationService(
             string.Equals(insight.GovernanceReason, reason, StringComparison.Ordinal) &&
             string.Equals(insight.GovernanceRunId, runId, StringComparison.Ordinal))
         {
+            await transaction.CommitAsync(cancellationToken);
             return MapInsight(insight);
         }
 
@@ -464,24 +518,29 @@ public sealed class ConversationAutomationService(
             dbContext, insight.ProjectId, tenantId, ownerUserId,
             insight.PromotedMemoryId, null, insight.Id,
             GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
-            [insight.Id.ToString("D"), insight.Title]);
+            [insight.Id.ToString("D"), insight.Title],
+            insight.Title,
+            insight.Summary);
         await AddInsightGovernanceAuditAsync(insight, request.Disposition.ToString(), cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return MapInsight(insight);
     }
 
     public async Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken)
     {
-        var query = dbContext.ConversationCheckpoints.AsNoTracking().AsQueryable();
         var actor = actorAccessor.Current;
-        if (actor.HasUser)
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.MemoryRead);
+        var query = ApplyCheckpointActorScope(dbContext.ConversationCheckpoints.AsNoTracking(), actor);
+        if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
         }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
+            ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
             query = query.Where(x => x.ProjectId == projectId);
         }
 
@@ -509,9 +568,15 @@ public sealed class ConversationAutomationService(
         var results = new List<ConversationCheckpointSearchResult>(checkpoints.Count);
         foreach (var checkpoint in checkpoints)
         {
-            var insights = await dbContext.ConversationInsights
+            var insightsQuery = ApplyInsightActorScope(dbContext.ConversationInsights.AsNoTracking(), actor)
+                .Where(x => x.CheckpointId == checkpoint.Id);
+            if (actor.AllowedProjectIds.Count > 0)
+            {
+                insightsQuery = insightsQuery.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            }
+
+            var insights = await insightsQuery
                 .AsNoTracking()
-                .Where(x => x.CheckpointId == checkpoint.Id)
                 .OrderByDescending(x => x.UpdatedAt)
                 .ToListAsync(cancellationToken);
             var pipelineStatus = DeterminePipelineStatus(
@@ -548,6 +613,8 @@ public sealed class ConversationAutomationService(
 
     public async Task<ConversationPipelineStatusResult?> GetPipelineStatusAsync(Guid checkpointId, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.MemoryRead);
         var checkpoint = await LoadCheckpointForReadAsync(checkpointId, cancellationToken);
         if (checkpoint is null)
         {
@@ -559,30 +626,61 @@ public sealed class ConversationAutomationService(
 
     public async Task<ConversationPipelineStatusResult> ProcessCheckpointNowAsync(Guid checkpointId, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var checkpoint = await LoadCheckpointForReadAsync(checkpointId, cancellationToken)
             ?? throw new InvalidOperationException($"Conversation checkpoint '{checkpointId}' was not found.");
 
-        await ProcessCheckpointJobAsync(checkpoint.Id, cancellationToken);
+        ActorAuthorization.EnsureProjectAllowed(actor, checkpoint.ProjectId, write: true);
+        await ProcessCheckpointCoreAsync(checkpoint, cancellationToken);
         return await BuildPipelineStatusAsync(checkpoint, cancellationToken);
     }
 
     public async Task<ConversationPromotionRetryResult> RetryPromotionAsync(ConversationPromotionRetryRequest request, CancellationToken cancellationToken)
     {
-        await PromotePendingInsightsAsync(request.ConversationId, request.ProjectId, cancellationToken);
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.MemoryRead);
+        if (string.IsNullOrWhiteSpace(request.ConversationId) && string.IsNullOrWhiteSpace(request.ProjectId))
+        {
+            throw new InvalidOperationException("ConversationId or ProjectId is required for a scoped promotion retry.");
+        }
+
+        var normalizedProjectId = string.IsNullOrWhiteSpace(request.ProjectId)
+            ? null
+            : ProjectContext.Normalize(request.ProjectId);
+        if (normalizedProjectId is not null)
+        {
+            ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: true);
+        }
+
+        await PromotePendingInsightsAsync(request.ConversationId, normalizedProjectId, cancellationToken);
         var status = await GetAutomationStatusAsync(cancellationToken);
         return new ConversationPromotionRetryResult(request.ConversationId, request.ProjectId, status);
     }
 
     public async Task<ConversationAutomationStatusResult> GetAutomationStatusAsync(CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.MemoryRead);
         var since = clock.UtcNow.AddHours(-24);
-        var recentCheckpoints = await dbContext.ConversationCheckpoints.CountAsync(x => x.CreatedAt >= since, cancellationToken);
-        var pendingInsights = await dbContext.ConversationInsights.CountAsync(x => x.PromotionStatus == ConversationPromotionStatus.Pending, cancellationToken);
-        var pendingPromotions = await dbContext.MemoryJobs.CountAsync(
+        var checkpointQuery = ApplyCheckpointActorScope(dbContext.ConversationCheckpoints.AsNoTracking(), actor);
+        var insightQuery = ApplyInsightActorScope(dbContext.ConversationInsights.AsNoTracking(), actor);
+        var jobQuery = ApplyJobActorScope(dbContext.MemoryJobs.AsNoTracking(), actor);
+        if (actor.AllowedProjectIds.Count > 0)
+        {
+            checkpointQuery = checkpointQuery.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            insightQuery = insightQuery.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            jobQuery = jobQuery.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+        }
+
+        var recentCheckpoints = await checkpointQuery.CountAsync(x => x.CreatedAt >= since, cancellationToken);
+        var pendingInsights = await insightQuery.CountAsync(x => x.PromotionStatus == ConversationPromotionStatus.Pending, cancellationToken);
+        var pendingPromotions = await jobQuery.CountAsync(
             x => x.JobType == MemoryJobType.PromoteConversationInsights &&
                  (x.Status == MemoryJobStatus.Pending || x.Status == MemoryJobStatus.Running),
             cancellationToken);
-        var lastPromotionError = await dbContext.MemoryJobs
+        var lastPromotionError = await jobQuery
             .Where(x => x.JobType == MemoryJobType.PromoteConversationInsights && x.Status == MemoryJobStatus.Failed)
             .OrderByDescending(x => x.CompletedAt ?? x.CreatedAt)
             .Select(x => x.Error)
@@ -597,11 +695,34 @@ public sealed class ConversationAutomationService(
 
     public async Task ProcessCheckpointJobAsync(Guid checkpointId, CancellationToken cancellationToken)
     {
-        var checkpoint = await dbContext.ConversationCheckpoints
+        var caller = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(caller, SecurityScopes.MemoryWrite);
+        if (!caller.IsServiceActor)
+        {
+            throw new UnauthorizedAccessException("Conversation checkpoint jobs require an internal service actor.");
+        }
+
+        var checkpoint = await ApplyCheckpointActorScope(dbContext.ConversationCheckpoints, caller)
             .Include(x => x.Session)
             .FirstOrDefaultAsync(x => x.Id == checkpointId, cancellationToken)
             ?? throw new InvalidOperationException($"Conversation checkpoint '{checkpointId}' was not found.");
 
+        var serviceActor = BuildAutomationActor(checkpoint.TenantId, checkpoint.OwnerUserId, checkpoint.ProjectId);
+        var previousActor = caller;
+        actorAccessor.Current = serviceActor;
+        try
+        {
+            await ProcessCheckpointCoreAsync(checkpoint, cancellationToken);
+        }
+        finally
+        {
+            actorAccessor.Current = previousActor;
+        }
+    }
+
+    private async Task ProcessCheckpointCoreAsync(ConversationCheckpoint checkpoint, CancellationToken cancellationToken)
+    {
+        var (tenantId, ownerUserId) = RequireCheckpointIdentity(checkpoint);
         var behavior = await behaviorSettingsAccessor.GetCurrentAsync(cancellationToken);
         var toolCalls = DeserializeToolCalls(checkpoint.ToolCallsJson);
         var candidates = ConversationInsightClassifier.Extract(
@@ -612,13 +733,21 @@ public sealed class ConversationAutomationService(
         var dedupKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var candidate in candidates)
         {
-            var dedupKey = BuildInsightDedupKey(checkpoint, candidate);
+            var candidateProjectId = ProjectContext.Normalize(candidate.ProjectId, checkpoint.ProjectId);
+            EnsureCheckpointCandidateProject(checkpoint, candidateProjectId);
+            if (!actorAccessor.Current.IsServiceActor)
+            {
+                ActorAuthorization.EnsureProjectAllowed(actorAccessor.Current, candidateProjectId, write: true);
+            }
+
+            var dedupKey = BuildInsightDedupKey(checkpoint, candidate, candidateProjectId);
             if (!dedupKeys.Add(dedupKey))
             {
                 continue;
             }
 
-            var exists = await dbContext.ConversationInsights.AnyAsync(x => x.DedupKey == dedupKey, cancellationToken);
+            var exists = await ApplyInsightActorScope(dbContext.ConversationInsights.AsNoTracking(), actorAccessor.Current)
+                .AnyAsync(x => x.DedupKey == dedupKey, cancellationToken);
             if (exists)
             {
                 continue;
@@ -628,11 +757,11 @@ public sealed class ConversationAutomationService(
             {
                 SessionId = checkpoint.SessionId,
                 CheckpointId = checkpoint.Id,
-                TenantId = checkpoint.TenantId,
-                OwnerUserId = checkpoint.OwnerUserId,
+                TenantId = tenantId,
+                OwnerUserId = ownerUserId,
                 ConversationId = checkpoint.ConversationId,
                 TurnId = checkpoint.TurnId,
-                ProjectId = candidate.ProjectId,
+                ProjectId = candidateProjectId,
                 ProjectName = candidate.ProjectName,
                 TaskId = checkpoint.TaskId,
                 SourceSystem = checkpoint.SourceSystem,
@@ -657,31 +786,84 @@ public sealed class ConversationAutomationService(
 
         if (ShouldEnqueuePromotion(checkpoint.EventType))
         {
-            await EnqueuePromotionJobIfNeededAsync(checkpoint.ConversationId, checkpoint.ProjectId, cancellationToken);
+            var candidateProjects = candidates
+                .Select(x => ProjectContext.Normalize(x.ProjectId, checkpoint.ProjectId))
+                .Append(checkpoint.ProjectId)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            foreach (var candidateProjectId in candidateProjects)
+            {
+                var previousActor = actorAccessor.Current;
+                actorAccessor.Current = BuildAutomationActor(tenantId, ownerUserId, candidateProjectId);
+                try
+                {
+                    await EnqueuePromotionJobIfNeededAsync(checkpoint.ConversationId, candidateProjectId, cancellationToken);
+                }
+                finally
+                {
+                    actorAccessor.Current = previousActor;
+                }
+            }
         }
     }
 
     public async Task PromotePendingInsightsAsync(string? conversationId, string? projectId, CancellationToken cancellationToken)
     {
-        var query = dbContext.ConversationInsights
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        if (string.IsNullOrWhiteSpace(conversationId) && string.IsNullOrWhiteSpace(projectId))
+        {
+            throw new InvalidOperationException("ConversationId or ProjectId is required for a scoped promotion run.");
+        }
+
+        var normalizedConversationId = string.IsNullOrWhiteSpace(conversationId) ? null : conversationId.Trim();
+        var normalizedProjectId = string.IsNullOrWhiteSpace(projectId) ? null : ProjectContext.Normalize(projectId);
+        if (normalizedProjectId is not null)
+        {
+            ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: true);
+        }
+
+        var query = ChatGptProposalService.ExcludeProposals(
+                ApplyInsightActorScope(dbContext.ConversationInsights, actor))
             .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending)
             .OrderBy(x => x.CreatedAt)
             .AsQueryable();
 
-        if (!string.IsNullOrWhiteSpace(conversationId))
+        if (normalizedConversationId is not null)
         {
-            query = query.Where(x => x.ConversationId == conversationId.Trim());
+            query = query.Where(x => x.ConversationId == normalizedConversationId);
         }
 
-        if (string.IsNullOrWhiteSpace(conversationId) && !string.IsNullOrWhiteSpace(projectId))
+        if (normalizedProjectId is not null)
         {
-            var normalizedProjectId = ProjectContext.Normalize(projectId);
             query = query.Where(x => x.ProjectId == normalizedProjectId);
         }
-
-        var items = await query.ToListAsync(cancellationToken);
-        foreach (var item in items)
+        else if (actor.AllowedProjectIds.Count > 0)
         {
+            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+        }
+
+        var itemIds = await query
+            .AsNoTracking()
+            .Select(x => x.Id)
+            .ToListAsync(cancellationToken);
+        foreach (var itemId in itemIds)
+        {
+            await using var transaction = await dbContext.BeginTransactionAsync(
+                IsolationLevel.Serializable,
+                cancellationToken);
+            var item = await ChatGptProposalService.ExcludeProposals(
+                    ApplyInsightActorScope(dbContext.ConversationInsights, actor))
+                .FirstOrDefaultAsync(
+                    x => x.Id == itemId && x.PromotionStatus == ConversationPromotionStatus.Pending,
+                    cancellationToken);
+            if (item is null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                continue;
+            }
+
+            ActorAuthorization.EnsureProjectAllowed(actor, item.ProjectId, write: true);
             var previousActor = actorAccessor.Current;
             actorAccessor.Current = BuildAutomationActor(item);
             try
@@ -742,37 +924,146 @@ public sealed class ConversationAutomationService(
             }
 
             item.UpdatedAt = clock.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
-
-        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private async Task EnqueuePromotionJobIfNeededAsync(string conversationId, string projectId, CancellationToken cancellationToken)
     {
-        var hasPending = await HasPendingPromotionJobAsync(conversationId, cancellationToken);
+        var normalizedConversationId = conversationId.Trim();
+        var normalizedProjectId = ProjectContext.Normalize(projectId);
+        var actor = actorAccessor.Current;
+        var predecessorId = (Guid?)null;
 
-        if (hasPending)
+        for (var attempt = 0; attempt < 16; attempt++)
         {
-            return;
+            if (await HasPendingPromotionJobAsync(normalizedConversationId, normalizedProjectId, cancellationToken))
+            {
+                return;
+            }
+
+            var jobId = BuildPromotionJobId(
+                actor,
+                normalizedConversationId,
+                normalizedProjectId,
+                predecessorId);
+            var existing = await ApplyJobActorScope(dbContext.MemoryJobs.AsNoTracking(), actor)
+                .FirstOrDefaultAsync(x => x.Id == jobId, cancellationToken);
+
+            if (existing is not null)
+            {
+                EnsureMatchingPromotionJob(existing, actor, normalizedConversationId, normalizedProjectId);
+                if (IsActivePromotionJob(existing))
+                {
+                    return;
+                }
+
+                predecessorId = existing.Id;
+                continue;
+            }
+
+            var job = new MemoryJob
+            {
+                Id = jobId,
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = normalizedProjectId,
+                JobType = MemoryJobType.PromoteConversationInsights,
+                Status = MemoryJobStatus.Pending,
+                PayloadJson = JsonSerializer.Serialize(
+                    new ConversationPromotionJobPayload(normalizedConversationId, normalizedProjectId),
+                    JsonOptions),
+                CreatedAt = clock.UtcNow
+            };
+
+            try
+            {
+                await jobQueue.EnqueueAsync(job, cancellationToken);
+                return;
+            }
+            catch (DbUpdateException)
+            {
+                // A concurrent caller may have reserved the same deterministic ID.
+                // Only an equivalent active promotion job is a safe replay; every
+                // other collision remains an error so we never broaden the job scope.
+                dbContext.ClearTrackedChanges();
+                var winner = await ApplyJobActorScope(dbContext.MemoryJobs.AsNoTracking(), actor)
+                    .FirstOrDefaultAsync(x => x.Id == jobId, cancellationToken);
+                if (winner is null)
+                {
+                    throw;
+                }
+
+                EnsureMatchingPromotionJob(winner, actor, normalizedConversationId, normalizedProjectId);
+                if (IsActivePromotionJob(winner))
+                {
+                    return;
+                }
+
+                predecessorId = winner.Id;
+            }
         }
 
-        var job = new MemoryJob
-        {
-            TenantId = actorAccessor.Current.TenantId,
-            OwnerUserId = actorAccessor.Current.UserId,
-            ProjectId = ProjectContext.Normalize(projectId),
-            JobType = MemoryJobType.PromoteConversationInsights,
-            Status = MemoryJobStatus.Pending,
-            PayloadJson = JsonSerializer.Serialize(new ConversationPromotionJobPayload(conversationId, projectId), JsonOptions),
-            CreatedAt = clock.UtcNow
-        };
+        throw new InvalidOperationException(
+            $"Could not reserve a promotion job for conversation '{normalizedConversationId}' after the bounded idempotency chain.");
+    }
 
-        await jobQueue.EnqueueAsync(job, cancellationToken);
+    private static bool IsActivePromotionJob(MemoryJob job)
+        => job.Status is MemoryJobStatus.Pending or MemoryJobStatus.Running;
+
+    private static void EnsureMatchingPromotionJob(
+        MemoryJob job,
+        ContextHubRequestActor actor,
+        string conversationId,
+        string projectId)
+    {
+        if (job.JobType != MemoryJobType.PromoteConversationInsights ||
+            job.TenantId != actor.TenantId ||
+            job.OwnerUserId != actor.UserId ||
+            !string.Equals(job.ProjectId, projectId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Promotion job idempotency reservation '{job.Id}' collided with an unrelated job.");
+        }
+
+        var payload = TryDeserialize<ConversationPromotionJobPayload>(job.PayloadJson);
+        if (payload is null ||
+            !string.Equals(payload.ConversationId, conversationId, StringComparison.Ordinal) ||
+            !string.Equals(ProjectContext.Normalize(payload.ProjectId), projectId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Promotion job idempotency reservation '{job.Id}' has an invalid or mismatched payload.");
+        }
+    }
+
+    private static Guid BuildPromotionJobId(
+        ContextHubRequestActor actor,
+        string conversationId,
+        string projectId,
+        Guid? predecessorId)
+    {
+        var digest = Hash(
+            "conversation-promotion-job-v1",
+            actor.TenantId?.ToString("D") ?? string.Empty,
+            actor.UserId?.ToString("D") ?? string.Empty,
+            projectId,
+            conversationId,
+            predecessorId?.ToString("D") ?? "root");
+        return Guid.ParseExact(
+            $"{digest[..8]}-{digest[8..12]}-{digest[12..16]}-{digest[16..20]}-{digest[20..32]}",
+            "D");
     }
 
     private async Task<ConversationInsight> LoadGovernableInsightAsync(Guid insightId, ContextHubRequestActor actor, CancellationToken cancellationToken)
     {
-        var insight = await ApplyInsightActorScope(dbContext.ConversationInsights, actor)
+        var query = ApplyInsightActorScope(dbContext.ConversationInsights, actor);
+        if (actor.AllowedProjectIds.Count > 0)
+        {
+            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+        }
+
+        var insight = await query
             .FirstOrDefaultAsync(x => x.Id == insightId, cancellationToken)
             ?? throw new InvalidOperationException($"Conversation insight '{insightId}' was not found.");
         if (insight.Tags.Contains("chatgpt-proposal", StringComparer.OrdinalIgnoreCase))
@@ -783,12 +1074,38 @@ public sealed class ConversationAutomationService(
         return insight;
     }
 
-    private static IQueryable<ConversationInsight> ApplyInsightActorScope(IQueryable<ConversationInsight> query, ContextHubRequestActor actor)
-        => !actor.HasUser
-            ? query
-            : actor.IsServiceActor
-                ? query.Where(x => x.TenantId == actor.TenantId)
-                : query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+    private static IQueryable<ConversationSession> ApplySessionActorScope(
+        IQueryable<ConversationSession> query,
+        ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query.Where(_ => false);
+
+    private static IQueryable<ConversationCheckpoint> ApplyCheckpointActorScope(
+        IQueryable<ConversationCheckpoint> query,
+        ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query.Where(_ => false);
+
+    private static IQueryable<ConversationInsight> ApplyInsightActorScope(
+        IQueryable<ConversationInsight> query,
+        ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query.Where(_ => false);
+
+    private static IQueryable<MemoryJob> ApplyJobActorScope(
+        IQueryable<MemoryJob> query,
+        ContextHubRequestActor actor)
+        => actor.HasUser
+            ? query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
+            : query.Where(_ => false);
+
+    private static (Guid TenantId, Guid OwnerUserId) RequireActorIdentity(ContextHubRequestActor actor)
+        => (
+            actor.TenantId ?? throw new UnauthorizedAccessException("Conversation automation requires a tenant identity."),
+            actor.UserId ?? throw new UnauthorizedAccessException("Conversation automation requires an owner identity."));
 
     private static ConversationInsightResult MapInsight(ConversationInsight x)
         => new(
@@ -823,6 +1140,7 @@ public sealed class ConversationAutomationService(
             GovernanceUpdatedAt = x.GovernanceUpdatedAt,
             GovernanceBlockedAt = x.GovernanceBlockedAt,
             GovernanceLastReevaluatedAt = x.GovernanceLastReevaluatedAt,
+            GovernanceLastEvidenceChangedAt = x.GovernanceLastEvidenceChangedAt,
             GovernanceBlockingLayer = x.GovernanceBlockingLayer,
             GovernanceReasonClass = x.GovernanceReasonClass,
             GovernanceRelatedTool = x.GovernanceRelatedTool,
@@ -839,6 +1157,7 @@ public sealed class ConversationAutomationService(
     {
         insight.GovernanceLastReevaluatedAt = now;
         insight.GovernanceEvidenceChangedSinceBlock = false;
+        insight.GovernanceLastEvidenceChangedAt = null;
         if (status != ConversationPromotionStatus.HostBlocked)
         {
             insight.GovernanceBlockedAt = null;
@@ -861,6 +1180,11 @@ public sealed class ConversationAutomationService(
         => (
             insight.TenantId ?? throw new InvalidOperationException("Conversation insight governance requires a tenant identity."),
             insight.OwnerUserId ?? throw new InvalidOperationException("Conversation insight governance requires an owner identity."));
+
+    private static (Guid TenantId, Guid OwnerUserId) RequireCheckpointIdentity(ConversationCheckpoint checkpoint)
+        => (
+            checkpoint.TenantId ?? throw new InvalidOperationException("Conversation checkpoint processing requires a tenant identity."),
+            checkpoint.OwnerUserId ?? throw new InvalidOperationException("Conversation checkpoint processing requires an owner identity."));
 
     private async ValueTask AddInsightGovernanceAuditAsync(ConversationInsight insight, string action, CancellationToken cancellationToken)
     {
@@ -892,16 +1216,26 @@ public sealed class ConversationAutomationService(
     }
 
     private static ContextHubRequestActor BuildAutomationActor(ConversationInsight item)
+        => BuildAutomationActor(item.TenantId, item.OwnerUserId, item.ProjectId);
+
+    private static ContextHubRequestActor BuildAutomationActor(
+        Guid? tenantId,
+        Guid? ownerUserId,
+        string projectId)
     {
-        if (!item.TenantId.HasValue || !item.OwnerUserId.HasValue)
+        if (!tenantId.HasValue || !ownerUserId.HasValue)
         {
-            throw new InvalidOperationException(
-                $"Conversation insight '{item.Id}' cannot be promoted because it has no tenant/user owner.");
+            throw new InvalidOperationException("Conversation automation cannot run without a tenant/user owner.");
+        }
+
+        if (string.IsNullOrWhiteSpace(projectId))
+        {
+            throw new InvalidOperationException("Conversation automation cannot run without a project scope.");
         }
 
         return new ContextHubRequestActor(
-            item.TenantId,
-            item.OwnerUserId,
+            tenantId,
+            ownerUserId,
             "conversation-automation",
             TenantUserRole.Member,
             [
@@ -910,9 +1244,7 @@ public sealed class ConversationAutomationService(
                 SecurityScopes.PreferencesRead,
                 SecurityScopes.PreferencesWrite
             ],
-            string.IsNullOrWhiteSpace(item.ProjectId)
-                ? []
-                : [item.ProjectId],
+            [ProjectContext.Normalize(projectId)],
             IsAuthenticated: true,
             IsServiceActor: true);
     }
@@ -946,6 +1278,7 @@ public sealed class ConversationAutomationService(
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => ProjectContext.Normalize(x, effectiveProjectId))
             .Append(effectiveProjectId)
+            .Append(ProjectContext.UserProjectId)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
@@ -961,6 +1294,36 @@ public sealed class ConversationAutomationService(
             .ToArray();
     }
 
+    private static void EnsureToolCallProjectGrants(
+        IReadOnlyList<ConversationToolCallRequest>? toolCalls,
+        string fallbackProjectId,
+        ContextHubRequestActor actor)
+    {
+        foreach (var toolCall in toolCalls ?? [])
+        {
+            var projectId = ProjectContext.Normalize(toolCall.ProjectId, fallbackProjectId);
+            ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
+        }
+    }
+
+    private static void EnsureCheckpointCandidateProject(
+        ConversationCheckpoint checkpoint,
+        string candidateProjectId)
+    {
+        RequireCheckpointIdentity(checkpoint);
+        var metadata = TryDeserialize<ConversationCheckpointMetadata>(checkpoint.MetadataJson);
+        var authorizedProjects = metadata?.CandidateProjectIds ?? [];
+        if (!authorizedProjects.Any(projectId =>
+                string.Equals(
+                    ProjectContext.Normalize(projectId, checkpoint.ProjectId),
+                    candidateProjectId,
+                    StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new UnauthorizedAccessException(
+                $"Conversation checkpoint '{checkpoint.Id}' does not authorize candidate project '{candidateProjectId}'.");
+        }
+    }
+
     private static IReadOnlyList<ConversationToolCallRequest> DeserializeToolCalls(string toolCallsJson)
         => JsonSerializer.Deserialize<IReadOnlyList<ConversationToolCallRequest>>(toolCallsJson, JsonOptions) ?? [];
 
@@ -969,8 +1332,8 @@ public sealed class ConversationAutomationService(
 
     private async Task<MemoryJob?> FindCheckpointJobAsync(Guid checkpointId, CancellationToken cancellationToken)
     {
-        var jobs = await dbContext.MemoryJobs
-            .AsNoTracking()
+        var actor = actorAccessor.Current;
+        var jobs = await ApplyJobActorScope(dbContext.MemoryJobs.AsNoTracking(), actor)
             .Where(x => x.JobType == MemoryJobType.IngestConversation)
             .OrderByDescending(x => x.CreatedAt)
             .Take(1000)
@@ -988,11 +1351,16 @@ public sealed class ConversationAutomationService(
         return null;
     }
 
-    private async Task<MemoryJob?> FindPromotionJobAsync(string conversationId, CancellationToken cancellationToken)
+    private async Task<MemoryJob?> FindPromotionJobAsync(
+        string conversationId,
+        string projectId,
+        CancellationToken cancellationToken)
     {
-        var jobs = await dbContext.MemoryJobs
-            .AsNoTracking()
+        var actor = actorAccessor.Current;
+        var normalizedProjectId = ProjectContext.Normalize(projectId);
+        var jobs = await ApplyJobActorScope(dbContext.MemoryJobs.AsNoTracking(), actor)
             .Where(x => x.JobType == MemoryJobType.PromoteConversationInsights)
+            .Where(x => x.ProjectId == normalizedProjectId)
             .OrderByDescending(x => x.CreatedAt)
             .Take(1000)
             .ToListAsync(cancellationToken);
@@ -1000,7 +1368,9 @@ public sealed class ConversationAutomationService(
         foreach (var job in jobs)
         {
             var payload = TryDeserialize<ConversationPromotionJobPayload>(job.PayloadJson);
-            if (string.Equals(payload?.ConversationId, conversationId, StringComparison.Ordinal))
+            if (payload is not null &&
+                string.Equals(payload.ConversationId, conversationId, StringComparison.Ordinal) &&
+                string.Equals(ProjectContext.Normalize(payload.ProjectId), normalizedProjectId, StringComparison.Ordinal))
             {
                 return job;
             }
@@ -1011,11 +1381,12 @@ public sealed class ConversationAutomationService(
 
     private async Task<ConversationCheckpoint?> LoadCheckpointForReadAsync(Guid checkpointId, CancellationToken cancellationToken)
     {
-        var query = dbContext.ConversationCheckpoints.AsNoTracking().Where(x => x.Id == checkpointId);
         var actor = actorAccessor.Current;
-        if (actor.HasUser)
+        var query = ApplyCheckpointActorScope(dbContext.ConversationCheckpoints.AsNoTracking(), actor)
+            .Where(x => x.Id == checkpointId);
+        if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
         }
 
         return await query.FirstOrDefaultAsync(cancellationToken);
@@ -1024,7 +1395,7 @@ public sealed class ConversationAutomationService(
     private async Task<ConversationPipelineStatusResult> BuildPipelineStatusAsync(ConversationCheckpoint checkpoint, CancellationToken cancellationToken)
     {
         var ingestJob = await FindCheckpointJobAsync(checkpoint.Id, cancellationToken);
-        var promotionJob = await FindPromotionJobAsync(checkpoint.ConversationId, cancellationToken);
+        var promotionJob = await FindPromotionJobAsync(checkpoint.ConversationId, checkpoint.ProjectId, cancellationToken);
         var insights = await ListInsightsAsync(
             new ConversationInsightListRequest(
                 checkpoint.ProjectId,
@@ -1136,20 +1507,24 @@ public sealed class ConversationAutomationService(
         return "checkpoint-only";
     }
 
-    private async Task<bool> HasPendingPromotionJobAsync(string conversationId, CancellationToken cancellationToken)
+    private async Task<bool> HasPendingPromotionJobAsync(
+        string conversationId,
+        string projectId,
+        CancellationToken cancellationToken)
     {
-        var jobs = await dbContext.MemoryJobs
-            .AsNoTracking()
+        var actor = actorAccessor.Current;
+        var jobs = await ApplyJobActorScope(dbContext.MemoryJobs.AsNoTracking(), actor)
             .Where(x => x.JobType == MemoryJobType.PromoteConversationInsights &&
-                        x.Status == MemoryJobStatus.Pending)
-            .OrderByDescending(x => x.CreatedAt)
-            .Take(200)
+                        (x.Status == MemoryJobStatus.Pending || x.Status == MemoryJobStatus.Running) &&
+                        x.ProjectId == projectId)
             .ToListAsync(cancellationToken);
 
         foreach (var job in jobs)
         {
             var payload = TryDeserialize<ConversationPromotionJobPayload>(job.PayloadJson);
-            if (string.Equals(payload?.ConversationId, conversationId, StringComparison.Ordinal))
+            if (payload is not null &&
+                string.Equals(payload.ConversationId, conversationId, StringComparison.Ordinal) &&
+                string.Equals(ProjectContext.Normalize(payload.ProjectId), projectId, StringComparison.Ordinal))
             {
                 return true;
             }
@@ -1181,11 +1556,17 @@ public sealed class ConversationAutomationService(
         return Truncate(source?.Trim() ?? string.Empty, maxLength);
     }
 
-    private static string BuildInsightDedupKey(ConversationCheckpoint checkpoint, ConversationInsightCandidate candidate)
+    private static string BuildInsightDedupKey(
+        ConversationCheckpoint checkpoint,
+        ConversationInsightCandidate candidate,
+        string candidateProjectId)
         => Hash(
+            "conversation-insight-v2",
+            checkpoint.TenantId?.ToString("D") ?? string.Empty,
+            checkpoint.OwnerUserId?.ToString("D") ?? string.Empty,
             checkpoint.SourceSystem,
             checkpoint.ConversationId,
-            candidate.ProjectId,
+            candidateProjectId,
             candidate.InsightType.ToString(),
             candidate.SourceRef,
             NormalizeForDedup(candidate.Title),

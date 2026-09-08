@@ -10,6 +10,40 @@ namespace Memory.ChatGptGatewayTests;
 public sealed class ScheduledGovernanceSchemaTests
 {
     [Fact]
+    public void Canonical_Automation_Artifact_Should_Match_Runtime_Catalog_And_All_Tool_Schemas()
+    {
+        var target = new ScheduledGovernanceTools(new StubScheduledGovernanceService());
+        var tools = typeof(ScheduledGovernanceTools).GetMethods()
+            .Where(method => method.GetCustomAttributes(typeof(McpServerToolAttribute), inherit: true).Length > 0)
+            .Select(method => JsonSerializer.SerializeToElement(
+                McpServerTool.Create(method, target, new McpServerToolCreateOptions()).ProtocolTool))
+            .ToArray();
+        var repoRoot = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", ".."));
+        using var artifact = JsonDocument.Parse(File.ReadAllText(Path.Combine(
+            repoRoot,
+            "tools",
+            "automation",
+            "scheduled-governance-automation.json")));
+        var catalog = artifact.RootElement.GetProperty("catalog");
+        var contract = artifact.RootElement.GetProperty("contract");
+
+        catalog.GetProperty("toolNames").EnumerateArray().Select(x => x.GetString()).Should().BeEquivalentTo(
+            ScheduledGovernanceToolCatalog.PublishedToolNames);
+        catalog.GetProperty("publishedCatalogHash").GetString().Should().Be(
+            ScheduledGovernanceToolCatalog.PublishedCatalogHash);
+        catalog.GetProperty("publishedCatalogVersion").GetString().Should().Be(
+            ScheduledGovernanceContract.PublishedCatalogVersion);
+        contract.GetProperty("toolContractVersion").GetString().Should().Be(
+            ScheduledGovernanceContract.ToolContractVersion);
+        contract.GetProperty("schemaHash").GetString().Should().Be(
+            ScheduledGovernanceContract.SchemaHash);
+        PublishedToolSchemaHash.ComputeCatalog(tools).Should().Be(
+            catalog.GetProperty("publishedToolSchemasHash").GetString());
+    }
+
+    [Fact]
     public void Catalog_Should_Expose_Only_Dedicated_Tools_And_No_Irreversible_Authority()
     {
         var target = new ScheduledGovernanceTools(new StubScheduledGovernanceService());
@@ -84,6 +118,12 @@ public sealed class ScheduledGovernanceSchemaTests
         outputProperties.TryGetProperty("terminal", out _).Should().BeTrue();
         outputProperties.TryGetProperty("decision", out _).Should().BeTrue();
         outputProperties.TryGetProperty("outcome", out _).Should().BeTrue();
+        outputProperties.TryGetProperty("reliability", out var reliability).Should().BeTrue();
+        var reliabilityProperties = reliability.GetProperty("properties");
+        reliabilityProperties.TryGetProperty("consecutiveQualifyingRuns", out _).Should().BeTrue();
+        reliabilityProperties.TryGetProperty("naturalOriginEvidence", out _).Should().BeTrue();
+        reliabilityProperties.TryGetProperty("schedule", out _).Should().BeTrue();
+        reliabilityProperties.TryGetProperty("resetEvents", out _).Should().BeTrue();
     }
 
     [Fact]

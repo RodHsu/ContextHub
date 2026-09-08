@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,6 +15,10 @@ public sealed class GovernanceRunReceiptService(
     TimeProvider timeProvider) : IGovernanceRunReceiptService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly GovernanceReceiptContractIdentity CurrentScheduledContractIdentity = new(
+        ScheduledGovernanceContract.ToolContractVersion,
+        ScheduledGovernanceContract.SchemaHash,
+        ScheduledGovernanceContract.PublishedCatalogVersion);
 
     public async Task RecordReviewStartedAsync(
         string governanceRunId,
@@ -23,11 +29,12 @@ public sealed class GovernanceRunReceiptService(
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(governanceRunId);
         var previous = await LatestAsync(runId, actor, cancellationToken);
+        var executionMode = ResolveReceiptExecutionMode(contractIdentity);
         var receipt = NewReceipt(
             actor,
             runId,
             Hash($"review-received\n{runId}"),
-            "Review",
+            executionMode,
             "ReviewReceived",
             "Running",
             startedAt,
@@ -48,7 +55,7 @@ public sealed class GovernanceRunReceiptService(
         var previous = await LatestAsync(runId, actor, cancellationToken);
         var snapshot = result.DurableMemoryCoverage?.SnapshotToken ?? string.Empty;
         var eventKey = Hash($"review\n{snapshot}\n{result.IsReReview}\n{result.Convergence.Status}\n{result.Convergence.GovernanceActionableCount}");
-        var receipt = NewReceipt(actor, runId, eventKey, "Review", "ReviewCompleted", "Completed", startedAt,
+        var receipt = NewReceipt(actor, runId, eventKey, ResolveReceiptExecutionMode(result.ReceiptContractIdentity), "ReviewCompleted", "Completed", startedAt,
             result.ReceiptContractIdentity);
         CopyCumulative(previous, receipt);
         receipt.InitialSnapshotToken = previous?.InitialSnapshotToken ?? snapshot;
@@ -62,11 +69,25 @@ public sealed class GovernanceRunReceiptService(
         receipt.Deferred = result.Convergence.DeferredCount;
         receipt.RequiresUserDecision = result.Convergence.RequiresUserDecisionCount;
         receipt.HostBlocked = result.Convergence.HostBlockedCount;
+        var projectIds = result.Projects
+            .Select(x => x.ProjectId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         var currentExceptionStates = result.GovernedExceptionStates
             .OrderBy(x => x.Key, StringComparer.Ordinal)
             .ToArray();
+        var exceptionBaseline = await FindExceptionDeltaBaselineAsync(
+            actor,
+            runId,
+            projectIds,
+            result.ReceiptContractIdentity ?? new GovernanceReceiptContractIdentity(
+                GovernanceToolContract.ToolContractVersion,
+                GovernanceToolContract.SchemaHash,
+                GovernanceToolContract.PublishedCatalogVersion),
+            cancellationToken);
         var exceptionDelta = ComputeExceptionDelta(
-            DeserializeExceptionStates(previous?.GovernedExceptionStatesJson),
+            DeserializeExceptionStates(exceptionBaseline?.GovernedExceptionStatesJson),
             currentExceptionStates);
         receipt.ExceptionNew = exceptionDelta.New;
         receipt.ExceptionResolved = exceptionDelta.Resolved;
@@ -79,8 +100,86 @@ public sealed class GovernanceRunReceiptService(
         receipt.BusinessWorkItemActionable = result.Convergence.BusinessWorkItemActionableCount;
         receipt.FinalConvergenceStatus = result.Convergence.Status;
         receipt.StoppedReason = "ReviewCompleted";
-        receipt.ProjectIdsJson = JsonSerializer.Serialize(
-            result.Projects.Select(x => x.ProjectId).Distinct(StringComparer.OrdinalIgnoreCase), JsonOptions);
+        receipt.ProjectIdsJson = JsonSerializer.Serialize(projectIds, JsonOptions);
+        await InsertImmutableAsync(receipt, cancellationToken);
+    }
+
+    public async Task RecordScheduledDecisionAsync(
+        ScheduledGovernanceReviewResult result,
+        DateTimeOffset startedAt,
+        CancellationToken cancellationToken)
+    {
+        var actor = RequireActor(SecurityScopes.ScheduledGovernance);
+        if (!actor.IsAdmin)
+        {
+            throw new UnauthorizedAccessException("Scheduled governance decision projection requires a tenant owner or administrator.");
+        }
+        var runId = RequireGovernanceRunId(result.GovernanceRunId);
+        var contractIdentity = new GovernanceReceiptContractIdentity(
+            result.ToolContractVersion,
+            result.SchemaHash,
+            result.PublishedCatalogVersion);
+        if (!ReceiptIdentityMatches(contractIdentity, CurrentScheduledContractIdentity))
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                "Scheduled governance decision projection requires the current scheduled contract identity.");
+        }
+        var lineage = await GetScheduledLineageAsync(
+            runId,
+            CurrentScheduledContractIdentity,
+            cancellationToken);
+        if (lineage.RunExists && !lineage.IsValid)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                $"Scheduled governance run lineage is invalid: {lineage.Status}.");
+        }
+        var previous = await LatestAsync(runId, actor, cancellationToken);
+        var exceptionDelta = result.ExceptionDelta ?? new GovernanceExceptionDeltaResult(0, 0, 0, 0);
+        var eventKey = Hash(string.Join('\n',
+            "scheduled-decision",
+            runId,
+            result.SnapshotToken,
+            result.IsReReview,
+            result.Decision,
+            result.CoverageComplete,
+            result.AutomationActionableCount,
+            result.RequiresUserDecisionCount,
+            result.GovernedExceptionCount,
+            exceptionDelta.New,
+            exceptionDelta.Resolved,
+            exceptionDelta.Unchanged,
+            exceptionDelta.Escalated));
+        var receipt = NewReceipt(
+            actor,
+            runId,
+            eventKey,
+            "Scheduled",
+            "ScheduledDecisionProjected",
+            "Completed",
+            startedAt,
+            contractIdentity);
+        CopyCumulative(previous, receipt);
+        receipt.InitialSnapshotToken = previous?.InitialSnapshotToken ?? result.SnapshotToken;
+        receipt.FinalSnapshotToken = result.SnapshotToken;
+        receipt.CoverageComplete = result.CoverageComplete;
+        receipt.InitialGovernanceActionable = previous?.InitialGovernanceActionable ?? result.AutomationActionableCount;
+        receipt.FinalGovernanceActionable = result.AutomationActionableCount;
+        receipt.CandidateCount = result.CandidateCount;
+        receipt.ExecutionActionableCount = result.AutomationActionableCount;
+        receipt.GovernedExceptionCount = result.GovernedExceptionCount;
+        receipt.Deferred = result.GovernedDeferredExceptionCount;
+        receipt.RequiresUserDecision = result.RequiresUserDecisionCount;
+        receipt.HostBlocked = result.GovernedHostBlockedExceptionCount;
+        receipt.ExceptionNew = exceptionDelta.New;
+        receipt.ExceptionResolved = exceptionDelta.Resolved;
+        receipt.ExceptionUnchanged = exceptionDelta.Unchanged;
+        receipt.ExceptionEscalated = exceptionDelta.Escalated;
+        receipt.BusinessWorkItemActionable = result.BusinessWorkItemActionableCount;
+        receipt.FinalConvergenceStatus = result.Decision.ToString();
+        receipt.StoppedReason = "ScheduledDecisionProjected";
+        receipt.ProjectIdsJson = JsonSerializer.Serialize(result.ResolvedProjectIds, JsonOptions);
         await InsertImmutableAsync(receipt, cancellationToken);
     }
 
@@ -101,11 +200,12 @@ public sealed class GovernanceRunReceiptService(
         var normalizedReason = string.IsNullOrWhiteSpace(stoppedReason) ? "ReviewStopped" : stoppedReason.Trim();
         var normalizedPhase = string.IsNullOrWhiteSpace(failurePhase) ? "Review" : failurePhase.Trim();
         var previous = await LatestAsync(runId, actor, cancellationToken);
+        var executionMode = ResolveReceiptExecutionMode(contractIdentity);
         var receipt = NewReceipt(
             actor,
             runId,
             Hash($"review-stopped\n{runId}\n{normalizedStatus}\n{normalizedReason}\n{normalizedPhase}"),
-            "Review",
+            executionMode,
             "ReviewStopped",
             normalizedStatus,
             startedAt,
@@ -180,7 +280,9 @@ public sealed class GovernanceRunReceiptService(
         receipt.Tombstoned += result.TombstonedCount * add;
         receipt.SemanticAutoResolved += result.SemanticAutoResolvedCount * add;
         receipt.FinalConvergenceStatus = result.ErrorCode == GovernanceBatchErrorCode.None
-            ? "ExecutionCompleted"
+            ? PreserveScheduledDecision(previous, request)
+                ? previous!.FinalConvergenceStatus
+                : "ExecutionCompleted"
             : result.ErrorCode.ToString();
         receipt.StoppedReason = result.StoppedReason;
         receipt.AuditIdsJson = JsonSerializer.Serialize(MergeAuditIds(previous, result.AuditIds), JsonOptions);
@@ -289,6 +391,91 @@ public sealed class GovernanceRunReceiptService(
 
         EnsureReceiptProjectsAllowed(actor, DeserializeStrings(entity.ProjectIdsJson));
         return await MapAsync(entity, actor, cancellationToken);
+    }
+
+    public async Task<GovernanceRunLineageResult> GetScheduledLineageAsync(
+        string governanceRunId,
+        GovernanceReceiptContractIdentity expectedContractIdentity,
+        CancellationToken cancellationToken)
+    {
+        var actor = RequireActor(SecurityScopes.MemoryRead);
+        var runId = RequireGovernanceRunId(governanceRunId);
+        var events = await dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId &&
+                        x.OwnerUserId == actor.UserId &&
+                        x.GovernanceRunId == runId)
+            .OrderBy(x => x.EventSequence)
+            .ThenBy(x => x.CreatedAt)
+            .ThenBy(x => x.Id)
+            .Take(1_001)
+            .ToArrayAsync(cancellationToken);
+
+        if (events.Length == 0)
+        {
+            return new GovernanceRunLineageResult(
+                RunExists: false,
+                IsScheduledMode: false,
+                ContractMatches: false,
+                Status: "NotReceived",
+                Reason: "No receipt event exists for this governance run and actor.");
+        }
+
+        if (events.Length > 1_000)
+        {
+            return new GovernanceRunLineageResult(
+                RunExists: true,
+                IsScheduledMode: false,
+                ContractMatches: false,
+                Status: "ContractMismatch",
+                Reason: "The governance run lineage exceeds the bounded validation window.");
+        }
+
+        // The first immutable event binds the run. Every subsequent event must
+        // remain in the same scheduled mode and use the exact current catalog
+        // identity; a generic review or an older catalog therefore invalidates
+        // the scheduled read/execute view instead of being folded into it.
+        var first = events[0];
+        var firstIsScheduled = string.Equals(first.ExecutionMode, "Scheduled", StringComparison.Ordinal);
+        if (!firstIsScheduled || events.Any(x => !string.Equals(x.ExecutionMode, "Scheduled", StringComparison.Ordinal)))
+        {
+            return new GovernanceRunLineageResult(
+                RunExists: true,
+                IsScheduledMode: false,
+                ContractMatches: false,
+                Status: "ModeMismatch",
+                Reason: "The governance run lineage contains a non-scheduled receipt event.");
+        }
+
+        var contractMatches = events.All(x => ReceiptIdentityMatches(x, expectedContractIdentity));
+        if (!contractMatches)
+        {
+            return new GovernanceRunLineageResult(
+                RunExists: true,
+                IsScheduledMode: true,
+                ContractMatches: false,
+                Status: "ContractMismatch",
+                Reason: "The governance run lineage is not bound to the current scheduled contract identity.");
+        }
+
+        return new GovernanceRunLineageResult(
+            RunExists: true,
+            IsScheduledMode: true,
+            ContractMatches: true,
+            Status: "Valid",
+            Reason: "The governance run lineage is bound to the current scheduled contract identity.");
+    }
+
+    public async Task<IAsyncDisposable> AcquireRunLockAsync(
+        string governanceRunId,
+        CancellationToken cancellationToken)
+    {
+        var actor = RequireActor(SecurityScopes.MemoryRead);
+        var runId = RequireGovernanceRunId(governanceRunId);
+        return await AcquireRunLockCoreAsync(
+            actor.TenantId!.Value,
+            actor.UserId!.Value,
+            runId,
+            cancellationToken);
     }
 
     public async Task<IReadOnlyList<GovernanceRunReceiptResult>> ListAsync(
@@ -400,17 +587,45 @@ public sealed class GovernanceRunReceiptService(
                                 !string.IsNullOrWhiteSpace(latestBatch.StoppedReason)
             ? latestBatch.StoppedReason
             : receipt.StoppedReason;
+        var scheduledProjection = await dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId &&
+                        x.OwnerUserId == actor.UserId &&
+                        x.GovernanceRunId == receipt.GovernanceRunId &&
+                        x.ExecutionMode == "Scheduled" &&
+                        x.EventType == "ScheduledDecisionProjected")
+            .OrderByDescending(x => x.EventSequence)
+            .FirstOrDefaultAsync(cancellationToken);
+        var latestReviewSequence = scheduledProjection is null
+            ? null
+            : await dbContext.GovernanceRunReceipts.AsNoTracking()
+                .Where(x => x.TenantId == actor.TenantId &&
+                            x.OwnerUserId == actor.UserId &&
+                            x.GovernanceRunId == receipt.GovernanceRunId &&
+                            x.EventType == "ReviewCompleted")
+                .Select(x => (long?)x.EventSequence)
+                .MaxAsync(cancellationToken);
+        var successfulScheduledEvent = string.Equals(receipt.EventType, "ScheduledDecisionProjected", StringComparison.Ordinal) ||
+                                       (string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
+                                        (string.Equals(receipt.EventType, "BatchReceived", StringComparison.Ordinal) ||
+                                         ((string.Equals(receipt.EventType, "BatchCompleted", StringComparison.Ordinal) ||
+                                           string.Equals(receipt.EventType, "BatchReplay", StringComparison.Ordinal)) &&
+                                          string.Equals(receipt.Status, "Completed", StringComparison.OrdinalIgnoreCase))));
+        var useScheduledProjection = scheduledProjection is not null &&
+                                      successfulScheduledEvent &&
+                                      (!latestReviewSequence.HasValue ||
+                                       scheduledProjection.EventSequence > latestReviewSequence.Value);
+        var canonical = useScheduledProjection ? scheduledProjection! : receipt;
 
         return new GovernanceRunReceiptResult(
             receipt.Id, receipt.GovernanceRunId, receipt.Actor, receipt.ExecutionMode,
             receipt.StartedAt, receipt.CompletedAt, receipt.ToolContractVersion, receipt.SchemaHash,
-            receipt.PublishedCatalogVersion, receipt.InitialSnapshotToken, receipt.FinalSnapshotToken,
-            receipt.CoverageComplete, receipt.InitialGovernanceActionable, receipt.FinalGovernanceActionable,
-            receipt.CandidateCount, receipt.ExecutionActionableCount, receipt.GovernedExceptionCount,
-            receipt.Applied, receipt.Failed, receipt.Deferred, receipt.RequiresUserDecision,
-            receipt.HostBlocked, receipt.Quarantined, receipt.DeleteEligible, receipt.DeleteMatured,
+            receipt.PublishedCatalogVersion, canonical.InitialSnapshotToken, canonical.FinalSnapshotToken,
+            canonical.CoverageComplete, canonical.InitialGovernanceActionable, canonical.FinalGovernanceActionable,
+            canonical.CandidateCount, canonical.ExecutionActionableCount, canonical.GovernedExceptionCount,
+            receipt.Applied, receipt.Failed, canonical.Deferred, canonical.RequiresUserDecision,
+            canonical.HostBlocked, receipt.Quarantined, receipt.DeleteEligible, receipt.DeleteMatured,
             receipt.AutoDeleted, receipt.DeleteCancelled, receipt.Tombstoned, receipt.SemanticAutoResolved,
-            receipt.BusinessWorkItemActionable, receipt.FinalConvergenceStatus, readStoppedReason,
+            canonical.BusinessWorkItemActionable, canonical.FinalConvergenceStatus, readStoppedReason,
             DeserializeGuids(receipt.AuditIdsJson), DeserializeStrings(receipt.ProjectIdsJson), receipt.IsReplay,
             RunExists: true,
             Status: readStatus,
@@ -419,11 +634,11 @@ public sealed class GovernanceRunReceiptService(
             LatestBatch: latestBatch)
         {
             ExceptionDelta = new GovernanceExceptionDeltaResult(
-                receipt.ExceptionNew,
-                receipt.ExceptionResolved,
-                receipt.ExceptionUnchanged,
-                receipt.ExceptionEscalated),
-            GovernedExceptionStates = DeserializeExceptionStates(receipt.GovernedExceptionStatesJson)
+                canonical.ExceptionNew,
+                canonical.ExceptionResolved,
+                canonical.ExceptionUnchanged,
+                canonical.ExceptionEscalated),
+            GovernedExceptionStates = DeserializeExceptionStates(canonical.GovernedExceptionStatesJson)
         };
     }
 
@@ -506,6 +721,12 @@ public sealed class GovernanceRunReceiptService(
 
     private async Task InsertImmutableAsync(GovernanceRunReceipt receipt, CancellationToken cancellationToken)
     {
+        await using var runLock = await AcquireRunLockCoreAsync(
+            receipt.TenantId,
+            receipt.OwnerUserId,
+            receipt.GovernanceRunId,
+            cancellationToken);
+        await EnsureScheduledRunBindingAsync(receipt, cancellationToken);
         await dbContext.GovernanceRunReceipts.AddAsync(receipt, cancellationToken);
         try
         {
@@ -522,6 +743,131 @@ public sealed class GovernanceRunReceiptService(
         }
     }
 
+    private async Task EnsureScheduledRunBindingAsync(
+        GovernanceRunReceipt receipt,
+        CancellationToken cancellationToken)
+    {
+        var existing = await dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == receipt.TenantId &&
+                        x.OwnerUserId == receipt.OwnerUserId &&
+                        x.GovernanceRunId == receipt.GovernanceRunId)
+            .OrderBy(x => x.EventSequence)
+            .Select(x => new
+            {
+                x.ExecutionMode,
+                x.ToolContractVersion,
+                x.SchemaHash,
+                x.PublishedCatalogVersion
+            })
+            .Take(1_001)
+            .ToArrayAsync(cancellationToken);
+
+        if (existing.Length > 1_000)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                "The governance run lineage exceeds the bounded validation window.");
+        }
+
+        var receiptIsScheduled = string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal);
+        var existingContainsScheduled = existing.Any(x =>
+            string.Equals(x.ExecutionMode, "Scheduled", StringComparison.Ordinal));
+        if (!receiptIsScheduled && !existingContainsScheduled)
+        {
+            return;
+        }
+
+        var matchesScheduledBinding = receiptIsScheduled &&
+                                      existing.All(x =>
+                                          string.Equals(x.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
+                                          string.Equals(x.ToolContractVersion, receipt.ToolContractVersion, StringComparison.Ordinal) &&
+                                          string.Equals(x.SchemaHash, receipt.SchemaHash, StringComparison.OrdinalIgnoreCase) &&
+                                          string.Equals(x.PublishedCatalogVersion, receipt.PublishedCatalogVersion, StringComparison.Ordinal));
+        if (!matchesScheduledBinding)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                "The governance run is already bound to a different execution mode or contract identity.");
+        }
+    }
+
+    private async Task<IAsyncDisposable> AcquireRunLockCoreAsync(
+        Guid tenantId,
+        Guid ownerUserId,
+        string governanceRunId,
+        CancellationToken cancellationToken)
+    {
+        var connection = dbContext.Database.GetDbConnection();
+        var closeWhenReleased = connection.State == ConnectionState.Closed;
+        if (closeWhenReleased)
+        {
+            await dbContext.Database.OpenConnectionAsync(cancellationToken);
+        }
+
+        var lockKey = ComputeRunLockKey(tenantId, ownerUserId, governanceRunId);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT pg_advisory_lock(@lock_key);";
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "lock_key";
+            parameter.Value = lockKey;
+            command.Parameters.Add(parameter);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            return new AdvisoryRunLock(dbContext, lockKey, closeWhenReleased);
+        }
+        catch
+        {
+            if (closeWhenReleased)
+            {
+                await dbContext.Database.CloseConnectionAsync();
+            }
+            throw;
+        }
+    }
+
+    private static long ComputeRunLockKey(Guid tenantId, Guid ownerUserId, string governanceRunId)
+    {
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{tenantId:N}\n{ownerUserId:N}\n{governanceRunId}"));
+        return BinaryPrimitives.ReadInt64BigEndian(digest.AsSpan(0, sizeof(long)));
+    }
+
+    private sealed class AdvisoryRunLock(
+        MemoryDbContext dbContext,
+        long lockKey,
+        bool closeWhenReleased) : IAsyncDisposable
+    {
+        private bool disposed;
+
+        public async ValueTask DisposeAsync()
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+            try
+            {
+                await using var command = dbContext.Database.GetDbConnection().CreateCommand();
+                command.CommandText = "SELECT pg_advisory_unlock(@lock_key);";
+                var parameter = command.CreateParameter();
+                parameter.ParameterName = "lock_key";
+                parameter.Value = lockKey;
+                command.Parameters.Add(parameter);
+                await command.ExecuteNonQueryAsync();
+            }
+            finally
+            {
+                if (closeWhenReleased)
+                {
+                    await dbContext.Database.CloseConnectionAsync();
+                }
+            }
+        }
+    }
+
     private Task<GovernanceRunReceipt?> LatestAsync(
         string governanceRunId,
         ContextHubRequestActor actor,
@@ -532,6 +878,79 @@ public sealed class GovernanceRunReceiptService(
                         x.GovernanceRunId == governanceRunId)
             .OrderByDescending(x => x.EventSequence)
             .FirstOrDefaultAsync(cancellationToken);
+
+    private async Task<GovernanceRunReceipt?> FindExceptionDeltaBaselineAsync(
+        ContextHubRequestActor actor,
+        string governanceRunId,
+        IReadOnlyList<string> projectIds,
+        GovernanceReceiptContractIdentity contractIdentity,
+        CancellationToken cancellationToken)
+    {
+        var sameRunReview = await dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId &&
+                        x.OwnerUserId == actor.UserId &&
+                        x.GovernanceRunId == governanceRunId &&
+                        x.EventType == "ReviewCompleted")
+            .OrderByDescending(x => x.EventSequence)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (sameRunReview is not null &&
+            ReceiptIdentityMatches(sameRunReview, contractIdentity) &&
+            ProjectSetsEqual(DeserializeStrings(sameRunReview.ProjectIdsJson), projectIds))
+        {
+            return sameRunReview;
+        }
+
+        // A fresh scheduled run has only a ReviewReceived event, whose copied
+        // exception state is empty. Compare with the most recent successful
+        // full review for the exact same actor and project scope so unchanged
+        // governed exceptions do not become a new human-decision event every
+        // four hours. A missing or ambiguous baseline deliberately returns
+        // null, preserving the fail-closed "all current exceptions are new"
+        // behavior.
+        var candidates = await dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId &&
+                        x.OwnerUserId == actor.UserId &&
+                        x.GovernanceRunId != governanceRunId &&
+                        x.EventType == "ReviewCompleted" &&
+                        x.Status == "Completed" &&
+                        x.CoverageComplete &&
+                        x.ToolContractVersion == contractIdentity.ToolContractVersion &&
+                        x.SchemaHash == contractIdentity.SchemaHash &&
+                        x.PublishedCatalogVersion == contractIdentity.PublishedCatalogVersion)
+            .OrderByDescending(x => x.EventSequence)
+            .Take(1_000)
+            .ToArrayAsync(cancellationToken);
+
+        return candidates.FirstOrDefault(candidate =>
+            ProjectSetsEqual(DeserializeStrings(candidate.ProjectIdsJson), projectIds));
+    }
+
+    private static bool ProjectSetsEqual(
+        IReadOnlyList<string> left,
+        IReadOnlyList<string> right)
+        => left.Count == right.Count &&
+           left.ToHashSet(StringComparer.OrdinalIgnoreCase)
+               .SetEquals(right);
+
+    private static bool ReceiptIdentityMatches(
+        GovernanceRunReceipt receipt,
+        GovernanceReceiptContractIdentity expected)
+        => string.Equals(receipt.ToolContractVersion, expected.ToolContractVersion, StringComparison.Ordinal) &&
+           string.Equals(receipt.SchemaHash, expected.SchemaHash, StringComparison.Ordinal) &&
+           string.Equals(receipt.PublishedCatalogVersion, expected.PublishedCatalogVersion, StringComparison.Ordinal);
+
+    private static bool ReceiptIdentityMatches(
+        GovernanceReceiptContractIdentity? actual,
+        GovernanceReceiptContractIdentity expected)
+        => actual is not null &&
+           string.Equals(actual.ToolContractVersion, expected.ToolContractVersion, StringComparison.Ordinal) &&
+           string.Equals(actual.SchemaHash, expected.SchemaHash, StringComparison.Ordinal) &&
+           string.Equals(actual.PublishedCatalogVersion, expected.PublishedCatalogVersion, StringComparison.Ordinal);
+
+    private static string ResolveReceiptExecutionMode(GovernanceReceiptContractIdentity? contractIdentity)
+        => ReceiptIdentityMatches(contractIdentity, CurrentScheduledContractIdentity)
+            ? "Scheduled"
+            : "Review";
 
     private ContextHubRequestActor RequireActor(string scope)
     {
@@ -653,6 +1072,18 @@ public sealed class GovernanceRunReceiptService(
             : receipt.StoppedReason.Contains("Stopped", StringComparison.OrdinalIgnoreCase)
                 ? "Stopped"
                 : "Completed";
+
+    private static bool PreserveScheduledDecision(
+        GovernanceRunReceipt? previous,
+        GovernanceBatchExecuteRequest request)
+        => previous is not null &&
+           request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled &&
+           string.Equals(previous.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
+           ReceiptIdentityMatches(previous, CurrentScheduledContractIdentity) &&
+           Enum.TryParse<ScheduledGovernanceDecision>(
+               previous.FinalConvergenceStatus,
+               ignoreCase: false,
+               out _);
 
     private static string RequestIdentity(GovernanceBatchExecuteRequest request)
         => Hash(JsonSerializer.Serialize(

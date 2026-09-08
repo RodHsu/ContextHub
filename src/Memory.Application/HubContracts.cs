@@ -97,6 +97,7 @@ public sealed record GovernanceFindingResult(
     public DateTimeOffset? GovernanceUpdatedAt { get; init; }
     public DateTimeOffset? GovernanceBlockedAt { get; init; }
     public DateTimeOffset? GovernanceLastReevaluatedAt { get; init; }
+    public DateTimeOffset? GovernanceLastEvidenceChangedAt { get; init; }
     public string GovernanceBlockingLayer { get; init; } = string.Empty;
     public string GovernanceReasonClass { get; init; } = string.Empty;
     public string GovernanceRelatedTool { get; init; } = string.Empty;

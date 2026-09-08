@@ -1,3 +1,4 @@
+using System.Data;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -19,6 +20,7 @@ public sealed class GovernanceBatchExecutor(
     IAutonomousRetentionService autonomousRetention,
     IRequestActorAccessor actorAccessor,
     IClock clock,
+    ICacheVersionStore cacheStore,
     IGovernanceRunReceiptService runReceipts) : IGovernanceBatchExecutor
 {
     private const int MaximumMutations = 500;
@@ -33,10 +35,31 @@ public sealed class GovernanceBatchExecutor(
         CancellationToken cancellationToken)
     {
         var startedAt = clock.UtcNow;
+        var receiptEligible = false;
+        IAsyncDisposable? runLock = null;
         try
         {
+            ValidateExecutionMode(request.ExecutionMode);
+            EnsureExecutionActorAllowed(request, actorAccessor.Current);
             ValidatePublishedContract(request);
-            EnsureExecutionActorAllowed(actorAccessor.Current);
+            if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled)
+            {
+                runLock = await runReceipts.AcquireRunLockAsync(
+                    request.GovernanceRunId,
+                    cancellationToken);
+                var identity = request.ReceiptContractIdentity!;
+                var lineage = await runReceipts.GetScheduledLineageAsync(
+                    request.GovernanceRunId,
+                    identity,
+                    cancellationToken);
+                if (!lineage.IsValid)
+                {
+                    throw new GovernanceBatchException(
+                        GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                        $"Scheduled governance run lineage rejected at the mutation boundary: {lineage.Status}.");
+                }
+            }
+            receiptEligible = true;
             if (request.AllowMaturedDelete ||
                 request.AllowedActionTypes?.Contains(GovernanceBatchActionType.MaturedDelete) == true)
             {
@@ -66,20 +89,36 @@ public sealed class GovernanceBatchExecutor(
         catch (GovernanceBatchException ex)
         {
             var failure = GovernanceBatchExecuteResult.Failure(request, ex);
-            await runReceipts.RecordExecutionAsync(request, failure, startedAt, CancellationToken.None);
+            if (receiptEligible)
+            {
+                await runReceipts.RecordExecutionAsync(request, failure, startedAt, CancellationToken.None);
+            }
             return failure;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            await runReceipts.RecordExecutionStoppedAsync(
-                request, startedAt, "Stopped", "RequestCancelledOutcomeUnknown", "OutcomeUnknown", CancellationToken.None);
+            if (receiptEligible)
+            {
+                await runReceipts.RecordExecutionStoppedAsync(
+                    request, startedAt, "Stopped", "RequestCancelledOutcomeUnknown", "OutcomeUnknown", CancellationToken.None);
+            }
             throw;
         }
         catch
         {
-            await runReceipts.RecordExecutionStoppedAsync(
-                request, startedAt, "Failed", "UnhandledExecutionFailure", "PreExecutionUnhandled", CancellationToken.None);
+            if (receiptEligible)
+            {
+                await runReceipts.RecordExecutionStoppedAsync(
+                    request, startedAt, "Failed", "UnhandledExecutionFailure", "PreExecutionUnhandled", CancellationToken.None);
+            }
             throw;
+        }
+        finally
+        {
+            if (runLock is not null)
+            {
+                await runLock.DisposeAsync();
+            }
         }
     }
 
@@ -305,6 +344,17 @@ public sealed class GovernanceBatchExecutor(
 
         var planItems = JsonSerializer.Deserialize<List<BatchPlanItem>>(run.PlanJson, JsonOptions)
             ?? throw new InvalidOperationException("Persisted governance batch plan is invalid.");
+        IReadOnlyDictionary<string, string>? scheduledPlanRejections = null;
+        if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled)
+        {
+            scheduledPlanRejections = await ValidateScheduledPlanAsync(
+                planItems,
+                snapshot,
+                projectIds,
+                request.GovernanceRunId.Trim(),
+                actor,
+                cancellationToken);
+        }
         var terminalItemKeys = await GetTerminalItemKeysAsync(
             logicalRunIds,
             run.Id,
@@ -379,43 +429,70 @@ public sealed class GovernanceBatchExecutor(
             var item = executablePlanItems[index];
             accumulator.ScannedCount++;
             GovernanceBatchItemResult itemResult;
-            if (request.DryRun)
+            if (scheduledPlanRejections is not null &&
+                scheduledPlanRejections.TryGetValue(item.Key, out var planRejection))
+            {
+                itemResult = await AuditedResultAsync(
+                    item,
+                    ParseRecommendedAction(item.RecommendedAction),
+                    GovernanceBatchItemDisposition.RequiresUserDecision,
+                    $"Scheduled Governance persisted plan integrity validation failed ({planRejection}); no governed resource was mutated.",
+                    [],
+                    item.RelatedResourceIds,
+                    actor,
+                    cancellationToken);
+            }
+            else if (request.DryRun)
             {
                 itemResult = Preview(item);
                 accumulator.Add(itemResult);
                 stoppedReason = "DryRunPreview";
                 break;
             }
-
-            try
+            else
             {
-                itemResult = await ProcessItemAsync(item, request, allowed, actor, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                var failureAudit = await AddAuditAsync(actor, SecurityAuditEventType.GovernanceBatchItemProcessed,
-                    "UnknownResult", new { item.Key, item.Kind, item.Id, error = "Execution cancelled; outcome unknown.", retryable = false }, CancellationToken.None);
-                itemResult = Failed(item, "The item outcome is unknown because execution was cancelled.", retryable: false, "NotAdvancedUnknown") with
+                try
                 {
-                    Disposition = GovernanceBatchItemDisposition.UnknownResult,
-                    AuditIds = [failureAudit]
-                };
-                accumulator.Add(itemResult);
-                stoppedReason = "UnknownResult";
-                await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
-                    executablePlanItems.Count - index, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
-                return accumulator.ToResult(execution.CursorAfter, index < executablePlanItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
-            }
-            catch (Exception ex)
-            {
-                var failureAudit = await AddAuditAsync(actor, SecurityAuditEventType.GovernanceBatchItemProcessed,
-                    "Failed", new { item.Key, item.Kind, item.Id, error = ex.Message, retryable = true }, CancellationToken.None);
-                itemResult = Failed(item, ex.Message, retryable: true, "NotAdvancedRetryable") with { AuditIds = [failureAudit] };
-                accumulator.Add(itemResult);
-                stoppedReason = "ItemFailed";
-                await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
-                    executablePlanItems.Count - index, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
-                return accumulator.ToResult(execution.CursorAfter, index < executablePlanItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
+                    itemResult = await ProcessItemAsync(item, request, allowed, actor, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    run = await dbContext.GovernanceBatchRuns.SingleAsync(
+                        x => x.Id == run.Id,
+                        CancellationToken.None);
+                    execution = await dbContext.GovernanceBatchExecutions.SingleAsync(
+                        x => x.Id == execution.Id,
+                        CancellationToken.None);
+                    var failureAudit = await AddAuditAsync(actor, SecurityAuditEventType.GovernanceBatchItemProcessed,
+                        "UnknownResult", new { item.Key, item.Kind, item.Id, error = "Execution cancelled; outcome unknown.", retryable = false }, CancellationToken.None);
+                    itemResult = Failed(item, "The item outcome is unknown because execution was cancelled.", retryable: false, "NotAdvancedUnknown") with
+                    {
+                        Disposition = GovernanceBatchItemDisposition.UnknownResult,
+                        AuditIds = [failureAudit]
+                    };
+                    accumulator.Add(itemResult);
+                    stoppedReason = "UnknownResult";
+                    await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
+                        executablePlanItems.Count - index, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
+                    return accumulator.ToResult(execution.CursorAfter, index < executablePlanItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
+                }
+                catch (Exception ex)
+                {
+                    run = await dbContext.GovernanceBatchRuns.SingleAsync(
+                        x => x.Id == run.Id,
+                        CancellationToken.None);
+                    execution = await dbContext.GovernanceBatchExecutions.SingleAsync(
+                        x => x.Id == execution.Id,
+                        CancellationToken.None);
+                    var failureAudit = await AddAuditAsync(actor, SecurityAuditEventType.GovernanceBatchItemProcessed,
+                        "Failed", new { item.Key, item.Kind, item.Id, error = ex.Message, retryable = true }, CancellationToken.None);
+                    itemResult = Failed(item, ex.Message, retryable: true, "NotAdvancedRetryable") with { AuditIds = [failureAudit] };
+                    accumulator.Add(itemResult);
+                    stoppedReason = "ItemFailed";
+                    await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
+                        executablePlanItems.Count - index, stopwatch, stoppedReason, advance: false, cancellationToken: CancellationToken.None);
+                    return accumulator.ToResult(execution.CursorAfter, index < executablePlanItems.Count, stopwatch.ElapsedMilliseconds, stoppedReason);
+                }
             }
 
             accumulator.Add(itemResult);
@@ -463,6 +540,36 @@ public sealed class GovernanceBatchExecutor(
 
     private static void ValidatePublishedContract(GovernanceBatchExecuteRequest request)
     {
+        ValidateExecutionMode(request.ExecutionMode);
+
+        if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled)
+        {
+            ValidateOptionalScheduledContractValue(
+                request.ToolContractVersion,
+                ScheduledGovernanceContract.ToolContractVersion,
+                GovernanceToolContract.ToolContractVersion,
+                nameof(request.ToolContractVersion));
+            ValidateOptionalScheduledContractValue(
+                request.SchemaHash,
+                ScheduledGovernanceContract.SchemaHash,
+                GovernanceToolContract.SchemaHash,
+                nameof(request.SchemaHash),
+                ignoreCase: true);
+
+            var identity = request.ReceiptContractIdentity;
+            if (identity is null ||
+                !string.Equals(identity.ToolContractVersion, ScheduledGovernanceContract.ToolContractVersion, StringComparison.Ordinal) ||
+                !string.Equals(identity.SchemaHash, ScheduledGovernanceContract.SchemaHash, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(identity.PublishedCatalogVersion, ScheduledGovernanceContract.PublishedCatalogVersion, StringComparison.Ordinal))
+            {
+                throw new GovernanceBatchException(
+                    GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                    "Scheduled execution requires the current Scheduled Governance receipt contract identity.");
+            }
+
+            return;
+        }
+
         if (!string.IsNullOrWhiteSpace(request.ToolContractVersion) &&
             !string.Equals(request.ToolContractVersion.Trim(), GovernanceToolContract.ToolContractVersion, StringComparison.Ordinal))
         {
@@ -478,13 +585,55 @@ public sealed class GovernanceBatchExecutor(
         }
     }
 
-    private static void EnsureExecutionActorAllowed(ContextHubRequestActor actor)
+    private static void ValidateOptionalScheduledContractValue(
+        string? value,
+        string scheduledValue,
+        string generalValue,
+        string fieldName,
+        bool ignoreCase = false)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        var comparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var normalized = value.Trim();
+        if (!string.Equals(normalized, scheduledValue, comparison) &&
+            !string.Equals(normalized, generalValue, comparison))
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                $"{fieldName} does not match the current Scheduled Governance contract.");
+        }
+    }
+
+    private static void EnsureExecutionActorAllowed(
+        GovernanceBatchExecuteRequest request,
+        ContextHubRequestActor actor)
     {
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         if (!actor.IsAdmin)
         {
             throw new UnauthorizedAccessException("Governance batch execution requires an administrator.");
+        }
+
+        var hasScheduledCapability = actor.HasScope(SecurityScopes.ScheduledGovernance);
+        var isScheduledOnlyCapabilityProfile = hasScheduledCapability &&
+                                               !actor.HasScope(SecurityScopes.GovernanceTrackerManage);
+        if (isScheduledOnlyCapabilityProfile && request.ExecutionMode != GovernanceBatchExecutionMode.Scheduled)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                "The governance:scheduled capability is bound to Scheduled execution and cannot downgrade to the general executor.");
+        }
+
+        if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled && !hasScheduledCapability)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                "Scheduled execution requires the governance:scheduled capability.");
         }
     }
 
@@ -495,12 +644,11 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
-        if (actor.HasScope(SecurityScopes.ScheduledGovernance))
+        if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled)
         {
             var scheduledAction = ParseRecommendedAction(item.RecommendedAction);
-            if (!item.IsReversible ||
-                item.RequiresExplicitApproval ||
-                item.RiskLevel > GovernanceBatchRiskLevel.Low ||
+            var eligibility = EvaluateScheduledEligibility(item);
+            if (!eligibility.AutomationActionable ||
                 !scheduledAction.HasValue ||
                 !allowed.Contains(scheduledAction.Value))
             {
@@ -508,7 +656,7 @@ public sealed class GovernanceBatchExecutor(
                     item,
                     scheduledAction,
                     GovernanceBatchItemDisposition.RequiresUserDecision,
-                    "The Scheduled Governance surface permits only fixed low-risk reversible actions; no governed resource was mutated.",
+                    $"Scheduled Governance eligibility denied mutation ({eligibility.ReasonClass}); no governed resource was mutated.",
                     [],
                     item.RelatedResourceIds,
                     actor,
@@ -526,6 +674,35 @@ public sealed class GovernanceBatchExecutor(
                 await ProcessTypedSurfaceAsync(item, request, allowed, actor, cancellationToken),
             _ => throw new InvalidOperationException($"Unsupported governance plan item kind '{item.Kind}'.")
         };
+    }
+
+    private static ScheduledGovernanceEligibilityResult EvaluateScheduledEligibility(BatchPlanItem item)
+    {
+        if (item.CanonicalKind is not { } itemKind)
+        {
+            return new(
+                ScheduledGovernanceEligibility.RequiresUserDecision,
+                "missing-canonical-eligibility-projection");
+        }
+
+        return ScheduledGovernanceAutomationEligibility.Evaluate(new GovernanceReviewItem(
+            item.Key,
+            itemKind,
+            item.ProjectId,
+            item.Classification,
+            item.RecommendedAction,
+            item.RiskLevel,
+            item.RequiresExplicitApproval,
+            item.AuthorityResourceId,
+            item.RelatedResourceIds,
+            item.ReasonCodes ?? [],
+            item.GovernanceRunId)
+        {
+            SemanticConfidence = item.SemanticConfidence,
+            IsReversible = item.IsReversible,
+            RetentionPolicyVersion = item.RetentionPolicyVersion,
+            DeleteEligibleAt = item.DeleteEligibleAt
+        });
     }
 
     private async Task<GovernanceBatchItemResult> ProcessTypedSurfaceAsync(
@@ -662,6 +839,21 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
+        await using var transaction = await dbContext.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
+        var result = await ProcessFindingCoreAsync(item, request, allowed, actor, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return result;
+    }
+
+    private async Task<GovernanceBatchItemResult> ProcessFindingCoreAsync(
+        BatchPlanItem item,
+        GovernanceBatchExecuteRequest request,
+        IReadOnlySet<GovernanceBatchActionType> allowed,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
         var finding = await dbContext.GovernanceFindings.FirstOrDefaultAsync(x => x.Id == item.Id, cancellationToken);
         if (finding is null || finding.Status != GovernanceFindingStatus.Open)
         {
@@ -707,6 +899,18 @@ public sealed class GovernanceBatchExecutor(
 
         if ((finding.Type is GovernanceFindingType.SupersededMemoryCandidate or GovernanceFindingType.ReplacementChainCandidate or GovernanceFindingType.AuthoritativeSourceCandidate) &&
             allowed.Contains(GovernanceBatchActionType.Archive))
+        {
+            return await ArchiveVerifiedSecondaryAsync(item, finding, request, actor, cancellationToken);
+        }
+
+        if ((finding.Type is GovernanceFindingType.StaleMemoryCandidate or
+             GovernanceFindingType.LowSignalEpisodeCandidate or
+             GovernanceFindingType.ObsoleteMemoryCandidate or
+             GovernanceFindingType.LowValueMemoryCandidate or
+             GovernanceFindingType.ArchiveMemoryCandidate) &&
+            finding.PrimaryMemoryId.HasValue &&
+            allowed.Contains(GovernanceBatchActionType.Archive) &&
+            await HasStrongSuccessorEvidenceAsync(finding.PrimaryMemoryId.Value, actor, cancellationToken))
         {
             return await ArchiveVerifiedSecondaryAsync(item, finding, request, actor, cancellationToken);
         }
@@ -818,6 +1022,19 @@ public sealed class GovernanceBatchExecutor(
 
         var primary = AuthorityScore(left) >= AuthorityScore(right) ? left : right;
         var secondary = primary.Id == left.Id ? right : left;
+        var typedAuthorityConflict = await GetTypedReplacementConflictAsync(
+            primary.Id, secondary.Id, primary.ProjectId, actor, cancellationToken);
+        if (!string.IsNullOrEmpty(typedAuthorityConflict))
+        {
+            return await SetFindingDispositionAsync(
+                item,
+                finding,
+                GovernanceFindingDisposition.RequiresUserDecision,
+                typedAuthorityConflict,
+                actor,
+                cancellationToken);
+        }
+
         var primaryMetadata = MergePrimaryMetadata(primary.MetadataJson, secondary.MetadataJson, secondary.Id);
         var secondaryMetadata = MergeSecondaryMetadata(secondary.MetadataJson, primary.Id);
         var mergedContent = MergeText(primary.Content, secondary.Content);
@@ -836,13 +1053,23 @@ public sealed class GovernanceBatchExecutor(
             request.GovernanceRunId, cancellationToken);
         proposals.Add(secondaryProposal.Id);
 
+        await ApplyTypedReplacementChainAsync(
+            primary.Id,
+            secondary.Id,
+            primary.ProjectId,
+            finding.Id,
+            request.GovernanceRunId,
+            actor,
+            cancellationToken);
+
         var primaryBeforeArchive = await memoryService.GetAsync(primary.Id, cancellationToken);
         var secondaryBeforeArchive = await memoryService.GetAsync(secondary.Id, cancellationToken);
         if (primaryBeforeArchive is null || secondaryBeforeArchive is null ||
             !MetadataContainsId(primaryBeforeArchive.MetadataJson, "mergedFromMemoryIds", secondary.Id) ||
-            !MetadataContainsId(secondaryBeforeArchive.MetadataJson, "supersededByMemoryId", primary.Id))
+            !MetadataContainsId(secondaryBeforeArchive.MetadataJson, "supersededByMemoryId", primary.Id) ||
+            !await HasTypedReplacementChainAsync(primary.Id, secondary.Id, primary.ProjectId, actor, cancellationToken))
         {
-            throw new InvalidOperationException("Merge metadata read-back failed before replacement-link creation and archival.");
+            throw new InvalidOperationException("Merge authority read-back failed before replacement-link creation and archival.");
         }
         var linked = await dbContext.MemoryLinks.AnyAsync(x =>
             x.LinkType == "replaced_by" && x.FromId == secondary.Id && x.ToId == primary.Id, cancellationToken);
@@ -876,13 +1103,153 @@ public sealed class GovernanceBatchExecutor(
         if (primaryReadBack is null || secondaryReadBack is null ||
             !MetadataContainsId(primaryReadBack.MetadataJson, "mergedFromMemoryIds", secondary.Id) ||
             !MetadataContainsId(secondaryReadBack.MetadataJson, "supersededByMemoryId", primary.Id) ||
-            secondaryReadBack.Status != MemoryStatus.Archived || !linked)
+            secondaryReadBack.Status != MemoryStatus.Archived || !linked ||
+            !await HasTypedReplacementChainAsync(primary.Id, secondary.Id, primary.ProjectId, actor, cancellationToken))
         {
             throw new InvalidOperationException("Merge resource read-back did not verify the complete replacement chain.");
         }
         await governanceService.AcceptAsync(finding.Id, cancellationToken);
         return await AuditedResultAsync(item, GovernanceBatchActionType.Merge, GovernanceBatchItemDisposition.Applied,
             $"Merged {secondary.Id:D} into {primary.Id:D}; replacement chain read-back passed before Suggested Action convergence.", proposals, [primary.Id, secondary.Id], actor, cancellationToken);
+    }
+
+    private async Task<string?> GetTypedReplacementConflictAsync(
+        Guid primaryId,
+        Guid secondaryId,
+        string projectId,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        if (!actor.TenantId.HasValue || !actor.UserId.HasValue)
+        {
+            return "Typed replacement requires an authenticated tenant owner.";
+        }
+
+        var pair = await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => (x.Id == primaryId || x.Id == secondaryId) &&
+                        x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
+                        x.ProjectId == projectId)
+            .ToArrayAsync(cancellationToken);
+        if (pair.Length != 2)
+        {
+            return "Typed replacement candidates are missing or outside the authenticated authority scope.";
+        }
+
+        var primary = pair.Single(x => x.Id == primaryId);
+        var secondary = pair.Single(x => x.Id == secondaryId);
+        if (primary.Scope != secondary.Scope)
+        {
+            return "Typed replacement cannot cross memory scope.";
+        }
+
+        if (IsExactTypedReplacement(primary, secondary))
+        {
+            return null;
+        }
+
+        var hasExistingAuthorityRelationship =
+            primary.AuthorityState != MemoryAuthorityState.Current ||
+            secondary.AuthorityState != MemoryAuthorityState.Current ||
+            primary.SupersedesId.HasValue || primary.SupersededById.HasValue ||
+            secondary.SupersedesId.HasValue || secondary.SupersededById.HasValue ||
+            primary.SuccessorEvidenceId.HasValue || secondary.SuccessorEvidenceId.HasValue ||
+            !string.IsNullOrWhiteSpace(primary.SuccessorEvidenceRef) ||
+            !string.IsNullOrWhiteSpace(secondary.SuccessorEvidenceRef);
+        return hasExistingAuthorityRelationship
+            ? "Merge candidates already participate in a typed authority relationship; explicit authority review is required."
+            : null;
+    }
+
+    private async Task ApplyTypedReplacementChainAsync(
+        Guid primaryId,
+        Guid secondaryId,
+        string projectId,
+        Guid findingId,
+        string governanceRunId,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        var conflict = await GetTypedReplacementConflictAsync(
+            primaryId, secondaryId, projectId, actor, cancellationToken);
+        if (!string.IsNullOrEmpty(conflict))
+        {
+            throw new InvalidOperationException($"Typed replacement revalidation failed: {conflict}");
+        }
+
+        var pair = await dbContext.MemoryItems
+            .Where(x => (x.Id == primaryId || x.Id == secondaryId) &&
+                        x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
+                        x.ProjectId == projectId)
+            .ToArrayAsync(cancellationToken);
+        var primary = pair.Single(x => x.Id == primaryId);
+        var secondary = pair.Single(x => x.Id == secondaryId);
+        if (IsExactTypedReplacement(primary, secondary))
+        {
+            return;
+        }
+
+        var now = clock.UtcNow;
+        primary.AuthorityState = MemoryAuthorityState.Current;
+        primary.SupersedesId = secondary.Id;
+        primary.ValidFrom ??= primary.CreatedAt;
+        primary.SuccessorEvidenceRef = $"governance-finding:{findingId:D}:run:{governanceRunId.Trim()}";
+        primary.Version += 1;
+        primary.UpdatedAt = now;
+
+        secondary.AuthorityState = MemoryAuthorityState.Superseded;
+        secondary.SupersededById = primary.Id;
+        secondary.ValidFrom ??= secondary.CreatedAt;
+        secondary.ValidUntil = now;
+        secondary.Version += 1;
+        secondary.UpdatedAt = now;
+
+        await AddAuthorityRevisionAsync(primary, now, cancellationToken);
+        await AddAuthorityRevisionAsync(secondary, now, cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await cacheStore.IncrementProjectAsync(projectId, cancellationToken);
+    }
+
+    private async Task<bool> HasTypedReplacementChainAsync(
+        Guid primaryId,
+        Guid secondaryId,
+        string projectId,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        var pair = await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => (x.Id == primaryId || x.Id == secondaryId) &&
+                        x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
+                        x.ProjectId == projectId)
+            .ToArrayAsync(cancellationToken);
+        return pair.Length == 2 && IsExactTypedReplacement(
+            pair.Single(x => x.Id == primaryId),
+            pair.Single(x => x.Id == secondaryId));
+    }
+
+    private static bool IsExactTypedReplacement(MemoryItem primary, MemoryItem secondary)
+        => primary.Scope == secondary.Scope &&
+           primary.AuthorityState == MemoryAuthorityState.Current &&
+           primary.SupersedesId == secondary.Id &&
+           secondary.AuthorityState == MemoryAuthorityState.Superseded &&
+           secondary.SupersededById == primary.Id &&
+           !string.IsNullOrWhiteSpace(primary.SuccessorEvidenceRef);
+
+    private async ValueTask AddAuthorityRevisionAsync(
+        MemoryItem memory,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        await dbContext.MemoryItemRevisions.AddAsync(new MemoryItemRevision
+        {
+            MemoryItemId = memory.Id,
+            Version = memory.Version,
+            Title = memory.Title,
+            Content = memory.Content,
+            Summary = memory.Summary,
+            MetadataJson = memory.MetadataJson,
+            ChangedBy = "governance-authority-replacement",
+            CreatedAt = now
+        }, cancellationToken);
     }
 
     private async Task<GovernanceBatchItemResult> ArchiveVerifiedSecondaryAsync(
@@ -896,44 +1263,187 @@ public sealed class GovernanceBatchExecutor(
         {
             return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.Deferred, "Archive requires a concrete MemoryId.", actor, cancellationToken);
         }
+
+        var authorityContext = await LoadSuccessorEvidenceContextAsync(
+            finding.PrimaryMemoryId.Value, actor, cancellationToken);
         var secondary = await memoryService.GetAsync(finding.PrimaryMemoryId.Value, cancellationToken);
-        if (secondary is null)
+        if (secondary is null || authorityContext is null)
         {
             return await AuditedResultAsync(item, GovernanceBatchActionType.Archive, GovernanceBatchItemDisposition.NoOp, "Secondary no longer exists.", [], [], actor, cancellationToken);
         }
-        if (secondary.Status == MemoryStatus.Archived)
+        var secondaryEntity = authorityContext.Predecessor;
+        if (secondary.Status == MemoryStatus.Archived || secondaryEntity.Status == MemoryStatus.Archived)
         {
             await governanceService.AcceptAsync(finding.Id, cancellationToken);
             return await AuditedResultAsync(item, GovernanceBatchActionType.Archive, GovernanceBatchItemDisposition.NoOp, "Secondary is already archived.", [], [secondary.Id], actor, cancellationToken);
         }
-        var replacementId = ReadGuid(secondary.MetadataJson, "supersededByMemoryId") ?? finding.SecondaryMemoryId;
-        if (!replacementId.HasValue)
+
+        var successorEvidence = authorityContext.Index.Evaluate(secondaryEntity, clock.UtcNow);
+        var hasTypedSuccessorSignal = successorEvidence.HasTypedSignal ||
+                                      authorityContext.RelatedItems.Any(x =>
+                                          x.SupersedesId == secondaryEntity.Id ||
+                                          x.SupersededById == secondaryEntity.Id);
+        if (hasTypedSuccessorSignal)
         {
-            return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.RequiresUserDecision, "Replacement chain has no authoritative primary.", actor, cancellationToken);
+            if (!successorEvidence.IsStrong)
+            {
+                return await SetFindingDispositionAsync(
+                    item,
+                    finding,
+                    GovernanceFindingDisposition.RequiresUserDecision,
+                    $"Typed successor evidence is not strong or same-scope ({successorEvidence.ReasonCode}); no archive mutation was attempted.",
+                    actor,
+                    cancellationToken);
+            }
+
+            if (SuccessorEvidencePolicy.RequiresHumanDecision(secondaryEntity))
+            {
+                return await SetFindingDispositionAsync(
+                    item,
+                    finding,
+                    GovernanceFindingDisposition.RequiresUserDecision,
+                    "Successor chain is valid but the predecessor is critical, protected, legal/privacy, business-sensitive, read-only, high-risk, or irreversible; explicit human approval is required.",
+                    actor,
+                    cancellationToken);
+            }
+
+            // Re-read the typed chain immediately before creating the proposal.
+            // A concurrent successor or evidence change must stop the item,
+            // never fall back to legacy metadata or revive the stale blocker.
+            authorityContext = await LoadSuccessorEvidenceContextAsync(
+                secondaryEntity.Id, actor, cancellationToken);
+            if (authorityContext is null)
+            {
+                return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.RequiresUserDecision,
+                    "Successor chain disappeared during revalidation; a fresh review is required.", actor, cancellationToken);
+            }
+
+            secondaryEntity = authorityContext.Predecessor;
+            successorEvidence = authorityContext.Index.Evaluate(secondaryEntity, clock.UtcNow);
+            if (!successorEvidence.IsStrong || SuccessorEvidencePolicy.RequiresHumanDecision(secondaryEntity))
+            {
+                return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.RequiresUserDecision,
+                    $"Successor chain changed during revalidation ({successorEvidence.ReasonCode}); no archive mutation was attempted.", actor, cancellationToken);
+            }
+
+            var typedSuccessor = successorEvidence.Successor!;
+            var typedEvidence = successorEvidence.Evidence!;
+            var typedProposal = await CreateAndApplyProposalAsync("memory_archive", secondaryEntity.ProjectId,
+                "Archive verified typed successor predecessor",
+                $"Archive {secondaryEntity.Id:D} only after explicit same-scope successor {typedSuccessor.Id:D} and evidence {typedEvidence.Id:D} read-back.",
+                new MemoryArchiveRequest(secondaryEntity.Id, secondaryEntity.ProjectId, true, "Verified typed successor evidence."),
+                request.GovernanceRunId, cancellationToken);
+            var typedReadBack = await memoryService.GetAsync(secondaryEntity.Id, cancellationToken);
+            if (typedReadBack?.Status != MemoryStatus.Archived)
+            {
+                throw new InvalidOperationException("Typed successor archive proposal applied but resource read-back is not Archived.");
+            }
+
+            var typedAuthorityReadBack = await LoadSuccessorEvidenceContextAsync(
+                secondaryEntity.Id, actor, cancellationToken);
+            var typedAuthority = typedAuthorityReadBack is null
+                ? null
+                : typedAuthorityReadBack.Index.Evaluate(typedAuthorityReadBack.Predecessor, clock.UtcNow);
+            if (typedAuthority is null || !typedAuthority.IsStrong ||
+                typedAuthority.Successor?.Id != typedSuccessor.Id ||
+                typedAuthority.Evidence?.Id != typedEvidence.Id)
+            {
+                throw new InvalidOperationException("Typed successor archive read-back no longer proves the same authority chain; review is required.");
+            }
+
+            await governanceService.AcceptAsync(finding.Id, cancellationToken);
+            return await AuditedResultAsync(item, GovernanceBatchActionType.Archive, GovernanceBatchItemDisposition.Applied,
+                "Typed successor predecessor was reversibly archived after same-scope evidence and resource read-back.",
+                [typedProposal.Id], [secondaryEntity.Id, typedSuccessor.Id, typedEvidence.Id], actor, cancellationToken);
         }
-        var primary = await memoryService.GetAsync(replacementId.Value, cancellationToken);
-        if (primary is null || primary.Status != MemoryStatus.Active || !string.Equals(primary.ProjectId, secondary.ProjectId, StringComparison.OrdinalIgnoreCase))
-        {
-            return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.RequiresUserDecision, "Replacement primary is missing, inactive, or cross ProjectId.", actor, cancellationToken);
-        }
-        var linked = await dbContext.MemoryLinks.AsNoTracking().AnyAsync(x =>
-            x.LinkType == "replaced_by" && x.FromId == secondary.Id && x.ToId == primary.Id, cancellationToken);
-        if (!linked)
-        {
-            return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.Deferred, "Replacement link is not yet materialized.", actor, cancellationToken);
-        }
-        var proposal = await CreateAndApplyProposalAsync("memory_archive", secondary.ProjectId, "Archive verified replacement secondary",
-            $"Archive {secondary.Id:D} after replacement-chain read-back.",
-            new MemoryArchiveRequest(secondary.Id, secondary.ProjectId, true, "Verified replacement chain."), request.GovernanceRunId, cancellationToken);
-        var readBack = await memoryService.GetAsync(secondary.Id, cancellationToken);
-        if (readBack?.Status != MemoryStatus.Archived)
-        {
-            throw new InvalidOperationException("Archive proposal applied but resource read-back is not Archived.");
-        }
-        await governanceService.AcceptAsync(finding.Id, cancellationToken);
-        return await AuditedResultAsync(item, GovernanceBatchActionType.Archive, GovernanceBatchItemDisposition.Applied,
-            "Verified replacement secondary was archived and read back.", [proposal.Id], [secondary.Id, primary.Id], actor, cancellationToken);
+
+        return await SetFindingDispositionAsync(
+            item,
+            finding,
+            GovernanceFindingDisposition.RequiresUserDecision,
+            "Legacy metadata-only replacement evidence cannot resolve a stale blocker; persist the typed AuthorityState, SupersededById, SupersedesId, and SuccessorEvidence chain first.",
+            actor,
+            cancellationToken);
     }
+
+    private async Task<bool> HasStrongSuccessorEvidenceAsync(
+        Guid predecessorId,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        var context = await LoadSuccessorEvidenceContextAsync(predecessorId, actor, cancellationToken);
+        return context is not null && context.Index.Evaluate(context.Predecessor, clock.UtcNow).IsStrong;
+    }
+
+    private async Task<SuccessorEvidenceContext?> LoadSuccessorEvidenceContextAsync(
+        Guid predecessorId,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        if (!actor.TenantId.HasValue || !actor.UserId.HasValue)
+        {
+            return null;
+        }
+
+        var predecessor = await dbContext.MemoryItems.AsNoTracking().FirstOrDefaultAsync(x =>
+            x.Id == predecessorId &&
+            x.TenantId == actor.TenantId &&
+            x.OwnerUserId == actor.UserId, cancellationToken);
+        if (predecessor is null)
+        {
+            return null;
+        }
+
+        // The authority graph is deliberately bounded to the target, its
+        // directly competing links, and referenced evidence. A large project
+        // fixture must not make an unrelated stale blocker appear resolved.
+        var anchorIds = new[]
+            {
+                predecessor.Id,
+                predecessor.SupersededById,
+                predecessor.SuccessorEvidenceId
+            }
+            .Where(x => x.HasValue)
+            .Select(x => x!.Value)
+            .Distinct()
+            .ToArray();
+        var related = await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId &&
+                        x.OwnerUserId == actor.UserId &&
+                        (anchorIds.Contains(x.Id) ||
+                         x.SupersedesId == predecessor.Id ||
+                         x.SupersededById == predecessor.Id))
+            .ToListAsync(cancellationToken);
+
+        var evidenceIds = related
+            .Select(x => x.SuccessorEvidenceId)
+            .Where(x => x.HasValue)
+            .Select(x => x!.Value)
+            .Except(related.Select(x => x.Id))
+            .Distinct()
+            .ToArray();
+        if (evidenceIds.Length > 0)
+        {
+            related.AddRange(await dbContext.MemoryItems.AsNoTracking()
+                .Where(x => x.TenantId == actor.TenantId &&
+                            x.OwnerUserId == actor.UserId &&
+                            evidenceIds.Contains(x.Id))
+                .ToListAsync(cancellationToken));
+        }
+
+        return new SuccessorEvidenceContext(
+            predecessor,
+            related
+                .Append(predecessor)
+                .DistinctBy(x => x.Id)
+                .ToArray(),
+            SuccessorEvidencePolicy.CreateIndex(related.Append(predecessor)));
+    }
+
+    private sealed record SuccessorEvidenceContext(
+        MemoryItem Predecessor,
+        IReadOnlyList<MemoryItem> RelatedItems,
+        SuccessorEvidencePolicy.SuccessorEvidenceIndex Index);
 
     private async Task<GovernanceBatchItemResult> ProcessSuggestedActionAsync(
         BatchPlanItem item,
@@ -987,14 +1497,21 @@ public sealed class GovernanceBatchExecutor(
         var protectedInsight = insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact || insight.Importance >= 0.8m;
         if (!protectedInsight && insight.Confidence >= request.SemanticAutoResolutionConfidenceThreshold)
         {
-            var title = Normalize(insight.Title);
-            var summary = Normalize(insight.Summary);
-            var durableEquivalent = await dbContext.MemoryItems.AsNoTracking().FirstOrDefaultAsync(x =>
+            var title = GovernanceEvidenceFingerprint.NormalizeExactText(insight.Title);
+            var summary = GovernanceEvidenceFingerprint.NormalizeExactText(insight.Summary);
+            var now = clock.UtcNow;
+            var durableEquivalents = await dbContext.MemoryItems.AsNoTracking().Where(x =>
                 x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && x.ProjectId == insight.ProjectId &&
-                x.Status == MemoryStatus.Active && x.Title.ToLower() == title && x.Summary.ToLower() == summary,
-                cancellationToken);
-            if (durableEquivalent is not null)
+                x.Status == MemoryStatus.Active &&
+                x.AuthorityState == MemoryAuthorityState.Current &&
+                x.ValidFrom <= now &&
+                (!x.ValidUntil.HasValue || x.ValidUntil > now) &&
+                x.Title.Trim().ToLower() == title && x.Summary.Trim().ToLower() == summary)
+                .Take(2)
+                .ToArrayAsync(cancellationToken);
+            if (durableEquivalents.Length == 1)
             {
+                var durableEquivalent = durableEquivalents[0];
                 await conversationService.SkipInsightAsync(new ConversationInsightGovernanceRequest(
                     insight.Id, request.GovernanceRunId,
                     $"Autonomously resolved against durable evidence {durableEquivalent.Id:D}."), cancellationToken);
@@ -1012,7 +1529,8 @@ public sealed class GovernanceBatchExecutor(
             protectedInsight
                 ? "Semantic or high-signal insight requires explicit user authority."
                 : "Scheduled batch deferred a non-terminal insight without inventing durable knowledge.",
-            request.GovernanceRunId), cancellationToken);
+            request.GovernanceRunId,
+            ExpectedPromotionStatus: insight.PromotionStatus), cancellationToken);
         var resultDisposition = updated.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision
             ? GovernanceBatchItemDisposition.RequiresUserDecision
             : GovernanceBatchItemDisposition.Deferred;
@@ -1031,14 +1549,9 @@ public sealed class GovernanceBatchExecutor(
         {
             return await AuditedResultAsync(item, GovernanceBatchActionType.ProposalApply, GovernanceBatchItemDisposition.NoOp, "Proposal is already terminal.", [], [], actor, cancellationToken);
         }
-        proposal.PromotionStatus = ConversationPromotionStatus.RequiresUserDecision;
-        proposal.GovernanceReason = "Pre-existing proposal was not auto-approved; target payload and irreversible effects require explicit review.";
-        proposal.GovernanceRunId = request.GovernanceRunId;
-        proposal.GovernanceUpdatedAt = clock.UtcNow;
-        proposal.UpdatedAt = clock.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        var reason = "Pending proposal requires explicit approval through the canonical proposal lifecycle; governance did not modify its status or payload.";
         return await AuditedResultAsync(item, GovernanceBatchActionType.ProposalApply, GovernanceBatchItemDisposition.RequiresUserDecision,
-            proposal.GovernanceReason, [proposal.Id], [], actor, cancellationToken);
+            reason, [proposal.Id], [], actor, cancellationToken);
     }
 
     private async Task<GovernanceBatchItemResult> SetFindingDispositionAsync(
@@ -1141,14 +1654,7 @@ public sealed class GovernanceBatchExecutor(
         var fullPlan = await fullGovernance.BuildAsync(projectIds, governanceRunId, snapshot, cancellationToken);
         return fullPlan.Items.Select(x => new BatchPlanItem(
                 x.ItemKey,
-                x.ItemKind switch
-                {
-                    GovernanceItemKind.Memory => "Finding",
-                    GovernanceItemKind.SuggestedAction => "SuggestedAction",
-                    GovernanceItemKind.ConversationInsight => "ConversationInsight",
-                    GovernanceItemKind.Proposal => "Proposal",
-                    _ => x.ItemKind.ToString()
-                },
+                DispatchKindFor(x.ItemKind),
                 ParseItemId(x.ItemKey, x.AuthorityResourceId),
                 x.ProjectId,
                 snapshot.Coverage.SnapshotToken,
@@ -1161,9 +1667,128 @@ public sealed class GovernanceBatchExecutor(
                 x.SemanticConfidence,
                 x.IsReversible,
                 x.RetentionPolicyVersion,
-                x.DeleteEligibleAt))
-            .OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Key, StringComparer.Ordinal).ToList();
+                x.DeleteEligibleAt,
+                x.ItemKind,
+                x.AuthorityResourceId,
+                x.ReasonCodes))
+             .OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Key, StringComparer.Ordinal).ToList();
     }
+
+    private async Task<IReadOnlyDictionary<string, string>> ValidateScheduledPlanAsync(
+        IReadOnlyList<BatchPlanItem> persistedPlan,
+        DurableMemoryGovernanceSnapshotResult snapshot,
+        IReadOnlyList<string> projectIds,
+        string governanceRunId,
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
+    {
+        if (persistedPlan.Count > MaximumPlanItems)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.ReReviewRequired,
+                "Persisted governance plan exceeds the safety limit; perform a fresh review.");
+        }
+
+        var duplicateKeys = persistedPlan
+            .GroupBy(x => x.Key, StringComparer.Ordinal)
+            .Where(x => string.IsNullOrWhiteSpace(x.Key) || x.Count() > 1)
+            .Select(x => x.Key)
+            .ToArray();
+        if (duplicateKeys.Length > 0)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.ReReviewRequired,
+                "Persisted governance plan contains duplicate or empty item keys; perform a fresh review.");
+        }
+
+        // PlanJson is a durable execution input, not an authority source. Rebuild
+        // the canonical projection from the immutable snapshot and current server
+        // state before a Scheduled mutation is allowed to cross this boundary.
+        var rebuiltPlan = await BuildPlanAsync(
+            snapshot,
+            projectIds,
+            governanceRunId,
+            actor,
+            cancellationToken);
+        var rebuiltByKey = rebuiltPlan.ToDictionary(x => x.Key, StringComparer.Ordinal);
+        if (rebuiltByKey.Count != persistedPlan.Count ||
+            persistedPlan.Any(item => !rebuiltByKey.ContainsKey(item.Key)))
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.ReReviewRequired,
+                "Persisted governance plan no longer matches the server-rebuilt authority projection; perform a fresh review.");
+        }
+
+        var rejected = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var item in persistedPlan)
+        {
+            var localReason = ValidateScheduledPlanItem(item);
+            if (localReason is not null)
+            {
+                rejected[item.Key] = localReason;
+                continue;
+            }
+
+            if (!CanonicalPlanEquivalent(item, rebuiltByKey[item.Key]))
+            {
+                rejected[item.Key] = "server-rebuilt-canonical-projection-mismatch";
+            }
+        }
+
+        return rejected;
+    }
+
+    private static string? ValidateScheduledPlanItem(BatchPlanItem item)
+    {
+        if (item.CanonicalKind is not { } canonicalKind || !Enum.IsDefined(canonicalKind))
+        {
+            return "missing-or-invalid-canonical-kind";
+        }
+
+        if (!string.Equals(item.Kind, DispatchKindFor(canonicalKind), StringComparison.Ordinal))
+        {
+            return "canonical-dispatch-kind-mismatch";
+        }
+
+        if (item.ReasonCodes is not { Count: > 0 } ||
+            item.ReasonCodes.Any(string.IsNullOrWhiteSpace))
+        {
+            return "missing-or-invalid-reason-codes";
+        }
+
+        return null;
+    }
+
+    private static bool CanonicalPlanEquivalent(BatchPlanItem persisted, BatchPlanItem rebuilt)
+        => string.Equals(persisted.Key, rebuilt.Key, StringComparison.Ordinal) &&
+           string.Equals(persisted.Kind, rebuilt.Kind, StringComparison.Ordinal) &&
+           persisted.Id == rebuilt.Id &&
+           string.Equals(persisted.ProjectId, rebuilt.ProjectId, StringComparison.OrdinalIgnoreCase) &&
+           string.Equals(persisted.SnapshotToken, rebuilt.SnapshotToken, StringComparison.Ordinal) &&
+           string.Equals(persisted.GovernanceRunId, rebuilt.GovernanceRunId, StringComparison.Ordinal) &&
+           string.Equals(persisted.Classification, rebuilt.Classification, StringComparison.Ordinal) &&
+           string.Equals(persisted.RecommendedAction, rebuilt.RecommendedAction, StringComparison.Ordinal) &&
+           persisted.RiskLevel == rebuilt.RiskLevel &&
+           persisted.RequiresExplicitApproval == rebuilt.RequiresExplicitApproval &&
+           persisted.SemanticConfidence == rebuilt.SemanticConfidence &&
+           persisted.IsReversible == rebuilt.IsReversible &&
+           string.Equals(persisted.RetentionPolicyVersion, rebuilt.RetentionPolicyVersion, StringComparison.Ordinal) &&
+           persisted.DeleteEligibleAt == rebuilt.DeleteEligibleAt &&
+           persisted.CanonicalKind == rebuilt.CanonicalKind &&
+           persisted.AuthorityResourceId == rebuilt.AuthorityResourceId &&
+           persisted.RelatedResourceIds.OrderBy(x => x).SequenceEqual(rebuilt.RelatedResourceIds.OrderBy(x => x)) &&
+           persisted.ReasonCodes!.OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(
+               rebuilt.ReasonCodes!.OrderBy(x => x, StringComparer.Ordinal), StringComparer.Ordinal);
+
+    private static string DispatchKindFor(GovernanceItemKind kind)
+        => kind switch
+        {
+            GovernanceItemKind.Memory => "Finding",
+            GovernanceItemKind.SuggestedAction => "SuggestedAction",
+            GovernanceItemKind.ConversationInsight => "ConversationInsight",
+            GovernanceItemKind.Proposal => "Proposal",
+            _ => kind.ToString()
+        };
 
     private async Task<IReadOnlyList<string>> ResolveProjectIdsAsync(
         IReadOnlyList<string>? requested,
@@ -1237,6 +1862,7 @@ public sealed class GovernanceBatchExecutor(
 
     internal static void ValidateRequest(GovernanceBatchExecuteRequest request)
     {
+        ValidateExecutionMode(request.ExecutionMode);
         if (string.IsNullOrWhiteSpace(request.GovernanceRunId) || request.GovernanceRunId.Trim().Length > 128)
             throw new InvalidOperationException("GovernanceRunId is required and must not exceed 128 characters.");
         if (request.MaxMutations is < 1 or > MaximumMutations)
@@ -1251,6 +1877,16 @@ public sealed class GovernanceBatchExecutor(
             throw new InvalidOperationException("MaxRiskLevel is invalid.");
         if (request.SemanticAutoResolutionConfidenceThreshold is < 0m or > 1m)
             throw new InvalidOperationException("SemanticAutoResolutionConfidenceThreshold must be between 0 and 1.");
+    }
+
+    private static void ValidateExecutionMode(GovernanceBatchExecutionMode executionMode)
+    {
+        if (!Enum.IsDefined(executionMode))
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                "ExecutionMode is invalid.");
+        }
     }
 
     private static object Canonicalize(GovernanceBatchExecuteRequest request, string snapshotToken, IReadOnlyList<string> projectIds)
@@ -1575,7 +2211,10 @@ public sealed class GovernanceBatchExecutor(
         decimal SemanticConfidence = 0m,
         bool IsReversible = false,
         string RetentionPolicyVersion = "",
-        DateTimeOffset? DeleteEligibleAt = null)
+        DateTimeOffset? DeleteEligibleAt = null,
+        GovernanceItemKind? CanonicalKind = null,
+        Guid? AuthorityResourceId = null,
+        IReadOnlyList<string>? ReasonCodes = null)
     {
         public IReadOnlyList<Guid> RelatedResourceIds => RelatedIds ?? [];
     }

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using Memory.Application;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace Memory.McpServer;
@@ -89,12 +90,20 @@ public sealed class MemoryMcpTools(
         => artifactExchangeService.PruneExpiredObjectsAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Create or replace a memory item using an external key.")]
-    public Task<MemoryDocument> memory_upsert(MemoryUpsertRequest request, CancellationToken cancellationToken = default)
-        => memoryService.UpsertAsync(request, cancellationToken);
+    public Task<MemoryDocument> memory_upsert(MemoryUpsertToolRequest request, CancellationToken cancellationToken = default)
+    {
+        var applicationRequest = request.ToApplicationRequest();
+        ValidateScoresForMcp(() => MemoryScoreContract.Validate(applicationRequest));
+        return memoryService.UpsertAsync(applicationRequest, cancellationToken);
+    }
 
     [McpServerTool(UseStructuredContent = true), Description("Update an existing memory item by id.")]
-    public Task<MemoryDocument> memory_update(MemoryUpdateRequest request, CancellationToken cancellationToken = default)
-        => memoryService.UpdateAsync(request, cancellationToken);
+    public Task<MemoryDocument> memory_update(MemoryUpdateToolRequest request, CancellationToken cancellationToken = default)
+    {
+        var applicationRequest = request.ToApplicationRequest();
+        ValidateScoresForMcp(() => MemoryScoreContract.Validate(applicationRequest));
+        return memoryService.UpdateAsync(applicationRequest, cancellationToken);
+    }
 
     [McpServerTool(UseStructuredContent = true), Description("Archive or restore an existing memory item by id.")]
     public Task<MemoryDocument> memory_archive(MemoryArchiveRequest request, CancellationToken cancellationToken = default)
@@ -295,8 +304,12 @@ public sealed class MemoryMcpTools(
         => memoryService.PromoteLogSliceAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Create or update an explicit user preference that should be reused across sessions and repositories.")]
-    public Task<UserPreferenceResult> user_preference_upsert(UserPreferenceUpsertRequest request, CancellationToken cancellationToken = default)
-        => memoryService.UpsertUserPreferenceAsync(request, cancellationToken);
+    public Task<UserPreferenceResult> user_preference_upsert(UserPreferenceUpsertToolRequest request, CancellationToken cancellationToken = default)
+    {
+        var applicationRequest = request.ToApplicationRequest();
+        ValidateScoresForMcp(() => MemoryScoreContract.Validate(applicationRequest));
+        return memoryService.UpsertUserPreferenceAsync(applicationRequest, cancellationToken);
+    }
 
     [McpServerTool(UseStructuredContent = true), Description("List persisted user preferences that guide coding style, tooling choices, and constraints.")]
     public Task<IReadOnlyList<UserPreferenceResult>> user_preference_list(UserPreferenceListRequest request, CancellationToken cancellationToken = default)
@@ -317,4 +330,16 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("Reject a pending ChatGPT write proposal without changing durable ContextHub memory.")]
     public Task<ChatGptProposalResult> chatgpt_proposal_reject(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
         => chatGptProposalService.RejectAsync(request, cancellationToken);
+
+    private static void ValidateScoresForMcp(Action validation)
+    {
+        try
+        {
+            validation();
+        }
+        catch (MemoryScoreValidationException ex)
+        {
+            throw new McpException(ex.Message, ex);
+        }
+    }
 }

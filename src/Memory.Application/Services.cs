@@ -399,6 +399,7 @@ public sealed class MemoryService(
 
     public async Task<MemoryDocument> UpsertAsync(MemoryUpsertRequest request, CancellationToken cancellationToken)
     {
+        MemoryScoreContract.Validate(request);
         await EnsureWriteAllowedUnlessServiceAsync("memory_upsert", cancellationToken);
         var externalKey = NormalizeRequiredText(request.ExternalKey, nameof(request.ExternalKey));
         var title = NormalizeRequiredText(request.Title, nameof(request.Title));
@@ -422,6 +423,7 @@ public sealed class MemoryService(
 
         if (entity is null)
         {
+            var now = clock.UtcNow;
             entity = new MemoryItem
             {
                 ProjectId = projectId,
@@ -440,8 +442,9 @@ public sealed class MemoryService(
                 Confidence = request.Confidence,
                 MetadataJson = metadataJson,
                 IsReadOnly = projectId == ProjectContext.SharedProjectId,
-                CreatedAt = clock.UtcNow,
-                UpdatedAt = clock.UtcNow
+                CreatedAt = now,
+                UpdatedAt = now,
+                ValidFrom = now
             };
             await dbContext.MemoryItems.AddAsync(entity, cancellationToken);
         }
@@ -486,6 +489,7 @@ public sealed class MemoryService(
 
     public async Task<MemoryDocument> UpdateAsync(MemoryUpdateRequest request, CancellationToken cancellationToken)
     {
+        MemoryScoreContract.Validate(request);
         await EnsureWriteAllowedUnlessServiceAsync("memory_update", cancellationToken);
         var projectId = request.ProjectId == null ? null : ProjectContext.Normalize(request.ProjectId);
         var actor = actorAccessor.Current;
@@ -935,19 +939,26 @@ public sealed class MemoryService(
             .Take(limit)
             .ToListAsync(cancellationToken);
 
-        return items
-            .Select(item => new MemorySearchHit(
-                item.Id,
-                item.Title,
-                item.MemoryType,
-                item.Scope,
-                item.Importance,
-                BuildFallbackExcerpt(item),
-                item.SourceType,
-                item.SourceRef,
-                item.Tags,
-                item.ProjectId,
-                ContextSavingsEstimator.EstimateTextTokens(item.Content)))
+        var candidates = items
+            .Select(item => new AuthorityAwareRetrievalReranker.RetrievalCandidate(
+                item,
+                decimal.Round((item.Importance + item.Confidence) / 2m, 4),
+                BuildFallbackExcerpt(item)))
+            .ToArray();
+
+        return AuthorityAwareRetrievalReranker.Rerank(candidates, limit)
+            .Select(candidate => new MemorySearchHit(
+                candidate.Item.Id,
+                candidate.Item.Title,
+                candidate.Item.MemoryType,
+                candidate.Item.Scope,
+                candidate.Score,
+                candidate.Excerpt,
+                candidate.Item.SourceType,
+                candidate.Item.SourceRef,
+                candidate.Item.Tags,
+                candidate.Item.ProjectId,
+                ContextSavingsEstimator.EstimateTextTokens(candidate.Item.Content)))
             .ToArray();
     }
 
@@ -1794,12 +1805,24 @@ public sealed class MemoryService(
             .OrderByDescending(x => x.Importance)
             .ThenByDescending(x => x.Confidence)
             .ThenByDescending(x => x.UpdatedAt)
-            .Take(limit)
+            .Take(limit * 4)
             .ToListAsync(cancellationToken);
+        var rankedFallback = AuthorityAwareRetrievalReranker.Rerank(
+            fallback.Select(item => new AuthorityAwareRetrievalReranker.RetrievalCandidate(
+                    item,
+                    decimal.Round((item.Importance + item.Confidence) / 2m, 4),
+                    item.Summary))
+                .ToArray(),
+            limit);
 
         return new UserPreferenceSearchResult(
-            fallback.Select(MapUserPreference).ToArray(),
-            fallback.Select(x => new WorkingContextCitation(x.Id, null, x.SourceRef, x.Summary, x.ProjectId)).ToArray());
+            rankedFallback.Select(x => MapUserPreference(x.Item)).ToArray(),
+            rankedFallback.Select(x => new WorkingContextCitation(
+                x.Item.Id,
+                null,
+                x.Item.SourceRef,
+                x.Excerpt,
+                x.Item.ProjectId)).ToArray());
     }
 
     private async Task ReplaceChunksAsync(MemoryItem entity, string content, CancellationToken cancellationToken)
@@ -2407,6 +2430,7 @@ public sealed class BackgroundJobProcessor(
 
         if (entity is null)
         {
+            var createdAt = clock.UtcNow;
             entity = new MemoryItem
             {
                 ProjectId = ProjectContext.SharedProjectId,
@@ -2417,7 +2441,8 @@ public sealed class BackgroundJobProcessor(
                 SourceType = "summary-layer",
                 SourceRef = normalizedProjectId,
                 IsReadOnly = true,
-                CreatedAt = clock.UtcNow
+                CreatedAt = createdAt,
+                ValidFrom = createdAt
             };
             await dbContext.MemoryItems.AddAsync(entity, cancellationToken);
         }
@@ -2553,6 +2578,7 @@ public static class DependencyInjection
         services.AddScoped<IGovernanceProjectScopeResolver, GovernanceProjectScopeResolver>();
         services.AddScoped<IDailyMemoryReviewService, DailyMemoryReviewService>();
         services.AddScoped<IKnowledgeReviewService, KnowledgeReviewService>();
+        services.AddScoped<IScheduledGovernanceReliabilityService, ScheduledGovernanceReliabilityService>();
         services.AddScoped<IScheduledGovernanceService, ScheduledGovernanceService>();
         services.AddScoped<IFullGovernancePlanService, FullGovernancePlanService>();
         services.AddScoped<IGovernanceBatchExecutor, GovernanceBatchExecutor>();

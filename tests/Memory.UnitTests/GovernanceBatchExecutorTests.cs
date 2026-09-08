@@ -32,6 +32,10 @@ public sealed class GovernanceBatchExecutorTests
             .Should().Throw<InvalidOperationException>().WithMessage("*MaxDurationSeconds*");
         ((Action)(() => GovernanceBatchExecutor.ValidateRequest(valid with { MaxRiskLevel = (GovernanceBatchRiskLevel)999 })))
             .Should().Throw<InvalidOperationException>().WithMessage("*MaxRiskLevel*");
+        ((Action)(() => GovernanceBatchExecutor.ValidateRequest(valid with { ExecutionMode = (GovernanceBatchExecutionMode)999 })))
+            .Should().Throw<GovernanceBatchException>()
+            .Where(ex => ex.Code == GovernanceBatchErrorCode.SchemaCapabilityMismatch)
+            .WithMessage("*ExecutionMode*");
         ((Action)(() => GovernanceBatchExecutor.ValidateRequest(valid with { SemanticAutoResolutionConfidenceThreshold = 1.01m })))
             .Should().Throw<InvalidOperationException>().WithMessage("*SemanticAutoResolutionConfidenceThreshold*");
     }

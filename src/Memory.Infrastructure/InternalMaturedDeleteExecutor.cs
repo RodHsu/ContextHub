@@ -55,7 +55,9 @@ public sealed class InternalMaturedDeleteExecutor(
                     cancellationToken);
                 if (state is not null)
                 {
-                    var eligibilityCancelled = state.DeleteEligibleAt is null || state.LifecycleStatus != "Eligible";
+                    var eligibilityCancelled = state.DeleteEligibleAt is null ||
+                        state.DeleteEligibleAt > timeProvider.GetUtcNow() ||
+                        state.LifecycleStatus != "Eligible";
                     if (string.Equals(state.ClaimToken, runId, StringComparison.Ordinal))
                     {
                         state.ClaimToken = string.Empty;
@@ -216,7 +218,8 @@ public sealed class InternalMaturedDeleteExecutor(
 
     private static ContextHubRequestActor BuildServiceActor(CandidateOwner owner)
         => new(owner.TenantId, owner.OwnerUserId, "internal-retention-worker", TenantUserRole.Admin,
-            [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite], [], IsAuthenticated: true, IsServiceActor: true);
+            [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.InternalRetentionDelete], [],
+            IsAuthenticated: true, IsServiceActor: true);
 
     private sealed record CandidateOwner(Guid TenantId, Guid OwnerUserId);
     private sealed record MaturedCandidate(Guid ResourceId, string ProjectId, Guid TenantId, Guid OwnerUserId);

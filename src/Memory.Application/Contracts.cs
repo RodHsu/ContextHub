@@ -1,5 +1,7 @@
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using Memory.Domain;
+using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 
 namespace Memory.Application;
@@ -14,7 +16,9 @@ public sealed record MemoryUpsertRequest(
     string SourceType,
     string SourceRef,
     IReadOnlyList<string> Tags,
+    [property: Range(0d, 1d)]
     decimal Importance,
+    [property: Range(0d, 1d)]
     decimal Confidence,
     string MetadataJson = "{}",
     string ProjectId = ProjectContext.DefaultProjectId);
@@ -25,7 +29,9 @@ public sealed record MemoryUpdateRequest(
     string? Content = null,
     string? Summary = null,
     IReadOnlyList<string>? Tags = null,
+    [property: Range(0d, 1d)]
     decimal? Importance = null,
+    [property: Range(0d, 1d)]
     decimal? Confidence = null,
     string? MetadataJson = null,
     string? ProjectId = null);
@@ -771,7 +777,9 @@ public sealed record UserPreferenceUpsertRequest(
     string Content,
     string Rationale,
     IReadOnlyList<string>? Tags = null,
+    [property: Range(0d, 1d)]
     decimal Importance = 0.95m,
+    [property: Range(0d, 1d)]
     decimal Confidence = 0.95m);
 
 public sealed record UserPreferenceListRequest(
@@ -1191,6 +1199,7 @@ public sealed record ConversationInsightResult(
     public DateTimeOffset? GovernanceUpdatedAt { get; init; }
     public DateTimeOffset? GovernanceBlockedAt { get; init; }
     public DateTimeOffset? GovernanceLastReevaluatedAt { get; init; }
+    public DateTimeOffset? GovernanceLastEvidenceChangedAt { get; init; }
     public string GovernanceBlockingLayer { get; init; } = string.Empty;
     public string GovernanceReasonClass { get; init; } = string.Empty;
     public string GovernanceRelatedTool { get; init; } = string.Empty;
@@ -1209,7 +1218,8 @@ public sealed record ConversationInsightDispositionRequest(
     string? GovernanceRunId = null,
     string? BlockingLayer = null,
     string? ReasonClass = null,
-    string? RelatedTool = null);
+    string? RelatedTool = null,
+    [property: JsonIgnore] ConversationPromotionStatus? ExpectedPromotionStatus = null);
 
 public sealed record AccessibleProjectResult(
     string ProjectId,
@@ -1545,7 +1555,7 @@ public sealed record GovernanceBatchExecuteRequest(
     bool DryRun = false,
     bool AllowHardDelete = false,
     bool IsReReview = false,
-    GovernanceBatchExecutionMode ExecutionMode = GovernanceBatchExecutionMode.Scheduled,
+    GovernanceBatchExecutionMode ExecutionMode = GovernanceBatchExecutionMode.Interactive,
     bool AllowMaturedDelete = false,
     decimal SemanticAutoResolutionConfidenceThreshold = 0.90m,
     string? ToolContractVersion = null,
@@ -1559,6 +1569,16 @@ public sealed record GovernanceReceiptContractIdentity(
     string ToolContractVersion,
     string SchemaHash,
     string PublishedCatalogVersion);
+
+public sealed record GovernanceRunLineageResult(
+    bool RunExists,
+    bool IsScheduledMode,
+    bool ContractMatches,
+    string Status,
+    string Reason)
+{
+    public bool IsValid => RunExists && IsScheduledMode && ContractMatches;
+}
 
 public sealed record GovernanceToolContractResult(
     string ToolName,
@@ -2118,14 +2138,21 @@ public interface IApplicationDbContext
     DbSet<MemoryRetentionState> MemoryRetentionStates { get; }
     DbSet<ResourceTombstone> ResourceTombstones { get; }
     DbSet<GovernanceRunReceipt> GovernanceRunReceipts { get; }
+    DbSet<ScheduledGovernanceReliabilityRun> ScheduledGovernanceReliabilityRuns { get; }
     DbSet<ProjectHierarchy> ProjectHierarchies { get; }
     DbSet<DiscussionThread> DiscussionThreads { get; }
     DbSet<DiscussionParticipant> DiscussionParticipants { get; }
     DbSet<DiscussionMessage> DiscussionMessages { get; }
     DbSet<ProjectWorkItem> ProjectWorkItems { get; }
     DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems { get; }
+    Task<IApplicationTransaction> BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken = default);
     void ClearTrackedChanges();
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
+}
+
+public interface IApplicationTransaction : IAsyncDisposable
+{
+    Task CommitAsync(CancellationToken cancellationToken = default);
 }
 
 public interface IChunkingService
@@ -2398,6 +2425,9 @@ public interface IGovernanceRunReceiptService
 {
     Task RecordReviewStartedAsync(string governanceRunId, DateTimeOffset startedAt, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken);
     Task RecordReviewAsync(KnowledgeReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
+    Task RecordScheduledDecisionAsync(ScheduledGovernanceReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
+    Task<IAsyncDisposable> AcquireRunLockAsync(string governanceRunId, CancellationToken cancellationToken);
+    Task<GovernanceRunLineageResult> GetScheduledLineageAsync(string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken);
     Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken);
     Task RecordExecutionStartedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task RecordExecutionAsync(GovernanceBatchExecuteRequest request, GovernanceBatchExecuteResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
