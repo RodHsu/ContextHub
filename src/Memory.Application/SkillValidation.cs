@@ -180,6 +180,26 @@ public static partial class PortableSkillBundleValidator
         return bounded.Length <= maximumLength ? bounded : bounded[..maximumLength];
     }
 
+    public static string ComputeContentHash(PortableSkillBundle bundle)
+    {
+        var files = new SortedDictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var file in bundle.Files)
+        {
+            var path = NormalizeRelativePath(file.Path)
+                ?? throw new InvalidOperationException("Cannot hash a portable bundle with an unsafe path.");
+            if (file.IsSymbolicLink)
+            {
+                throw new InvalidOperationException("Cannot hash a portable bundle containing a symbolic link.");
+            }
+            if (!files.TryAdd(path, Convert.FromBase64String(file.ContentBase64)))
+            {
+                throw new InvalidOperationException("Cannot hash a portable bundle containing duplicate paths.");
+            }
+        }
+
+        return ComputeContentHash(files);
+    }
+
     private static void ValidateIdentity(SkillImportPreviewRequest request, List<SkillValidationIssue> issues)
     {
         if (NormalizeStableKey(request.StableKey).Length is < 2 or > 120)

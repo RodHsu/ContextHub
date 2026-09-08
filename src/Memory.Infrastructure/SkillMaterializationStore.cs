@@ -13,17 +13,27 @@ public sealed class SkillRuntimeOptions
 public sealed class FileSystemSkillMaterializationStore(IOptions<SkillRuntimeOptions> options) : ISkillMaterializationStore
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ContentLocks = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> ExecutionLocks = [];
     private readonly string root = Path.GetFullPath(options.Value.MaterializationRoot);
 
     public async Task<string> MaterializeAsync(Guid executionId, string contentHash, PortableSkillBundle bundle, CancellationToken cancellationToken)
     {
         ValidateHash(contentHash);
+        var actualContentHash = PortableSkillBundleValidator.ComputeContentHash(bundle);
+        if (!string.Equals(contentHash, actualContentHash, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Materialization bundle does not match the pinned contentHash.");
+        }
         var contentRelative = Path.Combine("cache", contentHash);
         var contentPath = ResolveInsideRoot(contentRelative);
         var contentLock = ContentLocks.GetOrAdd(contentHash, _ => new SemaphoreSlim(1, 1));
         await contentLock.WaitAsync(cancellationToken);
         try
         {
+            if (Directory.Exists(contentPath) && !BundleMatchesDirectory(contentPath, bundle))
+            {
+                DeleteTree(contentPath);
+            }
             if (!Directory.Exists(contentPath))
             {
                 var staging = ResolveInsideRoot(Path.Combine("staging", $"{contentHash}-{Guid.NewGuid():N}"));
@@ -64,21 +74,64 @@ public sealed class FileSystemSkillMaterializationStore(IOptions<SkillRuntimeOpt
 
         var executionRelative = Path.Combine("executions", executionId.ToString("D"), contentHash);
         var executionPath = ResolveInsideRoot(executionRelative);
-        if (!Directory.Exists(executionPath))
+        var executionLock = ExecutionLocks.GetOrAdd(executionId, _ => new SemaphoreSlim(1, 1));
+        await executionLock.WaitAsync(cancellationToken);
+        try
         {
-            Directory.CreateDirectory(executionPath);
-            CopyTreeReadOnly(contentPath, executionPath);
+            if (Directory.Exists(executionPath) && !BundleMatchesDirectory(executionPath, bundle))
+            {
+                DeleteTree(executionPath);
+            }
+            if (!Directory.Exists(executionPath))
+            {
+                var staging = ResolveInsideRoot(Path.Combine("staging", $"execution-{executionId:N}-{contentHash}-{Guid.NewGuid():N}"));
+                Directory.CreateDirectory(staging);
+                try
+                {
+                    CopyTreeReadOnly(contentPath, staging);
+                    if (!BundleMatchesDirectory(staging, bundle))
+                    {
+                        DeleteTree(contentPath);
+                        throw new InvalidOperationException("Materialization cache failed contentHash integrity validation.");
+                    }
+                    Directory.CreateDirectory(Path.GetDirectoryName(executionPath)!);
+                    try
+                    {
+                        Directory.Move(staging, executionPath);
+                    }
+                    catch (IOException) when (Directory.Exists(executionPath))
+                    {
+                        DeleteTree(staging);
+                    }
+                }
+                catch
+                {
+                    DeleteTree(staging);
+                    throw;
+                }
+            }
+        }
+        finally
+        {
+            executionLock.Release();
         }
 
         return executionRelative.Replace('\\', '/');
     }
 
-    public Task CleanupExecutionAsync(Guid executionId, CancellationToken cancellationToken)
+    public async Task CleanupExecutionAsync(Guid executionId, CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var executionPath = ResolveInsideRoot(Path.Combine("executions", executionId.ToString("D")));
-        DeleteTree(executionPath);
-        return Task.CompletedTask;
+        var executionLock = ExecutionLocks.GetOrAdd(executionId, _ => new SemaphoreSlim(1, 1));
+        await executionLock.WaitAsync(cancellationToken);
+        try
+        {
+            var executionPath = ResolveInsideRoot(Path.Combine("executions", executionId.ToString("D")));
+            DeleteTree(executionPath);
+        }
+        finally
+        {
+            executionLock.Release();
+        }
     }
 
     private string ResolveInsideRoot(string relativePath) => ResolveInside(root, relativePath);
@@ -107,6 +160,25 @@ public sealed class FileSystemSkillMaterializationStore(IOptions<SkillRuntimeOpt
             File.Copy(file, target, overwrite: false);
             File.SetAttributes(target, File.GetAttributes(target) | FileAttributes.ReadOnly);
         }
+    }
+
+    private static bool BundleMatchesDirectory(string directory, PortableSkillBundle bundle)
+    {
+        var expected = bundle.Files.ToDictionary(
+            file => PortableSkillBundleValidator.NormalizeRelativePath(file.Path)!,
+            file => Convert.FromBase64String(file.ContentBase64),
+            StringComparer.Ordinal);
+        var actual = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .ToDictionary(
+                file => Path.GetRelativePath(directory, file).Replace('\\', '/'),
+                file => file,
+                StringComparer.Ordinal);
+        if (!expected.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(actual.Keys))
+        {
+            return false;
+        }
+
+        return expected.All(item => File.ReadAllBytes(actual[item.Key]).AsSpan().SequenceEqual(item.Value));
     }
 
     private static void DeleteTree(string path)

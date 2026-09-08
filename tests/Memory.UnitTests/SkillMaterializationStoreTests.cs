@@ -22,17 +22,30 @@ public sealed class SkillMaterializationStoreTests
                 "test-materialize", "Test", "Test materialization", "Use in tests", "1.0.0", bundle,
                 Memory.Domain.SkillSourceKind.LocalUpload, "tests", "1", "MIT")).ContentHash;
             var store = new FileSystemSkillMaterializationStore(Options.Create(new SkillRuntimeOptions { MaterializationRoot = root }));
+            var mismatch = () => store.MaterializeAsync(Guid.NewGuid(), new string('0', 64), bundle, CancellationToken.None);
+            await mismatch.Should().ThrowAsync<InvalidOperationException>()
+                .WithMessage("Materialization bundle does not match the pinned contentHash.");
             var firstExecution = Guid.NewGuid();
             var secondExecution = Guid.NewGuid();
+            var sharedExecution = Guid.NewGuid();
 
             var paths = await Task.WhenAll(
                 store.MaterializeAsync(firstExecution, hash, bundle, CancellationToken.None),
-                store.MaterializeAsync(secondExecution, hash, bundle, CancellationToken.None));
+                store.MaterializeAsync(secondExecution, hash, bundle, CancellationToken.None),
+                store.MaterializeAsync(sharedExecution, hash, bundle, CancellationToken.None),
+                store.MaterializeAsync(sharedExecution, hash, bundle, CancellationToken.None));
 
             paths[0].Should().NotBe(paths[1]);
+            paths[2].Should().Be(paths[3]);
             File.Exists(Path.Combine(root, paths[0], "SKILL.md")).Should().BeTrue();
             File.Exists(Path.Combine(root, paths[1], "SKILL.md")).Should().BeTrue();
+            File.Exists(Path.Combine(root, paths[2], "SKILL.md")).Should().BeTrue();
             Directory.GetDirectories(Path.Combine(root, "cache")).Should().ContainSingle();
+            var cachedSkill = Path.Combine(root, "cache", hash, "SKILL.md");
+            File.SetAttributes(cachedSkill, FileAttributes.Normal);
+            await File.WriteAllTextAsync(cachedSkill, "tampered");
+            var recoveredPath = await store.MaterializeAsync(Guid.NewGuid(), hash, bundle, CancellationToken.None);
+            (await File.ReadAllTextAsync(Path.Combine(root, recoveredPath, "SKILL.md"))).Should().Contain("Test materialization");
 
             await store.CleanupExecutionAsync(firstExecution, CancellationToken.None);
             Directory.Exists(Path.Combine(root, paths[0])).Should().BeFalse();
