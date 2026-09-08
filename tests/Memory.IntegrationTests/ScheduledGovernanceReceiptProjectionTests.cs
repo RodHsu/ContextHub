@@ -580,7 +580,11 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             GovernedHostBlockedExceptionCount: 0,
             GovernedDeferredExceptionCount: 0,
             ExceptionDelta: new GovernanceExceptionDeltaResult(0, 0, 1, 0),
-            RuntimeIdentity: ScheduledGovernanceContract.RuntimeIdentity);
+            RuntimeIdentity: ScheduledGovernanceContract.RuntimeIdentity)
+        {
+            SkillCoverage = new GovernanceSurfaceCoverageResult(8, 7, 6, 5, 4, 3, 2, true, true),
+            SkillSignalCounts = new Dictionary<string, int> { ["StaleMetadata"] = 2 }
+        };
 
         var identity = new GovernanceReceiptContractIdentity(
             ScheduledGovernanceContract.ToolContractVersion,
@@ -605,6 +609,8 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         projected.RequiresUserDecision.Should().Be(1);
         projected.FinalConvergenceStatus.Should().Be(nameof(ScheduledGovernanceDecision.ReversibleExecutionRequired));
         projected.ExceptionDelta.Should().Be(new GovernanceExceptionDeltaResult(0, 0, 1, 0));
+        projected.SkillCoverage.Should().Be(review.SkillCoverage);
+        projected.SkillSignalCounts.Should().BeEquivalentTo(review.SkillSignalCounts);
 
         var request = new GovernanceBatchExecuteRequest(
             runId,
@@ -658,6 +664,8 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         afterExecution.RequiresUserDecision.Should().Be(1);
         afterExecution.FinalConvergenceStatus.Should().Be(nameof(ScheduledGovernanceDecision.ReversibleExecutionRequired));
         afterExecution.LatestBatchReceived.Should().BeTrue();
+        afterExecution.SkillCoverage.Should().Be(review.SkillCoverage);
+        afterExecution.SkillSignalCounts.Should().BeEquivalentTo(review.SkillSignalCounts);
         var latestEntity = await scope.ServiceProvider.GetRequiredService<MemoryDbContext>()
             .GovernanceRunReceipts
             .Where(x => x.GovernanceRunId == runId)
@@ -678,6 +686,8 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         afterReplay.FinalConvergenceStatus.Should().Be(nameof(ScheduledGovernanceDecision.ReversibleExecutionRequired));
         afterReplay.Applied.Should().Be(1);
         afterReplay.IsReplay.Should().BeTrue();
+        afterReplay.SkillCoverage.Should().Be(review.SkillCoverage);
+        afterReplay.SkillSignalCounts.Should().BeEquivalentTo(review.SkillSignalCounts);
         var runAfterReplay = await scheduledService.GetReceiptAsync(runId, CancellationToken.None);
         runAfterReplay.Decision.Should().BeNull();
         runAfterReplay.Outcome.Should().Be("ReReviewRequired");

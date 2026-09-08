@@ -1082,7 +1082,7 @@ if ($governanceBatchTool.Count -ne 1) {
 }
 
 $governanceDescription = [string]$governanceBatchTool[0].description
-$expectedGovernanceSchemaHash = "6a8f6c0abd5be5687621b73c7cb73e6e19646057e9984703dbc5ec399cd5b2fb"
+$expectedGovernanceSchemaHash = "f2cffdc0359f7a8e31b844908e848de2515470e5d19a34560f253eccff96ca3e"
 if ($governanceDescription -notmatch "SchemaHash=$expectedGovernanceSchemaHash") {
     throw "governance_batch_execute did not publish expected SchemaHash=$expectedGovernanceSchemaHash."
 }

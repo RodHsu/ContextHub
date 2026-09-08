@@ -54,8 +54,8 @@ public sealed class ScheduledGovernanceSchemaTests
         methods.Select(method => method.Name).Should().BeEquivalentTo(
             ScheduledGovernanceToolCatalog.PublishedToolNames);
         methods.Should().HaveCount(4);
-        ScheduledGovernanceContract.ToolContractVersion.Should().Be("1.3");
-        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-09-08-automation-v4");
+        ScheduledGovernanceContract.ToolContractVersion.Should().Be("1.5");
+        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-09-08-automation-v6");
         ScheduledGovernanceContract.FixedReversibleActions.Should().Contain(GovernanceBatchActionType.SkillMetadataProposal);
 
         foreach (var method in methods)
@@ -109,6 +109,9 @@ public sealed class ScheduledGovernanceSchemaTests
             methods[ScheduledGovernanceContract.ReviewToolName], target, new McpServerToolCreateOptions()).ProtocolTool);
         review.GetProperty("description").GetString().Should().StartWith(
             "Read a full-governance snapshot without modifying, moving, archiving, or deleting governed resources.");
+        var reviewOutputProperties = review.GetProperty("outputSchema").GetProperty("properties");
+        reviewOutputProperties.TryGetProperty("skillCoverage", out _).Should().BeTrue();
+        reviewOutputProperties.TryGetProperty("skillSignalCounts", out _).Should().BeTrue();
         var reviewAnnotations = review.GetProperty("annotations");
         reviewAnnotations.GetProperty("readOnlyHint").GetBoolean().Should().BeTrue();
         reviewAnnotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
@@ -123,6 +126,8 @@ public sealed class ScheduledGovernanceSchemaTests
         outputProperties.TryGetProperty("decision", out _).Should().BeTrue();
         outputProperties.TryGetProperty("outcome", out _).Should().BeTrue();
         outputProperties.TryGetProperty("reliability", out var reliability).Should().BeTrue();
+        outputProperties.TryGetProperty("skillCoverage", out _).Should().BeTrue();
+        outputProperties.TryGetProperty("skillSignalCounts", out _).Should().BeTrue();
         var reliabilityProperties = reliability.GetProperty("properties");
         reliabilityProperties.TryGetProperty("consecutiveQualifyingRuns", out _).Should().BeTrue();
         reliabilityProperties.TryGetProperty("naturalOriginEvidence", out _).Should().BeTrue();

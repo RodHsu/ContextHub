@@ -19,14 +19,14 @@ public sealed class GovernanceToolContractTests
         GovernanceToolContract.SchemaHash.Should().MatchRegex("^[a-f0-9]{64}$");
         var contract = GovernanceToolContract.Describe();
         contract.ToolName.Should().Be("governance_batch_execute");
-        contract.ToolContractVersion.Should().Be("2.1");
-        contract.PublishedCatalogVersion.Should().Be("2026-09-08-v5");
+        contract.ToolContractVersion.Should().Be("2.2");
+        contract.PublishedCatalogVersion.Should().Be("2026-09-08-v6");
         contract.SupportedActions.Should().BeEquivalentTo(Enum.GetNames<GovernanceBatchActionType>());
         contract.SupportedActions.Should().Contain([
             nameof(GovernanceBatchActionType.Quarantine),
             nameof(GovernanceBatchActionType.MaturedDelete),
-            nameof(GovernanceBatchActionType.SemanticReevaluate)
-            ,nameof(GovernanceBatchActionType.SkillMetadataProposal)
+            nameof(GovernanceBatchActionType.SemanticReevaluate),
+            nameof(GovernanceBatchActionType.SkillMetadataProposal)
         ]);
     }
 

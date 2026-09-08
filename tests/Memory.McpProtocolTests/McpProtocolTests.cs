@@ -512,7 +512,8 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .EnumerateArray().Select(x => x.GetString()).Should().Contain([
                 nameof(GovernanceBatchActionType.Quarantine),
                 nameof(GovernanceBatchActionType.MaturedDelete),
-                nameof(GovernanceBatchActionType.SemanticReevaluate)
+                nameof(GovernanceBatchActionType.SemanticReevaluate),
+                nameof(GovernanceBatchActionType.SkillMetadataProposal)
             ]);
         governanceBatchTool.GetProperty("description").GetString().Should().Contain(GovernanceToolContract.SchemaHash);
         PublishedToolSchemaHash.Compute(governanceBatchTool).Should().Be(GovernanceToolContract.SchemaHash);
