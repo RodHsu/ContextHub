@@ -92,7 +92,19 @@ public sealed record SkillVersionSummaryResult(
     DateTimeOffset? PublishedAt,
     DateTimeOffset? DeprecatedAt,
     DateTimeOffset? RevokedAt,
-    DateTimeOffset? ArchivedAt);
+    DateTimeOffset? ArchivedAt,
+    IReadOnlyList<SkillDependencyInput>? Dependencies = null,
+    SkillPublishEvidenceResult? PublishEvidence = null);
+
+public sealed record SkillVersionDiffResult(
+    Guid SkillId,
+    SkillVersionSummaryResult Left,
+    SkillVersionSummaryResult Right,
+    IReadOnlyList<string> AddedPaths,
+    IReadOnlyList<string> RemovedPaths,
+    IReadOnlyList<string> ChangedPaths,
+    bool DiscoveryContractChanged,
+    bool ProvenanceChanged);
 
 public sealed record SkillSummaryResult(
     Guid Id,
@@ -112,7 +124,8 @@ public sealed record SkillSummaryResult(
     IReadOnlyList<SkillVersionSummaryResult> Versions,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    DateTimeOffset? ArchivedAt);
+    DateTimeOffset? ArchivedAt,
+    Guid? OwnerUserId = null);
 
 public sealed record SkillImportResult(
     SkillSummaryResult Skill,
@@ -458,6 +471,15 @@ public sealed record SkillAnalyticsRequest(
     string? AgentType = null,
     SkillAnalyticsDimension Dimension = SkillAnalyticsDimension.Skill);
 
+public sealed record SkillTelemetryTrendPointResult(
+    DateOnly Date,
+    int SearchImpressionCount,
+    int SelectedCount,
+    int RejectedCount,
+    int InvocationCount,
+    int SuccessCount,
+    int FailureCount);
+
 public sealed record SkillTelemetryReconciliationRequest(
     int RawEventRetentionDays = 90,
     int AggregateRetentionDays = 1095,
@@ -542,6 +564,7 @@ public interface ISkillService
     Task<IReadOnlyList<SkillSummaryResult>> ListAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken);
     Task<SkillSummaryResult?> GetAsync(Guid skillId, CancellationToken cancellationToken);
     Task<PortableSkillBundle> ExportAsync(Guid skillVersionId, CancellationToken cancellationToken);
+    Task<SkillVersionDiffResult> DiffVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken);
     Task<SkillSourceObservationResult> RecordSourceObservationAsync(SkillSourceObservationRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillSourceObservationResult>> ListSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken);
     Task<SkillSearchForExecutionResult> SearchForExecutionAsync(SkillSearchForExecutionRequest request, CancellationToken cancellationToken);
@@ -556,6 +579,7 @@ public interface ISkillService
     Task<IReadOnlyList<SkillSearchGenerationResult>> ListSearchGenerationsAsync(CancellationToken cancellationToken);
     Task<SkillReindexResult> ActivateSearchGenerationAsync(SkillSearchGenerationActivateRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetAnalyticsAsync(SkillAnalyticsRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillTelemetryTrendPointResult>> GetAnalyticsTrendAsync(SkillAnalyticsRequest request, CancellationToken cancellationToken);
     Task<SkillTelemetryReconciliationResult> ReconcileTelemetryAsync(SkillTelemetryReconciliationRequest request, CancellationToken cancellationToken);
     Task<SkillMetadataGovernanceReviewResult> ReviewMetadataGovernanceAsync(SkillMetadataGovernancePolicy policy, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillMetadataProposalResult>> ListMetadataProposalsAsync(SkillMetadataProposalStatus? status, CancellationToken cancellationToken);

@@ -288,6 +288,10 @@ public sealed class SkillResolution
     public int MaxSelectedSkills { get; set; }
     public string QueryHash { get; set; } = string.Empty;
     public string QueryTermsJson { get; set; } = "[]";
+    public string AvailableCapabilitiesJson { get; set; } = "[]";
+    public string AvailableToolsJson { get; set; } = "[]";
+    public string AllowedActionsJson { get; set; } = "[]";
+    public SkillRiskLevel MaximumRisk { get; set; }
     public Guid SearchGenerationId { get; set; }
     public SkillResolutionStatus Status { get; set; }
     public string IdempotencyKey { get; set; } = string.Empty;

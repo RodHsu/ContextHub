@@ -1529,6 +1529,8 @@ skills.MapPut("/{skillId:guid}/bindings", async (Guid skillId, SkillBindingUpser
 });
 skills.MapGet("/versions/{skillVersionId:guid}/export", async (Guid skillVersionId, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ExportAsync(skillVersionId, cancellationToken)));
+skills.MapGet("/{skillId:guid}/versions/diff", async (Guid skillId, Guid leftVersionId, Guid rightVersionId, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.DiffVersionsAsync(skillId, leftVersionId, rightVersionId, cancellationToken)));
 skills.MapGet("/{skillId:guid}/source-observations", async (Guid skillId, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ListSourceObservationsAsync(skillId, cancellationToken)));
 skills.MapPost("/{skillId:guid}/source-observations", async (Guid skillId, SkillSourceObservationRequest request, ISkillService service, CancellationToken cancellationToken) =>
@@ -1547,6 +1549,8 @@ skills.MapPost("/search-generations/{generationId:guid}/activate", async (Guid g
 });
 skills.MapPost("/analytics", async (SkillAnalyticsRequest request, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.GetAnalyticsAsync(request, cancellationToken)));
+skills.MapPost("/analytics/trend", async (SkillAnalyticsRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.GetAnalyticsTrendAsync(request, cancellationToken)));
 skills.MapPost("/analytics/reconcile", async (SkillTelemetryReconciliationRequest request, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ReconcileTelemetryAsync(request, cancellationToken)));
 skills.MapPost("/governance/review", async (SkillMetadataGovernancePolicy request, ISkillService service, CancellationToken cancellationToken)

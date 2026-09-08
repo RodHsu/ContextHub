@@ -47,6 +47,7 @@ public sealed class SkillService(
         var stableKey = preview.StableKey;
         var existing = await ScopedSkills(includeArchived: true)
             .Include(skill => skill.Versions)
+                .ThenInclude(version => version.Dependencies)
             .Include(skill => skill.Bindings)
             .FirstOrDefaultAsync(skill => skill.StableKey == stableKey, cancellationToken);
         if (existing is not null)
@@ -195,6 +196,7 @@ public sealed class SkillService(
         ValidateIdempotencyKey(request.IdempotencyKey);
         var version = await ScopedVersions(includeArchivedSkills: true)
             .Include(item => item.Skill)
+            .Include(item => item.Dependencies)
             .SingleOrDefaultAsync(item => item.Id == request.SkillVersionId, cancellationToken)
             ?? throw new KeyNotFoundException("SkillVersion was not found.");
         if (request.TargetStatus == SkillLifecycleStatus.Revoked)
@@ -257,6 +259,7 @@ public sealed class SkillService(
         ValidateIdempotencyKey(request.IdempotencyKey);
         var skill = await ScopedSkills(includeArchived: false)
             .Include(item => item.Versions)
+                .ThenInclude(version => version.Dependencies)
             .Include(item => item.Bindings)
             .SingleOrDefaultAsync(item => item.Id == request.SkillId, cancellationToken)
             ?? throw new KeyNotFoundException("Skill was not found.");
@@ -340,6 +343,7 @@ public sealed class SkillService(
 
         return (await ScopedSkills(includeArchived)
             .Include(skill => skill.Versions)
+                .ThenInclude(version => version.Dependencies)
             .Include(skill => skill.Bindings)
             .OrderBy(skill => skill.Name)
             .ToListAsync(cancellationToken))
@@ -352,6 +356,7 @@ public sealed class SkillService(
         EnsureReadAccess();
         var skill = await ScopedSkills(includeArchived: true)
             .Include(item => item.Versions)
+                .ThenInclude(version => version.Dependencies)
             .Include(item => item.Bindings)
             .SingleOrDefaultAsync(item => item.Id == skillId, cancellationToken);
         return skill is null ? null : ToSummary(skill);
@@ -364,6 +369,49 @@ public sealed class SkillService(
             .SingleOrDefaultAsync(item => item.Id == skillVersionId, cancellationToken)
             ?? throw new KeyNotFoundException("SkillVersion was not found.");
         return Deserialize<PortableSkillBundle>(version.BundleJson);
+    }
+
+    public async Task<SkillVersionDiffResult> DiffVersionsAsync(
+        Guid skillId,
+        Guid leftVersionId,
+        Guid rightVersionId,
+        CancellationToken cancellationToken)
+    {
+        EnsureReadAccess();
+        if (leftVersionId == rightVersionId)
+        {
+            throw new InvalidOperationException("Version diff requires two distinct SkillVersions.");
+        }
+
+        var versions = await ScopedVersions(includeArchivedSkills: true).AsNoTracking().Include(item => item.Dependencies)
+            .Where(item => item.SkillId == skillId && (item.Id == leftVersionId || item.Id == rightVersionId))
+            .ToListAsync(cancellationToken);
+        if (versions.Count != 2)
+        {
+            throw new KeyNotFoundException("One or both SkillVersions were not found on the requested Skill.");
+        }
+
+        var left = versions.Single(item => item.Id == leftVersionId);
+        var right = versions.Single(item => item.Id == rightVersionId);
+        var leftFiles = Deserialize<PortableSkillBundle>(left.BundleJson).Files.ToDictionary(
+            item => PortableSkillBundleValidator.NormalizeRelativePath(item.Path)!, item => item.ContentBase64, StringComparer.Ordinal);
+        var rightFiles = Deserialize<PortableSkillBundle>(right.BundleJson).Files.ToDictionary(
+            item => PortableSkillBundleValidator.NormalizeRelativePath(item.Path)!, item => item.ContentBase64, StringComparer.Ordinal);
+        var added = rightFiles.Keys.Except(leftFiles.Keys, StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var removed = leftFiles.Keys.Except(rightFiles.Keys, StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var changed = leftFiles.Keys.Intersect(rightFiles.Keys, StringComparer.Ordinal)
+            .Where(path => !string.Equals(leftFiles[path], rightFiles[path], StringComparison.Ordinal))
+            .Order(StringComparer.Ordinal).ToArray();
+        var discoveryChanged = !NormalizeValues(left.RequiredCapabilities).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(right.RequiredCapabilities) ||
+                               !NormalizeValues(left.RequiredTools).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(right.RequiredTools) ||
+                               !NormalizeValues(left.AllowedActions).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(right.AllowedActions) ||
+                               left.RequiresNetwork != right.RequiresNetwork || left.RequiresSecrets != right.RequiresSecrets ||
+                               !string.Equals(left.CompatibilityJson, right.CompatibilityJson, StringComparison.Ordinal);
+        var provenanceChanged = left.SourceKind != right.SourceKind || left.TrustLevel != right.TrustLevel ||
+                                !string.Equals(left.SourceRef, right.SourceRef, StringComparison.Ordinal) ||
+                                !string.Equals(left.SourceRevision, right.SourceRevision, StringComparison.Ordinal) ||
+                                left.SignatureVerified != right.SignatureVerified;
+        return new(skillId, ToVersionSummary(left), ToVersionSummary(right), added, removed, changed, discoveryChanged, provenanceChanged);
     }
 
     public async Task<SkillSourceObservationResult> RecordSourceObservationAsync(
@@ -459,7 +507,15 @@ public sealed class SkillService(
             .ToArray();
     }
 
-    public async Task<SkillSearchForExecutionResult> SearchForExecutionAsync(SkillSearchForExecutionRequest request, CancellationToken cancellationToken)
+    public Task<SkillSearchForExecutionResult> SearchForExecutionAsync(SkillSearchForExecutionRequest request, CancellationToken cancellationToken)
+        => dbContext.ExecuteInTransactionAsync(async transactionCancellationToken =>
+        {
+            var actor = actorAccessor.Current;
+            await dbContext.AcquireTransactionLockAsync($"skills:search:{actor.TenantId}:{actor.UserId}:{request.ExecutionId}", transactionCancellationToken);
+            return await SearchForExecutionCoreAsync(request, transactionCancellationToken);
+        }, cancellationToken);
+
+    private async Task<SkillSearchForExecutionResult> SearchForExecutionCoreAsync(SkillSearchForExecutionRequest request, CancellationToken cancellationToken)
     {
         EnsureExecutionAccess();
         ValidateSearchRequest(request);
@@ -569,6 +625,10 @@ public sealed class SkillService(
             MaxSelectedSkills = request.Policy.MaxSelectedSkills,
             QueryHash = queryHash,
             QueryTermsJson = Serialize(queryTerms),
+            AvailableCapabilitiesJson = Serialize(NormalizeValues(request.AvailableCapabilities)),
+            AvailableToolsJson = Serialize(NormalizeValues(request.AvailableTools)),
+            AllowedActionsJson = Serialize(NormalizeValues(request.AllowedActions)),
+            MaximumRisk = request.Policy.MaximumRisk,
             SearchGenerationId = generation.Id,
             Status = status,
             IdempotencyKey = request.IdempotencyKey,
@@ -668,7 +728,15 @@ public sealed class SkillService(
         }).ToArray();
     }
 
-    public async Task<SkillResolutionFeedbackResult> RecordFeedbackAsync(SkillResolutionFeedbackRequest request, CancellationToken cancellationToken)
+    public Task<SkillResolutionFeedbackResult> RecordFeedbackAsync(SkillResolutionFeedbackRequest request, CancellationToken cancellationToken)
+        => dbContext.ExecuteInTransactionAsync(async transactionCancellationToken =>
+        {
+            var actor = actorAccessor.Current;
+            await dbContext.AcquireTransactionLockAsync($"skills:feedback:{actor.TenantId}:{actor.UserId}:{request.IdempotencyKey}", transactionCancellationToken);
+            return await RecordFeedbackCoreAsync(request, transactionCancellationToken);
+        }, cancellationToken);
+
+    private async Task<SkillResolutionFeedbackResult> RecordFeedbackCoreAsync(SkillResolutionFeedbackRequest request, CancellationToken cancellationToken)
     {
         EnsureExecutionAccess();
         ValidateIdempotencyKey(request.IdempotencyKey);
@@ -728,7 +796,15 @@ public sealed class SkillService(
         return new(telemetry.Id, resolution.Id, version.Id, request.Stage, request.ReasonClass, false, resolution.Round < resolution.MaxSearchRounds, resolution.Round + 1, resolution.Status);
     }
 
-    public async Task<SkillSelectForExecutionResult> SelectAsync(SkillSelectForExecutionRequest request, CancellationToken cancellationToken)
+    public Task<SkillSelectForExecutionResult> SelectAsync(SkillSelectForExecutionRequest request, CancellationToken cancellationToken)
+        => dbContext.ExecuteInTransactionAsync(async transactionCancellationToken =>
+        {
+            var actor = actorAccessor.Current;
+            await dbContext.AcquireTransactionLockAsync($"skills:select:{actor.TenantId}:{actor.UserId}:{request.ResolutionId}", transactionCancellationToken);
+            return await SelectCoreAsync(request, transactionCancellationToken);
+        }, cancellationToken);
+
+    private async Task<SkillSelectForExecutionResult> SelectCoreAsync(SkillSelectForExecutionRequest request, CancellationToken cancellationToken)
     {
         EnsureExecutionAccess();
         ValidateIdempotencyKey(request.IdempotencyKey);
@@ -754,6 +830,7 @@ public sealed class SkillService(
         }
 
         var resolved = await ResolveDependenciesAsync(request.SkillVersionIds, resolution.MaxSelectedSkills, cancellationToken);
+        ValidateResolvedExecutionPolicy(resolution, resolved);
         ValidateConflicts(resolved);
         var now = timeProvider.GetUtcNow();
         foreach (var selected in resolved)
@@ -812,7 +889,15 @@ public sealed class SkillService(
         return new(version.SkillId, version.Id, version.Version, version.ContentHash, Deserialize<PortableSkillBundle>(version.BundleJson), version.Status, false);
     }
 
-    public async Task<SkillMaterializationResult> MaterializeAsync(SkillMaterializeRequest request, CancellationToken cancellationToken)
+    public Task<SkillMaterializationResult> MaterializeAsync(SkillMaterializeRequest request, CancellationToken cancellationToken)
+        => dbContext.ExecuteInTransactionAsync(async transactionCancellationToken =>
+        {
+            var actor = actorAccessor.Current;
+            await dbContext.AcquireTransactionLockAsync($"skills:materialize:{actor.TenantId}:{actor.UserId}:{request.ExecutionId}:{request.SkillVersionId}", transactionCancellationToken);
+            return await MaterializeCoreAsync(request, transactionCancellationToken);
+        }, cancellationToken);
+
+    private async Task<SkillMaterializationResult> MaterializeCoreAsync(SkillMaterializeRequest request, CancellationToken cancellationToken)
     {
         EnsureExecutionAccess();
         ValidateIdempotencyKey(request.IdempotencyKey);
@@ -896,7 +981,15 @@ public sealed class SkillService(
         return new(request.ExecutionId, materializations.Count, materializations.Select(item => item.Id).ToArray(), false);
     }
 
-    public async Task<SkillTelemetryRecordResult> RecordInvocationAsync(SkillInvocationRecordRequest request, CancellationToken cancellationToken)
+    public Task<SkillTelemetryRecordResult> RecordInvocationAsync(SkillInvocationRecordRequest request, CancellationToken cancellationToken)
+        => dbContext.ExecuteInTransactionAsync(async transactionCancellationToken =>
+        {
+            var actor = actorAccessor.Current;
+            await dbContext.AcquireTransactionLockAsync($"skills:invocation:{actor.TenantId}:{actor.UserId}:{request.IdempotencyKey}", transactionCancellationToken);
+            return await RecordInvocationCoreAsync(request, transactionCancellationToken);
+        }, cancellationToken);
+
+    private async Task<SkillTelemetryRecordResult> RecordInvocationCoreAsync(SkillInvocationRecordRequest request, CancellationToken cancellationToken)
     {
         EnsureExecutionAccess();
         ValidateIdempotencyKey(request.IdempotencyKey);
@@ -1008,12 +1101,17 @@ public sealed class SkillService(
 
         var target = await query.SingleOrDefaultAsync(item => item.Id == request.GenerationId, cancellationToken)
             ?? throw new KeyNotFoundException("Skill search generation was not found.");
-        var indexed = await dbContext.SkillSearchDocuments.CountAsync(item => item.GenerationId == target.Id, cancellationToken);
-        var eligibleCount = await ScopedVersions(includeArchivedSkills: false)
-            .CountAsync(item => SearchableStatuses.Contains(item.Status), cancellationToken);
-        if (indexed != eligibleCount)
+        var indexedDocuments = await dbContext.SkillSearchDocuments.AsNoTracking()
+            .Where(item => item.GenerationId == target.Id).ToListAsync(cancellationToken);
+        var eligibleVersions = await ScopedVersions(includeArchivedSkills: false).AsNoTracking().Include(item => item.Skill)
+            .Where(item => SearchableStatuses.Contains(item.Status)).ToListAsync(cancellationToken);
+        var indexedIds = indexedDocuments.Select(item => item.SkillVersionId).ToHashSet();
+        var eligibleIds = eligibleVersions.Select(item => item.Id).ToHashSet();
+        var indexed = indexedDocuments.Count;
+        if (!indexedIds.SetEquals(eligibleIds) || eligibleVersions.Any(version =>
+                !string.Equals(indexedDocuments.Single(item => item.SkillVersionId == version.Id).SearchText, BuildCurrentSearchText(version), StringComparison.Ordinal)))
         {
-            throw new InvalidOperationException("Search generation cannot be activated because its indexed version count is stale.");
+            throw new InvalidOperationException("Search generation cannot be activated because its version set or discovery metadata is stale.");
         }
 
         if (target.Status == SkillSearchGenerationStatus.Active)
@@ -1028,6 +1126,7 @@ public sealed class SkillService(
 
         await dbContext.ExecuteInTransactionAsync(async transactionCancellationToken =>
         {
+            await dbContext.AcquireTransactionLockAsync($"skills:index-activation:{target.TenantId}", transactionCancellationToken);
             var active = await dbContext.SkillSearchGenerations
                 .Where(item => item.TenantId == target.TenantId && item.Status == SkillSearchGenerationStatus.Active)
                 .ToListAsync(transactionCancellationToken);
@@ -1114,6 +1213,80 @@ public sealed class SkillService(
             .Select(group => BuildAggregate(group.Key, group, request.WindowDays))
             .OrderByDescending(item => item.SearchImpressionCount)
             .ToArray();
+    }
+
+    public async Task<IReadOnlyList<SkillTelemetryTrendPointResult>> GetAnalyticsTrendAsync(
+        SkillAnalyticsRequest request,
+        CancellationToken cancellationToken)
+    {
+        EnsureReadAccess();
+        if (request.WindowDays is < 1 or > 90)
+        {
+            throw new InvalidOperationException("Dashboard Skill telemetry trends support windows between 1 and 90 days.");
+        }
+
+        var actor = actorAccessor.Current;
+        var today = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime);
+        var firstDate = today.AddDays(-(request.WindowDays - 1));
+        var from = new DateTimeOffset(firstDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        var eventQuery = dbContext.SkillTelemetryEvents.AsNoTracking().Where(item =>
+            item.OccurredAt >= from && !dbContext.SkillTelemetryAggregationLedgers.Any(ledger => ledger.EventId == item.Id));
+        var aggregateQuery = dbContext.SkillTelemetryDailyAggregates.AsNoTracking().Where(item => item.AggregateDate >= firstDate);
+        if (actor.HasUser)
+        {
+            eventQuery = eventQuery.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
+            aggregateQuery = aggregateQuery.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
+            if (actor.AllowedProjectIds.Count > 0)
+            {
+                eventQuery = eventQuery.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
+                aggregateQuery = aggregateQuery.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
+            }
+        }
+        if (!string.IsNullOrWhiteSpace(request.ProjectId))
+        {
+            var normalized = ProjectContext.Normalize(request.ProjectId);
+            ActorAuthorization.EnsureProjectAllowed(actor, normalized, false);
+            eventQuery = eventQuery.Where(item => item.ProjectId == normalized);
+            aggregateQuery = aggregateQuery.Where(item => item.ProjectId == normalized);
+        }
+        if (!string.IsNullOrWhiteSpace(request.RepositoryId))
+        {
+            var normalized = NormalizeScopeValue(request.RepositoryId);
+            eventQuery = eventQuery.Where(item => item.RepositoryId == normalized);
+            aggregateQuery = aggregateQuery.Where(item => item.RepositoryId == normalized);
+        }
+        if (!string.IsNullOrWhiteSpace(request.AgentType))
+        {
+            var normalized = NormalizeScopeValue(request.AgentType);
+            eventQuery = eventQuery.Where(item => item.AgentType == normalized);
+            aggregateQuery = aggregateQuery.Where(item => item.AgentType == normalized);
+        }
+        if (request.SkillId.HasValue)
+        {
+            eventQuery = eventQuery.Where(item => item.SkillId == request.SkillId.Value);
+            aggregateQuery = aggregateQuery.Where(item => item.SkillId == request.SkillId.Value);
+        }
+        if (request.SkillVersionId.HasValue)
+        {
+            eventQuery = eventQuery.Where(item => item.SkillVersionId == request.SkillVersionId.Value);
+            aggregateQuery = aggregateQuery.Where(item => item.SkillVersionId == request.SkillVersionId.Value);
+        }
+
+        var rows = (await aggregateQuery.ToListAsync(cancellationToken)).Select(item => new TrendMetricRow(item.AggregateDate, item.EventType, item.EventCount))
+            .Concat((await eventQuery.ToListAsync(cancellationToken)).Select(item => new TrendMetricRow(DateOnly.FromDateTime(item.OccurredAt.UtcDateTime), item.EventType, 1)))
+            .GroupBy(item => item.Date).ToDictionary(group => group.Key, group => group.ToArray());
+        return Enumerable.Range(0, request.WindowDays).Select(offset =>
+        {
+            var date = firstDate.AddDays(offset);
+            var day = rows.GetValueOrDefault(date, []);
+            return new SkillTelemetryTrendPointResult(date,
+                Count(day, SkillTelemetryEventType.SearchImpression),
+                Count(day, SkillTelemetryEventType.Selected),
+                Count(day, SkillTelemetryEventType.Rejected, SkillTelemetryEventType.SelectedThenReleased),
+                Count(day, SkillTelemetryEventType.InvocationStarted),
+                Count(day, SkillTelemetryEventType.InvocationSucceeded),
+                Count(day, SkillTelemetryEventType.InvocationFailed));
+        }).ToArray();
     }
 
     public Task<SkillTelemetryReconciliationResult> ReconcileTelemetryAsync(
@@ -1568,16 +1741,54 @@ public sealed class SkillService(
         {
             var versions = await ScopedVersions(includeArchivedSkills: false).Include(item => item.Skill)
                 .Where(item => SearchableStatuses.Contains(item.Status)).ToListAsync(cancellationToken);
+            Dictionary<Guid, SkillSearchDocument> reusableDocuments = [];
+            if (!request.FullRebuild)
+            {
+                var sourceGeneration = await dbContext.SkillSearchGenerations.AsNoTracking()
+                    .Where(item => item.TenantId == actor.TenantId && item.Status == SkillSearchGenerationStatus.Active)
+                    .SingleOrDefaultAsync(cancellationToken)
+                    ?? throw new InvalidOperationException("Incremental Skill reindex requires an active source generation.");
+                if (!string.Equals(sourceGeneration.SearchProfileVersion, generation.SearchProfileVersion, StringComparison.Ordinal) ||
+                    !string.Equals(sourceGeneration.EmbeddingModelId, generation.EmbeddingModelId, StringComparison.Ordinal) ||
+                    !string.Equals(sourceGeneration.EmbeddingModelVersion, generation.EmbeddingModelVersion, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Embedding model or search profile changes require FullRebuild=true.");
+                }
+
+                reusableDocuments = await dbContext.SkillSearchDocuments.AsNoTracking()
+                    .Where(item => item.GenerationId == sourceGeneration.Id)
+                    .ToDictionaryAsync(item => item.SkillVersionId, cancellationToken);
+            }
+
+            var reused = 0;
+            var regenerated = 0;
             foreach (var version in versions)
             {
-                var vector = await embeddingProvider.EmbedAsync(version.SearchText, EmbeddingPurpose.Document, cancellationToken);
+                var currentSearchText = BuildCurrentSearchText(version);
+                string termsJson;
+                string embeddingJson;
+                if (reusableDocuments.TryGetValue(version.Id, out var existingDocument) &&
+                    string.Equals(existingDocument.SearchText, currentSearchText, StringComparison.Ordinal))
+                {
+                    termsJson = existingDocument.TermsJson;
+                    embeddingJson = existingDocument.EmbeddingJson;
+                    reused++;
+                }
+                else
+                {
+                    var vector = await embeddingProvider.EmbedAsync(currentSearchText, EmbeddingPurpose.Document, cancellationToken);
+                    termsJson = Serialize(SkillText.Tokenize(currentSearchText));
+                    embeddingJson = Serialize(vector.Values);
+                    regenerated++;
+                }
+
                 dbContext.SkillSearchDocuments.Add(new SkillSearchDocument
                 {
                     GenerationId = generation.Id,
                     SkillVersionId = version.Id,
-                    SearchText = version.SearchText,
-                    TermsJson = Serialize(SkillText.Tokenize(version.SearchText)),
-                    EmbeddingJson = Serialize(vector.Values),
+                    SearchText = currentSearchText,
+                    TermsJson = termsJson,
+                    EmbeddingJson = embeddingJson,
                     CreatedAt = timeProvider.GetUtcNow()
                 });
             }
@@ -1587,11 +1798,21 @@ public sealed class SkillService(
             var indexed = await dbContext.SkillSearchDocuments.CountAsync(item => item.GenerationId == generation.Id, cancellationToken);
             if (indexed != versions.Count) throw new InvalidOperationException("Shadow Skill index validation count does not match the eligible Published/Deprecated version count.");
             stopwatch.Stop();
-            generation.BenchmarkJson = Serialize(new { request.IdempotencyKey, indexedVersionCount = indexed, elapsedMilliseconds = stopwatch.ElapsedMilliseconds, validation = "count-and-hard-filter-pass" });
+            generation.BenchmarkJson = Serialize(new
+            {
+                request.IdempotencyKey,
+                buildMode = request.FullRebuild ? "full" : "incremental",
+                indexedVersionCount = indexed,
+                reusedDocumentCount = reused,
+                regeneratedVersionCount = regenerated,
+                elapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                validation = "exact-version-set-and-current-metadata-pass"
+            });
             if (request.Activate)
             {
                 await dbContext.ExecuteInTransactionAsync(async transactionCancellationToken =>
                 {
+                    await dbContext.AcquireTransactionLockAsync($"skills:index-activation:{actor.TenantId}", transactionCancellationToken);
                     var active = await dbContext.SkillSearchGenerations
                         .Where(item => item.TenantId == actor.TenantId && item.Status == SkillSearchGenerationStatus.Active)
                         .ToListAsync(transactionCancellationToken);
@@ -1641,6 +1862,8 @@ public sealed class SkillService(
         if (version.RequiredCapabilities.Any(value => !capabilities.Contains(value)) ||
             version.RequiredTools.Any(value => !tools.Contains(value)) ||
             version.AllowedActions.Any(value => !allowedActions.Contains(value))) return false;
+        if (version.RequiresNetwork && !capabilities.Contains("network")) return false;
+        if (version.RequiresSecrets && !capabilities.Contains("secrets")) return false;
         var matches = version.Skill.Bindings.Where(binding => BindingMatches(binding, request, projectId)).OrderByDescending(binding => BindingPrecedence(binding.Scope)).ToArray();
         if (matches.Any(binding => binding.Mode == SkillBindingMode.Disabled)) return false;
         var strongest = matches.FirstOrDefault();
@@ -1682,7 +1905,10 @@ public sealed class SkillService(
             if (depth > 8 || resolved.Count >= Math.Min(maximumCount, 32)) throw new InvalidOperationException("Selected Skill dependency closure exceeds the bounded depth/count policy.");
             if (resolved.TryGetValue(versionId, out var current)) { if (!dependency) resolved[versionId] = current with { IsDependency = false }; return; }
             if (!visiting.Add(versionId)) throw new InvalidOperationException("Skill dependency cycle detected.");
-            var version = await ScopedVersions(includeArchivedSkills: false).Include(item => item.Skill).Include(item => item.Dependencies).SingleAsync(item => item.Id == versionId, cancellationToken);
+            var version = await ScopedVersions(includeArchivedSkills: false)
+                .Include(item => item.Skill!).ThenInclude(skill => skill.Bindings)
+                .Include(item => item.Dependencies)
+                .SingleAsync(item => item.Id == versionId, cancellationToken);
             resolved[versionId] = new(version, dependency);
             foreach (var requirement in version.Dependencies.Where(item => item.Kind == SkillDependencyKind.Requires))
             {
@@ -1706,6 +1932,55 @@ public sealed class SkillService(
             if (conflict is not null) throw new InvalidOperationException($"SkillSetConflict: {item.Version.SkillId:D} conflicts with {conflict.TargetSkillId:D}.");
         }
     }
+
+    private static void ValidateResolvedExecutionPolicy(SkillResolution resolution, IReadOnlyList<ResolvedVersion> resolved)
+    {
+        var capabilities = Deserialize<string[]>(resolution.AvailableCapabilitiesJson).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var tools = Deserialize<string[]>(resolution.AvailableToolsJson).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var allowedActions = Deserialize<string[]>(resolution.AllowedActionsJson).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in resolved)
+        {
+            var version = item.Version;
+            if (version.Status is not (SkillLifecycleStatus.Published or SkillLifecycleStatus.Deprecated) ||
+                version.Skill is null ||
+                version.Skill.ArchivedAt.HasValue ||
+                version.Skill.RiskLevel > resolution.MaximumRisk ||
+                version.RequiredCapabilities.Any(value => !capabilities.Contains(value)) ||
+                version.RequiredTools.Any(value => !tools.Contains(value)) ||
+                version.AllowedActions.Any(value => !allowedActions.Contains(value)) ||
+                (version.RequiresNetwork && !capabilities.Contains("network")) ||
+                (version.RequiresSecrets && !capabilities.Contains("secrets")))
+            {
+                throw new InvalidOperationException("Resolved Skill dependency no longer satisfies the pinned execution policy.");
+            }
+
+            var bindings = version.Skill.Bindings
+                .Where(binding => BindingMatches(binding, resolution))
+                .OrderByDescending(binding => BindingPrecedence(binding.Scope))
+                .ToArray();
+            if (bindings.Any(binding => binding.Mode == SkillBindingMode.Disabled))
+            {
+                throw new InvalidOperationException("Resolved Skill dependency is disabled for this execution scope.");
+            }
+
+            var strongest = bindings.FirstOrDefault();
+            if (strongest is not null && !SemanticVersionConstraint.IsSatisfied(version.Version, strongest.VersionConstraint))
+            {
+                throw new InvalidOperationException("Resolved Skill dependency violates its binding version constraint.");
+            }
+        }
+    }
+
+    private static bool BindingMatches(SkillBinding binding, SkillResolution resolution)
+        => binding.Scope switch
+        {
+            SkillBindingScope.Tenant => true,
+            SkillBindingScope.Project => string.Equals(binding.ScopeValue, resolution.ProjectId, StringComparison.OrdinalIgnoreCase),
+            SkillBindingScope.Repository => string.Equals(binding.ScopeValue, resolution.RepositoryId, StringComparison.OrdinalIgnoreCase),
+            SkillBindingScope.AgentType => string.Equals(binding.ScopeValue, resolution.AgentType, StringComparison.OrdinalIgnoreCase),
+            SkillBindingScope.Execution => string.Equals(binding.ScopeValue, resolution.ExecutionId.ToString("D"), StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
 
     private async Task<SkillSearchForExecutionResult> BuildSearchResultAsync(SkillResolution resolution, bool replayed, CancellationToken cancellationToken, bool degraded = false, SkillSearchGeneration? knownGeneration = null)
     {
@@ -1800,6 +2075,9 @@ public sealed class SkillService(
             windowDays);
     }
 
+    private static int Count(IEnumerable<TrendMetricRow> rows, params SkillTelemetryEventType[] eventTypes)
+        => rows.Where(item => eventTypes.Contains(item.EventType)).Sum(item => item.Count);
+
     private static bool IsRelevanceQualityRejection(SkillTelemetryEvent item)
         => item.EventType is SkillTelemetryEventType.Rejected or SkillTelemetryEventType.SelectedThenReleased &&
            item.RejectionStage != SkillRejectionStage.RevokedOrPolicyCancelled &&
@@ -1866,10 +2144,12 @@ public sealed class SkillService(
         => new(skill.StableKey, skill.Name, skill.Description, skill.WhenToUse, version.Version, bundle, version.SourceKind, version.SourceRef, version.SourceRevision, skill.License, skill.Tags, skill.Aliases, Deserialize<string[]>(skill.MaintainersJson), version.RequiredCapabilities, version.RequiredTools, version.AllowedActions, version.Dependencies.Select(item => new SkillDependencyInput(item.TargetSkillId, item.Kind, item.VersionConstraint)).ToArray(), skill.RiskLevel, version.TrustLevel, version.RequiresNetwork, version.RequiresSecrets, version.SignatureAlgorithm, version.SignatureValue);
 
     private static SkillSummaryResult ToSummary(Skill skill)
-        => new(skill.Id, skill.StableKey, skill.Name, skill.Description, skill.WhenToUse, skill.Tags, skill.Aliases, skill.License, Deserialize<string[]>(skill.MaintainersJson), skill.RiskLevel, skill.MetadataVersion, MetadataHash(skill), skill.DefaultVersionId, skill.Bindings.OrderByDescending(item => BindingPrecedence(item.Scope)).Select(ToBindingResult).ToArray(), skill.Versions.OrderByDescending(item => ParseVersion(item.Version)).Select(ToVersionSummary).ToArray(), skill.CreatedAt, skill.UpdatedAt, skill.ArchivedAt);
+        => new(skill.Id, skill.StableKey, skill.Name, skill.Description, skill.WhenToUse, skill.Tags, skill.Aliases, skill.License, Deserialize<string[]>(skill.MaintainersJson), skill.RiskLevel, skill.MetadataVersion, MetadataHash(skill), skill.DefaultVersionId, skill.Bindings.OrderByDescending(item => BindingPrecedence(item.Scope)).Select(ToBindingResult).ToArray(), skill.Versions.OrderByDescending(item => ParseVersion(item.Version)).Select(ToVersionSummary).ToArray(), skill.CreatedAt, skill.UpdatedAt, skill.ArchivedAt, skill.OwnerUserId);
 
     private static SkillVersionSummaryResult ToVersionSummary(SkillVersion version)
-        => new(version.Id, version.SkillId, version.Version, version.Status, version.ContentHash, version.RequiredCapabilities, version.RequiredTools, version.AllowedActions, version.SourceKind, version.SourceRef, version.SourceRevision, version.TrustLevel, version.SignatureVerified, version.CreatedAt, version.PublishedAt, version.DeprecatedAt, version.RevokedAt, version.ArchivedAt);
+        => new(version.Id, version.SkillId, version.Version, version.Status, version.ContentHash, version.RequiredCapabilities, version.RequiredTools, version.AllowedActions, version.SourceKind, version.SourceRef, version.SourceRevision, version.TrustLevel, version.SignatureVerified, version.CreatedAt, version.PublishedAt, version.DeprecatedAt, version.RevokedAt, version.ArchivedAt,
+            version.Dependencies.Select(item => new SkillDependencyInput(item.TargetSkillId, item.Kind, item.VersionConstraint)).ToArray(),
+            string.IsNullOrWhiteSpace(version.PublishEvidenceJson) ? null : Deserialize<SkillPublishEvidenceResult>(version.PublishEvidenceJson));
 
     private static SkillBindingResult ToBindingResult(SkillBinding binding)
         => new(binding.Id, binding.SkillId, binding.Scope, binding.ScopeValue, binding.Mode, binding.VersionConstraint, binding.Revision, binding.UpdatedAt);
@@ -1879,6 +2159,15 @@ public sealed class SkillService(
 
     private static string BuildSearchText(Skill skill, string markdown)
         => string.Join('\n', skill.Name, skill.Description, skill.WhenToUse, string.Join(' ', skill.Tags), string.Join(' ', skill.Aliases), markdown.Length <= 4000 ? markdown : markdown[..4000]);
+
+    private static string BuildCurrentSearchText(SkillVersion version)
+    {
+        var bundle = Deserialize<PortableSkillBundle>(version.BundleJson);
+        var skillMarkdown = bundle.Files.FirstOrDefault(item => string.Equals(item.Path.Replace('\\', '/'), "SKILL.md", StringComparison.Ordinal)) is { } file
+            ? Encoding.UTF8.GetString(Convert.FromBase64String(file.ContentBase64))
+            : string.Empty;
+        return BuildSearchText(version.Skill ?? throw new InvalidOperationException("SkillVersion search indexing requires its Skill metadata."), skillMarkdown);
+    }
 
     private static string BuildQueryText(SkillSearchForExecutionRequest request)
         => string.Join('\n', request.Objective.Trim(), string.Join(' ', NormalizeValues(request.Keywords)), string.Join(' ', NormalizeValues(request.Tags)), string.Join(' ', NormalizeValues(request.AvailableCapabilities)), request.RepositoryId, request.AgentType);
@@ -2008,6 +2297,7 @@ public sealed class SkillService(
         SkillTelemetryEventType EventType,
         SkillRejectionStage? RejectionStage,
         SkillRejectionReason? ReasonClass);
+    private sealed record TrendMetricRow(DateOnly Date, SkillTelemetryEventType EventType, int Count);
     private sealed record TelemetryMetricRow(
         Guid SkillId,
         Guid SkillVersionId,

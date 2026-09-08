@@ -148,6 +148,10 @@ internal static class SkillDbModelConfiguration
             entity.Property(x => x.MaxSelectedSkills).HasColumnName("max_selected_skills");
             entity.Property(x => x.QueryHash).HasColumnName("query_hash");
             entity.Property(x => x.QueryTermsJson).HasColumnName("query_terms_json").HasColumnType("jsonb");
+            entity.Property(x => x.AvailableCapabilitiesJson).HasColumnName("available_capabilities_json").HasColumnType("jsonb");
+            entity.Property(x => x.AvailableToolsJson).HasColumnName("available_tools_json").HasColumnType("jsonb");
+            entity.Property(x => x.AllowedActionsJson).HasColumnName("allowed_actions_json").HasColumnType("jsonb");
+            entity.Property(x => x.MaximumRisk).HasColumnName("maximum_risk").HasConversion<string>();
             entity.Property(x => x.SearchGenerationId).HasColumnName("search_generation_id");
             entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
             entity.Property(x => x.IdempotencyKey).HasColumnName("idempotency_key");

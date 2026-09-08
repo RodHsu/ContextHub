@@ -101,6 +101,7 @@ public interface IContextHubApiClient
     Task<IReadOnlyList<AgentConnectivityRecentObservationResult>> GetRecentAgentConnectivityObservationsAsync(string? projectId, string? agentId, int limit, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillTelemetryTrendPointResult>> GetSkillAnalyticsTrendAsync(string? projectId, int windowDays, CancellationToken cancellationToken);
     Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken);
     Task<SkillReindexResult> ReindexSkillsAsync(SkillReindexRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillSearchGenerationResult>> GetSkillSearchGenerationsAsync(CancellationToken cancellationToken);
@@ -113,6 +114,7 @@ public interface IContextHubApiClient
     Task<SkillSummaryResult> SetSkillDefaultVersionAsync(SkillDefaultVersionRequest request, CancellationToken cancellationToken);
     Task<SkillBindingResult> UpsertSkillBindingAsync(SkillBindingUpsertRequest request, CancellationToken cancellationToken);
     Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken);
+    Task<SkillVersionDiffResult> DiffSkillVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken);
     Task<SkillSourceObservationResult> RecordSkillSourceObservationAsync(SkillSourceObservationRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillResolutionDetailResult>> GetSkillResolutionsAsync(string? projectId, int limit, CancellationToken cancellationToken);
@@ -145,6 +147,12 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     {
         using var response = await httpClient.PostAsJsonAsync("/api/skills/analytics", new SkillAnalyticsRequest(projectId, WindowDays: windowDays), cancellationToken);
         return await ReadRequiredAsync<IReadOnlyList<SkillTelemetryAggregateResult>>(response, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<SkillTelemetryTrendPointResult>> GetSkillAnalyticsTrendAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/skills/analytics/trend", new SkillAnalyticsRequest(projectId, WindowDays: windowDays), cancellationToken);
+        return await ReadRequiredAsync<IReadOnlyList<SkillTelemetryTrendPointResult>>(response, cancellationToken);
     }
 
     public async Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken)
@@ -212,6 +220,13 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken)
         => GetRequiredAsync<PortableSkillBundle>($"/api/skills/versions/{skillVersionId:D}/export", cancellationToken);
+
+    public Task<SkillVersionDiffResult> DiffSkillVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken)
+        => GetRequiredAsync<SkillVersionDiffResult>(QueryHelpers.AddQueryString($"/api/skills/{skillId:D}/versions/diff", new Dictionary<string, string?>
+        {
+            ["leftVersionId"] = leftVersionId.ToString("D"),
+            ["rightVersionId"] = rightVersionId.ToString("D")
+        }), cancellationToken);
 
     public Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken)
         => GetRequiredAsync<IReadOnlyList<SkillSourceObservationResult>>($"/api/skills/{skillId:D}/source-observations", cancellationToken);

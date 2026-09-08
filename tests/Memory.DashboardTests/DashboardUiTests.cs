@@ -669,6 +669,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         skillsHtml.Should().Contain("Portable import");
         skillsHtml.Should().Contain("Search index generations");
         skillsHtml.Should().Contain("Execution resolution audit");
+        skillsHtml.Should().Contain("Daily telemetry trend");
 
         using var evaluationResponse = await client.GetAsync("/evaluation");
         evaluationResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -2100,6 +2101,9 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
     public Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SkillTelemetryAggregateResult>>([]);
 
+    public Task<IReadOnlyList<SkillTelemetryTrendPointResult>> GetSkillAnalyticsTrendAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SkillTelemetryTrendPointResult>>([]);
+
     public Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken)
         => Task.FromResult(new SkillMetadataGovernanceReviewResult(0, 0, 0, 0, 0, true, false, []));
 
@@ -2134,6 +2138,9 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
         => throw new NotSupportedException();
 
     public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<SkillVersionDiffResult> DiffSkillVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken)
         => throw new NotSupportedException();
 
     public Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken)

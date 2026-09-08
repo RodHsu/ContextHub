@@ -17,6 +17,55 @@ namespace Memory.ApiContractTests;
 public sealed class ApiContractTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Skill_Version_Diff_And_Telemetry_Trend_Endpoints_Should_Return_Stable_Contracts()
+    {
+        Guid skillId;
+        Guid firstVersionId;
+        Guid secondVersionId;
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+            var stableKey = $"api-skill-{Guid.NewGuid():N}"[..30];
+
+            async Task<SkillImportResult> ImportVersionAsync(string version, string description)
+            {
+                var markdown = $"---\nname: API Skill\ndescription: {description}\n---\n# API Skill";
+                var preview = new SkillImportPreviewRequest(
+                    stableKey, "API Skill", description, "Use for API contract verification", version,
+                    new PortableSkillBundle([new PortableSkillFile("SKILL.md", Convert.ToBase64String(Encoding.UTF8.GetBytes(markdown)))]),
+                    SkillSourceKind.Repository, "https://example.test/api-skill", $"commit-{version}", "MIT",
+                    TrustLevel: SkillTrustLevel.SourceVerified);
+                var imported = await service.ImportAsync(new(preview, $"import-{Guid.NewGuid():N}"), CancellationToken.None);
+                await service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, false, $"publish-{Guid.NewGuid():N}"), CancellationToken.None);
+                return imported;
+            }
+
+            var first = await ImportVersionAsync("1.0.0", "First API contract version");
+            var second = await ImportVersionAsync("2.0.0", "Second API contract version");
+            skillId = first.Skill.Id;
+            firstVersionId = first.Version.Id;
+            secondVersionId = second.Version.Id;
+        }
+
+        using var client = environment.GetFactory().CreateClient();
+        var diff = await client.GetFromJsonAsync<SkillVersionDiffResult>(
+            $"/api/skills/{skillId:D}/versions/diff?leftVersionId={firstVersionId:D}&rightVersionId={secondVersionId:D}");
+        using var trendResponse = await client.PostAsJsonAsync(
+            "/api/skills/analytics/trend",
+            new SkillAnalyticsRequest(SkillId: skillId, WindowDays: 7));
+        var trend = await trendResponse.Content.ReadFromJsonAsync<List<SkillTelemetryTrendPointResult>>();
+
+        diff.Should().NotBeNull();
+        diff!.SkillId.Should().Be(skillId);
+        diff.ChangedPaths.Should().Contain("SKILL.md");
+        trendResponse.EnsureSuccessStatusCode();
+        trend.Should().HaveCount(7);
+        trend!.Select(item => item.Date).Should().OnlyHaveUniqueItems();
+        trend.Sum(item => item.SearchImpressionCount).Should().Be(0);
+    }
+
+    [DockerRequiredFact]
     public async Task Status_And_Search_Endpoints_Should_Return_Expected_Payloads()
     {
         using (var scope = environment.GetFactory().Services.CreateScope())
@@ -3075,7 +3124,14 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 SecurityScopes.PreferencesWrite,
                 SecurityScopes.TokenManage,
                 SecurityScopes.SecurityManage,
-                SecurityScopes.DashboardActAs
+                SecurityScopes.DashboardActAs,
+                SecurityScopes.SkillsRead,
+                SecurityScopes.SkillsExecute,
+                SecurityScopes.SkillsManage,
+                SecurityScopes.SkillsPublish,
+                SecurityScopes.SkillsSecurity,
+                SecurityScopes.SkillsBind,
+                SecurityScopes.SkillsReindex
             ],
             [],
             IsAuthenticated: true);

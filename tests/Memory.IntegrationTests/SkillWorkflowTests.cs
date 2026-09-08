@@ -91,6 +91,44 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
     }
 
     [DockerRequiredFact]
+    public async Task Transitive_dependency_should_fail_selection_when_it_exceeds_the_pinned_execution_policy()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var dependency = await ImportAndPublishAsync(
+            service,
+            $"capability-base-{Guid.NewGuid():N}"[..31],
+            "GPU dependency",
+            "Requires an unavailable GPU capability",
+            [],
+            "gpu-dependency",
+            requiredCapabilities: ["gpu"]);
+        var dependent = await ImportAndPublishAsync(
+            service,
+            $"capability-parent-{Guid.NewGuid():N}"[..31],
+            "Capability parent",
+            "Orchestrates a capability-gated dependency",
+            [new SkillDependencyInput(dependency.Skill.Id, SkillDependencyKind.Requires, $"={dependency.Version.Version}")],
+            "capability-parent");
+        await service.ReindexAsync(new("skill-search-v1", "deterministic", "1", 0m, true, true, $"reindex-{Guid.NewGuid():N}"), CancellationToken.None);
+
+        var search = await SearchAsync(service, Guid.NewGuid(), [], [], "dependency-policy-search");
+        search.Candidates.Should().Contain(item => item.SkillVersionId == dependent.Version.Id);
+        search.Candidates.Should().NotContain(item => item.SkillVersionId == dependency.Version.Id);
+        db.ChangeTracker.Clear();
+        var select = () => service.SelectAsync(new(
+            search.ResolutionId,
+            [dependent.Version.Id],
+            "Transitive execution policy fixture",
+            $"select-{Guid.NewGuid():N}"), CancellationToken.None);
+
+        await select.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Resolved Skill dependency no longer satisfies the pinned execution policy.");
+    }
+
+    [DockerRequiredFact]
     public async Task Conflicting_skills_should_be_rejected_before_exact_version_pinning()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -295,6 +333,10 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         var second = await ImportAndPublishAsync(service, stableKey, "Rollback Skill", "Version two", [], "rollback-v2", "2.0.0");
         var before = (await service.GetAsync(first.Skill.Id, CancellationToken.None))!;
         before.DefaultVersionId.Should().Be(first.Version.Id);
+        var diff = await service.DiffVersionsAsync(first.Skill.Id, first.Version.Id, second.Version.Id, CancellationToken.None);
+        diff.ChangedPaths.Should().ContainSingle().Which.Should().Be("SKILL.md");
+        diff.Left.ContentHash.Should().Be(first.Version.ContentHash);
+        diff.Right.ContentHash.Should().Be(second.Version.ContentHash);
 
         db.ChangeTracker.Clear();
         var promoted = await service.SetDefaultVersionAsync(new(first.Skill.Id, second.Version.Id, before.MetadataVersion, $"default-{Guid.NewGuid():N}"), CancellationToken.None);
@@ -329,6 +371,64 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         (await db.SkillSearchGenerations.AsNoTracking().SingleAsync(item => item.Id == first.GenerationId)).Status.Should().Be(SkillSearchGenerationStatus.Active);
         (await db.SkillSearchGenerations.AsNoTracking().SingleAsync(item => item.Id == second.GenerationId)).Status.Should().Be(SkillSearchGenerationStatus.RolledBack);
         (await service.ListSearchGenerationsAsync(CancellationToken.None)).Should().Contain(item => item.GenerationId == first.GenerationId && item.Status == SkillSearchGenerationStatus.Active);
+    }
+
+    [DockerRequiredFact]
+    public async Task Incremental_search_generation_should_reuse_unchanged_documents_and_rebuild_changed_metadata()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var first = await ImportAndPublishAsync(service, $"incremental-a-{Guid.NewGuid():N}"[..31], "Incremental alpha", "Initial alpha metadata", [], "incremental-alpha");
+        await ImportAndPublishAsync(service, $"incremental-b-{Guid.NewGuid():N}"[..31], "Incremental beta", "Stable beta metadata", [], "incremental-beta");
+        var full = await service.ReindexAsync(new("incremental-v1", "deterministic", "1", 0m, true, true, $"reindex-{Guid.NewGuid():N}"), CancellationToken.None);
+
+        db.ChangeTracker.Clear();
+        var skill = await db.Skills.SingleAsync(item => item.Id == first.Skill.Id);
+        skill.Description = "Changed alpha metadata";
+        skill.MetadataVersion++;
+        skill.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var incremental = await service.ReindexAsync(new("incremental-v1", "deterministic", "1", 0m, false, true, $"reindex-{Guid.NewGuid():N}"), CancellationToken.None);
+        incremental.GenerationId.Should().NotBe(full.GenerationId);
+        incremental.BenchmarkJson.Should().Contain("\"buildMode\":\"incremental\"");
+        incremental.BenchmarkJson.Should().Contain("\"reusedDocumentCount\":");
+        incremental.BenchmarkJson.Should().Contain("\"regeneratedVersionCount\":1");
+        var rebuilt = await db.SkillSearchDocuments.AsNoTracking().SingleAsync(item => item.GenerationId == incremental.GenerationId && item.SkillVersionId == first.Version.Id);
+        rebuilt.SearchText.Should().Contain("Changed alpha metadata");
+
+        var incompatible = () => service.ReindexAsync(new("incremental-v2", "deterministic", "1", 0m, false, false, $"reindex-{Guid.NewGuid():N}"), CancellationToken.None);
+        await incompatible.Should().ThrowAsync<InvalidOperationException>().WithMessage("*FullRebuild=true*");
+    }
+
+    [DockerRequiredFact]
+    public async Task Search_generation_and_idempotency_receipt_should_survive_application_restart()
+    {
+        SkillReindexRequest request;
+        SkillReindexResult beforeRestart;
+        await using (var scope = environment.GetFactory().Services.CreateAsyncScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+            await ImportAndPublishAsync(service, $"restart-{Guid.NewGuid():N}"[..30], "Restart recovery", "Application restart fixture", [], "restart-recovery");
+            request = new("restart-v1", "deterministic", "1", 0m, true, true, $"restart-reindex-{Guid.NewGuid():N}");
+            beforeRestart = await service.ReindexAsync(request, CancellationToken.None);
+        }
+
+        await environment.RestartApplicationAsync();
+
+        await using var restartedScope = environment.GetFactory().Services.CreateAsyncScope();
+        UseBootstrapActor(restartedScope.ServiceProvider);
+        var restartedService = restartedScope.ServiceProvider.GetRequiredService<ISkillService>();
+        var replay = await restartedService.ReindexAsync(request, CancellationToken.None);
+        replay.Replayed.Should().BeTrue();
+        replay.GenerationId.Should().Be(beforeRestart.GenerationId);
+        replay.IndexedVersionCount.Should().Be(beforeRestart.IndexedVersionCount);
+        (await restartedService.ListSearchGenerationsAsync(CancellationToken.None))
+            .Should().Contain(item => item.GenerationId == beforeRestart.GenerationId && item.Status == SkillSearchGenerationStatus.Active);
     }
 
     [DockerRequiredFact]
@@ -391,6 +491,9 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         replay.Replayed.Should().BeTrue();
         replay.RunId.Should().Be(first.RunId);
         analytics.Should().ContainSingle(item => item.SkillVersionId == imported.Version.Id && item.SearchImpressionCount == 1 && item.RejectedCount == 1);
+        var trend = await service.GetAnalyticsTrendAsync(new(SkillId: imported.Skill.Id, WindowDays: 90), CancellationToken.None);
+        trend.Should().HaveCount(90);
+        trend.Sum(item => item.SearchImpressionCount).Should().Be(0);
         (await db.SkillTelemetryEvents.AsNoTracking().CountAsync(item => item.SkillId == imported.Skill.Id)).Should().Be(1);
         (await db.SkillTelemetryDailyAggregates.AsNoTracking().SumAsync(item => item.SkillId == imported.Skill.Id ? item.EventCount : 0)).Should().Be(3);
     }
@@ -415,6 +518,46 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         results.Count(item => !item.Replayed).Should().Be(1);
     }
 
+    [DockerRequiredFact]
+    public async Task Concurrent_search_and_feedback_replay_should_converge_without_duplicate_events()
+    {
+        var executionId = Guid.NewGuid();
+        var searchKey = $"concurrent-search-{Guid.NewGuid():N}";
+        await using (var setupScope = environment.GetFactory().Services.CreateAsyncScope())
+        {
+            UseBootstrapActor(setupScope.ServiceProvider);
+            var setup = setupScope.ServiceProvider.GetRequiredService<ISkillService>();
+            await ImportAndPublishAsync(setup, $"concurrent-{Guid.NewGuid():N}"[..30], "Concurrent search", "Concurrent idempotency fixture", [], "concurrent-search");
+            await setup.ReindexAsync(new("concurrent-v1", "deterministic", "1", 0m, true, true, $"reindex-{Guid.NewGuid():N}"), CancellationToken.None);
+        }
+
+        await using var firstScope = environment.GetFactory().Services.CreateAsyncScope();
+        await using var secondScope = environment.GetFactory().Services.CreateAsyncScope();
+        UseBootstrapActor(firstScope.ServiceProvider);
+        UseBootstrapActor(secondScope.ServiceProvider);
+        var firstService = firstScope.ServiceProvider.GetRequiredService<ISkillService>();
+        var secondService = secondScope.ServiceProvider.GetRequiredService<ISkillService>();
+        var searchRequest = new SkillSearchForExecutionRequest(
+            executionId, null, "ContextHub", "ContextHub", "Codex", "concurrent idempotency fixture",
+            ["concurrent"], [], [], [], [], [], new SkillSearchPolicy(TopN: 10, Threshold: 0m), searchKey);
+        var searches = await Task.WhenAll(
+            firstService.SearchForExecutionAsync(searchRequest, CancellationToken.None),
+            secondService.SearchForExecutionAsync(searchRequest, CancellationToken.None));
+        searches.Select(item => item.ResolutionId).Distinct().Should().ContainSingle();
+        searches.Count(item => item.Replayed).Should().Be(1);
+
+        var candidate = searches[0].Candidates.First();
+        var feedbackKey = $"concurrent-feedback-{Guid.NewGuid():N}";
+        var feedbackRequest = new SkillResolutionFeedbackRequest(
+            searches[0].ResolutionId, candidate.SkillVersionId, SkillRejectionStage.SearchCandidateRejected,
+            SkillRejectionReason.NotApplicable, "Concurrent rejection", ["fixture:concurrent"], [], [], [], feedbackKey);
+        var feedback = await Task.WhenAll(
+            firstService.RecordFeedbackAsync(feedbackRequest, CancellationToken.None),
+            secondService.RecordFeedbackAsync(feedbackRequest, CancellationToken.None));
+        feedback.Select(item => item.EventId).Distinct().Should().ContainSingle();
+        feedback.Count(item => item.Replayed).Should().Be(1);
+    }
+
     private static Task<SkillSearchForExecutionResult> SearchAsync(ISkillService service, Guid executionId, IReadOnlyList<Guid> excluded, IReadOnlyList<Guid> selected, string prefix)
         => service.SearchForExecutionAsync(new(
             executionId, null, "ContextHub", "ContextHub", "Codex", "incident log analysis primitives",
@@ -429,13 +572,15 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         string description,
         IReadOnlyList<SkillDependencyInput> dependencies,
         string unique,
-        string version = "1.0.0")
+        string version = "1.0.0",
+        IReadOnlyList<string>? requiredCapabilities = null)
     {
         var markdown = $"---\nname: {name}\ndescription: {description}\n---\n# {name}\nUse bounded evidence.";
         var preview = new SkillImportPreviewRequest(
             stableKey, name, description, $"Use when {description.ToLowerInvariant()}", version,
             new PortableSkillBundle([new PortableSkillFile("SKILL.md", Convert.ToBase64String(Encoding.UTF8.GetBytes(markdown)))]),
             SkillSourceKind.Repository, $"https://example.test/{unique}", "commit-1", "MIT", ["incident", "log", "analysis"], [], ["tests"],
+            RequiredCapabilities: requiredCapabilities,
             Dependencies: dependencies, TrustLevel: SkillTrustLevel.SourceVerified);
         var imported = await service.ImportAsync(new(preview, $"import-{unique}-{Guid.NewGuid():N}"), CancellationToken.None);
         await service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, false, $"publish-{unique}-{Guid.NewGuid():N}"), CancellationToken.None);

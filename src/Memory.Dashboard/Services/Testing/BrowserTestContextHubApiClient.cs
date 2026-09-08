@@ -1947,6 +1947,9 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SkillTelemetryAggregateResult>>([]);
 
+    public Task<IReadOnlyList<SkillTelemetryTrendPointResult>> GetSkillAnalyticsTrendAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SkillTelemetryTrendPointResult>>([]);
+
     public Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken)
         => Task.FromResult(new SkillMetadataGovernanceReviewResult(0, 0, 0, 0, 0, true, false, []));
 
@@ -1981,6 +1984,9 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         => throw new NotSupportedException();
 
     public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<SkillVersionDiffResult> DiffSkillVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken)
         => throw new NotSupportedException();
 
     public Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken)

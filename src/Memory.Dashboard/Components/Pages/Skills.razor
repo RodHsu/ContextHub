@@ -29,6 +29,10 @@
                 @foreach (var item in StageReasonMatrix) { <tr><td>@item.Key</td><td>@item.Value</td></tr> }
                 @if (StageReasonMatrix.Count == 0) { <tr><td colspan="2">目前窗口沒有 rejection/cancellation。</td></tr> }
             </tbody></table></div>
+            <div class="panel-title">Daily telemetry trend</div>
+            <div class="table-scroll"><table class="data-table"><thead><tr><th>Date</th><th>Impressions</th><th>Selected</th><th>Rejected</th><th>Invoked</th><th>Success</th><th>Failure</th></tr></thead><tbody>
+                @foreach (var point in _trend.TakeLast(Math.Min(_windowDays, 30))) { <tr><td>@point.Date</td><td>@point.SearchImpressionCount</td><td>@point.SelectedCount</td><td>@point.RejectedCount</td><td>@point.InvocationCount</td><td>@point.SuccessCount</td><td>@point.FailureCount</td></tr> }
+            </tbody></table></div>
         </section>
 
         <section class="panel">
@@ -62,10 +66,12 @@
             @if (_skills.Count == 0) { <div class="empty-inline"><div class="empty-inline-title">尚無 Skills</div></div> }
             else { <div class="stack-list">@foreach (var skill in _skills) { <article class="stack-item @(skill.Id == _selectedSkillId ? "selected" : null)" @onclick="() => SelectSkill(skill.Id)"><div class="stack-item-title">@skill.Name <span class="status-badge neutral">@skill.StableKey</span></div><div class="stack-item-copy">@skill.Description</div><div class="stack-item-meta">metadata v@skill.MetadataVersion · @ShortHash(skill.MetadataHash) · default @(skill.DefaultVersionId?.ToString("D") ?? "未設定") · bindings @skill.Bindings.Count</div></article> }</div> }
             @if (SelectedSkill is { } selected) {
-                <div class="subpanel"><div class="subpanel-title">@selected.Name details</div><div class="stack-item-copy">WhenToUse: @selected.WhenToUse</div>
+                <div class="subpanel"><div class="subpanel-title">@selected.Name details</div><div class="stack-item-copy">Owner: @(selected.OwnerUserId?.ToString("D") ?? "system") · Maintainers: @string.Join(", ", selected.Maintainers) · Risk: @selected.RiskLevel<br/>WhenToUse: @selected.WhenToUse</div>
                     <div class="table-scroll"><table class="data-table"><thead><tr><th>Version</th><th>Status</th><th>Hash / provenance</th><th>Trust</th><th>Actions</th></tr></thead><tbody>
-                    @foreach (var version in selected.Versions) { <tr><td>@version.Version @if (selected.DefaultVersionId == version.Id) { <span class="status-badge ok">Default</span> }</td><td><span class="status-badge @StatusClass(version.Status)">@version.Status</span></td><td><span class="code-inline">@ShortHash(version.ContentHash)</span><br/>@version.SourceKind · @version.SourceRevision</td><td>@version.TrustLevel @(version.SignatureVerified ? "✓" : "")</td><td><button class="ghost-button" @onclick="() => ExportAsync(version.Id)">Export</button>@if (version.Status == SkillLifecycleStatus.Draft) { <button class="primary-button" @onclick="() => PublishAsync(version)">Publish</button> } @if (version.Status == SkillLifecycleStatus.Published && selected.DefaultVersionId != version.Id) { <button class="ghost-button" @onclick="() => SetDefaultAsync(selected, version.Id)">Set default</button> } @if (version.Status == SkillLifecycleStatus.Published) { <button class="ghost-button" @onclick="() => ChangeLifecycleAsync(version.Id, SkillLifecycleStatus.Deprecated)">Deprecate</button><button class="danger-button" @onclick="() => ChangeLifecycleAsync(version.Id, SkillLifecycleStatus.Revoked)">Revoke</button> }</td></tr> }
+                    @foreach (var version in selected.Versions) { <tr><td>@version.Version @if (selected.DefaultVersionId == version.Id) { <span class="status-badge ok">Default</span> }</td><td><span class="status-badge @StatusClass(version.Status)">@version.Status</span></td><td><span class="code-inline">@ShortHash(version.ContentHash)</span><br/>@version.SourceKind · @version.SourceRevision</td><td>@version.TrustLevel @(version.SignatureVerified ? "✓" : "")</td><td><button class="ghost-button" @onclick="() => ExportAsync(version.Id)">Export</button>@if (selected.Versions.Count > 1) { <button class="ghost-button" @onclick="() => CompareWithPreviousAsync(selected, version)">Diff previous</button> } @if (version.Status == SkillLifecycleStatus.Draft) { <button class="primary-button" @onclick="() => PublishAsync(version)">Publish</button> } @if (version.Status == SkillLifecycleStatus.Published && selected.DefaultVersionId != version.Id) { <button class="ghost-button" @onclick="() => SetDefaultAsync(selected, version.Id)">Set default</button> } @if (version.Status == SkillLifecycleStatus.Published) { <button class="ghost-button" @onclick="() => ChangeLifecycleAsync(version.Id, SkillLifecycleStatus.Deprecated)">Deprecate</button><button class="danger-button" @onclick="() => ChangeLifecycleAsync(version.Id, SkillLifecycleStatus.Revoked)">Revoke</button> }</td></tr> }
                     </tbody></table></div>
+                    @if (_versionDiff is not null) { <div class="code-block">Version diff @_versionDiff.Left.Version → @_versionDiff.Right.Version<br/>added: @string.Join(", ", _versionDiff.AddedPaths)<br/>removed: @string.Join(", ", _versionDiff.RemovedPaths)<br/>changed: @string.Join(", ", _versionDiff.ChangedPaths)<br/>discovery contract changed: @_versionDiff.DiscoveryContractChanged · provenance changed: @_versionDiff.ProvenanceChanged</div> }
+                    @foreach (var version in selected.Versions) { <div class="code-block">@version.Version dependencies: @string.Join(", ", (version.Dependencies ?? []).Select(item => $"{item.Kind}:{item.TargetSkillId:D}@{item.VersionConstraint}"))<br/>publish checks: @string.Join(", ", version.PublishEvidence?.Checks ?? []) · self-test @(version.PublishEvidence?.SelfTestExecuted == true ? (version.PublishEvidence.SelfTestPassed ? "PASS" : "FAIL") : "not executed")</div> }
                     <div class="form-grid"><label>Binding scope<select @bind="_bindingScope">@foreach (var value in Enum.GetValues<SkillBindingScope>()) { <option value="@value">@value</option> }</select></label><label>Mode<select @bind="_bindingMode">@foreach (var value in Enum.GetValues<SkillBindingMode>()) { <option value="@value">@value</option> }</select></label><label>Scope value<input @bind="_bindingScopeValue" /></label><label>Version constraint<input @bind="_bindingVersionConstraint" /></label></div><button class="ghost-button" @onclick="() => UpsertBindingAsync(selected)">Upsert binding</button>
                     @foreach (var binding in selected.Bindings) { <span class="status-badge neutral">@binding.Scope:@binding.ScopeValue · @binding.Mode · @binding.VersionConstraint · r@binding.Revision</span> }
                     <div class="form-grid"><label>Observed revision<input @bind="_observedRevision" /></label><label>Observed hash<input @bind="_observedHash" /></label><label><input type="checkbox" @bind="_sourceAvailable" /> Source available</label><label><input type="checkbox" @bind="_signatureVerified" /> Signature verified</label></div><button class="ghost-button" @onclick="() => ObserveSourceAsync(selected)">Record source observation</button>
@@ -82,11 +88,13 @@
 @code {
     private IReadOnlyList<SkillSummaryResult> _skills = [];
     private readonly Dictionary<int, IReadOnlyList<SkillTelemetryAggregateResult>> _analytics = [];
+    private IReadOnlyList<SkillTelemetryTrendPointResult> _trend = [];
     private IReadOnlyList<SkillSearchGenerationResult> _generations = [];
     private IReadOnlyList<SkillResolutionDetailResult> _resolutions = [];
     private IReadOnlyList<SkillSourceObservationResult> _sourceObservations = [];
     private SkillMetadataGovernanceReviewResult? _governance;
     private SkillImportPreviewResult? _importPreview;
+    private SkillVersionDiffResult? _versionDiff;
     private Guid? _selectedSkillId;
     private int _windowDays = 30;
     private bool _loading;
@@ -103,8 +111,28 @@
     private IReadOnlyDictionary<string, int> StageReasonMatrix => CurrentAnalytics.SelectMany(x => x.StageReasonCounts).GroupBy(x => x.Key).OrderByDescending(x => x.Sum(v => v.Value)).ToDictionary(x => x.Key, x => x.Sum(v => v.Value), StringComparer.Ordinal);
     protected override Task OnInitializedAsync() => LoadAsync();
     private IReadOnlyList<SkillTelemetryAggregateResult> Analytics(int window) => _analytics.GetValueOrDefault(window) ?? [];
-    private async Task LoadAsync() { _loading = true; _error = _notice = string.Empty; try { _skills = await ApiClient.GetSkillsAsync(null, false, CancellationToken.None); foreach (var window in new[] { 7, 30, 90 }) _analytics[window] = await ApiClient.GetSkillAnalyticsAsync(null, window, CancellationToken.None); _governance = await ApiClient.GetSkillGovernanceAsync(CancellationToken.None); _generations = await ApiClient.GetSkillSearchGenerationsAsync(CancellationToken.None); _resolutions = await ApiClient.GetSkillResolutionsAsync(null, 50, CancellationToken.None); if (_selectedSkillId is not null && SelectedSkill is null) _selectedSkillId = null; if (_selectedSkillId is not null) _sourceObservations = await ApiClient.GetSkillSourceObservationsAsync(_selectedSkillId.Value, CancellationToken.None); } catch (Exception ex) { _error = ex.Message; } finally { _loading = false; } }
-    private void SelectSkill(Guid id) { _selectedSkillId = id; _exportJson = string.Empty; _ = LoadSourceObservationsAsync(id); }
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = _notice = string.Empty;
+        try
+        {
+            _skills = await ApiClient.GetSkillsAsync(null, false, CancellationToken.None);
+            foreach (var window in new[] { 7, 30, 90 })
+            {
+                _analytics[window] = await ApiClient.GetSkillAnalyticsAsync(null, window, CancellationToken.None);
+            }
+            _trend = await ApiClient.GetSkillAnalyticsTrendAsync(null, 90, CancellationToken.None);
+            _governance = await ApiClient.GetSkillGovernanceAsync(CancellationToken.None);
+            _generations = await ApiClient.GetSkillSearchGenerationsAsync(CancellationToken.None);
+            _resolutions = await ApiClient.GetSkillResolutionsAsync(null, 50, CancellationToken.None);
+            if (_selectedSkillId is not null && SelectedSkill is null) _selectedSkillId = null;
+            if (_selectedSkillId is not null) _sourceObservations = await ApiClient.GetSkillSourceObservationsAsync(_selectedSkillId.Value, CancellationToken.None);
+        }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _loading = false; }
+    }
+    private void SelectSkill(Guid id) { _selectedSkillId = id; _exportJson = string.Empty; _versionDiff = null; _ = LoadSourceObservationsAsync(id); }
     private async Task LoadSourceObservationsAsync(Guid id) { try { _sourceObservations = await ApiClient.GetSkillSourceObservationsAsync(id, CancellationToken.None); await InvokeAsync(StateHasChanged); } catch (Exception ex) { _error = ex.Message; } }
     private SkillImportPreviewRequest BuildImport() => new(_importStableKey, _importName, _importDescription, _importWhenToUse, _importVersion, new PortableSkillBundle([new PortableSkillFile("SKILL.md", Convert.ToBase64String(Encoding.UTF8.GetBytes(_importMarkdown)))]), SkillSourceKind.LocalUpload, _importSourceRef, "manual", _importLicense);
     private async Task PreviewImportAsync() => await RunAsync(async () => { _importPreview = await ApiClient.PreviewSkillImportAsync(BuildImport(), CancellationToken.None); _notice = "Import preview 已完成。"; });
@@ -114,6 +142,7 @@
     private async Task SetDefaultAsync(SkillSummaryResult skill, Guid versionId) => await RunAsync(async () => { await ApiClient.SetSkillDefaultVersionAsync(new(skill.Id, versionId, skill.MetadataVersion, $"dashboard-default-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
     private async Task UpsertBindingAsync(SkillSummaryResult skill) => await RunAsync(async () => { var existing = skill.Bindings.FirstOrDefault(x => x.Scope == _bindingScope && string.Equals(x.ScopeValue, _bindingScopeValue, StringComparison.OrdinalIgnoreCase)); await ApiClient.UpsertSkillBindingAsync(new(skill.Id, _bindingScope, _bindingScopeValue, _bindingMode, _bindingVersionConstraint, existing?.Revision, $"dashboard-binding-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
     private async Task ExportAsync(Guid versionId) => await RunAsync(async () => _exportJson = JsonSerializer.Serialize(await ApiClient.ExportSkillVersionAsync(versionId, CancellationToken.None), new JsonSerializerOptions { WriteIndented = true }));
+    private async Task CompareWithPreviousAsync(SkillSummaryResult skill, SkillVersionSummaryResult version) => await RunAsync(async () => { var ordered = skill.Versions.ToList(); var index = ordered.FindIndex(item => item.Id == version.Id); var previous = index >= 0 && index + 1 < ordered.Count ? ordered[index + 1] : ordered.First(item => item.Id != version.Id); _versionDiff = await ApiClient.DiffSkillVersionsAsync(skill.Id, previous.Id, version.Id, CancellationToken.None); });
     private async Task ObserveSourceAsync(SkillSummaryResult skill) => await RunAsync(async () => { var source = skill.Versions.FirstOrDefault()?.SourceRef ?? _importSourceRef; await ApiClient.RecordSkillSourceObservationAsync(new(skill.Id, source, _observedRevision, _observedHash, _sourceAvailable, _signatureVerified, false, "dashboard:manual-refresh", $"dashboard-source-{Guid.NewGuid():N}"), CancellationToken.None); await LoadSourceObservationsAsync(skill.Id); });
     private async Task ReindexAsync() => await RunAsync(async () => { await ApiClient.ReindexSkillsAsync(new("skill-search-v1", "context-hub-default", "1", 0.35m, true, true, $"dashboard-reindex-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
     private async Task ActivateGenerationAsync(Guid id) => await RunAsync(async () => { await ApiClient.ActivateSkillSearchGenerationAsync(new(id, "Dashboard operator rollback", $"dashboard-activate-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });

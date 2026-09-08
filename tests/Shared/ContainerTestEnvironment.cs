@@ -15,6 +15,8 @@ public sealed class ContainerTestEnvironment : IAsyncLifetime
 {
     private PostgreSqlContainer? _postgres;
     private RedisContainer? _redis;
+    private string? _postgresConnectionString;
+    private string? _redisConnectionString;
 
     public MemoryApplicationFactory? Factory { get; private set; }
 
@@ -40,11 +42,27 @@ public sealed class ContainerTestEnvironment : IAsyncLifetime
 
         await _postgres.StartAsync();
         await _redis.StartAsync();
-        var postgresConnectionString = _postgres.GetConnectionString();
-        var redisConnectionString = _redis.GetConnectionString();
-        PostgresConnectionString = postgresConnectionString;
-        await WaitForDependenciesAsync(postgresConnectionString, redisConnectionString);
-        Factory = new MemoryApplicationFactory(postgresConnectionString, redisConnectionString);
+        _postgresConnectionString = _postgres.GetConnectionString();
+        _redisConnectionString = _redis.GetConnectionString();
+        PostgresConnectionString = _postgresConnectionString;
+        await WaitForDependenciesAsync(_postgresConnectionString, _redisConnectionString);
+        Factory = new MemoryApplicationFactory(_postgresConnectionString, _redisConnectionString);
+        await WaitForReadinessAsync();
+    }
+
+    public async Task RestartApplicationAsync()
+    {
+        if (_postgresConnectionString is null || _redisConnectionString is null)
+        {
+            throw new InvalidOperationException(DockerTestGate.Current.Reason);
+        }
+
+        if (Factory is not null)
+        {
+            await Factory.DisposeAsync();
+        }
+
+        Factory = new MemoryApplicationFactory(_postgresConnectionString, _redisConnectionString);
         await WaitForReadinessAsync();
     }
 
