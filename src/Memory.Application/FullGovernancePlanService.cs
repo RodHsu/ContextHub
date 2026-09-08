@@ -9,6 +9,7 @@ public sealed class FullGovernancePlanService(
     IApplicationDbContext dbContext,
     IRequestActorAccessor actorAccessor,
     IAutonomousRetentionService autonomousRetention,
+    ISkillService skillService,
     IClock clock) : IFullGovernancePlanService
 {
     private const string ProjectInformationExternalKey = DurableMemoryGovernancePolicy.ProjectInformationExternalKey;
@@ -303,13 +304,34 @@ public sealed class FullGovernancePlanService(
                 partition.HasHighValue ? ["LOG_PROMOTE_BEFORE_RETENTION"] : ["LOG_RETENTION_EXPIRED", "NO_SCHEDULED_HARD_DELETE"], governanceRunId));
         }
 
+        var skillGovernance = await skillService.ReviewMetadataGovernanceAsync(new SkillMetadataGovernancePolicy(), cancellationToken);
+        foreach (var finding in skillGovernance.Findings)
+        {
+            items.Add(new GovernanceReviewItem(
+                finding.FindingKey,
+                GovernanceItemKind.SkillMetadata,
+                ProjectContext.SharedProjectId,
+                finding.SignalType,
+                nameof(GovernanceBatchActionType.SkillMetadataProposal),
+                GovernanceBatchRiskLevel.Low,
+                false,
+                finding.SkillId,
+                finding.SkillVersionId.HasValue ? [finding.SkillVersionId.Value] : [],
+                [finding.SignalType, finding.RequiresNewVersion ? "SKILL_NEW_VERSION_REQUIRED" : "SKILL_METADATA_SIDECAR_PROPOSAL"],
+                governanceRunId)
+            {
+                IsReversible = true,
+                SemanticConfidence = finding.Confidence
+            });
+        }
+
         var ordered = items.GroupBy(x => x.ItemKey, StringComparer.Ordinal).Select(x => x.First())
             .OrderBy(x => x.ItemKind).ThenBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.ItemKey, StringComparer.Ordinal).ToArray();
         var businessWorkItems = workItems.Count(x =>
             x.ArchivedAt is null &&
             x.Status is ProjectWorkItemStatus.Pending or ProjectWorkItemStatus.InProgress or ProjectWorkItemStatus.Blocked &&
             !HasActiveGovernanceExclusion(x.GovernanceExclusionsJson, governanceRunId));
-        var governedExceptions = ordered.Count(x => x.RequiresExplicitApproval);
+        var governedExceptions = ordered.Count(x => x.RequiresExplicitApproval) + skillGovernance.ExceptionCount;
         var coverage = new FullGovernanceCoverageResult(
             Surface(projects.Length, projects.Length, ordered, GovernanceItemKind.Project),
             Surface(hierarchyRows.Count, hierarchyRows.Count, ordered, GovernanceItemKind.ProjectHierarchy),
@@ -323,13 +345,26 @@ public sealed class FullGovernancePlanService(
             Surface(actions.Count, actions.Count, ordered, GovernanceItemKind.SuggestedAction),
             Surface(proposalInsights.Count, proposalInsights.Count, ordered, GovernanceItemKind.Proposal),
             Surface(checked((int)Math.Min(logTotal, int.MaxValue)), logPartitions.Take(MaximumLogPartitions).Sum(x => x.Count), ordered, GovernanceItemKind.LogPartition,
-                logHasMore, !logHasMore));
+                logHasMore, !logHasMore))
+        {
+            SkillCoverage = new GovernanceSurfaceCoverageResult(
+                skillGovernance.TotalSkillCount,
+                skillGovernance.ScannedSkillCount,
+                skillGovernance.CandidateCount,
+                skillGovernance.ActionableCount,
+                0,
+                0,
+                skillGovernance.ExceptionCount,
+                skillGovernance.HasMore,
+                skillGovernance.CoverageComplete)
+        };
         var semanticAutoResolvable = ordered.Count(x => x.IsReversible && x.SemanticConfidence > 0m && !x.RequiresExplicitApproval);
         return new FullGovernancePlanResult(ordered, coverage, ordered.Count(x => !x.RequiresExplicitApproval), businessWorkItems, governedExceptions)
         {
             Retention = retention,
             SemanticAutoResolvableCount = semanticAutoResolvable,
-            RemainingHumanDecisionCount = governedExceptions
+            RemainingHumanDecisionCount = governedExceptions,
+            SkillGovernance = skillGovernance
         };
     }
 

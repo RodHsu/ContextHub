@@ -44,6 +44,7 @@ public static class DependencyInjection
         services.Configure<MemoryDataRetentionOptions>(configuration.GetSection(MemoryDataRetentionOptions.SectionName));
         services.Configure<AutonomousGovernanceOptions>(configuration.GetSection(AutonomousGovernanceOptions.SectionName));
         services.Configure<ProjectArtifactObjectStorageOptions>(configuration.GetSection(ProjectArtifactObjectStorageOptions.SectionName));
+        services.Configure<SkillRuntimeOptions>(configuration.GetSection(SkillRuntimeOptions.SectionName));
         services.AddOptions<DockerRuntimeOptions>()
             .Configure(options =>
             {
@@ -84,6 +85,7 @@ public static class DependencyInjection
         services.AddScoped<IAgentConnectivityService, AgentConnectivityService>();
         services.AddSingleton<IEmbeddingUsageTelemetry, DatabaseEmbeddingUsageTelemetry>();
         services.AddSingleton<IProjectArtifactObjectStore, S3CompatibleProjectArtifactObjectStore>();
+        services.AddSingleton<ISkillMaterializationStore, FileSystemSkillMaterializationStore>();
         services.AddScoped<ITokenCountingService, TokenCountingService>();
         services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
         services.AddScoped<IMemoryDataRetentionService, MemoryDataRetentionService>();

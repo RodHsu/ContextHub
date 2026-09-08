@@ -729,6 +729,73 @@ public sealed class GovernanceBatchExecutor(
         {
             return await ProcessRetentionAsync(item, request, allowed, actor, cancellationToken);
         }
+        if (item.Kind == nameof(GovernanceItemKind.SkillMetadata) &&
+            allowed.Contains(GovernanceBatchActionType.SkillMetadataProposal))
+        {
+            var skill = await dbContext.Skills.SingleOrDefaultAsync(x => x.Id == item.Id, cancellationToken);
+            if (skill is null || skill.ArchivedAt.HasValue)
+            {
+                return await AuditedResultAsync(item, GovernanceBatchActionType.SkillMetadataProposal,
+                    GovernanceBatchItemDisposition.NoOp, "Skill metadata candidate no longer exists or is archived.", [], [], actor, cancellationToken);
+            }
+
+            var metadataHash = PortableSkillBundleValidator.ComputeMetadataHash(
+                skill.StableKey, skill.Name, skill.Description, skill.WhenToUse,
+                skill.Tags, skill.Aliases, skill.RiskLevel, skill.MetadataVersion);
+            var existing = await dbContext.SkillMetadataProposals.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.SkillId == skill.Id &&
+                                          x.Status == SkillMetadataProposalStatus.Pending &&
+                                          x.ExpectedMetadataVersion == skill.MetadataVersion &&
+                                          x.ExpectedMetadataHash == metadataHash, cancellationToken);
+            if (existing is not null)
+            {
+                return await AuditedResultAsync(item, GovernanceBatchActionType.SkillMetadataProposal,
+                    GovernanceBatchItemDisposition.NoOp,
+                    "A pending metadata proposal already covers this exact metadata version and hash; published bundle content was not mutated.",
+                    [], [existing.Id, skill.Id], actor, cancellationToken);
+            }
+
+            var proposal = new SkillMetadataProposal
+            {
+                TenantId = skill.TenantId,
+                OwnerUserId = skill.OwnerUserId,
+                SkillId = skill.Id,
+                ExpectedMetadataVersion = skill.MetadataVersion,
+                ExpectedMetadataHash = metadataHash,
+                ProposedPatchJson = JsonSerializer.Serialize(new
+                {
+                    operation = "review-skill-metadata",
+                    signalType = item.Classification,
+                    requiresNewVersion = item.RelatedResourceIds.Count > 0
+                }, JsonOptions),
+                EvidenceJson = JsonSerializer.Serialize(new
+                {
+                    findingKey = item.Key,
+                    item.Classification,
+                    item.SemanticConfidence,
+                    evidenceRefs = item.RelatedResourceIds.Select(x => x.ToString("D")).ToArray()
+                }, JsonOptions),
+                Confidence = item.SemanticConfidence,
+                Status = SkillMetadataProposalStatus.Pending,
+                GovernanceRunId = request.GovernanceRunId,
+                IdempotencyKey = Hash($"skill-metadata-proposal:{request.GovernanceRunId}:{item.Key}"),
+                CreatedAt = clock.UtcNow,
+                UpdatedAt = clock.UtcNow
+            };
+            await dbContext.SkillMetadataProposals.AddAsync(proposal, cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            var readBack = await dbContext.SkillMetadataProposals.AsNoTracking()
+                .SingleOrDefaultAsync(x => x.Id == proposal.Id, cancellationToken);
+            if (readBack?.Status != SkillMetadataProposalStatus.Pending ||
+                !string.Equals(readBack.ExpectedMetadataHash, metadataHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Skill metadata proposal failed durable read-back.");
+            }
+            return await AuditedResultAsync(item, GovernanceBatchActionType.SkillMetadataProposal,
+                GovernanceBatchItemDisposition.Applied,
+                "Created and read back a proposal pinned to the current metadata version/hash; no Published SkillVersion bundle was modified.",
+                [], [proposal.Id, skill.Id], actor, cancellationToken);
+        }
         if (item.Kind == nameof(GovernanceItemKind.ProjectHierarchy) && item.RequiresExplicitApproval)
         {
             var rows = await dbContext.ProjectHierarchies.AsNoTracking()

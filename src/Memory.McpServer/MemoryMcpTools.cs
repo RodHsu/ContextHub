@@ -13,6 +13,7 @@ public sealed class MemoryMcpTools(
     IConversationAutomationService conversationAutomationService,
     IProjectDiscussionService projectDiscussionService,
     IProjectWorkItemService projectWorkItemService,
+    ISkillService skillService,
     IKnowledgeReviewService knowledgeReviewService,
     IGovernanceBatchExecutor governanceBatchExecutor,
     IAutonomousRetentionService autonomousRetentionService,
@@ -241,6 +242,34 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("List project work items. Archived work items are excluded unless IncludeArchived is true. These are user-managed project tasks, not governance suggested actions.")]
     public Task<IReadOnlyList<ProjectWorkItemResult>> project_work_items_list(ProjectWorkItemListRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.ListAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Return a bounded Top-N set of legal SkillVersion candidates for one execution after ACL, lifecycle, binding, capability, risk, version, and policy hard filters. The agent remains responsible for final applicability judgment.")]
+    public Task<SkillSearchForExecutionResult> skills_search_for_execution(SkillSearchForExecutionRequest request, CancellationToken cancellationToken = default)
+        => skillService.SearchForExecutionAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Record structured candidate rejection or selected-skill release evidence. Feedback is idempotent and may authorize only a bounded next search round; it never forces use of an inapplicable skill.")]
+    public Task<SkillResolutionFeedbackResult> skills_resolution_feedback(SkillResolutionFeedbackRequest request, CancellationToken cancellationToken = default)
+        => skillService.RecordFeedbackAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Pin zero-trust exact immutable SkillVersions selected from one resolution, including required dependency closure and conflict validation.")]
+    public Task<SkillSelectForExecutionResult> skills_select_for_execution(SkillSelectForExecutionRequest request, CancellationToken cancellationToken = default)
+        => skillService.SelectAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Return the portable bundle for an exact contentHash-pinned SkillVersion. Revoked or unpinned versions fail closed.")]
+    public Task<SkillVersionBundleResult> skill_version_get(SkillVersionGetRequest request, CancellationToken cancellationToken = default)
+        => skillService.GetPinnedVersionAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Materialize an accepted exact SkillVersion into an execution-isolated read-only workspace backed by a content-addressed cache.")]
+    public Task<SkillMaterializationResult> skill_version_materialize(SkillMaterializeRequest request, CancellationToken cancellationToken = default)
+        => skillService.MaterializeAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description("Clean execution-scoped Skill materializations after completion, failure, or workspace cleanup without removing immutable registry content or audit evidence.")]
+    public Task<SkillMaterializationCleanupResult> skills_materialization_cleanup(SkillMaterializationCleanupRequest request, CancellationToken cancellationToken = default)
+        => skillService.CleanupMaterializationsAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Record redacted, append-only, idempotent Skill invocation start or terminal evidence for an exact pinned contentHash.")]
+    public Task<SkillTelemetryRecordResult> skills_invocation_record(SkillInvocationRecordRequest request, CancellationToken cancellationToken = default)
+        => skillService.RecordInvocationAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Run server-side full-coverage governance across every authorized active/archived Project and Shared durable memory, then return compact stable-snapshot candidate pages plus user preferences, discussions, work items, insights, actions, and proposals.")]
     public Task<KnowledgeReviewResult> knowledge_review(KnowledgeReviewRequest request, CancellationToken cancellationToken = default)

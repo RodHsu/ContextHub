@@ -4,6 +4,8 @@
 
 ContextHub 是一套給 Codex 使用的外部知識系統。它的目標不是把所有歷史資料直接塞進 prompt，而是讓 Codex 在需要時透過 MCP 或 REST 查詢：
 
+Agent Skills 使用同一 Application/Infrastructure boundary：PostgreSQL 保存 stable Skill identity、不可變 SkillVersion、binding、index generation、resolution pin、telemetry 與 metadata proposal；embedding provider 建立 shadow search generation；檔案系統 adapter 只負責 content-addressed cache 與 execution-isolated materialization。完整契約與 lifecycle 見 [Agent Skills](agent-skills.md)。
+
 - 長期記憶
 - 專案事實與設計決策
 - 程式碼 / 文件 / 錯誤脈絡

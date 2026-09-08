@@ -48,6 +48,8 @@ public sealed record ScheduledGovernanceReviewResult(
     public int AutomationActionableCount => ReversibleExecutionCount;
 
     public int RequiresUserDecisionCount => HumanDecisionCount;
+    public GovernanceSurfaceCoverageResult SkillCoverage { get; init; } = new(0, 0, 0, 0, 0, 0, 0, false, true);
+    public IReadOnlyDictionary<string, int> SkillSignalCounts { get; init; } = new Dictionary<string, int>();
 }
 
 public sealed record ScheduledGovernanceExecuteRequest(
@@ -156,6 +158,8 @@ public sealed record ScheduledGovernanceRunResult(
     public ScheduledGovernanceDecision? Decision { get; init; }
     public string Outcome { get; init; } = string.Empty;
     public ScheduledGovernanceReliabilitySummary? Reliability { get; init; }
+    public GovernanceSurfaceCoverageResult SkillCoverage { get; init; } = new(0, 0, 0, 0, 0, 0, 0, false, true);
+    public IReadOnlyDictionary<string, int> SkillSignalCounts { get; init; } = new Dictionary<string, int>();
 }
 
 /// <summary>

@@ -136,7 +136,13 @@ public sealed class ScheduledGovernanceService(
             review.Convergence.HostBlockedCount,
             review.Convergence.DeferredCount,
             receipt?.ExceptionDelta,
-            ScheduledGovernanceContract.RuntimeIdentity);
+            ScheduledGovernanceContract.RuntimeIdentity)
+        {
+            SkillCoverage = governanceCoverage.SkillCoverage,
+            SkillSignalCounts = (review.SkillGovernance?.Findings ?? [])
+                .GroupBy(finding => finding.SignalType, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal)
+        };
 
         await receipts.RecordScheduledDecisionAsync(scheduledResult, startedAt, cancellationToken);
         receipt = await receipts.GetAsync(reviewedRunId, cancellationToken);
@@ -281,7 +287,9 @@ public sealed class ScheduledGovernanceService(
             Terminal = !string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase),
             Decision = decision,
             Outcome = outcome,
-            Reliability = reliabilitySummary
+            Reliability = reliabilitySummary,
+            SkillCoverage = receipt.SkillCoverage,
+            SkillSignalCounts = receipt.SkillSignalCounts
         };
     }
 

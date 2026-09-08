@@ -46,6 +46,13 @@ public static class SecurityScopes
     public const string GovernanceTrackerManage = "governance:tracker-manage";
     public const string ScheduledGovernance = "governance:scheduled";
     public const string InternalRetentionDelete = "internal:retention-delete";
+    public const string SkillsRead = "skills:read";
+    public const string SkillsExecute = "skills:execute";
+    public const string SkillsManage = "skills:manage";
+    public const string SkillsPublish = "skills:publish";
+    public const string SkillsSecurity = "skills:security";
+    public const string SkillsBind = "skills:bind";
+    public const string SkillsReindex = "skills:reindex";
 }
 
 public static class ActorAuthorization

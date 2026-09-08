@@ -2,7 +2,7 @@ namespace Memory.Application;
 
 public static class McpPublishedToolCatalog
 {
-    public const string AppFacingCatalogVersion = "2026-08-29-v5";
+    public const string AppFacingCatalogVersion = "2026-09-08-v6";
 
     public static IReadOnlySet<string> RestrictedToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -70,7 +70,14 @@ public static class McpPublishedToolCatalog
         "chatgpt_proposals_list",
         "chatgpt_governance_proposal_create",
         "chatgpt_proposal_approve",
-        "chatgpt_proposal_reject"
+        "chatgpt_proposal_reject",
+        "skills_search_for_execution",
+        "skills_resolution_feedback",
+        "skills_select_for_execution",
+        "skill_version_get",
+        "skill_version_materialize",
+        "skills_materialization_cleanup",
+        "skills_invocation_record"
     };
 
     public static IReadOnlySet<string> BackendOnlyToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
@@ -126,7 +133,9 @@ public static class McpPublishedToolCatalog
         "project_artifact_get",
         "log_search",
         "log_read",
-        "chatgpt_proposals_list"
+        "chatgpt_proposals_list",
+        "skills_search_for_execution",
+        "skill_version_get"
     };
 
     public static IReadOnlySet<string> ProposalWriteToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)

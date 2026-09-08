@@ -102,6 +102,11 @@ public sealed class GovernanceRunReceiptService(
         receipt.DeleteMatured = result.DeleteMaturedCount;
         receipt.DeleteCancelled = result.DeleteCancelledCount;
         receipt.BusinessWorkItemActionable = result.Convergence.BusinessWorkItemActionableCount;
+        receipt.SkillCoverageJson = JsonSerializer.Serialize(result.GovernanceCoverage?.SkillCoverage ??
+            new GovernanceSurfaceCoverageResult(0, 0, 0, 0, 0, 0, 0, false, true), JsonOptions);
+        receipt.SkillSignalCountsJson = JsonSerializer.Serialize(
+            (result.SkillGovernance?.Findings ?? []).GroupBy(x => x.SignalType, StringComparer.Ordinal)
+                .ToDictionary(x => x.Key, x => x.Count(), StringComparer.Ordinal), JsonOptions);
         receipt.FinalConvergenceStatus = result.Convergence.Status;
         receipt.StoppedReason = "ReviewCompleted";
         receipt.ProjectIdsJson = JsonSerializer.Serialize(projectIds, JsonOptions);
@@ -213,6 +218,8 @@ public sealed class GovernanceRunReceiptService(
         receipt.BusinessWorkItemActionable = result.BusinessWorkItemActionableCount;
         receipt.FinalConvergenceStatus = result.Decision.ToString();
         receipt.StoppedReason = "ScheduledDecisionProjected";
+        receipt.SkillCoverageJson = JsonSerializer.Serialize(result.SkillCoverage, JsonOptions);
+        receipt.SkillSignalCountsJson = JsonSerializer.Serialize(result.SkillSignalCounts, JsonOptions);
         receipt.ProjectIdsJson = JsonSerializer.Serialize(result.ResolvedProjectIds, JsonOptions);
         receipt.RequestIdentityHash = ReviewRequestIdentityHash(runId, result.IsReReview);
         SetCanonicalReviewEventKey(receipt);
@@ -744,7 +751,11 @@ public sealed class GovernanceRunReceiptService(
                 canonical.ExceptionResolved,
                 canonical.ExceptionUnchanged,
                 canonical.ExceptionEscalated),
-            GovernedExceptionStates = DeserializeExceptionStates(canonical.GovernedExceptionStatesJson)
+            GovernedExceptionStates = DeserializeExceptionStates(canonical.GovernedExceptionStatesJson),
+            SkillCoverage = DeserializeOrDefault(canonical.SkillCoverageJson,
+                new GovernanceSurfaceCoverageResult(0, 0, 0, 0, 0, 0, 0, false, true)),
+            SkillSignalCounts = DeserializeOrDefault<IReadOnlyDictionary<string, int>>(
+                canonical.SkillSignalCountsJson, new Dictionary<string, int>())
         };
     }
 
@@ -1470,6 +1481,8 @@ public sealed class GovernanceRunReceiptService(
         receipt.Tombstoned = previous.Tombstoned;
         receipt.SemanticAutoResolved = previous.SemanticAutoResolved;
         receipt.BusinessWorkItemActionable = previous.BusinessWorkItemActionable;
+        receipt.SkillCoverageJson = previous.SkillCoverageJson;
+        receipt.SkillSignalCountsJson = previous.SkillSignalCountsJson;
         receipt.FinalConvergenceStatus = previous.FinalConvergenceStatus;
         receipt.StoppedReason = previous.StoppedReason;
         receipt.RequestHash = previous.RequestHash;
@@ -1531,7 +1544,15 @@ public sealed class GovernanceRunReceiptService(
             coverage.ArtifactCoverage.CandidateCount + coverage.DiscussionCoverage.CandidateCount +
             coverage.WorkItemCoverage.CandidateCount + coverage.InsightCoverage.CandidateCount +
             coverage.SuggestedActionCoverage.CandidateCount + coverage.ProposalCoverage.CandidateCount +
+            coverage.SkillCoverage.CandidateCount +
             coverage.LogCoverage.CandidateCount;
+
+    private static T DeserializeOrDefault<T>(string? json, T fallback)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return fallback;
+        try { return JsonSerializer.Deserialize<T>(json, JsonOptions) ?? fallback; }
+        catch (JsonException) { return fallback; }
+    }
 
     private static string ResolveTerminalStatus(GovernanceBatchExecuteResult result)
         => result.ErrorCode == GovernanceBatchErrorCode.None

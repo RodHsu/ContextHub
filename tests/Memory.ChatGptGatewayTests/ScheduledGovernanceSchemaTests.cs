@@ -53,6 +53,10 @@ public sealed class ScheduledGovernanceSchemaTests
 
         methods.Select(method => method.Name).Should().BeEquivalentTo(
             ScheduledGovernanceToolCatalog.PublishedToolNames);
+        methods.Should().HaveCount(4);
+        ScheduledGovernanceContract.ToolContractVersion.Should().Be("1.3");
+        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-09-08-automation-v4");
+        ScheduledGovernanceContract.FixedReversibleActions.Should().Contain(GovernanceBatchActionType.SkillMetadataProposal);
 
         foreach (var method in methods)
         {

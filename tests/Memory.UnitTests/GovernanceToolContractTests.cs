@@ -26,6 +26,7 @@ public sealed class GovernanceToolContractTests
             nameof(GovernanceBatchActionType.Quarantine),
             nameof(GovernanceBatchActionType.MaturedDelete),
             nameof(GovernanceBatchActionType.SemanticReevaluate)
+            ,nameof(GovernanceBatchActionType.SkillMetadataProposal)
         ]);
     }
 

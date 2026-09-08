@@ -936,6 +936,18 @@ public sealed class DashboardQueryServiceTests
         public DbSet<DiscussionMessage> DiscussionMessages => throw new NotSupportedException();
         public DbSet<ProjectWorkItem> ProjectWorkItems => throw new NotSupportedException();
         public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => throw new NotSupportedException();
+        public DbSet<Skill> Skills => throw new NotSupportedException();
+        public DbSet<SkillVersion> SkillVersions => throw new NotSupportedException();
+        public DbSet<SkillVersionDependency> SkillVersionDependencies => throw new NotSupportedException();
+        public DbSet<SkillBinding> SkillBindings => throw new NotSupportedException();
+        public DbSet<SkillSearchGeneration> SkillSearchGenerations => throw new NotSupportedException();
+        public DbSet<SkillSearchDocument> SkillSearchDocuments => throw new NotSupportedException();
+        public DbSet<SkillResolution> SkillResolutions => throw new NotSupportedException();
+        public DbSet<SkillResolutionCandidate> SkillResolutionCandidates => throw new NotSupportedException();
+        public DbSet<SkillResolutionPin> SkillResolutionPins => throw new NotSupportedException();
+        public DbSet<SkillTelemetryEvent> SkillTelemetryEvents => throw new NotSupportedException();
+        public DbSet<SkillMaterialization> SkillMaterializations => throw new NotSupportedException();
+        public DbSet<SkillMetadataProposal> SkillMetadataProposals => throw new NotSupportedException();
 
         public Task<IApplicationTransaction> BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
@@ -943,6 +955,9 @@ public sealed class DashboardQueryServiceTests
         public void ClearTrackedChanges()
         {
         }
+
+        public Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default)
+            => operation(cancellationToken);
 
         public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
             => throw new NotSupportedException();

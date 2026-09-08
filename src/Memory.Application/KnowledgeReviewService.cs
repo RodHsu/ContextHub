@@ -198,6 +198,7 @@ public sealed class KnowledgeReviewService(
             SharedKnowledgeGovernance = new KnowledgeGovernanceSectionResult(sharedGovernancePage, sharedGovernancePageInfo),
             GovernancePlan = fullGovernancePlan.Items,
             GovernanceCoverage = fullGovernancePlan.Coverage,
+            SkillGovernance = fullGovernancePlan.SkillGovernance,
             QuarantinedCount = fullGovernancePlan.Retention.QuarantinedCount,
             DeleteEligibleCount = fullGovernancePlan.Retention.DeleteEligibleCount,
             DeleteMaturedCount = fullGovernancePlan.Retention.DeleteMaturedCount,
@@ -258,7 +259,7 @@ public sealed class KnowledgeReviewService(
            coverage.ArtifactCoverage.CandidateCount + coverage.DiscussionCoverage.CandidateCount +
            coverage.WorkItemCoverage.CandidateCount + coverage.InsightCoverage.CandidateCount +
            coverage.SuggestedActionCoverage.CandidateCount + coverage.ProposalCoverage.CandidateCount +
-           coverage.LogCoverage.CandidateCount;
+           coverage.SkillCoverage.CandidateCount + coverage.LogCoverage.CandidateCount;
 
     internal static KnowledgeReviewConvergenceResult BuildConvergence(
         bool isReReview,

@@ -4082,11 +4082,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
-        listedToolNames.Should().HaveCount(65);
+        listedToolNames.Should().HaveCount(72);
         var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
         appFacingProjection.IsValid.Should().BeTrue();
-        appFacingProjection.PublishedToolCount.Should().Be(65);
-        appFacingProjection.AppCallableToolCount.Should().Be(65);
+        appFacingProjection.PublishedToolCount.Should().Be(72);
+        appFacingProjection.AppCallableToolCount.Should().Be(72);
         appFacingProjection.MissingPublishedTools.Should().BeEmpty();
         appFacingProjection.UnexpectedPublishedTools.Should().BeEmpty();
         appFacingProjection.MissingAppCallableTools.Should().BeEmpty();
@@ -4096,7 +4096,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_run_get",
             "governance_runs_list"
         };
-        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(62);
+        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(69);
         foreach (var toolName in receiptAndContractTools)
         {
             var projectedTool = appFacingProjection.Tools.Single(tool => tool.Name == toolName);

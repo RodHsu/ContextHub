@@ -99,6 +99,10 @@ public interface IContextHubApiClient
     Task<AgentConnectivityStatusResult> GetAgentConnectivityStatusAsync(string? projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<AgentConnectivitySummaryResult>> GetAgentConnectivitySummariesAsync(AgentConnectivitySummaryQuery request, CancellationToken cancellationToken);
     Task<IReadOnlyList<AgentConnectivityRecentObservationResult>> GetRecentAgentConnectivityObservationsAsync(string? projectId, string? agentId, int limit, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken);
+    Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken);
+    Task<SkillReindexResult> ReindexSkillsAsync(SkillReindexRequest request, CancellationToken cancellationToken);
 }
 
 public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiClient
@@ -116,6 +120,31 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public Task<DashboardMonitoringResult> GetMonitoringAsync(CancellationToken cancellationToken)
         => GetRequiredAsync<DashboardMonitoringResult>("/api/dashboard/monitoring", cancellationToken);
+
+    public Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<SkillSummaryResult>>(QueryHelpers.AddQueryString("/api/skills", new Dictionary<string, string?>
+        {
+            ["projectId"] = projectId,
+            ["includeArchived"] = includeArchived.ToString()
+        }), cancellationToken);
+
+    public async Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/skills/analytics", new SkillAnalyticsRequest(projectId, WindowDays: windowDays), cancellationToken);
+        return await ReadRequiredAsync<IReadOnlyList<SkillTelemetryAggregateResult>>(response, cancellationToken);
+    }
+
+    public async Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/skills/governance/review", new SkillMetadataGovernancePolicy(), cancellationToken);
+        return await ReadRequiredAsync<SkillMetadataGovernanceReviewResult>(response, cancellationToken);
+    }
+
+    public async Task<SkillReindexResult> ReindexSkillsAsync(SkillReindexRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/skills/reindex", request, cancellationToken);
+        return await ReadRequiredAsync<SkillReindexResult>(response, cancellationToken);
+    }
 
     public Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken)
         => GetRequiredAsync<PagedResult<MemoryListItemResult>>(BuildMemoriesUrl(request), cancellationToken);

@@ -1940,4 +1940,16 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     public Task<ApiTokenResult> RevokeMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
         => RevokeApiTokenAsync(tokenId, cancellationToken);
+
+    public Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SkillSummaryResult>>([]);
+
+    public Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SkillTelemetryAggregateResult>>([]);
+
+    public Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken)
+        => Task.FromResult(new SkillMetadataGovernanceReviewResult(0, 0, 0, 0, 0, true, false, []));
+
+    public Task<SkillReindexResult> ReindexSkillsAsync(SkillReindexRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new SkillReindexResult(Guid.NewGuid(), SkillSearchGenerationStatus.Active, 0, "{}", true, false));
 }

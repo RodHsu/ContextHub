@@ -1,0 +1,100 @@
+@page "/skills"
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>Context Hub | Agent Skills</PageTitle>
+
+<PageViewport Title="Agent Skills"
+              Subtitle="可攜式 Skill Registry、不可變版本、搜尋索引與執行品質訊號。"
+              BodyClass="page-viewport-body">
+    <Actions>
+        <div class="page-actions-secondary">
+            <button class="ghost-button" @onclick="ReindexAsync" disabled="@_loading">重建搜尋索引</button>
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        @if (!string.IsNullOrWhiteSpace(_error))
+        {
+            <div class="inline-error">@_error</div>
+        }
+        <div class="metric-grid">
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Skills：</span><span class="metric-value-inline">@_skills.Count</span></div></section>
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Published versions：</span><span class="metric-value-inline">@PublishedCount</span></div></section>
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">治理候選：</span><span class="metric-value-inline">@(_governance?.CandidateCount ?? 0)</span></div></section>
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">30 日成功率：</span><span class="metric-value-inline">@SuccessRate.ToString("P1")</span></div></section>
+        </div>
+        <section class="panel">
+            <div class="panel-heading-row"><div><div class="panel-title">Registry</div><div class="panel-heading-meta">Default version 與 content hash 共同構成執行 pin；Revoked 版本不會由搜尋或 materialization 回傳。</div></div></div>
+            @if (_skills.Count == 0)
+            {
+                <div class="empty-inline"><div class="empty-inline-title">尚無 Skills</div><div class="empty-inline-copy">請透過管理 API 先執行 import preview、import 與 publish。</div></div>
+            }
+            else
+            {
+                <div class="stack-list">
+                    @foreach (var skill in _skills)
+                    {
+                        <article class="stack-item">
+                            <div class="stack-item-split"><div class="stack-item-content">
+                                <div class="stack-item-title">@skill.Name <span class="status-badge neutral">@skill.StableKey</span></div>
+                                <div class="stack-item-copy">@skill.Description</div>
+                                <div class="stack-item-meta">metadata v@skill.MetadataVersion · @skill.MetadataHash[..Math.Min(12, skill.MetadataHash.Length)] · default @(skill.DefaultVersionId?.ToString("D") ?? "未設定")</div>
+                            </div><div class="stack-item-actions stack-item-actions-column">
+                                @foreach (var version in skill.Versions.OrderByDescending(x => x.CreatedAt).Take(4))
+                                {
+                                    <span class="status-badge @StatusClass(version.Status)">@version.Version · @version.Status</span>
+                                }
+                            </div></div>
+                        </article>
+                    }
+                </div>
+            }
+        </section>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private IReadOnlyList<SkillSummaryResult> _skills = [];
+    private IReadOnlyList<SkillTelemetryAggregateResult> _analytics = [];
+    private SkillMetadataGovernanceReviewResult? _governance;
+    private bool _loading;
+    private string _error = string.Empty;
+    private int PublishedCount => _skills.Sum(x => x.Versions.Count(v => v.Status == SkillLifecycleStatus.Published));
+    private decimal SuccessRate => _analytics.Sum(x => x.InvocationCount) == 0 ? 0 : decimal.Divide(_analytics.Sum(x => x.SuccessCount), _analytics.Sum(x => x.InvocationCount));
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true; _error = string.Empty;
+        try
+        {
+            _skills = await ApiClient.GetSkillsAsync(null, false, CancellationToken.None);
+            _analytics = await ApiClient.GetSkillAnalyticsAsync(null, 30, CancellationToken.None);
+            _governance = await ApiClient.GetSkillGovernanceAsync(CancellationToken.None);
+        }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _loading = false; }
+    }
+
+    private async Task ReindexAsync()
+    {
+        _loading = true; _error = string.Empty;
+        try
+        {
+            await ApiClient.ReindexSkillsAsync(new("skill-search-v1", "context-hub-default", "1", 0.35m, true, true, $"dashboard-{Guid.NewGuid():N}"), CancellationToken.None);
+            await LoadAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; _loading = false; }
+    }
+
+    private static string StatusClass(SkillLifecycleStatus status) => status switch
+    {
+        SkillLifecycleStatus.Published => "ok",
+        SkillLifecycleStatus.Revoked => "danger",
+        SkillLifecycleStatus.Deprecated => "warning",
+        _ => "neutral"
+    };
+}

@@ -27,7 +27,8 @@ public static class ScheduledGovernanceContract
         GovernanceBatchActionType.ArtifactReconcile,
         GovernanceBatchActionType.DiscussionReconcile,
         GovernanceBatchActionType.Quarantine,
-        GovernanceBatchActionType.SemanticReevaluate
+        GovernanceBatchActionType.SemanticReevaluate,
+        GovernanceBatchActionType.SkillMetadataProposal
     ];
 
     public const string ReviewDescription =

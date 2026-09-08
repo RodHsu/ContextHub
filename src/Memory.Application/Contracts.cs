@@ -1311,6 +1311,7 @@ public enum GovernanceItemKind
     ConversationInsight,
     SuggestedAction,
     Proposal,
+    SkillMetadata,
     LogPartition,
     LogCandidate,
     Retention
@@ -1361,12 +1362,13 @@ public sealed record FullGovernanceCoverageResult(
 {
     public bool HasMore => Surfaces.Any(x => x.HasMore);
     public bool CoverageComplete => Surfaces.All(x => x.CoverageComplete && !x.HasMore);
+    public GovernanceSurfaceCoverageResult SkillCoverage { get; init; } = new(0, 0, 0, 0, 0, 0, 0, false, true);
 
     private IReadOnlyList<GovernanceSurfaceCoverageResult> Surfaces =>
     [
         ProjectCoverage, HierarchyCoverage, MemoryCoverage, PreferenceCoverage, ArtifactCoverage,
         DiscussionCoverage, WorkItemCoverage, InsightCoverage, SuggestedActionCoverage,
-        ProposalCoverage, LogCoverage
+        ProposalCoverage, SkillCoverage, LogCoverage
     ];
 }
 
@@ -1380,6 +1382,7 @@ public sealed record FullGovernancePlanResult(
     public AutonomousRetentionReviewResult Retention { get; init; } = AutonomousRetentionReviewResult.Empty;
     public int SemanticAutoResolvableCount { get; init; }
     public int RemainingHumanDecisionCount { get; init; }
+    public SkillMetadataGovernanceReviewResult? SkillGovernance { get; init; }
 }
 
 public sealed record KnowledgeReviewPaginationResult(
@@ -1443,6 +1446,7 @@ public sealed record KnowledgeReviewResult(
     public KnowledgeGovernanceSectionResult? SharedKnowledgeGovernance { get; init; }
     public IReadOnlyList<GovernanceReviewItem> GovernancePlan { get; init; } = [];
     public FullGovernanceCoverageResult? GovernanceCoverage { get; init; }
+    public SkillMetadataGovernanceReviewResult? SkillGovernance { get; init; }
     public int QuarantinedCount { get; init; }
     public int DeleteEligibleCount { get; init; }
     public int DeleteMaturedCount { get; init; }
@@ -1510,7 +1514,8 @@ public enum GovernanceBatchActionType
     LogRetentionProposal,
     Quarantine,
     MaturedDelete,
-    SemanticReevaluate
+    SemanticReevaluate,
+    SkillMetadataProposal
 }
 
 public enum GovernanceBatchItemDisposition
@@ -1754,6 +1759,8 @@ public sealed record GovernanceRunReceiptResult(
 {
     public GovernanceExceptionDeltaResult ExceptionDelta { get; init; } = new(0, 0, 0, 0);
     public IReadOnlyList<GovernanceExceptionStateResult> GovernedExceptionStates { get; init; } = [];
+    public GovernanceSurfaceCoverageResult SkillCoverage { get; init; } = new(0, 0, 0, 0, 0, 0, 0, false, true);
+    public IReadOnlyDictionary<string, int> SkillSignalCounts { get; init; } = new Dictionary<string, int>();
 }
 
 public sealed record GovernanceBatchOutcomeResult(
@@ -2145,8 +2152,21 @@ public interface IApplicationDbContext
     DbSet<DiscussionMessage> DiscussionMessages { get; }
     DbSet<ProjectWorkItem> ProjectWorkItems { get; }
     DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems { get; }
+    DbSet<Skill> Skills { get; }
+    DbSet<SkillVersion> SkillVersions { get; }
+    DbSet<SkillVersionDependency> SkillVersionDependencies { get; }
+    DbSet<SkillBinding> SkillBindings { get; }
+    DbSet<SkillSearchGeneration> SkillSearchGenerations { get; }
+    DbSet<SkillSearchDocument> SkillSearchDocuments { get; }
+    DbSet<SkillResolution> SkillResolutions { get; }
+    DbSet<SkillResolutionCandidate> SkillResolutionCandidates { get; }
+    DbSet<SkillResolutionPin> SkillResolutionPins { get; }
+    DbSet<SkillTelemetryEvent> SkillTelemetryEvents { get; }
+    DbSet<SkillMaterialization> SkillMaterializations { get; }
+    DbSet<SkillMetadataProposal> SkillMetadataProposals { get; }
     Task<IApplicationTransaction> BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken = default);
     void ClearTrackedChanges();
+    Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default);
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
 

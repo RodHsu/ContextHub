@@ -536,9 +536,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("連線面總覽");
         mcpToolsHtml.Should().Contain("目前發布數量");
         mcpToolsHtml.Should().Contain("Direct MCP");
-        mcpToolsHtml.Should().Contain("66</strong> 支工具");
+        mcpToolsHtml.Should().Contain("73</strong> 支工具");
         mcpToolsHtml.Should().Contain("ChatGPT App-facing");
-        mcpToolsHtml.Should().Contain("65</strong> 支工具");
+        mcpToolsHtml.Should().Contain("72</strong> 支工具");
         mcpToolsHtml.Should().Contain("可能刪除");
         mcpToolsHtml.Should().Contain("3</strong> 支工具");
         mcpToolsHtml.Should().Contain("Direct MCP 工具");
@@ -658,6 +658,13 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         governanceHtml.Should().Contain("治理細節");
         governanceHtml.Should().Contain("執行治理分析");
         governanceHtml.Should().Contain("不會自動塞示範資料");
+
+        using var skillsResponse = await client.GetAsync("/skills");
+        skillsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var skillsHtml = WebUtility.HtmlDecode(await skillsResponse.Content.ReadAsStringAsync());
+        skillsHtml.Should().Contain("Agent Skills");
+        skillsHtml.Should().Contain("Registry");
+        skillsHtml.Should().Contain("重建搜尋索引");
 
         using var evaluationResponse = await client.GetAsync("/evaluation");
         evaluationResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -2082,6 +2089,18 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public Task<ApiTokenResult> RevokeMyApiTokenAsync(Guid tokenId, CancellationToken cancellationToken)
         => RevokeApiTokenAsync(tokenId, cancellationToken);
+
+    public Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SkillSummaryResult>>([]);
+
+    public Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SkillTelemetryAggregateResult>>([]);
+
+    public Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken)
+        => Task.FromResult(new SkillMetadataGovernanceReviewResult(0, 0, 0, 0, 0, true, false, []));
+
+    public Task<SkillReindexResult> ReindexSkillsAsync(SkillReindexRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new SkillReindexResult(Guid.NewGuid(), SkillSearchGenerationStatus.Active, 0, "{}", true, false));
 
     public Task<IReadOnlyList<SecurityAuditEventResult>> GetSecurityAuditEventsAsync(Guid? tenantId, int limit, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SecurityAuditEventResult>>(

@@ -2,6 +2,8 @@
 
 This guide explains how agents and developers should use ContextHub through MCP.
 
+For execution-time Skill discovery, use `skills_search_for_execution` at startup, optionally perform bounded evidence-driven re-search after `skills_resolution_feedback`, then pin exact versions with `skills_select_for_execution`. `skill_version_get` and `skill_version_materialize` require the selected `contentHash`; revoked versions fail closed. Record invocation evidence and call `skills_materialization_cleanup` at execution termination. See [Agent Skills](agent-skills.md).
+
 ContextHub is not a prompt dump. It is a structured knowledge system that lets an agent retrieve and write durable context when that context has real future value.
 
 ## Endpoints

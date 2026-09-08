@@ -69,6 +69,18 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
     public DbSet<ProjectWorkItem> ProjectWorkItems => Set<ProjectWorkItem>();
     public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => Set<ProjectWorkItemChecklistItem>();
+    public DbSet<Skill> Skills => Set<Skill>();
+    public DbSet<SkillVersion> SkillVersions => Set<SkillVersion>();
+    public DbSet<SkillVersionDependency> SkillVersionDependencies => Set<SkillVersionDependency>();
+    public DbSet<SkillBinding> SkillBindings => Set<SkillBinding>();
+    public DbSet<SkillSearchGeneration> SkillSearchGenerations => Set<SkillSearchGeneration>();
+    public DbSet<SkillSearchDocument> SkillSearchDocuments => Set<SkillSearchDocument>();
+    public DbSet<SkillResolution> SkillResolutions => Set<SkillResolution>();
+    public DbSet<SkillResolutionCandidate> SkillResolutionCandidates => Set<SkillResolutionCandidate>();
+    public DbSet<SkillResolutionPin> SkillResolutionPins => Set<SkillResolutionPin>();
+    public DbSet<SkillTelemetryEvent> SkillTelemetryEvents => Set<SkillTelemetryEvent>();
+    public DbSet<SkillMaterialization> SkillMaterializations => Set<SkillMaterialization>();
+    public DbSet<SkillMetadataProposal> SkillMetadataProposals => Set<SkillMetadataProposal>();
 
     public async Task<IApplicationTransaction> BeginTransactionAsync(
         IsolationLevel isolationLevel,
@@ -148,6 +160,27 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
 
     public void ClearTrackedChanges()
         => ChangeTracker.Clear();
+
+    public async Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default)
+    {
+        if (Database.CurrentTransaction is not null)
+        {
+            return await operation(cancellationToken);
+        }
+
+        await using var transaction = await Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var result = await operation(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return result;
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+    }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -1145,6 +1178,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Tombstoned).HasColumnName("tombstoned");
             entity.Property(x => x.SemanticAutoResolved).HasColumnName("semantic_auto_resolved");
             entity.Property(x => x.BusinessWorkItemActionable).HasColumnName("business_work_item_actionable");
+            entity.Property(x => x.SkillCoverageJson).HasColumnName("skill_coverage_json").HasColumnType("jsonb");
+            entity.Property(x => x.SkillSignalCountsJson).HasColumnName("skill_signal_counts_json").HasColumnType("jsonb");
             entity.Property(x => x.FinalConvergenceStatus).HasColumnName("final_convergence_status");
             entity.Property(x => x.StoppedReason).HasColumnName("stopped_reason");
             entity.Property(x => x.EventType).HasColumnName("event_type");
@@ -1385,6 +1420,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.HasOne(x => x.WorkItem).WithMany(x => x.ChecklistItems).HasForeignKey(x => x.WorkItemId).OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(x => new { x.WorkItemId, x.SortOrder });
         });
+
+        modelBuilder.ConfigureSkillModels();
     }
 
     private static string NormalizeJson(string? value)

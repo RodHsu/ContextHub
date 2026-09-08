@@ -27,6 +27,7 @@ public sealed class ChatGptGatewayTools(
     IProjectArtifactExchangeService artifactExchangeService,
     IChatGptProposalService proposalService,
     IProjectWorkItemService projectWorkItemService,
+    ISkillService skillService,
     IRequestActorAccessor actorAccessor,
     IHttpContextAccessor httpContextAccessor)
 {
@@ -380,6 +381,34 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("Reject a pending ChatGPT write proposal without changing durable ContextHub memory.")]
     public Task<ChatGptProposalResult> chatgpt_proposal_reject(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
         => proposalService.RejectAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Search legal, relevant Skill candidates for execution startup or a bounded evidence-driven re-search. The agent may select zero, one, or multiple results.")]
+    public Task<SkillSearchForExecutionResult> skills_search_for_execution(SkillSearchForExecutionRequest request, CancellationToken cancellationToken = default)
+        => skillService.SearchForExecutionAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Record a structured Skill rejection or release reason with bounded redacted evidence and determine whether another search round is allowed.")]
+    public Task<SkillResolutionFeedbackResult> skills_resolution_feedback(SkillResolutionFeedbackRequest request, CancellationToken cancellationToken = default)
+        => skillService.RecordFeedbackAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Select exact candidate SkillVersions and pin their content hashes after dependency and conflict validation.")]
+    public Task<SkillSelectForExecutionResult> skills_select_for_execution(SkillSelectForExecutionRequest request, CancellationToken cancellationToken = default)
+        => skillService.SelectAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Read an exact content-hash-pinned portable SkillVersion. Revoked or unpinned versions fail closed.")]
+    public Task<SkillVersionBundleResult> skill_version_get(SkillVersionGetRequest request, CancellationToken cancellationToken = default)
+        => skillService.GetPinnedVersionAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Materialize an exact pinned SkillVersion into an execution-isolated read-only workspace.")]
+    public Task<SkillMaterializationResult> skill_version_materialize(SkillMaterializeRequest request, CancellationToken cancellationToken = default)
+        => skillService.MaterializeAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description("Clean only execution-scoped Skill materializations; immutable registry content and telemetry remain intact.")]
+    public Task<SkillMaterializationCleanupResult> skills_materialization_cleanup(SkillMaterializationCleanupRequest request, CancellationToken cancellationToken = default)
+        => skillService.CleanupMaterializationsAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Record append-only redacted Skill invocation start, success, or failure evidence for an exact pin.")]
+    public Task<SkillTelemetryRecordResult> skills_invocation_record(SkillInvocationRecordRequest request, CancellationToken cancellationToken = default)
+        => skillService.RecordInvocationAsync(request, cancellationToken);
 
     private Task<ChatGptProposalResult> CreateProposalAsync<T>(
         string toolName,

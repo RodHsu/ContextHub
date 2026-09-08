@@ -1106,6 +1106,8 @@ public sealed class GovernanceRunReceipt
     public int Tombstoned { get; set; }
     public int SemanticAutoResolved { get; set; }
     public int BusinessWorkItemActionable { get; set; }
+    public string SkillCoverageJson { get; set; } = "{}";
+    public string SkillSignalCountsJson { get; set; } = "{}";
     public string FinalConvergenceStatus { get; set; } = string.Empty;
     public string StoppedReason { get; set; } = string.Empty;
     public string EventType { get; set; } = string.Empty;

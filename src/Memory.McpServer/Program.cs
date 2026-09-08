@@ -1497,6 +1497,74 @@ workItems.MapPut("/{workItemId:guid}/governance-exclusion", async (Guid workItem
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["governanceExclusion"] = [ex.Message] }); }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 
+var skills = app.MapGroup("/api/skills");
+skills.RequireAuthIfEnabled(requireAuthentication);
+skills.MapGet(string.Empty, async (string? projectId, bool? includeArchived, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ListAsync(projectId, includeArchived ?? false, cancellationToken)));
+skills.MapGet("/{skillId:guid}", async (Guid skillId, ISkillService service, CancellationToken cancellationToken)
+    => await service.GetAsync(skillId, cancellationToken) is { } skill ? Results.Ok(skill) : Results.NotFound());
+skills.MapPost("/import/preview", async (SkillImportPreviewRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.PreviewImportAsync(request, cancellationToken)));
+skills.MapPost("/import", async (SkillImportRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Created("/api/skills", await service.ImportAsync(request, cancellationToken)));
+skills.MapPost("/versions/{skillVersionId:guid}/publish", async (Guid skillVersionId, SkillPublishRequest request, ISkillService service, CancellationToken cancellationToken) =>
+{
+    if (skillVersionId != request.SkillVersionId) return Results.BadRequest("Route and body SkillVersionId must match.");
+    return Results.Ok(await service.PublishAsync(request, cancellationToken));
+});
+skills.MapPost("/versions/{skillVersionId:guid}/lifecycle", async (Guid skillVersionId, SkillLifecycleRequest request, ISkillService service, CancellationToken cancellationToken) =>
+{
+    if (skillVersionId != request.SkillVersionId) return Results.BadRequest("Route and body SkillVersionId must match.");
+    return Results.Ok(await service.ChangeLifecycleAsync(request, cancellationToken));
+});
+skills.MapPut("/{skillId:guid}/default", async (Guid skillId, SkillDefaultVersionRequest request, ISkillService service, CancellationToken cancellationToken) =>
+{
+    if (skillId != request.SkillId) return Results.BadRequest("Route and body SkillId must match.");
+    return Results.Ok(await service.SetDefaultVersionAsync(request, cancellationToken));
+});
+skills.MapPut("/{skillId:guid}/bindings", async (Guid skillId, SkillBindingUpsertRequest request, ISkillService service, CancellationToken cancellationToken) =>
+{
+    if (skillId != request.SkillId) return Results.BadRequest("Route and body SkillId must match.");
+    return Results.Ok(await service.UpsertBindingAsync(request, cancellationToken));
+});
+skills.MapGet("/versions/{skillVersionId:guid}/export", async (Guid skillVersionId, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ExportAsync(skillVersionId, cancellationToken)));
+skills.MapPost("/reindex", async (SkillReindexRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ReindexAsync(request, cancellationToken)));
+skills.MapPost("/analytics", async (SkillAnalyticsRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.GetAnalyticsAsync(request, cancellationToken)));
+skills.MapPost("/governance/review", async (SkillMetadataGovernancePolicy request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ReviewMetadataGovernanceAsync(request, cancellationToken)));
+skills.MapGet("/governance/proposals", async (string? status, ISkillService service, CancellationToken cancellationToken) =>
+{
+    SkillMetadataProposalStatus? parsed = null;
+    if (!string.IsNullOrWhiteSpace(status))
+    {
+        if (!Enum.TryParse<SkillMetadataProposalStatus>(status, true, out var value)) return Results.BadRequest("Unsupported proposal status.");
+        parsed = value;
+    }
+    return Results.Ok(await service.ListMetadataProposalsAsync(parsed, cancellationToken));
+});
+skills.MapPost("/governance/proposals/{proposalId:guid}/decision", async (Guid proposalId, SkillMetadataProposalDecisionRequest request, ISkillService service, CancellationToken cancellationToken) =>
+{
+    if (proposalId != request.ProposalId) return Results.BadRequest("Route and body ProposalId must match.");
+    return Results.Ok(await service.DecideMetadataProposalAsync(request, cancellationToken));
+});
+skills.MapPost("/search-for-execution", async (SkillSearchForExecutionRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.SearchForExecutionAsync(request, cancellationToken)));
+skills.MapPost("/resolution-feedback", async (SkillResolutionFeedbackRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.RecordFeedbackAsync(request, cancellationToken)));
+skills.MapPost("/select-for-execution", async (SkillSelectForExecutionRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.SelectAsync(request, cancellationToken)));
+skills.MapPost("/version-get", async (SkillVersionGetRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.GetPinnedVersionAsync(request, cancellationToken)));
+skills.MapPost("/materialize", async (SkillMaterializeRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.MaterializeAsync(request, cancellationToken)));
+skills.MapPost("/materializations/cleanup", async (SkillMaterializationCleanupRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.CleanupMaterializationsAsync(request, cancellationToken)));
+skills.MapPost("/invocations", async (SkillInvocationRecordRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.RecordInvocationAsync(request, cancellationToken)));
+
 var knowledgeReviews = app.MapGroup("/api/knowledge-reviews");
 knowledgeReviews.RequireAuthIfEnabled(requireAuthentication);
 knowledgeReviews.MapPost(string.Empty, async (KnowledgeReviewRequest request, IKnowledgeReviewService service, CancellationToken cancellationToken)
