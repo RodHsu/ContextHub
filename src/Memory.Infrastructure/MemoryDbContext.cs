@@ -81,6 +81,10 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<SkillTelemetryEvent> SkillTelemetryEvents => Set<SkillTelemetryEvent>();
     public DbSet<SkillMaterialization> SkillMaterializations => Set<SkillMaterialization>();
     public DbSet<SkillMetadataProposal> SkillMetadataProposals => Set<SkillMetadataProposal>();
+    public DbSet<SkillSourceObservation> SkillSourceObservations => Set<SkillSourceObservation>();
+    public DbSet<SkillTelemetryDailyAggregate> SkillTelemetryDailyAggregates => Set<SkillTelemetryDailyAggregate>();
+    public DbSet<SkillTelemetryAggregationLedger> SkillTelemetryAggregationLedgers => Set<SkillTelemetryAggregationLedger>();
+    public DbSet<SkillTelemetryReconciliationRun> SkillTelemetryReconciliationRuns => Set<SkillTelemetryReconciliationRun>();
 
     public async Task<IApplicationTransaction> BeginTransactionAsync(
         IsolationLevel isolationLevel,
@@ -160,6 +164,14 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
 
     public void ClearTrackedChanges()
         => ChangeTracker.Clear();
+
+    public async Task AcquireTransactionLockAsync(string lockKey, CancellationToken cancellationToken = default)
+    {
+        if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            await Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0))", cancellationToken);
+        }
+    }
 
     public async Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default)
     {

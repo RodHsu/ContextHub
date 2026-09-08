@@ -2164,8 +2164,13 @@ public interface IApplicationDbContext
     DbSet<SkillTelemetryEvent> SkillTelemetryEvents { get; }
     DbSet<SkillMaterialization> SkillMaterializations { get; }
     DbSet<SkillMetadataProposal> SkillMetadataProposals { get; }
+    DbSet<SkillSourceObservation> SkillSourceObservations { get; }
+    DbSet<SkillTelemetryDailyAggregate> SkillTelemetryDailyAggregates { get; }
+    DbSet<SkillTelemetryAggregationLedger> SkillTelemetryAggregationLedgers { get; }
+    DbSet<SkillTelemetryReconciliationRun> SkillTelemetryReconciliationRuns { get; }
     Task<IApplicationTransaction> BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken = default);
     void ClearTrackedChanges();
+    Task AcquireTransactionLockAsync(string lockKey, CancellationToken cancellationToken = default);
     Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default);
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

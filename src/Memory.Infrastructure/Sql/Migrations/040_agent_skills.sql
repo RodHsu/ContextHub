@@ -241,6 +241,57 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_skill_telemetry_idempotency
 CREATE INDEX IF NOT EXISTS ix_skill_telemetry_version_type_time ON skill_telemetry_events (skill_version_id, event_type, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS ix_skill_telemetry_scope_time ON skill_telemetry_events (project_id, repository_id, agent_type, occurred_at DESC);
 
+CREATE TABLE IF NOT EXISTS skill_telemetry_daily_aggregates (
+    id uuid PRIMARY KEY,
+    tenant_id uuid NULL,
+    owner_user_id uuid NULL,
+    aggregate_date date NOT NULL,
+    skill_id uuid NOT NULL REFERENCES skills(id) ON DELETE RESTRICT,
+    skill_version_id uuid NOT NULL REFERENCES skill_versions(id) ON DELETE RESTRICT,
+    project_id text NOT NULL,
+    repository_id text NOT NULL,
+    agent_type text NOT NULL,
+    event_type text NOT NULL,
+    rejection_stage text NULL,
+    reason_class text NULL,
+    event_count integer NOT NULL,
+    last_occurred_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    CONSTRAINT ck_skill_telemetry_aggregate_count CHECK (event_count > 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_skill_telemetry_daily_aggregate_key
+    ON skill_telemetry_daily_aggregates (
+        COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid),
+        COALESCE(owner_user_id, '00000000-0000-0000-0000-000000000000'::uuid),
+        aggregate_date, skill_id, skill_version_id, project_id, repository_id, agent_type,
+        event_type, COALESCE(rejection_stage, ''), COALESCE(reason_class, ''));
+CREATE INDEX IF NOT EXISTS ix_skill_telemetry_aggregate_skill_date ON skill_telemetry_daily_aggregates (skill_id, skill_version_id, aggregate_date DESC);
+CREATE INDEX IF NOT EXISTS ix_skill_telemetry_aggregate_scope_date ON skill_telemetry_daily_aggregates (project_id, repository_id, agent_type, aggregate_date DESC);
+
+CREATE TABLE IF NOT EXISTS skill_telemetry_aggregation_ledger (
+    event_id uuid PRIMARY KEY REFERENCES skill_telemetry_events(id) ON DELETE CASCADE,
+    aggregated_at timestamptz NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_telemetry_reconciliation_runs (
+    id uuid PRIMARY KEY,
+    tenant_id uuid NULL,
+    owner_user_id uuid NULL,
+    idempotency_key text NOT NULL,
+    aggregated_event_count integer NOT NULL,
+    aggregate_row_count integer NOT NULL,
+    deleted_raw_event_count integer NOT NULL,
+    deleted_aggregate_row_count integer NOT NULL,
+    protected_raw_event_count integer NOT NULL,
+    raw_retention_days integer NOT NULL,
+    aggregate_retention_days integer NOT NULL,
+    created_at timestamptz NOT NULL,
+    CONSTRAINT ck_skill_telemetry_reconcile_counts CHECK (aggregated_event_count >= 0 AND aggregate_row_count >= 0 AND deleted_raw_event_count >= 0 AND deleted_aggregate_row_count >= 0 AND protected_raw_event_count >= 0),
+    CONSTRAINT ck_skill_telemetry_reconcile_retention CHECK (raw_retention_days >= 90 AND aggregate_retention_days >= raw_retention_days)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_skill_telemetry_reconcile_idempotency
+    ON skill_telemetry_reconciliation_runs (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(owner_user_id, '00000000-0000-0000-0000-000000000000'::uuid), idempotency_key);
+
 CREATE TABLE IF NOT EXISTS skill_materializations (
     id uuid PRIMARY KEY,
     tenant_id uuid NULL,
@@ -281,6 +332,27 @@ CREATE TABLE IF NOT EXISTS skill_metadata_proposals (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_skill_metadata_proposal_idempotency
     ON skill_metadata_proposals (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(owner_user_id, '00000000-0000-0000-0000-000000000000'::uuid), idempotency_key);
 CREATE INDEX IF NOT EXISTS ix_skill_metadata_proposals_status ON skill_metadata_proposals (skill_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS skill_source_observations (
+    id uuid PRIMARY KEY,
+    tenant_id uuid NULL,
+    owner_user_id uuid NULL,
+    skill_id uuid NOT NULL REFERENCES skills(id) ON DELETE RESTRICT,
+    source_ref text NOT NULL,
+    observed_revision text NOT NULL,
+    observed_content_hash text NOT NULL,
+    status text NOT NULL,
+    source_available boolean NOT NULL,
+    signature_verified boolean NOT NULL,
+    evidence_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    idempotency_key text NOT NULL,
+    observed_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL,
+    CONSTRAINT ck_skill_source_observation_status CHECK (status IN ('InSync','Changed','Deleted','TrustChanged','Compromised'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_skill_source_observation_idempotency
+    ON skill_source_observations (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(owner_user_id, '00000000-0000-0000-0000-000000000000'::uuid), idempotency_key);
+CREATE INDEX IF NOT EXISTS ix_skill_source_observations_skill_time ON skill_source_observations (skill_id, observed_at DESC);
 
 ALTER TABLE governance_run_receipts
     ADD COLUMN IF NOT EXISTS skill_coverage_json jsonb NOT NULL DEFAULT '{}'::jsonb,

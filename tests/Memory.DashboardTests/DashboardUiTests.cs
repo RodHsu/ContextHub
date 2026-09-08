@@ -664,7 +664,11 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         var skillsHtml = WebUtility.HtmlDecode(await skillsResponse.Content.ReadAsStringAsync());
         skillsHtml.Should().Contain("Agent Skills");
         skillsHtml.Should().Contain("Registry");
-        skillsHtml.Should().Contain("重建搜尋索引");
+        skillsHtml.Should().Contain("Shadow Reindex");
+        skillsHtml.Should().Contain("7／30／90 日 Funnel");
+        skillsHtml.Should().Contain("Portable import");
+        skillsHtml.Should().Contain("Search index generations");
+        skillsHtml.Should().Contain("Execution resolution audit");
 
         using var evaluationResponse = await client.GetAsync("/evaluation");
         evaluationResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -2101,6 +2105,45 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public Task<SkillReindexResult> ReindexSkillsAsync(SkillReindexRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new SkillReindexResult(Guid.NewGuid(), SkillSearchGenerationStatus.Active, 0, "{}", true, false));
+
+    public Task<IReadOnlyList<SkillSearchGenerationResult>> GetSkillSearchGenerationsAsync(CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SkillSearchGenerationResult>>([]);
+
+    public Task<SkillReindexResult> ActivateSkillSearchGenerationAsync(SkillSearchGenerationActivateRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new SkillReindexResult(request.GenerationId, SkillSearchGenerationStatus.Active, 0, "{}", true, false));
+
+    public Task<SkillTelemetryReconciliationResult> ReconcileSkillTelemetryAsync(SkillTelemetryReconciliationRequest request, CancellationToken cancellationToken)
+        => Task.FromResult(new SkillTelemetryReconciliationResult(Guid.NewGuid(), 0, 0, 0, 0, 0, request.RawEventRetentionDays, request.AggregateRetentionDays, DateTimeOffset.UtcNow, false));
+
+    public Task<SkillImportPreviewResult> PreviewSkillImportAsync(SkillImportPreviewRequest request, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<SkillImportResult> ImportSkillAsync(SkillImportRequest request, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<SkillVersionSummaryResult> PublishSkillVersionAsync(SkillPublishRequest request, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<SkillVersionSummaryResult> ChangeSkillVersionLifecycleAsync(SkillLifecycleRequest request, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<SkillSummaryResult> SetSkillDefaultVersionAsync(SkillDefaultVersionRequest request, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<SkillBindingResult> UpsertSkillBindingAsync(SkillBindingUpsertRequest request, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SkillSourceObservationResult>>([]);
+
+    public Task<SkillSourceObservationResult> RecordSkillSourceObservationAsync(SkillSourceObservationRequest request, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
+
+    public Task<IReadOnlyList<SkillResolutionDetailResult>> GetSkillResolutionsAsync(string? projectId, int limit, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SkillResolutionDetailResult>>([]);
 
     public Task<IReadOnlyList<SecurityAuditEventResult>> GetSecurityAuditEventsAsync(Guid? tenantId, int limit, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SecurityAuditEventResult>>(

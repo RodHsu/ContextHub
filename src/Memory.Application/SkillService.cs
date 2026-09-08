@@ -47,6 +47,7 @@ public sealed class SkillService(
         var stableKey = preview.StableKey;
         var existing = await ScopedSkills(includeArchived: true)
             .Include(skill => skill.Versions)
+            .Include(skill => skill.Bindings)
             .FirstOrDefaultAsync(skill => skill.StableKey == stableKey, cancellationToken);
         if (existing is not null)
         {
@@ -256,6 +257,7 @@ public sealed class SkillService(
         ValidateIdempotencyKey(request.IdempotencyKey);
         var skill = await ScopedSkills(includeArchived: false)
             .Include(item => item.Versions)
+            .Include(item => item.Bindings)
             .SingleOrDefaultAsync(item => item.Id == request.SkillId, cancellationToken)
             ?? throw new KeyNotFoundException("Skill was not found.");
         if (skill.MetadataVersion != request.ExpectedMetadataVersion)
@@ -338,6 +340,7 @@ public sealed class SkillService(
 
         return (await ScopedSkills(includeArchived)
             .Include(skill => skill.Versions)
+            .Include(skill => skill.Bindings)
             .OrderBy(skill => skill.Name)
             .ToListAsync(cancellationToken))
             .Select(ToSummary)
@@ -349,6 +352,7 @@ public sealed class SkillService(
         EnsureReadAccess();
         var skill = await ScopedSkills(includeArchived: true)
             .Include(item => item.Versions)
+            .Include(item => item.Bindings)
             .SingleOrDefaultAsync(item => item.Id == skillId, cancellationToken);
         return skill is null ? null : ToSummary(skill);
     }
@@ -360,6 +364,99 @@ public sealed class SkillService(
             .SingleOrDefaultAsync(item => item.Id == skillVersionId, cancellationToken)
             ?? throw new KeyNotFoundException("SkillVersion was not found.");
         return Deserialize<PortableSkillBundle>(version.BundleJson);
+    }
+
+    public async Task<SkillSourceObservationResult> RecordSourceObservationAsync(
+        SkillSourceObservationRequest request,
+        CancellationToken cancellationToken)
+    {
+        EnsureManagementAccess(SecurityScopes.SkillsManage);
+        ValidateIdempotencyKey(request.IdempotencyKey);
+        var actor = actorAccessor.Current;
+        var replay = await dbContext.SkillSourceObservations.AsNoTracking().SingleOrDefaultAsync(item =>
+            item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId && item.IdempotencyKey == request.IdempotencyKey,
+            cancellationToken);
+        if (replay is not null)
+        {
+            return ToSourceObservation(replay, true);
+        }
+
+        var skill = await ScopedSkills(includeArchived: true).Include(item => item.Versions)
+            .SingleOrDefaultAsync(item => item.Id == request.SkillId, cancellationToken)
+            ?? throw new KeyNotFoundException("Skill was not found.");
+        var sourceRef = request.SourceRef.Trim();
+        if (string.IsNullOrWhiteSpace(sourceRef))
+        {
+            throw new InvalidOperationException("SourceRef is required for source drift observation.");
+        }
+
+        var authorityVersion = skill.Versions
+            .Where(item => string.Equals(item.SourceRef, sourceRef, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(item => item.CreatedAt)
+            .FirstOrDefault()
+            ?? throw new InvalidOperationException("Observed SourceRef does not match this Skill's recorded provenance.");
+        var observedHash = request.ObservedContentHash.Trim().ToLowerInvariant();
+        if (request.SourceAvailable && (observedHash.Length != 64 || observedHash.Any(character => !Uri.IsHexDigit(character))))
+        {
+            throw new InvalidOperationException("An available source observation requires a SHA-256 content hash.");
+        }
+
+        var status = request.CompromiseReported
+            ? SkillSourceDriftStatus.Compromised
+            : !request.SourceAvailable
+                ? SkillSourceDriftStatus.Deleted
+                : authorityVersion.TrustLevel is >= SkillTrustLevel.Signed && !request.SignatureVerified
+                    ? SkillSourceDriftStatus.TrustChanged
+                    : string.Equals(authorityVersion.SourceRevision, request.ObservedRevision.Trim(), StringComparison.Ordinal) &&
+                      string.Equals(authorityVersion.ContentHash, observedHash, StringComparison.OrdinalIgnoreCase)
+                        ? SkillSourceDriftStatus.InSync
+                        : SkillSourceDriftStatus.Changed;
+        var now = timeProvider.GetUtcNow();
+        var observation = new SkillSourceObservation
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            SkillId = skill.Id,
+            SourceRef = sourceRef,
+            ObservedRevision = request.ObservedRevision.Trim(),
+            ObservedContentHash = observedHash,
+            Status = status,
+            SourceAvailable = request.SourceAvailable,
+            SignatureVerified = request.SignatureVerified,
+            EvidenceJson = Serialize(new
+            {
+                evidenceRef = PortableSkillBundleValidator.BoundAndRedact(request.EvidenceRef, 500),
+                authoritySkillVersionId = authorityVersion.Id,
+                authorityVersion = authorityVersion.Version,
+                authorityRevision = authorityVersion.SourceRevision,
+                authorityContentHash = authorityVersion.ContentHash
+            }),
+            IdempotencyKey = request.IdempotencyKey,
+            ObservedAt = now,
+            CreatedAt = now
+        };
+        dbContext.SkillSourceObservations.Add(observation);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return ToSourceObservation(observation, false);
+    }
+
+    public async Task<IReadOnlyList<SkillSourceObservationResult>> ListSourceObservationsAsync(
+        Guid skillId,
+        CancellationToken cancellationToken)
+    {
+        EnsureReadAccess();
+        _ = await ScopedSkills(includeArchived: true).AsNoTracking().SingleOrDefaultAsync(item => item.Id == skillId, cancellationToken)
+            ?? throw new KeyNotFoundException("Skill was not found.");
+        var actor = actorAccessor.Current;
+        var query = dbContext.SkillSourceObservations.AsNoTracking().Where(item => item.SkillId == skillId);
+        if (actor.HasUser)
+        {
+            query = query.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
+        }
+
+        return (await query.OrderByDescending(item => item.ObservedAt).Take(200).ToListAsync(cancellationToken))
+            .Select(item => ToSourceObservation(item, false))
+            .ToArray();
     }
 
     public async Task<SkillSearchForExecutionResult> SearchForExecutionAsync(SkillSearchForExecutionRequest request, CancellationToken cancellationToken)
@@ -503,6 +600,72 @@ public sealed class SkillService(
 
         await dbContext.SaveChangesAsync(cancellationToken);
         return await BuildSearchResultAsync(resolution, false, cancellationToken, degraded, generation);
+    }
+
+    public async Task<IReadOnlyList<SkillResolutionDetailResult>> ListResolutionsAsync(
+        string? projectId,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        EnsureReadAccess();
+        if (limit is < 1 or > 200)
+        {
+            throw new InvalidOperationException("Resolution audit limit must be between 1 and 200.");
+        }
+
+        var actor = actorAccessor.Current;
+        var normalizedProjectId = string.IsNullOrWhiteSpace(projectId) ? null : ProjectContext.Normalize(projectId);
+        if (normalizedProjectId is not null)
+        {
+            ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, false);
+        }
+
+        var query = dbContext.SkillResolutions.AsNoTracking()
+            .Include(item => item.Candidates)
+            .Include(item => item.Pins)
+            .AsQueryable();
+        if (actor.HasUser)
+        {
+            query = query.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
+        }
+
+        if (actor.AllowedProjectIds.Count > 0)
+        {
+            query = query.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
+        }
+
+        if (normalizedProjectId is not null)
+        {
+            query = query.Where(item => item.ProjectId == normalizedProjectId);
+        }
+
+        var resolutions = await query.OrderByDescending(item => item.UpdatedAt).Take(limit).ToListAsync(cancellationToken);
+        var resolutionIds = resolutions.Select(item => item.Id).ToArray();
+        var versionIds = resolutions.SelectMany(item => item.Candidates.Select(candidate => candidate.SkillVersionId)
+            .Concat(item.Pins.Select(pin => pin.SkillVersionId))).Distinct().ToArray();
+        var versions = await ScopedVersions(includeArchivedSkills: true).AsNoTracking().Include(item => item.Skill)
+            .Where(item => versionIds.Contains(item.Id)).ToDictionaryAsync(item => item.Id, cancellationToken);
+        var events = await ScopedTelemetry().AsNoTracking()
+            .Where(item => item.ResolutionId.HasValue && resolutionIds.Contains(item.ResolutionId.Value))
+            .OrderBy(item => item.OccurredAt).ToListAsync(cancellationToken);
+        var eventsByResolution = events.GroupBy(item => item.ResolutionId!.Value).ToDictionary(group => group.Key, group => group.ToArray());
+
+        return resolutions.Select(resolution =>
+        {
+            var pins = resolution.Pins.ToDictionary(item => item.SkillVersionId);
+            var candidates = resolution.Candidates.OrderBy(item => item.Rank).Where(item => versions.ContainsKey(item.SkillVersionId)).Select(item =>
+            {
+                var version = versions[item.SkillVersionId];
+                pins.TryGetValue(item.SkillVersionId, out var pin);
+                return new SkillResolutionCandidateAuditResult(item.SkillVersionId, version.Version, version.Skill!.Name, item.Rank, item.Score, item.Threshold,
+                    Deserialize<string[]>(item.MatchReasonsJson), pin is not null, pin?.ReleasedAt is not null, pin?.ContentHash ?? version.ContentHash);
+            }).ToArray();
+            var auditEvents = eventsByResolution.GetValueOrDefault(resolution.Id, []).Select(item => new SkillResolutionEventAuditResult(
+                item.Id, item.SkillVersionId, item.EventType, item.RejectionStage, item.ReasonClass, item.ReasonText, item.EvidenceJson, item.OccurredAt)).ToArray();
+            return new SkillResolutionDetailResult(resolution.Id, resolution.ExecutionId, resolution.WorkItemId, resolution.ProjectId, resolution.RepositoryId,
+                resolution.AgentType, resolution.Round, resolution.MaxSearchRounds, resolution.Status, resolution.QueryHash, resolution.SearchGenerationId,
+                candidates, auditEvents, resolution.CreatedAt, resolution.UpdatedAt);
+        }).ToArray();
     }
 
     public async Task<SkillResolutionFeedbackResult> RecordFeedbackAsync(SkillResolutionFeedbackRequest request, CancellationToken cancellationToken)
@@ -794,6 +957,97 @@ public sealed class SkillService(
         return await BuildGenerationAsync(request, cancellationToken);
     }
 
+    public async Task<IReadOnlyList<SkillSearchGenerationResult>> ListSearchGenerationsAsync(CancellationToken cancellationToken)
+    {
+        EnsureReadAccess();
+        var actor = actorAccessor.Current;
+        var query = dbContext.SkillSearchGenerations.AsNoTracking().AsQueryable();
+        if (actor.HasUser)
+        {
+            query = query.Where(item => item.TenantId == actor.TenantId);
+        }
+
+        var generations = await query.OrderByDescending(item => item.CreatedAt).Take(100).ToListAsync(cancellationToken);
+        var generationIds = generations.Select(item => item.Id).ToArray();
+        var counts = await dbContext.SkillSearchDocuments.AsNoTracking()
+            .Where(item => generationIds.Contains(item.GenerationId))
+            .GroupBy(item => item.GenerationId)
+            .Select(group => new { GenerationId = group.Key, Count = group.Count() })
+            .ToDictionaryAsync(item => item.GenerationId, item => item.Count, cancellationToken);
+        return generations.Select(item => new SkillSearchGenerationResult(
+            item.Id,
+            item.SearchProfileVersion,
+            item.EmbeddingModelId,
+            item.EmbeddingModelVersion,
+            item.Threshold,
+            item.Status,
+            counts.GetValueOrDefault(item.Id),
+            item.BenchmarkJson,
+            item.CreatedAt,
+            item.UpdatedAt,
+            item.ActivatedAt)).ToArray();
+    }
+
+    public async Task<SkillReindexResult> ActivateSearchGenerationAsync(
+        SkillSearchGenerationActivateRequest request,
+        CancellationToken cancellationToken)
+    {
+        EnsureManagementAccess(SecurityScopes.SkillsReindex);
+        ValidateIdempotencyKey(request.IdempotencyKey);
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            throw new InvalidOperationException("A bounded search-generation activation reason is required.");
+        }
+
+        var actor = actorAccessor.Current;
+        var query = dbContext.SkillSearchGenerations.AsQueryable();
+        if (actor.HasUser)
+        {
+            query = query.Where(item => item.TenantId == actor.TenantId);
+        }
+
+        var target = await query.SingleOrDefaultAsync(item => item.Id == request.GenerationId, cancellationToken)
+            ?? throw new KeyNotFoundException("Skill search generation was not found.");
+        var indexed = await dbContext.SkillSearchDocuments.CountAsync(item => item.GenerationId == target.Id, cancellationToken);
+        var eligibleCount = await ScopedVersions(includeArchivedSkills: false)
+            .CountAsync(item => SearchableStatuses.Contains(item.Status), cancellationToken);
+        if (indexed != eligibleCount)
+        {
+            throw new InvalidOperationException("Search generation cannot be activated because its indexed version count is stale.");
+        }
+
+        if (target.Status == SkillSearchGenerationStatus.Active)
+        {
+            return new(target.Id, target.Status, indexed, target.BenchmarkJson, true, true);
+        }
+
+        if (target.Status is SkillSearchGenerationStatus.Building or SkillSearchGenerationStatus.Validating or SkillSearchGenerationStatus.Failed)
+        {
+            throw new InvalidOperationException($"Search generation in status {target.Status} cannot be activated.");
+        }
+
+        await dbContext.ExecuteInTransactionAsync(async transactionCancellationToken =>
+        {
+            var active = await dbContext.SkillSearchGenerations
+                .Where(item => item.TenantId == target.TenantId && item.Status == SkillSearchGenerationStatus.Active)
+                .ToListAsync(transactionCancellationToken);
+            foreach (var current in active)
+            {
+                current.Status = SkillSearchGenerationStatus.RolledBack;
+                current.UpdatedAt = timeProvider.GetUtcNow();
+            }
+
+            await dbContext.SaveChangesAsync(transactionCancellationToken);
+            target.Status = SkillSearchGenerationStatus.Active;
+            target.ActivatedAt = timeProvider.GetUtcNow();
+            target.UpdatedAt = target.ActivatedAt.Value;
+            target.BenchmarkJson = MergeActivationEvidence(target.BenchmarkJson, request.Reason, request.IdempotencyKey);
+            await dbContext.SaveChangesAsync(transactionCancellationToken);
+            return true;
+        }, cancellationToken);
+        return new(target.Id, target.Status, indexed, target.BenchmarkJson, true, false);
+    }
+
     public async Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetAnalyticsAsync(SkillAnalyticsRequest request, CancellationToken cancellationToken)
     {
         EnsureReadAccess();
@@ -804,29 +1058,197 @@ public sealed class SkillService(
 
         var actor = actorAccessor.Current;
         var from = timeProvider.GetUtcNow().AddDays(-request.WindowDays);
-        var query = dbContext.SkillTelemetryEvents.AsNoTracking().Where(item => item.OccurredAt >= from);
-        if (actor.HasUser) query = query.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
+        var fromDate = DateOnly.FromDateTime(from.UtcDateTime);
+        var eventQuery = dbContext.SkillTelemetryEvents.AsNoTracking().Where(item =>
+            item.OccurredAt >= from &&
+            !dbContext.SkillTelemetryAggregationLedgers.Any(ledger => ledger.EventId == item.Id));
+        var aggregateQuery = dbContext.SkillTelemetryDailyAggregates.AsNoTracking().Where(item => item.AggregateDate >= fromDate);
+        if (actor.HasUser)
+        {
+            eventQuery = eventQuery.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
+            aggregateQuery = aggregateQuery.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
+            if (actor.AllowedProjectIds.Count > 0)
+            {
+                eventQuery = eventQuery.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
+                aggregateQuery = aggregateQuery.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
+            }
+        }
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
             ActorAuthorization.EnsureProjectAllowed(actor, projectId, false);
-            query = query.Where(item => item.ProjectId == projectId);
+            eventQuery = eventQuery.Where(item => item.ProjectId == projectId);
+            aggregateQuery = aggregateQuery.Where(item => item.ProjectId == projectId);
         }
-        if (request.SkillId.HasValue) query = query.Where(item => item.SkillId == request.SkillId.Value);
-        if (request.SkillVersionId.HasValue) query = query.Where(item => item.SkillVersionId == request.SkillVersionId.Value);
-        var events = await query.ToListAsync(cancellationToken);
-        return events.GroupBy(item => new { item.SkillId, SkillVersionId = request.SkillVersionId.HasValue ? item.SkillVersionId : (Guid?)null })
-            .Select(group => BuildAggregate(group.Key.SkillId, group.Key.SkillVersionId, group))
+        if (!string.IsNullOrWhiteSpace(request.RepositoryId))
+        {
+            var repositoryId = NormalizeScopeValue(request.RepositoryId);
+            eventQuery = eventQuery.Where(item => item.RepositoryId == repositoryId);
+            aggregateQuery = aggregateQuery.Where(item => item.RepositoryId == repositoryId);
+        }
+        if (!string.IsNullOrWhiteSpace(request.AgentType))
+        {
+            var agentType = NormalizeScopeValue(request.AgentType);
+            eventQuery = eventQuery.Where(item => item.AgentType == agentType);
+            aggregateQuery = aggregateQuery.Where(item => item.AgentType == agentType);
+        }
+        if (request.SkillId.HasValue)
+        {
+            eventQuery = eventQuery.Where(item => item.SkillId == request.SkillId.Value);
+            aggregateQuery = aggregateQuery.Where(item => item.SkillId == request.SkillId.Value);
+        }
+        if (request.SkillVersionId.HasValue)
+        {
+            eventQuery = eventQuery.Where(item => item.SkillVersionId == request.SkillVersionId.Value);
+            aggregateQuery = aggregateQuery.Where(item => item.SkillVersionId == request.SkillVersionId.Value);
+        }
+
+        var aggregateRows = (await aggregateQuery.ToListAsync(cancellationToken)).Select(item => new TelemetryMetricRow(
+            item.SkillId, item.SkillVersionId, item.ProjectId, item.RepositoryId, item.AgentType,
+            item.EventType, item.RejectionStage, item.ReasonClass, item.EventCount, item.LastOccurredAt));
+        var eventRows = (await eventQuery.ToListAsync(cancellationToken)).Select(item => new TelemetryMetricRow(
+            item.SkillId, item.SkillVersionId, item.ProjectId, item.RepositoryId, item.AgentType,
+            item.EventType, item.RejectionStage, item.ReasonClass, 1, item.OccurredAt));
+        return aggregateRows.Concat(eventRows)
+            .GroupBy(item => AnalyticsKey(item, request.Dimension))
+            .Select(group => BuildAggregate(group.Key, group, request.WindowDays))
             .OrderByDescending(item => item.SearchImpressionCount)
             .ToArray();
+    }
+
+    public Task<SkillTelemetryReconciliationResult> ReconcileTelemetryAsync(
+        SkillTelemetryReconciliationRequest request,
+        CancellationToken cancellationToken)
+    {
+        EnsureManagementAccess(SecurityScopes.SkillsManage);
+        ValidateIdempotencyKey(request.IdempotencyKey);
+        if (request.RawEventRetentionDays is < 90 or > 3650 ||
+            request.AggregateRetentionDays < request.RawEventRetentionDays ||
+            request.AggregateRetentionDays > 3650)
+        {
+            throw new InvalidOperationException("Telemetry retention must keep raw events for 90-3650 days so the 7/30/90-day governance windows remain reproducible, and aggregates for at least as long.");
+        }
+
+        var actor = actorAccessor.Current;
+        return dbContext.ExecuteInTransactionAsync(async transactionCancellationToken =>
+        {
+            await dbContext.AcquireTransactionLockAsync(
+                $"skill-telemetry-reconcile:{actor.TenantId:D}:{actor.UserId:D}",
+                transactionCancellationToken);
+            var replay = await dbContext.SkillTelemetryReconciliationRuns.AsNoTracking().SingleOrDefaultAsync(item =>
+                item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId && item.IdempotencyKey == request.IdempotencyKey,
+                transactionCancellationToken);
+            if (replay is not null)
+            {
+                return ToReconciliationResult(replay, true);
+            }
+
+            var eventQuery = ScopedTelemetry().Where(item =>
+                !dbContext.SkillTelemetryAggregationLedgers.Any(ledger => ledger.EventId == item.Id));
+            var events = await eventQuery.OrderBy(item => item.CreatedAt).ToListAsync(transactionCancellationToken);
+            var grouped = events.GroupBy(AggregateKey).ToArray();
+            var dates = grouped.Select(group => group.Key.AggregateDate).Distinct().ToArray();
+            var existingQuery = dbContext.SkillTelemetryDailyAggregates.AsQueryable();
+            if (actor.HasUser)
+            {
+                existingQuery = existingQuery.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
+            }
+            if (dates.Length > 0)
+            {
+                existingQuery = existingQuery.Where(item => dates.Contains(item.AggregateDate));
+            }
+            else
+            {
+                existingQuery = existingQuery.Where(_ => false);
+            }
+            var existing = (await existingQuery.ToListAsync(transactionCancellationToken))
+                .ToDictionary(AggregateKey, StringComparer.Ordinal);
+            var now = timeProvider.GetUtcNow();
+            foreach (var group in grouped)
+            {
+                var key = AggregateKey(group.Key);
+                if (!existing.TryGetValue(key, out var aggregate))
+                {
+                    aggregate = new SkillTelemetryDailyAggregate
+                    {
+                        TenantId = group.Key.TenantId,
+                        OwnerUserId = group.Key.OwnerUserId,
+                        AggregateDate = group.Key.AggregateDate,
+                        SkillId = group.Key.SkillId,
+                        SkillVersionId = group.Key.SkillVersionId,
+                        ProjectId = group.Key.ProjectId,
+                        RepositoryId = group.Key.RepositoryId,
+                        AgentType = group.Key.AgentType,
+                        EventType = group.Key.EventType,
+                        RejectionStage = group.Key.RejectionStage,
+                        ReasonClass = group.Key.ReasonClass,
+                        EventCount = 0
+                    };
+                    dbContext.SkillTelemetryDailyAggregates.Add(aggregate);
+                    existing[key] = aggregate;
+                }
+
+                aggregate.EventCount += group.Count();
+                aggregate.LastOccurredAt = group.Max(item => item.OccurredAt);
+                aggregate.UpdatedAt = now;
+            }
+
+            foreach (var item in events)
+            {
+                dbContext.SkillTelemetryAggregationLedgers.Add(new SkillTelemetryAggregationLedger
+                {
+                    EventId = item.Id,
+                    AggregatedAt = now
+                });
+            }
+            await dbContext.SaveChangesAsync(transactionCancellationToken);
+
+            var rawCutoff = now.AddDays(-request.RawEventRetentionDays);
+            var aggregateCutoff = DateOnly.FromDateTime(now.UtcDateTime.AddDays(-request.AggregateRetentionDays));
+            var protectedQuery = ScopedTelemetry().Where(item => item.OccurredAt < rawCutoff &&
+                (item.RejectionStage == SkillRejectionStage.RevokedOrPolicyCancelled ||
+                 item.ReasonClass == SkillRejectionReason.Revoked ||
+                 item.ReasonClass == SkillRejectionReason.PolicyConflict ||
+                 item.ReasonClass == SkillRejectionReason.PermissionDenied));
+            var protectedCount = await protectedQuery.CountAsync(transactionCancellationToken);
+            var deletedRaw = await ScopedTelemetry().Where(item => item.OccurredAt < rawCutoff &&
+                item.RejectionStage != SkillRejectionStage.RevokedOrPolicyCancelled &&
+                item.ReasonClass != SkillRejectionReason.Revoked &&
+                item.ReasonClass != SkillRejectionReason.PolicyConflict &&
+                item.ReasonClass != SkillRejectionReason.PermissionDenied)
+                .ExecuteDeleteAsync(transactionCancellationToken);
+            var aggregateRetentionQuery = dbContext.SkillTelemetryDailyAggregates.Where(item => item.AggregateDate < aggregateCutoff);
+            if (actor.HasUser)
+            {
+                aggregateRetentionQuery = aggregateRetentionQuery.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
+            }
+            var deletedAggregates = await aggregateRetentionQuery.ExecuteDeleteAsync(transactionCancellationToken);
+            var run = new SkillTelemetryReconciliationRun
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                IdempotencyKey = request.IdempotencyKey,
+                AggregatedEventCount = events.Count,
+                AggregateRowCount = grouped.Length,
+                DeletedRawEventCount = deletedRaw,
+                DeletedAggregateRowCount = deletedAggregates,
+                ProtectedRawEventCount = protectedCount,
+                RawRetentionDays = request.RawEventRetentionDays,
+                AggregateRetentionDays = request.AggregateRetentionDays,
+                CreatedAt = now
+            };
+            dbContext.SkillTelemetryReconciliationRuns.Add(run);
+            await dbContext.SaveChangesAsync(transactionCancellationToken);
+            return ToReconciliationResult(run, false);
+        }, cancellationToken);
     }
 
     public async Task<SkillMetadataGovernanceReviewResult> ReviewMetadataGovernanceAsync(SkillMetadataGovernancePolicy policy, CancellationToken cancellationToken)
     {
         EnsureReadAccess();
-        if (policy.MinimumSampleSize < 2 || policy.WindowDays < 1 || policy.MinimumRejectionRate is < 0 or > 1 || policy.MinimumSignalConfidence is < 0 or > 1)
+        if (policy.MinimumSampleSize < 2 || policy.WindowDays is < 1 or > 90 || policy.MinimumRejectionRate is < 0 or > 1 || policy.MinimumSignalConfidence is < 0 or > 1)
         {
-            throw new InvalidOperationException("Skill metadata governance thresholds are invalid.");
+            throw new InvalidOperationException("Skill metadata governance thresholds are invalid; raw evidence windows are limited to 90 days.");
         }
 
         var skills = await ScopedSkills(includeArchived: false).AsNoTracking().ToListAsync(cancellationToken);
@@ -1347,19 +1769,35 @@ public sealed class SkillService(
         };
     }
 
-    private static SkillTelemetryAggregateResult BuildAggregate(Guid skillId, Guid? skillVersionId, IEnumerable<SkillTelemetryEvent> events)
+    private static AnalyticsGroupKey AnalyticsKey(TelemetryMetricRow item, SkillAnalyticsDimension dimension) => new(
+        item.SkillId,
+        dimension == SkillAnalyticsDimension.SkillVersion ? item.SkillVersionId : null,
+        dimension is SkillAnalyticsDimension.Project or SkillAnalyticsDimension.Repository or SkillAnalyticsDimension.AgentType ? item.ProjectId : string.Empty,
+        dimension is SkillAnalyticsDimension.Repository or SkillAnalyticsDimension.AgentType ? item.RepositoryId : string.Empty,
+        dimension == SkillAnalyticsDimension.AgentType ? item.AgentType : string.Empty);
+
+    private static SkillTelemetryAggregateResult BuildAggregate(AnalyticsGroupKey key, IEnumerable<TelemetryMetricRow> events, int windowDays)
     {
         var array = events.ToArray();
-        var impressions = array.Count(item => item.EventType == SkillTelemetryEventType.SearchImpression);
-        var selected = array.Count(item => item.EventType == SkillTelemetryEventType.Selected);
-        var rejected = array.Count(item => item.EventType is SkillTelemetryEventType.Rejected or SkillTelemetryEventType.SelectedThenReleased);
-        var invocations = array.Count(item => item.EventType == SkillTelemetryEventType.InvocationStarted);
-        var successes = array.Count(item => item.EventType == SkillTelemetryEventType.InvocationSucceeded);
-        var failures = array.Count(item => item.EventType == SkillTelemetryEventType.InvocationFailed);
-        var matrix = array.Where(item => item.RejectionStage.HasValue || item.ReasonClass.HasValue).GroupBy(item => $"{item.RejectionStage}:{item.ReasonClass}").ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
-        return new(skillId, skillVersionId, impressions, selected, rejected, invocations, successes, failures,
+        var impressions = array.Where(item => item.EventType == SkillTelemetryEventType.SearchImpression).Sum(item => item.Count);
+        var selected = array.Where(item => item.EventType == SkillTelemetryEventType.Selected).Sum(item => item.Count);
+        var rejected = array.Where(item => item.EventType is SkillTelemetryEventType.Rejected or SkillTelemetryEventType.SelectedThenReleased).Sum(item => item.Count);
+        var invocations = array.Where(item => item.EventType == SkillTelemetryEventType.InvocationStarted).Sum(item => item.Count);
+        var successes = array.Where(item => item.EventType == SkillTelemetryEventType.InvocationSucceeded).Sum(item => item.Count);
+        var failures = array.Where(item => item.EventType == SkillTelemetryEventType.InvocationFailed).Sum(item => item.Count);
+        var matrix = array.Where(item => item.RejectionStage.HasValue || item.ReasonClass.HasValue)
+            .GroupBy(item => $"{item.RejectionStage}:{item.ReasonClass}")
+            .ToDictionary(group => group.Key, group => group.Sum(item => item.Count), StringComparer.Ordinal);
+        return new(key.SkillId, key.SkillVersionId, impressions, selected, rejected, invocations, successes, failures,
             Rate(selected, impressions), Rate(rejected, impressions), Rate(invocations, selected), Rate(successes, invocations), matrix,
-            Latest(array, SkillTelemetryEventType.SearchImpression), Latest(array, SkillTelemetryEventType.Selected), Latest(array, SkillTelemetryEventType.Rejected, SkillTelemetryEventType.SelectedThenReleased), Latest(array, SkillTelemetryEventType.InvocationStarted));
+            Latest(array, SkillTelemetryEventType.SearchImpression),
+            Latest(array, SkillTelemetryEventType.Selected),
+            Latest(array, SkillTelemetryEventType.Rejected, SkillTelemetryEventType.SelectedThenReleased),
+            Latest(array, SkillTelemetryEventType.InvocationStarted),
+            key.ProjectId,
+            key.RepositoryId,
+            key.AgentType,
+            windowDays);
     }
 
     private static bool IsRelevanceQualityRejection(SkillTelemetryEvent item)
@@ -1428,7 +1866,7 @@ public sealed class SkillService(
         => new(skill.StableKey, skill.Name, skill.Description, skill.WhenToUse, version.Version, bundle, version.SourceKind, version.SourceRef, version.SourceRevision, skill.License, skill.Tags, skill.Aliases, Deserialize<string[]>(skill.MaintainersJson), version.RequiredCapabilities, version.RequiredTools, version.AllowedActions, version.Dependencies.Select(item => new SkillDependencyInput(item.TargetSkillId, item.Kind, item.VersionConstraint)).ToArray(), skill.RiskLevel, version.TrustLevel, version.RequiresNetwork, version.RequiresSecrets, version.SignatureAlgorithm, version.SignatureValue);
 
     private static SkillSummaryResult ToSummary(Skill skill)
-        => new(skill.Id, skill.StableKey, skill.Name, skill.Description, skill.WhenToUse, skill.Tags, skill.Aliases, skill.License, Deserialize<string[]>(skill.MaintainersJson), skill.RiskLevel, skill.MetadataVersion, MetadataHash(skill), skill.DefaultVersionId, skill.Versions.OrderByDescending(item => ParseVersion(item.Version)).Select(ToVersionSummary).ToArray(), skill.CreatedAt, skill.UpdatedAt, skill.ArchivedAt);
+        => new(skill.Id, skill.StableKey, skill.Name, skill.Description, skill.WhenToUse, skill.Tags, skill.Aliases, skill.License, Deserialize<string[]>(skill.MaintainersJson), skill.RiskLevel, skill.MetadataVersion, MetadataHash(skill), skill.DefaultVersionId, skill.Bindings.OrderByDescending(item => BindingPrecedence(item.Scope)).Select(ToBindingResult).ToArray(), skill.Versions.OrderByDescending(item => ParseVersion(item.Version)).Select(ToVersionSummary).ToArray(), skill.CreatedAt, skill.UpdatedAt, skill.ArchivedAt);
 
     private static SkillVersionSummaryResult ToVersionSummary(SkillVersion version)
         => new(version.Id, version.SkillId, version.Version, version.Status, version.ContentHash, version.RequiredCapabilities, version.RequiredTools, version.AllowedActions, version.SourceKind, version.SourceRef, version.SourceRevision, version.TrustLevel, version.SignatureVerified, version.CreatedAt, version.PublishedAt, version.DeprecatedAt, version.RevokedAt, version.ArchivedAt);
@@ -1457,7 +1895,8 @@ public sealed class SkillService(
     private static SemanticVersion ParseVersion(string version) => SemanticVersion.TryParse(version, out var parsed) ? parsed : default;
     private static string Sha256(string value) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value.Trim())));
     private static decimal Rate(int numerator, int denominator) => denominator == 0 ? 0m : decimal.Divide(numerator, denominator);
-    private static DateTimeOffset? Latest(IEnumerable<SkillTelemetryEvent> events, params SkillTelemetryEventType[] types) => events.Where(item => types.Contains(item.EventType)).Select(item => (DateTimeOffset?)item.OccurredAt).Max();
+    private static DateTimeOffset? Latest(IEnumerable<TelemetryMetricRow> events, params SkillTelemetryEventType[] types)
+        => events.Where(item => types.Contains(item.EventType)).Select(item => (DateTimeOffset?)item.LastOccurredAt).Max();
     private static string Serialize<T>(T value) => JsonSerializer.Serialize(value, JsonOptions);
     private static T Deserialize<T>(string value) => JsonSerializer.Deserialize<T>(value, JsonOptions) ?? throw new InvalidOperationException($"Stored {typeof(T).Name} JSON is invalid.");
 
@@ -1466,10 +1905,83 @@ public sealed class SkillService(
         item.ProposedPatchJson, item.EvidenceJson, item.Confidence, item.Status,
         item.GovernanceRunId, item.CreatedAt, item.UpdatedAt);
 
+    private static SkillSourceObservationResult ToSourceObservation(SkillSourceObservation item, bool replayed) => new(
+        item.Id,
+        item.SkillId,
+        item.Status,
+        item.SourceRef,
+        item.ObservedRevision,
+        item.ObservedContentHash,
+        item.SourceAvailable,
+        item.SignatureVerified,
+        item.Status == SkillSourceDriftStatus.Changed,
+        item.Status is SkillSourceDriftStatus.Compromised or SkillSourceDriftStatus.TrustChanged,
+        item.EvidenceJson,
+        item.ObservedAt,
+        replayed);
+
+    private static SkillTelemetryReconciliationResult ToReconciliationResult(SkillTelemetryReconciliationRun item, bool replayed) => new(
+        item.Id,
+        item.AggregatedEventCount,
+        item.AggregateRowCount,
+        item.DeletedRawEventCount,
+        item.DeletedAggregateRowCount,
+        item.ProtectedRawEventCount,
+        item.RawRetentionDays,
+        item.AggregateRetentionDays,
+        item.CreatedAt,
+        replayed);
+
+    private static TelemetryAggregateKey AggregateKey(SkillTelemetryEvent item) => new(
+        item.TenantId,
+        item.OwnerUserId,
+        DateOnly.FromDateTime(item.OccurredAt.UtcDateTime),
+        item.SkillId,
+        item.SkillVersionId,
+        item.ProjectId,
+        item.RepositoryId,
+        item.AgentType,
+        item.EventType,
+        item.RejectionStage,
+        item.ReasonClass);
+
+    private static string AggregateKey(SkillTelemetryDailyAggregate item) => AggregateKey(new TelemetryAggregateKey(
+        item.TenantId,
+        item.OwnerUserId,
+        item.AggregateDate,
+        item.SkillId,
+        item.SkillVersionId,
+        item.ProjectId,
+        item.RepositoryId,
+        item.AgentType,
+        item.EventType,
+        item.RejectionStage,
+        item.ReasonClass));
+
+    private static string AggregateKey(TelemetryAggregateKey item) => string.Join("|",
+        item.TenantId,
+        item.OwnerUserId,
+        item.AggregateDate.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+        item.SkillId,
+        item.SkillVersionId,
+        item.ProjectId,
+        item.RepositoryId,
+        item.AgentType,
+        item.EventType,
+        item.RejectionStage,
+        item.ReasonClass);
+
     private static string MergeDecisionEvidence(string evidenceJson, string? note) => Serialize(new
     {
         sourceEvidence = evidenceJson,
         decisionNote = PortableSkillBundleValidator.BoundAndRedact(note, 500)
+    });
+
+    private static string MergeActivationEvidence(string benchmarkJson, string reason, string idempotencyKey) => Serialize(new
+    {
+        previousBenchmark = benchmarkJson,
+        activationReason = PortableSkillBundleValidator.BoundAndRedact(reason, 500),
+        activationIdempotencyKey = idempotencyKey
     });
 
     private static void EnsureHash(string actual, string expected)
@@ -1484,4 +1996,33 @@ public sealed class SkillService(
 
     private sealed record RankedCandidate(SkillVersion Version, decimal Score, IReadOnlyList<string> MatchReasons, SkillBindingMode BindingMode, bool Explicit, string FilterReason);
     private sealed record ResolvedVersion(SkillVersion Version, bool IsDependency);
+    private sealed record TelemetryAggregateKey(
+        Guid? TenantId,
+        Guid? OwnerUserId,
+        DateOnly AggregateDate,
+        Guid SkillId,
+        Guid SkillVersionId,
+        string ProjectId,
+        string RepositoryId,
+        string AgentType,
+        SkillTelemetryEventType EventType,
+        SkillRejectionStage? RejectionStage,
+        SkillRejectionReason? ReasonClass);
+    private sealed record TelemetryMetricRow(
+        Guid SkillId,
+        Guid SkillVersionId,
+        string ProjectId,
+        string RepositoryId,
+        string AgentType,
+        SkillTelemetryEventType EventType,
+        SkillRejectionStage? RejectionStage,
+        SkillRejectionReason? ReasonClass,
+        int Count,
+        DateTimeOffset LastOccurredAt);
+    private sealed record AnalyticsGroupKey(
+        Guid SkillId,
+        Guid? SkillVersionId,
+        string ProjectId,
+        string RepositoryId,
+        string AgentType);
 }

@@ -59,6 +59,45 @@ public sealed class SkillValidationTests
         result.Length.Should().BeLessThanOrEqualTo(PortableSkillBundleValidator.MaximumReasonTextLength);
     }
 
+    [Fact]
+    public void Portable_bundle_should_verify_hash_attestation_and_detect_signed_source_drift()
+    {
+        var request = ValidRequest([
+            File("SKILL.md", "---\nname: Signed\ndescription: Signed source\n---\n# Signed")
+        ]);
+        var hash = PortableSkillBundleValidator.Validate(request).ContentHash;
+        var signed = request with { TrustLevel = SkillTrustLevel.Signed, SignatureAlgorithm = "sha256", SignatureValue = hash };
+
+        var verified = PortableSkillBundleValidator.Validate(signed);
+        var drifted = PortableSkillBundleValidator.Validate(signed with
+        {
+            Bundle = new PortableSkillBundle([
+                File("SKILL.md", "---\nname: Signed\ndescription: Changed source\n---\n# Signed")
+            ])
+        });
+
+        verified.Validation.SignatureVerified.Should().BeTrue();
+        verified.CanImport.Should().BeTrue();
+        drifted.Validation.SignatureVerified.Should().BeFalse();
+        drifted.CanImport.Should().BeFalse();
+        drifted.Validation.Issues.Should().Contain(item => item.Code == "SignatureInvalid");
+    }
+
+    [Fact]
+    public void Executable_script_should_require_publish_approval_without_claiming_an_executed_self_test()
+    {
+        var result = PortableSkillBundleValidator.Validate(ValidRequest([
+            File("SKILL.md", "---\nname: Scripted\ndescription: Scripted source\n---\n# Scripted"),
+            File("scripts/check.ps1", "Write-Output 'bounded fixture'", executable: true)
+        ]));
+
+        result.CanImport.Should().BeTrue();
+        result.RequiresPublishApproval.Should().BeTrue();
+        result.Validation.StaticValidationPassed.Should().BeTrue();
+        result.Validation.SelfTestExecuted.Should().BeFalse();
+        result.Validation.SelfTestPassed.Should().BeFalse();
+    }
+
     private static SkillImportPreviewRequest ValidRequest(IReadOnlyList<PortableSkillFile> files) => new(
         "incident-helper", "Incident helper", "Reviews bounded evidence", "Use for incident review", "1.2.3",
         new PortableSkillBundle(files), SkillSourceKind.LocalUpload, "https://example.test/skills/incident-helper", "abc123", "MIT",

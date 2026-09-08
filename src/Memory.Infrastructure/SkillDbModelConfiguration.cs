@@ -262,5 +262,77 @@ internal static class SkillDbModelConfiguration
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.IdempotencyKey }).IsUnique();
             entity.HasIndex(x => new { x.SkillId, x.Status, x.UpdatedAt });
         });
+
+        modelBuilder.Entity<SkillSourceObservation>(entity =>
+        {
+            entity.ToTable("skill_source_observations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.SkillId).HasColumnName("skill_id");
+            entity.Property(x => x.SourceRef).HasColumnName("source_ref");
+            entity.Property(x => x.ObservedRevision).HasColumnName("observed_revision");
+            entity.Property(x => x.ObservedContentHash).HasColumnName("observed_content_hash");
+            entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.SourceAvailable).HasColumnName("source_available");
+            entity.Property(x => x.SignatureVerified).HasColumnName("signature_verified");
+            entity.Property(x => x.EvidenceJson).HasColumnName("evidence_json").HasColumnType("jsonb");
+            entity.Property(x => x.IdempotencyKey).HasColumnName("idempotency_key");
+            entity.Property(x => x.ObservedAt).HasColumnName("observed_at");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.IdempotencyKey }).IsUnique();
+            entity.HasIndex(x => new { x.SkillId, x.ObservedAt });
+        });
+
+        modelBuilder.Entity<SkillTelemetryDailyAggregate>(entity =>
+        {
+            entity.ToTable("skill_telemetry_daily_aggregates");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.AggregateDate).HasColumnName("aggregate_date");
+            entity.Property(x => x.SkillId).HasColumnName("skill_id");
+            entity.Property(x => x.SkillVersionId).HasColumnName("skill_version_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.RepositoryId).HasColumnName("repository_id");
+            entity.Property(x => x.AgentType).HasColumnName("agent_type");
+            entity.Property(x => x.EventType).HasColumnName("event_type").HasConversion<string>();
+            entity.Property(x => x.RejectionStage).HasColumnName("rejection_stage").HasConversion<string>();
+            entity.Property(x => x.ReasonClass).HasColumnName("reason_class").HasConversion<string>();
+            entity.Property(x => x.EventCount).HasColumnName("event_count");
+            entity.Property(x => x.LastOccurredAt).HasColumnName("last_occurred_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.SkillId, x.SkillVersionId, x.AggregateDate });
+            entity.HasIndex(x => new { x.ProjectId, x.RepositoryId, x.AgentType, x.AggregateDate });
+        });
+
+        modelBuilder.Entity<SkillTelemetryAggregationLedger>(entity =>
+        {
+            entity.ToTable("skill_telemetry_aggregation_ledger");
+            entity.HasKey(x => x.EventId);
+            entity.Property(x => x.EventId).HasColumnName("event_id");
+            entity.Property(x => x.AggregatedAt).HasColumnName("aggregated_at");
+        });
+
+        modelBuilder.Entity<SkillTelemetryReconciliationRun>(entity =>
+        {
+            entity.ToTable("skill_telemetry_reconciliation_runs");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.IdempotencyKey).HasColumnName("idempotency_key");
+            entity.Property(x => x.AggregatedEventCount).HasColumnName("aggregated_event_count");
+            entity.Property(x => x.AggregateRowCount).HasColumnName("aggregate_row_count");
+            entity.Property(x => x.DeletedRawEventCount).HasColumnName("deleted_raw_event_count");
+            entity.Property(x => x.DeletedAggregateRowCount).HasColumnName("deleted_aggregate_row_count");
+            entity.Property(x => x.ProtectedRawEventCount).HasColumnName("protected_raw_event_count");
+            entity.Property(x => x.RawRetentionDays).HasColumnName("raw_retention_days");
+            entity.Property(x => x.AggregateRetentionDays).HasColumnName("aggregate_retention_days");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.IdempotencyKey }).IsUnique();
+        });
     }
 }

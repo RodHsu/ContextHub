@@ -948,6 +948,10 @@ public sealed class DashboardQueryServiceTests
         public DbSet<SkillTelemetryEvent> SkillTelemetryEvents => throw new NotSupportedException();
         public DbSet<SkillMaterialization> SkillMaterializations => throw new NotSupportedException();
         public DbSet<SkillMetadataProposal> SkillMetadataProposals => throw new NotSupportedException();
+        public DbSet<SkillSourceObservation> SkillSourceObservations => throw new NotSupportedException();
+        public DbSet<SkillTelemetryDailyAggregate> SkillTelemetryDailyAggregates => throw new NotSupportedException();
+        public DbSet<SkillTelemetryAggregationLedger> SkillTelemetryAggregationLedgers => throw new NotSupportedException();
+        public DbSet<SkillTelemetryReconciliationRun> SkillTelemetryReconciliationRuns => throw new NotSupportedException();
 
         public Task<IApplicationTransaction> BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
@@ -958,6 +962,9 @@ public sealed class DashboardQueryServiceTests
 
         public Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default)
             => operation(cancellationToken);
+
+        public Task AcquireTransactionLockAsync(string lockKey, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
 
         public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
             => throw new NotSupportedException();

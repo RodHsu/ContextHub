@@ -149,6 +149,24 @@ public enum SkillMetadataProposalStatus
     Failed
 }
 
+public enum SkillSourceDriftStatus
+{
+    InSync,
+    Changed,
+    Deleted,
+    TrustChanged,
+    Compromised
+}
+
+public enum SkillAnalyticsDimension
+{
+    Skill,
+    SkillVersion,
+    Project,
+    Repository,
+    AgentType
+}
+
 public sealed class Skill
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -365,4 +383,63 @@ public sealed class SkillMetadataProposal
     public string IdempotencyKey { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class SkillSourceObservation
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
+    public Guid SkillId { get; set; }
+    public string SourceRef { get; set; } = string.Empty;
+    public string ObservedRevision { get; set; } = string.Empty;
+    public string ObservedContentHash { get; set; } = string.Empty;
+    public SkillSourceDriftStatus Status { get; set; }
+    public bool SourceAvailable { get; set; }
+    public bool SignatureVerified { get; set; }
+    public string EvidenceJson { get; set; } = "{}";
+    public string IdempotencyKey { get; set; } = string.Empty;
+    public DateTimeOffset ObservedAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public sealed class SkillTelemetryDailyAggregate
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
+    public DateOnly AggregateDate { get; set; }
+    public Guid SkillId { get; set; }
+    public Guid SkillVersionId { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public string RepositoryId { get; set; } = string.Empty;
+    public string AgentType { get; set; } = string.Empty;
+    public SkillTelemetryEventType EventType { get; set; }
+    public SkillRejectionStage? RejectionStage { get; set; }
+    public SkillRejectionReason? ReasonClass { get; set; }
+    public int EventCount { get; set; }
+    public DateTimeOffset LastOccurredAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class SkillTelemetryAggregationLedger
+{
+    public Guid EventId { get; set; }
+    public DateTimeOffset AggregatedAt { get; set; }
+}
+
+public sealed class SkillTelemetryReconciliationRun
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
+    public string IdempotencyKey { get; set; } = string.Empty;
+    public int AggregatedEventCount { get; set; }
+    public int AggregateRowCount { get; set; }
+    public int DeletedRawEventCount { get; set; }
+    public int DeletedAggregateRowCount { get; set; }
+    public int ProtectedRawEventCount { get; set; }
+    public int RawRetentionDays { get; set; }
+    public int AggregateRetentionDays { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
 }

@@ -103,6 +103,19 @@ public interface IContextHubApiClient
     Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken);
     Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken);
     Task<SkillReindexResult> ReindexSkillsAsync(SkillReindexRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillSearchGenerationResult>> GetSkillSearchGenerationsAsync(CancellationToken cancellationToken);
+    Task<SkillReindexResult> ActivateSkillSearchGenerationAsync(SkillSearchGenerationActivateRequest request, CancellationToken cancellationToken);
+    Task<SkillTelemetryReconciliationResult> ReconcileSkillTelemetryAsync(SkillTelemetryReconciliationRequest request, CancellationToken cancellationToken);
+    Task<SkillImportPreviewResult> PreviewSkillImportAsync(SkillImportPreviewRequest request, CancellationToken cancellationToken);
+    Task<SkillImportResult> ImportSkillAsync(SkillImportRequest request, CancellationToken cancellationToken);
+    Task<SkillVersionSummaryResult> PublishSkillVersionAsync(SkillPublishRequest request, CancellationToken cancellationToken);
+    Task<SkillVersionSummaryResult> ChangeSkillVersionLifecycleAsync(SkillLifecycleRequest request, CancellationToken cancellationToken);
+    Task<SkillSummaryResult> SetSkillDefaultVersionAsync(SkillDefaultVersionRequest request, CancellationToken cancellationToken);
+    Task<SkillBindingResult> UpsertSkillBindingAsync(SkillBindingUpsertRequest request, CancellationToken cancellationToken);
+    Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken);
+    Task<SkillSourceObservationResult> RecordSkillSourceObservationAsync(SkillSourceObservationRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillResolutionDetailResult>> GetSkillResolutionsAsync(string? projectId, int limit, CancellationToken cancellationToken);
 }
 
 public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiClient
@@ -145,6 +158,76 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         using var response = await httpClient.PostAsJsonAsync("/api/skills/reindex", request, cancellationToken);
         return await ReadRequiredAsync<SkillReindexResult>(response, cancellationToken);
     }
+
+    public Task<IReadOnlyList<SkillSearchGenerationResult>> GetSkillSearchGenerationsAsync(CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<SkillSearchGenerationResult>>("/api/skills/search-generations", cancellationToken);
+
+    public async Task<SkillReindexResult> ActivateSkillSearchGenerationAsync(SkillSearchGenerationActivateRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/skills/search-generations/{request.GenerationId:D}/activate", request, cancellationToken);
+        return await ReadRequiredAsync<SkillReindexResult>(response, cancellationToken);
+    }
+
+    public async Task<SkillTelemetryReconciliationResult> ReconcileSkillTelemetryAsync(SkillTelemetryReconciliationRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/skills/analytics/reconcile", request, cancellationToken);
+        return await ReadRequiredAsync<SkillTelemetryReconciliationResult>(response, cancellationToken);
+    }
+
+    public async Task<SkillImportPreviewResult> PreviewSkillImportAsync(SkillImportPreviewRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/skills/import/preview", request, cancellationToken);
+        return await ReadRequiredAsync<SkillImportPreviewResult>(response, cancellationToken);
+    }
+
+    public async Task<SkillImportResult> ImportSkillAsync(SkillImportRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync("/api/skills/import", request, cancellationToken);
+        return await ReadRequiredAsync<SkillImportResult>(response, cancellationToken);
+    }
+
+    public async Task<SkillVersionSummaryResult> PublishSkillVersionAsync(SkillPublishRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/skills/versions/{request.SkillVersionId:D}/publish", request, cancellationToken);
+        return await ReadRequiredAsync<SkillVersionSummaryResult>(response, cancellationToken);
+    }
+
+    public async Task<SkillVersionSummaryResult> ChangeSkillVersionLifecycleAsync(SkillLifecycleRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/skills/versions/{request.SkillVersionId:D}/lifecycle", request, cancellationToken);
+        return await ReadRequiredAsync<SkillVersionSummaryResult>(response, cancellationToken);
+    }
+
+    public async Task<SkillSummaryResult> SetSkillDefaultVersionAsync(SkillDefaultVersionRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PutAsJsonAsync($"/api/skills/{request.SkillId:D}/default", request, cancellationToken);
+        return await ReadRequiredAsync<SkillSummaryResult>(response, cancellationToken);
+    }
+
+    public async Task<SkillBindingResult> UpsertSkillBindingAsync(SkillBindingUpsertRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PutAsJsonAsync($"/api/skills/{request.SkillId:D}/bindings", request, cancellationToken);
+        return await ReadRequiredAsync<SkillBindingResult>(response, cancellationToken);
+    }
+
+    public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken)
+        => GetRequiredAsync<PortableSkillBundle>($"/api/skills/versions/{skillVersionId:D}/export", cancellationToken);
+
+    public Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<SkillSourceObservationResult>>($"/api/skills/{skillId:D}/source-observations", cancellationToken);
+
+    public async Task<SkillSourceObservationResult> RecordSkillSourceObservationAsync(SkillSourceObservationRequest request, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.PostAsJsonAsync($"/api/skills/{request.SkillId:D}/source-observations", request, cancellationToken);
+        return await ReadRequiredAsync<SkillSourceObservationResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<SkillResolutionDetailResult>> GetSkillResolutionsAsync(string? projectId, int limit, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<SkillResolutionDetailResult>>(QueryHelpers.AddQueryString("/api/skills/resolutions", new Dictionary<string, string?>
+        {
+            ["projectId"] = projectId,
+            ["limit"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        }), cancellationToken);
 
     public Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken)
         => GetRequiredAsync<PagedResult<MemoryListItemResult>>(BuildMemoriesUrl(request), cancellationToken);

@@ -1529,10 +1529,26 @@ skills.MapPut("/{skillId:guid}/bindings", async (Guid skillId, SkillBindingUpser
 });
 skills.MapGet("/versions/{skillVersionId:guid}/export", async (Guid skillVersionId, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ExportAsync(skillVersionId, cancellationToken)));
+skills.MapGet("/{skillId:guid}/source-observations", async (Guid skillId, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ListSourceObservationsAsync(skillId, cancellationToken)));
+skills.MapPost("/{skillId:guid}/source-observations", async (Guid skillId, SkillSourceObservationRequest request, ISkillService service, CancellationToken cancellationToken) =>
+{
+    if (skillId != request.SkillId) return Results.BadRequest("Route and body SkillId must match.");
+    return Results.Ok(await service.RecordSourceObservationAsync(request, cancellationToken));
+});
 skills.MapPost("/reindex", async (SkillReindexRequest request, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ReindexAsync(request, cancellationToken)));
+skills.MapGet("/search-generations", async (ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ListSearchGenerationsAsync(cancellationToken)));
+skills.MapPost("/search-generations/{generationId:guid}/activate", async (Guid generationId, SkillSearchGenerationActivateRequest request, ISkillService service, CancellationToken cancellationToken) =>
+{
+    if (generationId != request.GenerationId) return Results.BadRequest("Route and body GenerationId must match.");
+    return Results.Ok(await service.ActivateSearchGenerationAsync(request, cancellationToken));
+});
 skills.MapPost("/analytics", async (SkillAnalyticsRequest request, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.GetAnalyticsAsync(request, cancellationToken)));
+skills.MapPost("/analytics/reconcile", async (SkillTelemetryReconciliationRequest request, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ReconcileTelemetryAsync(request, cancellationToken)));
 skills.MapPost("/governance/review", async (SkillMetadataGovernancePolicy request, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ReviewMetadataGovernanceAsync(request, cancellationToken)));
 skills.MapGet("/governance/proposals", async (string? status, ISkillService service, CancellationToken cancellationToken) =>
@@ -1552,6 +1568,8 @@ skills.MapPost("/governance/proposals/{proposalId:guid}/decision", async (Guid p
 });
 skills.MapPost("/search-for-execution", async (SkillSearchForExecutionRequest request, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.SearchForExecutionAsync(request, cancellationToken)));
+skills.MapGet("/resolutions", async (string? projectId, int? limit, ISkillService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ListResolutionsAsync(projectId, limit ?? 50, cancellationToken)));
 skills.MapPost("/resolution-feedback", async (SkillResolutionFeedbackRequest request, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.RecordFeedbackAsync(request, cancellationToken)));
 skills.MapPost("/select-for-execution", async (SkillSelectForExecutionRequest request, ISkillService service, CancellationToken cancellationToken)

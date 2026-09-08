@@ -108,6 +108,7 @@ public sealed record SkillSummaryResult(
     long MetadataVersion,
     string MetadataHash,
     Guid? DefaultVersionId,
+    IReadOnlyList<SkillBindingResult> Bindings,
     IReadOnlyList<SkillVersionSummaryResult> Versions,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
@@ -156,6 +157,32 @@ public sealed record SkillBindingResult(
     string VersionConstraint,
     long Revision,
     DateTimeOffset UpdatedAt);
+
+public sealed record SkillSourceObservationRequest(
+    Guid SkillId,
+    string SourceRef,
+    string ObservedRevision,
+    string ObservedContentHash,
+    bool SourceAvailable,
+    bool SignatureVerified,
+    bool CompromiseReported,
+    string? EvidenceRef,
+    string IdempotencyKey);
+
+public sealed record SkillSourceObservationResult(
+    Guid ObservationId,
+    Guid SkillId,
+    SkillSourceDriftStatus Status,
+    string SourceRef,
+    string ObservedRevision,
+    string ObservedContentHash,
+    bool SourceAvailable,
+    bool SignatureVerified,
+    bool RequiresNewDraft,
+    bool EmergencyRevocationRecommended,
+    string EvidenceJson,
+    DateTimeOffset ObservedAt,
+    bool Replayed);
 
 public sealed record SkillSearchPolicy(
     bool Enabled = true,
@@ -221,6 +248,45 @@ public sealed record SkillSearchForExecutionResult(
     bool DegradedKeywordOnly,
     bool Replayed,
     string OutcomeReason);
+
+public sealed record SkillResolutionCandidateAuditResult(
+    Guid SkillVersionId,
+    string Version,
+    string SkillName,
+    int Rank,
+    decimal Score,
+    decimal Threshold,
+    IReadOnlyList<string> MatchReasons,
+    bool Pinned,
+    bool Released,
+    string ContentHash);
+
+public sealed record SkillResolutionEventAuditResult(
+    Guid EventId,
+    Guid SkillVersionId,
+    SkillTelemetryEventType EventType,
+    SkillRejectionStage? RejectionStage,
+    SkillRejectionReason? ReasonClass,
+    string ReasonText,
+    string EvidenceJson,
+    DateTimeOffset OccurredAt);
+
+public sealed record SkillResolutionDetailResult(
+    Guid ResolutionId,
+    Guid ExecutionId,
+    Guid? WorkItemId,
+    string ProjectId,
+    string RepositoryId,
+    string AgentType,
+    int Round,
+    int MaxSearchRounds,
+    SkillResolutionStatus Status,
+    string QueryHash,
+    Guid SearchGenerationId,
+    IReadOnlyList<SkillResolutionCandidateAuditResult> Candidates,
+    IReadOnlyList<SkillResolutionEventAuditResult> Events,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
 
 public sealed record SkillResolutionFeedbackRequest(
     Guid ResolutionId,
@@ -342,6 +408,24 @@ public sealed record SkillReindexResult(
     bool Activated,
     bool Replayed);
 
+public sealed record SkillSearchGenerationResult(
+    Guid GenerationId,
+    string SearchProfileVersion,
+    string EmbeddingModelId,
+    string EmbeddingModelVersion,
+    decimal Threshold,
+    SkillSearchGenerationStatus Status,
+    int IndexedVersionCount,
+    string BenchmarkJson,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    DateTimeOffset? ActivatedAt);
+
+public sealed record SkillSearchGenerationActivateRequest(
+    Guid GenerationId,
+    string Reason,
+    string IdempotencyKey);
+
 public sealed record SkillTelemetryAggregateResult(
     Guid SkillId,
     Guid? SkillVersionId,
@@ -359,13 +443,37 @@ public sealed record SkillTelemetryAggregateResult(
     DateTimeOffset? LastSearchedAt,
     DateTimeOffset? LastSelectedAt,
     DateTimeOffset? LastRejectedAt,
-    DateTimeOffset? LastInvokedAt);
+    DateTimeOffset? LastInvokedAt,
+    string ProjectId,
+    string RepositoryId,
+    string AgentType,
+    int WindowDays);
 
 public sealed record SkillAnalyticsRequest(
     string? ProjectId = null,
     Guid? SkillId = null,
     Guid? SkillVersionId = null,
-    int WindowDays = 30);
+    int WindowDays = 30,
+    string? RepositoryId = null,
+    string? AgentType = null,
+    SkillAnalyticsDimension Dimension = SkillAnalyticsDimension.Skill);
+
+public sealed record SkillTelemetryReconciliationRequest(
+    int RawEventRetentionDays = 90,
+    int AggregateRetentionDays = 1095,
+    string IdempotencyKey = "");
+
+public sealed record SkillTelemetryReconciliationResult(
+    Guid RunId,
+    int AggregatedEventCount,
+    int AggregateRowCount,
+    int DeletedRawEventCount,
+    int DeletedAggregateRowCount,
+    int ProtectedRawEventCount,
+    int RawEventRetentionDays,
+    int AggregateRetentionDays,
+    DateTimeOffset CompletedAt,
+    bool Replayed);
 
 public sealed record SkillMetadataGovernancePolicy(
     int MinimumSampleSize = 20,
@@ -434,7 +542,10 @@ public interface ISkillService
     Task<IReadOnlyList<SkillSummaryResult>> ListAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken);
     Task<SkillSummaryResult?> GetAsync(Guid skillId, CancellationToken cancellationToken);
     Task<PortableSkillBundle> ExportAsync(Guid skillVersionId, CancellationToken cancellationToken);
+    Task<SkillSourceObservationResult> RecordSourceObservationAsync(SkillSourceObservationRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillSourceObservationResult>> ListSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken);
     Task<SkillSearchForExecutionResult> SearchForExecutionAsync(SkillSearchForExecutionRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillResolutionDetailResult>> ListResolutionsAsync(string? projectId, int limit, CancellationToken cancellationToken);
     Task<SkillResolutionFeedbackResult> RecordFeedbackAsync(SkillResolutionFeedbackRequest request, CancellationToken cancellationToken);
     Task<SkillSelectForExecutionResult> SelectAsync(SkillSelectForExecutionRequest request, CancellationToken cancellationToken);
     Task<SkillVersionBundleResult> GetPinnedVersionAsync(SkillVersionGetRequest request, CancellationToken cancellationToken);
@@ -442,7 +553,10 @@ public interface ISkillService
     Task<SkillMaterializationCleanupResult> CleanupMaterializationsAsync(SkillMaterializationCleanupRequest request, CancellationToken cancellationToken);
     Task<SkillTelemetryRecordResult> RecordInvocationAsync(SkillInvocationRecordRequest request, CancellationToken cancellationToken);
     Task<SkillReindexResult> ReindexAsync(SkillReindexRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SkillSearchGenerationResult>> ListSearchGenerationsAsync(CancellationToken cancellationToken);
+    Task<SkillReindexResult> ActivateSearchGenerationAsync(SkillSearchGenerationActivateRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetAnalyticsAsync(SkillAnalyticsRequest request, CancellationToken cancellationToken);
+    Task<SkillTelemetryReconciliationResult> ReconcileTelemetryAsync(SkillTelemetryReconciliationRequest request, CancellationToken cancellationToken);
     Task<SkillMetadataGovernanceReviewResult> ReviewMetadataGovernanceAsync(SkillMetadataGovernancePolicy policy, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillMetadataProposalResult>> ListMetadataProposalsAsync(SkillMetadataProposalStatus? status, CancellationToken cancellationToken);
     Task<SkillMetadataProposalResult> DecideMetadataProposalAsync(SkillMetadataProposalDecisionRequest request, CancellationToken cancellationToken);

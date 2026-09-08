@@ -1,100 +1,124 @@
 @page "/skills"
+@using System.Text
+@using System.Text.Json
 @inject IContextHubApiClient ApiClient
 
 <PageTitle>Context Hub | Agent Skills</PageTitle>
 
-<PageViewport Title="Agent Skills"
-              Subtitle="可攜式 Skill Registry、不可變版本、搜尋索引與執行品質訊號。"
-              BodyClass="page-viewport-body">
+<PageViewport Title="Agent Skills" Subtitle="可攜式 Registry、不可變版本、搜尋 generation、執行品質與 metadata governance。" BodyClass="page-viewport-body">
     <Actions>
-        <div class="page-actions-secondary">
-            <button class="ghost-button" @onclick="ReindexAsync" disabled="@_loading">重建搜尋索引</button>
-        </div>
-        <div class="page-actions-primary">
-            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
-        </div>
+        <div class="page-actions-secondary"><button class="ghost-button" @onclick="ReconcileAsync" disabled="@_loading">彙總 Telemetry</button><button class="ghost-button" @onclick="ReindexAsync" disabled="@_loading">Shadow Reindex</button></div>
+        <div class="page-actions-primary"><button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
     </Actions>
     <ChildContent>
-        @if (!string.IsNullOrWhiteSpace(_error))
-        {
-            <div class="inline-error">@_error</div>
-        }
+        @if (!string.IsNullOrWhiteSpace(_error)) { <div class="inline-error">@_error</div> }
+        @if (!string.IsNullOrWhiteSpace(_notice)) { <div class="inline-success">@_notice</div> }
         <div class="metric-grid">
             <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Skills：</span><span class="metric-value-inline">@_skills.Count</span></div></section>
-            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Published versions：</span><span class="metric-value-inline">@PublishedCount</span></div></section>
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Published：</span><span class="metric-value-inline">@PublishedCount</span></div></section>
             <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">治理候選：</span><span class="metric-value-inline">@(_governance?.CandidateCount ?? 0)</span></div></section>
-            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">30 日成功率：</span><span class="metric-value-inline">@SuccessRate.ToString("P1")</span></div></section>
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">@_windowDays 日成功率：</span><span class="metric-value-inline">@SuccessRate.ToString("P1")</span></div></section>
         </div>
+
         <section class="panel">
-            <div class="panel-heading-row"><div><div class="panel-title">Registry</div><div class="panel-heading-meta">Default version 與 content hash 共同構成執行 pin；Revoked 版本不會由搜尋或 materialization 回傳。</div></div></div>
-            @if (_skills.Count == 0)
-            {
-                <div class="empty-inline"><div class="empty-inline-title">尚無 Skills</div><div class="empty-inline-copy">請透過管理 API 先執行 import preview、import 與 publish。</div></div>
+            <div class="panel-heading-row"><div><div class="panel-title">7／30／90 日 Funnel 與 rejection matrix</div><div class="panel-heading-meta">Raw event 與 reconciliation aggregate 以 ledger 去重；Project／Repo／AgentType ACL 在 server 端套用。</div></div><div class="segmented-control">@foreach (var window in new[] { 7, 30, 90 }) { <button class="@(window == _windowDays ? "active" : null)" @onclick="() => _windowDays = window">@window 日</button> }</div></div>
+            <div class="table-scroll"><table class="data-table"><thead><tr><th>Window</th><th>Impressions</th><th>Selected</th><th>Rejected</th><th>Invoked</th><th>Success</th><th>Failure</th></tr></thead><tbody>
+                @foreach (var window in new[] { 7, 30, 90 }) { var rows = Analytics(window); <tr><td>@window 日</td><td>@rows.Sum(x => x.SearchImpressionCount)</td><td>@rows.Sum(x => x.SelectedCount)</td><td>@rows.Sum(x => x.RejectedCount)</td><td>@rows.Sum(x => x.InvocationCount)</td><td>@rows.Sum(x => x.SuccessCount)</td><td>@rows.Sum(x => x.FailureCount)</td></tr> }
+            </tbody></table></div>
+            <div class="table-scroll"><table class="data-table"><thead><tr><th>Stage : Reason</th><th>Count</th></tr></thead><tbody>
+                @foreach (var item in StageReasonMatrix) { <tr><td>@item.Key</td><td>@item.Value</td></tr> }
+                @if (StageReasonMatrix.Count == 0) { <tr><td colspan="2">目前窗口沒有 rejection/cancellation。</td></tr> }
+            </tbody></table></div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-heading-row"><div><div class="panel-title">Search index generations</div><div class="panel-heading-meta">Shadow build 通過 count/benchmark 後才 atomic switch；Retired/RolledBack generation 可人工回復。</div></div></div>
+            <div class="table-scroll"><table class="data-table"><thead><tr><th>Profile / Model</th><th>Status</th><th>Documents</th><th>Threshold</th><th>Activated</th><th></th></tr></thead><tbody>
+                @foreach (var generation in _generations) { <tr><td>@generation.SearchProfileVersion<br/><span class="muted">@generation.EmbeddingModelId / @generation.EmbeddingModelVersion</span></td><td><span class="status-badge @StatusClass(generation.Status)">@generation.Status</span></td><td>@generation.IndexedVersionCount</td><td>@generation.Threshold</td><td>@generation.ActivatedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td><td>@if (generation.Status is SkillSearchGenerationStatus.Retired or SkillSearchGenerationStatus.RolledBack) { <button class="ghost-button" @onclick="() => ActivateGenerationAsync(generation.GenerationId)">Rollback</button> }</td></tr> }
+                @if (_generations.Count == 0) { <tr><td colspan="6">尚無 index generation。</td></tr> }
+            </tbody></table></div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-heading-row"><div><div class="panel-title">Execution resolution audit</div><div class="panel-heading-meta">顯示候選 ranking、exact-version/contentHash pin 與 rejection/cancellation evidence；內容已由 server 端套用 tenant、owner、project ACL。</div></div></div>
+            @foreach (var resolution in _resolutions) {
+                <article class="stack-item"><div class="stack-item-title">@resolution.Status · round @resolution.Round/@resolution.MaxSearchRounds <span class="status-badge neutral">@resolution.ProjectId</span></div><div class="stack-item-meta">execution @resolution.ExecutionId · generation @resolution.SearchGenerationId · query @ShortHash(resolution.QueryHash)</div>
+                    @foreach (var candidate in resolution.Candidates) { <div class="stack-item-copy">#@candidate.Rank @candidate.SkillName @candidate.Version · score @candidate.Score / @candidate.Threshold · @ShortHash(candidate.ContentHash) @if (candidate.Pinned) { <span class="status-badge ok">@(candidate.Released ? "Released" : "Pinned")</span> } · @string.Join(", ", candidate.MatchReasons)</div> }
+                    @foreach (var item in resolution.Events.Where(x => x.EventType is SkillTelemetryEventType.Rejected or SkillTelemetryEventType.SelectedThenReleased or SkillTelemetryEventType.Cancellation or SkillTelemetryEventType.InvocationFailed)) { <div class="code-block">@item.OccurredAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") · @item.EventType · @item.RejectionStage:@item.ReasonClass · @item.ReasonText<br/>@item.EvidenceJson</div> }
+                </article>
             }
-            else
-            {
-                <div class="stack-list">
-                    @foreach (var skill in _skills)
-                    {
-                        <article class="stack-item">
-                            <div class="stack-item-split"><div class="stack-item-content">
-                                <div class="stack-item-title">@skill.Name <span class="status-badge neutral">@skill.StableKey</span></div>
-                                <div class="stack-item-copy">@skill.Description</div>
-                                <div class="stack-item-meta">metadata v@skill.MetadataVersion · @skill.MetadataHash[..Math.Min(12, skill.MetadataHash.Length)] · default @(skill.DefaultVersionId?.ToString("D") ?? "未設定")</div>
-                            </div><div class="stack-item-actions stack-item-actions-column">
-                                @foreach (var version in skill.Versions.OrderByDescending(x => x.CreatedAt).Take(4))
-                                {
-                                    <span class="status-badge @StatusClass(version.Status)">@version.Version · @version.Status</span>
-                                }
-                            </div></div>
-                        </article>
-                    }
+            @if (_resolutions.Count == 0) { <div class="empty-inline"><div class="empty-inline-title">尚無 execution resolution。</div></div> }
+        </section>
+
+        <section class="panel">
+            <div class="panel-heading-row"><div><div class="panel-title">Portable import</div><div class="panel-heading-meta">以 SKILL.md 建立 Draft；preview 顯示 contentHash 與 supply-chain validation，需另行 Publish。</div></div></div>
+            <div class="form-grid"><label>Stable key<input @bind="_importStableKey" /></label><label>Name<input @bind="_importName" /></label><label>Version<input @bind="_importVersion" /></label><label>License<input @bind="_importLicense" /></label><label class="form-grid-span">Description<input @bind="_importDescription" /></label><label class="form-grid-span">When to use<input @bind="_importWhenToUse" /></label><label class="form-grid-span">Source ref<input @bind="_importSourceRef" /></label><label class="form-grid-span">SKILL.md<textarea rows="8" @bind="_importMarkdown"></textarea></label></div>
+            <div class="detail-actions"><button class="ghost-button" @onclick="PreviewImportAsync">Preview</button><button class="primary-button" @onclick="ImportAsync" disabled="@(_importPreview?.CanImport != true)">建立 Draft</button></div>
+            @if (_importPreview is not null) { <div class="code-block">hash=@_importPreview.ContentHash · bytes=@_importPreview.BundleSizeBytes · canImport=@_importPreview.CanImport · approval=@_importPreview.RequiresPublishApproval @foreach (var issue in _importPreview.Validation.Issues) { <div>@issue.Severity @issue.Code — @issue.Message</div> }</div> }
+        </section>
+
+        <section class="panel">
+            <div class="panel-heading-row"><div><div class="panel-title">Registry / versions / bindings</div><div class="panel-heading-meta">Default version＋contentHash 是 execution pin；bundle export 不含 ACL 或 secret sidecar。</div></div></div>
+            @if (_skills.Count == 0) { <div class="empty-inline"><div class="empty-inline-title">尚無 Skills</div></div> }
+            else { <div class="stack-list">@foreach (var skill in _skills) { <article class="stack-item @(skill.Id == _selectedSkillId ? "selected" : null)" @onclick="() => SelectSkill(skill.Id)"><div class="stack-item-title">@skill.Name <span class="status-badge neutral">@skill.StableKey</span></div><div class="stack-item-copy">@skill.Description</div><div class="stack-item-meta">metadata v@skill.MetadataVersion · @ShortHash(skill.MetadataHash) · default @(skill.DefaultVersionId?.ToString("D") ?? "未設定") · bindings @skill.Bindings.Count</div></article> }</div> }
+            @if (SelectedSkill is { } selected) {
+                <div class="subpanel"><div class="subpanel-title">@selected.Name details</div><div class="stack-item-copy">WhenToUse: @selected.WhenToUse</div>
+                    <div class="table-scroll"><table class="data-table"><thead><tr><th>Version</th><th>Status</th><th>Hash / provenance</th><th>Trust</th><th>Actions</th></tr></thead><tbody>
+                    @foreach (var version in selected.Versions) { <tr><td>@version.Version @if (selected.DefaultVersionId == version.Id) { <span class="status-badge ok">Default</span> }</td><td><span class="status-badge @StatusClass(version.Status)">@version.Status</span></td><td><span class="code-inline">@ShortHash(version.ContentHash)</span><br/>@version.SourceKind · @version.SourceRevision</td><td>@version.TrustLevel @(version.SignatureVerified ? "✓" : "")</td><td><button class="ghost-button" @onclick="() => ExportAsync(version.Id)">Export</button>@if (version.Status == SkillLifecycleStatus.Draft) { <button class="primary-button" @onclick="() => PublishAsync(version)">Publish</button> } @if (version.Status == SkillLifecycleStatus.Published && selected.DefaultVersionId != version.Id) { <button class="ghost-button" @onclick="() => SetDefaultAsync(selected, version.Id)">Set default</button> } @if (version.Status == SkillLifecycleStatus.Published) { <button class="ghost-button" @onclick="() => ChangeLifecycleAsync(version.Id, SkillLifecycleStatus.Deprecated)">Deprecate</button><button class="danger-button" @onclick="() => ChangeLifecycleAsync(version.Id, SkillLifecycleStatus.Revoked)">Revoke</button> }</td></tr> }
+                    </tbody></table></div>
+                    <div class="form-grid"><label>Binding scope<select @bind="_bindingScope">@foreach (var value in Enum.GetValues<SkillBindingScope>()) { <option value="@value">@value</option> }</select></label><label>Mode<select @bind="_bindingMode">@foreach (var value in Enum.GetValues<SkillBindingMode>()) { <option value="@value">@value</option> }</select></label><label>Scope value<input @bind="_bindingScopeValue" /></label><label>Version constraint<input @bind="_bindingVersionConstraint" /></label></div><button class="ghost-button" @onclick="() => UpsertBindingAsync(selected)">Upsert binding</button>
+                    @foreach (var binding in selected.Bindings) { <span class="status-badge neutral">@binding.Scope:@binding.ScopeValue · @binding.Mode · @binding.VersionConstraint · r@binding.Revision</span> }
+                    <div class="form-grid"><label>Observed revision<input @bind="_observedRevision" /></label><label>Observed hash<input @bind="_observedHash" /></label><label><input type="checkbox" @bind="_sourceAvailable" /> Source available</label><label><input type="checkbox" @bind="_signatureVerified" /> Signature verified</label></div><button class="ghost-button" @onclick="() => ObserveSourceAsync(selected)">Record source observation</button>
+                    @foreach (var observation in _sourceObservations) { <span class="status-badge @StatusClass(observation.Status)">@observation.Status · @observation.ObservedRevision · @ShortHash(observation.ObservedContentHash)</span> }
+                    @if (!string.IsNullOrWhiteSpace(_exportJson)) { <div class="code-block">@_exportJson</div> }
                 </div>
             }
         </section>
+
+        <section class="panel"><div class="panel-title">Metadata governance signals</div>@foreach (var finding in _governance?.Findings ?? []) { <article class="stack-item"><div class="stack-item-title">@finding.SignalType <span class="status-badge warning">@finding.Rate.ToString("P1")</span></div><div class="stack-item-copy">@finding.RecommendedAction · confidence @finding.Confidence.ToString("P1") · samples @finding.SampleSize</div></article> }</section>
     </ChildContent>
 </PageViewport>
 
 @code {
     private IReadOnlyList<SkillSummaryResult> _skills = [];
-    private IReadOnlyList<SkillTelemetryAggregateResult> _analytics = [];
+    private readonly Dictionary<int, IReadOnlyList<SkillTelemetryAggregateResult>> _analytics = [];
+    private IReadOnlyList<SkillSearchGenerationResult> _generations = [];
+    private IReadOnlyList<SkillResolutionDetailResult> _resolutions = [];
+    private IReadOnlyList<SkillSourceObservationResult> _sourceObservations = [];
     private SkillMetadataGovernanceReviewResult? _governance;
+    private SkillImportPreviewResult? _importPreview;
+    private Guid? _selectedSkillId;
+    private int _windowDays = 30;
     private bool _loading;
-    private string _error = string.Empty;
+    private string _error = string.Empty, _notice = string.Empty, _exportJson = string.Empty;
+    private string _importStableKey = string.Empty, _importName = string.Empty, _importDescription = string.Empty, _importWhenToUse = string.Empty, _importVersion = "1.0.0", _importLicense = "MIT", _importSourceRef = "repository:skill", _importMarkdown = "---\nname: Example\ndescription: Example portable skill\n---\n# Instructions\nUse bounded evidence.";
+    private SkillBindingScope _bindingScope = SkillBindingScope.Project;
+    private SkillBindingMode _bindingMode = SkillBindingMode.Recommended;
+    private string _bindingScopeValue = "ContextHub", _bindingVersionConstraint = "*", _observedRevision = string.Empty, _observedHash = string.Empty;
+    private bool _sourceAvailable = true, _signatureVerified;
+    private SkillSummaryResult? SelectedSkill => _skills.FirstOrDefault(x => x.Id == _selectedSkillId);
     private int PublishedCount => _skills.Sum(x => x.Versions.Count(v => v.Status == SkillLifecycleStatus.Published));
-    private decimal SuccessRate => _analytics.Sum(x => x.InvocationCount) == 0 ? 0 : decimal.Divide(_analytics.Sum(x => x.SuccessCount), _analytics.Sum(x => x.InvocationCount));
-
+    private IReadOnlyList<SkillTelemetryAggregateResult> CurrentAnalytics => Analytics(_windowDays);
+    private decimal SuccessRate => CurrentAnalytics.Sum(x => x.InvocationCount) == 0 ? 0 : decimal.Divide(CurrentAnalytics.Sum(x => x.SuccessCount), CurrentAnalytics.Sum(x => x.InvocationCount));
+    private IReadOnlyDictionary<string, int> StageReasonMatrix => CurrentAnalytics.SelectMany(x => x.StageReasonCounts).GroupBy(x => x.Key).OrderByDescending(x => x.Sum(v => v.Value)).ToDictionary(x => x.Key, x => x.Sum(v => v.Value), StringComparer.Ordinal);
     protected override Task OnInitializedAsync() => LoadAsync();
-
-    private async Task LoadAsync()
-    {
-        _loading = true; _error = string.Empty;
-        try
-        {
-            _skills = await ApiClient.GetSkillsAsync(null, false, CancellationToken.None);
-            _analytics = await ApiClient.GetSkillAnalyticsAsync(null, 30, CancellationToken.None);
-            _governance = await ApiClient.GetSkillGovernanceAsync(CancellationToken.None);
-        }
-        catch (Exception ex) { _error = ex.Message; }
-        finally { _loading = false; }
-    }
-
-    private async Task ReindexAsync()
-    {
-        _loading = true; _error = string.Empty;
-        try
-        {
-            await ApiClient.ReindexSkillsAsync(new("skill-search-v1", "context-hub-default", "1", 0.35m, true, true, $"dashboard-{Guid.NewGuid():N}"), CancellationToken.None);
-            await LoadAsync();
-        }
-        catch (Exception ex) { _error = ex.Message; _loading = false; }
-    }
-
-    private static string StatusClass(SkillLifecycleStatus status) => status switch
-    {
-        SkillLifecycleStatus.Published => "ok",
-        SkillLifecycleStatus.Revoked => "danger",
-        SkillLifecycleStatus.Deprecated => "warning",
-        _ => "neutral"
-    };
+    private IReadOnlyList<SkillTelemetryAggregateResult> Analytics(int window) => _analytics.GetValueOrDefault(window) ?? [];
+    private async Task LoadAsync() { _loading = true; _error = _notice = string.Empty; try { _skills = await ApiClient.GetSkillsAsync(null, false, CancellationToken.None); foreach (var window in new[] { 7, 30, 90 }) _analytics[window] = await ApiClient.GetSkillAnalyticsAsync(null, window, CancellationToken.None); _governance = await ApiClient.GetSkillGovernanceAsync(CancellationToken.None); _generations = await ApiClient.GetSkillSearchGenerationsAsync(CancellationToken.None); _resolutions = await ApiClient.GetSkillResolutionsAsync(null, 50, CancellationToken.None); if (_selectedSkillId is not null && SelectedSkill is null) _selectedSkillId = null; if (_selectedSkillId is not null) _sourceObservations = await ApiClient.GetSkillSourceObservationsAsync(_selectedSkillId.Value, CancellationToken.None); } catch (Exception ex) { _error = ex.Message; } finally { _loading = false; } }
+    private void SelectSkill(Guid id) { _selectedSkillId = id; _exportJson = string.Empty; _ = LoadSourceObservationsAsync(id); }
+    private async Task LoadSourceObservationsAsync(Guid id) { try { _sourceObservations = await ApiClient.GetSkillSourceObservationsAsync(id, CancellationToken.None); await InvokeAsync(StateHasChanged); } catch (Exception ex) { _error = ex.Message; } }
+    private SkillImportPreviewRequest BuildImport() => new(_importStableKey, _importName, _importDescription, _importWhenToUse, _importVersion, new PortableSkillBundle([new PortableSkillFile("SKILL.md", Convert.ToBase64String(Encoding.UTF8.GetBytes(_importMarkdown)))]), SkillSourceKind.LocalUpload, _importSourceRef, "manual", _importLicense);
+    private async Task PreviewImportAsync() => await RunAsync(async () => { _importPreview = await ApiClient.PreviewSkillImportAsync(BuildImport(), CancellationToken.None); _notice = "Import preview 已完成。"; });
+    private async Task ImportAsync() => await RunAsync(async () => { var result = await ApiClient.ImportSkillAsync(new(BuildImport(), $"dashboard-import-{Guid.NewGuid():N}"), CancellationToken.None); _selectedSkillId = result.Skill.Id; await LoadAsync(); });
+    private async Task PublishAsync(SkillVersionSummaryResult version) => await RunAsync(async () => { await ApiClient.PublishSkillVersionAsync(new(version.Id, version.ContentHash, true, $"dashboard-publish-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
+    private async Task ChangeLifecycleAsync(Guid versionId, SkillLifecycleStatus status) => await RunAsync(async () => { await ApiClient.ChangeSkillVersionLifecycleAsync(new(versionId, status, $"Dashboard {status}", $"dashboard-lifecycle-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
+    private async Task SetDefaultAsync(SkillSummaryResult skill, Guid versionId) => await RunAsync(async () => { await ApiClient.SetSkillDefaultVersionAsync(new(skill.Id, versionId, skill.MetadataVersion, $"dashboard-default-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
+    private async Task UpsertBindingAsync(SkillSummaryResult skill) => await RunAsync(async () => { var existing = skill.Bindings.FirstOrDefault(x => x.Scope == _bindingScope && string.Equals(x.ScopeValue, _bindingScopeValue, StringComparison.OrdinalIgnoreCase)); await ApiClient.UpsertSkillBindingAsync(new(skill.Id, _bindingScope, _bindingScopeValue, _bindingMode, _bindingVersionConstraint, existing?.Revision, $"dashboard-binding-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
+    private async Task ExportAsync(Guid versionId) => await RunAsync(async () => _exportJson = JsonSerializer.Serialize(await ApiClient.ExportSkillVersionAsync(versionId, CancellationToken.None), new JsonSerializerOptions { WriteIndented = true }));
+    private async Task ObserveSourceAsync(SkillSummaryResult skill) => await RunAsync(async () => { var source = skill.Versions.FirstOrDefault()?.SourceRef ?? _importSourceRef; await ApiClient.RecordSkillSourceObservationAsync(new(skill.Id, source, _observedRevision, _observedHash, _sourceAvailable, _signatureVerified, false, "dashboard:manual-refresh", $"dashboard-source-{Guid.NewGuid():N}"), CancellationToken.None); await LoadSourceObservationsAsync(skill.Id); });
+    private async Task ReindexAsync() => await RunAsync(async () => { await ApiClient.ReindexSkillsAsync(new("skill-search-v1", "context-hub-default", "1", 0.35m, true, true, $"dashboard-reindex-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
+    private async Task ActivateGenerationAsync(Guid id) => await RunAsync(async () => { await ApiClient.ActivateSkillSearchGenerationAsync(new(id, "Dashboard operator rollback", $"dashboard-activate-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
+    private async Task ReconcileAsync() => await RunAsync(async () => { await ApiClient.ReconcileSkillTelemetryAsync(new(90, 1095, $"dashboard-reconcile-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
+    private async Task RunAsync(Func<Task> action) { _loading = true; _error = _notice = string.Empty; try { await action(); } catch (Exception ex) { _error = ex.Message; } finally { _loading = false; } }
+    private static string ShortHash(string value) => string.IsNullOrWhiteSpace(value) ? "-" : value[..Math.Min(12, value.Length)];
+    private static string StatusClass(object status) => status.ToString() switch { "Published" or "Active" or "InSync" => "ok", "Revoked" or "Failed" or "Compromised" or "TrustChanged" => "danger", "Deprecated" or "Changed" or "Deleted" or "RolledBack" => "warning", _ => "neutral" };
 }

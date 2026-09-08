@@ -36,12 +36,22 @@ Append-only idempotent events cover search impressions, selection, rejection/rel
 - `PostInvocationRejected`
 - `RevokedOrPolicyCancelled`
 
-Telemetry stores query hashes and bounded/redacted evidence rather than raw prompts or secrets. Analytics expose funnel rates and a stage-by-reason matrix. Retention and access follow tenant/owner ACL.
+Telemetry stores query hashes and bounded/redacted evidence rather than raw prompts or secrets. Analytics expose funnel rates and a stage-by-reason matrix by Skill, SkillVersion, Project, repository, or agent type. A transactionally locked reconciliation run aggregates each raw event exactly once through a ledger, preserves protected revocation/policy/permission evidence, deletes ordinary raw events only after at least 90 days, and keeps daily aggregates longer (365–3650 days). Metadata-governance evidence windows are therefore bounded to 90 days. Replaying the same reconciliation idempotency key returns the persisted receipt without double counting.
 
 Scheduled metadata governance remains inside the existing exactly-four-tool surface. Review produces typed Skill coverage and quality signals. Bounded Execute may only create an idempotent proposal pinned to the current `MetadataVersion` and metadata hash. It never edits a Published bundle in place. Content defects require a new SkillVersion proposal. A matching pending proposal becomes a governed exception on re-review so the run converges without duplicate proposals.
 
 ## REST management surface
 
-The `/api/skills` group supports listing, detail, import preview/import, publish, lifecycle changes, default rollback, bindings, export, reindex, analytics, governance review, execution search/feedback/selection, exact version reads, materialization/cleanup, and invocation evidence. The Dashboard `/skills` page presents registry versions, default pins, analytics, governance count, and an authorized reindex action.
+The `/api/skills` group supports listing, detail, import preview/import, publish, lifecycle changes, default rollback, bindings, export, source observations, reindex and generation activation, analytics reconciliation, governance review, execution search/feedback/selection, resolution audit, exact version reads, materialization/cleanup, and invocation evidence. The Dashboard `/skills` page presents lifecycle management, provenance/source drift, default pins, bindings, generation rollback, 7/30/90-day analytics, stage-by-reason evidence, recent execution resolutions, metadata-governance signals, and authorized maintenance actions.
 
 Changing embedding model, version, or search profile creates a shadow generation, builds all eligible Published/Deprecated documents, validates counts and benchmark evidence, retires the prior generation, and activates the new generation. Failed builds remain non-active and preserve the previous active index.
+
+External source refresh is an explicit provider boundary. The current service records normalized append-only observations supplied by an authorized source adapter or operator. It classifies content/revision deletion, trust change, signature compromise, or in-sync state against immutable provenance. It never fetches arbitrary URLs and never mutates a Published bundle: content drift requires a new Draft, while trust compromise recommends emergency revocation.
+
+## Operations
+
+- Rebuild with `POST /api/skills/reindex`; activate a validated retired generation with `POST /api/skills/search-generations/{generationId}/activate`. Activation rejects incomplete document sets.
+- Aggregate and retain telemetry with `POST /api/skills/analytics/reconcile`. Use a durable unique idempotency key per scheduled reconciliation run.
+- Inspect tenant/project-authorized decisions at `GET /api/skills/resolutions`; evidence remains bounded and redacted.
+- Record upstream checks through `POST /api/skills/{skillId}/source-observations`; the caller is responsible for authenticated source retrieval.
+- Revocation is the immediate fail-closed response. Reindex afterward to remove stale documents physically, although service hard filters prevent a stale index from returning the revoked version before that rebuild.

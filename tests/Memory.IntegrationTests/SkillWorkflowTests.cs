@@ -43,6 +43,11 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         var selected = await service.SelectAsync(new(alternative.ResolutionId, [secondary.Version.Id], "Best available evidence match", $"select-{Guid.NewGuid():N}"), CancellationToken.None);
         selected.PinnedVersions.Should().ContainSingle();
         selected.PinnedVersions[0].ContentHash.Should().Be(secondary.Version.ContentHash);
+        var audit = (await service.ListResolutionsAsync("ContextHub", 20, CancellationToken.None))
+            .Single(item => item.ResolutionId == alternative.ResolutionId);
+        audit.Candidates.Should().ContainSingle(item => item.SkillVersionId == secondary.Version.Id && item.Pinned && !item.Released);
+        audit.Events.Should().Contain(item => item.EventType == SkillTelemetryEventType.SearchImpression);
+        audit.Events.Should().Contain(item => item.EventType == SkillTelemetryEventType.Selected);
 
         db.ChangeTracker.Clear();
         var materialized = await service.MaterializeAsync(new(executionId, alternative.ResolutionId, secondary.Version.Id,
@@ -167,6 +172,55 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
     }
 
     [DockerRequiredFact]
+    public async Task Metadata_governance_should_classify_quality_fixtures_and_exclude_runtime_and_policy_events()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
+        var fixtures = new[]
+        {
+            (Key: "tag", Reason: SkillRejectionReason.IncorrectTagOrTrigger, Stage: SkillRejectionStage.SearchCandidateRejected, Expected: "TagMismatchSignal", Included: true),
+            (Key: "broad", Reason: SkillRejectionReason.LowConfidenceMatch, Stage: SkillRejectionStage.SearchCandidateRejected, Expected: "DescriptionOverbreadthSignal", Included: true),
+            (Key: "compat", Reason: SkillRejectionReason.IncorrectCompatibilityMetadata, Stage: SkillRejectionStage.MaterializedRejectedBeforeInvoke, Expected: "CompatibilityMismatchSignal", Included: true),
+            (Key: "duplicate", Reason: SkillRejectionReason.DuplicateCoverage, Stage: SkillRejectionStage.PinnedReleasedBeforeMaterialize, Expected: "DuplicateSkillSignal", Included: true),
+            (Key: "instruction", Reason: SkillRejectionReason.InstructionMismatch, Stage: SkillRejectionStage.MaterializedRejectedBeforeInvoke, Expected: "InstructionMismatchSignal", Included: true),
+            (Key: "runtime", Reason: SkillRejectionReason.ToolUnavailable, Stage: SkillRejectionStage.InvocationAborted, Expected: string.Empty, Included: false),
+            (Key: "policy", Reason: SkillRejectionReason.Revoked, Stage: SkillRejectionStage.RevokedOrPolicyCancelled, Expected: string.Empty, Included: false)
+        };
+        var imported = new Dictionary<string, SkillImportResult>(StringComparer.Ordinal);
+        var now = DateTimeOffset.UtcNow;
+        foreach (var fixture in fixtures)
+        {
+            var skill = await ImportAndPublishAsync(service, $"fixture-{fixture.Key}-{Guid.NewGuid():N}"[..30], $"Fixture {fixture.Key}", $"Governance {fixture.Key} fixture", [], $"fixture-{fixture.Key}");
+            imported[fixture.Key] = skill;
+            for (var index = 0; index < 40; index++)
+            {
+                db.SkillTelemetryEvents.Add(Telemetry(skill, actor, SkillTelemetryEventType.SearchImpression, null, index + fixture.Key.GetHashCode(StringComparison.Ordinal), now));
+                if (index < 32)
+                {
+                    var rejection = Telemetry(skill, actor, SkillTelemetryEventType.Rejected, fixture.Reason, index + 1000 + fixture.Key.GetHashCode(StringComparison.Ordinal), now);
+                    rejection.RejectionStage = fixture.Stage;
+                    db.SkillTelemetryEvents.Add(rejection);
+                }
+            }
+        }
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var review = await service.ReviewMetadataGovernanceAsync(new(), CancellationToken.None);
+        foreach (var fixture in fixtures.Where(item => item.Included))
+        {
+            review.Findings.Should().Contain(item => item.SkillId == imported[fixture.Key].Skill.Id && item.SignalType == fixture.Expected);
+        }
+        foreach (var fixture in fixtures.Where(item => !item.Included))
+        {
+            review.Findings.Should().NotContain(item => item.SkillId == imported[fixture.Key].Skill.Id);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Skill_registry_should_enforce_explicit_read_and_management_scopes()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -185,6 +239,47 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
 
         accessor.Current = accessor.Current with { Scopes = [SecurityScopes.SkillsRead] };
         (await service.ListAsync("ContextHub", false, CancellationToken.None)).Should().NotBeNull();
+    }
+
+    [DockerRequiredFact]
+    public async Task Skill_management_scopes_should_separate_author_publish_bind_reindex_and_security_authority()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var owner = accessor.Current;
+        var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+        var stableKey = $"roles-{Guid.NewGuid():N}"[..28];
+        var markdown = "---\nname: Role matrix\ndescription: Role matrix fixture\n---\n# Role matrix";
+        var preview = new SkillImportPreviewRequest(
+            stableKey, "Role matrix", "Role matrix fixture", "Use for authorization regression", "1.0.0",
+            new PortableSkillBundle([new PortableSkillFile("SKILL.md", Convert.ToBase64String(Encoding.UTF8.GetBytes(markdown)))]),
+            SkillSourceKind.Repository, $"https://example.test/{stableKey}", "commit-1", "MIT",
+            RiskLevel: SkillRiskLevel.High, TrustLevel: SkillTrustLevel.SourceVerified);
+
+        accessor.Current = owner with { Role = TenantUserRole.Member, Scopes = [SecurityScopes.SkillsManage] };
+        var imported = await service.ImportAsync(new(preview, $"import-{Guid.NewGuid():N}"), CancellationToken.None);
+        var publishWithoutScope = () => service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, true, $"publish-{Guid.NewGuid():N}"), CancellationToken.None);
+        await publishWithoutScope.Should().ThrowAsync<UnauthorizedAccessException>();
+
+        accessor.Current = accessor.Current with { Scopes = [SecurityScopes.SkillsPublish] };
+        var publishWithoutApproval = () => service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, false, $"publish-{Guid.NewGuid():N}"), CancellationToken.None);
+        await publishWithoutApproval.Should().ThrowAsync<InvalidOperationException>().WithMessage("*explicit publish approval*");
+        await service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, true, $"publish-{Guid.NewGuid():N}"), CancellationToken.None);
+
+        accessor.Current = accessor.Current with { Scopes = [SecurityScopes.SkillsBind] };
+        var binding = await service.UpsertBindingAsync(new(imported.Skill.Id, SkillBindingScope.Project, "ContextHub", SkillBindingMode.Recommended, "=1.0.0", null, $"bind-{Guid.NewGuid():N}"), CancellationToken.None);
+        binding.Scope.Should().Be(SkillBindingScope.Project);
+
+        accessor.Current = accessor.Current with { Scopes = [SecurityScopes.SkillsReindex] };
+        (await service.ReindexAsync(new("roles-v1", "deterministic", "1", 0m, true, true, $"reindex-{Guid.NewGuid():N}"), CancellationToken.None)).Activated.Should().BeTrue();
+
+        accessor.Current = accessor.Current with { Scopes = [SecurityScopes.SkillsSecurity] };
+        (await service.ChangeLifecycleAsync(new(imported.Version.Id, SkillLifecycleStatus.Revoked, "Security scope fixture", $"revoke-{Guid.NewGuid():N}"), CancellationToken.None)).Status.Should().Be(SkillLifecycleStatus.Revoked);
+
+        accessor.Current = accessor.Current with { Scopes = [SecurityScopes.SkillsExecute] };
+        var unauthorizedBinding = () => service.UpsertBindingAsync(new(imported.Skill.Id, SkillBindingScope.Project, "ContextHub", SkillBindingMode.Disabled, "*", binding.Revision, $"bind-{Guid.NewGuid():N}"), CancellationToken.None);
+        await unauthorizedBinding.Should().ThrowAsync<UnauthorizedAccessException>();
     }
 
     [DockerRequiredFact]
@@ -208,6 +303,116 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
 
         rolledBack.DefaultVersionId.Should().Be(first.Version.Id);
         rolledBack.MetadataVersion.Should().Be(promoted.MetadataVersion + 1);
+    }
+
+    [DockerRequiredFact]
+    public async Task Search_generation_should_support_atomic_validated_rollback_and_replay()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await ImportAndPublishAsync(service, $"index-{Guid.NewGuid():N}"[..28], "Index rollback", "Search generation rollback fixture", [], "index-rollback");
+        var first = await service.ReindexAsync(new("skill-search-v1", "deterministic", "1", 0m, true, true, $"reindex-{Guid.NewGuid():N}"), CancellationToken.None);
+        var second = await service.ReindexAsync(new("skill-search-v2", "deterministic", "2", 0m, true, true, $"reindex-{Guid.NewGuid():N}"), CancellationToken.None);
+        second.GenerationId.Should().NotBe(first.GenerationId);
+        db.ChangeTracker.Clear();
+
+        var request = new SkillSearchGenerationActivateRequest(first.GenerationId, "Rollback after shadow benchmark regression", $"activate-{Guid.NewGuid():N}");
+        var rollback = await service.ActivateSearchGenerationAsync(request, CancellationToken.None);
+        db.ChangeTracker.Clear();
+        var replay = await service.ActivateSearchGenerationAsync(request, CancellationToken.None);
+
+        rollback.Activated.Should().BeTrue();
+        rollback.Replayed.Should().BeFalse();
+        replay.Replayed.Should().BeTrue();
+        (await db.SkillSearchGenerations.AsNoTracking().SingleAsync(item => item.Id == first.GenerationId)).Status.Should().Be(SkillSearchGenerationStatus.Active);
+        (await db.SkillSearchGenerations.AsNoTracking().SingleAsync(item => item.Id == second.GenerationId)).Status.Should().Be(SkillSearchGenerationStatus.RolledBack);
+        (await service.ListSearchGenerationsAsync(CancellationToken.None)).Should().Contain(item => item.GenerationId == first.GenerationId && item.Status == SkillSearchGenerationStatus.Active);
+    }
+
+    [DockerRequiredFact]
+    public async Task External_source_observation_should_detect_drift_without_mutating_published_content()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+        var imported = await ImportAndPublishAsync(service, $"source-{Guid.NewGuid():N}"[..29], "Source drift", "External source drift fixture", [], "source-drift");
+        var request = new SkillSourceObservationRequest(
+            imported.Skill.Id,
+            imported.Version.SourceRef,
+            "commit-2",
+            new string('a', 64),
+            SourceAvailable: true,
+            SignatureVerified: false,
+            CompromiseReported: false,
+            EvidenceRef: "provider-refresh:test",
+            IdempotencyKey: $"source-{Guid.NewGuid():N}");
+
+        var drift = await service.RecordSourceObservationAsync(request, CancellationToken.None);
+        var replay = await service.RecordSourceObservationAsync(request, CancellationToken.None);
+        var current = await service.GetAsync(imported.Skill.Id, CancellationToken.None);
+
+        drift.Status.Should().Be(SkillSourceDriftStatus.Changed);
+        drift.RequiresNewDraft.Should().BeTrue();
+        replay.Replayed.Should().BeTrue();
+        current!.Versions.Single(item => item.Id == imported.Version.Id).ContentHash.Should().Be(imported.Version.ContentHash);
+        current.Versions.Single(item => item.Id == imported.Version.Id).Status.Should().Be(SkillLifecycleStatus.Published);
+        (await service.ListSourceObservationsAsync(imported.Skill.Id, CancellationToken.None)).Should().ContainSingle(item => item.ObservationId == drift.ObservationId);
+    }
+
+    [DockerRequiredFact]
+    public async Task Telemetry_reconciliation_should_be_idempotent_retain_aggregates_and_protect_revocation_evidence()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
+        var imported = await ImportAndPublishAsync(service, $"telemetry-{Guid.NewGuid():N}"[..30], "Telemetry retention", "Telemetry reconciliation fixture", [], "telemetry-retention");
+        var old = DateTimeOffset.UtcNow.AddDays(-100);
+        var impression = Telemetry(imported, actor, SkillTelemetryEventType.SearchImpression, null, 501, old);
+        var rejection = Telemetry(imported, actor, SkillTelemetryEventType.Rejected, SkillRejectionReason.NotApplicable, 502, old);
+        var revocation = Telemetry(imported, actor, SkillTelemetryEventType.Cancellation, SkillRejectionReason.Revoked, 503, old);
+        revocation.RejectionStage = SkillRejectionStage.RevokedOrPolicyCancelled;
+        db.SkillTelemetryEvents.AddRange(impression, rejection, revocation);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var request = new SkillTelemetryReconciliationRequest(90, 365, $"reconcile-{Guid.NewGuid():N}");
+
+        var first = await service.ReconcileTelemetryAsync(request, CancellationToken.None);
+        db.ChangeTracker.Clear();
+        var replay = await service.ReconcileTelemetryAsync(request, CancellationToken.None);
+        var analytics = await service.GetAnalyticsAsync(new(SkillId: imported.Skill.Id, WindowDays: 365, Dimension: SkillAnalyticsDimension.SkillVersion), CancellationToken.None);
+
+        first.AggregatedEventCount.Should().BeGreaterThanOrEqualTo(3);
+        first.DeletedRawEventCount.Should().Be(2);
+        first.ProtectedRawEventCount.Should().Be(1);
+        replay.Replayed.Should().BeTrue();
+        replay.RunId.Should().Be(first.RunId);
+        analytics.Should().ContainSingle(item => item.SkillVersionId == imported.Version.Id && item.SearchImpressionCount == 1 && item.RejectedCount == 1);
+        (await db.SkillTelemetryEvents.AsNoTracking().CountAsync(item => item.SkillId == imported.Skill.Id)).Should().Be(1);
+        (await db.SkillTelemetryDailyAggregates.AsNoTracking().SumAsync(item => item.SkillId == imported.Skill.Id ? item.EventCount : 0)).Should().Be(3);
+    }
+
+    [DockerRequiredFact]
+    public async Task Concurrent_telemetry_reconciliation_should_serialize_to_one_exact_run()
+    {
+        using var firstScope = environment.GetFactory().Services.CreateScope();
+        using var secondScope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(firstScope.ServiceProvider);
+        UseBootstrapActor(secondScope.ServiceProvider);
+        var firstService = firstScope.ServiceProvider.GetRequiredService<ISkillService>();
+        var secondService = secondScope.ServiceProvider.GetRequiredService<ISkillService>();
+        var key = $"reconcile-race-{Guid.NewGuid():N}";
+
+        var results = await Task.WhenAll(
+            firstService.ReconcileTelemetryAsync(new(90, 365, key), CancellationToken.None),
+            secondService.ReconcileTelemetryAsync(new(90, 365, key), CancellationToken.None));
+
+        results.Select(item => item.RunId).Distinct().Should().ContainSingle();
+        results.Count(item => item.Replayed).Should().Be(1);
+        results.Count(item => !item.Replayed).Should().Be(1);
     }
 
     private static Task<SkillSearchForExecutionResult> SearchAsync(ISkillService service, Guid executionId, IReadOnlyList<Guid> excluded, IReadOnlyList<Guid> selected, string prefix)
