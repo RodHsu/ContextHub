@@ -58,10 +58,10 @@ public sealed class GovernanceRunReceiptService(
         var receipt = NewReceipt(actor, runId, eventKey, ResolveReceiptExecutionMode(result.ReceiptContractIdentity), "ReviewCompleted", "Completed", startedAt,
             result.ReceiptContractIdentity);
         CopyCumulative(previous, receipt);
-        receipt.InitialSnapshotToken = previous?.InitialSnapshotToken ?? snapshot;
+        receipt.InitialSnapshotToken = snapshot;
         receipt.FinalSnapshotToken = snapshot;
         receipt.CoverageComplete = result.Convergence.CoverageComplete;
-        receipt.InitialGovernanceActionable = previous?.InitialGovernanceActionable ?? result.Convergence.GovernanceActionableCount;
+        receipt.InitialGovernanceActionable = result.Convergence.GovernanceActionableCount;
         receipt.FinalGovernanceActionable = result.Convergence.GovernanceActionableCount;
         receipt.CandidateCount = SumCandidates(result.GovernanceCoverage);
         receipt.ExecutionActionableCount = result.Convergence.GovernanceActionableCount;
@@ -77,22 +77,6 @@ public sealed class GovernanceRunReceiptService(
         var currentExceptionStates = result.GovernedExceptionStates
             .OrderBy(x => x.Key, StringComparer.Ordinal)
             .ToArray();
-        var exceptionBaseline = await FindExceptionDeltaBaselineAsync(
-            actor,
-            runId,
-            projectIds,
-            result.ReceiptContractIdentity ?? new GovernanceReceiptContractIdentity(
-                GovernanceToolContract.ToolContractVersion,
-                GovernanceToolContract.SchemaHash,
-                GovernanceToolContract.PublishedCatalogVersion),
-            cancellationToken);
-        var exceptionDelta = ComputeExceptionDelta(
-            DeserializeExceptionStates(exceptionBaseline?.GovernedExceptionStatesJson),
-            currentExceptionStates);
-        receipt.ExceptionNew = exceptionDelta.New;
-        receipt.ExceptionResolved = exceptionDelta.Resolved;
-        receipt.ExceptionUnchanged = exceptionDelta.Unchanged;
-        receipt.ExceptionEscalated = exceptionDelta.Escalated;
         receipt.GovernedExceptionStatesJson = JsonSerializer.Serialize(currentExceptionStates, JsonOptions);
         receipt.DeleteEligible = result.DeleteEligibleCount;
         receipt.DeleteMatured = result.DeleteMaturedCount;
@@ -161,10 +145,10 @@ public sealed class GovernanceRunReceiptService(
             startedAt,
             contractIdentity);
         CopyCumulative(previous, receipt);
-        receipt.InitialSnapshotToken = previous?.InitialSnapshotToken ?? result.SnapshotToken;
+        receipt.InitialSnapshotToken = result.SnapshotToken;
         receipt.FinalSnapshotToken = result.SnapshotToken;
         receipt.CoverageComplete = result.CoverageComplete;
-        receipt.InitialGovernanceActionable = previous?.InitialGovernanceActionable ?? result.AutomationActionableCount;
+        receipt.InitialGovernanceActionable = result.AutomationActionableCount;
         receipt.FinalGovernanceActionable = result.AutomationActionableCount;
         receipt.CandidateCount = result.CandidateCount;
         receipt.ExecutionActionableCount = result.AutomationActionableCount;
@@ -265,7 +249,7 @@ public sealed class GovernanceRunReceiptService(
         receipt.RequestIdentityHash = requestIdentity;
         receipt.RequestHash = requestHash;
         receipt.FailurePhase = ResolveFailurePhase(result);
-        receipt.InitialSnapshotToken = previous?.InitialSnapshotToken ?? result.SnapshotToken;
+        receipt.InitialSnapshotToken = result.SnapshotToken;
         receipt.FinalSnapshotToken = result.SnapshotToken;
         receipt.Applied += result.AppliedCount * add;
         receipt.Failed += result.FailedCount * add;
@@ -279,17 +263,26 @@ public sealed class GovernanceRunReceiptService(
         receipt.DeleteCancelled = result.DeleteCancelledCount;
         receipt.Tombstoned += result.TombstonedCount * add;
         receipt.SemanticAutoResolved += result.SemanticAutoResolvedCount * add;
-        receipt.FinalConvergenceStatus = result.ErrorCode == GovernanceBatchErrorCode.None
-            ? PreserveScheduledDecision(previous, request)
-                ? previous!.FinalConvergenceStatus
-                : "ExecutionCompleted"
-            : result.ErrorCode.ToString();
+        receipt.FinalConvergenceStatus = PreserveScheduledDecision(previous, request)
+            ? previous!.FinalConvergenceStatus
+            : result.ErrorCode == GovernanceBatchErrorCode.None
+                ? "ExecutionCompleted"
+                : result.ErrorCode.ToString();
         receipt.StoppedReason = result.StoppedReason;
         receipt.AuditIdsJson = JsonSerializer.Serialize(MergeAuditIds(previous, result.AuditIds), JsonOptions);
         receipt.ProjectIdsJson = JsonSerializer.Serialize(
             request.ProjectIds ?? DeserializeStrings(previous?.ProjectIdsJson), JsonOptions);
         receipt.IsReplay = result.IsReplay;
-        await InsertImmutableAsync(receipt, cancellationToken);
+        CumulativeExecutionDelta? cumulativeDelta = result.IsReplay
+            ? null
+            : new CumulativeExecutionDelta(
+                result.AppliedCount,
+                result.FailedCount,
+                result.QuarantinedCount,
+                result.AutoDeletedCount,
+                result.TombstonedCount,
+                result.SemanticAutoResolvedCount);
+        await InsertImmutableAsync(receipt, cancellationToken, cumulativeDelta);
     }
 
     public async Task RecordExecutionStoppedAsync(
@@ -719,13 +712,20 @@ public sealed class GovernanceRunReceiptService(
         return (0, false);
     }
 
-    private async Task InsertImmutableAsync(GovernanceRunReceipt receipt, CancellationToken cancellationToken)
+    private async Task InsertImmutableAsync(
+        GovernanceRunReceipt receipt,
+        CancellationToken cancellationToken,
+        CumulativeExecutionDelta? cumulativeDelta = null)
     {
         await using var runLock = await AcquireRunLockCoreAsync(
             receipt.TenantId,
             receipt.OwnerUserId,
             receipt.GovernanceRunId,
             cancellationToken);
+        await MergeLockedCumulativeEvidenceAsync(receipt, cumulativeDelta, cancellationToken);
+        await ApplyLockedReviewExceptionDeltaAsync(receipt, cancellationToken);
+        await ApplyInitialReviewBaselineAsync(receipt, cancellationToken);
+        await EnsureScheduledDecisionBindsLatestReviewAsync(receipt, cancellationToken);
         await EnsureScheduledRunBindingAsync(receipt, cancellationToken);
         await dbContext.GovernanceRunReceipts.AddAsync(receipt, cancellationToken);
         try
@@ -879,16 +879,165 @@ public sealed class GovernanceRunReceiptService(
             .OrderByDescending(x => x.EventSequence)
             .FirstOrDefaultAsync(cancellationToken);
 
+    private async Task ApplyInitialReviewBaselineAsync(
+        GovernanceRunReceipt receipt,
+        CancellationToken cancellationToken)
+    {
+        var firstCompletedReview = await dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == receipt.TenantId &&
+                        x.OwnerUserId == receipt.OwnerUserId &&
+                        x.GovernanceRunId == receipt.GovernanceRunId &&
+                        x.EventType == "ReviewCompleted" &&
+                        x.Status == "Completed")
+            .OrderBy(x => x.EventSequence)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (firstCompletedReview is not null)
+        {
+            receipt.InitialSnapshotToken = firstCompletedReview.FinalSnapshotToken;
+            receipt.InitialGovernanceActionable = firstCompletedReview.FinalGovernanceActionable;
+            return;
+        }
+
+        if (!string.Equals(receipt.EventType, "ReviewCompleted", StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(receipt.FinalSnapshotToken))
+        {
+            receipt.InitialSnapshotToken = string.Empty;
+            receipt.InitialGovernanceActionable = 0;
+        }
+    }
+
+    private async Task MergeLockedCumulativeEvidenceAsync(
+        GovernanceRunReceipt receipt,
+        CumulativeExecutionDelta? cumulativeDelta,
+        CancellationToken cancellationToken)
+    {
+        var latest = await dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == receipt.TenantId &&
+                        x.OwnerUserId == receipt.OwnerUserId &&
+                        x.GovernanceRunId == receipt.GovernanceRunId)
+            .OrderByDescending(x => x.EventSequence)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (cumulativeDelta is not null)
+        {
+            var baseline = latest ?? new GovernanceRunReceipt();
+            receipt.Applied = checked(baseline.Applied + cumulativeDelta.Value.Applied);
+            receipt.Failed = checked(baseline.Failed + cumulativeDelta.Value.Failed);
+            receipt.Quarantined = checked(baseline.Quarantined + cumulativeDelta.Value.Quarantined);
+            receipt.AutoDeleted = checked(baseline.AutoDeleted + cumulativeDelta.Value.AutoDeleted);
+            receipt.Tombstoned = checked(baseline.Tombstoned + cumulativeDelta.Value.Tombstoned);
+            receipt.SemanticAutoResolved = checked(
+                baseline.SemanticAutoResolved + cumulativeDelta.Value.SemanticAutoResolved);
+        }
+        else if (latest is not null)
+        {
+            // Non-execution events and exact replay carry no new cumulative
+            // effect, so they retain the greatest already committed totals.
+            receipt.Applied = Math.Max(receipt.Applied, latest.Applied);
+            receipt.Failed = Math.Max(receipt.Failed, latest.Failed);
+            receipt.Quarantined = Math.Max(receipt.Quarantined, latest.Quarantined);
+            receipt.AutoDeleted = Math.Max(receipt.AutoDeleted, latest.AutoDeleted);
+            receipt.Tombstoned = Math.Max(receipt.Tombstoned, latest.Tombstoned);
+            receipt.SemanticAutoResolved = Math.Max(receipt.SemanticAutoResolved, latest.SemanticAutoResolved);
+        }
+
+        if (latest is null)
+        {
+            return;
+        }
+
+        // HostBlocked is the current governed-exception projection, not a
+        // cumulative execution counter. A blocked execution remains immutable
+        // in its event row and is projected through LatestBatch.
+        receipt.AuditIdsJson = JsonSerializer.Serialize(
+            DeserializeGuids(receipt.AuditIdsJson)
+                .Concat(DeserializeGuids(latest.AuditIdsJson))
+                .Distinct()
+                .Order(),
+            JsonOptions);
+    }
+
+    private readonly record struct CumulativeExecutionDelta(
+        int Applied,
+        int Failed,
+        int Quarantined,
+        int AutoDeleted,
+        int Tombstoned,
+        int SemanticAutoResolved);
+
+    private async Task ApplyLockedReviewExceptionDeltaAsync(
+        GovernanceRunReceipt receipt,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(receipt.EventType, "ReviewCompleted", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var currentExceptionStates = DeserializeExceptionStates(receipt.GovernedExceptionStatesJson);
+        var projectIds = DeserializeStrings(receipt.ProjectIdsJson);
+        var contractIdentity = new GovernanceReceiptContractIdentity(
+            receipt.ToolContractVersion,
+            receipt.SchemaHash,
+            receipt.PublishedCatalogVersion);
+        var exceptionBaseline = await FindExceptionDeltaBaselineAsync(
+            receipt.TenantId,
+            receipt.OwnerUserId,
+            receipt.GovernanceRunId,
+            projectIds,
+            contractIdentity,
+            cancellationToken);
+        var exceptionDelta = ComputeExceptionDelta(
+            DeserializeExceptionStates(exceptionBaseline?.GovernedExceptionStatesJson),
+            currentExceptionStates);
+        receipt.ExceptionNew = exceptionDelta.New;
+        receipt.ExceptionResolved = exceptionDelta.Resolved;
+        receipt.ExceptionUnchanged = exceptionDelta.Unchanged;
+        receipt.ExceptionEscalated = exceptionDelta.Escalated;
+    }
+
+    private async Task EnsureScheduledDecisionBindsLatestReviewAsync(
+        GovernanceRunReceipt receipt,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(receipt.EventType, "ScheduledDecisionProjected", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var latestCompletedReview = await dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == receipt.TenantId &&
+                        x.OwnerUserId == receipt.OwnerUserId &&
+                        x.GovernanceRunId == receipt.GovernanceRunId &&
+                        x.EventType == "ReviewCompleted" &&
+                        x.Status == "Completed")
+            .OrderByDescending(x => x.EventSequence)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (latestCompletedReview is null ||
+            string.IsNullOrWhiteSpace(latestCompletedReview.FinalSnapshotToken) ||
+            !string.Equals(
+                latestCompletedReview.FinalSnapshotToken,
+                receipt.FinalSnapshotToken,
+                StringComparison.Ordinal))
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.ReReviewRequired,
+                "Scheduled governance decision projection requires the latest completed review for the exact snapshot.");
+        }
+    }
+
     private async Task<GovernanceRunReceipt?> FindExceptionDeltaBaselineAsync(
-        ContextHubRequestActor actor,
+        Guid tenantId,
+        Guid ownerUserId,
         string governanceRunId,
         IReadOnlyList<string> projectIds,
         GovernanceReceiptContractIdentity contractIdentity,
         CancellationToken cancellationToken)
     {
         var sameRunReview = await dbContext.GovernanceRunReceipts.AsNoTracking()
-            .Where(x => x.TenantId == actor.TenantId &&
-                        x.OwnerUserId == actor.UserId &&
+            .Where(x => x.TenantId == tenantId &&
+                        x.OwnerUserId == ownerUserId &&
                         x.GovernanceRunId == governanceRunId &&
                         x.EventType == "ReviewCompleted")
             .OrderByDescending(x => x.EventSequence)
@@ -908,8 +1057,8 @@ public sealed class GovernanceRunReceiptService(
         // null, preserving the fail-closed "all current exceptions are new"
         // behavior.
         var candidates = await dbContext.GovernanceRunReceipts.AsNoTracking()
-            .Where(x => x.TenantId == actor.TenantId &&
-                        x.OwnerUserId == actor.UserId &&
+            .Where(x => x.TenantId == tenantId &&
+                        x.OwnerUserId == ownerUserId &&
                         x.GovernanceRunId != governanceRunId &&
                         x.EventType == "ReviewCompleted" &&
                         x.Status == "Completed" &&

@@ -102,6 +102,58 @@ public sealed class GovernanceExceptionDeltaBaselineTests(ContainerTestEnvironme
         receipt!.ExceptionDelta.Should().Be(new GovernanceExceptionDeltaResult(1, 0, 0, 0));
     }
 
+    [DockerRequiredFact]
+    public async Task Concurrent_re_review_should_compute_exception_delta_from_locked_latest_review()
+    {
+        using var lockScope = environment.GetFactory().Services.CreateScope();
+        using var writerScope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(lockScope.ServiceProvider);
+        writerScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        var receipts = lockScope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"exception-delta-race-{Guid.NewGuid():N}";
+        var projectId = $"exception-delta-race-project-{Guid.NewGuid():N}";
+        var identity = ContractIdentity();
+        var exception = new GovernanceExceptionStateResult(
+            "finding:stable",
+            "GovernanceFinding",
+            "RequiresUserDecision",
+            2);
+
+        await receipts.RecordReviewAsync(
+            CreateReview(runId, projectId, []) with { ReceiptContractIdentity = identity },
+            DateTimeOffset.UtcNow,
+            CancellationToken.None);
+
+        var lockDb = lockScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var writerDb = writerScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await writerDb.Database.OpenConnectionAsync(CancellationToken.None);
+        var productionLock = await receipts.AcquireRunLockAsync(runId, CancellationToken.None);
+        await using var runLock = await PostgresAdvisoryLockBarrier.CreateAsync(
+            productionLock,
+            lockDb.Database.GetDbConnection(),
+            writerDb.Database.GetDbConnection(),
+            environment.PostgresConnectionString!);
+        var writer = Task.Run(async () =>
+            await writerScope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>()
+                .RecordReviewAsync(
+                    CreateReview(runId, projectId, [exception]) with { ReceiptContractIdentity = identity },
+                    DateTimeOffset.UtcNow,
+                    CancellationToken.None));
+
+        await runLock.WaitForWriterBlockedAsync();
+        await receipts.RecordReviewAsync(
+            CreateReview(runId, projectId, [exception]) with { ReceiptContractIdentity = identity },
+            DateTimeOffset.UtcNow,
+            CancellationToken.None);
+        await runLock.ReleaseHolderAsync();
+        await writer.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var receipt = await receipts.GetAsync(runId, CancellationToken.None);
+
+        receipt.Should().NotBeNull();
+        receipt!.ExceptionDelta.Should().Be(new GovernanceExceptionDeltaResult(0, 0, 1, 0));
+    }
+
     private static GovernanceReceiptContractIdentity ContractIdentity()
         => new(
             ScheduledGovernanceContract.ToolContractVersion,

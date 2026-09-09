@@ -18,6 +18,8 @@ public sealed class ContainerTestEnvironment : IAsyncLifetime
 
     public MemoryApplicationFactory? Factory { get; private set; }
 
+    public string? PostgresConnectionString { get; private set; }
+
     public async Task InitializeAsync()
     {
         if (!DockerTestGate.Current.IsAvailable)
@@ -40,6 +42,7 @@ public sealed class ContainerTestEnvironment : IAsyncLifetime
         await _redis.StartAsync();
         var postgresConnectionString = _postgres.GetConnectionString();
         var redisConnectionString = _redis.GetConnectionString();
+        PostgresConnectionString = postgresConnectionString;
         await WaitForDependenciesAsync(postgresConnectionString, redisConnectionString);
         Factory = new MemoryApplicationFactory(postgresConnectionString, redisConnectionString);
         await WaitForReadinessAsync();

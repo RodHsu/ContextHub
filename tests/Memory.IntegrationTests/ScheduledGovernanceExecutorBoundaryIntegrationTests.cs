@@ -53,6 +53,7 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         var review = await reviewService.ReviewAsync(
             ScheduledReviewRequest(projectId, runId),
             CancellationToken.None);
+        await RecordReversibleDecisionAsync(scope.ServiceProvider, review);
         review.GovernancePlan.Should().Contain(x =>
             x.ItemKind == GovernanceItemKind.WorkItem &&
             x.RecommendedAction == GovernanceBatchActionType.WorkItemReconcile.ToString());
@@ -160,6 +161,7 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         var review = await scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>().ReviewAsync(
             ScheduledReviewRequest(projectId, runId),
             CancellationToken.None);
+        await RecordReversibleDecisionAsync(scope.ServiceProvider, review);
         review.GovernancePlan.Should().Contain(x =>
             x.ItemKind == GovernanceItemKind.Retention &&
             x.AuthorityResourceId == memory.Id &&
@@ -227,6 +229,10 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .Should().Be(MemoryStatus.Active);
 
         actorAccessor.Current = ScheduledActor(user);
+        var missingDecision = await executor.ExecuteAsync(request, CancellationToken.None);
+        missingDecision.ErrorCode.Should().Be(GovernanceBatchErrorCode.ReReviewRequired);
+        missingDecision.AppliedCount.Should().Be(0);
+
         var downgradedMode = await executor.ExecuteAsync(
             request with { ExecutionMode = GovernanceBatchExecutionMode.Manual },
             CancellationToken.None);
@@ -273,6 +279,7 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         var review = await scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>().ReviewAsync(
             ScheduledReviewRequest(projectId, runId),
             CancellationToken.None);
+        await RecordReversibleDecisionAsync(scope.ServiceProvider, review);
         var request = ScheduledRequest(
             runId,
             projectId,
@@ -324,6 +331,7 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         var review = await scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>().ReviewAsync(
             ScheduledReviewRequest(projectId, runId),
             CancellationToken.None);
+        await RecordReversibleDecisionAsync(scope.ServiceProvider, review);
         var request = ScheduledRequest(
             runId,
             projectId,
@@ -389,6 +397,56 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
     }
 
     [DockerRequiredFact]
+    public async Task Interactive_Executor_Rejects_Durable_ReadOnly_Project_Grant_Before_Mutation()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await db.TenantUsers.SingleAsync(x => x.Username == "contract-test-admin");
+        var projectId = $"governance-read-only-{Guid.NewGuid():N}";
+        var memory = CreateRetentionCandidate(user, projectId);
+        db.MemoryItems.Add(memory);
+        db.TenantProjectGrants.Add(new TenantProjectGrant
+        {
+            TenantId = user.TenantId,
+            ProjectId = projectId,
+            CanRead = true,
+            CanWrite = false,
+            CanManageTokens = false,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync();
+
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = GenericAdminActor(user) with { AllowedProjectIds = [projectId] };
+        var resolvedScope = await scope.ServiceProvider.GetRequiredService<IGovernanceProjectScopeResolver>()
+            .ResolveAsync([projectId], CancellationToken.None);
+        resolvedScope.Should().ContainSingle()
+            .Which.CanWrite.Should().BeFalse();
+        var runId = $"governance-read-only-run-{Guid.NewGuid():N}";
+        var review = await scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>()
+            .ReviewAsync(
+                new KnowledgeReviewRequest([projectId], LimitPerSection: 200, GovernanceRunId: runId),
+                CancellationToken.None);
+        var request = new GovernanceBatchExecuteRequest(
+            runId,
+            [projectId],
+            review.DurableMemoryCoverage!.SnapshotToken,
+            AllowedActionTypes: [GovernanceBatchActionType.Quarantine],
+            ExecutionMode: GovernanceBatchExecutionMode.Interactive);
+
+        var action = () => scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+            .ExecuteAsync(request, CancellationToken.None);
+
+        await action.Should().ThrowAsync<UnauthorizedAccessException>()
+            .WithMessage("*durable project grant*");
+        (await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id)).Status
+            .Should().Be(MemoryStatus.Active);
+        (await db.MemoryRetentionStates.AsNoTracking().CountAsync(x => x.ResourceId == memory.Id))
+            .Should().Be(0);
+    }
+
+    [DockerRequiredFact]
     public async Task Scheduled_Lineage_Rejects_CrossMode_Pollution_And_Remains_Executable()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -404,6 +462,7 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         var review = await scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>().ReviewAsync(
             ScheduledReviewRequest(projectId, runId),
             CancellationToken.None);
+        await RecordReversibleDecisionAsync(scope.ServiceProvider, review);
         var scheduledRequest = ScheduledRequest(
             runId,
             projectId,
@@ -445,14 +504,20 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .SingleAsync(x => x.Username == "contract-test-admin");
         lockScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = ScheduledActor(user);
         var runId = $"scheduled-lineage-lock-{Guid.NewGuid():N}";
-        var runLock = await lockScope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>()
+        var writerDb = writerScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await writerDb.Database.OpenConnectionAsync(CancellationToken.None);
+        var productionLock = await lockScope.ServiceProvider
+            .GetRequiredService<IGovernanceRunReceiptService>()
             .AcquireRunLockAsync(runId, CancellationToken.None);
-        var writerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var runLock = await PostgresAdvisoryLockBarrier.CreateAsync(
+            productionLock,
+            lockDb.Database.GetDbConnection(),
+            writerDb.Database.GetDbConnection(),
+            environment.PostgresConnectionString!);
 
         var writer = Task.Run(async () =>
         {
             writerScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = ScheduledActor(user);
-            writerEntered.SetResult();
             await writerScope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>()
                 .RecordReviewStartedAsync(
                     runId,
@@ -461,11 +526,9 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
                     CancellationToken.None);
         });
 
-        await writerEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await Task.Delay(250);
-        writer.IsCompleted.Should().BeFalse("the second connection must wait on the same per-run advisory lock");
+        await runLock.WaitForWriterBlockedAsync();
 
-        await runLock.DisposeAsync();
+        await runLock.ReleaseHolderAsync();
         await writer.WaitAsync(TimeSpan.FromSeconds(10));
         (await lockDb.GovernanceRunReceipts.AsNoTracking().CountAsync(x => x.GovernanceRunId == runId))
             .Should().Be(1);
@@ -660,6 +723,49 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         {
             ReceiptContractIdentity = CurrentScheduledReceiptIdentity()
         };
+
+    private static async Task RecordReversibleDecisionAsync(
+        IServiceProvider services,
+        KnowledgeReviewResult review)
+    {
+        var durable = review.DurableMemoryCoverage
+            ?? throw new InvalidOperationException("Scheduled test review requires durable coverage.");
+        var sharedOccurrences = durable.GovernanceProjectIds.Count(ProjectContext.IsShared);
+        var userOccurrences = durable.GovernanceProjectIds.Count(ProjectContext.IsUser);
+        var countInvariant = new ScheduledGovernanceCountInvariant(
+            durable.AuthorizedGovernanceDurableMemoryCount,
+            durable.GovernanceCoveredDurableMemoryCount,
+            durable.ScannedCount,
+            durable.TotalCount,
+            sharedOccurrences,
+            userOccurrences,
+            userOccurrences == 0,
+            durable.CountInvariantSatisfied && sharedOccurrences == 1 && userOccurrences == 0);
+        var result = new ScheduledGovernanceReviewResult(
+            review.GovernanceRunId,
+            review.IsReReview,
+            ScheduledGovernanceDecision.ReversibleExecutionRequired,
+            durable.SnapshotToken,
+            countInvariant,
+            CoverageComplete: true,
+            CandidateCount: Math.Max(1, review.CandidateCount),
+            ReversibleExecutionCount: 1,
+            HumanDecisionCount: 0,
+            GovernedExceptionCount: review.GovernedExceptionCount,
+            BusinessWorkItemActionableCount: review.Convergence.BusinessWorkItemActionableCount,
+            ResolvedProjectIds: durable.GovernanceProjectIds,
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion,
+            CurrentReviewHumanDecisionCandidateCount: 0,
+            GovernedRequiresUserDecisionExceptionCount: review.Convergence.RequiresUserDecisionCount,
+            GovernedHostBlockedExceptionCount: review.Convergence.HostBlockedCount,
+            GovernedDeferredExceptionCount: review.Convergence.DeferredCount,
+            ExceptionDelta: new GovernanceExceptionDeltaResult(0, 0, 0, 0),
+            RuntimeIdentity: ScheduledGovernanceContract.RuntimeIdentity);
+        await services.GetRequiredService<IGovernanceRunReceiptService>()
+            .RecordScheduledDecisionAsync(result, DateTimeOffset.UtcNow, CancellationToken.None);
+    }
 
     private static GovernanceReceiptContractIdentity CurrentScheduledReceiptIdentity()
         => new(

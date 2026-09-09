@@ -127,7 +127,12 @@ public sealed class ScheduledGovernanceServiceTests
     public async Task Execute_Should_Map_Only_Fixed_Reversible_Policy()
     {
         var executor = new CapturingExecutor();
-        var service = CreateService(new StubKnowledgeReviewService(CreateReview([])), executor);
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            executor,
+            new StubReceipts(CreateDecisionReceipt(
+                "run-1",
+                ScheduledGovernanceDecision.ReversibleExecutionRequired)));
         var request = new ScheduledGovernanceExecuteRequest(
             "  run-1  ", "snapshot-1", MaxMutations: 25, MaxDurationSeconds: 60,
             ToolContractVersion: ScheduledGovernanceContract.ToolContractVersion,
@@ -157,6 +162,138 @@ public sealed class ScheduledGovernanceServiceTests
             ScheduledGovernanceContract.ToolContractVersion,
             ScheduledGovernanceContract.SchemaHash,
             ScheduledGovernanceContract.PublishedCatalogVersion));
+    }
+
+    [Theory]
+    [InlineData(ScheduledGovernanceDecision.NoOpConverged)]
+    [InlineData(ScheduledGovernanceDecision.HumanDecisionOnly)]
+    [InlineData(ScheduledGovernanceDecision.CoverageIncomplete)]
+    public async Task Execute_Should_Fail_Closed_When_Persisted_Decision_Is_Not_Reversible(
+        ScheduledGovernanceDecision decision)
+    {
+        var executor = new CapturingExecutor();
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            executor,
+            new StubReceipts(CreateDecisionReceipt("run-gate", decision)));
+
+        var action = () => service.ExecuteAsync(
+            CreateExecuteRequest("run-gate", "snapshot-1"),
+            CancellationToken.None);
+
+        await action.Should().ThrowAsync<GovernanceBatchException>()
+            .Where(x => x.Code == GovernanceBatchErrorCode.ReReviewRequired &&
+                        x.Message.Contains($"persisted-decision-{decision}", StringComparison.Ordinal));
+        executor.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Execute_Should_Fail_Closed_When_Persisted_Decision_Is_Missing()
+    {
+        var executor = new CapturingExecutor();
+        var receipt = CreateDecisionReceipt(
+            "run-missing-decision",
+            ScheduledGovernanceDecision.NoOpConverged) with
+        {
+            FinalConvergenceStatus = string.Empty
+        };
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            executor,
+            new StubReceipts(receipt));
+
+        var action = () => service.ExecuteAsync(
+            CreateExecuteRequest("run-missing-decision", "snapshot-1"),
+            CancellationToken.None);
+
+        await action.Should().ThrowAsync<GovernanceBatchException>()
+            .Where(x => x.Code == GovernanceBatchErrorCode.ReReviewRequired &&
+                        x.Message.Contains("persisted-decision-missing", StringComparison.Ordinal));
+        executor.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Execute_Should_Require_ReReview_After_Item_Execution_Failure()
+    {
+        var executor = new CapturingExecutor();
+        var failedBatch = CreateBatchOutcome(
+            "snapshot-1",
+            cursorBefore: string.Empty,
+            nextCursor: null,
+            requiresReReview: true) with
+        {
+            Executed = false,
+            FailurePhase = "ItemExecution",
+            Failed = 1,
+            StoppedReason = "ItemFailed"
+        };
+        var receipt = CreateDecisionReceipt(
+            "run-item-failed",
+            ScheduledGovernanceDecision.ReversibleExecutionRequired,
+            latestBatch: failedBatch);
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            executor,
+            new StubReceipts(receipt));
+
+        var action = () => service.ExecuteAsync(
+            CreateExecuteRequest("run-item-failed", "snapshot-1"),
+            CancellationToken.None);
+
+        await action.Should().ThrowAsync<GovernanceBatchException>()
+            .Where(x => x.Code == GovernanceBatchErrorCode.ReReviewRequired &&
+                        x.Message.Contains("persisted-latest-batch-requires-re-review", StringComparison.Ordinal));
+        executor.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Execute_Should_Fail_Closed_When_Persisted_Snapshot_Does_Not_Match_Request()
+    {
+        var executor = new CapturingExecutor();
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            executor,
+            new StubReceipts(CreateDecisionReceipt(
+                "run-snapshot-mismatch",
+                ScheduledGovernanceDecision.ReversibleExecutionRequired,
+                "snapshot-authoritative")));
+
+        var action = () => service.ExecuteAsync(
+            CreateExecuteRequest("run-snapshot-mismatch", "snapshot-forged"),
+            CancellationToken.None);
+
+        await action.Should().ThrowAsync<GovernanceBatchException>()
+            .Where(x => x.Code == GovernanceBatchErrorCode.CursorSnapshotMismatch &&
+                        x.Message.Contains("snapshot-binding-mismatch", StringComparison.Ordinal));
+        executor.CallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Execute_Should_Allow_Exact_Replay_Binding_For_Reversible_Decision()
+    {
+        var executor = new CapturingExecutor();
+        var latestBatch = CreateBatchOutcome(
+            snapshotToken: "snapshot-1",
+            cursorBefore: "",
+            nextCursor: null,
+            requiresReReview: true,
+            isReplay: true);
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            executor,
+            new StubReceipts(CreateDecisionReceipt(
+                "run-replay",
+                ScheduledGovernanceDecision.ReversibleExecutionRequired,
+                latestBatch: latestBatch) with
+            {
+                IsReplay = true
+            }));
+
+        await service.ExecuteAsync(
+            CreateExecuteRequest("run-replay", "snapshot-1"),
+            CancellationToken.None);
+
+        executor.CallCount.Should().Be(1, "the existing executor owns exact replay/idempotency handling");
     }
 
     [Fact]
@@ -495,6 +632,87 @@ public sealed class ScheduledGovernanceServiceTests
             LatestBatchReceived: false,
             RequestIdentityHash: string.Empty,
             LatestBatch: null);
+
+    private static ScheduledGovernanceExecuteRequest CreateExecuteRequest(
+        string runId,
+        string snapshotToken)
+        => new(
+            runId,
+            snapshotToken,
+            ToolContractVersion: ScheduledGovernanceContract.ToolContractVersion,
+            SchemaHash: ScheduledGovernanceContract.SchemaHash);
+
+    private static GovernanceRunReceiptResult CreateDecisionReceipt(
+        string runId,
+        ScheduledGovernanceDecision decision,
+        string snapshotToken = "snapshot-1",
+        GovernanceBatchOutcomeResult? latestBatch = null)
+    {
+        var automationActionable = decision == ScheduledGovernanceDecision.ReversibleExecutionRequired ? 1 : 0;
+        return CreateReceipt(
+            runId,
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion) with
+        {
+            InitialSnapshotToken = snapshotToken,
+            FinalSnapshotToken = snapshotToken,
+            CoverageComplete = decision != ScheduledGovernanceDecision.CoverageIncomplete,
+            InitialGovernanceActionable = automationActionable,
+            FinalGovernanceActionable = automationActionable,
+            CandidateCount = automationActionable,
+            ExecutionActionableCount = automationActionable,
+            FinalConvergenceStatus = decision.ToString(),
+            LatestBatchReceived = latestBatch is not null,
+            LatestBatch = latestBatch
+        };
+    }
+
+    private static GovernanceBatchOutcomeResult CreateBatchOutcome(
+        string snapshotToken,
+        string cursorBefore,
+        string? nextCursor,
+        bool requiresReReview = false,
+        bool isReplay = false)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return new GovernanceBatchOutcomeResult(
+            Received: true,
+            Executed: true,
+            RequestIdentityHash: "request-identity",
+            RequestHash: "request-hash",
+            Status: "Completed",
+            FailurePhase: string.Empty,
+            ReceivedAt: now,
+            StartedAt: now.AddSeconds(-1),
+            CompletedAt: now,
+            SnapshotToken: snapshotToken,
+            SnapshotGeneration: 0,
+            IsReReview: false,
+            CursorBefore: cursorBefore,
+            NextCursor: nextCursor,
+            HasMore: nextCursor is not null,
+            RequiresReReview: requiresReReview,
+            StoppedReason: "Completed",
+            Scanned: 1,
+            Attempted: 1,
+            Applied: 1,
+            NoOp: 0,
+            Failed: 0,
+            Deferred: 0,
+            RequiresUserDecision: 0,
+            Quarantined: 0,
+            DeleteEligible: 0,
+            DeleteMatured: 0,
+            AutoDeleted: 0,
+            DeleteCancelled: 0,
+            Tombstoned: 0,
+            SemanticAutoResolved: 0,
+            RemainingHumanDecision: 0,
+            ProtectedRetention: 0,
+            AuditIds: [],
+            IsReplay: isReplay);
+    }
 
     private static KnowledgeReviewResult CreateReview(
         IReadOnlyList<GovernanceReviewItem> items,

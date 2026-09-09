@@ -6,6 +6,9 @@ namespace Memory.UnitTests;
 public sealed class ScheduledGovernanceReliabilityServiceTests
 {
     private static readonly DateTimeOffset FirstRun = new(2026, 9, 1, 0, 0, 0, TimeSpan.Zero);
+    private static readonly Guid TenantId = Guid.Parse("10000000-0000-0000-0000-000000000001");
+    private static readonly Guid OwnerUserId = Guid.Parse("20000000-0000-0000-0000-000000000002");
+    private static readonly string[] ProjectIds = ["test-project"];
 
     [Fact]
     public void Scheduled_Mode_Without_Platform_Attestation_Must_Not_Qualify_Even_With_Other_Evidence()
@@ -113,13 +116,67 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
     }
 
     private static ScheduledGovernanceReliabilityReceiptProjection QualifyingProjection(int index)
-        => new()
+    {
+        var runId = $"scheduled-{index}";
+        var receiptId = Guid.NewGuid();
+        var expectedAt = FirstRun.AddHours(index * 4);
+        var requestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeReviewRequestIdentityHash(runId);
+        var actorBindingHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeActorBindingHash(TenantId, OwnerUserId);
+        var binding = new ScheduledGovernanceReliabilityEvidenceBinding(
+            TenantId,
+            OwnerUserId,
+            runId,
+            receiptId,
+            ScheduledGovernanceReliabilityEvidenceContract.ComputeProjectScopeHash(ProjectIds),
+            "production",
+            expectedAt,
+            $"slot-{index}",
+            ScheduledGovernanceReliabilityEvidenceContract.NaturalScheduleTrigger,
+            ScheduledGovernanceReliabilityEvidenceContract.ResourceAudience,
+            requestIdentityHash,
+            Digest($"dispatch-{index}"),
+            actorBindingHash,
+            Digest("task"),
+            Digest("automation"),
+            Digest("schedule"),
+            Digest("configuration"),
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion,
+            ScheduledGovernanceReliabilityEvidenceContract.ComputeRuntimeIdentityHash(
+                ScheduledGovernanceContract.RuntimeIdentity));
+        var evidence = new ScheduledGovernanceReliabilityEvidenceSnapshot(
+            new ScheduledGovernancePlatformAttestationEvidence(
+                ScheduledGovernanceEvidenceVerificationStatus.Verified,
+                SignatureValid: true,
+                ReplaySafe: true,
+                "https://scheduler.example.test",
+                "production",
+                "key-1",
+                binding,
+                expectedAt.AddMinutes(-1),
+                expectedAt.AddMinutes(14)),
+            new ScheduledGovernanceControlPlaneAuditEvidence(
+                ScheduledGovernanceEvidenceVerificationStatus.Verified,
+                SourceAuthenticated: true,
+                ImmutableEvent: true,
+                ReplaySafe: true,
+                "scheduler-control-plane",
+                Digest($"audit-{index}"),
+                index,
+                binding));
+
+        return new()
         {
-            ReceiptId = Guid.NewGuid(),
-            GovernanceRunId = $"scheduled-{index}",
-            StartedAt = FirstRun.AddHours(index * 4),
-            CompletedAt = FirstRun.AddHours(index * 4).AddMinutes(1),
-            ObservedAtUtc = FirstRun.AddHours(index * 4),
+            TenantId = TenantId,
+            OwnerUserId = OwnerUserId,
+            ReceiptId = receiptId,
+            GovernanceRunId = runId,
+            StartedAt = expectedAt,
+            CompletedAt = expectedAt.AddMinutes(1),
+            ObservedAtUtc = expectedAt,
             ExecutionMode = "Scheduled",
             RunExists = true,
             Terminal = true,
@@ -127,7 +184,10 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
             ToolContractVersion = ScheduledGovernanceContract.ToolContractVersion,
             SchemaHash = ScheduledGovernanceContract.SchemaHash,
             PublishedCatalogVersion = ScheduledGovernanceContract.PublishedCatalogVersion,
+            RequestIdentityHash = requestIdentityHash,
+            ProjectIds = ProjectIds,
             RuntimeIdentity = ScheduledGovernanceContract.RuntimeIdentity,
+            NaturalOriginEvidence = evidence,
             BaselineIdentity = "stable-baseline",
             Decision = ScheduledGovernanceDecision.NoOpConverged,
             InitialReviewReceived = true,
@@ -145,6 +205,10 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
             FinalConvergenceStatus = "NoOpConverged",
             StoppedReason = "ReviewCompleted"
         };
+    }
+
+    private static string Digest(string value)
+        => ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(value);
 
     private static GovernanceRunReceiptResult CreateReceipt(
         string runId,

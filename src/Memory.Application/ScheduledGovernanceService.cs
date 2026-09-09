@@ -148,12 +148,6 @@ public sealed class ScheduledGovernanceService(
         EnsureScheduledAuthority();
         var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
         ValidateContract(request with { GovernanceRunId = governanceRunId });
-        var lineage = await receipts.GetScheduledLineageAsync(
-            governanceRunId,
-            ReceiptContractIdentity,
-            cancellationToken);
-        EnsureScheduledLineage(lineage, requireExistingRun: true);
-
         var batchRequest = new GovernanceBatchExecuteRequest(
             governanceRunId,
             ProjectIds: null,
@@ -174,6 +168,13 @@ public sealed class ScheduledGovernanceService(
         {
             ReceiptContractIdentity = ReceiptContractIdentity
         };
+        var lineage = await receipts.GetScheduledLineageAsync(
+            governanceRunId,
+            ReceiptContractIdentity,
+            cancellationToken);
+        EnsureScheduledLineage(lineage, requireExistingRun: true);
+        var receipt = await receipts.GetAsync(governanceRunId, cancellationToken);
+        ScheduledGovernanceExecutionDecisionGate.EnsureReversible(receipt, batchRequest);
         GovernanceBatchExecuteResult result;
         try
         {

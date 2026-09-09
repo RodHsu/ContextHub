@@ -1739,6 +1739,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var admin = actorAccessor.Current;
         var executor = scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>();
         var reviewService = scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>();
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var projectId = $"batch-closed-{Guid.NewGuid():N}";
         var runId = $"batch-closed-run-{Guid.NewGuid():N}";
@@ -1768,6 +1769,26 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 ScheduledGovernanceContract.SchemaHash,
                 ScheduledGovernanceContract.PublishedCatalogVersion)
         };
+        await receipts.RecordScheduledDecisionAsync(
+            new ScheduledGovernanceReviewResult(
+                runId,
+                IsReReview: false,
+                ScheduledGovernanceDecision.ReversibleExecutionRequired,
+                request.SnapshotToken!,
+                new ScheduledGovernanceCountInvariant(0, 0, 0, 0, 1, 0, true, true),
+                CoverageComplete: true,
+                CandidateCount: 1,
+                ReversibleExecutionCount: 1,
+                HumanDecisionCount: 0,
+                GovernedExceptionCount: 0,
+                BusinessWorkItemActionableCount: 0,
+                ResolvedProjectIds: [projectId],
+                ScheduledGovernanceContract.ToolContractVersion,
+                ScheduledGovernanceContract.SchemaHash,
+                ScheduledGovernanceContract.PublishedCatalogVersion,
+                RuntimeIdentity: ScheduledGovernanceContract.RuntimeIdentity),
+            DateTimeOffset.UtcNow,
+            CancellationToken.None);
 
         var hardDelete = () => executor.ExecuteAsync(request with { AllowHardDelete = true }, CancellationToken.None);
         await hardDelete.Should().ThrowAsync<InvalidOperationException>().WithMessage("*AllowHardDelete=false*");
@@ -1789,8 +1810,15 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var first = await executor.ExecuteAsync(request, CancellationToken.None);
         var payloadMismatch = await executor.ExecuteAsync(request with { MaxDurationSeconds = 31 }, CancellationToken.None);
         payloadMismatch.ErrorCode.Should().Be(GovernanceBatchErrorCode.ReplayPayloadMismatch);
+        var afterPayloadMismatch = await receipts.GetAsync(runId, CancellationToken.None);
+        afterPayloadMismatch!.FinalConvergenceStatus.Should()
+            .Be(nameof(ScheduledGovernanceDecision.ReversibleExecutionRequired));
+        afterPayloadMismatch.FinalSnapshotToken.Should().Be(request.SnapshotToken);
         var invalidCursor = await executor.ExecuteAsync(request with { Cursor = "invalid-cursor", MaxMutations = 11 }, CancellationToken.None);
-        invalidCursor.ErrorCode.Should().Be(GovernanceBatchErrorCode.InvalidCursor);
+        invalidCursor.ErrorCode.Should().Be(
+            GovernanceBatchErrorCode.InvalidCursor,
+            "the executor stopped with {0}",
+            invalidCursor.StoppedReason);
         var wrongProject = await executor.ExecuteAsync(request with
         {
             ProjectIds = [projectId, $"wrong-project-{Guid.NewGuid():N}"],

@@ -42,6 +42,7 @@ public sealed class GovernanceBatchExecutor(
             ValidateExecutionMode(request.ExecutionMode);
             EnsureExecutionActorAllowed(request, actorAccessor.Current);
             ValidatePublishedContract(request);
+            ValidateRequest(request);
             if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled)
             {
                 runLock = await runReceipts.AcquireRunLockAsync(
@@ -58,6 +59,17 @@ public sealed class GovernanceBatchExecutor(
                         GovernanceBatchErrorCode.SchemaCapabilityMismatch,
                         $"Scheduled governance run lineage rejected at the mutation boundary: {lineage.Status}.");
                 }
+
+                // The service performs a cheap preflight check for a clearer
+                // caller failure, but the mutation boundary must re-read the
+                // latest server-owned ScheduledDecision under this executor's
+                // run lock so a decision change cannot race into execution.
+                var scheduledReceipt = await runReceipts.GetAsync(
+                    request.GovernanceRunId,
+                    cancellationToken);
+                ScheduledGovernanceExecutionDecisionGate.EnsureReversible(
+                    scheduledReceipt,
+                    request);
             }
             receiptEligible = true;
             if (request.AllowMaturedDelete ||
@@ -126,7 +138,6 @@ public sealed class GovernanceBatchExecutor(
         GovernanceBatchExecuteRequest request,
         CancellationToken cancellationToken)
     {
-        ValidateRequest(request);
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
@@ -158,6 +169,7 @@ public sealed class GovernanceBatchExecutor(
                 cancellationToken);
             projectIds = DurableMemoryGovernancePolicy.ToExecutionProjectIds(snapshot.Coverage.GovernanceProjectIds);
             EnsureExplicitScopeMatchesSnapshot(request.ProjectIds, projectIds);
+            projectIds = await ResolveProjectIdsAsync(projectIds, actor, cancellationToken);
         }
         else
         {
@@ -1801,9 +1813,25 @@ public sealed class GovernanceBatchExecutor(
         var normalized = requested?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => ProjectContext.Normalize(x))
             .Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var result = normalized is { Length: > 0 }
-            ? normalized
-            : available.Select(x => x.ProjectId).Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var availableProjectIds = available
+            .Select(x => x.ProjectId)
+            .Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (normalized is { Length: > 0 })
+        {
+            var denied = normalized
+                .Except(availableProjectIds, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (denied.Length > 0)
+            {
+                throw new UnauthorizedAccessException(
+                    $"Project '{denied[0]}' is not writable for the current token and durable project grant.");
+            }
+        }
+
+        var result = normalized is { Length: > 0 } ? normalized : availableProjectIds;
         if (result.Length == 0) throw new InvalidOperationException("At least one authorized ProjectId is required.");
         ActorAuthorization.EnsureProjectsAllowed(actor, result, write: true);
         return result.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();

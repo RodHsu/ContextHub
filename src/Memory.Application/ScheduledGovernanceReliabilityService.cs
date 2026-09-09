@@ -13,7 +13,8 @@ namespace Memory.Application;
 public sealed class ScheduledGovernanceReliabilityService(
     IApplicationDbContext dbContext,
     IRequestActorAccessor actorAccessor,
-    TimeProvider timeProvider) : IScheduledGovernanceReliabilityService
+    TimeProvider timeProvider,
+    IScheduledGovernanceReliabilityEvidenceProvider? evidenceProvider = null) : IScheduledGovernanceReliabilityService
 {
     internal const int MaxGovernanceRunIdLength = 128;
 
@@ -21,9 +22,11 @@ public sealed class ScheduledGovernanceReliabilityService(
         "platform-signed-natural-origin-attestation-not-proven";
 
     internal const string EvidenceBoundary =
-        "ContextHub observes server receipt metadata and scheduler timing only; " +
-        "it has no platform-signed natural-origin attestation and cannot change " +
-        "the host platform timezone configuration.";
+        "Reliability qualification requires server-verified platform-signed natural-origin " +
+        "attestation AND authenticated immutable control-plane audit with exact actor, " +
+        "scope, run, slot, request, receipt, audience, contract and runtime binding. " +
+        "Timing is a consistency check only; missing or ambiguous evidence remains " +
+        "Unattested, and ContextHub cannot change the host platform timezone configuration.";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly ScheduledGovernanceReliabilityWindowOptions Options =
@@ -37,7 +40,7 @@ public sealed class ScheduledGovernanceReliabilityService(
     {
         ArgumentNullException.ThrowIfNull(receipt);
         var actor = RequireReadActor();
-        var projection = BuildProjection(receipt);
+        var projection = await BuildProjectionAsync(actor, receipt, cancellationToken);
         var now = timeProvider.GetUtcNow();
         var runId = NormalizeRunId(receipt.GovernanceRunId);
         var entity = await dbContext.ScheduledGovernanceReliabilityRuns
@@ -70,7 +73,7 @@ public sealed class ScheduledGovernanceReliabilityService(
             isNewEntity,
             cancellationToken);
         var rows = await ReadRowsAsync(actor, cancellationToken);
-        return BuildSummary(rows);
+        return await BuildSummaryAsync(actor, rows, cancellationToken);
     }
 
     public async Task<ScheduledGovernanceReliabilitySummary> GetAsync(
@@ -78,7 +81,66 @@ public sealed class ScheduledGovernanceReliabilityService(
     {
         var actor = RequireReadActor();
         var rows = await ReadRowsAsync(actor, cancellationToken);
-        return BuildSummary(rows);
+        return await BuildSummaryAsync(actor, rows, cancellationToken);
+    }
+
+    private async Task<ScheduledGovernanceReliabilityReceiptProjection> BuildProjectionAsync(
+        ContextHubRequestActor actor,
+        GovernanceRunReceiptResult receipt,
+        CancellationToken cancellationToken)
+    {
+        var evidence = await GetNaturalOriginEvidenceAsync(
+            actor,
+            receipt.ReceiptId,
+            receipt.GovernanceRunId,
+            receipt.ProjectIds,
+            cancellationToken);
+
+        return BuildProjection(receipt, actor, evidence);
+    }
+
+    private async Task<ScheduledGovernanceReliabilityEvidenceSnapshot?> GetNaturalOriginEvidenceAsync(
+        ContextHubRequestActor actor,
+        Guid receiptId,
+        string governanceRunId,
+        IReadOnlyList<string> projectIds,
+        CancellationToken cancellationToken)
+    {
+        if (evidenceProvider is null || !actor.TenantId.HasValue || !actor.UserId.HasValue)
+        {
+            return null;
+        }
+
+        var runId = NormalizeRunId(governanceRunId);
+        var projectScopeHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeProjectScopeHash(projectIds);
+        if (receiptId == Guid.Empty || string.IsNullOrWhiteSpace(projectScopeHash))
+        {
+            return null;
+        }
+
+        try
+        {
+            return await evidenceProvider.GetAsync(
+                new ScheduledGovernanceReliabilityEvidenceQuery(
+                    actor.TenantId.Value,
+                    actor.UserId.Value,
+                    receiptId,
+                    runId,
+                    ScheduledGovernanceReliabilityEvidenceContract.ComputeReviewRequestIdentityHash(runId),
+                    projectScopeHash),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Evidence-provider outage, malformed data, or an ambiguous
+            // verification result must never promote timing-only evidence.
+            return null;
+        }
     }
 
     private async Task SaveWithConcurrentInsertRecoveryAsync(
@@ -139,8 +201,10 @@ public sealed class ScheduledGovernanceReliabilityService(
             .ThenBy(x => x.GovernanceRunId)
             .ToArrayAsync(cancellationToken);
 
-    private ScheduledGovernanceReliabilitySummary BuildSummary(
-        IReadOnlyList<ScheduledGovernanceReliabilityRun> rows)
+    private async Task<ScheduledGovernanceReliabilitySummary> BuildSummaryAsync(
+        ContextHubRequestActor actor,
+        IReadOnlyList<ScheduledGovernanceReliabilityRun> rows,
+        CancellationToken cancellationToken)
     {
         var projections = new List<ScheduledGovernanceReliabilityReceiptProjection>(rows.Count * 2);
         foreach (var row in rows)
@@ -153,10 +217,32 @@ public sealed class ScheduledGovernanceReliabilityService(
 
             projection = projection with
             {
+                TenantId = row.TenantId,
+                OwnerUserId = row.OwnerUserId,
                 GovernanceRunId = NormalizeRunId(row.GovernanceRunId),
                 ReceiptId = row.ReceiptId,
                 IsReplay = row.IsReplay
             };
+            if (IsScheduled(projection.ExecutionMode))
+            {
+                var evidence = await GetNaturalOriginEvidenceAsync(
+                    actor,
+                    projection.ReceiptId,
+                    projection.GovernanceRunId,
+                    projection.ProjectIds,
+                    cancellationToken);
+                projection = projection with
+                {
+                    NaturalOriginEvidence = evidence,
+                    ResetReason = evidence is null ||
+                                  !string.Equals(
+                                      projection.ResetReason,
+                                      NaturalOriginAttestationNotProvenReason,
+                                      StringComparison.Ordinal)
+                        ? projection.ResetReason
+                        : null
+                };
+            }
             projections.Add(projection);
 
             foreach (var replayReceiptId in DeserializeReplayReceiptIds(row.ReplayReceiptIdsJson))
@@ -183,9 +269,11 @@ public sealed class ScheduledGovernanceReliabilityService(
             result.Schedule.IntendedLocalRunTimes,
             result.Schedule.SchedulerLocalRunTimes,
             result.Schedule.CompensationDescription);
+        var latestScheduledRun = result.Runs
+            .LastOrDefault(x => IsScheduled(x.ExecutionMode));
         var naturalOrigin = new ScheduledGovernanceNaturalOriginEvidenceResult(
-            PlatformSignedAttestationAvailable: false,
-            Status: "Unattested",
+            PlatformSignedAttestationAvailable: latestScheduledRun?.PlatformSignedNaturalOriginAttested ?? false,
+            Status: latestScheduledRun?.NaturalOriginStatus ?? "Unattested",
             EvidenceBoundary);
 
         return new ScheduledGovernanceReliabilitySummary(
@@ -220,9 +308,13 @@ public sealed class ScheduledGovernanceReliabilityService(
         ScheduledGovernanceReliabilityRunEvidence evidence)
     {
         var mode = evidence.ExecutionMode?.Trim() ?? string.Empty;
-        var naturalOriginStatus = IsScheduled(mode)
-            ? "Unattested"
-            : IsManual(mode) ? "Manual" : "NotScheduled";
+        var naturalOriginStatus = evidence.NaturalOriginStatus;
+        if (string.IsNullOrWhiteSpace(naturalOriginStatus))
+        {
+            naturalOriginStatus = IsScheduled(mode)
+                ? "Unattested"
+                : IsManual(mode) ? "Manual" : "NotScheduled";
+        }
         return new ScheduledGovernanceReliabilityRunResult(
             evidence.GovernanceRunId,
             evidence.ReceiptId,
@@ -238,7 +330,7 @@ public sealed class ScheduledGovernanceReliabilityService(
             evidence.IsFailed,
             PublicReasons(evidence),
             naturalOriginStatus,
-            PlatformSignedNaturalOriginAttested: false,
+            PlatformSignedNaturalOriginAttested: evidence.PlatformSignedNaturalOriginAttested,
             EvidenceBoundary);
     }
 
@@ -267,12 +359,23 @@ public sealed class ScheduledGovernanceReliabilityService(
 
     internal static ScheduledGovernanceReliabilityReceiptProjection BuildProjection(
         GovernanceRunReceiptResult receipt)
+        => BuildProjection(receipt, actor: null, naturalOriginEvidence: null);
+
+    internal static ScheduledGovernanceReliabilityReceiptProjection BuildProjection(
+        GovernanceRunReceiptResult receipt,
+        ContextHubRequestActor? actor,
+        ScheduledGovernanceReliabilityEvidenceSnapshot? naturalOriginEvidence)
     {
         var projection = ScheduledGovernanceReliabilityReceiptProjection.FromReceipt(
             receipt,
             ScheduledGovernanceContract.RuntimeIdentity) with
         {
-            GovernanceRunId = NormalizeRunId(receipt.GovernanceRunId)
+            TenantId = actor?.TenantId,
+            OwnerUserId = actor?.UserId,
+            GovernanceRunId = NormalizeRunId(receipt.GovernanceRunId),
+            NaturalOriginEvidence = naturalOriginEvidence,
+            ExpectedAtUtc = naturalOriginEvidence?.PlatformAttestation?.Binding.ExpectedAtUtc ??
+                            naturalOriginEvidence?.ControlPlaneAudit?.Binding.ExpectedAtUtc
         };
         if (IsManual(receipt.ExecutionMode))
         {
@@ -281,13 +384,15 @@ public sealed class ScheduledGovernanceReliabilityService(
 
         // Observation occurs only through the dedicated scheduled-governance
         // application service. That proves the least-privilege surface, but
-        // not whether ChatGPT invoked it naturally or interactively. Model it
-        // as a scheduled-surface candidate and explicitly fail the natural
-        // origin gate until the host provides signed attestation.
+        // not whether ChatGPT invoked it naturally or interactively. The
+        // trusted provider is the only source that can satisfy the natural
+        // origin gate; timing and the Scheduled mode are never sufficient.
         return projection with
         {
             ExecutionMode = "Scheduled",
-            ResetReason = NaturalOriginAttestationNotProvenReason
+            ResetReason = naturalOriginEvidence is null
+                ? NaturalOriginAttestationNotProvenReason
+                : null
         };
     }
 
@@ -345,10 +450,12 @@ public sealed class ScheduledGovernanceReliabilityService(
         entity.Qualifies = evidence?.Qualifies ?? false;
         entity.IsIgnored = evidence?.IsIgnored ?? false;
         entity.IsFailed = evidence?.IsFailed ?? false;
-        entity.NaturalOriginStatus = IsScheduled(entity.ExecutionMode)
-            ? "Unattested"
-            : IsManual(entity.ExecutionMode) ? "Manual" : "NotScheduled";
-        entity.PlatformSignedNaturalOriginAttested = false;
+        entity.NaturalOriginStatus = evidence?.NaturalOriginStatus ??
+            (IsScheduled(entity.ExecutionMode)
+                ? "Unattested"
+                : IsManual(entity.ExecutionMode) ? "Manual" : "NotScheduled");
+        entity.PlatformSignedNaturalOriginAttested =
+            evidence?.PlatformSignedNaturalOriginAttested ?? false;
         entity.EvidenceBoundary = EvidenceBoundary;
         entity.ReasonsJson = JsonSerializer.Serialize(
             evidence is null ? [] : PublicReasons(evidence),
@@ -382,7 +489,8 @@ public sealed class ScheduledGovernanceReliabilityService(
         return incoming with
         {
             RuntimeIdentity = persisted.RuntimeIdentity ?? incoming.RuntimeIdentity,
-            BaselineIdentity = persisted.BaselineIdentity ?? incoming.BaselineIdentity
+            BaselineIdentity = persisted.BaselineIdentity ?? incoming.BaselineIdentity,
+            NaturalOriginEvidence = incoming.NaturalOriginEvidence
         };
     }
 
@@ -465,6 +573,7 @@ public sealed class ScheduledGovernanceReliabilityService(
     {
         var reasons = evidence.Reasons.ToList();
         if (IsScheduled(evidence.ExecutionMode) &&
+            !string.Equals(evidence.NaturalOriginStatus, "Verified", StringComparison.Ordinal) &&
             !reasons.Contains(NaturalOriginAttestationNotProvenReason, StringComparer.Ordinal))
         {
             reasons.Insert(0, NaturalOriginAttestationNotProvenReason);

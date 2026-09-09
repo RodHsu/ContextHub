@@ -1,4 +1,5 @@
 using Memory.Application;
+using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -88,6 +89,8 @@ public static class DependencyInjection
         services.AddScoped<IMemoryDataRetentionService, MemoryDataRetentionService>();
         services.AddScoped<IAutonomousRetentionService, AutonomousRetentionService>();
         services.AddScoped<IGovernanceRunReceiptService, GovernanceRunReceiptService>();
+        services.AddScoped<INaturalOriginEvidenceStore, NaturalOriginEvidenceStore>();
+        services.AddScoped<IScheduledGovernanceReliabilityEvidenceProvider, ScheduledGovernanceReliabilityEvidenceProvider>();
         services.AddSingleton<IInternalMaturedDeleteExecutor, InternalMaturedDeleteExecutor>();
         services.AddScoped<IVacuumFullReclaimService, VacuumFullReclaimService>();
         services.AddScoped<IDomainOwnerRepairService, DomainOwnerRepairService>();

@@ -61,6 +61,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<ResourceTombstone> ResourceTombstones => Set<ResourceTombstone>();
     public DbSet<GovernanceRunReceipt> GovernanceRunReceipts => Set<GovernanceRunReceipt>();
     public DbSet<ScheduledGovernanceReliabilityRun> ScheduledGovernanceReliabilityRuns => Set<ScheduledGovernanceReliabilityRun>();
+    public DbSet<NaturalOriginEvidenceLedgerEntry> NaturalOriginEvidenceLedgerEntries => Set<NaturalOriginEvidenceLedgerEntry>();
     public DbSet<ProjectHierarchy> ProjectHierarchies => Set<ProjectHierarchy>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
@@ -1160,6 +1161,62 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunId }).IsUnique();
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ObservedAtUtc });
+        });
+
+        modelBuilder.Entity<NaturalOriginEvidenceLedgerEntry>(entity =>
+        {
+            entity.ToTable("natural_origin_evidence_ledger");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.EvidenceKind).HasColumnName("evidence_kind").HasConversion<string>();
+            entity.Property(x => x.Issuer).HasColumnName("issuer");
+            entity.Property(x => x.Environment).HasColumnName("environment");
+            entity.Property(x => x.KeyId).HasColumnName("key_id");
+            entity.Property(x => x.Algorithm).HasColumnName("algorithm");
+            entity.Property(x => x.EvidenceVersion).HasColumnName("evidence_version");
+            entity.Property(x => x.JtiHash).HasColumnName("jti_hash");
+            entity.Property(x => x.SourceSystem).HasColumnName("source_system");
+            entity.Property(x => x.SourceEventIdHash).HasColumnName("source_event_id_hash");
+            entity.Property(x => x.SourceSequence).HasColumnName("source_sequence");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectScopeHash).HasColumnName("project_scope_hash");
+            entity.Property(x => x.TriggerKind).HasColumnName("trigger_kind");
+            entity.Property(x => x.Audience).HasColumnName("audience");
+            entity.Property(x => x.ActorBindingHash).HasColumnName("actor_binding_hash");
+            entity.Property(x => x.TaskBindingHash).HasColumnName("task_binding_hash");
+            entity.Property(x => x.AutomationBindingHash).HasColumnName("automation_binding_hash");
+            entity.Property(x => x.GovernanceRunIdHash).HasColumnName("governance_run_id_hash");
+            entity.Property(x => x.SlotIdHash).HasColumnName("slot_id_hash");
+            entity.Property(x => x.ExpectedAtUtc).HasColumnName("expected_at_utc");
+            entity.Property(x => x.IssuedAtUtc).HasColumnName("issued_at_utc");
+            entity.Property(x => x.ObservedAtUtc).HasColumnName("observed_at_utc");
+            entity.Property(x => x.ExpiresAtUtc).HasColumnName("expires_at_utc");
+            entity.Property(x => x.ScheduleDigest).HasColumnName("schedule_digest");
+            entity.Property(x => x.ConfigurationDigest).HasColumnName("configuration_digest");
+            entity.Property(x => x.RequestIdentityHash).HasColumnName("request_identity_hash");
+            entity.Property(x => x.DispatchIdentityHash).HasColumnName("dispatch_identity_hash");
+            entity.Property(x => x.ReceiptId).HasColumnName("receipt_id");
+            entity.Property(x => x.ReceiptEventKeyHash).HasColumnName("receipt_event_key_hash");
+            entity.Property(x => x.SignatureDigest).HasColumnName("signature_digest");
+            entity.Property(x => x.TenantBindingHash).HasColumnName("tenant_binding_hash");
+            entity.Property(x => x.ToolContractVersion).HasColumnName("tool_contract_version");
+            entity.Property(x => x.SchemaHash).HasColumnName("schema_hash");
+            entity.Property(x => x.PublishedCatalogVersion).HasColumnName("published_catalog_version");
+            entity.Property(x => x.RuntimeIdentityHash).HasColumnName("runtime_identity_hash");
+            entity.Property(x => x.VerificationStatus).HasColumnName("verification_status");
+            entity.Property(x => x.CreatedAtUtc).HasColumnName("created_at_utc");
+            entity.HasIndex(x => new { x.Issuer, x.JtiHash }).IsUnique();
+            entity.HasIndex(x => new { x.SourceSystem, x.SourceEventIdHash }).IsUnique();
+            entity.HasIndex(x => new
+            {
+                x.TenantId,
+                x.OwnerUserId,
+                x.GovernanceRunIdHash,
+                x.SlotIdHash,
+                x.EvidenceKind
+            }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunIdHash, x.ExpectedAtUtc });
         });
 
         modelBuilder.Entity<ProjectHierarchy>(entity =>

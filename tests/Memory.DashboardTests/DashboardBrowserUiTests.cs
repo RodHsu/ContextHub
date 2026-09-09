@@ -3920,7 +3920,6 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Load });
                 }
 
-                await page.WaitForLoadStateAsync(LoadState.Load);
                 await page.Locator(".dashboard-shell[data-dashboard-interactive='true']").WaitForAsync(new LocatorWaitForOptions
                 {
                     State = WaitForSelectorState.Visible,

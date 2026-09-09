@@ -8,6 +8,8 @@ namespace Memory.Application;
 /// </summary>
 internal sealed record ScheduledGovernanceReliabilityReceiptProjection
 {
+    public Guid? TenantId { get; init; }
+    public Guid? OwnerUserId { get; init; }
     public Guid ReceiptId { get; init; }
     public string GovernanceRunId { get; init; } = string.Empty;
     public DateTimeOffset StartedAt { get; init; }
@@ -22,9 +24,12 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
     public string ToolContractVersion { get; init; } = string.Empty;
     public string SchemaHash { get; init; } = string.Empty;
     public string PublishedCatalogVersion { get; init; } = string.Empty;
+    public string RequestIdentityHash { get; init; } = string.Empty;
+    public IReadOnlyList<string> ProjectIds { get; init; } = [];
     public ScheduledGovernanceRuntimeIdentity? RuntimeIdentity { get; init; }
     public string? BaselineIdentity { get; init; }
     public string? ResetReason { get; init; }
+    public ScheduledGovernanceReliabilityEvidenceSnapshot? NaturalOriginEvidence { get; init; }
     public ScheduledGovernanceDecision? Decision { get; init; }
     public bool? InitialReviewReceived { get; init; }
     public bool CoverageComplete { get; init; }
@@ -73,7 +78,11 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
             ToolContractVersion = receipt.ToolContractVersion,
             SchemaHash = receipt.SchemaHash,
             PublishedCatalogVersion = receipt.PublishedCatalogVersion,
+            RequestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+                .ComputeReviewRequestIdentityHash(receipt.GovernanceRunId),
+            ProjectIds = receipt.ProjectIds,
             RuntimeIdentity = runtimeIdentity,
+            NaturalOriginEvidence = evidence?.NaturalOriginEvidence,
             BaselineIdentity = BuildBaselineIdentity(receipt, runtimeIdentity),
             Decision = ResolveDecision(receipt),
             InitialReviewReceived = evidence?.InitialReviewReceived ??
@@ -126,7 +135,11 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
             ToolContractVersion = run.ToolContractVersion,
             SchemaHash = run.SchemaHash,
             PublishedCatalogVersion = run.PublishedCatalogVersion,
+            RequestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+                .ComputeReviewRequestIdentityHash(run.GovernanceRunId),
+            ProjectIds = run.ProjectIds,
             RuntimeIdentity = run.RuntimeIdentity,
+            NaturalOriginEvidence = evidence?.NaturalOriginEvidence,
             BaselineIdentity = BuildBaselineIdentity(run),
             Decision = run.Decision,
             InitialReviewReceived = evidence?.InitialReviewReceived ?? run.Received &&
@@ -221,6 +234,7 @@ internal sealed record ScheduledGovernanceReliabilityEvidence
     public bool? ImmutableSnapshotBound { get; init; }
     public bool? FixedReversibleExecutorUsed { get; init; }
     public string? ResetReason { get; init; }
+    public ScheduledGovernanceReliabilityEvidenceSnapshot? NaturalOriginEvidence { get; init; }
 }
 
 internal sealed record ScheduledGovernanceReliabilityWindowOptions
@@ -301,7 +315,9 @@ internal sealed record ScheduledGovernanceReliabilityRunEvidence(
     bool Qualifies,
     bool IsIgnored,
     bool IsFailed,
-    IReadOnlyList<string> Reasons);
+    IReadOnlyList<string> Reasons,
+    string NaturalOriginStatus = "Unattested",
+    bool PlatformSignedNaturalOriginAttested = false);
 
 internal sealed record ScheduledGovernanceReliabilityResetEvent(
     DateTimeOffset AtUtc,
@@ -417,8 +433,9 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
                 continue;
             }
 
-            var expectedAt = ResolveExpectedAt(projection, observedAt);
             var reasons = new List<string>();
+            var naturalOrigin = EvaluateNaturalOrigin(projection, observedAt, reasons);
+            var expectedAt = ResolveExpectedAt(projection, observedAt, naturalOrigin.ExpectedAtUtc);
             var signedDrift = expectedAt.HasValue
                 ? (TimeSpan?)(observedAt - expectedAt.Value)
                 : null;
@@ -488,7 +505,9 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
                 qualifies,
                 false,
                 failed,
-                reasons.Distinct(StringComparer.Ordinal).ToArray());
+                reasons.Distinct(StringComparer.Ordinal).ToArray(),
+                naturalOrigin.Status,
+                naturalOrigin.PlatformSignedAttestationVerified);
             runEvidence.Add(evidence);
             if (qualifies)
             {
@@ -651,6 +670,242 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
 
     }
 
+    private static NaturalOriginEvaluation EvaluateNaturalOrigin(
+        ScheduledGovernanceReliabilityReceiptProjection projection,
+        DateTimeOffset observedAt,
+        ICollection<string> reasons)
+    {
+        var evidence = projection.NaturalOriginEvidence;
+        if (evidence is null)
+        {
+            reasons.Add(ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason);
+            return NaturalOriginEvaluation.Unattested;
+        }
+
+        var naturalOriginReasonCount = reasons.Count;
+        var attestation = evidence.PlatformAttestation;
+        var audit = evidence.ControlPlaneAudit;
+        var attestationVerified = attestation is not null &&
+                                   attestation.VerificationStatus ==
+                                   ScheduledGovernanceEvidenceVerificationStatus.Verified &&
+                                   attestation.SignatureValid &&
+                                   attestation.ReplaySafe;
+        var auditVerified = audit is not null &&
+                             audit.VerificationStatus ==
+                             ScheduledGovernanceEvidenceVerificationStatus.Verified &&
+                             audit.SourceAuthenticated &&
+                             audit.ImmutableEvent &&
+                             audit.ReplaySafe;
+
+        if (!attestationVerified)
+        {
+            reasons.Add("platform-attestation-not-verified");
+        }
+
+        if (!auditVerified)
+        {
+            reasons.Add("control-plane-audit-not-verified");
+        }
+
+        var expectedAt = attestation?.Binding.ExpectedAtUtc ?? audit?.Binding.ExpectedAtUtc;
+        if (expectedAt is null)
+        {
+            reasons.Add("signed-schedule-slot-not-proven");
+        }
+
+        if (attestation is not null)
+        {
+            if (string.IsNullOrWhiteSpace(attestation.Issuer) ||
+                string.IsNullOrWhiteSpace(attestation.Environment) ||
+                string.IsNullOrWhiteSpace(attestation.KeyId))
+            {
+                reasons.Add("platform-attestation-key-binding-not-proven");
+            }
+
+            var issuedAt = attestation.IssuedAtUtc.ToUniversalTime();
+            var expiresAt = attestation.ExpiresAtUtc.ToUniversalTime();
+            var lifetime = expiresAt - issuedAt;
+            if (issuedAt > expiresAt ||
+                lifetime <= TimeSpan.Zero ||
+                lifetime > ScheduledGovernanceReliabilityEvidenceContract.MaximumAttestationLifetime ||
+                observedAt.ToUniversalTime() < issuedAt ||
+                observedAt.ToUniversalTime() > expiresAt)
+            {
+                reasons.Add("platform-attestation-freshness-invalid");
+            }
+        }
+
+        if (audit is not null &&
+            (string.IsNullOrWhiteSpace(audit.SourceSystem) ||
+             string.IsNullOrWhiteSpace(audit.AuditEventHash) ||
+             audit.Sequence < 0))
+        {
+            reasons.Add("control-plane-audit-identity-not-proven");
+        }
+
+        if (attestation is null || audit is null)
+        {
+            reasons.Add(ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason);
+        }
+        else
+        {
+            RequireExactBinding(projection, attestation.Binding, audit.Binding, reasons);
+        }
+
+        var verified = attestationVerified &&
+                       auditVerified &&
+                       reasons.Count == naturalOriginReasonCount;
+        if (!verified)
+        {
+            if (!reasons.Contains(
+                    ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason,
+                    StringComparer.Ordinal))
+            {
+                reasons.Add(ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason);
+            }
+
+            return new NaturalOriginEvaluation(
+                expectedAt,
+                "Unattested",
+                attestationVerified);
+        }
+
+        return new NaturalOriginEvaluation(expectedAt, "Verified", true);
+    }
+
+    private static void RequireExactBinding(
+        ScheduledGovernanceReliabilityReceiptProjection projection,
+        ScheduledGovernanceReliabilityEvidenceBinding attestation,
+        ScheduledGovernanceReliabilityEvidenceBinding audit,
+        ICollection<string> reasons)
+    {
+        if (projection.TenantId is null || projection.OwnerUserId is null ||
+            attestation.TenantId != projection.TenantId.Value ||
+            audit.TenantId != projection.TenantId.Value ||
+            attestation.OwnerUserId != projection.OwnerUserId.Value ||
+            audit.OwnerUserId != projection.OwnerUserId.Value)
+        {
+            reasons.Add("natural-origin-actor-binding-mismatch");
+        }
+        else
+        {
+            var actorBindingHash = ScheduledGovernanceReliabilityEvidenceContract
+                .ComputeActorBindingHash(projection.TenantId.Value, projection.OwnerUserId.Value);
+            if (!string.Equals(attestation.ActorBindingHash, actorBindingHash, StringComparison.Ordinal) ||
+                !string.Equals(audit.ActorBindingHash, actorBindingHash, StringComparison.Ordinal))
+            {
+                reasons.Add("natural-origin-actor-binding-mismatch");
+            }
+        }
+
+        if (!BindingIdentityMatches(attestation, audit))
+        {
+            reasons.Add("natural-origin-evidence-binding-mismatch");
+        }
+
+        var receiptScopeHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeProjectScopeHash(projection.ProjectIds);
+        if (string.IsNullOrWhiteSpace(receiptScopeHash) ||
+            !string.Equals(attestation.ProjectScopeHash, receiptScopeHash, StringComparison.Ordinal) ||
+            !string.Equals(audit.ProjectScopeHash, receiptScopeHash, StringComparison.Ordinal))
+        {
+            reasons.Add("natural-origin-project-scope-mismatch");
+        }
+
+        if (attestation.ReceiptId != projection.ReceiptId ||
+            audit.ReceiptId != projection.ReceiptId ||
+            string.IsNullOrWhiteSpace(projection.RequestIdentityHash) ||
+            !string.Equals(
+                attestation.RequestIdentityHash,
+                projection.RequestIdentityHash,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                audit.RequestIdentityHash,
+                projection.RequestIdentityHash,
+                StringComparison.Ordinal))
+        {
+            reasons.Add("natural-origin-request-correlation-mismatch");
+        }
+
+        if (attestation.TriggerType != ScheduledGovernanceReliabilityEvidenceContract.NaturalScheduleTrigger ||
+            audit.TriggerType != ScheduledGovernanceReliabilityEvidenceContract.NaturalScheduleTrigger)
+        {
+            reasons.Add("natural-origin-trigger-not-natural");
+        }
+
+        if (attestation.ResourceAudience != ScheduledGovernanceReliabilityEvidenceContract.ResourceAudience ||
+            audit.ResourceAudience != ScheduledGovernanceReliabilityEvidenceContract.ResourceAudience)
+        {
+            reasons.Add("natural-origin-audience-mismatch");
+        }
+
+        if (!BindingContractIdentityMatches(projection, attestation) ||
+            !BindingContractIdentityMatches(projection, audit))
+        {
+            reasons.Add("natural-origin-contract-runtime-mismatch");
+        }
+
+        if (attestation.ExpectedAtUtc is null || audit.ExpectedAtUtc is null ||
+            attestation.ExpectedAtUtc.Value.ToUniversalTime() != audit.ExpectedAtUtc.Value.ToUniversalTime() ||
+            !string.Equals(attestation.ScheduleSlotId, audit.ScheduleSlotId, StringComparison.Ordinal))
+        {
+            reasons.Add("natural-origin-slot-binding-mismatch");
+        }
+
+        if (string.IsNullOrWhiteSpace(attestation.DispatchIdentityHash) ||
+            !string.Equals(attestation.DispatchIdentityHash, audit.DispatchIdentityHash, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(attestation.ActorBindingHash) ||
+            !string.Equals(attestation.ActorBindingHash, audit.ActorBindingHash, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(attestation.TaskBindingHash) ||
+            !string.Equals(attestation.TaskBindingHash, audit.TaskBindingHash, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(attestation.AutomationBindingHash) ||
+            !string.Equals(attestation.AutomationBindingHash, audit.AutomationBindingHash, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(attestation.ScheduleDigest) ||
+            !string.Equals(attestation.ScheduleDigest, audit.ScheduleDigest, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(attestation.ConfigurationDigest) ||
+            !string.Equals(attestation.ConfigurationDigest, audit.ConfigurationDigest, StringComparison.Ordinal))
+        {
+            reasons.Add("natural-origin-dispatch-correlation-mismatch");
+        }
+    }
+
+    private static bool BindingIdentityMatches(
+        ScheduledGovernanceReliabilityEvidenceBinding left,
+        ScheduledGovernanceReliabilityEvidenceBinding right)
+        => left.TenantId == right.TenantId &&
+           left.OwnerUserId == right.OwnerUserId &&
+           string.Equals(left.GovernanceRunId, right.GovernanceRunId, StringComparison.Ordinal) &&
+           left.ReceiptId == right.ReceiptId &&
+           string.Equals(left.ProjectScopeHash, right.ProjectScopeHash, StringComparison.Ordinal) &&
+           string.Equals(left.Environment, right.Environment, StringComparison.Ordinal) &&
+           left.ExpectedAtUtc?.ToUniversalTime() == right.ExpectedAtUtc?.ToUniversalTime() &&
+           string.Equals(left.ScheduleSlotId, right.ScheduleSlotId, StringComparison.Ordinal) &&
+           string.Equals(left.TriggerType, right.TriggerType, StringComparison.Ordinal) &&
+           string.Equals(left.ResourceAudience, right.ResourceAudience, StringComparison.Ordinal) &&
+           string.Equals(left.RequestIdentityHash, right.RequestIdentityHash, StringComparison.Ordinal) &&
+           string.Equals(left.DispatchIdentityHash, right.DispatchIdentityHash, StringComparison.Ordinal) &&
+           string.Equals(left.ActorBindingHash, right.ActorBindingHash, StringComparison.Ordinal) &&
+           string.Equals(left.TaskBindingHash, right.TaskBindingHash, StringComparison.Ordinal) &&
+           string.Equals(left.AutomationBindingHash, right.AutomationBindingHash, StringComparison.Ordinal) &&
+           string.Equals(left.ScheduleDigest, right.ScheduleDigest, StringComparison.Ordinal) &&
+           string.Equals(left.ConfigurationDigest, right.ConfigurationDigest, StringComparison.Ordinal) &&
+           string.Equals(left.ToolContractVersion, right.ToolContractVersion, StringComparison.Ordinal) &&
+           string.Equals(left.SchemaHash, right.SchemaHash, StringComparison.Ordinal) &&
+           string.Equals(left.PublishedCatalogVersion, right.PublishedCatalogVersion, StringComparison.Ordinal) &&
+           string.Equals(left.RuntimeIdentityHash, right.RuntimeIdentityHash, StringComparison.Ordinal);
+
+    private static bool BindingContractIdentityMatches(
+        ScheduledGovernanceReliabilityReceiptProjection projection,
+        ScheduledGovernanceReliabilityEvidenceBinding binding)
+        => string.Equals(binding.GovernanceRunId, projection.GovernanceRunId, StringComparison.Ordinal) &&
+           string.Equals(binding.ToolContractVersion, projection.ToolContractVersion, StringComparison.Ordinal) &&
+           string.Equals(binding.SchemaHash, projection.SchemaHash, StringComparison.Ordinal) &&
+           string.Equals(binding.PublishedCatalogVersion, projection.PublishedCatalogVersion, StringComparison.Ordinal) &&
+           string.Equals(
+               binding.RuntimeIdentityHash,
+               ScheduledGovernanceReliabilityEvidenceContract.ComputeRuntimeIdentityHash(projection.RuntimeIdentity),
+               StringComparison.Ordinal);
+
     private void RequireContractIdentity(
         ScheduledGovernanceReliabilityReceiptProjection projection,
         ICollection<string> reasons)
@@ -761,8 +1016,14 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
 
     private DateTimeOffset? ResolveExpectedAt(
         ScheduledGovernanceReliabilityReceiptProjection projection,
-        DateTimeOffset observedAt)
+        DateTimeOffset observedAt,
+        DateTimeOffset? attestedExpectedAt)
     {
+        if (attestedExpectedAt.HasValue)
+        {
+            return attestedExpectedAt.Value.ToUniversalTime();
+        }
+
         if (projection.ExpectedAtUtc.HasValue)
         {
             return projection.ExpectedAtUtc.Value.ToUniversalTime();
@@ -811,9 +1072,10 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
             : value < TimeSpan.Zero ? value.Negate() : value;
 
     private static bool RuntimeIdentityMatches(
-        ScheduledGovernanceRuntimeIdentity expected,
-        ScheduledGovernanceRuntimeIdentity actual)
-        => string.Equals(expected.ServiceName, actual.ServiceName, StringComparison.Ordinal) &&
+        ScheduledGovernanceRuntimeIdentity? expected,
+        ScheduledGovernanceRuntimeIdentity? actual)
+        => expected is not null && actual is not null &&
+           string.Equals(expected.ServiceName, actual.ServiceName, StringComparison.Ordinal) &&
            string.Equals(expected.BuildVersion, actual.BuildVersion, StringComparison.Ordinal) &&
            string.Equals(expected.DerivedIdentity, actual.DerivedIdentity, StringComparison.Ordinal);
 
@@ -845,6 +1107,14 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
            $"{string.Join('/', options.SchedulerLocalRunTimes.Select(x => x.ToString("HH:mm")))} " +
            $"=> intended {options.IntendedTimeZoneId} " +
            string.Join('/', options.IntendedLocalRunTimes.Select(x => x.ToString("HH:mm")));
+
+    private sealed record NaturalOriginEvaluation(
+        DateTimeOffset? ExpectedAtUtc,
+        string Status,
+        bool PlatformSignedAttestationVerified)
+    {
+        public static NaturalOriginEvaluation Unattested { get; } = new(null, "Unattested", false);
+    }
 
     private sealed record CanonicalProjection(
         ScheduledGovernanceReliabilityReceiptProjection Projection,

@@ -1,3 +1,4 @@
+using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
 
 namespace Memory.Application;
@@ -18,16 +19,24 @@ public sealed class GovernanceProjectScopeResolver(
             .Select(x => ProjectContext.Normalize(x))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        var durableGrants = actor.TenantId.HasValue
+            ? await dbContext.TenantProjectGrants
+                .AsNoTracking()
+                .Where(x => x.TenantId == actor.TenantId.Value)
+                .ToDictionaryAsync(x => x.ProjectId, StringComparer.OrdinalIgnoreCase, cancellationToken)
+            : new Dictionary<string, TenantProjectGrant>(StringComparer.OrdinalIgnoreCase);
 
         if (requested is { Length: > 0 })
         {
             return requested.Select(projectId =>
             {
                 ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
+                durableGrants.TryGetValue(projectId, out var grant);
                 return new AccessibleProjectResult(
                     projectId,
-                    CanRead: true,
+                    CanRead: grant?.CanRead ?? true,
                     CanWrite: actor.HasScope(SecurityScopes.MemoryWrite) &&
+                              (grant?.CanWrite ?? true) &&
                               (actor.AllowedProjectIds.Count == 0 ||
                                actor.AllowedProjectIds.Contains(projectId, StringComparer.OrdinalIgnoreCase)));
             }).ToArray();
@@ -51,12 +60,17 @@ public sealed class GovernanceProjectScopeResolver(
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        return projectIds.Select(projectId => new AccessibleProjectResult(
-            projectId,
-            CanRead: true,
-            CanWrite: actor.HasScope(SecurityScopes.MemoryWrite) &&
-                      (actor.AllowedProjectIds.Count == 0 ||
-                       actor.AllowedProjectIds.Contains(projectId, StringComparer.OrdinalIgnoreCase))))
+        return projectIds.Select(projectId =>
+        {
+            durableGrants.TryGetValue(projectId, out var grant);
+            return new AccessibleProjectResult(
+                projectId,
+                CanRead: grant?.CanRead ?? true,
+                CanWrite: actor.HasScope(SecurityScopes.MemoryWrite) &&
+                          (grant?.CanWrite ?? true) &&
+                          (actor.AllowedProjectIds.Count == 0 ||
+                           actor.AllowedProjectIds.Contains(projectId, StringComparer.OrdinalIgnoreCase)));
+        })
             .ToArray();
     }
 }

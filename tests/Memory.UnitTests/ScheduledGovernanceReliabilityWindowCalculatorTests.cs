@@ -6,6 +6,9 @@ namespace Memory.UnitTests;
 public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
 {
     private static readonly DateTimeOffset FirstRun = new(2026, 9, 1, 0, 0, 0, TimeSpan.Zero);
+    private static readonly Guid TenantId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+    private static readonly Guid OwnerUserId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+    private static readonly string[] ProjectIds = ["project-a"];
 
     [Fact]
     public void Default_Window_Should_Expose_The_Six_Run_Taiwan_Schedule()
@@ -234,12 +237,17 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             BusinessWorkItemsUntouched = true,
             HostDispatchCompleted = true,
             ImmutableSnapshotBound = true,
-            FixedReversibleExecutorUsed = true
+            FixedReversibleExecutorUsed = true,
+            NaturalOriginEvidence = projection.NaturalOriginEvidence
         };
         var adapted = ScheduledGovernanceReliabilityReceiptProjection.FromReceipt(
             receipt,
             ScheduledGovernanceContract.RuntimeIdentity,
-            evidence);
+            evidence) with
+        {
+            TenantId = projection.TenantId,
+            OwnerUserId = projection.OwnerUserId
+        };
         var result = new ScheduledGovernanceReliabilityWindowCalculator()
             .Calculate(new[] { adapted });
 
@@ -269,10 +277,8 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
     [Fact]
     public void Two_Different_Runs_In_The_Same_Natural_Slot_Should_Fail_Closed()
     {
-        var duplicateSlot = QualifyingRun(1) with
+        var duplicateSlot = RebindRun(QualifyingRun(0), "different-run-same-slot") with
         {
-            GovernanceRunId = "different-run-same-slot",
-            ReceiptId = Guid.NewGuid(),
             ObservedAtUtc = FirstRun.AddMinutes(2),
             StartedAt = FirstRun.AddMinutes(2),
             CompletedAt = FirstRun.AddMinutes(3)
@@ -303,6 +309,59 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
         result.Runs[0].SignedDrift.Should().Be(TimeSpan.FromMinutes(10));
     }
 
+    [Fact]
+    public void Schedule_Aligned_Run_Without_A_And_B_Should_Remain_Unattested()
+    {
+        var run = QualifyingRun(0) with { NaturalOriginEvidence = null };
+
+        var result = Calculate([run]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.Runs.Should().ContainSingle(x =>
+            !x.Qualifies &&
+            x.NaturalOriginStatus == "Unattested" &&
+            x.Reasons.Contains(ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason));
+    }
+
+    [Fact]
+    public void Verified_A_Without_Control_Plane_B_Should_Not_Qualify()
+    {
+        var run = QualifyingRun(0);
+        run = run with
+        {
+            NaturalOriginEvidence = run.NaturalOriginEvidence! with { ControlPlaneAudit = null }
+        };
+
+        var result = Calculate([run]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.NonQualifyingRuns.Should().ContainSingle(x =>
+            x.Reasons.Contains("control-plane-audit-not-verified"));
+    }
+
+    [Fact]
+    public void A_And_B_With_Different_Actor_Binding_Should_Fail_Closed()
+    {
+        var run = QualifyingRun(0);
+        var audit = run.NaturalOriginEvidence!.ControlPlaneAudit!;
+        run = run with
+        {
+            NaturalOriginEvidence = run.NaturalOriginEvidence with
+            {
+                ControlPlaneAudit = audit with
+                {
+                    Binding = audit.Binding with { ActorBindingHash = Digest("different-actor") }
+                }
+            }
+        };
+
+        var result = Calculate([run]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.NonQualifyingRuns.Should().ContainSingle(x =>
+            x.Reasons.Contains("natural-origin-actor-binding-mismatch"));
+    }
+
     private static ScheduledGovernanceReliabilityWindowResult Calculate(
         IEnumerable<ScheduledGovernanceReliabilityReceiptProjection> receipts)
         => new ScheduledGovernanceReliabilityWindowCalculator(
@@ -312,10 +371,66 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             }).Calculate(receipts);
 
     private static ScheduledGovernanceReliabilityReceiptProjection QualifyingRun(int index)
-        => new()
+    {
+        var governanceRunId = $"run-{index}";
+        var receiptId = Guid.NewGuid();
+        var expectedAt = FirstRun.AddHours(index * 4);
+        var projectScopeHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeProjectScopeHash(ProjectIds);
+        var requestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeReviewRequestIdentityHash(governanceRunId);
+        var actorBindingHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeActorBindingHash(TenantId, OwnerUserId);
+        var binding = new ScheduledGovernanceReliabilityEvidenceBinding(
+            TenantId,
+            OwnerUserId,
+            governanceRunId,
+            receiptId,
+            projectScopeHash,
+            "production",
+            expectedAt,
+            $"slot-{index}",
+            ScheduledGovernanceReliabilityEvidenceContract.NaturalScheduleTrigger,
+            ScheduledGovernanceReliabilityEvidenceContract.ResourceAudience,
+            requestIdentityHash,
+            Digest($"dispatch-{index}"),
+            actorBindingHash,
+            Digest("task"),
+            Digest("automation"),
+            Digest("schedule"),
+            Digest("configuration"),
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion,
+            ScheduledGovernanceReliabilityEvidenceContract.ComputeRuntimeIdentityHash(
+                ScheduledGovernanceContract.RuntimeIdentity));
+        var naturalOriginEvidence = new ScheduledGovernanceReliabilityEvidenceSnapshot(
+            new ScheduledGovernancePlatformAttestationEvidence(
+                ScheduledGovernanceEvidenceVerificationStatus.Verified,
+                SignatureValid: true,
+                ReplaySafe: true,
+                "https://scheduler.example.test",
+                "production",
+                "key-1",
+                binding,
+                expectedAt.AddMinutes(-1),
+                expectedAt.AddMinutes(14)),
+            new ScheduledGovernanceControlPlaneAuditEvidence(
+                ScheduledGovernanceEvidenceVerificationStatus.Verified,
+                SourceAuthenticated: true,
+                ImmutableEvent: true,
+                ReplaySafe: true,
+                "scheduler-control-plane",
+                Digest($"audit-{index}"),
+                index,
+                binding));
+
+        return new()
         {
-            ReceiptId = Guid.NewGuid(),
-            GovernanceRunId = $"run-{index}",
+            TenantId = TenantId,
+            OwnerUserId = OwnerUserId,
+            ReceiptId = receiptId,
+            GovernanceRunId = governanceRunId,
             StartedAt = FirstRun.AddHours(index * 4),
             CompletedAt = FirstRun.AddHours(index * 4).AddMinutes(1),
             ObservedAtUtc = FirstRun.AddHours(index * 4),
@@ -327,7 +442,10 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             ToolContractVersion = ScheduledGovernanceContract.ToolContractVersion,
             SchemaHash = ScheduledGovernanceContract.SchemaHash,
             PublishedCatalogVersion = ScheduledGovernanceContract.PublishedCatalogVersion,
+            RequestIdentityHash = requestIdentityHash,
+            ProjectIds = ProjectIds,
             RuntimeIdentity = ScheduledGovernanceContract.RuntimeIdentity,
+            NaturalOriginEvidence = naturalOriginEvidence,
             BaselineIdentity = "v1.1.95|catalog-automation-v4",
             Decision = ScheduledGovernanceDecision.HumanDecisionOnly,
             InitialReviewReceived = true,
@@ -353,6 +471,40 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             FinalConvergenceStatus = "ConvergedWithExceptions",
             StoppedReason = "ReviewCompleted"
         };
+    }
+
+    private static string Digest(string value)
+        => ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(value);
+
+    private static ScheduledGovernanceReliabilityReceiptProjection RebindRun(
+        ScheduledGovernanceReliabilityReceiptProjection run,
+        string governanceRunId)
+    {
+        var receiptId = Guid.NewGuid();
+        var requestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeReviewRequestIdentityHash(governanceRunId);
+        var evidence = run.NaturalOriginEvidence!;
+        var attestation = evidence.PlatformAttestation!;
+        var audit = evidence.ControlPlaneAudit!;
+        var binding = attestation.Binding with
+        {
+            GovernanceRunId = governanceRunId,
+            ReceiptId = receiptId,
+            RequestIdentityHash = requestIdentityHash,
+            DispatchIdentityHash = Digest($"dispatch-{governanceRunId}")
+        };
+        return run with
+        {
+            ReceiptId = receiptId,
+            GovernanceRunId = governanceRunId,
+            RequestIdentityHash = requestIdentityHash,
+            NaturalOriginEvidence = evidence with
+            {
+                PlatformAttestation = attestation with { Binding = binding },
+                ControlPlaneAudit = audit with { Binding = binding }
+            }
+        };
+    }
 
     private static GovernanceRunReceiptResult ReceiptFrom(
         ScheduledGovernanceReliabilityReceiptProjection projection)
@@ -390,7 +542,7 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             projection.FinalConvergenceStatus,
             projection.StoppedReason,
             projection.AuditIds,
-            [],
+            projection.ProjectIds,
             projection.IsReplay,
             projection.RunExists,
             projection.Status,
