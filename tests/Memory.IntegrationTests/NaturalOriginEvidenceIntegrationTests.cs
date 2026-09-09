@@ -99,13 +99,15 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         var factory = environment.GetFactory();
         using var scope = factory.Services.CreateScope();
         var actor = UseBootstrapActor(scope.ServiceProvider);
-        var runId = $"natural-origin-replay-{Guid.NewGuid():N}";
-        var receipt = CreateReceiptResult(runId, actor);
+        var (receipt, receiptEventKey) = await CreatePersistedReceiptAsync(
+            scope.ServiceProvider,
+            actor,
+            "natural-origin-replay");
         var entry = CreateEvidence(
             NaturalOriginEvidenceKind.PlatformAttestation,
             actor,
             receipt,
-            Digest("receipt-event"),
+            receiptEventKey,
             DateTimeOffset.UtcNow,
             sourceSequence: null);
         var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
@@ -146,20 +148,15 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         var mismatchedReceipt = receipt with { ReceiptId = Guid.NewGuid() };
         var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
 
-        await store.AppendAsync(CreateEvidence(
+        var orphanAppend = () => store.AppendAsync(CreateEvidence(
             NaturalOriginEvidenceKind.PlatformAttestation,
             actor,
             mismatchedReceipt,
             receiptRow.EventKey,
             startedAt,
             sourceSequence: null));
-        await store.AppendAsync(CreateEvidence(
-            NaturalOriginEvidenceKind.ControlPlaneAudit,
-            actor,
-            mismatchedReceipt,
-            receiptRow.EventKey,
-            startedAt,
-            sourceSequence: 0));
+        await orphanAppend.Should().ThrowAsync<DbUpdateException>();
+        db.ChangeTracker.Clear();
 
         var reliability = await scope.ServiceProvider
             .GetRequiredService<IScheduledGovernanceReliabilityService>()
@@ -168,8 +165,8 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         var run = reliability.Runs.Single(item => item.GovernanceRunId == runId);
         run.NaturalOriginStatus.Should().Be("Unattested");
         run.PlatformSignedNaturalOriginAttested.Should().BeFalse();
-        run.Reasons.Should().Contain("platform-attestation-not-verified");
-        run.Reasons.Should().Contain("control-plane-audit-not-verified");
+        run.Reasons.Should().Contain(
+            ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason);
     }
 
     [DockerRequiredFact]
@@ -178,13 +175,16 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         var factory = environment.GetFactory();
         using var scope = factory.Services.CreateScope();
         var actor = UseBootstrapActor(scope.ServiceProvider);
-        var receipt = CreateReceiptResult($"natural-origin-ledger-{Guid.NewGuid():N}", actor);
+        var (receipt, receiptEventKey) = await CreatePersistedReceiptAsync(
+            scope.ServiceProvider,
+            actor,
+            "natural-origin-ledger");
         var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
         var invalid = CreateEvidence(
             NaturalOriginEvidenceKind.PlatformAttestation,
             actor,
             receipt,
-            Digest("receipt-event-invalid"),
+            receiptEventKey,
             DateTimeOffset.UtcNow,
             sourceSequence: null);
         invalid.Issuer = "https://scheduler.example.test\nnoncanonical";
@@ -197,7 +197,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             NaturalOriginEvidenceKind.PlatformAttestation,
             actor,
             receipt,
-            Digest("receipt-event-valid"),
+            receiptEventKey,
             DateTimeOffset.UtcNow,
             sourceSequence: null);
         await store.AppendAsync(valid);
@@ -213,6 +213,16 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             $"DELETE FROM natural_origin_evidence_ledger WHERE id = {valid.Id}");
         var deleteFailure = await delete.Should().ThrowAsync<PostgresException>();
         deleteFailure.Which.SqlState.Should().Be(PostgresErrorCodes.RaiseException);
+
+        var truncateEvidence = async () => await db.Database.ExecuteSqlRawAsync(
+            "TRUNCATE TABLE natural_origin_evidence_ledger");
+        var truncateEvidenceFailure = await truncateEvidence.Should().ThrowAsync<PostgresException>();
+        truncateEvidenceFailure.Which.SqlState.Should().Be(PostgresErrorCodes.RaiseException);
+
+        var truncateReceipts = async () => await db.Database.ExecuteSqlRawAsync(
+            "TRUNCATE TABLE governance_run_receipts CASCADE");
+        var truncateReceiptsFailure = await truncateReceipts.Should().ThrowAsync<PostgresException>();
+        truncateReceiptsFailure.Which.SqlState.Should().Be(PostgresErrorCodes.RaiseException);
 
         (await db.NaturalOriginEvidenceLedgerEntries.AsNoTracking()
             .CountAsync(row => row.Id == valid.Id)).Should().Be(1);
@@ -355,17 +365,31 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         };
     }
 
-    private static GovernanceRunReceiptResult CreateReceiptResult(
-        string runId,
-        ContextHubRequestActor actor)
-        => new(
-            Guid.NewGuid(), runId, actor.Username, "Scheduled", DateTimeOffset.UtcNow,
-            DateTimeOffset.UtcNow, ScheduledGovernanceContract.ToolContractVersion,
-            ScheduledGovernanceContract.SchemaHash,
-            ScheduledGovernanceContract.PublishedCatalogVersion,
-            "snapshot", "snapshot", true, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, "NoOpConverged", "ReviewCompleted", [],
-            ["test-project"], false, true, "Completed", false, string.Empty, null);
+    private static async Task<(GovernanceRunReceiptResult Receipt, string EventKey)> CreatePersistedReceiptAsync(
+        IServiceProvider services,
+        ContextHubRequestActor actor,
+        string prefix)
+    {
+        var receipts = services.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"{prefix}-{Guid.NewGuid():N}";
+        var projectId = $"evidence-project-{Guid.NewGuid():N}";
+        var startedAt = DateTimeOffset.UtcNow;
+        var identity = CurrentScheduledIdentity();
+        await receipts.RecordReviewStartedAsync(runId, startedAt, identity, CancellationToken.None);
+        await receipts.RecordReviewAsync(
+            CreateReview(runId, projectId, identity),
+            startedAt,
+            CancellationToken.None);
+        var receipt = (await receipts.GetAsync(runId, CancellationToken.None))!;
+        var eventKey = await services.GetRequiredService<MemoryDbContext>()
+            .GovernanceRunReceipts.AsNoTracking()
+            .Where(row => row.Id == receipt.ReceiptId &&
+                          row.TenantId == actor.TenantId &&
+                          row.OwnerUserId == actor.UserId)
+            .Select(row => row.EventKey)
+            .SingleAsync();
+        return (receipt, eventKey);
+    }
 
     private static GovernanceReceiptContractIdentity CurrentScheduledIdentity()
         => new(
