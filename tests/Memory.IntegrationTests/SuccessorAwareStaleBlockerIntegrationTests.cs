@@ -157,7 +157,7 @@ public sealed class SuccessorAwareStaleBlockerIntegrationTests(ContainerTestEnvi
         });
 
         await executionEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await Task.Delay(250);
+        await WaitForWriterBlockedByResourceLockAsync(resourceLockDb);
         executionTask.IsCompleted.Should().BeFalse("the archive must wait at the locked resource after reading the open finding");
 
         using (var blockerScope = environment.GetFactory().Services.CreateScope())
@@ -189,6 +189,33 @@ public sealed class SuccessorAwareStaleBlockerIntegrationTests(ContainerTestEnvi
         (await seedDb.ConversationInsights.CountAsync(x =>
             x.SourceSystem == ChatGptProposalService.SourceSystem && x.ProjectId == projectId))
             .Should().Be(proposalCountBefore);
+    }
+
+    private static async Task WaitForWriterBlockedByResourceLockAsync(
+        MemoryDbContext holderDb,
+        CancellationToken cancellationToken = default)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var writerIsBlocked = await holderDb.Database.SqlQueryRaw<bool>("""
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_stat_activity AS waiter
+                        WHERE waiter.pid <> pg_backend_pid()
+                          AND pg_backend_pid() = ANY(pg_blocking_pids(waiter.pid))) AS "Value"
+                    """)
+                .SingleAsync(cancellationToken);
+            if (writerIsBlocked)
+            {
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+        }
+
+        throw new TimeoutException(
+            "PostgreSQL did not report a governance writer blocked by the held resource row lock.");
     }
 
     private static void SetActor(IServiceProvider services, TenantUser user)

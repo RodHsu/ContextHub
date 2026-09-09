@@ -90,6 +90,7 @@ public static class DependencyInjection
         services.AddScoped<IAutonomousRetentionService, AutonomousRetentionService>();
         services.AddScoped<IGovernanceRunReceiptService, GovernanceRunReceiptService>();
         services.AddScoped<INaturalOriginEvidenceStore, NaturalOriginEvidenceStore>();
+        services.AddScoped<IScheduledGovernanceAuthorityEpochLedger, ScheduledGovernanceAuthorityEpochLedger>();
         services.AddScoped<IScheduledGovernanceReliabilityEvidenceProvider, ScheduledGovernanceReliabilityEvidenceProvider>();
         services.AddScoped<IScheduledGovernanceServerSafetyEvidenceProvider, ScheduledGovernanceServerSafetyEvidenceProvider>();
         services.AddSingleton<IScheduledGovernanceNaturalOriginAuthorityProvider,

@@ -62,6 +62,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<GovernanceRunReceipt> GovernanceRunReceipts => Set<GovernanceRunReceipt>();
     public DbSet<ScheduledGovernanceReliabilityRun> ScheduledGovernanceReliabilityRuns => Set<ScheduledGovernanceReliabilityRun>();
     public DbSet<NaturalOriginEvidenceLedgerEntry> NaturalOriginEvidenceLedgerEntries => Set<NaturalOriginEvidenceLedgerEntry>();
+    public DbSet<ScheduledGovernanceAuthorityEpoch> ScheduledGovernanceAuthorityEpochs => Set<ScheduledGovernanceAuthorityEpoch>();
     public DbSet<ProjectHierarchy> ProjectHierarchies => Set<ProjectHierarchy>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
@@ -1235,6 +1236,26 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
                 x.EvidenceKind
             }).IsUnique();
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.GovernanceRunIdHash, x.ExpectedAtUtc });
+        });
+
+        modelBuilder.Entity<ScheduledGovernanceAuthorityEpoch>(entity =>
+        {
+            entity.ToTable("scheduled_governance_authority_epochs");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.Environment).HasColumnName("environment");
+            entity.Property(x => x.ConfigurationDigest).HasColumnName("configuration_digest");
+            entity.Property(x => x.AuthorityEpochDigest).HasColumnName("authority_epoch_digest");
+            entity.Property(x => x.Generation).HasColumnName("generation");
+            entity.Property(x => x.PreviousAuthorityEpochDigest).HasColumnName("previous_authority_epoch_digest");
+            entity.Property(x => x.PreviousGeneration).HasColumnName("previous_generation");
+            entity.Property(x => x.RequestHash).HasColumnName("request_hash");
+            entity.Property(x => x.CreatedAtUtc).HasColumnName("created_at_utc");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.Environment, x.Generation }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.Environment, x.AuthorityEpochDigest }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.Environment, x.RequestHash }).IsUnique();
         });
 
         modelBuilder.Entity<ProjectHierarchy>(entity =>

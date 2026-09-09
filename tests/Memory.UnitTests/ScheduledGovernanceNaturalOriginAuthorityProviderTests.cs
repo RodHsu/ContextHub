@@ -25,6 +25,8 @@ public sealed class ScheduledGovernanceNaturalOriginAuthorityProviderTests
     [Theory]
     [InlineData("PlatformIssuer", "")]
     [InlineData("Environment", " production")]
+    [InlineData("Environment", "production-環境")]
+    [InlineData("Environment", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
     [InlineData("ControlPlaneSourceSystem", "scheduler\ncontrol")]
     [InlineData("TaskBindingHash", "not-a-digest")]
     [InlineData("ScheduleDigest", null)]

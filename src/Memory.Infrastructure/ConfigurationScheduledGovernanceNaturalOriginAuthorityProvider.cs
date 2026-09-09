@@ -1,4 +1,5 @@
 using Memory.Application;
+using Memory.Domain;
 using Microsoft.Extensions.Configuration;
 
 namespace Memory.Infrastructure;
@@ -18,7 +19,7 @@ public sealed class ConfigurationScheduledGovernanceNaturalOriginAuthorityProvid
     {
         var platformIssuer = ReadIdentifier("PlatformIssuer");
         var controlPlaneSourceSystem = ReadIdentifier("ControlPlaneSourceSystem");
-        var environment = ReadIdentifier("Environment");
+        var environment = ReadEnvironment();
         var taskBindingHash = ReadDigest("TaskBindingHash");
         var automationBindingHash = ReadDigest("AutomationBindingHash");
         var scheduleDigest = ReadDigest("ScheduleDigest");
@@ -59,6 +60,14 @@ public sealed class ConfigurationScheduledGovernanceNaturalOriginAuthorityProvid
         }
 
         return value;
+    }
+
+    private string? ReadEnvironment()
+    {
+        var value = configuration[$"{SectionName}:Environment"];
+        return value is not null && ScheduledGovernanceAuthorityEpochContract.IsValidEnvironment(value)
+            ? value
+            : null;
     }
 
     private string? ReadDigest(string key)
