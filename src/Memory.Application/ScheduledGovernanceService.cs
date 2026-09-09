@@ -31,7 +31,8 @@ public sealed class ScheduledGovernanceService(
             governanceRunId,
             startedAt,
             ReceiptContractIdentity,
-            cancellationToken);
+            cancellationToken,
+            request.IsReReview);
 
         KnowledgeReviewResult review;
         try
@@ -57,7 +58,8 @@ public sealed class ScheduledGovernanceService(
                 "OperationCanceled",
                 "KnowledgeReview",
                 ReceiptContractIdentity,
-                CancellationToken.None);
+                CancellationToken.None,
+                request.IsReReview);
             await ObserveReceiptAsync(
                 await receipts.GetAsync(governanceRunId, CancellationToken.None),
                 CancellationToken.None);
@@ -72,7 +74,8 @@ public sealed class ScheduledGovernanceService(
                 ex.GetType().Name,
                 "KnowledgeReview",
                 ReceiptContractIdentity,
-                CancellationToken.None);
+                CancellationToken.None,
+                request.IsReReview);
             await ObserveReceiptAsync(
                 await receipts.GetAsync(governanceRunId, CancellationToken.None),
                 CancellationToken.None);

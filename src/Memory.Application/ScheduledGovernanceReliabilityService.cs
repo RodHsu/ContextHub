@@ -14,7 +14,9 @@ public sealed class ScheduledGovernanceReliabilityService(
     IApplicationDbContext dbContext,
     IRequestActorAccessor actorAccessor,
     TimeProvider timeProvider,
-    IScheduledGovernanceReliabilityEvidenceProvider? evidenceProvider = null) : IScheduledGovernanceReliabilityService
+    IScheduledGovernanceReliabilityEvidenceProvider? evidenceProvider = null,
+    IScheduledGovernanceServerSafetyEvidenceProvider? serverSafetyEvidenceProvider = null,
+    IScheduledGovernanceNaturalOriginAuthorityProvider? naturalOriginAuthorityProvider = null) : IScheduledGovernanceReliabilityService
 {
     internal const int MaxGovernanceRunIdLength = 128;
 
@@ -31,8 +33,8 @@ public sealed class ScheduledGovernanceReliabilityService(
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly ScheduledGovernanceReliabilityWindowOptions Options =
         ScheduledGovernanceReliabilityWindowOptions.Default;
-    private static readonly ScheduledGovernanceReliabilityWindowCalculator Calculator =
-        new(Options);
+    internal static readonly string CurrentScheduleDigest =
+        ComputeScheduleDigest(Options);
 
     public async Task<ScheduledGovernanceReliabilitySummary> ObserveAsync(
         GovernanceRunReceiptResult receipt,
@@ -40,7 +42,12 @@ public sealed class ScheduledGovernanceReliabilityService(
     {
         ArgumentNullException.ThrowIfNull(receipt);
         var actor = RequireReadActor();
-        var projection = await BuildProjectionAsync(actor, receipt, cancellationToken);
+        var current = CreateCurrentAuthorityContext();
+        var projection = await BuildProjectionAsync(
+            actor,
+            receipt,
+            current.Authority,
+            cancellationToken);
         var now = timeProvider.GetUtcNow();
         var runId = NormalizeRunId(receipt.GovernanceRunId);
         var entity = await dbContext.ScheduledGovernanceReliabilityRuns
@@ -52,7 +59,7 @@ public sealed class ScheduledGovernanceReliabilityService(
 
         if (entity is null)
         {
-            entity = CreateEntity(actor, projection, now);
+            entity = CreateEntity(actor, projection, now, current.Calculator);
             await dbContext.ScheduledGovernanceReliabilityRuns.AddAsync(entity, cancellationToken);
         }
         else if (receipt.IsReplay)
@@ -61,7 +68,12 @@ public sealed class ScheduledGovernanceReliabilityService(
         }
         else
         {
-            ApplyCanonicalProjection(entity, projection, now, preserveReplayMetadata: true);
+            ApplyCanonicalProjectionIfNewer(
+                entity,
+                projection,
+                now,
+                current.Calculator,
+                preserveReplayMetadata: true);
         }
 
         await SaveWithConcurrentInsertRecoveryAsync(
@@ -71,32 +83,76 @@ public sealed class ScheduledGovernanceReliabilityService(
             entity,
             now,
             isNewEntity,
+            current.Calculator,
             cancellationToken);
         var rows = await ReadRowsAsync(actor, cancellationToken);
-        return await BuildSummaryAsync(actor, rows, cancellationToken);
+        return await BuildSummaryAsync(actor, rows, current.Calculator, cancellationToken);
     }
 
     public async Task<ScheduledGovernanceReliabilitySummary> GetAsync(
         CancellationToken cancellationToken)
     {
         var actor = RequireReadActor();
+        var current = CreateCurrentAuthorityContext();
         var rows = await ReadRowsAsync(actor, cancellationToken);
-        return await BuildSummaryAsync(actor, rows, cancellationToken);
+        return await BuildSummaryAsync(actor, rows, current.Calculator, cancellationToken);
     }
 
     private async Task<ScheduledGovernanceReliabilityReceiptProjection> BuildProjectionAsync(
         ContextHubRequestActor actor,
         GovernanceRunReceiptResult receipt,
+        ScheduledGovernanceNaturalOriginAuthority? authority,
         CancellationToken cancellationToken)
     {
+        var serverSafetyEvidence = await GetServerSafetyEvidenceAsync(
+            actor,
+            receipt.ReceiptId,
+            receipt.GovernanceRunId,
+            cancellationToken);
         var evidence = await GetNaturalOriginEvidenceAsync(
             actor,
             receipt.ReceiptId,
             receipt.GovernanceRunId,
             receipt.ProjectIds,
+            serverSafetyEvidence?.ReviewRequestIdentityHash,
             cancellationToken);
 
-        return BuildProjection(receipt, actor, evidence);
+        return BuildProjection(receipt, actor, evidence, serverSafetyEvidence, authority);
+    }
+
+    private async Task<ScheduledGovernanceServerSafetyEvidenceSnapshot?> GetServerSafetyEvidenceAsync(
+        ContextHubRequestActor actor,
+        Guid receiptId,
+        string governanceRunId,
+        CancellationToken cancellationToken)
+    {
+        if (serverSafetyEvidenceProvider is null ||
+            !actor.TenantId.HasValue ||
+            !actor.UserId.HasValue ||
+            receiptId == Guid.Empty)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await serverSafetyEvidenceProvider.GetAsync(
+                new ScheduledGovernanceServerSafetyEvidenceQuery(
+                    actor.TenantId.Value,
+                    actor.UserId.Value,
+                    receiptId,
+                    NormalizeRunId(governanceRunId)),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // A read or integrity failure is unknown evidence, never success.
+            return null;
+        }
     }
 
     private async Task<ScheduledGovernanceReliabilityEvidenceSnapshot?> GetNaturalOriginEvidenceAsync(
@@ -104,6 +160,7 @@ public sealed class ScheduledGovernanceReliabilityService(
         Guid receiptId,
         string governanceRunId,
         IReadOnlyList<string> projectIds,
+        string? reviewRequestIdentityHash,
         CancellationToken cancellationToken)
     {
         if (evidenceProvider is null || !actor.TenantId.HasValue || !actor.UserId.HasValue)
@@ -114,7 +171,9 @@ public sealed class ScheduledGovernanceReliabilityService(
         var runId = NormalizeRunId(governanceRunId);
         var projectScopeHash = ScheduledGovernanceReliabilityEvidenceContract
             .ComputeProjectScopeHash(projectIds);
-        if (receiptId == Guid.Empty || string.IsNullOrWhiteSpace(projectScopeHash))
+        if (receiptId == Guid.Empty ||
+            string.IsNullOrWhiteSpace(projectScopeHash) ||
+            string.IsNullOrWhiteSpace(reviewRequestIdentityHash))
         {
             return null;
         }
@@ -127,7 +186,7 @@ public sealed class ScheduledGovernanceReliabilityService(
                     actor.UserId.Value,
                     receiptId,
                     runId,
-                    ScheduledGovernanceReliabilityEvidenceContract.ComputeReviewRequestIdentityHash(runId),
+                    reviewRequestIdentityHash,
                     projectScopeHash),
                 cancellationToken);
         }
@@ -150,10 +209,39 @@ public sealed class ScheduledGovernanceReliabilityService(
         ScheduledGovernanceReliabilityRun entity,
         DateTimeOffset now,
         bool isNewEntity,
+        ScheduledGovernanceReliabilityWindowCalculator calculator,
         CancellationToken cancellationToken)
     {
         try
         {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException) when (!isNewEntity)
+        {
+            // ReceiptEventSequence is an optimistic-concurrency token. One
+            // bounded reload prevents an older receipt projection from
+            // winning a cross-instance race; a second conflict propagates.
+            dbContext.ClearTrackedChanges();
+            var concurrent = await LoadRunAsync(actor, receipt.GovernanceRunId, cancellationToken);
+            if (concurrent is null)
+            {
+                throw;
+            }
+
+            if (receipt.IsReplay)
+            {
+                AddReplayProjection(concurrent, receipt.ReceiptId, now);
+            }
+            else
+            {
+                ApplyCanonicalProjectionIfNewer(
+                    concurrent,
+                    projection,
+                    now,
+                    calculator,
+                    preserveReplayMetadata: true);
+            }
+
             await dbContext.SaveChangesAsync(cancellationToken);
         }
         catch (DbUpdateException)
@@ -168,11 +256,7 @@ public sealed class ScheduledGovernanceReliabilityService(
             // missing table, invalid migration, or other database failure is
             // allowed to propagate instead of being hidden as a race.
             dbContext.ClearTrackedChanges();
-            var concurrent = await dbContext.ScheduledGovernanceReliabilityRuns
-                .SingleOrDefaultAsync(x => x.TenantId == actor.TenantId &&
-                                           x.OwnerUserId == actor.UserId &&
-                                           x.GovernanceRunId == NormalizeRunId(receipt.GovernanceRunId),
-                    cancellationToken);
+            var concurrent = await LoadRunAsync(actor, receipt.GovernanceRunId, cancellationToken);
             if (concurrent is null)
             {
                 throw;
@@ -184,12 +268,27 @@ public sealed class ScheduledGovernanceReliabilityService(
             }
             else
             {
-                ApplyCanonicalProjection(concurrent, projection, now, preserveReplayMetadata: true);
+                ApplyCanonicalProjectionIfNewer(
+                    concurrent,
+                    projection,
+                    now,
+                    calculator,
+                    preserveReplayMetadata: true);
             }
 
             await dbContext.SaveChangesAsync(cancellationToken);
         }
     }
+
+    private Task<ScheduledGovernanceReliabilityRun?> LoadRunAsync(
+        ContextHubRequestActor actor,
+        string governanceRunId,
+        CancellationToken cancellationToken)
+        => dbContext.ScheduledGovernanceReliabilityRuns.SingleOrDefaultAsync(
+            x => x.TenantId == actor.TenantId &&
+                 x.OwnerUserId == actor.UserId &&
+                 x.GovernanceRunId == NormalizeRunId(governanceRunId),
+            cancellationToken);
 
     private async Task<IReadOnlyList<ScheduledGovernanceReliabilityRun>> ReadRowsAsync(
         ContextHubRequestActor actor,
@@ -204,6 +303,7 @@ public sealed class ScheduledGovernanceReliabilityService(
     private async Task<ScheduledGovernanceReliabilitySummary> BuildSummaryAsync(
         ContextHubRequestActor actor,
         IReadOnlyList<ScheduledGovernanceReliabilityRun> rows,
+        ScheduledGovernanceReliabilityWindowCalculator calculator,
         CancellationToken cancellationToken)
     {
         var projections = new List<ScheduledGovernanceReliabilityReceiptProjection>(rows.Count * 2);
@@ -221,19 +321,41 @@ public sealed class ScheduledGovernanceReliabilityService(
                 OwnerUserId = row.OwnerUserId,
                 GovernanceRunId = NormalizeRunId(row.GovernanceRunId),
                 ReceiptId = row.ReceiptId,
+                ReceiptEventSequence = row.ReceiptEventSequence,
                 IsReplay = row.IsReplay
             };
             if (IsScheduled(projection.ExecutionMode))
             {
+                var serverSafetyEvidence = await GetServerSafetyEvidenceAsync(
+                    actor,
+                    projection.ReceiptId,
+                    projection.GovernanceRunId,
+                    cancellationToken);
                 var evidence = await GetNaturalOriginEvidenceAsync(
                     actor,
                     projection.ReceiptId,
                     projection.GovernanceRunId,
                     projection.ProjectIds,
+                    serverSafetyEvidence?.ReviewRequestIdentityHash,
                     cancellationToken);
                 projection = projection with
                 {
                     NaturalOriginEvidence = evidence,
+                    RequestIdentityHash = serverSafetyEvidence?.ReviewRequestIdentityHash ?? string.Empty,
+                    RuntimeIdentity = serverSafetyEvidence?.CapturedRuntimeIdentity ?? projection.RuntimeIdentity,
+                    InitialReviewReceived = serverSafetyEvidence?.InitialReviewReceived,
+                    ReceiptEventSequence = serverSafetyEvidence?.ReceiptEventSequence ??
+                                           projection.ReceiptEventSequence,
+                    CountInvariantSatisfied = serverSafetyEvidence?.CountInvariantSatisfied,
+                    DecisionObeyed = serverSafetyEvidence?.DecisionObeyed,
+                    NoGeneralConnectorFallback = serverSafetyEvidence?.NoGeneralConnectorFallback,
+                    NoUnauthorizedMutation = serverSafetyEvidence?.NoUnauthorizedMutation,
+                    NoDuplicateMutation = serverSafetyEvidence?.NoDuplicateMutation,
+                    DisplayNameUnchanged = serverSafetyEvidence?.DisplayNameUnchanged,
+                    BusinessWorkItemsUntouched = serverSafetyEvidence?.BusinessWorkItemsUntouched,
+                    HostDispatchCompleted = serverSafetyEvidence?.HostDispatchCompleted,
+                    ImmutableSnapshotBound = serverSafetyEvidence?.ImmutableSnapshotBound,
+                    FixedReversibleExecutorUsed = serverSafetyEvidence?.FixedReversibleExecutorUsed,
                     ResetReason = evidence is null ||
                                   !string.Equals(
                                       projection.ResetReason,
@@ -255,7 +377,7 @@ public sealed class ScheduledGovernanceReliabilityService(
             }
         }
 
-        var result = Calculator.Calculate(projections);
+        var result = calculator.Calculate(projections);
         return ToSummary(result);
     }
 
@@ -352,28 +474,63 @@ public sealed class ScheduledGovernanceReliabilityService(
             "contract-version-mismatch",
             "schema-hash-mismatch",
             "catalog-version-mismatch",
-            "runtime-identity-mismatch"
+            "runtime-identity-mismatch",
+            "natural-origin-authority-baseline-not-proven",
+            "natural-origin-authority-baseline-mismatch"
         };
         return result.NonQualifyingRuns.Any(x => x.Reasons.Any(relevantReasons.Contains));
     }
 
     internal static ScheduledGovernanceReliabilityReceiptProjection BuildProjection(
         GovernanceRunReceiptResult receipt)
-        => BuildProjection(receipt, actor: null, naturalOriginEvidence: null);
+        => BuildProjection(
+            receipt,
+            actor: null,
+            naturalOriginEvidence: null,
+            serverSafetyEvidence: null,
+            authority: null);
 
     internal static ScheduledGovernanceReliabilityReceiptProjection BuildProjection(
         GovernanceRunReceiptResult receipt,
         ContextHubRequestActor? actor,
-        ScheduledGovernanceReliabilityEvidenceSnapshot? naturalOriginEvidence)
+        ScheduledGovernanceReliabilityEvidenceSnapshot? naturalOriginEvidence,
+        ScheduledGovernanceServerSafetyEvidenceSnapshot? serverSafetyEvidence = null,
+        ScheduledGovernanceNaturalOriginAuthority? authority = null)
     {
-        var projection = ScheduledGovernanceReliabilityReceiptProjection.FromReceipt(
+        var capturedRuntimeIdentity = IsManual(receipt.ExecutionMode)
+            ? ScheduledGovernanceContract.RuntimeIdentity
+            : serverSafetyEvidence?.CapturedRuntimeIdentity;
+        var baseProjection = ScheduledGovernanceReliabilityReceiptProjection.FromReceipt(
             receipt,
-            ScheduledGovernanceContract.RuntimeIdentity) with
+            capturedRuntimeIdentity);
+        var projection = baseProjection with
         {
             TenantId = actor?.TenantId,
             OwnerUserId = actor?.UserId,
             GovernanceRunId = NormalizeRunId(receipt.GovernanceRunId),
+            ReceiptEventSequence = serverSafetyEvidence?.ReceiptEventSequence,
+            RequestIdentityHash = IsManual(receipt.ExecutionMode)
+                ? receipt.RequestIdentityHash
+                : serverSafetyEvidence?.ReviewRequestIdentityHash ?? string.Empty,
+            InitialReviewReceived = IsManual(receipt.ExecutionMode)
+                ? !string.IsNullOrWhiteSpace(receipt.InitialSnapshotToken)
+                : serverSafetyEvidence?.InitialReviewReceived,
+            BaselineIdentity = IsManual(receipt.ExecutionMode)
+                ? baseProjection.BaselineIdentity
+                : ScheduledGovernanceReliabilityReceiptProjection.BindAuthorityEpoch(
+                    baseProjection.BaselineIdentity,
+                    authority?.AuthorityEpochDigest),
             NaturalOriginEvidence = naturalOriginEvidence,
+            CountInvariantSatisfied = serverSafetyEvidence?.CountInvariantSatisfied,
+            DecisionObeyed = serverSafetyEvidence?.DecisionObeyed,
+            NoGeneralConnectorFallback = serverSafetyEvidence?.NoGeneralConnectorFallback,
+            NoUnauthorizedMutation = serverSafetyEvidence?.NoUnauthorizedMutation,
+            NoDuplicateMutation = serverSafetyEvidence?.NoDuplicateMutation,
+            DisplayNameUnchanged = serverSafetyEvidence?.DisplayNameUnchanged,
+            BusinessWorkItemsUntouched = serverSafetyEvidence?.BusinessWorkItemsUntouched,
+            HostDispatchCompleted = serverSafetyEvidence?.HostDispatchCompleted,
+            ImmutableSnapshotBound = serverSafetyEvidence?.ImmutableSnapshotBound,
+            FixedReversibleExecutorUsed = serverSafetyEvidence?.FixedReversibleExecutorUsed,
             ExpectedAtUtc = naturalOriginEvidence?.PlatformAttestation?.Binding.ExpectedAtUtc ??
                             naturalOriginEvidence?.ControlPlaneAudit?.Binding.ExpectedAtUtc
         };
@@ -399,7 +556,8 @@ public sealed class ScheduledGovernanceReliabilityService(
     private static ScheduledGovernanceReliabilityRun CreateEntity(
         ContextHubRequestActor actor,
         ScheduledGovernanceReliabilityReceiptProjection projection,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        ScheduledGovernanceReliabilityWindowCalculator calculator)
     {
         var entity = new ScheduledGovernanceReliabilityRun
         {
@@ -409,7 +567,12 @@ public sealed class ScheduledGovernanceReliabilityService(
             CreatedAt = now,
             UpdatedAt = now
         };
-        ApplyCanonicalProjection(entity, projection, now, preserveReplayMetadata: false);
+        ApplyCanonicalProjection(
+            entity,
+            projection,
+            now,
+            calculator,
+            preserveReplayMetadata: false);
         if (projection.IsReplay)
         {
             entity.IsReplay = true;
@@ -424,6 +587,7 @@ public sealed class ScheduledGovernanceReliabilityService(
         ScheduledGovernanceReliabilityRun entity,
         ScheduledGovernanceReliabilityReceiptProjection projection,
         DateTimeOffset now,
+        ScheduledGovernanceReliabilityWindowCalculator calculator,
         bool preserveReplayMetadata)
     {
         // RuntimeIdentity and BaselineIdentity are capture-time evidence. A
@@ -436,9 +600,10 @@ public sealed class ScheduledGovernanceReliabilityService(
             GovernanceRunId = NormalizeRunId(projection.GovernanceRunId),
             IsReplay = false
         };
-        var evidence = Calculator.Calculate([storedProjection]).Runs.FirstOrDefault();
+        var evidence = calculator.Calculate([storedProjection]).Runs.FirstOrDefault();
         var schedule = Options;
         entity.ReceiptId = projection.ReceiptId;
+        entity.ReceiptEventSequence = projection.ReceiptEventSequence;
         entity.ExecutionMode = projection.ExecutionMode?.Trim() ?? string.Empty;
         entity.IsReplay = false;
         entity.ObservedAtUtc = ObservedAt(storedProjection);
@@ -493,6 +658,118 @@ public sealed class ScheduledGovernanceReliabilityService(
             NaturalOriginEvidence = incoming.NaturalOriginEvidence
         };
     }
+
+    private static void ApplyCanonicalProjectionIfNewer(
+        ScheduledGovernanceReliabilityRun entity,
+        ScheduledGovernanceReliabilityReceiptProjection projection,
+        DateTimeOffset now,
+        ScheduledGovernanceReliabilityWindowCalculator calculator,
+        bool preserveReplayMetadata)
+    {
+        if (!ShouldApplyCanonicalProjection(
+                entity.ReceiptEventSequence,
+                entity.ReceiptId,
+                projection.ReceiptEventSequence,
+                projection.ReceiptId))
+        {
+            return;
+        }
+
+        ApplyCanonicalProjection(entity, projection, now, calculator, preserveReplayMetadata);
+    }
+
+    internal static bool ShouldApplyCanonicalProjection(
+        long? storedReceiptEventSequence,
+        Guid storedReceiptId,
+        long? incomingReceiptEventSequence,
+        Guid incomingReceiptId)
+    {
+        if (!incomingReceiptEventSequence.HasValue)
+        {
+            return !storedReceiptEventSequence.HasValue && storedReceiptId == incomingReceiptId;
+        }
+
+        if (!storedReceiptEventSequence.HasValue ||
+            incomingReceiptEventSequence.Value > storedReceiptEventSequence.Value)
+        {
+            return true;
+        }
+
+        return incomingReceiptEventSequence.Value == storedReceiptEventSequence.Value &&
+               storedReceiptId == incomingReceiptId;
+    }
+
+    private CurrentAuthorityContext CreateCurrentAuthorityContext()
+    {
+        ScheduledGovernanceNaturalOriginAuthority? authority = null;
+        try
+        {
+            var snapshot = naturalOriginAuthorityProvider?.GetCurrent();
+            if (snapshot is not null && IsCurrentScheduleDigest(snapshot.ScheduleDigest))
+            {
+                authority = new ScheduledGovernanceNaturalOriginAuthority(
+                    snapshot.PlatformIssuer,
+                    snapshot.ControlPlaneSourceSystem,
+                    snapshot.Environment,
+                    snapshot.TaskBindingHash,
+                    snapshot.AutomationBindingHash,
+                    snapshot.ScheduleDigest,
+                    ComputeConfigurationDigest(
+                        snapshot.ConfigurationDigest,
+                        snapshot.AuthorityEpochDigest),
+                    snapshot.AuthorityEpochDigest);
+                authority.Validate();
+            }
+        }
+        catch
+        {
+            // Configuration/provider failures are deliberately represented as
+            // unavailable authority. The calculator then fails closed.
+            authority = null;
+        }
+
+        var calculator = new ScheduledGovernanceReliabilityWindowCalculator(Options with
+        {
+            ExpectedNaturalOriginAuthority = authority
+        });
+        return new CurrentAuthorityContext(authority, calculator);
+    }
+
+    private static string ComputeScheduleDigest(ScheduledGovernanceReliabilityWindowOptions options)
+        => ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(string.Join('|',
+            "scheduled-governance-schedule-v1",
+            options.IntendedTimeZoneId,
+            options.SchedulerTimeZoneId,
+            options.Cadence.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            string.Join(',', options.IntendedLocalRunTimes.Select(value => value.ToString("HH:mm"))),
+            string.Join(',', options.SchedulerLocalRunTimes.Select(value => value.ToString("HH:mm")))));
+
+    internal static bool IsCurrentScheduleDigest(string? value)
+        => string.Equals(value, CurrentScheduleDigest, StringComparison.Ordinal);
+
+    internal const string ConfigurationDigestBindingVersion =
+        "scheduled-governance-configuration-v1";
+
+    internal static string ComputeConfigurationDigest(
+        string? baseConfigurationDigest,
+        string? authorityEpochDigest)
+    {
+        if (!IsDigest(baseConfigurationDigest) || !IsDigest(authorityEpochDigest))
+        {
+            throw new ArgumentException(
+                "Natural-origin configuration digest binding is incomplete or malformed.");
+        }
+
+        return ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(string.Join(
+            '|',
+            ConfigurationDigestBindingVersion,
+            baseConfigurationDigest,
+            authorityEpochDigest));
+    }
+
+    private static bool IsDigest(string? value)
+        => value is { Length: 64 } &&
+           value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static void AddReplayProjection(
         ScheduledGovernanceReliabilityRun entity,
@@ -626,4 +903,8 @@ public sealed class ScheduledGovernanceReliabilityService(
            $"{string.Join('/', options.SchedulerLocalRunTimes.Select(x => x.ToString("HH:mm")))} " +
            $"=> intended {options.IntendedTimeZoneId} " +
            string.Join('/', options.IntendedLocalRunTimes.Select(x => x.ToString("HH:mm")));
+
+    private sealed record CurrentAuthorityContext(
+        ScheduledGovernanceNaturalOriginAuthority? Authority,
+        ScheduledGovernanceReliabilityWindowCalculator Calculator);
 }

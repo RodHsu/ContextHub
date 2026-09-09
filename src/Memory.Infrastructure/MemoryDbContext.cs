@@ -1066,9 +1066,24 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.ToolContractVersion).HasColumnName("tool_contract_version");
             entity.Property(x => x.SchemaHash).HasColumnName("schema_hash");
             entity.Property(x => x.PublishedCatalogVersion).HasColumnName("published_catalog_version");
+            entity.Property(x => x.RuntimeEvidenceVersion).HasColumnName("runtime_evidence_version");
+            entity.Property(x => x.RuntimeServiceName).HasColumnName("runtime_service_name");
+            entity.Property(x => x.RuntimeBuildVersion).HasColumnName("runtime_build_version");
+            entity.Property(x => x.RuntimeBuildTimestampUtc).HasColumnName("runtime_build_timestamp_utc");
+            entity.Property(x => x.RuntimeDerivedIdentity).HasColumnName("runtime_derived_identity");
+            entity.Property(x => x.RuntimeIdentityHash).HasColumnName("runtime_identity_hash");
             entity.Property(x => x.InitialSnapshotToken).HasColumnName("initial_snapshot_token");
             entity.Property(x => x.FinalSnapshotToken).HasColumnName("final_snapshot_token");
             entity.Property(x => x.CoverageComplete).HasColumnName("coverage_complete");
+            entity.Property(x => x.AcceptanceEvidenceVersion).HasColumnName("acceptance_evidence_version");
+            entity.Property(x => x.AuthorizedDurableMemoryCount).HasColumnName("authorized_durable_memory_count");
+            entity.Property(x => x.CoveredDurableMemoryCount).HasColumnName("covered_durable_memory_count");
+            entity.Property(x => x.ScannedDurableMemoryCount).HasColumnName("scanned_durable_memory_count");
+            entity.Property(x => x.TotalDurableMemoryCount).HasColumnName("total_durable_memory_count");
+            entity.Property(x => x.SharedScopeOccurrences).HasColumnName("shared_scope_occurrences");
+            entity.Property(x => x.UserScopeOccurrences).HasColumnName("user_scope_occurrences");
+            entity.Property(x => x.UserScopeHandledSeparately).HasColumnName("user_scope_handled_separately");
+            entity.Property(x => x.CountInvariantSatisfied).HasColumnName("count_invariant_satisfied");
             entity.Property(x => x.InitialGovernanceActionable).HasColumnName("initial_governance_actionable");
             entity.Property(x => x.FinalGovernanceActionable).HasColumnName("final_governance_actionable");
             entity.Property(x => x.CandidateCount).HasColumnName("candidate_count");
@@ -1117,6 +1132,9 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
             entity.Property(x => x.ReceiptId).HasColumnName("receipt_id");
+            entity.Property(x => x.ReceiptEventSequence)
+                .HasColumnName("receipt_event_sequence")
+                .IsConcurrencyToken();
             entity.Property(x => x.ExecutionMode).HasColumnName("execution_mode");
             entity.Property(x => x.IsReplay).HasColumnName("is_replay");
             entity.Property(x => x.ReplayProjectionCount).HasColumnName("replay_projection_count");

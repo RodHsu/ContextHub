@@ -1065,9 +1065,24 @@ public sealed class GovernanceRunReceipt
     public string ToolContractVersion { get; set; } = string.Empty;
     public string SchemaHash { get; set; } = string.Empty;
     public string PublishedCatalogVersion { get; set; } = string.Empty;
+    public string RuntimeEvidenceVersion { get; set; } = string.Empty;
+    public string RuntimeServiceName { get; set; } = string.Empty;
+    public string RuntimeBuildVersion { get; set; } = string.Empty;
+    public DateTimeOffset? RuntimeBuildTimestampUtc { get; set; }
+    public string RuntimeDerivedIdentity { get; set; } = string.Empty;
+    public string RuntimeIdentityHash { get; set; } = string.Empty;
     public string InitialSnapshotToken { get; set; } = string.Empty;
     public string FinalSnapshotToken { get; set; } = string.Empty;
     public bool CoverageComplete { get; set; }
+    public string AcceptanceEvidenceVersion { get; set; } = string.Empty;
+    public int? AuthorizedDurableMemoryCount { get; set; }
+    public int? CoveredDurableMemoryCount { get; set; }
+    public int? ScannedDurableMemoryCount { get; set; }
+    public int? TotalDurableMemoryCount { get; set; }
+    public int? SharedScopeOccurrences { get; set; }
+    public int? UserScopeOccurrences { get; set; }
+    public bool? UserScopeHandledSeparately { get; set; }
+    public bool? CountInvariantSatisfied { get; set; }
     public int InitialGovernanceActionable { get; set; }
     public int FinalGovernanceActionable { get; set; }
     public int CandidateCount { get; set; }
@@ -1118,6 +1133,7 @@ public sealed class ScheduledGovernanceReliabilityRun
     public Guid OwnerUserId { get; set; }
     public string GovernanceRunId { get; set; } = string.Empty;
     public Guid ReceiptId { get; set; }
+    public long? ReceiptEventSequence { get; set; }
     public string ExecutionMode { get; set; } = string.Empty;
     public bool IsReplay { get; set; }
     public int ReplayProjectionCount { get; set; }

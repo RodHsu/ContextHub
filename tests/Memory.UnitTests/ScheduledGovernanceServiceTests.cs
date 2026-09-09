@@ -819,7 +819,7 @@ public sealed class ScheduledGovernanceServiceTests
             }
         }
 
-        public Task RecordReviewStartedAsync(string governanceRunId, DateTimeOffset startedAt, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken)
+        public Task RecordReviewStartedAsync(string governanceRunId, DateTimeOffset startedAt, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken, bool isReReview = false)
         {
             ReviewStartedCount++;
             LastReviewStartedRunId = governanceRunId;
@@ -836,7 +836,7 @@ public sealed class ScheduledGovernanceServiceTests
             => Task.FromResult<IAsyncDisposable>(new NoopAsyncDisposable());
         public Task<GovernanceRunLineageResult> GetScheduledLineageAsync(string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken)
             => Task.FromResult(Lineage);
-        public Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken)
+        public Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken, bool isReReview = false)
         {
             ReviewStoppedCount++;
             return Task.CompletedTask;

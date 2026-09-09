@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Data;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,6 +15,8 @@ public sealed class GovernanceRunReceiptService(
     IRequestActorAccessor actorAccessor,
     TimeProvider timeProvider) : IGovernanceRunReceiptService
 {
+    internal const string ScheduledAcceptanceEvidenceVersion = "1";
+    internal const string ScheduledRuntimeEvidenceVersion = "1";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly GovernanceReceiptContractIdentity CurrentScheduledContractIdentity = new(
         ScheduledGovernanceContract.ToolContractVersion,
@@ -24,7 +27,8 @@ public sealed class GovernanceRunReceiptService(
         string governanceRunId,
         DateTimeOffset startedAt,
         GovernanceReceiptContractIdentity contractIdentity,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool isReReview = false)
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(governanceRunId);
@@ -42,6 +46,8 @@ public sealed class GovernanceRunReceiptService(
         CopyCumulative(previous, receipt);
         receipt.ProjectIdsJson = previous?.ProjectIdsJson ?? "[]";
         receipt.StoppedReason = "ReviewReceived";
+        receipt.RequestIdentityHash = ReviewRequestIdentityHash(runId, isReReview);
+        SetCanonicalReviewEventKey(receipt);
         await InsertImmutableAsync(receipt, cancellationToken);
     }
 
@@ -53,9 +59,23 @@ public sealed class GovernanceRunReceiptService(
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(result.GovernanceRunId);
         var previous = await LatestAsync(runId, actor, cancellationToken);
-        var snapshot = result.DurableMemoryCoverage?.SnapshotToken ?? string.Empty;
-        var eventKey = Hash($"review\n{snapshot}\n{result.IsReReview}\n{result.Convergence.Status}\n{result.Convergence.GovernanceActionableCount}");
-        var receipt = NewReceipt(actor, runId, eventKey, ResolveReceiptExecutionMode(result.ReceiptContractIdentity), "ReviewCompleted", "Completed", startedAt,
+        var durableEvidence = result.DurableMemoryCoverage;
+        var snapshot = durableEvidence?.SnapshotToken ?? string.Empty;
+        var eventKey = Hash(string.Join('\n',
+            "review",
+            snapshot,
+            result.IsReReview,
+            result.Convergence.Status,
+            result.Convergence.GovernanceActionableCount,
+            durableEvidence?.AuthorizedGovernanceDurableMemoryCount,
+            durableEvidence?.GovernanceCoveredDurableMemoryCount,
+            durableEvidence?.ScannedCount,
+            durableEvidence?.TotalCount,
+            durableEvidence?.GovernanceProjectIds.Count(ProjectContext.IsShared),
+            durableEvidence?.GovernanceProjectIds.Count(ProjectContext.IsUser),
+            durableEvidence?.CountInvariantSatisfied));
+        var executionMode = ResolveReceiptExecutionMode(result.ReceiptContractIdentity);
+        var receipt = NewReceipt(actor, runId, eventKey, executionMode, "ReviewCompleted", "Completed", startedAt,
             result.ReceiptContractIdentity);
         CopyCumulative(previous, receipt);
         receipt.InitialSnapshotToken = snapshot;
@@ -85,6 +105,26 @@ public sealed class GovernanceRunReceiptService(
         receipt.FinalConvergenceStatus = result.Convergence.Status;
         receipt.StoppedReason = "ReviewCompleted";
         receipt.ProjectIdsJson = JsonSerializer.Serialize(projectIds, JsonOptions);
+        receipt.RequestIdentityHash = ReviewRequestIdentityHash(runId, result.IsReReview);
+        SetCanonicalReviewEventKey(receipt);
+        if (string.Equals(executionMode, "Scheduled", StringComparison.Ordinal) &&
+            result.DurableMemoryCoverage is { } durableCoverage)
+        {
+            var sharedScopeOccurrences = durableCoverage.GovernanceProjectIds.Count(ProjectContext.IsShared);
+            var userScopeOccurrences = durableCoverage.GovernanceProjectIds.Count(ProjectContext.IsUser);
+            var countInvariant = new ScheduledGovernanceCountInvariant(
+                durableCoverage.AuthorizedGovernanceDurableMemoryCount,
+                durableCoverage.GovernanceCoveredDurableMemoryCount,
+                durableCoverage.ScannedCount,
+                durableCoverage.TotalCount,
+                sharedScopeOccurrences,
+                userScopeOccurrences,
+                userScopeOccurrences == 0,
+                durableCoverage.CountInvariantSatisfied &&
+                sharedScopeOccurrences == 1 &&
+                userScopeOccurrences == 0);
+            ApplyScheduledCountInvariant(receipt, countInvariant);
+        }
         await InsertImmutableAsync(receipt, cancellationToken);
     }
 
@@ -109,6 +149,7 @@ public sealed class GovernanceRunReceiptService(
                 GovernanceBatchErrorCode.SchemaCapabilityMismatch,
                 "Scheduled governance decision projection requires the current scheduled contract identity.");
         }
+        ValidateScheduledCountInvariant(result);
         var lineage = await GetScheduledLineageAsync(
             runId,
             CurrentScheduledContractIdentity,
@@ -134,7 +175,15 @@ public sealed class GovernanceRunReceiptService(
             exceptionDelta.New,
             exceptionDelta.Resolved,
             exceptionDelta.Unchanged,
-            exceptionDelta.Escalated));
+            exceptionDelta.Escalated,
+            result.CountInvariant.AuthorizedDurableMemoryCount,
+            result.CountInvariant.CoveredDurableMemoryCount,
+            result.CountInvariant.ScannedDurableMemoryCount,
+            result.CountInvariant.TotalDurableMemoryCount,
+            result.CountInvariant.SharedScopeOccurrences,
+            result.CountInvariant.UserScopeOccurrences,
+            result.CountInvariant.UserScopeHandledSeparately,
+            result.CountInvariant.Satisfied));
         var receipt = NewReceipt(
             actor,
             runId,
@@ -148,6 +197,7 @@ public sealed class GovernanceRunReceiptService(
         receipt.InitialSnapshotToken = result.SnapshotToken;
         receipt.FinalSnapshotToken = result.SnapshotToken;
         receipt.CoverageComplete = result.CoverageComplete;
+        ApplyScheduledCountInvariant(receipt, result.CountInvariant);
         receipt.InitialGovernanceActionable = result.AutomationActionableCount;
         receipt.FinalGovernanceActionable = result.AutomationActionableCount;
         receipt.CandidateCount = result.CandidateCount;
@@ -164,7 +214,42 @@ public sealed class GovernanceRunReceiptService(
         receipt.FinalConvergenceStatus = result.Decision.ToString();
         receipt.StoppedReason = "ScheduledDecisionProjected";
         receipt.ProjectIdsJson = JsonSerializer.Serialize(result.ResolvedProjectIds, JsonOptions);
+        receipt.RequestIdentityHash = ReviewRequestIdentityHash(runId, result.IsReReview);
+        SetCanonicalReviewEventKey(receipt);
         await InsertImmutableAsync(receipt, cancellationToken);
+    }
+
+    private static void ValidateScheduledCountInvariant(ScheduledGovernanceReviewResult result)
+    {
+        var invariant = result.CountInvariant;
+        var recomputed = invariant.AuthorizedDurableMemoryCount >= 0 &&
+                         invariant.AuthorizedDurableMemoryCount == invariant.CoveredDurableMemoryCount &&
+                         invariant.CoveredDurableMemoryCount == invariant.ScannedDurableMemoryCount &&
+                         invariant.ScannedDurableMemoryCount == invariant.TotalDurableMemoryCount &&
+                         invariant.SharedScopeOccurrences == 1 &&
+                         invariant.UserScopeOccurrences == 0 &&
+                         invariant.UserScopeHandledSeparately;
+        if (invariant.Satisfied != recomputed || (result.CoverageComplete && !recomputed))
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                "Scheduled governance count-invariant evidence is inconsistent.");
+        }
+    }
+
+    private static void ApplyScheduledCountInvariant(
+        GovernanceRunReceipt receipt,
+        ScheduledGovernanceCountInvariant invariant)
+    {
+        receipt.AcceptanceEvidenceVersion = ScheduledAcceptanceEvidenceVersion;
+        receipt.AuthorizedDurableMemoryCount = invariant.AuthorizedDurableMemoryCount;
+        receipt.CoveredDurableMemoryCount = invariant.CoveredDurableMemoryCount;
+        receipt.ScannedDurableMemoryCount = invariant.ScannedDurableMemoryCount;
+        receipt.TotalDurableMemoryCount = invariant.TotalDurableMemoryCount;
+        receipt.SharedScopeOccurrences = invariant.SharedScopeOccurrences;
+        receipt.UserScopeOccurrences = invariant.UserScopeOccurrences;
+        receipt.UserScopeHandledSeparately = invariant.UserScopeHandledSeparately;
+        receipt.CountInvariantSatisfied = invariant.Satisfied;
     }
 
     public async Task RecordReviewStoppedAsync(
@@ -174,7 +259,8 @@ public sealed class GovernanceRunReceiptService(
         string stoppedReason,
         string failurePhase,
         GovernanceReceiptContractIdentity contractIdentity,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool isReReview = false)
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(governanceRunId);
@@ -199,6 +285,7 @@ public sealed class GovernanceRunReceiptService(
         receipt.FailurePhase = normalizedPhase;
         receipt.StoppedReason = normalizedReason;
         receipt.FinalConvergenceStatus = normalizedStatus;
+        receipt.RequestIdentityHash = ReviewRequestIdentityHash(runId, isReReview);
         await InsertImmutableAsync(receipt, cancellationToken);
     }
 
@@ -514,7 +601,7 @@ public sealed class GovernanceRunReceiptService(
         GovernanceReceiptContractIdentity? contractIdentity = null)
     {
         var now = timeProvider.GetUtcNow();
-        return new GovernanceRunReceipt
+        var receipt = new GovernanceRunReceipt
         {
             TenantId = actor.TenantId!.Value,
             OwnerUserId = actor.UserId!.Value,
@@ -531,6 +618,29 @@ public sealed class GovernanceRunReceiptService(
             PublishedCatalogVersion = contractIdentity?.PublishedCatalogVersion ?? GovernanceToolContract.PublishedCatalogVersion,
             CreatedAt = now
         };
+        if (string.Equals(executionMode, "Scheduled", StringComparison.Ordinal) &&
+            contractIdentity is not null &&
+            contractIdentity.ToolContractVersion == CurrentScheduledContractIdentity.ToolContractVersion &&
+            contractIdentity.SchemaHash == CurrentScheduledContractIdentity.SchemaHash &&
+            contractIdentity.PublishedCatalogVersion == CurrentScheduledContractIdentity.PublishedCatalogVersion)
+        {
+            ApplyScheduledRuntimeIdentity(receipt, ScheduledGovernanceContract.RuntimeIdentity);
+        }
+
+        return receipt;
+    }
+
+    private static void ApplyScheduledRuntimeIdentity(
+        GovernanceRunReceipt receipt,
+        ScheduledGovernanceRuntimeIdentity runtimeIdentity)
+    {
+        receipt.RuntimeEvidenceVersion = ScheduledRuntimeEvidenceVersion;
+        receipt.RuntimeServiceName = runtimeIdentity.ServiceName;
+        receipt.RuntimeBuildVersion = runtimeIdentity.BuildVersion;
+        receipt.RuntimeBuildTimestampUtc = runtimeIdentity.BuildTimestampUtc.ToUniversalTime();
+        receipt.RuntimeDerivedIdentity = runtimeIdentity.DerivedIdentity;
+        receipt.RuntimeIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeRuntimeIdentityHash(runtimeIdentity);
     }
 
     private async Task<GovernanceRunReceiptResult> MapAsync(
@@ -726,22 +836,192 @@ public sealed class GovernanceRunReceiptService(
         await ApplyLockedReviewExceptionDeltaAsync(receipt, cancellationToken);
         await ApplyInitialReviewBaselineAsync(receipt, cancellationToken);
         await EnsureScheduledDecisionBindsLatestReviewAsync(receipt, cancellationToken);
+        SetCanonicalReviewEventKey(receipt);
         await EnsureScheduledRunBindingAsync(receipt, cancellationToken);
         await dbContext.GovernanceRunReceipts.AddAsync(receipt, cancellationToken);
         try
         {
             await dbContext.SaveChangesAsync(cancellationToken);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception) when (IsUniqueViolation(exception))
         {
             dbContext.Entry(receipt).State = EntityState.Detached;
-            var exists = await dbContext.GovernanceRunReceipts.AsNoTracking().AnyAsync(x =>
+            var existing = await dbContext.GovernanceRunReceipts.AsNoTracking().SingleOrDefaultAsync(x =>
                 x.TenantId == receipt.TenantId && x.OwnerUserId == receipt.OwnerUserId &&
                 x.GovernanceRunId == receipt.GovernanceRunId && x.EventKey == receipt.EventKey,
                 cancellationToken);
-            if (!exists) throw;
+            if (existing is null)
+            {
+                throw;
+            }
+
+            if (!CanonicalReceiptPayloadMatches(existing, receipt))
+            {
+                throw new GovernanceBatchException(
+                    GovernanceBatchErrorCode.ReplayPayloadMismatch,
+                    "The immutable governance receipt event key collides with a different canonical payload.");
+            }
         }
     }
+
+    private static void SetCanonicalReviewEventKey(GovernanceRunReceipt receipt)
+    {
+        if (receipt.EventType is "ReviewReceived" or "ReviewCompleted" or "ScheduledDecisionProjected")
+        {
+            receipt.EventKey = Hash(CanonicalReceiptPayload(receipt));
+        }
+    }
+
+    private static bool CanonicalReceiptPayloadMatches(
+        GovernanceRunReceipt existing,
+        GovernanceRunReceipt incoming)
+        => string.Equals(
+            CanonicalReceiptPayload(existing),
+            CanonicalReceiptPayload(incoming),
+            StringComparison.Ordinal);
+
+    private static string CanonicalReceiptPayload(GovernanceRunReceipt receipt)
+    {
+        var builder = new StringBuilder("governance-receipt-payload-v2");
+        AppendCanonicalField(builder, receipt.TenantId.ToString("D"));
+        AppendCanonicalField(builder, receipt.OwnerUserId.ToString("D"));
+        AppendCanonicalField(builder, receipt.GovernanceRunId);
+        AppendCanonicalField(builder, receipt.Actor);
+        AppendCanonicalField(builder, receipt.ExecutionMode);
+        AppendCanonicalField(builder, receipt.EventType);
+        AppendCanonicalField(builder, receipt.Status);
+        AppendCanonicalField(builder, receipt.ToolContractVersion);
+        AppendCanonicalField(builder, receipt.SchemaHash);
+        AppendCanonicalField(builder, receipt.PublishedCatalogVersion);
+        AppendCanonicalField(builder, receipt.RuntimeEvidenceVersion);
+        AppendCanonicalField(builder, receipt.RuntimeServiceName);
+        AppendCanonicalField(builder, receipt.RuntimeBuildVersion);
+        AppendCanonicalField(builder, receipt.RuntimeBuildTimestampUtc);
+        AppendCanonicalField(builder, receipt.RuntimeDerivedIdentity);
+        AppendCanonicalField(builder, receipt.RuntimeIdentityHash);
+        if (receipt.EventType == "ReviewReceived")
+        {
+            AppendCanonicalField(builder, receipt.RequestIdentityHash);
+            return builder.ToString();
+        }
+
+        if (receipt.EventType == "BatchReceived")
+        {
+            AppendCanonicalField(builder, receipt.RequestIdentityHash);
+            AppendCanonicalField(builder, receipt.RequestHash);
+            AppendCanonicalField(builder, receipt.FinalSnapshotToken);
+            return builder.ToString();
+        }
+
+        AppendCanonicalField(builder, receipt.InitialSnapshotToken);
+        AppendCanonicalField(builder, receipt.FinalSnapshotToken);
+        AppendCanonicalField(builder, receipt.CoverageComplete);
+        AppendCanonicalField(builder, receipt.AcceptanceEvidenceVersion);
+        AppendCanonicalField(builder, receipt.AuthorizedDurableMemoryCount);
+        AppendCanonicalField(builder, receipt.CoveredDurableMemoryCount);
+        AppendCanonicalField(builder, receipt.ScannedDurableMemoryCount);
+        AppendCanonicalField(builder, receipt.TotalDurableMemoryCount);
+        AppendCanonicalField(builder, receipt.SharedScopeOccurrences);
+        AppendCanonicalField(builder, receipt.UserScopeOccurrences);
+        AppendCanonicalField(builder, receipt.UserScopeHandledSeparately);
+        AppendCanonicalField(builder, receipt.CountInvariantSatisfied);
+        AppendCanonicalField(builder, receipt.InitialGovernanceActionable);
+        AppendCanonicalField(builder, receipt.FinalGovernanceActionable);
+        AppendCanonicalField(builder, receipt.CandidateCount);
+        AppendCanonicalField(builder, receipt.ExecutionActionableCount);
+        AppendCanonicalField(builder, receipt.GovernedExceptionCount);
+        AppendCanonicalField(builder, receipt.Applied);
+        AppendCanonicalField(builder, receipt.Failed);
+        AppendCanonicalField(builder, receipt.Deferred);
+        AppendCanonicalField(builder, receipt.RequiresUserDecision);
+        AppendCanonicalField(builder, receipt.HostBlocked);
+        AppendCanonicalField(builder, receipt.ExceptionNew);
+        AppendCanonicalField(builder, receipt.ExceptionResolved);
+        AppendCanonicalField(builder, receipt.ExceptionUnchanged);
+        AppendCanonicalField(builder, receipt.ExceptionEscalated);
+        AppendCanonicalField(builder, CanonicalJson(receipt.GovernedExceptionStatesJson));
+        AppendCanonicalField(builder, receipt.Quarantined);
+        AppendCanonicalField(builder, receipt.DeleteEligible);
+        AppendCanonicalField(builder, receipt.DeleteMatured);
+        AppendCanonicalField(builder, receipt.AutoDeleted);
+        AppendCanonicalField(builder, receipt.DeleteCancelled);
+        AppendCanonicalField(builder, receipt.Tombstoned);
+        AppendCanonicalField(builder, receipt.SemanticAutoResolved);
+        AppendCanonicalField(builder, receipt.BusinessWorkItemActionable);
+        AppendCanonicalField(builder, receipt.FinalConvergenceStatus);
+        AppendCanonicalField(builder, receipt.StoppedReason);
+        AppendCanonicalField(builder, receipt.LatestBatchReceived);
+        AppendCanonicalField(builder, receipt.RequestIdentityHash);
+        AppendCanonicalField(builder, receipt.RequestHash);
+        AppendCanonicalField(builder, receipt.FailurePhase);
+        AppendCanonicalField(builder, CanonicalJson(receipt.AuditIdsJson));
+        AppendCanonicalField(builder, CanonicalJson(receipt.ProjectIdsJson));
+        AppendCanonicalField(builder, receipt.IsReplay);
+        return builder.ToString();
+    }
+
+    private static void AppendCanonicalField(StringBuilder builder, object? value)
+    {
+        if (value is null)
+        {
+            builder.Append("-1:");
+            return;
+        }
+
+        var text = value switch
+        {
+            bool boolean => boolean ? "true" : "false",
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty,
+            _ => value.ToString() ?? string.Empty
+        };
+        builder.Append(text.Length).Append(':').Append(text);
+    }
+
+    private static string CanonicalJson(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return CanonicalJson(document.RootElement);
+        }
+        catch (JsonException)
+        {
+            // A malformed JSON payload remains part of the exact replay
+            // comparison. It must not become equal to a valid empty payload.
+            return $"invalid:{json.Trim()}";
+        }
+    }
+
+    private static string CanonicalJson(JsonElement element)
+        => element.ValueKind switch
+        {
+            JsonValueKind.Object => "{" + string.Join(
+                ',',
+                element.EnumerateObject()
+                    .OrderBy(property => property.Name, StringComparer.Ordinal)
+                    .Select(property =>
+                        $"{JsonSerializer.Serialize(property.Name, JsonOptions)}:{CanonicalJson(property.Value)}")) + "}",
+            JsonValueKind.Array => "[" + string.Join(',', element.EnumerateArray().Select(CanonicalJson)) + "]",
+            JsonValueKind.String => JsonSerializer.Serialize(element.GetString() ?? string.Empty, JsonOptions),
+            JsonValueKind.Number => element.GetRawText(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            JsonValueKind.Null => "null",
+            _ => element.GetRawText()
+        };
+
+    private static string ReviewRequestIdentityHash(string governanceRunId, bool isReReview)
+        => ScheduledGovernanceReliabilityEvidenceContract.ComputeReviewRequestIdentityHash(
+            governanceRunId,
+            isReReview);
+
+    private static bool IsUniqueViolation(DbUpdateException exception)
+        => exception.InnerException is Npgsql.PostgresException { SqlState: "23505" };
 
     private async Task EnsureScheduledRunBindingAsync(
         GovernanceRunReceipt receipt,
@@ -1019,13 +1299,34 @@ public sealed class GovernanceRunReceiptService(
             !string.Equals(
                 latestCompletedReview.FinalSnapshotToken,
                 receipt.FinalSnapshotToken,
-                StringComparison.Ordinal))
+                StringComparison.Ordinal) ||
+            !ScheduledCountInvariantMatches(latestCompletedReview, receipt))
         {
             throw new GovernanceBatchException(
                 GovernanceBatchErrorCode.ReReviewRequired,
                 "Scheduled governance decision projection requires the latest completed review for the exact snapshot.");
         }
     }
+
+    private static bool ScheduledCountInvariantMatches(
+        GovernanceRunReceipt review,
+        GovernanceRunReceipt decision)
+        => string.Equals(
+               review.AcceptanceEvidenceVersion,
+               ScheduledAcceptanceEvidenceVersion,
+               StringComparison.Ordinal) &&
+           string.Equals(
+               decision.AcceptanceEvidenceVersion,
+               ScheduledAcceptanceEvidenceVersion,
+               StringComparison.Ordinal) &&
+           review.AuthorizedDurableMemoryCount == decision.AuthorizedDurableMemoryCount &&
+           review.CoveredDurableMemoryCount == decision.CoveredDurableMemoryCount &&
+           review.ScannedDurableMemoryCount == decision.ScannedDurableMemoryCount &&
+           review.TotalDurableMemoryCount == decision.TotalDurableMemoryCount &&
+           review.SharedScopeOccurrences == decision.SharedScopeOccurrences &&
+           review.UserScopeOccurrences == decision.UserScopeOccurrences &&
+           review.UserScopeHandledSeparately == decision.UserScopeHandledSeparately &&
+           review.CountInvariantSatisfied == decision.CountInvariantSatisfied;
 
     private async Task<GovernanceRunReceipt?> FindExceptionDeltaBaselineAsync(
         Guid tenantId,

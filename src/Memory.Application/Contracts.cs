@@ -2423,12 +2423,12 @@ public interface IGovernanceBatchExecutor
 
 public interface IGovernanceRunReceiptService
 {
-    Task RecordReviewStartedAsync(string governanceRunId, DateTimeOffset startedAt, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken);
+    Task RecordReviewStartedAsync(string governanceRunId, DateTimeOffset startedAt, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken, bool isReReview = false);
     Task RecordReviewAsync(KnowledgeReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task RecordScheduledDecisionAsync(ScheduledGovernanceReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task<IAsyncDisposable> AcquireRunLockAsync(string governanceRunId, CancellationToken cancellationToken);
     Task<GovernanceRunLineageResult> GetScheduledLineageAsync(string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken);
-    Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken);
+    Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken, bool isReReview = false);
     Task RecordExecutionStartedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task RecordExecutionAsync(GovernanceBatchExecuteRequest request, GovernanceBatchExecuteResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task RecordExecutionStoppedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, CancellationToken cancellationToken);

@@ -13,26 +13,41 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
     : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
-    public async Task Verified_A_And_B_Should_Bind_To_The_Immutable_Receipt_And_Project_As_Verified()
+    public async Task Verified_A_And_B_Without_Current_Server_Authority_Should_Remain_Unattested()
     {
         var factory = environment.GetFactory();
         using var scope = factory.Services.CreateScope();
         var actor = UseBootstrapActor(scope.ServiceProvider);
         var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
         var runId = $"natural-origin-{Guid.NewGuid():N}";
-        var projectId = $"evidence-project-{Guid.NewGuid():N}";
+        var projectId = ProjectContext.SharedProjectId;
         var startedAt = DateTimeOffset.UtcNow;
         var identity = CurrentScheduledIdentity();
 
         await receipts.RecordReviewStartedAsync(runId, startedAt, identity, CancellationToken.None);
-        await receipts.RecordReviewAsync(
-            CreateReview(runId, projectId, identity),
+        var review = CreateReview(runId, projectId, identity);
+        await receipts.RecordReviewAsync(review, startedAt, CancellationToken.None);
+        await receipts.RecordScheduledDecisionAsync(
+            CreateScheduledDecision(
+                runId,
+                projectId,
+                review.DurableMemoryCoverage!.SnapshotToken),
             startedAt,
             CancellationToken.None);
         var receipt = (await receipts.GetAsync(runId, CancellationToken.None))!;
         var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var receiptRow = await db.GovernanceRunReceipts.AsNoTracking()
             .SingleAsync(row => row.Id == receipt.ReceiptId);
+        var serverSafety = await scope.ServiceProvider
+            .GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>()
+            .GetAsync(
+                new ScheduledGovernanceServerSafetyEvidenceQuery(
+                    actor.TenantId!.Value,
+                    actor.UserId!.Value,
+                    receipt.ReceiptId,
+                    runId),
+                CancellationToken.None);
+        serverSafety!.CapturedRuntimeIdentity.Should().Be(ScheduledGovernanceContract.RuntimeIdentity);
         var expectedAt = startedAt.ToUniversalTime();
         var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
         var reliabilityService = scope.ServiceProvider
@@ -80,9 +95,11 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         var reliability = await reliabilityService.GetAsync(CancellationToken.None);
         reliability.Runs.Should().ContainSingle(run =>
             run.GovernanceRunId == runId &&
-            run.NaturalOriginStatus == "Verified" &&
+            run.NaturalOriginStatus == "Unattested" &&
             run.PlatformSignedNaturalOriginAttested);
-        reliability.Runs.Single().Reasons.Should().NotContain(
+        reliability.Runs.Single().Reasons.Should().Contain(
+            "natural-origin-authority-baseline-not-proven");
+        reliability.Runs.Single().Reasons.Should().Contain(
             ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason);
         reliability.Runs.Single().Qualifies.Should().BeFalse(
             "natural origin does not replace missing server-owned mutation-safety evidence");
@@ -170,6 +187,44 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
     }
 
     [DockerRequiredFact]
+    public async Task Evidence_With_A_Nonmatching_Dispatch_Identity_Must_Be_Invalid()
+    {
+        var factory = environment.GetFactory();
+        using var scope = factory.Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var (receipt, receiptEventKey) = await CreatePersistedReceiptAsync(
+            scope.ServiceProvider,
+            actor,
+            "natural-origin-dispatch-mismatch");
+        var evidence = CreateEvidence(
+            NaturalOriginEvidenceKind.PlatformAttestation,
+            actor,
+            receipt,
+            receiptEventKey,
+            DateTimeOffset.UtcNow,
+            sourceSequence: null);
+        evidence.DispatchIdentityHash = Digest("wrong-dispatch");
+        await scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>()
+            .AppendAsync(evidence);
+
+        var query = new ScheduledGovernanceReliabilityEvidenceQuery(
+            actor.TenantId!.Value,
+            actor.UserId!.Value,
+            receipt.ReceiptId,
+            receipt.GovernanceRunId,
+            ScheduledGovernanceReliabilityEvidenceContract.ComputeReviewRequestIdentityHash(
+                receipt.GovernanceRunId),
+            ScheduledGovernanceReliabilityEvidenceContract.ComputeProjectScopeHash(receipt.ProjectIds));
+        var projected = await scope.ServiceProvider
+            .GetRequiredService<IScheduledGovernanceReliabilityEvidenceProvider>()
+            .GetAsync(query, CancellationToken.None);
+
+        projected!.PlatformAttestation!.VerificationStatus.Should()
+            .Be(ScheduledGovernanceEvidenceVerificationStatus.Invalid);
+        projected.PlatformAttestation.SignatureValid.Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
     public async Task Ledger_Must_Reject_Noncanonical_Identifiers_And_All_Mutations()
     {
         var factory = environment.GetFactory();
@@ -237,7 +292,10 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         long? sourceSequence)
     {
         var now = DateTimeOffset.UtcNow;
-        var sharedDispatchHash = Digest($"dispatch:{receipt.GovernanceRunId}");
+        var requestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeReviewRequestIdentityHash(receipt.GovernanceRunId);
+        var sharedDispatchHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeDispatchIdentityHash(receipt.ReceiptId, receiptEventKey, requestIdentityHash);
         return new NaturalOriginEvidenceLedgerEntry
         {
             EvidenceKind = kind,
@@ -272,8 +330,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             ExpiresAtUtc = now.AddMinutes(10),
             ScheduleDigest = Digest("four-hour-cadence"),
             ConfigurationDigest = Digest("approved-config"),
-            RequestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
-                .ComputeReviewRequestIdentityHash(receipt.GovernanceRunId),
+            RequestIdentityHash = requestIdentityHash,
             DispatchIdentityHash = sharedDispatchHash,
             ReceiptId = receipt.ReceiptId,
             ReceiptEventKeyHash = Digest(receiptEventKey),
@@ -364,6 +421,28 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             ReceiptContractIdentity = identity
         };
     }
+
+    private static ScheduledGovernanceReviewResult CreateScheduledDecision(
+        string runId,
+        string projectId,
+        string snapshotToken)
+        => new(
+            runId,
+            IsReReview: false,
+            ScheduledGovernanceDecision.NoOpConverged,
+            snapshotToken,
+            new ScheduledGovernanceCountInvariant(0, 0, 0, 0, 1, 0, true, true),
+            CoverageComplete: true,
+            CandidateCount: 0,
+            ReversibleExecutionCount: 0,
+            HumanDecisionCount: 0,
+            GovernedExceptionCount: 0,
+            BusinessWorkItemActionableCount: 0,
+            ResolvedProjectIds: [projectId],
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion,
+            RuntimeIdentity: ScheduledGovernanceContract.RuntimeIdentity);
 
     private static async Task<(GovernanceRunReceiptResult Receipt, string EventKey)> CreatePersistedReceiptAsync(
         IServiceProvider services,

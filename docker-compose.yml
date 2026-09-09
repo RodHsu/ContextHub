@@ -317,6 +317,14 @@ services:
       ChatGptGateway__PublicMcpUrl: ${AUTOMATION_GATEWAY_PUBLIC_MCP_URL:-https://context-hub.example.com/mcp-automation}
       ChatGptGateway__PublicResourceMetadataUrl: ${AUTOMATION_GATEWAY_PUBLIC_RESOURCE_METADATA_URL:-https://context-hub.example.com/.well-known/oauth-protected-resource/mcp-automation}
       ChatGptGateway__AllowedMcpOrigins__0: ${CHATGPT_GATEWAY_ALLOWED_MCP_ORIGIN:-}
+      ScheduledGovernance__NaturalOriginAuthority__PlatformIssuer: ${SCHEDULED_GOVERNANCE_NATURAL_ORIGIN_PLATFORM_ISSUER:-}
+      ScheduledGovernance__NaturalOriginAuthority__ControlPlaneSourceSystem: ${SCHEDULED_GOVERNANCE_NATURAL_ORIGIN_CONTROL_PLANE_SOURCE:-}
+      ScheduledGovernance__NaturalOriginAuthority__Environment: ${SCHEDULED_GOVERNANCE_NATURAL_ORIGIN_ENVIRONMENT:-}
+      ScheduledGovernance__NaturalOriginAuthority__TaskBindingHash: ${SCHEDULED_GOVERNANCE_NATURAL_ORIGIN_TASK_BINDING_HASH:-}
+      ScheduledGovernance__NaturalOriginAuthority__AutomationBindingHash: ${SCHEDULED_GOVERNANCE_NATURAL_ORIGIN_AUTOMATION_BINDING_HASH:-}
+      ScheduledGovernance__NaturalOriginAuthority__ScheduleDigest: ${SCHEDULED_GOVERNANCE_NATURAL_ORIGIN_SCHEDULE_DIGEST:-}
+      ScheduledGovernance__NaturalOriginAuthority__ConfigurationDigest: ${SCHEDULED_GOVERNANCE_NATURAL_ORIGIN_CONFIGURATION_DIGEST:-}
+      ScheduledGovernance__NaturalOriginAuthority__AuthorityEpochDigest: ${SCHEDULED_GOVERNANCE_NATURAL_ORIGIN_AUTHORITY_EPOCH_DIGEST:-}
       ForwardedHeaders__KnownNetworks__0: ${TRUSTED_PROXY_NETWORK:-}
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081

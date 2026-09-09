@@ -9,15 +9,31 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
     private static readonly Guid TenantId = Guid.Parse("10000000-0000-0000-0000-000000000001");
     private static readonly Guid OwnerUserId = Guid.Parse("20000000-0000-0000-0000-000000000002");
     private static readonly string[] ProjectIds = ["test-project"];
+    private static readonly string AuthorityEpochDigest = Digest("authority-epoch-a");
+    private static readonly string BaseConfigurationDigest = Digest("configuration");
+    private static readonly string ExpectedConfigurationDigest =
+        ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(
+            BaseConfigurationDigest,
+            AuthorityEpochDigest);
+    private static readonly ScheduledGovernanceNaturalOriginAuthority NaturalOriginAuthority = new(
+        "https://scheduler.example.test",
+        "scheduler-control-plane",
+        "production",
+        Digest("task"),
+        Digest("automation"),
+        Digest("schedule"),
+        ExpectedConfigurationDigest,
+        AuthorityEpochDigest);
 
     [Fact]
     public void Scheduled_Mode_Without_Platform_Attestation_Must_Not_Qualify_Even_With_Other_Evidence()
     {
         var observedProjection = ScheduledGovernanceReliabilityService.BuildProjection(
             CreateReceipt("scheduled-1", "Review"));
-        observedProjection.RuntimeIdentity.Should().Be(ScheduledGovernanceContract.RuntimeIdentity);
-        observedProjection.BaselineIdentity.Should()
-            .Contain(ScheduledGovernanceContract.RuntimeIdentity.BuildVersion);
+        observedProjection.RuntimeIdentity.Should().BeNull(
+            "scheduled runtime identity must come from immutable receipt evidence");
+        observedProjection.BaselineIdentity.Should().NotContain(
+            ScheduledGovernanceContract.RuntimeIdentity.BuildVersion);
 
         var projection = observedProjection with
         {
@@ -94,6 +110,102 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
         action.Should().Throw<ArgumentException>();
     }
 
+    [Theory]
+    [InlineData(null, null, true, true)]
+    [InlineData(null, 3, false, true)]
+    [InlineData(3, null, true, false)]
+    [InlineData(3, 2, true, false)]
+    [InlineData(3, 3, true, true)]
+    [InlineData(3, 3, false, false)]
+    [InlineData(3, 4, false, true)]
+    public void Receipt_projection_must_not_be_overwritten_by_older_or_unordered_evidence(
+        int? storedSequence,
+        int? incomingSequence,
+        bool sameReceipt,
+        bool expected)
+    {
+        var storedReceiptId = Guid.NewGuid();
+        var incomingReceiptId = sameReceipt ? storedReceiptId : Guid.NewGuid();
+
+        ScheduledGovernanceReliabilityService.ShouldApplyCanonicalProjection(
+                storedSequence,
+                storedReceiptId,
+                incomingSequence,
+                incomingReceiptId)
+            .Should().Be(expected);
+    }
+
+    [Fact]
+    public void Current_Natural_Origin_Authority_Must_Bind_The_Server_Schedule_Intent()
+    {
+        ScheduledGovernanceReliabilityService.CurrentScheduleDigest.Should().MatchRegex("^[0-9a-f]{64}$");
+        ScheduledGovernanceReliabilityService.IsCurrentScheduleDigest(
+                ScheduledGovernanceReliabilityService.CurrentScheduleDigest)
+            .Should().BeTrue();
+        ScheduledGovernanceReliabilityService.IsCurrentScheduleDigest(Digest("different-schedule"))
+            .Should().BeFalse();
+        ScheduledGovernanceReliabilityService.IsCurrentScheduleDigest(null).Should().BeFalse();
+    }
+
+    [Fact]
+    public void BuildProjection_Must_Use_Only_Immutable_Server_Safety_Request_Identity()
+    {
+        var receipt = CreateReceipt("scheduled-immutable-request");
+        var immutableRequestHash = Digest("immutable-request");
+        var serverSafetyEvidence = new ScheduledGovernanceServerSafetyEvidenceSnapshot(
+            ReceiptEventSequence: 7,
+            ReviewRequestIdentityHash: immutableRequestHash,
+            CapturedRuntimeIdentity: ScheduledGovernanceContract.RuntimeIdentity,
+            InitialReviewReceived: true,
+            CountInvariantSatisfied: true,
+            DecisionObeyed: true,
+            NoGeneralConnectorFallback: true,
+            NoUnauthorizedMutation: true,
+            NoDuplicateMutation: true,
+            DisplayNameUnchanged: true,
+            BusinessWorkItemsUntouched: true,
+            HostDispatchCompleted: true,
+            ImmutableSnapshotBound: true,
+            FixedReversibleExecutorUsed: true);
+
+        var projection = ScheduledGovernanceReliabilityService.BuildProjection(
+            receipt,
+            actor: null,
+            naturalOriginEvidence: null,
+            serverSafetyEvidence: serverSafetyEvidence,
+            authority: NaturalOriginAuthority);
+
+        projection.RequestIdentityHash.Should().Be(immutableRequestHash);
+        projection.InitialReviewReceived.Should().BeTrue();
+
+        var missingRequestHash = ScheduledGovernanceReliabilityService.BuildProjection(
+            receipt,
+            actor: null,
+            naturalOriginEvidence: null,
+            serverSafetyEvidence: serverSafetyEvidence with { ReviewRequestIdentityHash = null },
+            authority: NaturalOriginAuthority);
+
+        missingRequestHash.RequestIdentityHash.Should().BeEmpty();
+        missingRequestHash.InitialReviewReceived.Should().BeTrue();
+    }
+
+    [Fact]
+    public void ConfigurationDigest_Must_Bind_The_Base_Configuration_To_The_Authority_Epoch()
+    {
+        var epochA = Digest("epoch-a");
+        var epochB = Digest("epoch-b");
+        var baseDigest = Digest("base-configuration");
+
+        var digestA = ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(baseDigest, epochA);
+        var digestB = ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(baseDigest, epochB);
+
+        digestA.Should().MatchRegex("^[0-9a-f]{64}$");
+        digestA.Should().NotBe(digestB);
+        digestA.Should().Be(
+            ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(
+                $"{ScheduledGovernanceReliabilityService.ConfigurationDigestBindingVersion}|{baseDigest}|{epochA}"));
+    }
+
     [Fact]
     public void Manual_Invocation_Must_Be_Ignored_And_Cannot_Increase_Natural_Streak()
     {
@@ -104,7 +216,11 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
             .ToArray();
 
         var result = new ScheduledGovernanceReliabilityWindowCalculator(
-            new ScheduledGovernanceReliabilityWindowOptions { ExpectedFirstRunAtUtc = FirstRun })
+            new ScheduledGovernanceReliabilityWindowOptions
+            {
+                ExpectedFirstRunAtUtc = FirstRun,
+                ExpectedNaturalOriginAuthority = NaturalOriginAuthority
+            })
             .Calculate(projections);
 
         result.ConsecutiveQualifyingRuns.Should().Be(3);
@@ -141,7 +257,7 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
             Digest("task"),
             Digest("automation"),
             Digest("schedule"),
-            Digest("configuration"),
+            NaturalOriginAuthority.ConfigurationDigest,
             ScheduledGovernanceContract.ToolContractVersion,
             ScheduledGovernanceContract.SchemaHash,
             ScheduledGovernanceContract.PublishedCatalogVersion,
@@ -188,7 +304,9 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
             ProjectIds = ProjectIds,
             RuntimeIdentity = ScheduledGovernanceContract.RuntimeIdentity,
             NaturalOriginEvidence = evidence,
-            BaselineIdentity = "stable-baseline",
+            BaselineIdentity = ScheduledGovernanceReliabilityReceiptProjection.BindAuthorityEpoch(
+                "stable-baseline",
+                NaturalOriginAuthority.AuthorityEpochDigest),
             Decision = ScheduledGovernanceDecision.NoOpConverged,
             InitialReviewReceived = true,
             CoverageComplete = true,

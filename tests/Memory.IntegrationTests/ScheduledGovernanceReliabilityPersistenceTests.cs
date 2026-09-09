@@ -15,6 +15,21 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    [Fact]
+    public void Receipt_event_sequence_is_configured_as_a_concurrency_token()
+    {
+        using var db = new MemoryDbContext(
+            new DbContextOptionsBuilder<MemoryDbContext>()
+                .UseNpgsql("Host=localhost;Database=concurrency-model;Username=unused;Password=unused")
+                .Options);
+        var property = db.Model
+            .FindEntityType(typeof(ScheduledGovernanceReliabilityRun))!
+            .FindProperty(nameof(ScheduledGovernanceReliabilityRun.ReceiptEventSequence));
+
+        property.Should().NotBeNull();
+        property!.IsConcurrencyToken.Should().BeTrue();
+    }
+
     [DockerRequiredFact]
     public async Task Concurrent_observation_should_converge_to_one_row_and_survive_a_fresh_scope_read()
     {
@@ -87,6 +102,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
         using (var firstScope = factory.Services.CreateScope())
         {
             SetActor(firstScope.ServiceProvider, actor);
+            await PersistObservedReceiptAsync(firstScope.ServiceProvider, actor, firstReceipt);
             await firstScope.ServiceProvider
                 .GetRequiredService<IScheduledGovernanceReliabilityService>()
                 .ObserveAsync(firstReceipt, CancellationToken.None);
@@ -129,6 +145,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
         using (var laterScope = factory.Services.CreateScope())
         {
             SetActor(laterScope.ServiceProvider, actor);
+            await PersistObservedReceiptAsync(laterScope.ServiceProvider, actor, laterReceipt);
             var observed = await laterScope.ServiceProvider
                 .GetRequiredService<IScheduledGovernanceReliabilityService>()
                 .ObserveAsync(laterReceipt, CancellationToken.None);
@@ -190,10 +207,8 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
             x.TenantId == primary.TenantId && x.OwnerUserId == primary.Id && x.GovernanceRunId == runId);
         using var persistedProjection = JsonDocument.Parse(persisted.ProjectionJson);
         var persistedRuntimeIdentity = persistedProjection.RootElement.GetProperty("runtimeIdentity");
-        persistedRuntimeIdentity.GetProperty("buildVersion").GetString().Should()
-            .Be(ScheduledGovernanceContract.RuntimeIdentity.BuildVersion);
-        persistedRuntimeIdentity.GetProperty("derivedIdentity").GetString().Should()
-            .Be(ScheduledGovernanceContract.RuntimeIdentity.DerivedIdentity);
+        persistedRuntimeIdentity.ValueKind.Should().Be(JsonValueKind.Null,
+            "a synthetic receipt without immutable runtime evidence must not inherit the current deployment");
 
         SetActor(scope.ServiceProvider, other);
         var isolated = await reliability.ObserveAsync(receipt with { ReceiptId = Guid.NewGuid() }, CancellationToken.None);
@@ -301,6 +316,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
             var reliability = observeScope.ServiceProvider
                 .GetRequiredService<IScheduledGovernanceReliabilityService>();
 
+            await PersistObservedReceiptAsync(observeScope.ServiceProvider, actor, replayReceipt);
             var replayFirst = await reliability.ObserveAsync(replayReceipt, CancellationToken.None);
 
             replayFirst.Runs.Should().BeEmpty();
@@ -321,6 +337,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
             DeserializeReplayReceiptIds(replayRow.ReplayReceiptIdsJson)
                 .Should().Contain(replayReceipt.ReceiptId);
 
+            await PersistObservedReceiptAsync(observeScope.ServiceProvider, actor, canonicalReceipt);
             var afterCanonical = await reliability.ObserveAsync(canonicalReceipt, CancellationToken.None);
 
             afterCanonical.Runs.Should().ContainSingle(x =>
@@ -427,6 +444,49 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
         serverCalculatorReadBack.ResetEvents.Should().HaveCount(6);
     }
 
+    [DockerRequiredFact]
+    public async Task Receipt_event_sequence_must_reject_a_stale_concurrent_projection_update()
+    {
+        var factory = environment.GetFactory();
+        TenantUser actor;
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var seed = await setupDb.TenantUsers.AsNoTracking()
+                .SingleAsync(x => x.Username == "contract-test-admin");
+            actor = await CreateOwnerAsync(setupDb, seed.TenantId, "reliability-concurrency-token-owner");
+        }
+
+        var runId = $"reliability-concurrency-token-{Guid.NewGuid():N}";
+        using (var observeScope = factory.Services.CreateScope())
+        {
+            SetActor(observeScope.ServiceProvider, actor);
+            await observeScope.ServiceProvider
+                .GetRequiredService<IScheduledGovernanceReliabilityService>()
+                .ObserveAsync(CreateReceipt(runId, "Scheduled"), CancellationToken.None);
+        }
+
+        using var firstScope = factory.Services.CreateScope();
+        using var secondScope = factory.Services.CreateScope();
+        var firstDb = firstScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var secondDb = secondScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var first = await firstDb.ScheduledGovernanceReliabilityRuns.SingleAsync(x =>
+            x.TenantId == actor.TenantId &&
+            x.OwnerUserId == actor.Id &&
+            x.GovernanceRunId == runId);
+        var second = await secondDb.ScheduledGovernanceReliabilityRuns.SingleAsync(x =>
+            x.TenantId == actor.TenantId &&
+            x.OwnerUserId == actor.Id &&
+            x.GovernanceRunId == runId);
+
+        first.ReceiptEventSequence = 1;
+        second.ReceiptEventSequence = 2;
+        await firstDb.SaveChangesAsync();
+
+        var staleUpdate = () => secondDb.SaveChangesAsync();
+        await staleUpdate.Should().ThrowAsync<DbUpdateConcurrencyException>();
+    }
+
     private static void SetActor(IServiceProvider services, TenantUser user)
         => services.GetRequiredService<IRequestActorAccessor>().Current = new ContextHubRequestActor(
             user.TenantId,
@@ -509,6 +569,71 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
             false,
             string.Empty,
             null);
+    }
+
+    private static async Task PersistObservedReceiptAsync(
+        IServiceProvider services,
+        TenantUser actor,
+        GovernanceRunReceiptResult receipt)
+    {
+        var db = services.GetRequiredService<MemoryDbContext>();
+        db.GovernanceRunReceipts.Add(new GovernanceRunReceipt
+        {
+            Id = receipt.ReceiptId,
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.Id,
+            GovernanceRunId = receipt.GovernanceRunId,
+            EventKey = $"reliability-observed-{Guid.NewGuid():N}",
+            Actor = receipt.Actor,
+            ExecutionMode = receipt.ExecutionMode,
+            StartedAt = receipt.StartedAt,
+            CompletedAt = receipt.CompletedAt,
+            ToolContractVersion = receipt.ToolContractVersion,
+            SchemaHash = receipt.SchemaHash,
+            PublishedCatalogVersion = receipt.PublishedCatalogVersion,
+            InitialSnapshotToken = receipt.InitialSnapshotToken,
+            FinalSnapshotToken = receipt.FinalSnapshotToken,
+            CoverageComplete = receipt.CoverageComplete,
+            AcceptanceEvidenceVersion = "1",
+            AuthorizedDurableMemoryCount = 0,
+            CoveredDurableMemoryCount = 0,
+            ScannedDurableMemoryCount = 0,
+            TotalDurableMemoryCount = 0,
+            SharedScopeOccurrences = 1,
+            UserScopeOccurrences = 0,
+            UserScopeHandledSeparately = true,
+            CountInvariantSatisfied = true,
+            InitialGovernanceActionable = receipt.InitialGovernanceActionable,
+            FinalGovernanceActionable = receipt.FinalGovernanceActionable,
+            CandidateCount = receipt.CandidateCount,
+            ExecutionActionableCount = receipt.ExecutionActionableCount,
+            GovernedExceptionCount = receipt.GovernedExceptionCount,
+            Applied = receipt.Applied,
+            Failed = receipt.Failed,
+            Deferred = receipt.Deferred,
+            RequiresUserDecision = receipt.RequiresUserDecision,
+            HostBlocked = receipt.HostBlocked,
+            Quarantined = receipt.Quarantined,
+            DeleteEligible = receipt.DeleteEligible,
+            DeleteMatured = receipt.DeleteMatured,
+            AutoDeleted = receipt.AutoDeleted,
+            DeleteCancelled = receipt.DeleteCancelled,
+            Tombstoned = receipt.Tombstoned,
+            SemanticAutoResolved = receipt.SemanticAutoResolved,
+            BusinessWorkItemActionable = receipt.BusinessWorkItemActionable,
+            FinalConvergenceStatus = receipt.FinalConvergenceStatus,
+            StoppedReason = receipt.StoppedReason,
+            EventType = "ReviewCompleted",
+            Status = receipt.Status,
+            LatestBatchReceived = receipt.LatestBatchReceived,
+            RequestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+                .ComputeReviewRequestIdentityHash(receipt.GovernanceRunId),
+            AuditIdsJson = JsonSerializer.Serialize(receipt.AuditIds, JsonOptions),
+            ProjectIdsJson = JsonSerializer.Serialize(receipt.ProjectIds, JsonOptions),
+            IsReplay = receipt.IsReplay,
+            CreatedAt = receipt.CompletedAt
+        });
+        await db.SaveChangesAsync();
     }
 
     private static IReadOnlyList<Guid> DeserializeReplayReceiptIds(string value)

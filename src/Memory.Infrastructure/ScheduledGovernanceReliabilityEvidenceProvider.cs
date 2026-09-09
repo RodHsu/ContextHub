@@ -172,9 +172,16 @@ public sealed class ScheduledGovernanceReliabilityEvidenceProvider(
                    query.ProjectScopeHash,
                    StringComparison.Ordinal) &&
                !string.IsNullOrWhiteSpace(receipt.EventKey) &&
+                string.Equals(
+                    row.ReceiptEventKeyHash,
+                    ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(receipt.EventKey),
+                    StringComparison.Ordinal) &&
                string.Equals(
-                   row.ReceiptEventKeyHash,
-                   ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(receipt.EventKey),
+                   row.DispatchIdentityHash,
+                   ScheduledGovernanceReliabilityEvidenceContract.ComputeDispatchIdentityHash(
+                       receipt.Id,
+                       receipt.EventKey,
+                       query.RequestIdentityHash),
                    StringComparison.Ordinal);
     }
 

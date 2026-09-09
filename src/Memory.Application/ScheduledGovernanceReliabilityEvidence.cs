@@ -78,11 +78,39 @@ public static class ScheduledGovernanceReliabilityEvidenceContract
             ? string.Empty
             : ComputeFieldSequenceHash([value.Trim()]);
 
-    public static string ComputeReviewRequestIdentityHash(string? governanceRunId)
+    public static string ComputeReviewRequestIdentityHash(
+        string? governanceRunId,
+        bool isReReview = false)
         => string.IsNullOrWhiteSpace(governanceRunId)
             ? string.Empty
             : ComputeFieldSequenceHash(
-                [ScheduledGovernanceContract.ReviewToolName, governanceRunId.Trim()]);
+                [
+                    "scheduled-governance-review-request-v2",
+                    ScheduledGovernanceContract.ReviewToolName,
+                    ResourceAudience,
+                    governanceRunId.Trim(),
+                    isReReview ? "true" : "false",
+                    "projectIds:server-resolved",
+                    "limitPerSection:200",
+                    "offset:0"
+                 ]);
+
+    public static string ComputeDispatchIdentityHash(
+        Guid receiptId,
+        string? receiptEventKey,
+        string? requestIdentityHash)
+        => receiptId == Guid.Empty ||
+           string.IsNullOrWhiteSpace(receiptEventKey) ||
+           string.IsNullOrWhiteSpace(requestIdentityHash)
+            ? string.Empty
+            : ComputeFieldSequenceHash(
+                [
+                    "scheduled-governance-dispatch-v1",
+                    ResourceAudience,
+                    receiptId.ToString("D"),
+                    ComputeOpaqueHash(receiptEventKey),
+                    requestIdentityHash.Trim()
+                ]);
 
     private static string ComputeFieldSequenceHash(IEnumerable<string> fields)
     {

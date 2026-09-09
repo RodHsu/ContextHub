@@ -91,6 +91,9 @@ public static class DependencyInjection
         services.AddScoped<IGovernanceRunReceiptService, GovernanceRunReceiptService>();
         services.AddScoped<INaturalOriginEvidenceStore, NaturalOriginEvidenceStore>();
         services.AddScoped<IScheduledGovernanceReliabilityEvidenceProvider, ScheduledGovernanceReliabilityEvidenceProvider>();
+        services.AddScoped<IScheduledGovernanceServerSafetyEvidenceProvider, ScheduledGovernanceServerSafetyEvidenceProvider>();
+        services.AddSingleton<IScheduledGovernanceNaturalOriginAuthorityProvider,
+            ConfigurationScheduledGovernanceNaturalOriginAuthorityProvider>();
         services.AddSingleton<IInternalMaturedDeleteExecutor, InternalMaturedDeleteExecutor>();
         services.AddScoped<IVacuumFullReclaimService, VacuumFullReclaimService>();
         services.AddScoped<IDomainOwnerRepairService, DomainOwnerRepairService>();

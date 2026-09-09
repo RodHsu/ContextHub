@@ -9,6 +9,21 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
     private static readonly Guid TenantId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid OwnerUserId = Guid.Parse("22222222-2222-2222-2222-222222222222");
     private static readonly string[] ProjectIds = ["project-a"];
+    private static readonly string AuthorityEpochDigest = Digest("authority-epoch-a");
+    private static readonly string BaseConfigurationDigest = Digest("configuration");
+    private static readonly string ExpectedConfigurationDigest =
+        ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(
+            BaseConfigurationDigest,
+            AuthorityEpochDigest);
+    private static readonly ScheduledGovernanceNaturalOriginAuthority NaturalOriginAuthority = new(
+        "https://scheduler.example.test",
+        "scheduler-control-plane",
+        "production",
+        Digest("task"),
+        Digest("automation"),
+        Digest("schedule"),
+        ExpectedConfigurationDigest,
+        AuthorityEpochDigest);
 
     [Fact]
     public void Default_Window_Should_Expose_The_Six_Run_Taiwan_Schedule()
@@ -170,7 +185,8 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
         var options = new ScheduledGovernanceReliabilityWindowOptions
         {
             ExpectedFirstRunAtUtc = FirstRun,
-            MaximumAllowedDrift = TimeSpan.FromMinutes(15)
+            MaximumAllowedDrift = TimeSpan.FromMinutes(15),
+            ExpectedNaturalOriginAuthority = NaturalOriginAuthority
         };
         var result = new ScheduledGovernanceReliabilityWindowCalculator(options)
             .Calculate(new[]
@@ -246,9 +262,16 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             evidence) with
         {
             TenantId = projection.TenantId,
-            OwnerUserId = projection.OwnerUserId
+            OwnerUserId = projection.OwnerUserId,
+            RequestIdentityHash = projection.RequestIdentityHash,
+            BaselineIdentity = ScheduledGovernanceReliabilityReceiptProjection.BindAuthorityEpoch(
+                projection.BaselineIdentity,
+                NaturalOriginAuthority.AuthorityEpochDigest)
         };
-        var result = new ScheduledGovernanceReliabilityWindowCalculator()
+        var result = new ScheduledGovernanceReliabilityWindowCalculator(new()
+        {
+            ExpectedNaturalOriginAuthority = NaturalOriginAuthority
+        })
             .Calculate(new[] { adapted });
 
         result.ConsecutiveQualifyingRuns.Should().Be(1);
@@ -300,7 +323,10 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             CompletedAt = FirstRun.AddMinutes(11),
             ObservedAtUtc = null
         };
-        var result = new ScheduledGovernanceReliabilityWindowCalculator().Calculate(new[] { observed });
+        var result = new ScheduledGovernanceReliabilityWindowCalculator(new()
+        {
+            ExpectedNaturalOriginAuthority = NaturalOriginAuthority
+        }).Calculate(new[] { observed });
 
         result.ConsecutiveQualifyingRuns.Should().Be(1);
         result.Runs.Should().ContainSingle();
@@ -362,12 +388,146 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             x.Reasons.Contains("natural-origin-actor-binding-mismatch"));
     }
 
+    [Theory]
+    [InlineData("platformIssuer")]
+    [InlineData("controlPlaneSource")]
+    [InlineData("environment")]
+    [InlineData("task")]
+    [InlineData("automation")]
+    [InlineData("schedule")]
+    [InlineData("configuration")]
+    public void A_And_B_That_Agree_But_Do_Not_Match_Current_Authority_Should_Fail_Closed(
+        string mismatchedField)
+    {
+        var run = QualifyingRun(0);
+        var currentAuthority = mismatchedField switch
+        {
+            "platformIssuer" => NaturalOriginAuthority with { PlatformIssuer = "https://other.example.test" },
+            "controlPlaneSource" => NaturalOriginAuthority with { ControlPlaneSourceSystem = "other-control-plane" },
+            "environment" => NaturalOriginAuthority with { Environment = "staging" },
+            "task" => NaturalOriginAuthority with { TaskBindingHash = Digest("different-task") },
+            "automation" => NaturalOriginAuthority with { AutomationBindingHash = Digest("different-automation") },
+            "schedule" => NaturalOriginAuthority with { ScheduleDigest = Digest("different-schedule") },
+            "configuration" => NaturalOriginAuthority with
+            {
+                ConfigurationDigest = Digest("different-current-configuration")
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(mismatchedField))
+        };
+        var result = new ScheduledGovernanceReliabilityWindowCalculator(new()
+        {
+            ExpectedFirstRunAtUtc = FirstRun,
+            ExpectedNaturalOriginAuthority = currentAuthority
+        }).Calculate([run]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.NonQualifyingRuns.Should().ContainSingle(x =>
+            x.Reasons.Contains("natural-origin-authority-baseline-mismatch"));
+    }
+
+    [Fact]
+    public void Missing_Current_Natural_Origin_Authority_Should_Fail_Closed()
+    {
+        var result = new ScheduledGovernanceReliabilityWindowCalculator(new()
+        {
+            ExpectedFirstRunAtUtc = FirstRun
+        }).Calculate([QualifyingRun(0)]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.NonQualifyingRuns.Should().ContainSingle(x =>
+            x.Reasons.Contains("natural-origin-authority-baseline-not-proven"));
+    }
+
+    [Fact]
+    public void Authority_Epoch_A_to_B_to_A_Must_Not_Revive_The_Previous_Streak()
+    {
+        var baseIdentity = "v1.1.95|catalog-automation-v4";
+        var first = QualifyingRun(0) with
+        {
+            BaselineIdentity = ScheduledGovernanceReliabilityReceiptProjection.BindAuthorityEpoch(
+                baseIdentity,
+                NaturalOriginAuthority.AuthorityEpochDigest)
+        };
+        var epochB = Digest("authority-epoch-b");
+        var second = QualifyingRun(1) with
+        {
+            BaselineIdentity = ScheduledGovernanceReliabilityReceiptProjection.BindAuthorityEpoch(
+                baseIdentity,
+                epochB)
+        };
+        var third = QualifyingRun(2) with
+        {
+            BaselineIdentity = ScheduledGovernanceReliabilityReceiptProjection.BindAuthorityEpoch(
+                baseIdentity,
+                NaturalOriginAuthority.AuthorityEpochDigest)
+        };
+
+        var result = Calculate([first, second, third]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.NonQualifyingRuns.Should().HaveCount(2);
+        result.NonQualifyingRuns[0].Reasons.Should()
+            .Contain("natural-origin-authority-baseline-mismatch");
+        result.NonQualifyingRuns[1].Reasons.Should().Contain("reliability-baseline-changed");
+    }
+
+    [Fact]
+    public void Missing_Immutable_Server_Safety_Request_Identity_Must_Not_Qualify()
+    {
+        var result = Calculate([QualifyingRun(0) with { RequestIdentityHash = string.Empty }]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.NonQualifyingRuns.Should().ContainSingle(x =>
+            x.Reasons.Contains("natural-origin-request-correlation-mismatch"));
+    }
+
+    [Fact]
+    public void Human_Decision_Only_Must_Not_Qualify_A_Natural_Run()
+    {
+        var run = QualifyingRun(0) with
+        {
+            Decision = ScheduledGovernanceDecision.HumanDecisionOnly,
+            GovernedExceptionCount = 1,
+            FinalConvergenceStatus = "ConvergedWithExceptions"
+        };
+
+        var result = Calculate([run]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.NonQualifyingRuns.Should().ContainSingle(x =>
+            x.Reasons.Contains("decision-human-authority-required"));
+    }
+
+    [Fact]
+    public void Drift_Tolerance_Above_Fifteen_Minutes_Must_Be_Rejected()
+    {
+        var action = () => new ScheduledGovernanceReliabilityWindowCalculator(new()
+        {
+            MaximumAllowedDrift = TimeSpan.FromMinutes(16)
+        });
+
+        action.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void Malformed_Authority_Digest_Should_Return_A_Stable_Validation_Error()
+    {
+        var action = () => new ScheduledGovernanceReliabilityWindowCalculator(new()
+        {
+            ExpectedNaturalOriginAuthority = NaturalOriginAuthority with { TaskBindingHash = null! }
+        });
+
+        action.Should().Throw<ArgumentException>()
+            .WithMessage("Natural-origin authority is incomplete or malformed.");
+    }
+
     private static ScheduledGovernanceReliabilityWindowResult Calculate(
         IEnumerable<ScheduledGovernanceReliabilityReceiptProjection> receipts)
         => new ScheduledGovernanceReliabilityWindowCalculator(
             new ScheduledGovernanceReliabilityWindowOptions
             {
-                ExpectedFirstRunAtUtc = FirstRun
+                ExpectedFirstRunAtUtc = FirstRun,
+                ExpectedNaturalOriginAuthority = NaturalOriginAuthority
             }).Calculate(receipts);
 
     private static ScheduledGovernanceReliabilityReceiptProjection QualifyingRun(int index)
@@ -398,7 +558,7 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             Digest("task"),
             Digest("automation"),
             Digest("schedule"),
-            Digest("configuration"),
+            NaturalOriginAuthority.ConfigurationDigest,
             ScheduledGovernanceContract.ToolContractVersion,
             ScheduledGovernanceContract.SchemaHash,
             ScheduledGovernanceContract.PublishedCatalogVersion,
@@ -446,8 +606,10 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             ProjectIds = ProjectIds,
             RuntimeIdentity = ScheduledGovernanceContract.RuntimeIdentity,
             NaturalOriginEvidence = naturalOriginEvidence,
-            BaselineIdentity = "v1.1.95|catalog-automation-v4",
-            Decision = ScheduledGovernanceDecision.HumanDecisionOnly,
+            BaselineIdentity = ScheduledGovernanceReliabilityReceiptProjection.BindAuthorityEpoch(
+                "v1.1.95|catalog-automation-v4",
+                NaturalOriginAuthority.AuthorityEpochDigest),
+            Decision = ScheduledGovernanceDecision.NoOpConverged,
             InitialReviewReceived = true,
             CoverageComplete = true,
             CountInvariantSatisfied = true,
@@ -464,11 +626,11 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             InitialGovernanceActionable = 0,
             FinalGovernanceActionable = 0,
             ExecutionActionableCount = 0,
-            GovernedExceptionCount = 1,
+            GovernedExceptionCount = 0,
             Applied = 0,
             Failed = 0,
             AuditIds = [Guid.NewGuid()],
-            FinalConvergenceStatus = "ConvergedWithExceptions",
+            FinalConvergenceStatus = "NoOpConverged",
             StoppedReason = "ReviewCompleted"
         };
     }
@@ -523,13 +685,13 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             projection.CoverageComplete,
             projection.InitialGovernanceActionable,
             projection.FinalGovernanceActionable,
-            1,
+            0,
             projection.ExecutionActionableCount,
             projection.GovernedExceptionCount,
             projection.Applied,
             projection.Failed,
             0,
-            1,
+            0,
             0,
             0,
             0,
