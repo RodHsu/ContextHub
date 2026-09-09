@@ -9,8 +9,21 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG APP_VERSION=1.1.0
 ARG BUILD_TIMESTAMP_UTC=
 WORKDIR /src
+
+COPY ContextHub.slnx ./
+COPY Directory.Build.props ./
+COPY src/Memory.Domain/Memory.Domain.csproj src/Memory.Domain/
+COPY src/Memory.Application/Memory.Application.csproj src/Memory.Application/
+COPY src/Memory.Infrastructure/Memory.Infrastructure.csproj src/Memory.Infrastructure/
+COPY src/Memory.McpTransport/Memory.McpTransport.csproj src/Memory.McpTransport/
+COPY src/Memory.ChatGptGateway/Memory.ChatGptGateway.csproj src/Memory.ChatGptGateway/
+
+RUN --mount=type=cache,id=contexthub-nuget-dotnet10-v1,target=/root/.nuget/packages,sharing=locked \
+    dotnet restore src/Memory.ChatGptGateway/Memory.ChatGptGateway.csproj --disable-parallel
+
 COPY . .
-RUN dotnet publish src/Memory.ChatGptGateway/Memory.ChatGptGateway.csproj -c Release -o /app/publish \
+RUN --mount=type=cache,id=contexthub-nuget-dotnet10-v1,target=/root/.nuget/packages,sharing=locked \
+    dotnet publish src/Memory.ChatGptGateway/Memory.ChatGptGateway.csproj -c Release -o /app/publish --no-restore \
     /p:Version=$APP_VERSION \
     /p:FileVersion=$APP_VERSION \
     /p:InformationalVersion=$APP_VERSION \

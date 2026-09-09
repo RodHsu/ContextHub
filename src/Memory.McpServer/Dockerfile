@@ -11,10 +11,12 @@ COPY src/Memory.Infrastructure/Memory.Infrastructure.csproj src/Memory.Infrastru
 COPY src/Memory.McpTransport/Memory.McpTransport.csproj src/Memory.McpTransport/
 COPY src/Memory.McpServer/Memory.McpServer.csproj src/Memory.McpServer/
 
-RUN dotnet restore src/Memory.McpServer/Memory.McpServer.csproj
+RUN --mount=type=cache,id=contexthub-nuget-dotnet10-v1,target=/root/.nuget/packages,sharing=locked \
+    dotnet restore src/Memory.McpServer/Memory.McpServer.csproj --disable-parallel
 
 COPY . .
-RUN dotnet publish src/Memory.McpServer/Memory.McpServer.csproj -c Release -o /app/publish /p:UseAppHost=false /p:Version=$APP_VERSION /p:InformationalVersion=$APP_VERSION /p:BuildTimestampUtc=$BUILD_TIMESTAMP_UTC
+RUN --mount=type=cache,id=contexthub-nuget-dotnet10-v1,target=/root/.nuget/packages,sharing=locked \
+    dotnet publish src/Memory.McpServer/Memory.McpServer.csproj -c Release -o /app/publish --no-restore /p:UseAppHost=false /p:Version=$APP_VERSION /p:InformationalVersion=$APP_VERSION /p:BuildTimestampUtc=$BUILD_TIMESTAMP_UTC
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 RUN apt-get update \

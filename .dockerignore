@@ -5,6 +5,7 @@
 **/.idea/
 **/.vscode/
 .agent/
+artifacts/
 deploy/
 docs/
 tests/

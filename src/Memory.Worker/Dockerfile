@@ -10,10 +10,12 @@ COPY src/Memory.Application/Memory.Application.csproj src/Memory.Application/
 COPY src/Memory.Infrastructure/Memory.Infrastructure.csproj src/Memory.Infrastructure/
 COPY src/Memory.Worker/Memory.Worker.csproj src/Memory.Worker/
 
-RUN dotnet restore src/Memory.Worker/Memory.Worker.csproj
+RUN --mount=type=cache,id=contexthub-nuget-dotnet10-v1,target=/root/.nuget/packages,sharing=locked \
+    dotnet restore src/Memory.Worker/Memory.Worker.csproj --disable-parallel
 
 COPY . .
-RUN dotnet publish src/Memory.Worker/Memory.Worker.csproj -c Release -o /app/publish /p:UseAppHost=false /p:Version=$APP_VERSION /p:InformationalVersion=$APP_VERSION /p:BuildTimestampUtc=$BUILD_TIMESTAMP_UTC
+RUN --mount=type=cache,id=contexthub-nuget-dotnet10-v1,target=/root/.nuget/packages,sharing=locked \
+    dotnet publish src/Memory.Worker/Memory.Worker.csproj -c Release -o /app/publish --no-restore /p:UseAppHost=false /p:Version=$APP_VERSION /p:InformationalVersion=$APP_VERSION /p:BuildTimestampUtc=$BUILD_TIMESTAMP_UTC
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
