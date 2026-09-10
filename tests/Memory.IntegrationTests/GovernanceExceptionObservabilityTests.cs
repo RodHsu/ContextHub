@@ -1,11 +1,14 @@
 using System.Data;
+using System.Diagnostics;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace Memory.IntegrationTests;
 
@@ -165,20 +168,12 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
             CreatedAt = blockedAt
         });
         await blockerDb.SaveChangesAsync();
-
-        var acceptTask = Task.Run(async () =>
-        {
-            using var acceptScope = environment.GetFactory().Services.CreateScope();
-            UseBootstrapActor(acceptScope.ServiceProvider);
-            await acceptScope.ServiceProvider.GetRequiredService<IGovernanceService>()
-                .AcceptAsync(finding.Id, CancellationToken.None);
-        });
-        await Task.Delay(250);
-        acceptTask.IsCompleted.Should().BeFalse(
-            "the serializable accept must wait for the concurrent HostBlocked row writer");
-
-        await blockerTransaction.CommitAsync(CancellationToken.None);
-        var acceptException = await Record.ExceptionAsync(() => acceptTask);
+        var acceptException = await CommitAfterWriterBlockedAsync(
+            blockerDb,
+            blockerTransaction,
+            "governance_findings",
+            (services, cancellationToken) => services.GetRequiredService<IGovernanceService>()
+                .AcceptAsync(finding.Id, cancellationToken));
         acceptException.Should().NotBeNull(
             "a stale accept must fail closed after the HostBlocked write commits");
 
@@ -241,20 +236,12 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
             CreatedAt = blockedAt
         });
         await blockerDb.SaveChangesAsync();
-
-        var analyzeTask = Task.Run(async () =>
-        {
-            using var analyzeScope = environment.GetFactory().Services.CreateScope();
-            UseBootstrapActor(analyzeScope.ServiceProvider);
-            await analyzeScope.ServiceProvider.GetRequiredService<IGovernanceService>()
-                .AnalyzeAsync(projectId, CancellationToken.None);
-        });
-        await Task.Delay(250);
-        analyzeTask.IsCompleted.Should().BeFalse(
-            "the serializable evidence re-evaluation must wait for the concurrent HostBlocked row writer");
-
-        await blockerTransaction.CommitAsync(CancellationToken.None);
-        var analyzeException = await Record.ExceptionAsync(() => analyzeTask);
+        var analyzeException = await CommitAfterWriterBlockedAsync(
+            blockerDb,
+            blockerTransaction,
+            "governance_findings",
+            (services, cancellationToken) => services.GetRequiredService<IGovernanceService>()
+                .AnalyzeAsync(projectId, cancellationToken));
         analyzeException.Should().NotBeNull(
             "a stale automatic reopen must fail closed after the HostBlocked write commits");
 
@@ -307,22 +294,14 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
             CreatedAt = blockedAt
         });
         await blockerDb.SaveChangesAsync();
-
-        var buildTask = Task.Run(async () =>
-        {
-            using var buildScope = environment.GetFactory().Services.CreateScope();
-            UseBootstrapActor(buildScope.ServiceProvider);
-            await buildScope.ServiceProvider.GetRequiredService<IFullGovernancePlanService>()
+        var buildException = await CommitAfterWriterBlockedAsync(
+            blockerDb,
+            blockerTransaction,
+            "conversation_insights",
+            (services, cancellationToken) => services.GetRequiredService<IFullGovernancePlanService>()
                 .BuildAsync(
                     [projectId], $"insight-reopen-race-{Guid.NewGuid():N}",
-                    CreateEmptyGovernanceSnapshot(), CancellationToken.None);
-        });
-        await Task.Delay(250);
-        buildTask.IsCompleted.Should().BeFalse(
-            "the serializable insight re-evaluation must wait for the concurrent HostBlocked row writer");
-
-        await blockerTransaction.CommitAsync(CancellationToken.None);
-        var buildException = await Record.ExceptionAsync(() => buildTask);
+                    CreateEmptyGovernanceSnapshot(), cancellationToken));
         buildException.Should().NotBeNull(
             "a stale automatic insight reopen must fail closed after the HostBlocked write commits");
 
@@ -748,6 +727,55 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
     }
 
     [DockerRequiredFact]
+    public async Task Review_Stopped_Receipt_Should_Distinguish_Initial_Review_From_ReReview_Idempotently()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"review-stopped-phase-{Guid.NewGuid():N}";
+        var startedAt = DateTimeOffset.UtcNow;
+        var identity = new GovernanceReceiptContractIdentity(
+            ScheduledGovernanceContract.ToolContractVersion,
+            ScheduledGovernanceContract.SchemaHash,
+            ScheduledGovernanceContract.PublishedCatalogVersion);
+
+        foreach (var isReReview in new[] { false, true })
+        {
+            await receipts.RecordReviewStoppedAsync(
+                runId,
+                startedAt,
+                "Failed",
+                nameof(InvalidOperationException),
+                "KnowledgeReview",
+                identity,
+                CancellationToken.None,
+                isReReview);
+            await receipts.RecordReviewStoppedAsync(
+                runId,
+                startedAt,
+                "Failed",
+                nameof(InvalidOperationException),
+                "KnowledgeReview",
+                identity,
+                CancellationToken.None,
+                isReReview);
+        }
+
+        var stoppedEvents = await db.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId &&
+                        x.OwnerUserId == actor.UserId &&
+                        x.GovernanceRunId == runId &&
+                        x.EventType == "ReviewStopped")
+            .OrderBy(x => x.EventSequence)
+            .ToArrayAsync();
+
+        stoppedEvents.Should().HaveCount(2);
+        stoppedEvents.Select(x => x.EventKey).Should().OnlyHaveUniqueItems();
+        stoppedEvents.Select(x => x.RequestIdentityHash).Should().OnlyHaveUniqueItems();
+    }
+
+    [DockerRequiredFact]
     public async Task InternalRetentionWorker_Should_Claim_Concurrent_Batches_Without_Duplicate_Delete()
     {
         Guid memoryId;
@@ -1104,6 +1132,109 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         }
 
         throw new TimeoutException($"Retention worker did not claim resource '{memoryId}' within the test bound.");
+    }
+
+    private async Task<Exception?> CommitAfterWriterBlockedAsync(
+        MemoryDbContext blockerDb,
+        IDbContextTransaction blockerTransaction,
+        string relationName,
+        Func<IServiceProvider, CancellationToken, Task> operation)
+    {
+        var blockerPid = await ReadBackendPidAsync(blockerDb);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var writerPidSource = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var worker = Task.Run(async () =>
+        {
+            try
+            {
+                using var workerScope = environment.GetFactory().Services.CreateScope();
+                UseBootstrapActor(workerScope.ServiceProvider);
+                var workerDb = workerScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+                await workerDb.Database.OpenConnectionAsync(timeout.Token);
+                writerPidSource.TrySetResult(await ReadBackendPidAsync(workerDb, timeout.Token));
+                await operation(workerScope.ServiceProvider, timeout.Token);
+            }
+            catch (Exception exception)
+            {
+                writerPidSource.TrySetException(exception);
+                throw;
+            }
+        });
+
+        try
+        {
+            var writerPid = await writerPidSource.Task.WaitAsync(timeout.Token);
+            var blocked = WaitForBackendBlockedByAsync(
+                blockerPid,
+                writerPid,
+                relationName,
+                timeout.Token);
+            if (await Task.WhenAny(blocked, worker) == worker)
+            {
+                await worker;
+                throw new InvalidOperationException(
+                    $"Writer PID {writerPid} completed before PostgreSQL reported the expected '{relationName}' lock wait.");
+            }
+
+            await blocked;
+            await blockerTransaction.CommitAsync(timeout.Token);
+            return await Record.ExceptionAsync(() => worker);
+        }
+        catch
+        {
+            timeout.Cancel();
+            try
+            {
+                await blockerTransaction.RollbackAsync(CancellationToken.None);
+            }
+            catch
+            {
+            }
+
+            await Record.ExceptionAsync(() => worker);
+            throw;
+        }
+    }
+
+    private static async Task<int> ReadBackendPidAsync(
+        MemoryDbContext db,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = "SELECT pg_backend_pid();";
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
+    }
+
+    private async Task WaitForBackendBlockedByAsync(
+        int blockerPid,
+        int writerPid,
+        string relationName,
+        CancellationToken cancellationToken)
+    {
+        var connectionString = environment.PostgresConnectionString ??
+                               throw new InvalidOperationException("PostgreSQL test connection is unavailable.");
+        var deadline = Stopwatch.GetTimestamp() + 10 * Stopwatch.Frequency;
+        await using var observer = new NpgsqlConnection(connectionString);
+        await observer.OpenAsync(cancellationToken);
+        while (Stopwatch.GetTimestamp() < deadline)
+        {
+            await using var command = new NpgsqlCommand(
+                """
+                SELECT @blocker_pid = ANY(pg_blocking_pids(@writer_pid));
+                """,
+                observer);
+            command.Parameters.AddWithValue("blocker_pid", blockerPid);
+            command.Parameters.AddWithValue("writer_pid", writerPid);
+            if ((bool)(await command.ExecuteScalarAsync(cancellationToken) ?? false))
+            {
+                return;
+            }
+
+            await Task.Delay(25, cancellationToken);
+        }
+
+        throw new TimeoutException(
+            $"PostgreSQL did not report writer PID {writerPid} on '{relationName}' blocked by backend PID {blockerPid}.");
     }
 
     private static DurableMemoryGovernanceSnapshotResult CreateEmptyGovernanceSnapshot()

@@ -922,6 +922,103 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         receipt.Outcome.Should().NotBe("ModeMismatch");
     }
 
+    [DockerRequiredFact]
+    public async Task Scheduled_lineage_rejects_cross_runtime_or_legacy_replay_without_appending_an_event()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var sourceRunId = $"scheduled-runtime-source-{Guid.NewGuid():N}";
+        var legacyRunId = $"scheduled-runtime-legacy-{Guid.NewGuid():N}";
+        var identity = CurrentScheduledIdentity();
+
+        await receipts.RecordReviewStartedAsync(
+            sourceRunId,
+            DateTimeOffset.UtcNow,
+            identity,
+            CancellationToken.None);
+        var source = await db.GovernanceRunReceipts.AsNoTracking()
+            .SingleAsync(x => x.TenantId == actor.TenantId &&
+                              x.OwnerUserId == actor.UserId &&
+                              x.GovernanceRunId == sourceRunId &&
+                              x.EventType == "ReviewReceived");
+        var legacy = CloneReceipt(source, "legacy-review-received", "ReviewReceived");
+        legacy.GovernanceRunId = legacyRunId;
+        legacy.RuntimeEvidenceVersion = string.Empty;
+        legacy.RuntimeServiceName = string.Empty;
+        legacy.RuntimeBuildVersion = string.Empty;
+        legacy.RuntimeBuildTimestampUtc = null;
+        legacy.RuntimeDerivedIdentity = string.Empty;
+        legacy.RuntimeIdentityHash = string.Empty;
+        legacy.RequestIdentityHash = string.Empty;
+        await db.GovernanceRunReceipts.AddAsync(legacy);
+        await db.SaveChangesAsync();
+
+        var replay = () => receipts.RecordReviewStartedAsync(
+            legacyRunId,
+            DateTimeOffset.UtcNow,
+            identity,
+            CancellationToken.None);
+
+        await replay.Should().ThrowAsync<GovernanceBatchException>()
+            .Where(x => x.Code == GovernanceBatchErrorCode.SchemaCapabilityMismatch);
+        (await db.GovernanceRunReceipts.AsNoTracking()
+                .CountAsync(x => x.TenantId == actor.TenantId &&
+                                 x.OwnerUserId == actor.UserId &&
+                                 x.GovernanceRunId == legacyRunId))
+            .Should().Be(1);
+    }
+
+    [DockerRequiredFact]
+    public async Task Generic_legacy_review_replay_must_fail_closed_without_appending_an_event()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var sourceRunId = $"generic-runtime-source-{Guid.NewGuid():N}";
+        var legacyRunId = $"generic-runtime-legacy-{Guid.NewGuid():N}";
+        var identity = new GovernanceReceiptContractIdentity(
+            GovernanceToolContract.ToolContractVersion,
+            GovernanceToolContract.SchemaHash,
+            GovernanceToolContract.PublishedCatalogVersion);
+
+        await receipts.RecordReviewStartedAsync(
+            sourceRunId,
+            DateTimeOffset.UtcNow,
+            identity,
+            CancellationToken.None);
+        var source = await db.GovernanceRunReceipts.AsNoTracking()
+            .SingleAsync(x => x.TenantId == actor.TenantId &&
+                              x.OwnerUserId == actor.UserId &&
+                              x.GovernanceRunId == sourceRunId &&
+                              x.EventType == "ReviewReceived");
+        var legacyEventKey = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes($"review-received\n{legacyRunId}")))
+            .ToLowerInvariant();
+        var legacy = CloneReceipt(source, legacyEventKey, "ReviewReceived");
+        legacy.GovernanceRunId = legacyRunId;
+        legacy.RequestIdentityHash = string.Empty;
+        await db.GovernanceRunReceipts.AddAsync(legacy);
+        await db.SaveChangesAsync();
+
+        var replay = () => receipts.RecordReviewStartedAsync(
+            legacyRunId,
+            DateTimeOffset.UtcNow,
+            identity,
+            CancellationToken.None);
+
+        await replay.Should().ThrowAsync<GovernanceBatchException>()
+            .Where(x => x.Code == GovernanceBatchErrorCode.ReplayPayloadMismatch);
+        (await db.GovernanceRunReceipts.AsNoTracking()
+                .CountAsync(x => x.TenantId == actor.TenantId &&
+                                 x.OwnerUserId == actor.UserId &&
+                                 x.GovernanceRunId == legacyRunId))
+            .Should().Be(1);
+    }
+
     private static ContextHubRequestActor UseBootstrapActor(IServiceProvider services)
     {
         var db = services.GetRequiredService<MemoryDbContext>();

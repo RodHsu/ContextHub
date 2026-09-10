@@ -44,7 +44,8 @@ public static class ScheduledGovernanceContract
             return new(
                 RuntimeServiceName,
                 build.Version,
-                build.TimestampUtc,
+                ScheduledGovernanceReliabilityEvidenceContract.NormalizeRuntimeBuildTimestampUtc(
+                    build.TimestampUtc),
                 $"{RuntimeServiceName}/{build.Version}+catalog.{PublishedCatalogVersion}.{SchemaHash[..12]}");
         }
     }

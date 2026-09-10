@@ -38,6 +38,9 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var receiptRow = await db.GovernanceRunReceipts.AsNoTracking()
             .SingleAsync(row => row.Id == receipt.ReceiptId);
+        receiptRow.RuntimeBuildTimestampUtc.Should().NotBeNull();
+        (receiptRow.RuntimeBuildTimestampUtc!.Value.Ticks % TimeSpan.TicksPerMicrosecond)
+            .Should().Be(0);
         var serverSafety = await scope.ServiceProvider
             .GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>()
             .GetAsync(
@@ -48,6 +51,9 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
                     runId),
                 CancellationToken.None);
         serverSafety!.CapturedRuntimeIdentity.Should().Be(ScheduledGovernanceContract.RuntimeIdentity);
+        ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeRuntimeIdentityHash(serverSafety.CapturedRuntimeIdentity)
+            .Should().Be(receiptRow.RuntimeIdentityHash);
         var expectedAt = startedAt.ToUniversalTime();
         var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
         var reliabilityService = scope.ServiceProvider

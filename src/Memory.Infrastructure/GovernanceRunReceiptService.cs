@@ -269,12 +269,13 @@ public sealed class GovernanceRunReceiptService(
             : "Stopped";
         var normalizedReason = string.IsNullOrWhiteSpace(stoppedReason) ? "ReviewStopped" : stoppedReason.Trim();
         var normalizedPhase = string.IsNullOrWhiteSpace(failurePhase) ? "Review" : failurePhase.Trim();
+        var reReviewDiscriminator = isReReview ? "\nre-review" : string.Empty;
         var previous = await LatestAsync(runId, actor, cancellationToken);
         var executionMode = ResolveReceiptExecutionMode(contractIdentity);
         var receipt = NewReceipt(
             actor,
             runId,
-            Hash($"review-stopped\n{runId}\n{normalizedStatus}\n{normalizedReason}\n{normalizedPhase}"),
+            Hash($"review-stopped\n{runId}\n{normalizedStatus}\n{normalizedReason}\n{normalizedPhase}{reReviewDiscriminator}"),
             executionMode,
             "ReviewStopped",
             normalizedStatus,
@@ -634,10 +635,12 @@ public sealed class GovernanceRunReceiptService(
         GovernanceRunReceipt receipt,
         ScheduledGovernanceRuntimeIdentity runtimeIdentity)
     {
+        var normalizedTimestamp = ScheduledGovernanceReliabilityEvidenceContract
+            .NormalizeRuntimeBuildTimestampUtc(runtimeIdentity.BuildTimestampUtc);
         receipt.RuntimeEvidenceVersion = ScheduledRuntimeEvidenceVersion;
         receipt.RuntimeServiceName = runtimeIdentity.ServiceName;
         receipt.RuntimeBuildVersion = runtimeIdentity.BuildVersion;
-        receipt.RuntimeBuildTimestampUtc = runtimeIdentity.BuildTimestampUtc.ToUniversalTime();
+        receipt.RuntimeBuildTimestampUtc = normalizedTimestamp;
         receipt.RuntimeDerivedIdentity = runtimeIdentity.DerivedIdentity;
         receipt.RuntimeIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
             .ComputeRuntimeIdentityHash(runtimeIdentity);
@@ -838,6 +841,7 @@ public sealed class GovernanceRunReceiptService(
         await EnsureScheduledDecisionBindsLatestReviewAsync(receipt, cancellationToken);
         SetCanonicalReviewEventKey(receipt);
         await EnsureScheduledRunBindingAsync(receipt, cancellationToken);
+        await EnsureNoAmbiguousLegacyReviewReplayAsync(receipt, cancellationToken);
         await dbContext.GovernanceRunReceipts.AddAsync(receipt, cancellationToken);
         try
         {
@@ -869,6 +873,30 @@ public sealed class GovernanceRunReceiptService(
         if (receipt.EventType is "ReviewReceived" or "ReviewCompleted" or "ScheduledDecisionProjected")
         {
             receipt.EventKey = Hash(CanonicalReceiptPayload(receipt));
+        }
+    }
+
+    private async Task EnsureNoAmbiguousLegacyReviewReplayAsync(
+        GovernanceRunReceipt receipt,
+        CancellationToken cancellationToken)
+    {
+        if (receipt.EventType is not ("ReviewReceived" or "ReviewCompleted" or "ScheduledDecisionProjected"))
+        {
+            return;
+        }
+
+        var hasLegacyEvent = await dbContext.GovernanceRunReceipts.AsNoTracking().AnyAsync(x =>
+            x.TenantId == receipt.TenantId &&
+            x.OwnerUserId == receipt.OwnerUserId &&
+            x.GovernanceRunId == receipt.GovernanceRunId &&
+            x.EventType == receipt.EventType &&
+            x.RequestIdentityHash == string.Empty,
+            cancellationToken);
+        if (hasLegacyEvent)
+        {
+            throw new GovernanceBatchException(
+                GovernanceBatchErrorCode.ReplayPayloadMismatch,
+                "The governance run contains a legacy review receipt without a canonical request identity; use a fresh governanceRunId.");
         }
     }
 
@@ -1037,7 +1065,9 @@ public sealed class GovernanceRunReceiptService(
                 x.ExecutionMode,
                 x.ToolContractVersion,
                 x.SchemaHash,
-                x.PublishedCatalogVersion
+                x.PublishedCatalogVersion,
+                x.RuntimeEvidenceVersion,
+                x.RuntimeIdentityHash
             })
             .Take(1_001)
             .ToArrayAsync(cancellationToken);
@@ -1060,14 +1090,16 @@ public sealed class GovernanceRunReceiptService(
         var matchesScheduledBinding = receiptIsScheduled &&
                                       existing.All(x =>
                                           string.Equals(x.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
-                                          string.Equals(x.ToolContractVersion, receipt.ToolContractVersion, StringComparison.Ordinal) &&
-                                          string.Equals(x.SchemaHash, receipt.SchemaHash, StringComparison.OrdinalIgnoreCase) &&
-                                          string.Equals(x.PublishedCatalogVersion, receipt.PublishedCatalogVersion, StringComparison.Ordinal));
+                                           string.Equals(x.ToolContractVersion, receipt.ToolContractVersion, StringComparison.Ordinal) &&
+                                           string.Equals(x.SchemaHash, receipt.SchemaHash, StringComparison.OrdinalIgnoreCase) &&
+                                           string.Equals(x.PublishedCatalogVersion, receipt.PublishedCatalogVersion, StringComparison.Ordinal) &&
+                                           string.Equals(x.RuntimeEvidenceVersion, receipt.RuntimeEvidenceVersion, StringComparison.Ordinal) &&
+                                           string.Equals(x.RuntimeIdentityHash, receipt.RuntimeIdentityHash, StringComparison.OrdinalIgnoreCase));
         if (!matchesScheduledBinding)
         {
             throw new GovernanceBatchException(
                 GovernanceBatchErrorCode.SchemaCapabilityMismatch,
-                "The governance run is already bound to a different execution mode or contract identity.");
+                "The governance run is already bound to a different execution mode, contract identity, or runtime identity.");
         }
     }
 

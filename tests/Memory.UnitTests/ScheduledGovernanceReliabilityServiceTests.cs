@@ -65,6 +65,27 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
     }
 
     [Fact]
+    public void Runtime_identity_hash_must_canonicalize_to_postgres_microsecond_precision()
+    {
+        var timestampWithSeventhFractionalDigit =
+            new DateTimeOffset(2026, 9, 10, 1, 2, 3, TimeSpan.Zero).AddTicks(1_234_567);
+        var original = new ScheduledGovernanceRuntimeIdentity(
+            "Memory.ScheduledGovernanceGateway",
+            "v1.1.98",
+            timestampWithSeventhFractionalDigit,
+            "runtime-derived-identity");
+        var persisted = original with
+        {
+            BuildTimestampUtc = ScheduledGovernanceReliabilityEvidenceContract
+                .NormalizeRuntimeBuildTimestampUtc(timestampWithSeventhFractionalDigit)
+        };
+
+        (persisted.BuildTimestampUtc.Ticks % TimeSpan.TicksPerMicrosecond).Should().Be(0);
+        ScheduledGovernanceReliabilityEvidenceContract.ComputeRuntimeIdentityHash(original)
+            .Should().Be(ScheduledGovernanceReliabilityEvidenceContract.ComputeRuntimeIdentityHash(persisted));
+    }
+
+    [Fact]
     public void Later_receipt_phase_must_keep_the_first_captured_identity()
     {
         var capturedIdentity = new ScheduledGovernanceRuntimeIdentity(

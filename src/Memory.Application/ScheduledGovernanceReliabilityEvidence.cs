@@ -69,9 +69,16 @@ public static class ScheduledGovernanceReliabilityEvidenceContract
                 [
                     identity.ServiceName,
                     identity.BuildVersion,
-                    identity.BuildTimestampUtc.ToUniversalTime().ToString("O"),
+                    NormalizeRuntimeBuildTimestampUtc(identity.BuildTimestampUtc).ToString("O"),
                     identity.DerivedIdentity
                 ]);
+
+    public static DateTimeOffset NormalizeRuntimeBuildTimestampUtc(DateTimeOffset timestamp)
+    {
+        var utc = timestamp.ToUniversalTime();
+        var normalizedTicks = utc.Ticks - (utc.Ticks % TimeSpan.TicksPerMicrosecond);
+        return new DateTimeOffset(normalizedTicks, TimeSpan.Zero);
+    }
 
     public static string ComputeOpaqueHash(string? value)
         => string.IsNullOrWhiteSpace(value)
