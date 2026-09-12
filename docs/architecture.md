@@ -297,6 +297,8 @@ Memory.Dashboard
 
 `importance` 與 `confidence` 的 canonical scale 是含端點的 `[0,1]` decimal；例如 `0.95` 合法，裸值 `95`、`100` 或 `101` 必須 fail fast，禁止以除以 100 等 heuristic 自動正規化。此契約同時套用於 `memory_items` 與 `conversation_insights`，由 API/MCP producer validation、`SaveChanges` 前的 tracked-entity validation，以及 PostgreSQL `CHECK` constraint 分層防守。若 migration 發現既有資料超出範圍，會拒絕套用並要求明確稽核，不會靜默改寫或刪除資料。`Percent100` scale 目前不受支援；只有直接 producer evidence 證明有實際需求時，才能另行設計明確且不可混用的 scale contract。
 
+在 `[0,1]` 契約建立前已存在、且找不到可證明精確 replacement 值的 malformed 歷史資料，不得以數值大小推定 scale。這類資料只可透過 authority-bound、exact-set migration 進入 append-only `RequiresHumanDecision` quarantine：transaction 必須先保存原始 row 與所有會受關聯刪除影響的 aggregate、完成 hash/read-back，再將其移出正式 actionable tables。任何清單漂移、額外 malformed row、缺漏 aggregate 或非法 replacement 都必須整體 rollback。quarantine evidence 禁止 update、delete 與 truncate；正式 `memory_items`、`conversation_insights` 仍維持 unconditional `[0,1]` constraint，不因歷史例外形成第二套 numeric contract。
+
 ### 5.2 `memory_item_revisions`
 
 用來記錄每次更新後的版本快照。
