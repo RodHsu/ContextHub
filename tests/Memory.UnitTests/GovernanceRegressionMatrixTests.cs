@@ -26,13 +26,15 @@ public sealed class GovernanceRegressionMatrixTests
 
     [Theory]
     [InlineData("importance", "-1")]
-    [InlineData("importance", "1.0001")]
+    [InlineData("importance", "1.01")]
     [InlineData("importance", "95")]
     [InlineData("importance", "100")]
+    [InlineData("importance", "101")]
     [InlineData("confidence", "-1")]
-    [InlineData("confidence", "1.0001")]
+    [InlineData("confidence", "1.01")]
     [InlineData("confidence", "95")]
     [InlineData("confidence", "100")]
+    [InlineData("confidence", "101")]
     public void Validate_rejects_each_noncanonical_score_field_value(string field, string rawValue)
     {
         var value = decimal.Parse(rawValue, CultureInfo.InvariantCulture);

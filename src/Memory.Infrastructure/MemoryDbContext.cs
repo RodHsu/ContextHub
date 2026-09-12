@@ -84,6 +84,35 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             await Database.BeginTransactionAsync(isolationLevel, cancellationToken));
     }
 
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        ValidateTrackedMemoryScores();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateTrackedMemoryScores();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private void ValidateTrackedMemoryScores()
+    {
+        foreach (var entry in ChangeTracker.Entries<MemoryItem>()
+                     .Where(entry => entry.State is EntityState.Added or EntityState.Modified))
+        {
+            MemoryScoreContract.Validate(entry.Entity.Importance, entry.Entity.Confidence);
+        }
+
+        foreach (var entry in ChangeTracker.Entries<ConversationInsight>()
+                     .Where(entry => entry.State is EntityState.Added or EntityState.Modified))
+        {
+            MemoryScoreContract.Validate(entry.Entity.Importance, entry.Entity.Confidence);
+        }
+    }
+
     private sealed class ApplicationTransaction(
         MemoryDbContext owner,
         IDbContextTransaction transaction) : IApplicationTransaction
@@ -297,7 +326,11 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
 
         modelBuilder.Entity<MemoryItem>(entity =>
         {
-            entity.ToTable("memory_items");
+            entity.ToTable("memory_items", table =>
+            {
+                table.HasCheckConstraint("ck_memory_items_importance_normalized", "importance >= 0 AND importance <= 1");
+                table.HasCheckConstraint("ck_memory_items_confidence_normalized", "confidence >= 0 AND confidence <= 1");
+            });
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
             entity.Property(x => x.TenantId).HasColumnName("tenant_id");
@@ -884,7 +917,11 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
 
         modelBuilder.Entity<ConversationInsight>(entity =>
         {
-            entity.ToTable("conversation_insights");
+            entity.ToTable("conversation_insights", table =>
+            {
+                table.HasCheckConstraint("ck_conversation_insights_importance_normalized", "importance >= 0 AND importance <= 1");
+                table.HasCheckConstraint("ck_conversation_insights_confidence_normalized", "confidence >= 0 AND confidence <= 1");
+            });
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
             entity.Property(x => x.SessionId).HasColumnName("session_id");

@@ -22,9 +22,10 @@ public sealed class MemoryScoreContractTests
 
     [Theory]
     [InlineData("-1")]
-    [InlineData("1.0001")]
+    [InlineData("1.01")]
     [InlineData("95")]
     [InlineData("100")]
+    [InlineData("101")]
     public void Validate_rejects_percentage_or_out_of_range_values_without_normalization(string rawValue)
     {
         var value = decimal.Parse(rawValue, CultureInfo.InvariantCulture);

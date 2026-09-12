@@ -295,6 +295,8 @@ Memory.Dashboard
 - `created_at`
 - `updated_at`
 
+`importance` 與 `confidence` 的 canonical scale 是含端點的 `[0,1]` decimal；例如 `0.95` 合法，裸值 `95`、`100` 或 `101` 必須 fail fast，禁止以除以 100 等 heuristic 自動正規化。此契約同時套用於 `memory_items` 與 `conversation_insights`，由 API/MCP producer validation、`SaveChanges` 前的 tracked-entity validation，以及 PostgreSQL `CHECK` constraint 分層防守。若 migration 發現既有資料超出範圍，會拒絕套用並要求明確稽核，不會靜默改寫或刪除資料。`Percent100` scale 目前不受支援；只有直接 producer evidence 證明有實際需求時，才能另行設計明確且不可混用的 scale contract。
+
 ### 5.2 `memory_item_revisions`
 
 用來記錄每次更新後的版本快照。

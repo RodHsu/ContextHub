@@ -170,6 +170,7 @@ public sealed class MemoryTransferService(
         var actor = actorAccessor.Current;
         var package = ParsePackage(request.PackageBase64);
         var bundle = ParseBundle(package, request.Passphrase);
+        ValidateImportScores(bundle.Items);
         var externalKeys = bundle.Items
             .Select(x => x.ExternalKey)
             .Distinct(StringComparer.Ordinal)
@@ -216,6 +217,14 @@ public sealed class MemoryTransferService(
             conflicts);
 
         return new ParsedImportPreview(bundle, preview);
+    }
+
+    private static void ValidateImportScores(IReadOnlyList<MemoryTransferItem> items)
+    {
+        foreach (var item in items)
+        {
+            MemoryScoreContract.Validate(item.Importance, item.Confidence);
+        }
     }
 
     private static MemoryTransferPackage ParsePackage(string packageBase64)
