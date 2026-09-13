@@ -21,6 +21,9 @@ public sealed class SkillValidationTests
         result.CanImport.Should().BeTrue();
         result.Validation.SelfTestExecuted.Should().BeTrue();
         result.Validation.SelfTestPassed.Should().BeTrue();
+        result.Validation.SelfTestMode.Should().Be("Declarative");
+        result.Validation.SandboxSelfTestExecuted.Should().BeFalse();
+        result.Validation.SandboxSelfTestPassed.Should().BeFalse();
         result.ContentHash.Should().MatchRegex("^[a-f0-9]{64}$");
         PortableSkillBundleValidator.Validate(request).ContentHash.Should().Be(result.ContentHash);
     }
@@ -96,6 +99,9 @@ public sealed class SkillValidationTests
         result.Validation.StaticValidationPassed.Should().BeTrue();
         result.Validation.SelfTestExecuted.Should().BeFalse();
         result.Validation.SelfTestPassed.Should().BeFalse();
+        result.Validation.SelfTestMode.Should().Be("NotExecuted");
+        result.Validation.SandboxSelfTestExecuted.Should().BeFalse();
+        result.Validation.SandboxSelfTestPassed.Should().BeFalse();
     }
 
     private static SkillImportPreviewRequest ValidRequest(IReadOnlyList<PortableSkillFile> files) => new(

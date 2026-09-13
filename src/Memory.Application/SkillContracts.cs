@@ -56,7 +56,16 @@ public sealed record SkillPublishEvidenceResult(
     bool SelfTestPassed,
     bool SignatureVerified,
     IReadOnlyList<string> Checks,
-    IReadOnlyList<SkillValidationIssue> Issues);
+    IReadOnlyList<SkillValidationIssue> Issues,
+    string SelfTestMode = "NotExecuted",
+    bool SandboxSelfTestExecuted = false,
+    bool SandboxSelfTestPassed = false,
+    bool PublishApprovalGranted = false,
+    string ApprovalActor = "",
+    string ApprovalReference = "",
+    string ApprovalReason = "",
+    bool SelfTestWaiverGranted = false,
+    string CanaryReference = "");
 
 public sealed record SkillImportPreviewResult(
     string StableKey,
@@ -134,11 +143,18 @@ public sealed record SkillImportResult(
     bool Replayed,
     SkillPublishEvidenceResult Validation);
 
+public sealed record SkillPublishApprovalEvidence(
+    string ApprovalReference,
+    string Reason,
+    bool SelfTestWaiverGranted = false,
+    string? CanaryReference = null);
+
 public sealed record SkillPublishRequest(
     Guid SkillVersionId,
     string ExpectedContentHash,
     bool ApprovalGranted,
-    string IdempotencyKey);
+    string IdempotencyKey,
+    SkillPublishApprovalEvidence? ApprovalEvidence = null);
 
 public sealed record SkillLifecycleRequest(
     Guid SkillVersionId,
@@ -343,6 +359,84 @@ public sealed record SkillSelectForExecutionResult(
     IReadOnlyList<SkillPinnedVersionResult> PinnedVersions,
     SkillResolutionStatus Status,
     bool Replayed);
+
+public enum SkillExecutionSnapshotDecision
+{
+    Continue,
+    ReResolve,
+    StopRevoked,
+    RequiresHumanDecision
+}
+
+public static class SkillExecutionSnapshotContract
+{
+    public const string Version = "1.0";
+}
+
+public sealed record SkillExecutionSnapshotCreateRequest(
+    Guid ExecutionId,
+    Guid ResolutionId,
+    string ExecutionPackageContextVersion);
+
+public sealed record SkillExecutionPinnedVersionSnapshot(
+    Guid SkillId,
+    Guid SkillVersionId,
+    string Version,
+    string ContentHash,
+    bool IsDependency,
+    SkillLifecycleStatus LifecycleStatus,
+    SkillRiskLevel RiskLevel,
+    IReadOnlyList<string> RequiredCapabilities,
+    IReadOnlyList<string> RequiredTools,
+    IReadOnlyList<string> AllowedActions,
+    IReadOnlyList<SkillDependencyInput> Dependencies,
+    string ScopePolicyHash,
+    bool RequiresNetwork,
+    bool RequiresSecrets);
+
+public sealed record SkillExecutionSnapshotResult(
+    string ContractVersion,
+    Guid ExecutionId,
+    Guid? WorkItemId,
+    Guid ResolutionId,
+    int ResolutionRound,
+    string ProjectId,
+    string RepositoryId,
+    string AgentType,
+    string ExecutionPackageContextVersion,
+    string QueryHash,
+    Guid SearchGenerationId,
+    string SearchProfileVersion,
+    string EmbeddingModelId,
+    string EmbeddingModelVersion,
+    IReadOnlyList<string> AvailableCapabilities,
+    IReadOnlyList<string> AvailableTools,
+    IReadOnlyList<string> AllowedActions,
+    SkillRiskLevel MaximumRisk,
+    IReadOnlyList<SkillExecutionPinnedVersionSnapshot> PinnedVersions,
+    string SnapshotHash);
+
+public sealed record SkillExecutionSnapshotRevalidateRequest(
+    SkillExecutionSnapshotResult Snapshot,
+    string CurrentExecutionPackageContextVersion,
+    IReadOnlyList<string>? CurrentAvailableCapabilities,
+    IReadOnlyList<string>? CurrentAvailableTools,
+    IReadOnlyList<string>? CurrentAllowedActions,
+    SkillRiskLevel CurrentMaximumRisk);
+
+public sealed record SkillExecutionSnapshotIssue(
+    string Code,
+    Guid? SkillVersionId,
+    SkillRejectionReason Reason,
+    string Message);
+
+public sealed record SkillExecutionSnapshotRevalidationResult(
+    SkillExecutionSnapshotDecision Decision,
+    bool SnapshotHashValid,
+    bool ExactPinsValid,
+    bool PolicyValid,
+    IReadOnlyList<SkillExecutionSnapshotIssue> Issues,
+    SkillExecutionSnapshotResult CurrentSnapshot);
 
 public sealed record SkillVersionGetRequest(
     Guid ExecutionId,
@@ -571,6 +665,8 @@ public interface ISkillService
     Task<IReadOnlyList<SkillResolutionDetailResult>> ListResolutionsAsync(string? projectId, int limit, CancellationToken cancellationToken);
     Task<SkillResolutionFeedbackResult> RecordFeedbackAsync(SkillResolutionFeedbackRequest request, CancellationToken cancellationToken);
     Task<SkillSelectForExecutionResult> SelectAsync(SkillSelectForExecutionRequest request, CancellationToken cancellationToken);
+    Task<SkillExecutionSnapshotResult> CreateExecutionSnapshotAsync(SkillExecutionSnapshotCreateRequest request, CancellationToken cancellationToken);
+    Task<SkillExecutionSnapshotRevalidationResult> RevalidateExecutionSnapshotAsync(SkillExecutionSnapshotRevalidateRequest request, CancellationToken cancellationToken);
     Task<SkillVersionBundleResult> GetPinnedVersionAsync(SkillVersionGetRequest request, CancellationToken cancellationToken);
     Task<SkillMaterializationResult> MaterializeAsync(SkillMaterializeRequest request, CancellationToken cancellationToken);
     Task<SkillMaterializationCleanupResult> CleanupMaterializationsAsync(SkillMaterializationCleanupRequest request, CancellationToken cancellationToken);

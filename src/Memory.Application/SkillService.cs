@@ -172,12 +172,43 @@ public sealed class SkillService(
             throw new InvalidOperationException("High-risk, executable, network, or secret-dependent skills require explicit publish approval.");
         }
 
+        var publishEvidence = validation.Validation;
+        if (validation.RequiresPublishApproval)
+        {
+            EnsureRiskApprovalAccess();
+            var approval = request.ApprovalEvidence
+                ?? throw new InvalidOperationException("Risk-based publish approval requires structured approval evidence.");
+            var approvalReference = PortableSkillBundleValidator.BoundAndRedact(approval.ApprovalReference, 300);
+            var approvalReason = PortableSkillBundleValidator.BoundAndRedact(approval.Reason, 500);
+            var canaryReference = PortableSkillBundleValidator.BoundAndRedact(approval.CanaryReference, 300);
+            if (string.IsNullOrWhiteSpace(approvalReference) || string.IsNullOrWhiteSpace(approvalReason))
+            {
+                throw new InvalidOperationException("Risk-based publish approval requires a bounded approval reference and reason.");
+            }
+
+            var executableContent = bundle.Files.Any(file => file.Executable);
+            if (executableContent && !publishEvidence.SandboxSelfTestPassed && !approval.SelfTestWaiverGranted)
+            {
+                throw new InvalidOperationException("Executable Skill publication requires a passed sandbox self-test or an explicit Owner/security self-test waiver.");
+            }
+
+            publishEvidence = publishEvidence with
+            {
+                PublishApprovalGranted = true,
+                ApprovalActor = PortableSkillBundleValidator.BoundAndRedact(actorAccessor.Current.Username, 160),
+                ApprovalReference = approvalReference,
+                ApprovalReason = approvalReason,
+                SelfTestWaiverGranted = approval.SelfTestWaiverGranted,
+                CanaryReference = canaryReference
+            };
+        }
+
         await ValidateDependencyGraphAsync(version, cancellationToken);
         var now = timeProvider.GetUtcNow();
         version.Status = SkillLifecycleStatus.Published;
         version.PublishedAt = now;
         version.UpdatedAt = now;
-        version.PublishEvidenceJson = Serialize(validation.Validation);
+        version.PublishEvidenceJson = Serialize(publishEvidence);
         if (version.Skill!.DefaultVersionId is null)
         {
             version.Skill.DefaultVersionId = version.Id;
@@ -866,6 +897,141 @@ public sealed class SkillService(
                 $"Skill selection lost an optimistic concurrency race for: {string.Join(", ", ex.Entries.Select(entry => entry.Metadata.ClrType.Name).Distinct())}.", ex);
         }
         return await BuildSelectionResultAsync(resolution, false, cancellationToken);
+    }
+
+    public async Task<SkillExecutionSnapshotResult> CreateExecutionSnapshotAsync(
+        SkillExecutionSnapshotCreateRequest request,
+        CancellationToken cancellationToken)
+    {
+        EnsureExecutionAccess();
+        var contextVersion = ValidateExecutionPackageContextVersion(request.ExecutionPackageContextVersion);
+        var snapshot = await BuildExecutionSnapshotAsync(
+            request.ExecutionId,
+            request.ResolutionId,
+            contextVersion,
+            cancellationToken);
+        if (snapshot.PinnedVersions.Count == 0)
+        {
+            throw new InvalidOperationException("An AgentExecution Skill snapshot requires at least one active exact-version pin.");
+        }
+
+        var resolution = await OwnedResolution(request.ResolutionId)
+            .AsNoTracking()
+            .SingleAsync(item => item.ExecutionId == request.ExecutionId, cancellationToken);
+        if (resolution.Status != SkillResolutionStatus.Selected)
+        {
+            throw new InvalidOperationException("Only a selected Skill resolution can be attached to an AgentExecution package.");
+        }
+
+        var issues = ValidateExecutionSnapshotPolicy(
+            snapshot,
+            Deserialize<string[]>(resolution.AvailableCapabilitiesJson),
+            Deserialize<string[]>(resolution.AvailableToolsJson),
+            Deserialize<string[]>(resolution.AllowedActionsJson),
+            resolution.MaximumRisk);
+        if (issues.Count > 0)
+        {
+            throw new InvalidOperationException($"The selected Skill snapshot is no longer valid: {string.Join(", ", issues.Select(issue => issue.Code).Distinct())}.");
+        }
+
+        return snapshot;
+    }
+
+    public async Task<SkillExecutionSnapshotRevalidationResult> RevalidateExecutionSnapshotAsync(
+        SkillExecutionSnapshotRevalidateRequest request,
+        CancellationToken cancellationToken)
+    {
+        EnsureExecutionAccess();
+        ArgumentNullException.ThrowIfNull(request.Snapshot);
+        var contextVersion = ValidateExecutionPackageContextVersion(request.CurrentExecutionPackageContextVersion);
+        var snapshotHashValid = string.Equals(
+            request.Snapshot.SnapshotHash,
+            ComputeExecutionSnapshotHash(request.Snapshot),
+            StringComparison.OrdinalIgnoreCase);
+        var current = await BuildExecutionSnapshotAsync(
+            request.Snapshot.ExecutionId,
+            request.Snapshot.ResolutionId,
+            contextVersion,
+            cancellationToken);
+        var issues = new List<SkillExecutionSnapshotIssue>();
+
+        if (!snapshotHashValid || !string.Equals(request.Snapshot.ContractVersion, SkillExecutionSnapshotContract.Version, StringComparison.Ordinal))
+        {
+            issues.Add(new("SnapshotIntegrityMismatch", null, SkillRejectionReason.PolicyConflict,
+                "The supplied AgentExecution Skill snapshot contract or hash is invalid."));
+        }
+
+        if (request.Snapshot.ExecutionId != current.ExecutionId ||
+            request.Snapshot.ResolutionId != current.ResolutionId ||
+            request.Snapshot.WorkItemId != current.WorkItemId ||
+            !string.Equals(request.Snapshot.ProjectId, current.ProjectId, StringComparison.Ordinal) ||
+            !string.Equals(request.Snapshot.RepositoryId, current.RepositoryId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(request.Snapshot.AgentType, current.AgentType, StringComparison.OrdinalIgnoreCase))
+        {
+            issues.Add(new("ExecutionBindingMismatch", null, SkillRejectionReason.PermissionDenied,
+                "The Skill snapshot is not bound to the current execution package identity."));
+        }
+
+        if (!string.Equals(request.Snapshot.ExecutionPackageContextVersion, contextVersion, StringComparison.Ordinal))
+        {
+            issues.Add(new("ExecutionContextChanged", null, SkillRejectionReason.ExecutionContextChanged,
+                "The authoritative execution package context changed and requires bounded Skill re-resolution."));
+        }
+
+        if (!PolicySetEquals(request.Snapshot.AvailableCapabilities, request.CurrentAvailableCapabilities) ||
+            !PolicySetEquals(request.Snapshot.AvailableTools, request.CurrentAvailableTools) ||
+            !PolicySetEquals(request.Snapshot.AllowedActions, request.CurrentAllowedActions) ||
+            request.Snapshot.MaximumRisk != request.CurrentMaximumRisk)
+        {
+            issues.Add(new("ExecutionPolicyChanged", null, SkillRejectionReason.ExecutionContextChanged,
+                "The execution capability, tool, action, or risk policy changed and requires bounded Skill re-resolution."));
+        }
+
+        var expectedPins = request.Snapshot.PinnedVersions
+            .OrderBy(item => item.SkillVersionId)
+            .Select(item => (item.SkillVersionId, item.ContentHash, item.IsDependency))
+            .ToArray();
+        var currentPins = current.PinnedVersions
+            .OrderBy(item => item.SkillVersionId)
+            .Select(item => (item.SkillVersionId, item.ContentHash, item.IsDependency))
+            .ToArray();
+        var exactPinsValid = expectedPins.SequenceEqual(currentPins);
+        if (!exactPinsValid)
+        {
+            issues.Add(new("PinSetChanged", null, SkillRejectionReason.ExecutionContextChanged,
+                "The active exact-version pin set no longer matches the execution package snapshot."));
+        }
+
+        var expectedById = request.Snapshot.PinnedVersions.ToDictionary(item => item.SkillVersionId);
+        foreach (var pinned in current.PinnedVersions)
+        {
+            if (expectedById.TryGetValue(pinned.SkillVersionId, out var expected) &&
+                !string.Equals(expected.ScopePolicyHash, pinned.ScopePolicyHash, StringComparison.OrdinalIgnoreCase))
+            {
+                issues.Add(new("ScopePolicyChanged", pinned.SkillVersionId, SkillRejectionReason.PolicyConflict,
+                    "A binding or scope policy changed after the SkillVersion was pinned."));
+            }
+        }
+
+        var policyIssues = ValidateExecutionSnapshotPolicy(
+            current,
+            request.CurrentAvailableCapabilities,
+            request.CurrentAvailableTools,
+            request.CurrentAllowedActions,
+            request.CurrentMaximumRisk);
+        issues.AddRange(policyIssues);
+        var policyValid = policyIssues.Count == 0 && !issues.Any(issue => issue.Code == "ScopePolicyChanged");
+        var hasRevocation = issues.Any(issue => issue.Reason == SkillRejectionReason.Revoked);
+        var hasIntegrityFailure = issues.Any(issue => issue.Code is "SnapshotIntegrityMismatch" or "ExecutionBindingMismatch");
+        var decision = hasIntegrityFailure
+            ? SkillExecutionSnapshotDecision.RequiresHumanDecision
+            : hasRevocation
+                ? SkillExecutionSnapshotDecision.StopRevoked
+                : issues.Count > 0
+                    ? SkillExecutionSnapshotDecision.ReResolve
+                    : SkillExecutionSnapshotDecision.Continue;
+
+        return new(decision, snapshotHashValid, exactPinsValid, policyValid, issues, current);
     }
 
     public async Task<SkillVersionBundleResult> GetPinnedVersionAsync(SkillVersionGetRequest request, CancellationToken cancellationToken)
@@ -1611,6 +1777,13 @@ public sealed class SkillService(
 
     private void EnsurePublishAccess() => EnsureManagementAccess(SecurityScopes.SkillsPublish);
 
+    private void EnsureRiskApprovalAccess()
+    {
+        var actor = actorAccessor.Current;
+        if (actor.HasUser && actor.Role != TenantUserRole.Owner && !actor.HasScope(SecurityScopes.SkillsSecurity) && !actor.HasScope(SecurityScopes.SecurityManage))
+            throw new UnauthorizedAccessException("Owner role or skills:security scope is required for risk-based Skill publication approval.");
+    }
+
     private void EnsureSecurityAccess()
     {
         var actor = actorAccessor.Current;
@@ -2015,6 +2188,189 @@ public sealed class SkillService(
             return new SkillPinnedVersionResult(version.SkillId, version.Id, version.Version, item.ContentHash, item.IsDependency);
         }).ToArray(), resolution.Status, replayed);
     }
+
+    private async Task<SkillExecutionSnapshotResult> BuildExecutionSnapshotAsync(
+        Guid executionId,
+        Guid resolutionId,
+        string contextVersion,
+        CancellationToken cancellationToken)
+    {
+        var resolution = await OwnedResolution(resolutionId)
+            .AsNoTracking()
+            .Include(item => item.Pins)
+            .SingleOrDefaultAsync(item => item.ExecutionId == executionId, cancellationToken)
+            ?? throw new KeyNotFoundException("Skill resolution was not found for this execution.");
+        var generation = await dbContext.SkillSearchGenerations
+            .AsNoTracking()
+            .SingleAsync(item => item.Id == resolution.SearchGenerationId, cancellationToken);
+        var activePins = resolution.Pins
+            .Where(item => item.ReleasedAt == null)
+            .OrderBy(item => item.SkillVersionId)
+            .ToArray();
+        var versionIds = activePins.Select(item => item.SkillVersionId).ToArray();
+        var versions = await ScopedVersions(includeArchivedSkills: true)
+            .AsNoTracking()
+            .Include(item => item.Skill!).ThenInclude(skill => skill.Bindings)
+            .Include(item => item.Dependencies)
+            .Where(item => versionIds.Contains(item.Id))
+            .ToListAsync(cancellationToken);
+        if (versions.Count != versionIds.Distinct().Count())
+        {
+            throw new InvalidOperationException("One or more exact pinned SkillVersions are no longer readable in the execution scope.");
+        }
+
+        var byId = versions.ToDictionary(item => item.Id);
+        var pinned = activePins.Select(pin =>
+        {
+            var version = byId[pin.SkillVersionId];
+            var skill = version.Skill ?? throw new InvalidOperationException("Pinned SkillVersion metadata is missing.");
+            var scopePolicy = skill.Bindings
+                .Where(binding => BindingMatches(binding, resolution))
+                .OrderByDescending(binding => BindingPrecedence(binding.Scope))
+                .ThenBy(binding => binding.Id)
+                .Select(binding => $"{binding.Scope}:{binding.ScopeValue}:{binding.Mode}:{binding.VersionConstraint}:{binding.Revision}");
+            return new SkillExecutionPinnedVersionSnapshot(
+                version.SkillId,
+                version.Id,
+                version.Version,
+                pin.ContentHash,
+                pin.IsDependency,
+                version.Status,
+                skill.RiskLevel,
+                version.RequiredCapabilities.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+                version.RequiredTools.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+                version.AllowedActions.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+                version.Dependencies
+                    .OrderBy(item => item.Kind)
+                    .ThenBy(item => item.TargetSkillId)
+                    .Select(item => new SkillDependencyInput(item.TargetSkillId, item.Kind, item.VersionConstraint))
+                    .ToArray(),
+                Sha256(string.Join('\n', scopePolicy)),
+                version.RequiresNetwork,
+                version.RequiresSecrets);
+        }).ToArray();
+        var snapshot = new SkillExecutionSnapshotResult(
+            SkillExecutionSnapshotContract.Version,
+            resolution.ExecutionId,
+            resolution.WorkItemId,
+            resolution.Id,
+            resolution.Round,
+            resolution.ProjectId,
+            resolution.RepositoryId,
+            resolution.AgentType,
+            contextVersion,
+            resolution.QueryHash,
+            generation.Id,
+            generation.SearchProfileVersion,
+            generation.EmbeddingModelId,
+            generation.EmbeddingModelVersion,
+            Deserialize<string[]>(resolution.AvailableCapabilitiesJson).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+            Deserialize<string[]>(resolution.AvailableToolsJson).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+            Deserialize<string[]>(resolution.AllowedActionsJson).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+            resolution.MaximumRisk,
+            pinned,
+            string.Empty);
+        return snapshot with { SnapshotHash = ComputeExecutionSnapshotHash(snapshot) };
+    }
+
+    private static string ComputeExecutionSnapshotHash(SkillExecutionSnapshotResult snapshot)
+        => Sha256(Serialize(snapshot with { SnapshotHash = string.Empty }));
+
+    private static IReadOnlyList<SkillExecutionSnapshotIssue> ValidateExecutionSnapshotPolicy(
+        SkillExecutionSnapshotResult snapshot,
+        IReadOnlyList<string>? availableCapabilities,
+        IReadOnlyList<string>? availableTools,
+        IReadOnlyList<string>? allowedActions,
+        SkillRiskLevel maximumRisk)
+    {
+        var capabilities = NormalizeValues(availableCapabilities).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var tools = NormalizeValues(availableTools).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var actions = NormalizeValues(allowedActions).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var issues = new List<SkillExecutionSnapshotIssue>();
+        foreach (var pinned in snapshot.PinnedVersions)
+        {
+            if (pinned.LifecycleStatus == SkillLifecycleStatus.Revoked)
+            {
+                issues.Add(new("PinnedVersionRevoked", pinned.SkillVersionId, SkillRejectionReason.Revoked,
+                    "A pinned SkillVersion was revoked and the execution must stop before further materialization or invocation."));
+                continue;
+            }
+
+            if (pinned.LifecycleStatus is not (SkillLifecycleStatus.Published or SkillLifecycleStatus.Deprecated))
+            {
+                issues.Add(new("PinnedLifecycleInvalid", pinned.SkillVersionId, SkillRejectionReason.PolicyConflict,
+                    "The pinned SkillVersion is no longer eligible for execution."));
+            }
+            if (pinned.RiskLevel > maximumRisk)
+            {
+                issues.Add(new("RiskLimitExceeded", pinned.SkillVersionId, SkillRejectionReason.PolicyConflict,
+                    "The pinned SkillVersion exceeds the current execution risk limit."));
+            }
+            if (pinned.RequiredCapabilities.Any(value => !capabilities.Contains(value)))
+            {
+                issues.Add(new("MissingCapability", pinned.SkillVersionId, SkillRejectionReason.MissingCapability,
+                    "The current execution no longer provides every required capability."));
+            }
+            if (pinned.RequiredTools.Any(value => !tools.Contains(value)))
+            {
+                issues.Add(new("ToolUnavailable", pinned.SkillVersionId, SkillRejectionReason.ToolUnavailable,
+                    "The current execution no longer provides every required tool."));
+            }
+            if (pinned.AllowedActions.Any(value => !actions.Contains(value)))
+            {
+                issues.Add(new("AllowedActionRemoved", pinned.SkillVersionId, SkillRejectionReason.PermissionDenied,
+                    "The current execution package no longer authorizes every action declared by the SkillVersion."));
+            }
+            if (pinned.RequiresNetwork && !capabilities.Contains("network"))
+            {
+                issues.Add(new("NetworkUnavailable", pinned.SkillVersionId, SkillRejectionReason.NetworkUnavailable,
+                    "The SkillVersion requires network access that is unavailable in the current execution."));
+            }
+            if (pinned.RequiresSecrets && !capabilities.Contains("secrets"))
+            {
+                issues.Add(new("SecretUnavailable", pinned.SkillVersionId, SkillRejectionReason.SecretUnavailable,
+                    "The SkillVersion requires secret references that are unavailable in the current execution."));
+            }
+        }
+
+        var pinsBySkill = snapshot.PinnedVersions.GroupBy(item => item.SkillId).ToDictionary(group => group.Key, group => group.ToArray());
+        foreach (var pinned in snapshot.PinnedVersions)
+        {
+            foreach (var dependency in pinned.Dependencies.Where(item => item.Kind == SkillDependencyKind.Requires))
+            {
+                if (!pinsBySkill.TryGetValue(dependency.TargetSkillId, out var candidates) ||
+                    !candidates.Any(candidate => SemanticVersionConstraint.IsSatisfied(candidate.Version, dependency.VersionConstraint)))
+                {
+                    issues.Add(new("RequiredDependencyUnavailable", pinned.SkillVersionId, SkillRejectionReason.VersionConflict,
+                        "The exact pinned dependency closure no longer satisfies a required version constraint."));
+                }
+            }
+            foreach (var conflict in pinned.Dependencies.Where(item => item.Kind == SkillDependencyKind.ConflictsWith))
+            {
+                if (pinsBySkill.ContainsKey(conflict.TargetSkillId))
+                {
+                    issues.Add(new("SkillSetConflict", pinned.SkillVersionId, SkillRejectionReason.ConflictWithTask,
+                        "The exact pinned Skill set contains a declared conflict."));
+                }
+            }
+        }
+
+        return issues;
+    }
+
+    private static string ValidateExecutionPackageContextVersion(string value)
+    {
+        var normalized = value?.Trim() ?? string.Empty;
+        if (normalized.Length is < 1 or > 200)
+        {
+            throw new InvalidOperationException("ExecutionPackageContextVersion must be a bounded opaque version or hash.");
+        }
+        return normalized;
+    }
+
+    private static bool PolicySetEquals(IReadOnlyList<string> expected, IReadOnlyList<string>? current)
+        => NormalizeValues(expected).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            .SetEquals(NormalizeValues(current));
 
     private SkillTelemetryEvent CreateTelemetryEvent(SkillVersion version, SkillResolution resolution, SkillTelemetryEventType type, string idempotencyKey, SkillResolutionCandidate? candidate = null)
     {

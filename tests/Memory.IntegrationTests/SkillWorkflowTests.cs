@@ -48,6 +48,37 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         audit.Candidates.Should().ContainSingle(item => item.SkillVersionId == secondary.Version.Id && item.Pinned && !item.Released);
         audit.Events.Should().Contain(item => item.EventType == SkillTelemetryEventType.SearchImpression);
         audit.Events.Should().Contain(item => item.EventType == SkillTelemetryEventType.Selected);
+        var executionSnapshot = await service.CreateExecutionSnapshotAsync(new(
+            executionId, alternative.ResolutionId, "execution-package-v1"), CancellationToken.None);
+        executionSnapshot.ContractVersion.Should().Be(SkillExecutionSnapshotContract.Version);
+        executionSnapshot.PinnedVersions.Should().ContainSingle(item =>
+            item.SkillVersionId == secondary.Version.Id &&
+            item.ContentHash == secondary.Version.ContentHash &&
+            !item.IsDependency);
+        executionSnapshot.SnapshotHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        var validSnapshot = await service.RevalidateExecutionSnapshotAsync(new(
+            executionSnapshot, "execution-package-v1", [], [], [], SkillRiskLevel.Medium), CancellationToken.None);
+        validSnapshot.Decision.Should().Be(SkillExecutionSnapshotDecision.Continue);
+        validSnapshot.SnapshotHashValid.Should().BeTrue();
+        validSnapshot.ExactPinsValid.Should().BeTrue();
+        validSnapshot.PolicyValid.Should().BeTrue();
+        validSnapshot.Issues.Should().BeEmpty();
+        var changedContextSnapshot = await service.RevalidateExecutionSnapshotAsync(new(
+            executionSnapshot, "execution-package-v2", [], [], [], SkillRiskLevel.Medium), CancellationToken.None);
+        changedContextSnapshot.Decision.Should().Be(SkillExecutionSnapshotDecision.ReResolve);
+        changedContextSnapshot.Issues.Should().Contain(item =>
+            item.Reason == SkillRejectionReason.ExecutionContextChanged);
+        var broadenedPolicySnapshot = await service.RevalidateExecutionSnapshotAsync(new(
+            executionSnapshot, "execution-package-v1", [], [], ["write"], SkillRiskLevel.Medium), CancellationToken.None);
+        broadenedPolicySnapshot.Decision.Should().Be(SkillExecutionSnapshotDecision.ReResolve);
+        broadenedPolicySnapshot.Issues.Should().Contain(item => item.Code == "ExecutionPolicyChanged");
+
+        var tamperedSnapshot = await service.RevalidateExecutionSnapshotAsync(new(
+            executionSnapshot with { SnapshotHash = new string('0', 64) },
+            "execution-package-v1", [], [], [], SkillRiskLevel.Medium), CancellationToken.None);
+        tamperedSnapshot.Decision.Should().Be(SkillExecutionSnapshotDecision.RequiresHumanDecision);
+        tamperedSnapshot.SnapshotHashValid.Should().BeFalse();
+        tamperedSnapshot.Issues.Should().Contain(item => item.Code == "SnapshotIntegrityMismatch");
 
         db.ChangeTracker.Clear();
         var materialized = await service.MaterializeAsync(new(executionId, alternative.ResolutionId, secondary.Version.Id,
@@ -58,6 +89,12 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         await service.ChangeLifecycleAsync(new(secondary.Version.Id, SkillLifecycleStatus.Revoked, "Security revocation fixture", $"revoke-{Guid.NewGuid():N}"), CancellationToken.None);
         db.ChangeTracker.Clear();
         (await db.SkillMaterializations.SingleAsync(x => x.Id == materialized.MaterializationId)).Status.Should().Be(SkillMaterializationStatus.Revoked);
+        var revokedSnapshot = await service.RevalidateExecutionSnapshotAsync(new(
+            executionSnapshot, "execution-package-v1", [], [], [], SkillRiskLevel.Medium), CancellationToken.None);
+        revokedSnapshot.Decision.Should().Be(SkillExecutionSnapshotDecision.StopRevoked);
+        revokedSnapshot.PolicyValid.Should().BeFalse();
+        revokedSnapshot.Issues.Should().Contain(item =>
+            item.SkillVersionId == secondary.Version.Id && item.Reason == SkillRejectionReason.Revoked);
         var staleIndexSearch = await SearchAsync(service, Guid.NewGuid(), [], [], "search-after-revoke");
         staleIndexSearch.Candidates.Should().NotContain(x => x.SkillVersionId == secondary.Version.Id);
         var getPinned = () => service.GetPinnedVersionAsync(new(executionId, alternative.ResolutionId, secondary.Version.Id, secondary.Version.ContentHash), CancellationToken.None);
@@ -291,7 +328,10 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         var markdown = "---\nname: Role matrix\ndescription: Role matrix fixture\n---\n# Role matrix";
         var preview = new SkillImportPreviewRequest(
             stableKey, "Role matrix", "Role matrix fixture", "Use for authorization regression", "1.0.0",
-            new PortableSkillBundle([new PortableSkillFile("SKILL.md", Convert.ToBase64String(Encoding.UTF8.GetBytes(markdown)))]),
+            new PortableSkillBundle([
+                new PortableSkillFile("SKILL.md", Convert.ToBase64String(Encoding.UTF8.GetBytes(markdown))),
+                new PortableSkillFile("scripts/check.ps1", Convert.ToBase64String(Encoding.UTF8.GetBytes("Write-Output 'fixture'")), Executable: true)
+            ]),
             SkillSourceKind.Repository, $"https://example.test/{stableKey}", "commit-1", "MIT",
             RiskLevel: SkillRiskLevel.High, TrustLevel: SkillTrustLevel.SourceVerified);
 
@@ -303,7 +343,27 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
         accessor.Current = accessor.Current with { Scopes = [SecurityScopes.SkillsPublish] };
         var publishWithoutApproval = () => service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, false, $"publish-{Guid.NewGuid():N}"), CancellationToken.None);
         await publishWithoutApproval.Should().ThrowAsync<InvalidOperationException>().WithMessage("*explicit publish approval*");
-        await service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, true, $"publish-{Guid.NewGuid():N}"), CancellationToken.None);
+        var publishWithoutRiskAuthority = () => service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, true,
+            $"publish-{Guid.NewGuid():N}", new("approval:test", "Reviewed high-risk metadata")), CancellationToken.None);
+        await publishWithoutRiskAuthority.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*skills:security*");
+
+        accessor.Current = accessor.Current with { Scopes = [SecurityScopes.SkillsPublish, SecurityScopes.SkillsSecurity] };
+        var publishWithoutEvidence = () => service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, true,
+            $"publish-{Guid.NewGuid():N}"), CancellationToken.None);
+        await publishWithoutEvidence.Should().ThrowAsync<InvalidOperationException>().WithMessage("*structured approval evidence*");
+        var publishWithoutWaiver = () => service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, true,
+            $"publish-{Guid.NewGuid():N}", new("approval:test", "Reviewed executable bundle")), CancellationToken.None);
+        await publishWithoutWaiver.Should().ThrowAsync<InvalidOperationException>().WithMessage("*sandbox self-test*waiver*");
+        var published = await service.PublishAsync(new(imported.Version.Id, imported.Version.ContentHash, true,
+            $"publish-{Guid.NewGuid():N}", new("approval:test", "Reviewed executable bundle", true, "canary:test")), CancellationToken.None);
+        published.PublishEvidence.Should().NotBeNull();
+        published.PublishEvidence!.PublishApprovalGranted.Should().BeTrue();
+        published.PublishEvidence.ApprovalReference.Should().Be("approval:test");
+        published.PublishEvidence.ApprovalReason.Should().Be("Reviewed executable bundle");
+        published.PublishEvidence.SandboxSelfTestExecuted.Should().BeFalse();
+        published.PublishEvidence.SandboxSelfTestPassed.Should().BeFalse();
+        published.PublishEvidence.SelfTestWaiverGranted.Should().BeTrue();
+        published.PublishEvidence.CanaryReference.Should().Be("canary:test");
 
         accessor.Current = accessor.Current with { Scopes = [SecurityScopes.SkillsBind] };
         var binding = await service.UpsertBindingAsync(new(imported.Skill.Id, SkillBindingScope.Project, "ContextHub", SkillBindingMode.Recommended, "=1.0.0", null, $"bind-{Guid.NewGuid():N}"), CancellationToken.None);

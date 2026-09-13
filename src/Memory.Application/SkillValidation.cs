@@ -121,7 +121,8 @@ public static partial class PortableSkillBundleValidator
             selfTest.Passed,
             signatureVerified,
             checks,
-            issues);
+            issues,
+            SelfTestMode: selfTest.Executed ? "Declarative" : "NotExecuted");
 
         return new(
             NormalizeStableKey(request.StableKey),
