@@ -4,13 +4,48 @@ using Memory.Application;
 using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Memory.IntegrationTests;
 
 public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Executable_publish_should_persist_hash_bound_sandbox_receipt_without_waiver()
+    {
+        using var factory = environment.GetFactory().WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<ISkillSandboxSelfTestRunner>();
+            services.AddSingleton<ISkillSandboxSelfTestRunner, PassingSandboxRunner>();
+        }));
+        using var scope = factory.Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+        var stableKey = $"sandbox-{Guid.NewGuid():N}"[..28];
+        var bundle = new PortableSkillBundle([
+            new("SKILL.md", Convert.ToBase64String(Encoding.UTF8.GetBytes("---\nname: Sandbox publish\ndescription: Sandbox publish fixture\n---\n"))),
+            new("scripts/check.sh", Convert.ToBase64String(Encoding.UTF8.GetBytes("exit 0")), true),
+            new(".contexthub/self-test.json", Convert.ToBase64String(Encoding.UTF8.GetBytes("{\"sandbox\":{\"entrypoint\":\"scripts/check.sh\",\"timeoutSeconds\":5}}")))
+        ]);
+        var imported = await service.ImportAsync(new(new(
+            stableKey, "Sandbox publish", "Sandbox publish fixture", "Use for sandbox publish tests", "1.0.0", bundle,
+            SkillSourceKind.Repository, $"https://example.test/{stableKey}", "commit-1", "MIT",
+            RiskLevel: SkillRiskLevel.High, TrustLevel: SkillTrustLevel.SourceVerified), $"import-{Guid.NewGuid():N}"), CancellationToken.None);
+
+        var published = await service.PublishAsync(new(
+            imported.Version.Id, imported.Version.ContentHash, true, $"publish-{Guid.NewGuid():N}",
+            new("approval:sandbox-test", "Reviewed isolated self-test evidence")), CancellationToken.None);
+
+        published.PublishEvidence!.SandboxSelfTestExecuted.Should().BeTrue();
+        published.PublishEvidence.SandboxSelfTestPassed.Should().BeTrue();
+        published.PublishEvidence.SandboxReceiptId.Should().Be("sandbox-receipt-test");
+        published.PublishEvidence.SandboxContractVersion.Should().Be(SkillSandboxContract.Version);
+        published.PublishEvidence.SelfTestWaiverGranted.Should().BeFalse();
+    }
+
     [DockerRequiredFact]
     public async Task Registry_search_research_pinning_and_revocation_should_fail_closed()
     {
@@ -682,5 +717,15 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
             [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.SkillsRead, SecurityScopes.SkillsExecute,
              SecurityScopes.SkillsManage, SecurityScopes.SkillsPublish, SecurityScopes.SkillsSecurity, SecurityScopes.SkillsBind, SecurityScopes.SkillsReindex],
             [], true);
+    }
+
+    private sealed class PassingSandboxRunner : ISkillSandboxSelfTestRunner
+    {
+        public Task<SkillSandboxSelfTestResult> RunAsync(SkillSandboxSelfTestRequest request, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            PortableSkillBundleValidator.ComputeContentHash(request.Bundle).Should().Be(request.ContentHash);
+            return Task.FromResult(new SkillSandboxSelfTestResult(true, true, "sandbox-receipt-test", string.Empty, "PASS", 10));
+        }
     }
 }

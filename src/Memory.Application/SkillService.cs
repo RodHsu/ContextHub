@@ -12,6 +12,7 @@ public sealed class SkillService(
     IRequestActorAccessor actorAccessor,
     IEmbeddingProvider embeddingProvider,
     ISkillMaterializationStore materializationStore,
+    ISkillSandboxSelfTestRunner sandboxSelfTestRunner,
     TimeProvider timeProvider) : ISkillService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -184,6 +185,31 @@ public sealed class SkillService(
             if (string.IsNullOrWhiteSpace(approvalReference) || string.IsNullOrWhiteSpace(approvalReason))
             {
                 throw new InvalidOperationException("Risk-based publish approval requires a bounded approval reference and reason.");
+            }
+
+            var sandboxDefinition = PortableSkillBundleValidator.GetSandboxSelfTestDefinition(bundle);
+            if (sandboxDefinition is not null)
+            {
+                var sandboxResult = await sandboxSelfTestRunner.RunAsync(
+                    new(version.ContentHash, bundle, sandboxDefinition), cancellationToken);
+                var sandboxContractValid = string.Equals(
+                    sandboxResult.ContractVersion, SkillSandboxContract.Version, StringComparison.Ordinal);
+                publishEvidence = publishEvidence with
+                {
+                    SelfTestMode = sandboxResult.Executed ? "Sandbox" : publishEvidence.SelfTestMode,
+                    SelfTestExecuted = publishEvidence.SelfTestExecuted || sandboxResult.Executed,
+                    SelfTestPassed = sandboxResult.Executed && sandboxResult.Passed && sandboxContractValid &&
+                                     (!publishEvidence.SelfTestExecuted || publishEvidence.SelfTestPassed),
+                    SandboxSelfTestExecuted = sandboxResult.Executed,
+                    SandboxSelfTestPassed = sandboxResult.Passed && sandboxContractValid,
+                    SandboxReceiptId = PortableSkillBundleValidator.BoundAndRedact(sandboxResult.ReceiptId, 160),
+                    SandboxFailureCode = sandboxContractValid
+                        ? PortableSkillBundleValidator.BoundAndRedact(sandboxResult.FailureCode, 160)
+                        : "UnsupportedSandboxContract",
+                    SandboxSummary = PortableSkillBundleValidator.BoundAndRedact(sandboxResult.Summary, 1000),
+                    SandboxDurationMilliseconds = Math.Max(0, sandboxResult.DurationMilliseconds),
+                    SandboxContractVersion = sandboxResult.ContractVersion
+                };
             }
 
             var executableContent = bundle.Files.Any(file => file.Executable);

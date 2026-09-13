@@ -45,6 +45,7 @@ public static class DependencyInjection
         services.Configure<AutonomousGovernanceOptions>(configuration.GetSection(AutonomousGovernanceOptions.SectionName));
         services.Configure<ProjectArtifactObjectStorageOptions>(configuration.GetSection(ProjectArtifactObjectStorageOptions.SectionName));
         services.Configure<SkillRuntimeOptions>(configuration.GetSection(SkillRuntimeOptions.SectionName));
+        services.Configure<SkillSandboxOptions>(configuration.GetSection(SkillSandboxOptions.SectionName));
         services.AddOptions<DockerRuntimeOptions>()
             .Configure(options =>
             {
@@ -86,6 +87,7 @@ public static class DependencyInjection
         services.AddSingleton<IEmbeddingUsageTelemetry, DatabaseEmbeddingUsageTelemetry>();
         services.AddSingleton<IProjectArtifactObjectStore, S3CompatibleProjectArtifactObjectStore>();
         services.AddSingleton<ISkillMaterializationStore, FileSystemSkillMaterializationStore>();
+        services.AddSingleton<ISkillSandboxSelfTestRunner, FileQueueSkillSandboxSelfTestRunner>();
         services.AddScoped<ITokenCountingService, TokenCountingService>();
         services.AddScoped<IRetrievalTelemetryRetentionService, RetrievalTelemetryRetentionService>();
         services.AddScoped<IMemoryDataRetentionService, MemoryDataRetentionService>();

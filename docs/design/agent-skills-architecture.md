@@ -6,6 +6,8 @@ ContextHub owns a portable, tenant-scoped Skill registry and the governed candid
 
 ```text
 portable source -> validate/import Draft -> approve/publish immutable SkillVersion
+                         |                     ^
+                         +-> no-network sandbox self-test -> signed hash-bound receipt
                                                |
 execution startup -> active generation -> hard filters -> hybrid rank -> Top-N
        ^                                                       |
@@ -31,7 +33,7 @@ source observation -> drift/trust classification -> new Draft or revoke proposal
 ## Security and privacy invariants
 
 - Management, publish, bind, reindex, security/revoke, read, and execute scopes remain distinct; tenant/owner/project ACL is applied server-side.
-- Import rejects traversal, symlinks, duplicate paths, oversized bundles, unsupported executable placement, secret/private-key patterns, and invalid attestations. Declarative fixture validation and executable sandbox execution are separate evidence fields. Risky publication requires Publisher plus Owner/security authority and structured approval evidence; when no trusted sandbox runner exists, an explicit waiver is recorded and sandbox PASS remains false.
+- Import rejects traversal, symlinks, duplicate paths, oversized bundles, unsupported executable placement, secret/private-key patterns, and invalid attestations. Declarative fixture validation and executable sandbox execution are separate evidence fields. The executable runner is a dedicated no-network container with a read-only root, bounded resources, private HMAC queue, unprivileged child process, cleared environment, timeout/tree kill, mutation detection, and cleanup; MCP Server never executes bundle code or receives broader Docker socket authority. Risky publication requires Publisher plus Owner/security authority and structured approval evidence; when no trusted sandbox runner exists, an explicit waiver is recorded and sandbox PASS remains false.
 - Telemetry stores query hashes and redacted bounded evidence. Reconciliation uses a transaction lock and per-event ledger, retains protected policy/security evidence, and provides longer-lived aggregates without double counting.
 - A stale search document cannot leak a Revoked version because lifecycle and policy hard filters are evaluated against current version state.
 

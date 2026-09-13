@@ -8,7 +8,7 @@ namespace Memory.Application;
 
 public static partial class PortableSkillBundleValidator
 {
-    public const string ValidatorVersion = "1.0";
+    public const string ValidatorVersion = "1.1";
     public const long MaximumBundleBytes = 10 * 1024 * 1024;
     public const int MaximumFileCount = 256;
     public const int MaximumReasonTextLength = 1000;
@@ -83,7 +83,7 @@ public static partial class PortableSkillBundleValidator
 
         var skillMarkdown = DecodeUtf8(skillMarkdownBytes, "SKILL.md", issues);
         ValidateSkillMarkdown(skillMarkdown, issues);
-        var selfTest = ValidateDeclarativeSelfTest(decoded, issues);
+        var selfTest = ValidateSelfTestManifest(decoded, request.Bundle, issues);
         var hash = ComputeContentHash(decoded);
         var signatureVerified = VerifySignature(request.SignatureAlgorithm, request.SignatureValue, hash);
         if (!string.IsNullOrWhiteSpace(request.SignatureValue) && !signatureVerified)
@@ -112,6 +112,10 @@ public static partial class PortableSkillBundleValidator
         {
             checks.Add("declarative-self-test");
         }
+        if (selfTest.SandboxDeclared)
+        {
+            checks.Add("sandbox-self-test-declaration");
+        }
 
         var validation = new SkillPublishEvidenceResult(
             ValidatorVersion,
@@ -122,7 +126,7 @@ public static partial class PortableSkillBundleValidator
             signatureVerified,
             checks,
             issues,
-            SelfTestMode: selfTest.Executed ? "Declarative" : "NotExecuted");
+            SelfTestMode: selfTest.SandboxDeclared ? "SandboxDeclared" : selfTest.Executed ? "Declarative" : "NotExecuted");
 
         return new(
             NormalizeStableKey(request.StableKey),
@@ -201,6 +205,19 @@ public static partial class PortableSkillBundleValidator
         return ComputeContentHash(files);
     }
 
+    public static SkillSandboxSelfTestDefinition? GetSandboxSelfTestDefinition(PortableSkillBundle bundle)
+    {
+        var manifest = bundle.Files.FirstOrDefault(file =>
+            string.Equals(NormalizeRelativePath(file.Path), ".contexthub/self-test.json", StringComparison.Ordinal));
+        if (manifest is null)
+        {
+            return null;
+        }
+
+        using var document = JsonDocument.Parse(Convert.FromBase64String(manifest.ContentBase64));
+        return ParseSandboxDefinition(document.RootElement);
+    }
+
     private static void ValidateIdentity(SkillImportPreviewRequest request, List<SkillValidationIssue> issues)
     {
         if (NormalizeStableKey(request.StableKey).Length is < 2 or > 120)
@@ -259,36 +276,90 @@ public static partial class PortableSkillBundleValidator
         }
     }
 
-    private static (bool Executed, bool Passed) ValidateDeclarativeSelfTest(
+    private static (bool Executed, bool Passed, bool SandboxDeclared) ValidateSelfTestManifest(
         IReadOnlyDictionary<string, byte[]> files,
+        PortableSkillBundle bundle,
         List<SkillValidationIssue> issues)
     {
         if (!files.TryGetValue(".contexthub/self-test.json", out var bytes))
         {
-            return (false, false);
+            return (false, false, false);
         }
 
         try
         {
             using var document = JsonDocument.Parse(bytes);
             var root = document.RootElement;
-            var requiredFiles = root.TryGetProperty("requiredFiles", out var requiredElement)
+            var hasDeclarativeChecks = root.TryGetProperty("requiredFiles", out var requiredElement);
+            var requiredFiles = hasDeclarativeChecks
                 ? requiredElement.EnumerateArray().Select(item => item.GetString() ?? string.Empty).ToArray()
                 : [];
             var missing = requiredFiles.Where(path => NormalizeRelativePath(path) is not { } normalized || !files.ContainsKey(normalized)).ToArray();
             if (missing.Length > 0)
             {
                 issues.Add(new("SelfTestFailed", $"Declarative self-test is missing required files: {string.Join(", ", missing)}.", "Error", ".contexthub/self-test.json"));
-                return (true, false);
+                return (true, false, root.TryGetProperty("sandbox", out _));
             }
 
-            return (true, true);
+            var sandboxDefinition = ParseSandboxDefinition(root);
+            if (root.TryGetProperty("sandbox", out _) && sandboxDefinition is null)
+            {
+                issues.Add(new("SandboxSelfTestInvalid", "Sandbox self-test requires a scripts/*.sh entrypoint, 0-16 bounded arguments, and timeoutSeconds between 1 and 30.", "Error", ".contexthub/self-test.json"));
+                return (true, false, true);
+            }
+            if (sandboxDefinition is not null)
+            {
+                var executable = bundle.Files.FirstOrDefault(file =>
+                    string.Equals(NormalizeRelativePath(file.Path), sandboxDefinition.Entrypoint, StringComparison.Ordinal));
+                if (executable is null || !executable.Executable)
+                {
+                    issues.Add(new("SandboxEntrypointNotExecutable", "Sandbox self-test entrypoint must identify an executable file in the bundle.", "Error", sandboxDefinition.Entrypoint));
+                    return (true, false, true);
+                }
+            }
+
+            return (hasDeclarativeChecks, hasDeclarativeChecks, sandboxDefinition is not null);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
             issues.Add(new("SelfTestInvalid", "Declarative self-test manifest is invalid JSON.", "Error", ".contexthub/self-test.json"));
-            return (true, false);
+            return (true, false, false);
         }
+    }
+
+    private static SkillSandboxSelfTestDefinition? ParseSandboxDefinition(JsonElement root)
+    {
+        if (!root.TryGetProperty("sandbox", out var sandbox) || sandbox.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var entrypoint = sandbox.TryGetProperty("entrypoint", out var entrypointElement)
+            ? NormalizeRelativePath(entrypointElement.GetString())
+            : null;
+        if (entrypoint is null || !entrypoint.StartsWith("scripts/", StringComparison.Ordinal) ||
+            !entrypoint.EndsWith(".sh", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var timeoutSeconds = sandbox.TryGetProperty("timeoutSeconds", out var timeoutElement) && timeoutElement.TryGetInt32(out var parsedTimeout)
+            ? parsedTimeout
+            : 10;
+        if (timeoutSeconds is < 1 or > 30)
+        {
+            return null;
+        }
+
+        var arguments = sandbox.TryGetProperty("arguments", out var argumentsElement)
+            ? argumentsElement.EnumerateArray().Select(item => item.GetString() ?? string.Empty).ToArray()
+            : [];
+        if (arguments.Length > 16 || arguments.Any(argument => argument.Length > 256 || argument.Contains('\0')))
+        {
+            return null;
+        }
+
+        return new(entrypoint, arguments, timeoutSeconds);
     }
 
     private static byte[] Decode(string value, string path, List<SkillValidationIssue> issues)

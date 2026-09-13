@@ -104,6 +104,40 @@ public sealed class SkillValidationTests
         result.Validation.SandboxSelfTestPassed.Should().BeFalse();
     }
 
+    [Fact]
+    public void Sandbox_manifest_should_bind_a_bounded_executable_shell_entrypoint()
+    {
+        var bundle = new PortableSkillBundle([
+            File("SKILL.md", "---\nname: Scripted\ndescription: Scripted source\n---\n# Scripted"),
+            File("scripts/check.sh", "#!/bin/sh\nexit 0", executable: true),
+            File(".contexthub/self-test.json", "{\"requiredFiles\":[\"SKILL.md\"],\"sandbox\":{\"entrypoint\":\"scripts/check.sh\",\"arguments\":[\"--verify\"],\"timeoutSeconds\":7}}")
+        ]);
+
+        var result = PortableSkillBundleValidator.Validate(ValidRequest(bundle.Files));
+        var definition = PortableSkillBundleValidator.GetSandboxSelfTestDefinition(bundle);
+
+        result.CanImport.Should().BeTrue();
+        result.Validation.Checks.Should().Contain("sandbox-self-test-declaration");
+        result.Validation.SelfTestMode.Should().Be("SandboxDeclared");
+        definition.Should().BeEquivalentTo(new SkillSandboxSelfTestDefinition("scripts/check.sh", ["--verify"], 7));
+    }
+
+    [Theory]
+    [InlineData("scripts/check.ps1", 5, "Sandbox self-tests must use the container's explicit shell allowlist.")]
+    [InlineData("../check.sh", 5, "Sandbox paths must not traverse.")]
+    [InlineData("scripts/check.sh", 31, "Sandbox deadlines must remain bounded.")]
+    public void Sandbox_manifest_should_fail_closed_for_unsupported_execution(string entrypoint, int timeout, string because)
+    {
+        var result = PortableSkillBundleValidator.Validate(ValidRequest([
+            File("SKILL.md", "---\nname: Scripted\ndescription: Scripted source\n---\n"),
+            File("scripts/check.sh", "exit 0", executable: true),
+            File(".contexthub/self-test.json", $"{{\"sandbox\":{{\"entrypoint\":\"{entrypoint}\",\"timeoutSeconds\":{timeout}}}}}")
+        ]));
+
+        result.CanImport.Should().BeFalse(because);
+        result.Validation.Issues.Should().Contain(item => item.Code == "SandboxSelfTestInvalid");
+    }
+
     private static SkillImportPreviewRequest ValidRequest(IReadOnlyList<PortableSkillFile> files) => new(
         "incident-helper", "Incident helper", "Reviews bounded evidence", "Use for incident review", "1.2.3",
         new PortableSkillBundle(files), SkillSourceKind.LocalUpload, "https://example.test/skills/incident-helper", "abc123", "MIT",

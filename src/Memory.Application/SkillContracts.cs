@@ -65,7 +65,36 @@ public sealed record SkillPublishEvidenceResult(
     string ApprovalReference = "",
     string ApprovalReason = "",
     bool SelfTestWaiverGranted = false,
-    string CanaryReference = "");
+    string CanaryReference = "",
+    string SandboxReceiptId = "",
+    string SandboxFailureCode = "",
+    string SandboxSummary = "",
+    long SandboxDurationMilliseconds = 0,
+    string SandboxContractVersion = "");
+
+public static class SkillSandboxContract
+{
+    public const string Version = "1.0";
+}
+
+public sealed record SkillSandboxSelfTestDefinition(
+    string Entrypoint,
+    IReadOnlyList<string> Arguments,
+    int TimeoutSeconds);
+
+public sealed record SkillSandboxSelfTestRequest(
+    string ContentHash,
+    PortableSkillBundle Bundle,
+    SkillSandboxSelfTestDefinition Definition);
+
+public sealed record SkillSandboxSelfTestResult(
+    bool Executed,
+    bool Passed,
+    string ReceiptId,
+    string FailureCode,
+    string Summary,
+    long DurationMilliseconds,
+    string ContractVersion = SkillSandboxContract.Version);
 
 public sealed record SkillImportPreviewResult(
     string StableKey,
@@ -686,4 +715,9 @@ public interface ISkillMaterializationStore
 {
     Task<string> MaterializeAsync(Guid executionId, string contentHash, PortableSkillBundle bundle, CancellationToken cancellationToken);
     Task CleanupExecutionAsync(Guid executionId, CancellationToken cancellationToken);
+}
+
+public interface ISkillSandboxSelfTestRunner
+{
+    Task<SkillSandboxSelfTestResult> RunAsync(SkillSandboxSelfTestRequest request, CancellationToken cancellationToken);
 }

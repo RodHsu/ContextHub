@@ -231,6 +231,9 @@ services:
       ConnectionStrings__Redis: redis:6379
       Memory__Namespace: contexthub
       DatabaseLogging__MinimumLevel: Warning
+      ContextHub__Skills__Sandbox__Enabled: "true"
+      ContextHub__Skills__Sandbox__QueueRoot: /var/lib/contexthub-skill-sandbox
+      ContextHub__Skills__Sandbox__ReceiptKey: ${CONTEXTHUB_SKILL_SANDBOX_RECEIPT_KEY:-${CONTEXTHUB_SECRET_KEY:-}}
     depends_on:
       embedding-service:
         condition: service_healthy
@@ -242,6 +245,8 @@ services:
         condition: service_started
     ports:
       - "${MCP_SERVER_HOST_BIND:-127.0.0.1}:${MCP_SERVER_HOST_PORT:-8092}:8080"
+    volumes:
+      - skill-sandbox-queue:/var/lib/contexthub-skill-sandbox
     networks:
       - default
       - mcp-docker-api
@@ -251,6 +256,51 @@ services:
       timeout: 10s
       retries: 60
       start_period: 90s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  skill-sandbox:
+    image: contexthub-skill-sandbox:latest
+    build:
+      context: .
+      dockerfile: src/Memory.SkillSandbox/Dockerfile
+      args:
+        APP_VERSION: ${CONTEXTHUB_BUILD_VERSION:-1.1.0}
+        BUILD_TIMESTAMP_UTC: ${CONTEXTHUB_BUILD_TIMESTAMP_UTC:-}
+    restart: always
+    network_mode: none
+    read_only: true
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - KILL
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.50
+    environment:
+      ContextHub__Skills__Sandbox__Enabled: "true"
+      ContextHub__Skills__Sandbox__NetworkIsolationAttested: "true"
+      ContextHub__Skills__Sandbox__QueueRoot: /var/lib/contexthub-skill-sandbox
+      ContextHub__Skills__Sandbox__ReceiptKey: ${CONTEXTHUB_SKILL_SANDBOX_RECEIPT_KEY:-${CONTEXTHUB_SECRET_KEY:-}}
+    volumes:
+      - skill-sandbox-queue:/var/lib/contexthub-skill-sandbox
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/contexthub-skill-sandbox-ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     logging:
       driver: "json-file"
       options:
@@ -437,6 +487,7 @@ volumes:
   redis-data:
   embedding-model-cache:
   dashboard-data-protection:
+  skill-sandbox-queue:
 
 networks:
   mcp-docker-api:
