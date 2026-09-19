@@ -2152,6 +2152,9 @@ public interface IApplicationDbContext
     DbSet<DiscussionMessage> DiscussionMessages { get; }
     DbSet<ProjectWorkItem> ProjectWorkItems { get; }
     DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems { get; }
+    DbSet<AgentExecution> AgentExecutions { get; }
+    DbSet<AgentExecutionEvent> AgentExecutionEvents { get; }
+    DbSet<AgentExecutionOperation> AgentExecutionOperations { get; }
     DbSet<Skill> Skills { get; }
     DbSet<SkillVersion> SkillVersions { get; }
     DbSet<SkillVersionDependency> SkillVersionDependencies { get; }

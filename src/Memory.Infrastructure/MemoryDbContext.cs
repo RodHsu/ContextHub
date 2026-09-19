@@ -69,6 +69,9 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
     public DbSet<ProjectWorkItem> ProjectWorkItems => Set<ProjectWorkItem>();
     public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => Set<ProjectWorkItemChecklistItem>();
+    public DbSet<AgentExecution> AgentExecutions => Set<AgentExecution>();
+    public DbSet<AgentExecutionEvent> AgentExecutionEvents => Set<AgentExecutionEvent>();
+    public DbSet<AgentExecutionOperation> AgentExecutionOperations => Set<AgentExecutionOperation>();
     public DbSet<Skill> Skills => Set<Skill>();
     public DbSet<SkillVersion> SkillVersions => Set<SkillVersion>();
     public DbSet<SkillVersionDependency> SkillVersionDependencies => Set<SkillVersionDependency>();
@@ -1431,6 +1434,75 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasOne(x => x.WorkItem).WithMany(x => x.ChecklistItems).HasForeignKey(x => x.WorkItemId).OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(x => new { x.WorkItemId, x.SortOrder });
+        });
+
+        modelBuilder.Entity<AgentExecution>(entity =>
+        {
+            entity.ToTable("agent_executions");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.WorkItemId).HasColumnName("work_item_id");
+            entity.Property(x => x.ParentExecutionId).HasColumnName("parent_execution_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.RepositoryId).HasColumnName("repository_id");
+            entity.Property(x => x.AgentType).HasColumnName("agent_type");
+            entity.Property(x => x.RequiredCapabilitiesJson).HasColumnName("required_capabilities_json").HasColumnType("jsonb");
+            entity.Property(x => x.AllowedActionsJson).HasColumnName("allowed_actions_json").HasColumnType("jsonb");
+            entity.Property(x => x.PackageJson).HasColumnName("package_json").HasColumnType("jsonb");
+            entity.Property(x => x.PackageHash).HasColumnName("package_hash");
+            entity.Property(x => x.PackageContextVersion).HasColumnName("package_context_version");
+            entity.Property(x => x.SkillSnapshotJson).HasColumnName("skill_snapshot_json").HasColumnType("jsonb");
+            entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.Priority).HasColumnName("priority");
+            entity.Property(x => x.Attempt).HasColumnName("attempt");
+            entity.Property(x => x.MaxAttempts).HasColumnName("max_attempts");
+            entity.Property(x => x.ClaimedByAgentId).HasColumnName("claimed_by_agent_id");
+            entity.Property(x => x.LeaseTokenHash).HasColumnName("lease_token_hash");
+            entity.Property(x => x.LeaseVersion).HasColumnName("lease_version");
+            entity.Property(x => x.LeaseExpiresAt).HasColumnName("lease_expires_at");
+            entity.Property(x => x.FailureClass).HasColumnName("failure_class");
+            entity.Property(x => x.StructuredReasonJson).HasColumnName("structured_reason_json").HasColumnType("jsonb");
+            entity.Property(x => x.EligibleAt).HasColumnName("eligible_at");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.StartedAt).HasColumnName("started_at");
+            entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
+            entity.HasOne(x => x.WorkItem).WithMany().HasForeignKey(x => x.WorkItemId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasIndex(x => new { x.TenantId, x.ProjectId, x.RepositoryId, x.Status, x.EligibleAt });
+        });
+
+        modelBuilder.Entity<AgentExecutionEvent>(entity =>
+        {
+            entity.ToTable("agent_execution_events");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.ExecutionId).HasColumnName("execution_id");
+            entity.Property(x => x.EventType).HasColumnName("event_type").HasConversion<string>();
+            entity.Property(x => x.Sequence).HasColumnName("sequence");
+            entity.Property(x => x.AgentId).HasColumnName("agent_id");
+            entity.Property(x => x.PayloadJson).HasColumnName("payload_json").HasColumnType("jsonb");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasOne(x => x.Execution).WithMany(x => x.Events).HasForeignKey(x => x.ExecutionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.ExecutionId, x.Sequence }).IsUnique();
+        });
+
+        modelBuilder.Entity<AgentExecutionOperation>(entity =>
+        {
+            entity.ToTable("agent_execution_operations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ExecutionId).HasColumnName("execution_id");
+            entity.Property(x => x.AgentId).HasColumnName("agent_id");
+            entity.Property(x => x.Operation).HasColumnName("operation");
+            entity.Property(x => x.IdempotencyKey).HasColumnName("idempotency_key");
+            entity.Property(x => x.RequestHash).HasColumnName("request_hash");
+            entity.Property(x => x.ProtectedResultJson).HasColumnName("protected_result_json");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasOne(x => x.Execution).WithMany().HasForeignKey(x => x.ExecutionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.TenantId, x.AgentId, x.Operation, x.IdempotencyKey }).IsUnique();
         });
 
         modelBuilder.ConfigureSkillModels();

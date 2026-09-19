@@ -34,6 +34,9 @@ public interface IContextHubApiClient
     Task<DiscussionThreadDetailResult> CreateDiscussionThreadAsync(DiscussionThreadCreateRequest request, CancellationToken cancellationToken);
     Task<DiscussionMessageResult> CreateDiscussionMessageAsync(DiscussionMessageCreateRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken);
+    Task<AgentExecutionDashboardResult> GetAgentExecutionDashboardAsync(string projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<AgentExecutionResult>> GetAgentExecutionsAsync(AgentExecutionListRequest request, CancellationToken cancellationToken);
+    Task<AgentExecutionResult?> GetAgentExecutionAsync(Guid executionId, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken);
@@ -142,6 +145,29 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
             ["projectId"] = projectId,
             ["includeArchived"] = includeArchived.ToString()
         }), cancellationToken);
+
+    public Task<AgentExecutionDashboardResult> GetAgentExecutionDashboardAsync(string projectId, CancellationToken cancellationToken)
+        => GetRequiredAsync<AgentExecutionDashboardResult>($"/api/agent-executions/dashboard/{Uri.EscapeDataString(projectId)}", cancellationToken);
+
+    public Task<IReadOnlyList<AgentExecutionResult>> GetAgentExecutionsAsync(AgentExecutionListRequest request, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<AgentExecutionResult>>(QueryHelpers.AddQueryString("/api/agent-executions", new Dictionary<string, string?>
+        {
+            ["projectId"] = request.ProjectId,
+            ["status"] = request.Status?.ToString(),
+            ["limit"] = request.Limit.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["offset"] = request.Offset.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        }), cancellationToken);
+
+    public async Task<AgentExecutionResult?> GetAgentExecutionAsync(Guid executionId, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.GetAsync($"/api/agent-executions/{executionId:D}", cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        return await ReadRequiredAsync<AgentExecutionResult>(response, cancellationToken);
+    }
 
     public async Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
     {

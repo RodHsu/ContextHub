@@ -1497,6 +1497,48 @@ workItems.MapPut("/{workItemId:guid}/governance-exclusion", async (Guid workItem
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["governanceExclusion"] = [ex.Message] }); }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 
+var agentExecutions = app.MapGroup("/api/agent-executions");
+agentExecutions.RequireAuthIfEnabled(requireAuthentication);
+agentExecutions.MapPost("/prepare", async (AgentExecutionPrepareRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
+    => Results.Created("/api/agent-executions", await service.PrepareAsync(request, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsManage);
+agentExecutions.MapPost("/claim-next", async (AgentExecutionClaimRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.ClaimNextAsync(request, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsClaim);
+agentExecutions.MapGet("/{executionId:guid}", async (Guid executionId, IAgentExecutionService service, CancellationToken cancellationToken)
+    => await service.GetAsync(executionId, cancellationToken) is { } execution ? Results.Ok(execution) : Results.NotFound())
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsRead);
+agentExecutions.MapGet(string.Empty, async (string projectId, string? status, int? limit, int? offset, IAgentExecutionService service, CancellationToken cancellationToken) =>
+{
+    if (!EnumParser.TryParse(status, out AgentExecutionStatus? parsedStatus, out var error))
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = [error ?? "Unsupported AgentExecutionStatus value."] });
+    return Results.Ok(await service.ListAsync(new AgentExecutionListRequest(projectId, parsedStatus, limit ?? 100, offset ?? 0), cancellationToken));
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsRead);
+agentExecutions.MapGet("/dashboard/{projectId}", async (string projectId, IAgentExecutionService service, CancellationToken cancellationToken)
+    => Results.Ok(await service.GetDashboardAsync(projectId, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsRead);
+agentExecutions.MapPost("/{executionId:guid}/heartbeat", async (Guid executionId, AgentExecutionLeaseRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
+    => executionId == request.ExecutionId ? Results.Ok(await service.HeartbeatAsync(request, cancellationToken)) : Results.BadRequest("Route and body ExecutionId must match."))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsWrite);
+agentExecutions.MapPost("/{executionId:guid}/checkpoints", async (Guid executionId, AgentExecutionCheckpointRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
+    => executionId == request.ExecutionId ? Results.Ok(await service.CheckpointAsync(request, cancellationToken)) : Results.BadRequest("Route and body ExecutionId must match."))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsWrite);
+agentExecutions.MapPost("/{executionId:guid}/block", async (Guid executionId, AgentExecutionTerminalRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
+    => executionId == request.ExecutionId ? Results.Ok(await service.BlockAsync(request, cancellationToken)) : Results.BadRequest("Route and body ExecutionId must match."))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsWrite);
+agentExecutions.MapPost("/{executionId:guid}/complete", async (Guid executionId, AgentExecutionTerminalRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
+    => executionId == request.ExecutionId ? Results.Ok(await service.CompleteAsync(request, cancellationToken)) : Results.BadRequest("Route and body ExecutionId must match."))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsWrite);
+agentExecutions.MapPost("/{executionId:guid}/fail", async (Guid executionId, AgentExecutionTerminalRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
+    => executionId == request.ExecutionId ? Results.Ok(await service.FailAsync(request, cancellationToken)) : Results.BadRequest("Route and body ExecutionId must match."))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsWrite);
+agentExecutions.MapPost("/{executionId:guid}/abandon", async (Guid executionId, AgentExecutionTerminalRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
+    => executionId == request.ExecutionId ? Results.Ok(await service.AbandonAsync(request, cancellationToken)) : Results.BadRequest("Route and body ExecutionId must match."))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsWrite);
+agentExecutions.MapPost("/{executionId:guid}/cancel", async (Guid executionId, AgentExecutionCancelRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
+    => executionId == request.ExecutionId ? Results.Ok(await service.CancelAsync(request, cancellationToken)) : Results.BadRequest("Route and body ExecutionId must match."))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsManage);
+
 var skills = app.MapGroup("/api/skills");
 skills.RequireAuthIfEnabled(requireAuthentication);
 skills.MapGet(string.Empty, async (string? projectId, bool? includeArchived, ISkillService service, CancellationToken cancellationToken)

@@ -1944,6 +1944,15 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SkillSummaryResult>>([]);
 
+    public Task<AgentExecutionDashboardResult> GetAgentExecutionDashboardAsync(string projectId, CancellationToken cancellationToken)
+        => Task.FromResult(new AgentExecutionDashboardResult(projectId, Enum.GetValues<AgentExecutionStatus>().ToDictionary(x => x, _ => 0), 0, 0, 0, []));
+
+    public Task<IReadOnlyList<AgentExecutionResult>> GetAgentExecutionsAsync(AgentExecutionListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<AgentExecutionResult>>([]);
+
+    public Task<AgentExecutionResult?> GetAgentExecutionAsync(Guid executionId, CancellationToken cancellationToken)
+        => Task.FromResult<AgentExecutionResult?>(null);
+
     public Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SkillTelemetryAggregateResult>>([]);
 

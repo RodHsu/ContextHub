@@ -90,7 +90,16 @@ public static class McpPublishedToolCatalog
         "maintenance_status",
         "memory_restore",
         "project_artifacts_prune_expired_objects",
-        "user_preference_list"
+        "user_preference_list",
+        "agent_execution_prepare",
+        "agent_execution_claim_next",
+        "agent_execution_get",
+        "agent_execution_heartbeat",
+        "agent_execution_checkpoint",
+        "agent_execution_block",
+        "agent_execution_complete",
+        "agent_execution_fail",
+        "agent_execution_abandon"
     };
 
     public static IReadOnlySet<string> GatewayOnlyToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)

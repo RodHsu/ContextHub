@@ -53,6 +53,10 @@ public static class SecurityScopes
     public const string SkillsSecurity = "skills:security";
     public const string SkillsBind = "skills:bind";
     public const string SkillsReindex = "skills:reindex";
+    public const string AgentExecutionsRead = "agent-executions:read";
+    public const string AgentExecutionsClaim = "agent-executions:claim";
+    public const string AgentExecutionsWrite = "agent-executions:write";
+    public const string AgentExecutionsManage = "agent-executions:manage";
 }
 
 public static class ActorAuthorization

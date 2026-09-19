@@ -23,7 +23,11 @@ public sealed class SecurityBootstrapHostedService(
         SecurityScopes.SecurityManage,
         SecurityScopes.DashboardActAs,
         SecurityScopes.AgentConnectivityWrite,
-        SecurityScopes.GovernanceTrackerManage
+        SecurityScopes.GovernanceTrackerManage,
+        SecurityScopes.AgentExecutionsRead,
+        SecurityScopes.AgentExecutionsClaim,
+        SecurityScopes.AgentExecutionsWrite,
+        SecurityScopes.AgentExecutionsManage
     ];
 
     public async Task StartAsync(CancellationToken cancellationToken)

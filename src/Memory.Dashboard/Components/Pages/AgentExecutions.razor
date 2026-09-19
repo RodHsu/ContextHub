@@ -1,0 +1,100 @@
+@page "/agent-executions"
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>Context Hub | Agent Executions</PageTitle>
+
+<PageViewport Title="Agent Executions" Subtitle="權威執行佇列、lease、retry、checkpoint 與 Skills runtime 狀態；不等同 Work Item 商務生命週期。" BodyClass="page-viewport-body">
+    <Actions>
+        <div class="page-actions-secondary"><label>ProjectId <input @bind="_projectId" /></label></div>
+        <div class="page-actions-primary"><button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
+    </Actions>
+    <ChildContent>
+        @if (!string.IsNullOrWhiteSpace(_error)) { <div class="inline-error">@_error</div> }
+        <div class="metric-grid">
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Ready：</span><span class="metric-value-inline">@Count(AgentExecutionStatus.Ready)</span></div></section>
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Active leases：</span><span class="metric-value-inline">@(_dashboard?.ActiveLeases ?? 0)</span></div></section>
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Blocked：</span><span class="metric-value-inline">@Count(AgentExecutionStatus.Blocked)</span></div></section>
+            <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Expired／Retry：</span><span class="metric-value-inline">@((_dashboard?.ExpiredLeases ?? 0) + (_dashboard?.RetryableFailures ?? 0))</span></div></section>
+        </div>
+
+        <section class="panel">
+            <div class="panel-heading-row"><div><div class="panel-title">Queue 與 lifecycle</div><div class="panel-heading-meta">Eligibility、priority、repository、agent type 與 capability filter 全由 server-side claim 套用。</div></div></div>
+            <div class="table-scroll"><table class="data-table"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>
+                @foreach (var status in Enum.GetValues<AgentExecutionStatus>()) { <tr><td><span class="status-badge @StatusClass(status)">@status</span></td><td>@Count(status)</td></tr> }
+            </tbody></table></div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-heading-row"><div><div class="panel-title">Recent executions</div><div class="panel-heading-meta">Package hash、attempt 與 lease fencing version 可供 audit；lease token 不會顯示。</div></div></div>
+            <div class="table-scroll"><table class="data-table"><thead><tr><th>Execution / Work Item</th><th>Repository / Agent</th><th>Status</th><th>Attempt</th><th>Lease</th><th>Updated</th><th>Audit</th></tr></thead><tbody>
+                @foreach (var item in _dashboard?.Recent ?? [])
+                {
+                    <tr><td><span class="code-inline">@Short(item.Id)</span><br/><span class="muted">@Short(item.WorkItemId) · @ShortHash(item.PackageHash)</span></td><td>@item.RepositoryId<br/><span class="muted">@item.AgentType · @(string.IsNullOrWhiteSpace(item.ClaimedByAgentId) ? "unclaimed" : item.ClaimedByAgentId)</span></td><td><span class="status-badge @StatusClass(item.Status)">@item.Status</span>@if (!string.IsNullOrWhiteSpace(item.FailureClass)) { <div class="muted">@item.FailureClass</div> }</td><td>@item.Attempt / @item.MaxAttempts</td><td>v@item.LeaseVersion<br/><span class="muted">@item.LeaseExpiresAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span></td><td>@item.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td><td><button class="secondary-button" @onclick="() => LoadDetailAsync(item.Id)" disabled="@_loadingDetail">檢視</button></td></tr>
+                }
+                @if ((_dashboard?.Recent.Count ?? 0) == 0) { <tr><td colspan="7">此 Project 尚無 AgentExecution。</td></tr> }
+            </tbody></table></div>
+        </section>
+
+        @if (_detail is not null)
+        {
+            <section class="panel">
+                <div class="panel-heading-row"><div><div class="panel-title">Execution audit drill-down</div><div class="panel-heading-meta"><span class="code-inline">@_detail.Id</span> · package <span class="code-inline">@_detail.PackageHash</span></div></div></div>
+                <div class="stack-list">
+                    <div class="stack-item"><div class="stack-item-title">Objective</div><div class="stack-item-copy selectable-text">@_detail.Package.Objective</div></div>
+                    <div class="stack-item"><div class="stack-item-title">Authority / validation</div><div class="stack-item-copy selectable-text">Authority: @Join(_detail.Package.AuthorityRefs)<br/>Required validation: @Join(_detail.Package.RequiredValidation)<br/>Allowed actions: @Join(_detail.Package.AllowedActions)</div></div>
+                </div>
+                <div class="table-scroll"><table class="data-table"><thead><tr><th>Sequence</th><th>Event</th><th>Agent</th><th>Timestamp</th><th>Payload</th></tr></thead><tbody>
+                    @foreach (var auditEvent in _detail.Events ?? [])
+                    {
+                        <tr><td>@auditEvent.Sequence</td><td>@auditEvent.EventType</td><td>@auditEvent.AgentId</td><td>@auditEvent.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td><td><span class="code-inline selectable-text">@auditEvent.PayloadJson</span></td></tr>
+                    }
+                    @if ((_detail.Events?.Count ?? 0) == 0) { <tr><td colspan="5">尚無 audit events。</td></tr> }
+                </tbody></table></div>
+            </section>
+        }
+
+        <section class="panel"><div class="panel-title">安全邊界</div><div class="stack-item-copy">Execution 完成只會記錄執行證據，不會自動完成、取消或封存 Work Item。Skills exact-version snapshot 在 heartbeat／checkpoint 重新驗證；revoked 或 policy drift 會 fail closed。</div></section>
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private string _projectId = "ContextHub";
+    private AgentExecutionDashboardResult? _dashboard;
+    private AgentExecutionResult? _detail;
+    private bool _loading;
+    private bool _loadingDetail;
+    private string _error = string.Empty;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = string.Empty;
+        try { _dashboard = await ApiClient.GetAgentExecutionDashboardAsync(_projectId.Trim(), CancellationToken.None); _detail = null; }
+        catch (Exception exception) { _error = exception.Message; }
+        finally { _loading = false; }
+    }
+
+    private async Task LoadDetailAsync(Guid executionId)
+    {
+        _loadingDetail = true;
+        _error = string.Empty;
+        try { _detail = await ApiClient.GetAgentExecutionAsync(executionId, CancellationToken.None); }
+        catch (Exception exception) { _error = exception.Message; }
+        finally { _loadingDetail = false; }
+    }
+
+    private int Count(AgentExecutionStatus status) => _dashboard?.Counts.GetValueOrDefault(status) ?? 0;
+    private static string Short(Guid id) => id.ToString("N")[..12];
+    private static string ShortHash(string hash) => hash.Length <= 12 ? hash : hash[..12];
+    private static string Join(IReadOnlyList<string> values) => values.Count == 0 ? "none" : string.Join(", ", values);
+    private static string StatusClass(AgentExecutionStatus status) => status switch
+    {
+        AgentExecutionStatus.Completed => "ok",
+        AgentExecutionStatus.Blocked or AgentExecutionStatus.FailedRetryable or AgentExecutionStatus.Expired => "warning",
+        AgentExecutionStatus.FailedTerminal or AgentExecutionStatus.Cancelled => "danger",
+        AgentExecutionStatus.Claimed or AgentExecutionStatus.Running => "active",
+        _ => "neutral"
+    };
+}

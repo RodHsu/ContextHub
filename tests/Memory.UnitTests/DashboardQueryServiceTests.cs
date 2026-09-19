@@ -936,6 +936,9 @@ public sealed class DashboardQueryServiceTests
         public DbSet<DiscussionMessage> DiscussionMessages => throw new NotSupportedException();
         public DbSet<ProjectWorkItem> ProjectWorkItems => throw new NotSupportedException();
         public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => throw new NotSupportedException();
+        public DbSet<AgentExecution> AgentExecutions => throw new NotSupportedException();
+        public DbSet<AgentExecutionEvent> AgentExecutionEvents => throw new NotSupportedException();
+        public DbSet<AgentExecutionOperation> AgentExecutionOperations => throw new NotSupportedException();
         public DbSet<Skill> Skills => throw new NotSupportedException();
         public DbSet<SkillVersion> SkillVersions => throw new NotSupportedException();
         public DbSet<SkillVersionDependency> SkillVersionDependencies => throw new NotSupportedException();

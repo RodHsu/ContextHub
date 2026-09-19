@@ -522,6 +522,13 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         settingsHtml.Should().Contain("使用者偏好");
         settingsHtml.Should().Contain("重啟 app 容器");
 
+        using var agentExecutionsResponse = await client.GetAsync("/agent-executions");
+        agentExecutionsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var agentExecutionsHtml = WebUtility.HtmlDecode(await agentExecutionsResponse.Content.ReadAsStringAsync());
+        agentExecutionsHtml.Should().Contain("Agent Executions");
+        agentExecutionsHtml.Should().Contain("Active leases");
+        agentExecutionsHtml.Should().Contain("Execution 完成只會記錄執行證據");
+
         using var mcpToolsResponse = await client.GetAsync("/mcp-tools");
         mcpToolsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var mcpToolsHtml = WebUtility.HtmlDecode(await mcpToolsResponse.Content.ReadAsStringAsync());
@@ -536,7 +543,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("連線面總覽");
         mcpToolsHtml.Should().Contain("目前發布數量");
         mcpToolsHtml.Should().Contain("Direct MCP");
-        mcpToolsHtml.Should().Contain("73</strong> 支工具");
+        mcpToolsHtml.Should().Contain("82</strong> 支工具");
         mcpToolsHtml.Should().Contain("ChatGPT App-facing");
         mcpToolsHtml.Should().Contain("72</strong> 支工具");
         mcpToolsHtml.Should().Contain("可能刪除");
@@ -548,6 +555,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("project_cleanup_apply");
         mcpToolsHtml.Should().Contain("discussion_threads_list / discussion_thread_get");
         mcpToolsHtml.Should().Contain("discussion_thread_create / discussion_thread_close / discussion_thread_archive / discussion_thread_restore / discussion_message_create");
+        mcpToolsHtml.Should().Contain("agent_execution_prepare / agent_execution_claim_next / agent_execution_get");
         mcpToolsHtml.Should().Contain("project_work_item_create / project_work_item_update / project_work_item_checklist_update / project_work_item_archive / project_work_item_restore / project_work_items_list");
         mcpToolsHtml.Should().Contain("project_hierarchy_get_children / project_hierarchy_set_children");
         mcpToolsHtml.Should().Contain("/api/projects/hierarchy/*, /api/discussions/*");
@@ -2097,6 +2105,15 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SkillSummaryResult>>([]);
+
+    public Task<AgentExecutionDashboardResult> GetAgentExecutionDashboardAsync(string projectId, CancellationToken cancellationToken)
+        => Task.FromResult(new AgentExecutionDashboardResult(projectId, Enum.GetValues<AgentExecutionStatus>().ToDictionary(x => x, _ => 0), 0, 0, 0, []));
+
+    public Task<IReadOnlyList<AgentExecutionResult>> GetAgentExecutionsAsync(AgentExecutionListRequest request, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<AgentExecutionResult>>([]);
+
+    public Task<AgentExecutionResult?> GetAgentExecutionAsync(Guid executionId, CancellationToken cancellationToken)
+        => Task.FromResult<AgentExecutionResult?>(null);
 
     public Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SkillTelemetryAggregateResult>>([]);

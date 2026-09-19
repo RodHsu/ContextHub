@@ -20,6 +20,7 @@ The goal is to keep durable context outside the prompt while still letting agent
 - Retrieval telemetry and maintenance APIs for retention, summaries, and reclaim workflows
 - Chat-agent gateway for restricted MCP access with OAuth/OIDC and proposal-gated writes
 - Portable Agent Skills registry with immutable versions, hybrid discovery, exact execution pinning, isolated materialization, and quality telemetry
+- Lease-safe AgentExecution dispatch with immutable packages, atomic claim, checkpoint/retry evidence, and mid-execution Skill revalidation
 
 ## Repository Layout
 
@@ -316,6 +317,7 @@ Notes:
 - [Architecture](docs/architecture.md)
 - [MCP usage guide](docs/mcp-usage-guide.md)
 - [Agent Skills](docs/agent-skills.md)
+- [Agent Execution / Work Dispatch](docs/agent-execution.md)
 - [Agent connectivity telemetry](docs/agent-connectivity-telemetry.md)
 - [Repo onboarding guide](docs/repo-onboarding.md) — initial `ProjectId`／project information setup and data-routing rules
 - [Public Nginx proxy guide](docs/context-hub-public-nginx.md)
