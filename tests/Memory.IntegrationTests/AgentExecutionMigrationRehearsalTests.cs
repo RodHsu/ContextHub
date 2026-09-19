@@ -1,0 +1,187 @@
+using FluentAssertions;
+using Memory.Infrastructure;
+using Memory.Tests.Shared;
+using Npgsql;
+using Testcontainers.PostgreSql;
+
+namespace Memory.IntegrationTests;
+
+public sealed class AgentExecutionMigrationRehearsalTests
+{
+    [DockerRequiredFact]
+    public async Task Production_like_039_database_should_upgrade_through_skills_and_agent_execution_and_replay_cleanly()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true)
+            .WithDatabase("contexthub")
+            .WithUsername("contexthub")
+            .WithPassword("contexthub")
+            .Build();
+        await postgres.StartAsync();
+
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "039_scheduled_acceptance_receipt_evidence.sql");
+
+        var workItemId = Guid.NewGuid();
+        await ExecuteAsync(connection, """
+            INSERT INTO project_work_items
+                (id, project_id, title, description, tags, status, priority, created_at, updated_at)
+            VALUES
+                (@id, 'migration-rehearsal', 'Preserved pre-040 work item', '', '{}', 'Pending', 50, NOW(), NOW());
+            """, new NpgsqlParameter<Guid>("id", workItemId));
+
+        await ApplyRemainingAsync(connection, migrations);
+
+        (await ScalarAsync<long>(connection,
+            "SELECT COUNT(*) FROM project_work_items WHERE id = @id AND status = 'Pending';",
+            new NpgsqlParameter<Guid>("id", workItemId))).Should().Be(1);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM schema_migrations
+            WHERE name IN ('040_agent_skills.sql', '041_scheduled_governance_authority_epochs.sql',
+                           '041a_memory_score_reconciliation.sql', '042_memory_score_contract.sql',
+                           '043_agent_execution.sql');
+            """)).Should().Be(5);
+
+        var skillId = Guid.NewGuid();
+        var skillVersionId = Guid.NewGuid();
+        var executionId = Guid.NewGuid();
+        await ExecuteAsync(connection, """
+            INSERT INTO skills
+                (id, stable_key, name, description, when_to_use, license, risk_level, created_at, updated_at)
+            VALUES
+                (@skill_id, 'migration-rehearsal', 'Migration rehearsal', '', '', 'MIT', 'Low', NOW(), NOW());
+            INSERT INTO skill_versions
+                (id, skill_id, version, status, content_hash, bundle_json, source_kind, source_ref,
+                 trust_level, created_at, updated_at, published_at)
+            VALUES
+                (@version_id, @skill_id, '1.0.0', 'Published', repeat('a', 64), '{}'::jsonb,
+                 'Repository', 'migration-rehearsal', 'SourceVerified', NOW(), NOW(), NOW());
+            INSERT INTO agent_executions
+                (id, work_item_id, project_id, repository_id, agent_type, package_json, package_hash,
+                 package_context_version, skill_snapshot_json, status, eligible_at, created_at, updated_at)
+            VALUES
+                (@execution_id, @work_item_id, 'migration-rehearsal', 'ContextHub', 'Codex', '{}'::jsonb,
+                 repeat('b', 64), '1.0', jsonb_build_object('skillVersionId', @version_id), 'Ready', NOW(), NOW(), NOW());
+            """,
+            new NpgsqlParameter<Guid>("skill_id", skillId),
+            new NpgsqlParameter<Guid>("version_id", skillVersionId),
+            new NpgsqlParameter<Guid>("execution_id", executionId),
+            new NpgsqlParameter<Guid>("work_item_id", workItemId));
+
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection,
+            "SELECT COUNT(*) FROM agent_executions WHERE id = @id AND skill_snapshot_json->>'skillVersionId' = @version_id;",
+            new NpgsqlParameter<Guid>("id", executionId),
+            new NpgsqlParameter<string>("version_id", skillVersionId.ToString()))).Should().Be(1);
+
+        await connection.CloseAsync();
+        await connection.OpenAsync();
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection,
+            "SELECT COUNT(*) FROM schema_migrations WHERE name = '043_agent_execution.sql';")).Should().Be(1);
+    }
+
+    private static IReadOnlyList<(string Name, string Sql)> ReadMigrations()
+    {
+        var assembly = typeof(MemoryDbContext).Assembly;
+        return assembly.GetManifestResourceNames()
+            .Where(name => name.Contains(".Sql.Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .Select(name =>
+            {
+                using var stream = assembly.GetManifestResourceStream(name)
+                    ?? throw new InvalidOperationException($"Embedded migration '{name}' was not found.");
+                using var reader = new StreamReader(stream);
+                var migrationName = name[(name.LastIndexOf(".Sql.Migrations.", StringComparison.Ordinal) + ".Sql.Migrations.".Length)..];
+                return (migrationName, reader.ReadToEnd());
+            })
+            .ToArray();
+    }
+
+    private static async Task ApplyThroughAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<(string Name, string Sql)> migrations,
+        string terminalMigration)
+    {
+        foreach (var migration in migrations)
+        {
+            await ApplyAsync(connection, migration);
+            if (migration.Name == terminalMigration)
+            {
+                return;
+            }
+        }
+
+        throw new InvalidOperationException($"Migration '{terminalMigration}' was not found.");
+    }
+
+    private static async Task ApplyRemainingAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<(string Name, string Sql)> migrations)
+    {
+        foreach (var migration in migrations)
+        {
+            await ApplyAsync(connection, migration);
+        }
+    }
+
+    private static async Task ApplyAsync(NpgsqlConnection connection, (string Name, string Sql) migration)
+    {
+        await ExecuteAsync(connection, """
+            CREATE TABLE IF NOT EXISTS schema_migrations
+            (
+                name TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """);
+        if (await ScalarAsync<bool>(connection,
+                "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = @name);",
+                new NpgsqlParameter<string>("name", migration.Name)))
+        {
+            return;
+        }
+
+        await using var transaction = await connection.BeginTransactionAsync();
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandTimeout = 300;
+            command.CommandText = migration.Sql;
+            await command.ExecuteNonQueryAsync();
+            await using var record = connection.CreateCommand();
+            record.Transaction = transaction;
+            record.CommandText = "INSERT INTO schema_migrations (name) VALUES (@name);";
+            record.Parameters.Add(new NpgsqlParameter<string>("name", migration.Name));
+            await record.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+
+    private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, params NpgsqlParameter[] parameters)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = 300;
+        command.CommandText = sql;
+        command.Parameters.AddRange(parameters);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, params NpgsqlParameter[] parameters)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddRange(parameters);
+        var value = await command.ExecuteScalarAsync()
+            ?? throw new InvalidOperationException("Expected a scalar database value.");
+        return (T)value;
+    }
+}

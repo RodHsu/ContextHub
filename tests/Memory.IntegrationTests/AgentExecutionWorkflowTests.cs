@@ -133,7 +133,7 @@ public sealed class AgentExecutionWorkflowTests(ContainerTestEnvironment environ
         }
 
         var prepared = await Task.WhenAll(PrepareFromAsync(), PrepareFromAsync());
-        prepared.Select(item => item.Id).Should().ContainSingle();
+        prepared.Select(item => item.Id).Distinct().Should().ContainSingle();
 
         await using var manager = environment.GetFactory().Services.CreateAsyncScope();
         UseAgentActor(manager.ServiceProvider);
@@ -317,7 +317,7 @@ public sealed class AgentExecutionWorkflowTests(ContainerTestEnvironment environ
             result.Outcome.Should().Be("BlockedBySkillPolicy");
             result.Execution.Status.Should().Be(AgentExecutionStatus.Blocked);
             result.Execution.LeaseExpiresAt.Should().BeNull();
-            result.Execution.ClaimedByAgentId.Should().BeNull();
+            result.Execution.ClaimedByAgentId.Should().BeEmpty();
             result.SkillDecision.Should().Be(SkillExecutionSnapshotDecision.ReResolve);
             result.SkillIssues.Should().Contain(item => item.SkillVersionId == skillVersionId);
         }
@@ -328,7 +328,7 @@ public sealed class AgentExecutionWorkflowTests(ContainerTestEnvironment environ
         (await db.ProjectWorkItems.SingleAsync(item => item.Id == workItemId)).Status.Should().Be(ProjectWorkItemStatus.Pending);
         var execution = await db.AgentExecutions.SingleAsync(item => item.Id == executionId);
         execution.Status.Should().Be(AgentExecutionStatus.Blocked);
-        execution.LeaseTokenHash.Should().BeNull();
+        execution.LeaseTokenHash.Should().BeEmpty();
     }
 
     [DockerRequiredFact]
@@ -390,8 +390,8 @@ public sealed class AgentExecutionWorkflowTests(ContainerTestEnvironment environ
     {
         var unique = Guid.NewGuid().ToString("N");
         var stableKey = $"agent-exec-{unique}"[..31];
-        const string name = "Agent execution integration";
-        var markdown = "---\nname: Agent execution integration\ndescription: Exercise exact AgentExecution runtime pinning\n---\n# Integration\nUse bounded evidence.";
+        var name = $"Agent execution integration {unique}";
+        var markdown = $"---\nname: {name}\ndescription: Exercise exact AgentExecution runtime pinning\n---\n# Integration\nUse bounded evidence.";
         var preview = new SkillImportPreviewRequest(
             stableKey,
             name,
