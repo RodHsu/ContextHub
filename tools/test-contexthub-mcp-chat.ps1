@@ -972,11 +972,23 @@ if ($Surface -eq "Automation") {
     Write-Host "Scheduled Governance least-privilege catalog verified (4 tools; controlledReview=$RunControlledReview)."
     return
 }
-$canonicalRestrictedToolCount = 65
+$canonicalRestrictedToolCount = 81
 $requiredAppFacingReadTools = @(
     "governance_contract_get",
     "governance_run_get",
-    "governance_runs_list"
+    "governance_runs_list",
+    "agent_execution_get"
+)
+$requiredAgentExecutionTools = @(
+    "agent_execution_prepare",
+    "agent_execution_claim_next",
+    "agent_execution_get",
+    "agent_execution_heartbeat",
+    "agent_execution_checkpoint",
+    "agent_execution_block",
+    "agent_execution_complete",
+    "agent_execution_fail",
+    "agent_execution_abandon"
 )
 $appFacingInvalidTools = [System.Collections.Generic.List[string]]::new()
 foreach ($tool in @($toolsJson.result.tools)) {
@@ -1001,6 +1013,19 @@ foreach ($tool in @($toolsJson.result.tools)) {
         }
         else {
             if ($tool.annotations.readOnlyHint -ne $true) { $invalidReasons.Add("readOnlyHint-must-be-true") }
+            if ($tool.annotations.destructiveHint -ne $false) { $invalidReasons.Add("destructiveHint-must-be-false") }
+            if ($tool.annotations.openWorldHint -ne $false) { $invalidReasons.Add("openWorldHint-must-be-false") }
+            if ($tool.annotations.idempotentHint -ne $true) { $invalidReasons.Add("idempotentHint-must-be-true") }
+        }
+    }
+
+    if ($requiredAgentExecutionTools -contains [string]$tool.name) {
+        if (-not $tool.annotations) {
+            $invalidReasons.Add("missing-agent-execution-annotations")
+        }
+        else {
+            $expectedReadOnly = [string]$tool.name -eq "agent_execution_get"
+            if ($tool.annotations.readOnlyHint -ne $expectedReadOnly) { $invalidReasons.Add("unexpected-readOnlyHint") }
             if ($tool.annotations.destructiveHint -ne $false) { $invalidReasons.Add("destructiveHint-must-be-false") }
             if ($tool.annotations.openWorldHint -ne $false) { $invalidReasons.Add("openWorldHint-must-be-false") }
             if ($tool.annotations.idempotentHint -ne $true) { $invalidReasons.Add("idempotentHint-must-be-true") }
@@ -1051,6 +1076,22 @@ $requiredTools = @(
     "promote_log_slice_to_memory",
     "project_work_items_list",
     "project_work_item_set_governance_exclusion",
+    "agent_execution_prepare",
+    "agent_execution_claim_next",
+    "agent_execution_get",
+    "agent_execution_heartbeat",
+    "agent_execution_checkpoint",
+    "agent_execution_block",
+    "agent_execution_complete",
+    "agent_execution_fail",
+    "agent_execution_abandon",
+    "skills_search_for_execution",
+    "skills_resolution_feedback",
+    "skills_select_for_execution",
+    "skill_version_get",
+    "skill_version_materialize",
+    "skills_materialization_cleanup",
+    "skills_invocation_record",
     "chatgpt_proposals_list",
     "chatgpt_proposal_approve",
     "chatgpt_proposal_reject"

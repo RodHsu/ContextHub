@@ -1,6 +1,6 @@
 # AgentExecution Architecture Decision Record
 
-Status: Implemented for single ContextHub project/repository dispatch; Production acceptance pending.
+Status: Implemented and server-side Production accepted for single ContextHub project/repository dispatch; ChatGPT host discovery is independently revalidated after catalog releases.
 
 ## Decision
 

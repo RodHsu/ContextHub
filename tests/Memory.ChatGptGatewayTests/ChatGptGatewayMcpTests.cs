@@ -96,7 +96,12 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
         names.Should().BeEquivalentTo(ScheduledGovernanceToolCatalog.PublishedToolNames);
         names.Should().HaveCount(4);
-        names.Should().NotContain(["governance_batch_execute", "memory_delete", "project_cleanup_apply", "governance_tombstone_get"]);
+        names.Should().NotContain([
+            "governance_batch_execute", "memory_delete", "project_cleanup_apply", "governance_tombstone_get",
+            "agent_execution_prepare", "agent_execution_claim_next", "agent_execution_get",
+            "agent_execution_heartbeat", "agent_execution_checkpoint", "agent_execution_block",
+            "agent_execution_complete", "agent_execution_fail", "agent_execution_abandon"
+        ]);
 
         foreach (var tool in tools.EnumerateArray())
         {
@@ -149,6 +154,19 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         (deniedAsProtocolError || deniedAsToolError).Should().BeTrue(
             "tools omitted from the automation catalog must also be unreachable through tools/call");
         deniedPayload.GetRawText().Should().Contain("memory_delete");
+
+        var agentExecutionDeniedPayload = ExtractSseJson(await SendMcpAsync(client, null, 3, "tools/call", new
+        {
+            name = "agent_execution_get",
+            arguments = new { executionId = Guid.NewGuid() }
+        }));
+        var agentExecutionDeniedAsProtocolError = agentExecutionDeniedPayload.TryGetProperty("error", out _);
+        var agentExecutionDeniedAsToolError = agentExecutionDeniedPayload.TryGetProperty("result", out var agentExecutionDeniedResult) &&
+                                               agentExecutionDeniedResult.TryGetProperty("isError", out var agentExecutionIsError) &&
+                                               agentExecutionIsError.GetBoolean();
+        (agentExecutionDeniedAsProtocolError || agentExecutionDeniedAsToolError).Should().BeTrue(
+            "AgentExecution tools must remain unreachable on the exactly-four automation surface");
+        agentExecutionDeniedPayload.GetRawText().Should().Contain("agent_execution_get");
     }
 
     [DockerRequiredFact]
@@ -310,7 +328,13 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .Should().Contain(["openid", "profile", "email", "offline_access"]);
         metadata.GetProperty("scopes_supported").EnumerateArray()
             .Select(x => x.GetString())
-            .Should().NotContain(SecurityScopes.ScheduledGovernance);
+            .Should().NotContain([
+                SecurityScopes.ScheduledGovernance,
+                SecurityScopes.AgentExecutionsRead,
+                SecurityScopes.AgentExecutionsClaim,
+                SecurityScopes.AgentExecutionsWrite,
+                SecurityScopes.AgentExecutionsManage
+            ], "internal application scopes must not widen the public OAuth contract");
         metadata.GetProperty("bearer_methods_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("header");
@@ -342,6 +366,154 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         oidcMetadata.GetProperty("scopes_supported").EnumerateArray()
             .Select(x => x.GetString())
             .Should().Contain("offline_access");
+    }
+
+    [DockerRequiredFact]
+    public async Task General_Surface_Should_Run_Existing_AgentExecution_Workflow_Through_Restricted_Projection()
+    {
+        using var client = CreateAuthorizedClient(environment.GetFactory());
+        var repositoryId = $"gateway-repo-{Guid.NewGuid():N}";
+        var agentId = $"gateway-agent-{Guid.NewGuid():N}";
+
+        var createWorkItemPayload = await SendMcpAsync(client, null, 101, "tools/call", new
+        {
+            name = "project_work_item_create",
+            arguments = new
+            {
+                request = new
+                {
+                    projectId = ProjectId,
+                    title = "Restricted AgentExecution projection regression",
+                    description = "Proves general gateway wiring without changing business lifecycle.",
+                    tags = new[] { "agent-execution", "gateway-regression" },
+                    checklistItems = new[] { "Server-side workflow verified" },
+                    priority = 50
+                }
+            }
+        });
+        var workItemId = ExtractToolJson(createWorkItemPayload).GetProperty("id").GetGuid();
+
+        var prepareKey = $"gateway-prepare-{Guid.NewGuid():N}";
+        var prepareArguments = new
+        {
+            request = new
+            {
+                workItemId,
+                projectId = ProjectId,
+                repositoryId,
+                objective = "Verify the already implemented AgentExecution gateway projection.",
+                acceptanceCriteria = new[] { "restricted projection reaches the existing service" },
+                authorityRefs = new[] { "test:restricted-projection" },
+                constraints = new[] { "preserve work item lifecycle" },
+                allowedActions = new[] { "read", "write" },
+                requiredValidation = new[] { "gateway E2E" },
+                agentType = "Codex",
+                requiredCapabilities = Array.Empty<string>(),
+                priority = 50,
+                maxAttempts = 3,
+                skillResolutionId = (Guid?)null,
+                idempotencyKey = prepareKey
+            }
+        };
+        var prepared = ExtractToolJson(await SendMcpAsync(client, null, 102, "tools/call", new
+        {
+            name = "agent_execution_prepare",
+            arguments = prepareArguments
+        }));
+        var prepareReplay = ExtractToolJson(await SendMcpAsync(client, null, 103, "tools/call", new
+        {
+            name = "agent_execution_prepare",
+            arguments = prepareArguments
+        }));
+        prepareReplay.GetProperty("id").GetGuid().Should().Be(prepared.GetProperty("id").GetGuid());
+
+        var claimKey = $"gateway-claim-{Guid.NewGuid():N}";
+        var claimArguments = new
+        {
+            request = new
+            {
+                projectId = ProjectId,
+                repositoryId,
+                agentId,
+                agentType = "Codex",
+                capabilities = Array.Empty<string>(),
+                leaseSeconds = 300,
+                idempotencyKey = claimKey,
+                availableTools = Array.Empty<string>()
+            }
+        };
+        var claimed = ExtractToolJson(await SendMcpAsync(client, null, 104, "tools/call", new
+        {
+            name = "agent_execution_claim_next",
+            arguments = claimArguments
+        }));
+        claimed.GetProperty("hasExecution").GetBoolean().Should().BeTrue();
+        var execution = claimed.GetProperty("execution");
+        var executionId = execution.GetProperty("id").GetGuid();
+        var leaseVersion = execution.GetProperty("leaseVersion").GetInt64();
+        var leaseToken = claimed.GetProperty("leaseToken").GetString()!;
+
+        var readBack = ExtractToolJson(await SendMcpAsync(client, null, 105, "tools/call", new
+        {
+            name = "agent_execution_get",
+            arguments = new { executionId }
+        }));
+        readBack.GetProperty("id").GetGuid().Should().Be(executionId);
+
+        var heartbeatKey = $"gateway-heartbeat-{Guid.NewGuid():N}";
+        var heartbeatArguments = new
+        {
+            request = new
+            {
+                executionId,
+                agentId,
+                leaseToken,
+                leaseVersion,
+                leaseSeconds = 300,
+                idempotencyKey = heartbeatKey,
+                currentCapabilities = Array.Empty<string>(),
+                currentTools = Array.Empty<string>()
+            }
+        };
+        var heartbeat = ExtractToolJson(await SendMcpAsync(client, null, 106, "tools/call", new
+        {
+            name = "agent_execution_heartbeat",
+            arguments = heartbeatArguments
+        }));
+        heartbeat.GetProperty("outcome").GetString().Should().Be("heartbeat");
+        var heartbeatReplay = ExtractToolJson(await SendMcpAsync(client, null, 107, "tools/call", new
+        {
+            name = "agent_execution_heartbeat",
+            arguments = heartbeatArguments
+        }));
+        heartbeatReplay.GetProperty("replayed").GetBoolean().Should().BeTrue();
+
+        _ = ExtractToolJson(await SendMcpAsync(client, null, 108, "tools/call", new
+        {
+            name = "agent_execution_abandon",
+            arguments = new
+            {
+                request = new
+                {
+                    executionId,
+                    agentId,
+                    leaseToken,
+                    leaseVersion,
+                    reasonClass = "RegressionCleanup",
+                    reason = "Restricted projection regression completed.",
+                    evidenceRefs = new[] { "test:restricted-projection" },
+                    retryable = false,
+                    idempotencyKey = $"gateway-abandon-{Guid.NewGuid():N}",
+                    currentCapabilities = Array.Empty<string>(),
+                    currentTools = Array.Empty<string>()
+                }
+            }
+        }));
+
+        await using var verificationScope = environment.GetFactory().Services.CreateAsyncScope();
+        var db = verificationScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        (await db.ProjectWorkItems.SingleAsync(item => item.Id == workItemId)).Status
+            .Should().Be(ProjectWorkItemStatus.Pending);
     }
 
     [DockerRequiredFact]
@@ -4082,11 +4254,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
-        listedToolNames.Should().HaveCount(72);
+        listedToolNames.Should().HaveCount(81);
         var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
         appFacingProjection.IsValid.Should().BeTrue();
-        appFacingProjection.PublishedToolCount.Should().Be(72);
-        appFacingProjection.AppCallableToolCount.Should().Be(72);
+        appFacingProjection.PublishedToolCount.Should().Be(81);
+        appFacingProjection.AppCallableToolCount.Should().Be(81);
         appFacingProjection.MissingPublishedTools.Should().BeEmpty();
         appFacingProjection.UnexpectedPublishedTools.Should().BeEmpty();
         appFacingProjection.MissingAppCallableTools.Should().BeEmpty();
@@ -4096,7 +4268,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_run_get",
             "governance_runs_list"
         };
-        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(69);
+        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(78);
         foreach (var toolName in receiptAndContractTools)
         {
             var projectedTool = appFacingProjection.Tools.Single(tool => tool.Name == toolName);
@@ -4136,6 +4308,15 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "project_work_item_checklist_update",
             "project_work_item_archive",
             "project_work_item_restore",
+            "agent_execution_prepare",
+            "agent_execution_claim_next",
+            "agent_execution_get",
+            "agent_execution_heartbeat",
+            "agent_execution_checkpoint",
+            "agent_execution_block",
+            "agent_execution_complete",
+            "agent_execution_fail",
+            "agent_execution_abandon",
             "conversation_insight_status",
             "conversation_insight_retry",
             "conversation_insight_skip",
@@ -4144,6 +4325,39 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_finding_reopen",
             "chatgpt_governance_proposal_create"
         ]);
+        var agentExecutionToolNames = new[]
+        {
+            "agent_execution_prepare",
+            "agent_execution_claim_next",
+            "agent_execution_get",
+            "agent_execution_heartbeat",
+            "agent_execution_checkpoint",
+            "agent_execution_block",
+            "agent_execution_complete",
+            "agent_execution_fail",
+            "agent_execution_abandon"
+        };
+        foreach (var toolName in agentExecutionToolNames)
+        {
+            var tool = listedTools.EnumerateArray().Single(candidate =>
+                candidate.GetProperty("name").GetString() == toolName);
+            tool.TryGetProperty("outputSchema", out var outputSchema).Should().BeTrue();
+            outputSchema.ValueKind.Should().Be(JsonValueKind.Object);
+            var annotations = tool.GetProperty("annotations");
+            annotations.GetProperty("readOnlyHint").GetBoolean().Should().Be(toolName == "agent_execution_get");
+            annotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("idempotentHint").GetBoolean().Should().BeTrue();
+        }
+        listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "agent_execution_get")
+            .GetProperty("inputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name)
+            .Should().Contain("executionId");
+        listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "agent_execution_claim_next")
+            .GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties").EnumerateObject().Select(x => x.Name)
+            .Should().Contain(["projectId", "repositoryId", "agentId", "idempotencyKey"]);
         var batchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
         var reviewTool = listedTools.EnumerateArray()
@@ -4217,6 +4431,18 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .Should().Be(typeof(GovernanceBatchExecuteRequest));
         typeof(MemoryMcpTools).GetMethod(nameof(MemoryMcpTools.governance_batch_execute))!.GetParameters()[0].ParameterType
             .Should().Be(typeof(GovernanceBatchExecuteRequest));
+
+        var agentExecutionGetPayload = ExtractSseJson(await SendMcpAsync(client, sessionId!, 20, "tools/call", new
+        {
+            name = "agent_execution_get",
+            arguments = new { executionId = Guid.NewGuid() }
+        }));
+        agentExecutionGetPayload.TryGetProperty("error", out _).Should().BeFalse();
+        var agentExecutionGetResult = agentExecutionGetPayload.GetProperty("result");
+        var agentExecutionGetFailed = agentExecutionGetResult.TryGetProperty("isError", out var agentExecutionGetIsError) &&
+                                      agentExecutionGetIsError.GetBoolean();
+        agentExecutionGetFailed.Should().BeFalse(
+            "the general /mcp-chat actor must receive the existing read scope while retaining service ACL checks");
 
         var projectsPayload = await SendMcpAsync(client, sessionId!, 21, "tools/call", new
         {

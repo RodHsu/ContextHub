@@ -15,7 +15,7 @@ public sealed class ContextHubBootstrapServiceTests
 
         result.Service.Name.Should().Be("ContextHub");
         result.ToolCatalog.BackendToolCount.Should().Be(82);
-        result.ToolCatalog.AppFacingToolCount.Should().Be(72);
+        result.ToolCatalog.AppFacingToolCount.Should().Be(81);
         result.ToolCatalog.QueryToolCount.Should().BeGreaterThan(0);
         result.ToolCatalog.DeleteCapableToolCount.Should().Be(3);
         result.ToolCatalog.MutationToolCount.Should().Be(

@@ -27,6 +27,7 @@ public sealed class ChatGptGatewayTools(
     IProjectArtifactExchangeService artifactExchangeService,
     IChatGptProposalService proposalService,
     IProjectWorkItemService projectWorkItemService,
+    IAgentExecutionService agentExecutionService,
     ISkillService skillService,
     IRequestActorAccessor actorAccessor,
     IHttpContextAccessor httpContextAccessor)
@@ -220,6 +221,42 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("List user-managed project work items for one explicitly authorized ProjectId.")]
     public Task<IReadOnlyList<ProjectWorkItemResult>> project_work_items_list(ProjectWorkItemListRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.ListAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Create one immutable, versioned execution package for an active project work item. This management operation never completes or cancels the business work item.")]
+    public Task<AgentExecutionResult> agent_execution_prepare(AgentExecutionPrepareRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.PrepareAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Atomically claim the highest-priority eligible execution compatible with the repository, agent type, project ACL, and capabilities. Returns NoEligibleWork when none is legal.")]
+    public Task<AgentExecutionClaimResult> agent_execution_claim_next(AgentExecutionClaimRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.ClaimNextAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Read one agent execution package and current lease-safe lifecycle state.")]
+    public Task<AgentExecutionResult?> agent_execution_get(Guid executionId, CancellationToken cancellationToken = default)
+        => agentExecutionService.GetAsync(executionId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Renew an owned execution lease using its exact token and fencing version. Revalidates pinned Skills and fails closed on revocation or policy drift.")]
+    public Task<AgentExecutionMutationResult> agent_execution_heartbeat(AgentExecutionLeaseRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.HeartbeatAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Append a structured execution checkpoint and evidence while renewing the owned lease and revalidating pinned Skills.")]
+    public Task<AgentExecutionMutationResult> agent_execution_checkpoint(AgentExecutionCheckpointRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.CheckpointAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Stop an execution as blocked with a structured reason and evidence. This does not change the business work item status.")]
+    public Task<AgentExecutionMutationResult> agent_execution_block(AgentExecutionTerminalRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.BlockAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Record successful execution completion with evidence. This does not automatically complete the business work item.")]
+    public Task<AgentExecutionMutationResult> agent_execution_complete(AgentExecutionTerminalRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.CompleteAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Record a retryable or terminal execution failure with structured reason and evidence.")]
+    public Task<AgentExecutionMutationResult> agent_execution_fail(AgentExecutionTerminalRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.FailAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Relinquish an owned execution lease with structured evidence without mutating the business work item.")]
+    public Task<AgentExecutionMutationResult> agent_execution_abandon(AgentExecutionTerminalRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.AbandonAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Create a user-managed project work item for one explicitly authorized ProjectId.")]
     public Task<ProjectWorkItemResult> project_work_item_create(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken = default)

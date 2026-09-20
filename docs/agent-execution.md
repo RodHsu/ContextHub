@@ -28,6 +28,6 @@ The worker must not broaden requirements, search the entire Work Item backlog, r
 - Monitor Ready age, active/expired leases, retryable failures, blocked executions, and terminal failure classes in Dashboard.
 - Preserve the workspace and evidence when a worker blocks; do not mark the Work Item completed from execution status alone.
 
-## Production acceptance gate
+## Production publication and acceptance
 
-Migration `043_agent_execution.sql` must be rehearsed after the Skills migration chain including `040_agent_skills.sql`. Production deployment is prohibited while Scheduled Governance reliability/acceptance freeze is active. After authority explicitly clears the freeze, controlled E2E must prove claim, checkpoint, completion, read-back, crash handoff, Skill revocation, and Work Item lifecycle separation.
+Migration `043_agent_execution.sql` is applied after the Skills migration chain including `040_agent_skills.sql`. The nine worker-facing `agent_execution_*` tools are published on both the trusted backend `/mcp` catalog and the OAuth-protected general `/mcp-chat` catalog; they are never published on the exactly-four-tool `/mcp-automation` surface. Server-side acceptance covers claim, checkpoint, completion, read-back, replay, crash handoff, Skill revocation, ACL/lease enforcement, and Work Item lifecycle separation. ChatGPT connector discovery remains a host-controlled acceptance step after each catalog release and must not be inferred from server-side E2E alone.

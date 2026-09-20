@@ -132,7 +132,10 @@ internal sealed class ChatGptGatewayActorMiddleware(RequestDelegate next)
                 SecurityScopes.PreferencesRead,
                 SecurityScopes.PreferencesWrite,
                 SecurityScopes.LogsRead,
-                SecurityScopes.GovernanceTrackerManage
+                SecurityScopes.GovernanceTrackerManage,
+                SecurityScopes.AgentExecutionsRead,
+                SecurityScopes.AgentExecutionsClaim,
+                SecurityScopes.AgentExecutionsWrite
             };
 
         var previous = actorAccessor.Current;

@@ -2,7 +2,7 @@ namespace Memory.Application;
 
 public static class McpPublishedToolCatalog
 {
-    public const string AppFacingCatalogVersion = "2026-09-08-v6";
+    public const string AppFacingCatalogVersion = "2026-09-20-v7";
 
     public static IReadOnlySet<string> RestrictedToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -46,6 +46,15 @@ public static class McpPublishedToolCatalog
         "project_work_item_checklist_update",
         "project_work_item_archive",
         "project_work_item_restore",
+        "agent_execution_prepare",
+        "agent_execution_claim_next",
+        "agent_execution_get",
+        "agent_execution_heartbeat",
+        "agent_execution_checkpoint",
+        "agent_execution_block",
+        "agent_execution_complete",
+        "agent_execution_fail",
+        "agent_execution_abandon",
         "project_information_upsert",
         "project_information_update_lifecycle",
         "project_artifacts_list",
@@ -90,16 +99,7 @@ public static class McpPublishedToolCatalog
         "maintenance_status",
         "memory_restore",
         "project_artifacts_prune_expired_objects",
-        "user_preference_list",
-        "agent_execution_prepare",
-        "agent_execution_claim_next",
-        "agent_execution_get",
-        "agent_execution_heartbeat",
-        "agent_execution_checkpoint",
-        "agent_execution_block",
-        "agent_execution_complete",
-        "agent_execution_fail",
-        "agent_execution_abandon"
+        "user_preference_list"
     };
 
     public static IReadOnlySet<string> GatewayOnlyToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
@@ -137,6 +137,7 @@ public static class McpPublishedToolCatalog
         "discussion_thread_get",
         "project_hierarchy_get_children",
         "project_work_items_list",
+        "agent_execution_get",
         "project_artifacts_list",
         "project_artifacts_search",
         "project_artifact_get",

@@ -22,7 +22,7 @@ public sealed class AgentExecutionContractTests
     }
 
     [Fact]
-    public void Backend_catalog_should_publish_execution_tools_without_expanding_restricted_app_surface()
+    public void Backend_and_restricted_catalogs_should_publish_execution_tools_with_safe_classification()
     {
         var names = new[]
         {
@@ -38,8 +38,11 @@ public sealed class AgentExecutionContractTests
         };
 
         McpPublishedToolCatalog.BackendToolNames.Should().Contain(names);
-        McpPublishedToolCatalog.RestrictedToolNames.Should().NotContain(names);
-        McpPublishedToolCatalog.AppFacingCatalogVersion.Should().Be("2026-09-08-v6");
+        McpPublishedToolCatalog.RestrictedToolNames.Should().Contain(names);
+        McpPublishedToolCatalog.BackendOnlyToolNames.Should().NotContain(names);
+        McpPublishedToolCatalog.QueryToolNames.Should().ContainSingle(name => name == "agent_execution_get");
+        McpPublishedToolCatalog.DirectMutationToolNames.Should().Contain(names.Except(["agent_execution_get"]));
+        McpPublishedToolCatalog.AppFacingCatalogVersion.Should().Be("2026-09-20-v7");
     }
 
     [Fact]
