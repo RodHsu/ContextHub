@@ -1458,13 +1458,17 @@ discussions.MapPost("/threads/{threadId:guid}/messages", async (Guid threadId, D
 
 var workItems = app.MapGroup("/api/work-items");
 workItems.RequireAuthIfEnabled(requireAuthentication);
-workItems.MapGet(string.Empty, async (string projectId, string? status, int? limit, bool? includeArchived, IProjectWorkItemService service, CancellationToken cancellationToken) =>
+workItems.MapGet(string.Empty, async (string projectId, string? status, string? definitionState, int? limit, bool? includeArchived, IProjectWorkItemService service, CancellationToken cancellationToken) =>
 {
     if (!EnumParser.TryParse(status, out ProjectWorkItemStatus? parsedStatus, out var error))
     {
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = [error ?? "Unsupported ProjectWorkItemStatus value."] });
     }
-    return Results.Ok(await service.ListAsync(new ProjectWorkItemListRequest(ProjectContext.Normalize(projectId), parsedStatus, limit ?? 100, includeArchived ?? false), cancellationToken));
+    if (!EnumParser.TryParse(definitionState, out ProjectWorkItemDefinitionState? parsedDefinitionState, out var definitionError))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["definitionState"] = [definitionError ?? "Unsupported ProjectWorkItemDefinitionState value."] });
+    }
+    return Results.Ok(await service.ListAsync(new ProjectWorkItemListRequest(ProjectContext.Normalize(projectId), parsedStatus, limit ?? 100, includeArchived ?? false, DefinitionState: parsedDefinitionState), cancellationToken));
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 workItems.MapPost(string.Empty, async (ProjectWorkItemCreateRequest request, IProjectWorkItemService service, CancellationToken cancellationToken) =>
 {
@@ -1473,7 +1477,7 @@ workItems.MapPost(string.Empty, async (ProjectWorkItemCreateRequest request, IPr
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 workItems.MapPut("/{id:guid}", async (Guid id, ProjectWorkItemUpdateBody body, IProjectWorkItemService service, CancellationToken cancellationToken) =>
 {
-    try { return Results.Ok(await service.UpdateAsync(new ProjectWorkItemUpdateRequest(id, body.Title, body.Description, body.Tags, body.Status, body.Priority, body.DueAt), cancellationToken)); }
+    try { return Results.Ok(await service.UpdateAsync(new ProjectWorkItemUpdateRequest(id, body.Title, body.Description, body.Tags, body.Status, body.Priority, body.DueAt, body.DefinitionState), cancellationToken)); }
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 workItems.MapPost("/{id:guid}/archive", async (Guid id, IProjectWorkItemService service, CancellationToken cancellationToken) =>
@@ -2352,7 +2356,7 @@ internal sealed record TenantUserUpdateBody(
     string? Password = null);
 internal sealed record DiscussionMessageCreateBody(string SenderProjectId, string Content);
 internal sealed record DiscussionThreadReadBody(string ReaderProjectId, Guid LastReadMessageId);
-internal sealed record ProjectWorkItemUpdateBody(string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
+internal sealed record ProjectWorkItemUpdateBody(string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null, ProjectWorkItemDefinitionState? DefinitionState = null);
 internal sealed record ProjectWorkItemChecklistCompletionBody(bool IsCompleted);
 internal sealed record ProjectWorkItemGovernanceExclusionBody(string ProjectId, string GovernanceRunId, string Reason, bool Excluded = true);
 internal sealed record ConversationInsightGovernanceBody(string? GovernanceRunId = null, string? Reason = null);

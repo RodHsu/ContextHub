@@ -35,6 +35,7 @@ public sealed class ProjectWorkItemService(
             Title = request.Title.Trim(),
             Description = request.Description?.Trim() ?? string.Empty,
             Tags = tags,
+            DefinitionState = request.DefinitionState,
             Priority = Math.Clamp(request.Priority, 0, 100),
             DueAt = request.DueAt,
             CreatedAt = now,
@@ -83,6 +84,11 @@ public sealed class ProjectWorkItemService(
             entity.Status = request.Status.Value;
             entity.CompletedAt = request.Status is ProjectWorkItemStatus.Completed or ProjectWorkItemStatus.Cancelled ? clock.UtcNow : null;
         }
+        if (request.DefinitionState.HasValue && request.DefinitionState.Value != entity.DefinitionState)
+        {
+            EnsureDefinitionTransitionAllowed(entity.DefinitionState, request.DefinitionState.Value);
+            entity.DefinitionState = request.DefinitionState.Value;
+        }
         entity.UpdatedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
         return Map(entity);
@@ -97,6 +103,7 @@ public sealed class ProjectWorkItemService(
         var query = ApplyActorScope(dbContext.ProjectWorkItems.AsNoTracking().Include(x => x.ChecklistItems), actor).Where(x => x.ProjectId == projectId);
         if (!request.IncludeArchived) query = query.Where(x => x.ArchivedAt == null);
         if (request.Status.HasValue) query = query.Where(x => x.Status == request.Status.Value);
+        if (request.DefinitionState.HasValue) query = query.Where(x => x.DefinitionState == request.DefinitionState.Value);
         var items = await query.OrderBy(x => x.Status == ProjectWorkItemStatus.Completed || x.Status == ProjectWorkItemStatus.Cancelled)
             .ThenByDescending(x => x.Priority).ThenBy(x => x.DueAt).ThenByDescending(x => x.UpdatedAt)
             .Skip(Math.Max(0, request.Offset))
@@ -233,8 +240,28 @@ public sealed class ProjectWorkItemService(
             : query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
     private static ProjectWorkItemResult Map(ProjectWorkItem x) => new(x.Id, x.ProjectId, x.Title, x.Description, x.Tags, x.ChecklistItems.OrderBy(item => item.SortOrder).Select(item => new ProjectWorkItemChecklistItemResult(item.Id, item.Content, item.IsCompleted, item.SortOrder)).ToArray(), x.Status, x.Priority, x.DueAt, x.CreatedAt, x.UpdatedAt, x.CompletedAt, x.ArchivedAt)
     {
+        DefinitionState = x.DefinitionState,
         GovernanceExclusions = ReadExclusions(x.GovernanceExclusionsJson)
     };
+
+    private static void EnsureDefinitionTransitionAllowed(
+        ProjectWorkItemDefinitionState current,
+        ProjectWorkItemDefinitionState requested)
+    {
+        var allowed = current switch
+        {
+            ProjectWorkItemDefinitionState.Discussing => requested is ProjectWorkItemDefinitionState.Draft or ProjectWorkItemDefinitionState.ReadyForDevelopment or ProjectWorkItemDefinitionState.Superseded,
+            ProjectWorkItemDefinitionState.Draft => requested is ProjectWorkItemDefinitionState.Discussing or ProjectWorkItemDefinitionState.ReadyForDevelopment or ProjectWorkItemDefinitionState.Superseded,
+            ProjectWorkItemDefinitionState.ReadyForDevelopment => requested is ProjectWorkItemDefinitionState.Draft or ProjectWorkItemDefinitionState.Frozen or ProjectWorkItemDefinitionState.Superseded,
+            ProjectWorkItemDefinitionState.Frozen => requested is ProjectWorkItemDefinitionState.ReadyForDevelopment or ProjectWorkItemDefinitionState.Superseded,
+            ProjectWorkItemDefinitionState.Superseded => false,
+            _ => false
+        };
+        if (!allowed)
+        {
+            throw new InvalidOperationException($"DefinitionState transition from '{current}' to '{requested}' is not allowed.");
+        }
+    }
     private static void EnsureNotArchived(ProjectWorkItem entity)
     {
         if (entity.ArchivedAt.HasValue) throw new InvalidOperationException("Project work item is archived. Restore it before making changes.");

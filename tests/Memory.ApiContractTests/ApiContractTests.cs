@@ -2927,11 +2927,25 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             "驗證分區整理 API",
             "確認專案代辦不會混入治理建議。",
             ChecklistItems: ["完成 checklist"],
-            Priority: 80));
+            Priority: 80,
+            DefinitionState: ProjectWorkItemDefinitionState.ReadyForDevelopment));
         createResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.Created);
         var created = await createResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>();
         created.Should().NotBeNull();
         created!.Status.Should().Be(ProjectWorkItemStatus.Pending);
+        created.DefinitionState.Should().Be(ProjectWorkItemDefinitionState.ReadyForDevelopment);
+
+        using var frozenResponse = await client.PutAsJsonAsync(
+            $"/api/work-items/{created.Id:D}",
+            new { definitionState = ProjectWorkItemDefinitionState.Frozen });
+        frozenResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        (await frozenResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!.DefinitionState
+            .Should().Be(ProjectWorkItemDefinitionState.Frozen);
+
+        using var invalidDefinitionResponse = await client.PutAsJsonAsync(
+            $"/api/work-items/{created.Id:D}",
+            new { definitionState = ProjectWorkItemDefinitionState.Discussing });
+        invalidDefinitionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
 
         using var guardedCompletionResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed });
         guardedCompletionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
@@ -2946,6 +2960,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         var listed = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&status=Completed");
         listed.Should().ContainSingle(x => x.Id == created.Id);
+        var definitionListed = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&definitionState=Frozen");
+        definitionListed.Should().ContainSingle(x => x.Id == created.Id && x.Status == ProjectWorkItemStatus.Completed);
 
         using var archiveResponse = await client.PostAsync($"/api/work-items/{created.Id:D}/archive", null);
         archiveResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
@@ -2974,7 +2990,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var review = await reviewResponse.Content.ReadFromJsonAsync<KnowledgeReviewResult>();
         review.Should().NotBeNull();
         review!.Projects.Should().Contain(x => x.ProjectId == ProjectContext.DefaultProjectId);
-        review.WorkItems.Should().Contain(x => x.Id == created.Id && x.Status == ProjectWorkItemStatus.Completed);
+        review.WorkItems.Should().Contain(x => x.Id == created.Id && x.Status == ProjectWorkItemStatus.Completed && x.DefinitionState == ProjectWorkItemDefinitionState.Frozen);
         review.Convergence.WorkItemActionableCount.Should().Be(0);
         review.DurableMemoryCoverage.Should().NotBeNull();
         review.DurableMemoryCoverage!.CoverageComplete.Should().BeTrue();

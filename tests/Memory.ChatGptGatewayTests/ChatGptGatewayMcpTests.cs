@@ -387,11 +387,15 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                     description = "Proves general gateway wiring without changing business lifecycle.",
                     tags = new[] { "agent-execution", "gateway-regression" },
                     checklistItems = new[] { "Server-side workflow verified" },
-                    priority = 50
+                    priority = 50,
+                    definitionState = ProjectWorkItemDefinitionState.ReadyForDevelopment
                 }
             }
         });
-        var workItemId = ExtractToolJson(createWorkItemPayload).GetProperty("id").GetGuid();
+        var createdWorkItem = ExtractToolJson(createWorkItemPayload);
+        var workItemId = createdWorkItem.GetProperty("id").GetGuid();
+        createdWorkItem.GetProperty("status").GetString().Should().Be(nameof(ProjectWorkItemStatus.Pending));
+        createdWorkItem.GetProperty("definitionState").GetString().Should().Be(nameof(ProjectWorkItemDefinitionState.ReadyForDevelopment));
 
         var prepareKey = $"gateway-prepare-{Guid.NewGuid():N}";
         var prepareArguments = new

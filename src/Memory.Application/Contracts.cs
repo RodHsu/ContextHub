@@ -2386,19 +2386,20 @@ public sealed record DiscussionThreadDetailResult(Guid Id, string HostProjectId,
     public bool IsArchived => ArchivedAt.HasValue;
 }
 
-public sealed record ProjectWorkItemCreateRequest(string ProjectId, string Title, string? Description = null, IReadOnlyList<string>? Tags = null, IReadOnlyList<string>? ChecklistItems = null, int Priority = 0, DateTimeOffset? DueAt = null);
-public sealed record ProjectWorkItemUpdateRequest(Guid Id, string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null);
+public sealed record ProjectWorkItemCreateRequest(string ProjectId, string Title, string? Description = null, IReadOnlyList<string>? Tags = null, IReadOnlyList<string>? ChecklistItems = null, int Priority = 0, DateTimeOffset? DueAt = null, ProjectWorkItemDefinitionState DefinitionState = ProjectWorkItemDefinitionState.Draft);
+public sealed record ProjectWorkItemUpdateRequest(Guid Id, string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null, ProjectWorkItemDefinitionState? DefinitionState = null);
 public sealed record ProjectWorkItemGovernanceExclusionRequest(Guid WorkItemId, string ProjectId, string GovernanceRunId, string Reason, bool Excluded = true);
 public sealed record ProjectWorkItemGovernanceExclusionResult(string GovernanceRunId, string Reason, string Actor, DateTimeOffset UpdatedAt, DateTimeOffset? RevokedAt = null)
 {
     public bool IsActive => RevokedAt is null;
 }
-public sealed record ProjectWorkItemListRequest(string ProjectId, ProjectWorkItemStatus? Status = null, int Limit = 100, bool IncludeArchived = false, int Offset = 0);
+public sealed record ProjectWorkItemListRequest(string ProjectId, ProjectWorkItemStatus? Status = null, int Limit = 100, bool IncludeArchived = false, int Offset = 0, ProjectWorkItemDefinitionState? DefinitionState = null);
 public sealed record ProjectWorkItemArchiveRequest(Guid WorkItemId, bool Archived = true);
 public sealed record ProjectWorkItemChecklistItemResult(Guid Id, string Content, bool IsCompleted, int SortOrder);
 public sealed record ProjectWorkItemResult(Guid Id, string ProjectId, string Title, string Description, IReadOnlyList<string> Tags, IReadOnlyList<ProjectWorkItemChecklistItemResult> ChecklistItems, ProjectWorkItemStatus Status, int Priority, DateTimeOffset? DueAt, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? CompletedAt, DateTimeOffset? ArchivedAt = null)
 {
     public bool IsArchived => ArchivedAt.HasValue;
+    public ProjectWorkItemDefinitionState DefinitionState { get; init; } = ProjectWorkItemDefinitionState.Draft;
     public IReadOnlyList<ProjectWorkItemGovernanceExclusionResult> GovernanceExclusions { get; init; } = [];
 }
 

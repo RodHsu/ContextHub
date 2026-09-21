@@ -488,6 +488,12 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .Single(tool => tool.GetProperty("name").GetString() == "describe_context_hub");
         var trackerExclusionTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_set_governance_exclusion");
+        var workItemCreateTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_create");
+        var workItemUpdateTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "project_work_item_update");
+        var workItemListTool = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "project_work_items_list");
         var governanceBatchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
         listedTools.GetArrayLength().Should().Be(82);
@@ -542,6 +548,14 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([
                 "workItemId", "projectId", "governanceRunId", "reason", "excluded"
             ]);
+        workItemCreateTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain("definitionState");
+        workItemUpdateTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain("definitionState");
+        workItemListTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain("definitionState");
+        workItemCreateTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject()
+            .Select(x => x.Name).Should().Contain("definitionState");
         bootstrapResult.TryGetProperty("structuredContent", out var bootstrapStructuredContent).Should().BeTrue();
         bootstrapStructuredContent.GetProperty("service").GetProperty("name").GetString().Should().Be("ContextHub");
         bootstrap.GetProperty("service").GetProperty("name").GetString().Should().Be("ContextHub");

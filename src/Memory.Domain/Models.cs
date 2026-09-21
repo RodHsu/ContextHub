@@ -194,6 +194,15 @@ public enum ProjectWorkItemStatus
     Cancelled
 }
 
+public enum ProjectWorkItemDefinitionState
+{
+    Discussing,
+    Draft,
+    ReadyForDevelopment,
+    Frozen,
+    Superseded
+}
+
 public enum MaintenanceRunStatus
 {
     Scheduled,
@@ -1219,6 +1228,7 @@ public sealed class ProjectWorkItem
     public string Description { get; set; } = string.Empty;
     public string[] Tags { get; set; } = [];
     public ProjectWorkItemStatus Status { get; set; } = ProjectWorkItemStatus.Pending;
+    public ProjectWorkItemDefinitionState DefinitionState { get; set; } = ProjectWorkItemDefinitionState.Draft;
     public int Priority { get; set; }
     public DateTimeOffset? DueAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }

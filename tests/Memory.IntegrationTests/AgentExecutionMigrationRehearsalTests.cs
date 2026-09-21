@@ -9,7 +9,7 @@ namespace Memory.IntegrationTests;
 public sealed class AgentExecutionMigrationRehearsalTests
 {
     [DockerRequiredFact]
-    public async Task Production_like_039_database_should_upgrade_through_skills_and_agent_execution_and_replay_cleanly()
+    public async Task Production_like_039_database_should_upgrade_through_definition_state_and_agent_execution_and_replay_cleanly()
     {
         await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
             .WithPortBinding(5432, true)
@@ -26,24 +26,37 @@ public sealed class AgentExecutionMigrationRehearsalTests
         await ApplyThroughAsync(connection, migrations, "039_scheduled_acceptance_receipt_evidence.sql");
 
         var workItemId = Guid.NewGuid();
+        var discussingWorkItemId = Guid.NewGuid();
+        var readyWorkItemId = Guid.NewGuid();
         await ExecuteAsync(connection, """
             INSERT INTO project_work_items
                 (id, project_id, title, description, tags, status, priority, created_at, updated_at)
             VALUES
-                (@id, 'migration-rehearsal', 'Preserved pre-040 work item', '', '{}', 'Pending', 50, NOW(), NOW());
-            """, new NpgsqlParameter<Guid>("id", workItemId));
+                (@id, 'migration-rehearsal', 'Preserved in-progress work item', '', '{}', 'InProgress', 50, NOW(), NOW()),
+                (@discussing_id, 'migration-rehearsal', 'Explicit discussing work item', '', ARRAY['discussion:active'], 'InProgress', 50, NOW(), NOW()),
+                (@ready_id, 'migration-rehearsal', 'Explicit ready work item', '', ARRAY['definition:ready-for-development'], 'Pending', 50, NOW(), NOW());
+            """,
+            new NpgsqlParameter<Guid>("id", workItemId),
+            new NpgsqlParameter<Guid>("discussing_id", discussingWorkItemId),
+            new NpgsqlParameter<Guid>("ready_id", readyWorkItemId));
 
         await ApplyRemainingAsync(connection, migrations);
 
         (await ScalarAsync<long>(connection,
-            "SELECT COUNT(*) FROM project_work_items WHERE id = @id AND status = 'Pending';",
+            "SELECT COUNT(*) FROM project_work_items WHERE id = @id AND status = 'InProgress' AND definition_state = 'Draft';",
             new NpgsqlParameter<Guid>("id", workItemId))).Should().Be(1);
+        (await ScalarAsync<long>(connection,
+            "SELECT COUNT(*) FROM project_work_items WHERE id = @id AND status = 'InProgress' AND definition_state = 'Discussing';",
+            new NpgsqlParameter<Guid>("id", discussingWorkItemId))).Should().Be(1);
+        (await ScalarAsync<long>(connection,
+            "SELECT COUNT(*) FROM project_work_items WHERE id = @id AND status = 'Pending' AND definition_state = 'ReadyForDevelopment';",
+            new NpgsqlParameter<Guid>("id", readyWorkItemId))).Should().Be(1);
         (await ScalarAsync<long>(connection, """
             SELECT COUNT(*) FROM schema_migrations
             WHERE name IN ('040_agent_skills.sql', '041_scheduled_governance_authority_epochs.sql',
                            '041a_memory_score_reconciliation.sql', '042_memory_score_contract.sql',
-                           '043_agent_execution.sql');
-            """)).Should().Be(5);
+                           '043_agent_execution.sql', '044_project_work_item_definition_state.sql');
+            """)).Should().Be(6);
 
         var skillId = Guid.NewGuid();
         var skillVersionId = Guid.NewGuid();
@@ -81,7 +94,39 @@ public sealed class AgentExecutionMigrationRehearsalTests
         await connection.OpenAsync();
         await ApplyRemainingAsync(connection, migrations);
         (await ScalarAsync<long>(connection,
-            "SELECT COUNT(*) FROM schema_migrations WHERE name = '043_agent_execution.sql';")).Should().Be(1);
+            "SELECT COUNT(*) FROM schema_migrations WHERE name IN ('043_agent_execution.sql', '044_project_work_item_definition_state.sql');")).Should().Be(2);
+    }
+
+    [DockerRequiredFact]
+    public async Task Definition_state_migration_should_fail_closed_on_conflicting_compatibility_tags()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true)
+            .WithDatabase("contexthub")
+            .WithUsername("contexthub")
+            .WithPassword("contexthub")
+            .Build();
+        await postgres.StartAsync();
+
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "043_agent_execution.sql");
+        await ExecuteAsync(connection, """
+            INSERT INTO project_work_items
+                (id, project_id, title, description, tags, status, priority, created_at, updated_at)
+            VALUES
+                (@id, 'migration-rehearsal', 'Conflicting definition labels', '',
+                 ARRAY['discussion:active', 'definition:ready-for-development'], 'Pending', 50, NOW(), NOW());
+            """, new NpgsqlParameter<Guid>("id", Guid.NewGuid()));
+
+        var migration = migrations.Single(x => x.Name == "044_project_work_item_definition_state.sql");
+        var act = () => ApplyAsync(connection, migration);
+        await act.Should().ThrowAsync<PostgresException>()
+            .WithMessage("*conflicting explicit DefinitionState compatibility tags*");
+        (await ScalarAsync<bool>(connection,
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'project_work_items' AND column_name = 'definition_state');"))
+            .Should().BeFalse("the failed migration transaction must roll back the schema change");
     }
 
     private static IReadOnlyList<(string Name, string Sql)> ReadMigrations()

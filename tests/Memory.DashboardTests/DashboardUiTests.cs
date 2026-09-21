@@ -633,6 +633,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         projectWorkItemsHtml.Should().Contain("完成進度");
         projectWorkItemsHtml.Should().Contain("顯示已封存");
         projectWorkItemsHtml.Should().Contain("封存");
+        projectWorkItemsHtml.Should().Contain("定義成熟度");
+        projectWorkItemsHtml.Should().Contain("可進入開發");
 
         using var graphResponse = await client.GetAsync("/graph");
         graphResponse.StatusCode.Should().Be(HttpStatusCode.OK);

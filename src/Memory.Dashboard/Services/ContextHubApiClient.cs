@@ -409,7 +409,7 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     }
 
     public Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
-        => GetRequiredAsync<IReadOnlyList<ProjectWorkItemResult>>(QueryHelpers.AddQueryString("/api/work-items", new Dictionary<string, string?> { ["projectId"] = request.ProjectId, ["status"] = request.Status?.ToString(), ["limit"] = request.Limit.ToString(), ["includeArchived"] = request.IncludeArchived.ToString() }), cancellationToken);
+        => GetRequiredAsync<IReadOnlyList<ProjectWorkItemResult>>(QueryHelpers.AddQueryString("/api/work-items", new Dictionary<string, string?> { ["projectId"] = request.ProjectId, ["status"] = request.Status?.ToString(), ["definitionState"] = request.DefinitionState?.ToString(), ["limit"] = request.Limit.ToString(), ["includeArchived"] = request.IncludeArchived.ToString() }), cancellationToken);
 
     public async Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
     {

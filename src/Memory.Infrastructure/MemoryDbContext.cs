@@ -1411,6 +1411,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.Description).HasColumnName("description");
             entity.Property(x => x.Tags).HasColumnName("tags").HasColumnType("text[]");
             entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.DefinitionState).HasColumnName("definition_state").HasConversion<string>();
             entity.Property(x => x.Priority).HasColumnName("priority");
             entity.Property(x => x.DueAt).HasColumnName("due_at");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
