@@ -64,6 +64,14 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<NaturalOriginEvidenceLedgerEntry> NaturalOriginEvidenceLedgerEntries => Set<NaturalOriginEvidenceLedgerEntry>();
     public DbSet<ScheduledGovernanceAuthorityEpoch> ScheduledGovernanceAuthorityEpochs => Set<ScheduledGovernanceAuthorityEpoch>();
     public DbSet<ProjectHierarchy> ProjectHierarchies => Set<ProjectHierarchy>();
+    public DbSet<ProjectSecurityRevision> ProjectSecurityRevisions => Set<ProjectSecurityRevision>();
+    public DbSet<ProjectAuthorizationPolicy> ProjectAuthorizationPolicies => Set<ProjectAuthorizationPolicy>();
+    public DbSet<ProjectExplicitGrant> ProjectExplicitGrants => Set<ProjectExplicitGrant>();
+    public DbSet<CanonicalTagDefinition> CanonicalTagDefinitions => Set<CanonicalTagDefinition>();
+    public DbSet<CanonicalTagAlias> CanonicalTagAliases => Set<CanonicalTagAlias>();
+    public DbSet<CanonicalTagRelation> CanonicalTagRelations => Set<CanonicalTagRelation>();
+    public DbSet<CanonicalTagBinding> CanonicalTagBindings => Set<CanonicalTagBinding>();
+    public DbSet<CanonicalTagSuggestion> CanonicalTagSuggestions => Set<CanonicalTagSuggestion>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
     public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
@@ -1354,9 +1362,102 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ParentProjectId).HasColumnName("parent_project_id");
             entity.Property(x => x.ChildProjectId).HasColumnName("child_project_id");
+            entity.Property(x => x.Dimension).HasColumnName("dimension");
+            entity.Property(x => x.AuthorizationInheritable).HasColumnName("authorization_inheritable");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.Revision).IsConcurrencyToken();
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
-            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ParentProjectId, x.ChildProjectId }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.Dimension, x.ParentProjectId, x.ChildProjectId }).IsUnique();
+        });
+
+        modelBuilder.Entity<ProjectSecurityRevision>(entity =>
+        {
+            entity.ToTable("project_security_revisions");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.TopologyRevision).HasColumnName("topology_revision");
+            entity.Property(x => x.PolicyRevision).HasColumnName("policy_revision");
+            entity.Property(x => x.GrantRevision).HasColumnName("grant_revision");
+            entity.Property(x => x.TagRevision).HasColumnName("tag_revision");
+            entity.Property(x => x.TopologyRevision).IsConcurrencyToken();
+            entity.Property(x => x.PolicyRevision).IsConcurrencyToken();
+            entity.Property(x => x.GrantRevision).IsConcurrencyToken();
+            entity.Property(x => x.TagRevision).IsConcurrencyToken();
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId }).IsUnique();
+        });
+
+        ConfigureAuthorizationRule<ProjectAuthorizationPolicy>(modelBuilder, "project_authorization_policies");
+        ConfigureAuthorizationRule<ProjectExplicitGrant>(modelBuilder, "project_explicit_grants");
+
+        modelBuilder.Entity<CanonicalTagDefinition>(entity =>
+        {
+            entity.ToTable("canonical_tag_definitions");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.CanonicalName).HasColumnName("canonical_name");
+            entity.Property(x => x.NormalizedName).HasColumnName("normalized_name");
+            entity.Property(x => x.Description).HasColumnName("description");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.NormalizedName }).IsUnique();
+        });
+        modelBuilder.Entity<CanonicalTagAlias>(entity =>
+        {
+            entity.ToTable("canonical_tag_aliases");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.DefinitionId).HasColumnName("definition_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.Alias).HasColumnName("alias");
+            entity.Property(x => x.NormalizedAlias).HasColumnName("normalized_alias");
+            entity.HasOne(x => x.Definition).WithMany().HasForeignKey(x => x.DefinitionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.ProjectId, x.NormalizedAlias }).IsUnique();
+        });
+        modelBuilder.Entity<CanonicalTagRelation>(entity =>
+        {
+            entity.ToTable("canonical_tag_relations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.SourceDefinitionId).HasColumnName("source_definition_id");
+            entity.Property(x => x.TargetDefinitionId).HasColumnName("target_definition_id");
+            entity.Property(x => x.RelationType).HasColumnName("relation_type");
+            entity.HasIndex(x => new { x.SourceDefinitionId, x.TargetDefinitionId, x.RelationType }).IsUnique();
+        });
+        modelBuilder.Entity<CanonicalTagBinding>(entity =>
+        {
+            entity.ToTable("canonical_tag_bindings");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.DefinitionId).HasColumnName("definition_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ResourceType).HasColumnName("resource_type");
+            entity.Property(x => x.ResourceId).HasColumnName("resource_id");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.DefinitionId, x.ProjectId, x.ResourceType, x.ResourceId }).IsUnique();
+        });
+        modelBuilder.Entity<CanonicalTagSuggestion>(entity =>
+        {
+            entity.ToTable("canonical_tag_suggestions");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.SuggestedName).HasColumnName("suggested_name");
+            entity.Property(x => x.NormalizedName).HasColumnName("normalized_name");
+            entity.Property(x => x.Rationale).HasColumnName("rationale");
+            entity.Property(x => x.Status).HasColumnName("status");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Status, x.NormalizedName });
         });
 
         modelBuilder.Entity<DiscussionThread>(entity =>
@@ -1507,6 +1608,29 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
         });
 
         modelBuilder.ConfigureSkillModels();
+    }
+
+    private static void ConfigureAuthorizationRule<TEntity>(ModelBuilder modelBuilder, string tableName)
+        where TEntity : class
+    {
+        var entity = modelBuilder.Entity<TEntity>();
+        entity.ToTable(tableName);
+        entity.HasKey("Id");
+        entity.Property<Guid>("Id").HasColumnName("id");
+        entity.Property<Guid?>("TenantId").HasColumnName("tenant_id");
+        entity.Property<Guid?>("OwnerUserId").HasColumnName("owner_user_id");
+        entity.Property<string>("ProjectId").HasColumnName("project_id");
+        entity.Property<string>("PrincipalId").HasColumnName("principal_id");
+        entity.Property<string>("Right").HasColumnName("right_key");
+        entity.Property<AuthorizationEffect>("Effect").HasColumnName("effect").HasConversion<string>();
+        entity.Property<string?>("ResourceType").HasColumnName("resource_type");
+        entity.Property<string?>("ResourceId").HasColumnName("resource_id");
+        entity.Property<string>("EvidenceRef").HasColumnName("evidence_ref");
+        entity.Property<long>("Revision").HasColumnName("revision");
+        entity.Property<long>("Revision").IsConcurrencyToken();
+        entity.Property<DateTimeOffset>("CreatedAt").HasColumnName("created_at");
+        entity.Property<DateTimeOffset>("UpdatedAt").HasColumnName("updated_at");
+        entity.HasIndex("TenantId", "OwnerUserId", "ProjectId", "PrincipalId", "Right", "ResourceType", "ResourceId");
     }
 
     private static string NormalizeJson(string? value)

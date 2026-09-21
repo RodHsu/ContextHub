@@ -17,12 +17,12 @@ public sealed class ProjectDiscussionService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         ActorAuthorization.EnsureProjectAllowed(actor, parent, write: true);
         ActorAuthorization.EnsureProjectsAllowed(actor, children, write: false);
-        var existing = ApplyActorScope(dbContext.ProjectHierarchies.Where(x => x.ParentProjectId == parent), actor);
+        var existing = ApplyActorScope(dbContext.ProjectHierarchies.Where(x => x.Dimension == "discussion" && x.ParentProjectId == parent), actor);
         dbContext.ProjectHierarchies.RemoveRange(existing);
         var now = clock.UtcNow;
         foreach (var child in children)
         {
-            await dbContext.ProjectHierarchies.AddAsync(new ProjectHierarchy { TenantId = actor.TenantId, OwnerUserId = actor.UserId, ParentProjectId = parent, ChildProjectId = child, CreatedAt = now, UpdatedAt = now }, cancellationToken);
+            await dbContext.ProjectHierarchies.AddAsync(new ProjectHierarchy { TenantId = actor.TenantId, OwnerUserId = actor.UserId, ParentProjectId = parent, ChildProjectId = child, Dimension = "discussion", AuthorizationInheritable = false, Revision = 1, CreatedAt = now, UpdatedAt = now }, cancellationToken);
         }
         await dbContext.SaveChangesAsync(cancellationToken);
         return new ProjectHierarchyResult(parent, children, now);
@@ -34,7 +34,7 @@ public sealed class ProjectDiscussionService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         ActorAuthorization.EnsureProjectAllowed(actor, parent, write: false);
-        var children = await ApplyActorScope(dbContext.ProjectHierarchies.AsNoTracking().Where(x => x.ParentProjectId == parent), actor).OrderBy(x => x.ChildProjectId).ToListAsync(cancellationToken);
+        var children = await ApplyActorScope(dbContext.ProjectHierarchies.AsNoTracking().Where(x => x.Dimension == "discussion" && x.ParentProjectId == parent), actor).OrderBy(x => x.ChildProjectId).ToListAsync(cancellationToken);
         return new ProjectHierarchyResult(parent, children.Select(x => x.ChildProjectId).ToArray(), children.Select(x => x.UpdatedAt).DefaultIfEmpty(DateTimeOffset.MinValue).Max());
     }
 

@@ -1181,6 +1181,9 @@ public sealed class ProjectHierarchy
     public Guid? OwnerUserId { get; set; }
     public string ParentProjectId { get; set; } = string.Empty;
     public string ChildProjectId { get; set; } = string.Empty;
+    public string Dimension { get; set; } = "discussion";
+    public bool AuthorizationInheritable { get; set; }
+    public long Revision { get; set; } = 1;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }

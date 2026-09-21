@@ -2571,6 +2571,9 @@ public static class DependencyInjection
     public static IServiceCollection AddMemoryApplication(this IServiceCollection services)
     {
         services.AddSingleton<IClock, SystemClock>();
+        services.AddSingleton<IEffectiveRightsEvaluator, EffectiveRightsEvaluator>();
+        services.AddSingleton<ICanonicalTagResolver, CanonicalTagResolver>();
+        services.AddScoped<IPlatformFoundationStore, PlatformFoundationStore>();
         services.AddScoped<IRequestActorAccessor, RequestActorAccessor>();
         services.AddScoped<IChunkingService, ChunkingService>();
         services.AddScoped<IContextHubBootstrapService, ContextHubBootstrapService>();

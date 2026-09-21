@@ -2147,6 +2147,14 @@ public interface IApplicationDbContext
     DbSet<GovernanceRunReceipt> GovernanceRunReceipts { get; }
     DbSet<ScheduledGovernanceReliabilityRun> ScheduledGovernanceReliabilityRuns { get; }
     DbSet<ProjectHierarchy> ProjectHierarchies { get; }
+    DbSet<ProjectSecurityRevision> ProjectSecurityRevisions => throw new NotSupportedException();
+    DbSet<ProjectAuthorizationPolicy> ProjectAuthorizationPolicies => throw new NotSupportedException();
+    DbSet<ProjectExplicitGrant> ProjectExplicitGrants => throw new NotSupportedException();
+    DbSet<CanonicalTagDefinition> CanonicalTagDefinitions => throw new NotSupportedException();
+    DbSet<CanonicalTagAlias> CanonicalTagAliases => throw new NotSupportedException();
+    DbSet<CanonicalTagRelation> CanonicalTagRelations => throw new NotSupportedException();
+    DbSet<CanonicalTagBinding> CanonicalTagBindings => throw new NotSupportedException();
+    DbSet<CanonicalTagSuggestion> CanonicalTagSuggestions => throw new NotSupportedException();
     DbSet<DiscussionThread> DiscussionThreads { get; }
     DbSet<DiscussionParticipant> DiscussionParticipants { get; }
     DbSet<DiscussionMessage> DiscussionMessages { get; }

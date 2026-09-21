@@ -39,6 +39,12 @@ public sealed class AgentExecutionMigrationRehearsalTests
             new NpgsqlParameter<Guid>("id", workItemId),
             new NpgsqlParameter<Guid>("discussing_id", discussingWorkItemId),
             new NpgsqlParameter<Guid>("ready_id", readyWorkItemId));
+        await ExecuteAsync(connection, """
+            INSERT INTO project_hierarchies
+                (id, parent_project_id, child_project_id, created_at, updated_at)
+            VALUES
+                (@id, 'legacy-parent', 'legacy-child', NOW(), NOW());
+            """, new NpgsqlParameter<Guid>("id", Guid.NewGuid()));
 
         await ApplyRemainingAsync(connection, migrations);
 
@@ -55,8 +61,46 @@ public sealed class AgentExecutionMigrationRehearsalTests
             SELECT COUNT(*) FROM schema_migrations
             WHERE name IN ('040_agent_skills.sql', '041_scheduled_governance_authority_epochs.sql',
                            '041a_memory_score_reconciliation.sql', '042_memory_score_contract.sql',
-                           '043_agent_execution.sql', '044_project_work_item_definition_state.sql');
-            """)).Should().Be(6);
+                           '043_agent_execution.sql', '044_project_work_item_definition_state.sql',
+                           '045_platform_foundation_a.sql');
+            """)).Should().Be(7);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM project_hierarchies
+            WHERE parent_project_id = 'legacy-parent' AND child_project_id = 'legacy-child'
+              AND dimension = 'discussion' AND authorization_inheritable = FALSE AND revision = 1;
+            """)).Should().Be(1, "legacy hierarchy rows must remain non-authorization-inheritable");
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name IN
+                ('project_security_revisions', 'project_authorization_policies', 'project_explicit_grants',
+                 'canonical_tag_definitions', 'canonical_tag_aliases', 'canonical_tag_relations',
+                 'canonical_tag_bindings', 'canonical_tag_suggestions');
+            """)).Should().Be(8);
+
+        var tagDefinitionId = Guid.NewGuid();
+        await ExecuteAsync(connection, """
+            INSERT INTO canonical_tag_definitions
+                (id, project_id, canonical_name, normalized_name, description, created_at, updated_at)
+            VALUES (@id, 'migration-rehearsal', 'Platform Security', 'platform-security', '', NOW(), NOW());
+            INSERT INTO canonical_tag_aliases (id, definition_id, project_id, alias, normalized_alias)
+            VALUES (@alias_id, @id, 'migration-rehearsal', 'security platform', 'security-platform');
+            INSERT INTO project_explicit_grants
+                (id, project_id, principal_id, right_key, effect, evidence_ref, created_at, updated_at)
+            VALUES (@grant_id, 'migration-rehearsal', 'agent', 'read', 'Allow', 'migration-rehearsal', NOW(), NOW());
+            """,
+            new NpgsqlParameter<Guid>("id", tagDefinitionId),
+            new NpgsqlParameter<Guid>("alias_id", Guid.NewGuid()),
+            new NpgsqlParameter<Guid>("grant_id", Guid.NewGuid()));
+        var aliasRace = () => ExecuteAsync(connection, """
+            INSERT INTO canonical_tag_aliases (id, definition_id, project_id, alias, normalized_alias)
+            VALUES (@id, @definition_id, 'migration-rehearsal', 'Security Platform duplicate', 'security-platform');
+            """,
+            new NpgsqlParameter<Guid>("id", Guid.NewGuid()),
+            new NpgsqlParameter<Guid>("definition_id", tagDefinitionId));
+        (await aliasRace.Should().ThrowAsync<PostgresException>()).Which.SqlState.Should().Be(PostgresErrorCodes.UniqueViolation);
+        (await ScalarAsync<long>(connection,
+            "SELECT COUNT(*) FROM project_explicit_grants WHERE project_id = 'migration-rehearsal' AND evidence_ref = 'migration-rehearsal';"))
+            .Should().Be(1, "explicit grants are persisted independently from dynamically evaluated policies");
 
         var skillId = Guid.NewGuid();
         var skillVersionId = Guid.NewGuid();
@@ -94,7 +138,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
         await connection.OpenAsync();
         await ApplyRemainingAsync(connection, migrations);
         (await ScalarAsync<long>(connection,
-            "SELECT COUNT(*) FROM schema_migrations WHERE name IN ('043_agent_execution.sql', '044_project_work_item_definition_state.sql');")).Should().Be(2);
+            "SELECT COUNT(*) FROM schema_migrations WHERE name IN ('043_agent_execution.sql', '044_project_work_item_definition_state.sql', '045_platform_foundation_a.sql');")).Should().Be(3);
     }
 
     [DockerRequiredFact]
