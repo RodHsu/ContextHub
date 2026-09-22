@@ -1531,6 +1531,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.MaxBytes).HasColumnName("max_bytes");
             entity.Property(x => x.UsedBytes).HasColumnName("used_bytes");
             entity.Property(x => x.MaxConcurrency).HasColumnName("max_concurrency");
+            entity.Property(x => x.MaxBytesPerSecond).HasColumnName("max_bytes_per_second");
             entity.Property(x => x.Revision).HasColumnName("revision");
             entity.Property(x => x.EncryptionGeneration).HasColumnName("encryption_generation");
             entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();

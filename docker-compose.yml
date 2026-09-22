@@ -92,6 +92,7 @@ x-managed-storage-config: &managed-storage-config
   ManagedTransfers__SessionTtlMinutes: ${MANAGED_TRANSFER_SESSION_TTL_MINUTES:-15}
   ManagedTransfers__StagedObjectTtlHours: ${MANAGED_TRANSFER_STAGED_TTL_HOURS:-24}
   ManagedTransfers__MaxConcurrency: ${MANAGED_TRANSFER_MAX_CONCURRENCY:-1}
+  ManagedTransfers__MaxBytesPerSecond: ${MANAGED_TRANSFER_MAX_BYTES_PER_SECOND:-33554432}
   ManagedTransfers__ReconciliationIntervalMinutes: ${MANAGED_TRANSFER_RECONCILIATION_MINUTES:-30}
 
 services:

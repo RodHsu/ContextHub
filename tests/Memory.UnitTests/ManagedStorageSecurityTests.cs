@@ -96,5 +96,6 @@ public sealed class ManagedStorageSecurityTests
         chunkCount.Should().Be(1025);
         options.NormalizedChunkBytes.Should().Be(4 * 1024 * 1024);
         ((long)options.NormalizedMaxRangeBytes).Should().BeLessThan(length);
+        options.NormalizedMaxBytesPerSecond.Should().Be(32L * 1024 * 1024);
     }
 }

@@ -204,6 +204,7 @@ public sealed class ManagedTransferSession
     public long MaxBytes { get; set; }
     public long UsedBytes { get; set; }
     public int MaxConcurrency { get; set; }
+    public long MaxBytesPerSecond { get; set; }
     public long Revision { get; set; } = 1;
     public int EncryptionGeneration { get; set; } = 1;
     public ManagedTransferSessionState State { get; set; } = ManagedTransferSessionState.Active;

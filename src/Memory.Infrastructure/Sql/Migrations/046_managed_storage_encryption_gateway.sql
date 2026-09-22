@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS managed_transfer_sessions
     max_bytes BIGINT NOT NULL,
     used_bytes BIGINT NOT NULL DEFAULT 0,
     max_concurrency INTEGER NOT NULL,
+    max_bytes_per_second BIGINT NOT NULL,
     revision BIGINT NOT NULL DEFAULT 1,
     encryption_generation INTEGER NOT NULL,
     state TEXT NOT NULL,
@@ -90,6 +91,7 @@ CREATE TABLE IF NOT EXISTS managed_transfer_sessions
     CONSTRAINT ck_managed_transfer_sessions_state CHECK (state IN ('Active', 'Completed', 'Revoked', 'Expired')),
     CONSTRAINT ck_managed_transfer_sessions_limits CHECK
         (max_bytes > 0 AND used_bytes >= 0 AND used_bytes <= max_bytes AND max_concurrency BETWEEN 1 AND 8
+         AND max_bytes_per_second BETWEEN 65536 AND 1073741824
          AND revision > 0 AND encryption_generation > 0),
     CONSTRAINT ck_managed_transfer_sessions_capability_hash CHECK (capability_hash ~ '^[0-9a-f]{64}$')
 );

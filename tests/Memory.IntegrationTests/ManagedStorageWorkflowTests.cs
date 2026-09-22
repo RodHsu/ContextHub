@@ -108,6 +108,19 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
                 tampered.SessionId, tampered.Capability, tampered.Revision, "range-tamper", 0, 1024), sink, CancellationToken.None);
             await tamperRead.Should().ThrowAsync<CryptographicException>();
 
+            transferSettings.MaxBytesPerSecond = 64 * 1024;
+            var rateLimited = await service.CreateUploadAsync(new CreateManagedUploadRequest(
+                persisted.ProjectId, 128 * 1024, "rate-limit", Guid.NewGuid().ToString("N")), CancellationToken.None);
+            var rateChunk = RandomNumberGenerator.GetBytes(64 * 1024);
+            var rateChecksum = Convert.ToHexString(SHA256.HashData(rateChunk)).ToLowerInvariant();
+            var firstRateWrite = await service.UploadChunkAsync(new ManagedChunkWriteRequest(
+                rateLimited.SessionId, rateLimited.Capability, rateLimited.Revision, "rate-1", 0, rateChunk, rateChecksum), CancellationToken.None);
+            var secondRateChunk = RandomNumberGenerator.GetBytes(64 * 1024);
+            var secondRateChecksum = Convert.ToHexString(SHA256.HashData(secondRateChunk)).ToLowerInvariant();
+            var rateExceeded = () => service.UploadChunkAsync(new ManagedChunkWriteRequest(
+                rateLimited.SessionId, rateLimited.Capability, firstRateWrite.Revision, "rate-2", 1, secondRateChunk, secondRateChecksum), CancellationToken.None);
+            await rateExceeded.Should().ThrowAsync<InvalidOperationException>().WithMessage("*rate limit exceeded*");
+
             actor.Username.Should().NotContain("ChatGPT").And.NotContain("Codex").And.NotContain("Gemini");
         }
         finally

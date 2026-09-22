@@ -24,7 +24,7 @@ The REST-only binary path is rooted at `/api/transfers`:
 - `GET /api/transfers/{sessionId}/content?offset=...&length=...` authenticates and streams only the requested logical plaintext range.
 - `DELETE /api/transfers/{sessionId}` revokes a session.
 
-Capabilities are random bearer values; only SHA-256 hashes are persisted. The stored binding includes tenant, owner/actor, project, optional agent/execution, logical object, operation, purpose, expiry, revision, encryption generation, byte limit, and concurrency limit. Database advisory locking serializes each session. Foreign, expired, revoked, stale-revision, over-limit, and mutated-replay requests fail closed.
+Capabilities are random bearer values; only SHA-256 hashes are persisted. The stored binding includes tenant, owner/actor, project, optional agent/execution, logical object, operation, purpose, expiry, revision, encryption generation, byte limit, sustained byte-rate limit, and concurrency limit. A bounded first-chunk/range burst is allowed, after which the persisted session rate is enforced. Database advisory locking serializes each session. Foreign, expired, revoked, stale-revision, over-limit, and mutated-replay requests fail closed.
 
 ## Lifecycle and recovery
 

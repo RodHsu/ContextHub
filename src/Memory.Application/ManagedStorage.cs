@@ -16,6 +16,7 @@ public sealed class ManagedTransferOptions
     public int SessionTtlMinutes { get; set; } = 15;
     public int StagedObjectTtlHours { get; set; } = 24;
     public int MaxConcurrency { get; set; } = 1;
+    public long MaxBytesPerSecond { get; set; } = 32L * 1024 * 1024;
     public int ReconciliationIntervalMinutes { get; set; } = 30;
 
     public int NormalizedChunkBytes => Math.Clamp(ChunkBytes, 64 * 1024, 16 * 1024 * 1024);
@@ -24,6 +25,7 @@ public sealed class ManagedTransferOptions
     public TimeSpan NormalizedSessionTtl => TimeSpan.FromMinutes(Math.Clamp(SessionTtlMinutes, 1, 60));
     public TimeSpan NormalizedStagedObjectTtl => TimeSpan.FromHours(Math.Clamp(StagedObjectTtlHours, 1, 168));
     public int NormalizedMaxConcurrency => Math.Clamp(MaxConcurrency, 1, 8);
+    public long NormalizedMaxBytesPerSecond => Math.Clamp(MaxBytesPerSecond, 64 * 1024, 1024L * 1024 * 1024);
 }
 
 public sealed record ManagedObjectRef(Guid ObjectId, int Generation);
@@ -234,6 +236,7 @@ public sealed class ManagedTransferService(
                 var replay = await CheckReplayAsync(session, request.RequestId, requestHash, transactionToken);
                 if (replay is not null) return replay;
                 if (managedObject.Chunks.Any(x => x.ChunkIndex == request.ChunkIndex)) throw new InvalidOperationException("Chunk already exists; use the original request identity for an idempotent retry.");
+                EnsureRateLimit(session, request.Plaintext.Length, managedObject.ChunkSize);
 
                 var dek = Unwrap(managedObject);
                 var nonce = RandomNumberGenerator.GetBytes(NonceBytes);
@@ -326,6 +329,7 @@ public sealed class ManagedTransferService(
                 throw new InvalidOperationException("Requested range is outside the authorized managed object boundary.");
             }
             if (session.UsedBytes + request.Length > session.MaxBytes) throw new InvalidOperationException("Transfer capability byte limit exceeded.");
+            EnsureRateLimit(session, request.Length, Math.Max(managedObject.ChunkSize, options.Value.NormalizedMaxRangeBytes));
             var requestHash = HashRequest("download", session.Id.ToString("D"), session.Revision.ToString(), request.Offset.ToString(), request.Length.ToString());
             if (await dbContext.ManagedTransferOperationRecords.AnyAsync(x => x.SessionId == session.Id && x.RequestId == request.RequestId, transactionToken))
             {
@@ -471,6 +475,7 @@ public sealed class ManagedTransferService(
             Purpose = purpose.Trim(),
             MaxBytes = maxBytes,
             MaxConcurrency = settings.NormalizedMaxConcurrency,
+            MaxBytesPerSecond = settings.NormalizedMaxBytesPerSecond,
             EncryptionGeneration = managedObject.EncryptionGeneration,
             ExpiresAt = now + settings.NormalizedSessionTtl,
             CreatedAt = now,
@@ -532,6 +537,17 @@ public sealed class ManagedTransferService(
     {
         if (string.IsNullOrWhiteSpace(purpose) || purpose.Trim().Length > 200) throw new InvalidOperationException("Transfer purpose is required and must not exceed 200 characters.");
         ValidateRequestId(idempotencyKey);
+    }
+
+    private void EnsureRateLimit(ManagedTransferSession session, long additionalBytes, int burstBytes)
+    {
+        var elapsedSeconds = Math.Max(1d, (clock.UtcNow - session.CreatedAt).TotalSeconds);
+        var sustainedAllowance = checked((long)Math.Ceiling(elapsedSeconds * session.MaxBytesPerSecond));
+        var allowance = Math.Min(session.MaxBytes, Math.Max(burstBytes, sustainedAllowance));
+        if (session.UsedBytes + additionalBytes > allowance)
+        {
+            throw new InvalidOperationException("Transfer capability rate limit exceeded.");
+        }
     }
 
     private static void ValidateRequestId(string value)
