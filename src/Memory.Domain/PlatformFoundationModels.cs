@@ -113,3 +113,114 @@ public sealed class CanonicalTagSuggestion
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
+
+public enum ManagedObjectSecurityDomain
+{
+    ManagedFile,
+    Secret
+}
+
+public enum ManagedObjectState
+{
+    Staged,
+    Ready,
+    Orphaned,
+    Missing,
+    Corrupt,
+    Tombstoned
+}
+
+public enum ManagedTransferOperation
+{
+    Upload,
+    Download
+}
+
+public enum ManagedTransferSessionState
+{
+    Active,
+    Completed,
+    Revoked,
+    Expired
+}
+
+public sealed class ManagedObject
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public ManagedObjectSecurityDomain SecurityDomain { get; set; } = ManagedObjectSecurityDomain.ManagedFile;
+    public ManagedObjectState State { get; set; } = ManagedObjectState.Staged;
+    public string StorageId { get; set; } = string.Empty;
+    public long PlaintextLength { get; set; }
+    public int ChunkSize { get; set; }
+    public int ChunkCount { get; set; }
+    public int EncryptionSchemaVersion { get; set; } = 1;
+    public int EncryptionGeneration { get; set; } = 1;
+    public string EncryptionAlgorithm { get; set; } = "AES-256-GCM";
+    public string KeyId { get; set; } = string.Empty;
+    public byte[] WrappedDek { get; set; } = [];
+    public byte[] WrapNonce { get; set; } = [];
+    public byte[] WrapTag { get; set; } = [];
+    public string? PlaintextSha256 { get; set; }
+    public DateTimeOffset StagedUntil { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public DateTimeOffset? TombstonedAt { get; set; }
+    public ICollection<ManagedObjectChunk> Chunks { get; set; } = [];
+}
+
+public sealed class ManagedObjectChunk
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ManagedObjectId { get; set; }
+    public int ChunkIndex { get; set; }
+    public long PlaintextOffset { get; set; }
+    public int PlaintextLength { get; set; }
+    public int CiphertextLength { get; set; }
+    public byte[] Nonce { get; set; } = [];
+    public byte[] AuthenticationTag { get; set; } = [];
+    public string PlaintextSha256 { get; set; } = string.Empty;
+    public string CiphertextSha256 { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+    public ManagedObject? ManagedObject { get; set; }
+}
+
+public sealed class ManagedTransferSession
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ManagedObjectId { get; set; }
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
+    public string ProjectId { get; set; } = string.Empty;
+    public string ActorId { get; set; } = string.Empty;
+    public string? AgentId { get; set; }
+    public Guid? ExecutionId { get; set; }
+    public Guid CapabilityId { get; set; } = Guid.NewGuid();
+    public string CapabilityHash { get; set; } = string.Empty;
+    public ManagedTransferOperation Operation { get; set; }
+    public string Purpose { get; set; } = string.Empty;
+    public long MaxBytes { get; set; }
+    public long UsedBytes { get; set; }
+    public int MaxConcurrency { get; set; }
+    public long Revision { get; set; } = 1;
+    public int EncryptionGeneration { get; set; } = 1;
+    public ManagedTransferSessionState State { get; set; } = ManagedTransferSessionState.Active;
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public ManagedObject? ManagedObject { get; set; }
+    public ICollection<ManagedTransferOperationRecord> Operations { get; set; } = [];
+}
+
+public sealed class ManagedTransferOperationRecord
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid SessionId { get; set; }
+    public string RequestId { get; set; } = string.Empty;
+    public string RequestHash { get; set; } = string.Empty;
+    public long BytesTransferred { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public ManagedTransferSession? Session { get; set; }
+}

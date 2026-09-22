@@ -2155,6 +2155,10 @@ public interface IApplicationDbContext
     DbSet<CanonicalTagRelation> CanonicalTagRelations => throw new NotSupportedException();
     DbSet<CanonicalTagBinding> CanonicalTagBindings => throw new NotSupportedException();
     DbSet<CanonicalTagSuggestion> CanonicalTagSuggestions => throw new NotSupportedException();
+    DbSet<ManagedObject> ManagedObjects => throw new NotSupportedException();
+    DbSet<ManagedObjectChunk> ManagedObjectChunks => throw new NotSupportedException();
+    DbSet<ManagedTransferSession> ManagedTransferSessions => throw new NotSupportedException();
+    DbSet<ManagedTransferOperationRecord> ManagedTransferOperationRecords => throw new NotSupportedException();
     DbSet<DiscussionThread> DiscussionThreads { get; }
     DbSet<DiscussionParticipant> DiscussionParticipants { get; }
     DbSet<DiscussionMessage> DiscussionMessages { get; }

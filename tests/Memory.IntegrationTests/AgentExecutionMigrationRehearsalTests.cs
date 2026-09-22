@@ -62,8 +62,8 @@ public sealed class AgentExecutionMigrationRehearsalTests
             WHERE name IN ('040_agent_skills.sql', '041_scheduled_governance_authority_epochs.sql',
                            '041a_memory_score_reconciliation.sql', '042_memory_score_contract.sql',
                            '043_agent_execution.sql', '044_project_work_item_definition_state.sql',
-                           '045_platform_foundation_a.sql');
-            """)).Should().Be(7);
+                           '045_platform_foundation_a.sql', '046_managed_storage_encryption_gateway.sql');
+            """)).Should().Be(8);
         (await ScalarAsync<long>(connection, """
             SELECT COUNT(*) FROM project_hierarchies
             WHERE parent_project_id = 'legacy-parent' AND child_project_id = 'legacy-child'
@@ -76,6 +76,11 @@ public sealed class AgentExecutionMigrationRehearsalTests
                  'canonical_tag_definitions', 'canonical_tag_aliases', 'canonical_tag_relations',
                  'canonical_tag_bindings', 'canonical_tag_suggestions');
             """)).Should().Be(8);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name IN
+                ('managed_objects', 'managed_object_chunks', 'managed_transfer_sessions', 'managed_transfer_operations');
+            """)).Should().Be(4);
 
         var tagDefinitionId = Guid.NewGuid();
         await ExecuteAsync(connection, """
@@ -138,7 +143,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
         await connection.OpenAsync();
         await ApplyRemainingAsync(connection, migrations);
         (await ScalarAsync<long>(connection,
-            "SELECT COUNT(*) FROM schema_migrations WHERE name IN ('043_agent_execution.sql', '044_project_work_item_definition_state.sql', '045_platform_foundation_a.sql');")).Should().Be(3);
+            "SELECT COUNT(*) FROM schema_migrations WHERE name IN ('043_agent_execution.sql', '044_project_work_item_definition_state.sql', '045_platform_foundation_a.sql', '046_managed_storage_encryption_gateway.sql');")).Should().Be(4);
     }
 
     [DockerRequiredFact]

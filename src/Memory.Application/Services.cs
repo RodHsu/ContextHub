@@ -2574,6 +2574,8 @@ public static class DependencyInjection
         services.AddSingleton<IEffectiveRightsEvaluator, EffectiveRightsEvaluator>();
         services.AddSingleton<ICanonicalTagResolver, CanonicalTagResolver>();
         services.AddScoped<IPlatformFoundationStore, PlatformFoundationStore>();
+        services.AddScoped<IManagedTransferService, ManagedTransferService>();
+        services.AddScoped<IManagedObjectReconciliationService, ManagedObjectReconciliationService>();
         services.AddScoped<IRequestActorAccessor, RequestActorAccessor>();
         services.AddScoped<IChunkingService, ChunkingService>();
         services.AddScoped<IContextHubBootstrapService, ContextHubBootstrapService>();

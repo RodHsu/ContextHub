@@ -44,6 +44,9 @@ public static class DependencyInjection
         services.Configure<MemoryDataRetentionOptions>(configuration.GetSection(MemoryDataRetentionOptions.SectionName));
         services.Configure<AutonomousGovernanceOptions>(configuration.GetSection(AutonomousGovernanceOptions.SectionName));
         services.Configure<ProjectArtifactObjectStorageOptions>(configuration.GetSection(ProjectArtifactObjectStorageOptions.SectionName));
+        services.Configure<ManagedObjectStorageOptions>(configuration.GetSection(ManagedObjectStorageOptions.SectionName));
+        services.Configure<ManagedFileKeyAuthorityOptions>(configuration.GetSection(ManagedFileKeyAuthorityOptions.SectionName));
+        services.Configure<ManagedTransferOptions>(configuration.GetSection(ManagedTransferOptions.SectionName));
         services.Configure<SkillRuntimeOptions>(configuration.GetSection(SkillRuntimeOptions.SectionName));
         services.Configure<SkillSandboxOptions>(configuration.GetSection(SkillSandboxOptions.SectionName));
         services.AddOptions<DockerRuntimeOptions>()
@@ -86,6 +89,12 @@ public static class DependencyInjection
         services.AddScoped<IAgentConnectivityService, AgentConnectivityService>();
         services.AddSingleton<IEmbeddingUsageTelemetry, DatabaseEmbeddingUsageTelemetry>();
         services.AddSingleton<IProjectArtifactObjectStore, S3CompatibleProjectArtifactObjectStore>();
+        services.AddSingleton<IManagedObjectStore, FileSystemManagedObjectStore>();
+        services.AddSingleton<IManagedFileKeyAuthority, AesGcmManagedFileKeyAuthority>();
+        if (string.Equals(serviceName, "worker", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddHostedService<ManagedObjectReconciliationHostedService>();
+        }
         services.AddSingleton<ISkillMaterializationStore, FileSystemSkillMaterializationStore>();
         services.AddSingleton<ISkillSandboxSelfTestRunner, FileQueueSkillSandboxSelfTestRunner>();
         services.AddScoped<ITokenCountingService, TokenCountingService>();

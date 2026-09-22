@@ -72,6 +72,10 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<CanonicalTagRelation> CanonicalTagRelations => Set<CanonicalTagRelation>();
     public DbSet<CanonicalTagBinding> CanonicalTagBindings => Set<CanonicalTagBinding>();
     public DbSet<CanonicalTagSuggestion> CanonicalTagSuggestions => Set<CanonicalTagSuggestion>();
+    public DbSet<ManagedObject> ManagedObjects => Set<ManagedObject>();
+    public DbSet<ManagedObjectChunk> ManagedObjectChunks => Set<ManagedObjectChunk>();
+    public DbSet<ManagedTransferSession> ManagedTransferSessions => Set<ManagedTransferSession>();
+    public DbSet<ManagedTransferOperationRecord> ManagedTransferOperationRecords => Set<ManagedTransferOperationRecord>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
     public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
@@ -1458,6 +1462,98 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Status, x.NormalizedName });
+        });
+
+        modelBuilder.Entity<ManagedObject>(entity =>
+        {
+            entity.ToTable("managed_objects");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.SecurityDomain).HasColumnName("security_domain").HasConversion<string>();
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.StorageId).HasColumnName("storage_id");
+            entity.Property(x => x.PlaintextLength).HasColumnName("plaintext_length");
+            entity.Property(x => x.ChunkSize).HasColumnName("chunk_size");
+            entity.Property(x => x.ChunkCount).HasColumnName("chunk_count");
+            entity.Property(x => x.EncryptionSchemaVersion).HasColumnName("encryption_schema_version");
+            entity.Property(x => x.EncryptionGeneration).HasColumnName("encryption_generation");
+            entity.Property(x => x.EncryptionAlgorithm).HasColumnName("encryption_algorithm");
+            entity.Property(x => x.KeyId).HasColumnName("key_id");
+            entity.Property(x => x.WrappedDek).HasColumnName("wrapped_dek");
+            entity.Property(x => x.WrapNonce).HasColumnName("wrap_nonce");
+            entity.Property(x => x.WrapTag).HasColumnName("wrap_tag");
+            entity.Property(x => x.PlaintextSha256).HasColumnName("plaintext_sha256");
+            entity.Property(x => x.StagedUntil).HasColumnName("staged_until");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.TombstonedAt).HasColumnName("tombstoned_at");
+            entity.HasIndex(x => x.StorageId).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.State });
+            entity.HasMany(x => x.Chunks).WithOne(x => x.ManagedObject).HasForeignKey(x => x.ManagedObjectId).OnDelete(DeleteBehavior.Cascade);
+        });
+        modelBuilder.Entity<ManagedObjectChunk>(entity =>
+        {
+            entity.ToTable("managed_object_chunks");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.ManagedObjectId).HasColumnName("managed_object_id");
+            entity.Property(x => x.ChunkIndex).HasColumnName("chunk_index");
+            entity.Property(x => x.PlaintextOffset).HasColumnName("plaintext_offset");
+            entity.Property(x => x.PlaintextLength).HasColumnName("plaintext_length");
+            entity.Property(x => x.CiphertextLength).HasColumnName("ciphertext_length");
+            entity.Property(x => x.Nonce).HasColumnName("nonce");
+            entity.Property(x => x.AuthenticationTag).HasColumnName("authentication_tag");
+            entity.Property(x => x.PlaintextSha256).HasColumnName("plaintext_sha256");
+            entity.Property(x => x.CiphertextSha256).HasColumnName("ciphertext_sha256");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.ManagedObjectId, x.ChunkIndex }).IsUnique();
+            entity.HasIndex(x => new { x.ManagedObjectId, x.Nonce }).IsUnique();
+        });
+        modelBuilder.Entity<ManagedTransferSession>(entity =>
+        {
+            entity.ToTable("managed_transfer_sessions");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.ManagedObjectId).HasColumnName("managed_object_id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ActorId).HasColumnName("actor_id");
+            entity.Property(x => x.AgentId).HasColumnName("agent_id");
+            entity.Property(x => x.ExecutionId).HasColumnName("execution_id");
+            entity.Property(x => x.CapabilityId).HasColumnName("capability_id");
+            entity.Property(x => x.CapabilityHash).HasColumnName("capability_hash");
+            entity.Property(x => x.Operation).HasColumnName("operation").HasConversion<string>();
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.MaxBytes).HasColumnName("max_bytes");
+            entity.Property(x => x.UsedBytes).HasColumnName("used_bytes");
+            entity.Property(x => x.MaxConcurrency).HasColumnName("max_concurrency");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.EncryptionGeneration).HasColumnName("encryption_generation");
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasOne(x => x.ManagedObject).WithMany().HasForeignKey(x => x.ManagedObjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasMany(x => x.Operations).WithOne(x => x.Session).HasForeignKey(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => x.CapabilityId).IsUnique();
+            entity.HasIndex(x => x.CapabilityHash).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.State, x.ExpiresAt });
+        });
+        modelBuilder.Entity<ManagedTransferOperationRecord>(entity =>
+        {
+            entity.ToTable("managed_transfer_operations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.SessionId).HasColumnName("session_id");
+            entity.Property(x => x.RequestId).HasColumnName("request_id");
+            entity.Property(x => x.RequestHash).HasColumnName("request_hash");
+            entity.Property(x => x.BytesTransferred).HasColumnName("bytes_transferred");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.SessionId, x.RequestId }).IsUnique();
         });
 
         modelBuilder.Entity<DiscussionThread>(entity =>

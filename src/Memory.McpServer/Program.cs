@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
+using System.Security.Cryptography;
 
 var builder = WebApplication.CreateBuilder(args);
 LocalDotEnvConfiguration.AddFallbacks(
@@ -2040,6 +2041,91 @@ maintenance.MapGet("/runs", async (
     return Results.Ok(result);
 });
 
+var transfers = app.MapGroup("/api/transfers");
+transfers.RequireAuthIfEnabled(requireAuthentication);
+
+transfers.MapPost("/uploads", async (CreateManagedUploadRequest request, IManagedTransferService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.CreateUploadAsync(request, cancellationToken)));
+
+transfers.MapPost("/downloads", async (CreateManagedDownloadRequest request, IManagedTransferService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.CreateDownloadAsync(request, cancellationToken)));
+
+transfers.MapPut("/{sessionId:guid}/chunks/{chunkIndex:int}", async (
+    Guid sessionId,
+    int chunkIndex,
+    HttpRequest httpRequest,
+    IManagedTransferService service,
+    IOptions<ManagedTransferOptions> transferOptions,
+    CancellationToken cancellationToken) =>
+{
+    var contentLength = httpRequest.ContentLength;
+    if (!contentLength.HasValue || contentLength <= 0 || contentLength > transferOptions.Value.NormalizedChunkBytes)
+    {
+        return Results.BadRequest(new { error = "Chunk Content-Length is required and exceeds no configured transfer boundary." });
+    }
+    var buffer = new byte[checked((int)contentLength.Value)];
+    try
+    {
+        await httpRequest.Body.ReadExactlyAsync(buffer, cancellationToken);
+        if (await httpRequest.Body.ReadAsync(new byte[1], cancellationToken) != 0)
+        {
+            return Results.BadRequest(new { error = "Chunk body exceeds its declared boundary." });
+        }
+        var result = await service.UploadChunkAsync(new ManagedChunkWriteRequest(
+            sessionId,
+            RequireTransferHeader(httpRequest, "X-ContextHub-Capability"),
+            RequireTransferRevision(httpRequest),
+            RequireTransferHeader(httpRequest, "X-Request-Id"),
+            chunkIndex,
+            buffer,
+            RequireTransferHeader(httpRequest, "X-Content-SHA256")), cancellationToken);
+        buffer = [];
+        return Results.Ok(result);
+    }
+    finally
+    {
+        if (buffer.Length > 0) CryptographicOperations.ZeroMemory(buffer);
+    }
+});
+
+transfers.MapPost("/{sessionId:guid}/complete", async (
+    Guid sessionId,
+    HttpRequest request,
+    IManagedTransferService service,
+    CancellationToken cancellationToken) => Results.Ok(await service.CompleteUploadAsync(
+        sessionId,
+        RequireTransferHeader(request, "X-ContextHub-Capability"),
+        RequireTransferRevision(request),
+        RequireTransferHeader(request, "X-Request-Id"),
+        cancellationToken)));
+
+transfers.MapGet("/{sessionId:guid}/content", async (
+    Guid sessionId,
+    long offset,
+    int length,
+    HttpContext context,
+    IManagedTransferService service,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.ContentType = "application/octet-stream";
+    context.Response.ContentLength = length;
+    context.Response.Headers.CacheControl = "no-store";
+    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    await service.CopyRangeAsync(new ManagedRangeReadRequest(
+        sessionId,
+        RequireTransferHeader(context.Request, "X-ContextHub-Capability"),
+        RequireTransferRevision(context.Request),
+        RequireTransferHeader(context.Request, "X-Request-Id"),
+        offset,
+        length), context.Response.Body, cancellationToken);
+});
+
+transfers.MapDelete("/{sessionId:guid}", async (Guid sessionId, IManagedTransferService service, CancellationToken cancellationToken) =>
+{
+    await service.RevokeAsync(sessionId, cancellationToken);
+    return Results.NoContent();
+});
+
 var storage = app.MapGroup("/api/storage");
 storage.RequireAuthIfEnabled(requireAuthentication);
 storage.RequireAdminIfEnabled(requireAuthentication);
@@ -2108,6 +2194,21 @@ static void SetDataSource(HttpContext httpContext, string source)
 static bool RequiresToken(PathString path)
     => path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase) ||
        path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
+
+static string RequireTransferHeader(HttpRequest request, string name)
+{
+    var value = request.Headers[name].ToString().Trim();
+    if (string.IsNullOrWhiteSpace(value)) throw new BadHttpRequestException($"{name} is required.");
+    return value;
+}
+
+static long RequireTransferRevision(HttpRequest request)
+{
+    var value = RequireTransferHeader(request, "X-Transfer-Revision");
+    return long.TryParse(value, out var revision) && revision > 0
+        ? revision
+        : throw new BadHttpRequestException("X-Transfer-Revision must be a positive integer.");
+}
 
 app.MapPost("/api/performance/measure", async (PerformanceMeasureRequest request, IPerformanceProbeService service, CancellationToken cancellationToken) =>
 {

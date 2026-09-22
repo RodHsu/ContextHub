@@ -80,6 +80,20 @@ x-project-artifact-object-storage-config: &project-artifact-object-storage-confi
   ProjectArtifacts__ObjectStorage__PublicBaseUrl: ${PROJECT_ARTIFACT_OBJECT_STORAGE_PUBLIC_BASE_URL:-}
   ProjectArtifacts__ObjectStorage__MaxObjectBytes: ${PROJECT_ARTIFACT_OBJECT_STORAGE_MAX_OBJECT_BYTES:-10485760}
 
+x-managed-storage-config: &managed-storage-config
+  ManagedStorage__Enabled: ${MANAGED_STORAGE_ENABLED:-false}
+  ManagedStorage__RootPath: /var/lib/contexthub-managed-objects
+  ManagedFileKeyAuthority__CurrentKeyId: ${MANAGED_FILE_KEK_CURRENT_ID:-}
+  ManagedFileKeyAuthority__Keys__v1: ${MANAGED_FILE_KEK_V1_BASE64:-}
+  ManagedFileKeyAuthority__Keys__v2: ${MANAGED_FILE_KEK_V2_BASE64:-}
+  ManagedTransfers__ChunkBytes: ${MANAGED_TRANSFER_CHUNK_BYTES:-4194304}
+  ManagedTransfers__MaxObjectBytes: ${MANAGED_TRANSFER_MAX_OBJECT_BYTES:-5368709120}
+  ManagedTransfers__MaxRangeBytes: ${MANAGED_TRANSFER_MAX_RANGE_BYTES:-16777216}
+  ManagedTransfers__SessionTtlMinutes: ${MANAGED_TRANSFER_SESSION_TTL_MINUTES:-15}
+  ManagedTransfers__StagedObjectTtlHours: ${MANAGED_TRANSFER_STAGED_TTL_HOURS:-24}
+  ManagedTransfers__MaxConcurrency: ${MANAGED_TRANSFER_MAX_CONCURRENCY:-1}
+  ManagedTransfers__ReconciliationIntervalMinutes: ${MANAGED_TRANSFER_RECONCILIATION_MINUTES:-30}
+
 services:
   mcp-docker-proxy:
     image: contexthub-docker-socket-proxy:latest
@@ -221,7 +235,7 @@ services:
       ContextHub__Security__BootstrapAllowedProjectIds: ${CONTEXTHUB_SECURITY_BOOTSTRAP_ALLOWED_PROJECT_IDS:-ContextHub}
       ContextHub__Security__AllowedMcpOrigins__0: ${CONTEXTHUB_ALLOWED_MCP_ORIGIN:-}
       ForwardedHeaders__KnownNetworks__0: ${TRUSTED_PROXY_NETWORK:-}
-      <<: [*embedding-config, *telemetry-retention-config, *project-artifact-object-storage-config]
+      <<: [*embedding-config, *telemetry-retention-config, *project-artifact-object-storage-config, *managed-storage-config]
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
       Dashboard__ComposeProject: ${DASHBOARD_COMPOSE_PROJECT:-contexthub}
@@ -247,6 +261,7 @@ services:
       - "${MCP_SERVER_HOST_BIND:-127.0.0.1}:${MCP_SERVER_HOST_PORT:-8092}:8080"
     volumes:
       - skill-sandbox-queue:/var/lib/contexthub-skill-sandbox
+      - managed-object-data:/var/lib/contexthub-managed-objects
     networks:
       - default
       - mcp-docker-api
@@ -412,7 +427,7 @@ services:
     environment:
       ContextHub__InstanceId: ${CONTEXT_HUB_INSTANCE_ID:-default}
       ContextHub__SecretKey: ${CONTEXTHUB_SECRET_KEY:-${DASHBOARD_SECRET_KEY:-}}
-      <<: [*embedding-config, *telemetry-retention-config, *project-artifact-object-storage-config]
+      <<: [*embedding-config, *telemetry-retention-config, *project-artifact-object-storage-config, *managed-storage-config]
       ASPNETCORE_URLS: http://0.0.0.0:8082
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
@@ -427,6 +442,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - managed-object-data:/var/lib/contexthub-managed-objects
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8082/health/ready"]
       interval: 10s
@@ -488,6 +505,7 @@ volumes:
   embedding-model-cache:
   dashboard-data-protection:
   skill-sandbox-queue:
+  managed-object-data:
 
 networks:
   mcp-docker-api:
