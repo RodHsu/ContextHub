@@ -68,6 +68,11 @@ public sealed class CanonicalTagDefinition
     public string CanonicalName { get; set; } = string.Empty;
     public string NormalizedName { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
+    public CanonicalTagStatus Status { get; set; } = CanonicalTagStatus.Active;
+    public Guid? RedirectToId { get; set; }
+    public long Revision { get; set; } = 1;
+    public DateTimeOffset? LastUsedAt { get; set; }
+    public DateTimeOffset? LastValidatedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
@@ -75,6 +80,8 @@ public sealed class CanonicalTagDefinition
 public sealed class CanonicalTagAlias
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public Guid DefinitionId { get; set; }
     public string ProjectId { get; set; } = string.Empty;
     public string Alias { get; set; } = string.Empty;
@@ -93,11 +100,18 @@ public sealed class CanonicalTagRelation
 public sealed class CanonicalTagBinding
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? TenantId { get; set; }
+    public Guid? OwnerUserId { get; set; }
     public Guid DefinitionId { get; set; }
     public string ProjectId { get; set; } = string.Empty;
     public string ResourceType { get; set; } = string.Empty;
     public string ResourceId { get; set; } = string.Empty;
+    public string Source { get; set; } = "Manual";
+    public decimal Confidence { get; set; } = 1m;
+    public string EvidenceRef { get; set; } = string.Empty;
+    public string Status { get; set; } = "Active";
     public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? LastValidatedAt { get; set; }
 }
 
 public sealed class CanonicalTagSuggestion

@@ -289,6 +289,14 @@ Key routes:
 - `/connectivity`
 - `/mcp-tools`
 
+## Managed Files and Tag Governance
+
+Managed-file APIs use a logical `FileAsset` / immutable `FileVersion` model over the encrypted managed-object data plane. File search and download authorization are evaluated through the same actor/project effective-right boundary as the rest of the platform; storage keys, provider details, and cryptographic metadata are never public response fields. Upload finalization computes a plaintext SHA-256 digest for owner-scoped deduplication without exposing cross-owner existence.
+
+Every version enters the DLP pipeline before it can be downloaded. Malware, credentials, unsupported parsing, scanner outage, or ambiguous classification fail closed. Quarantine release requires an external high-assurance approval verifier; the default verifier denies release. Derived representations inherit the source classification and cannot downgrade it.
+
+Canonical tag governance stores hashed search telemetry and bounded daily aggregates rather than raw queries. Quality windows are available for 7, 30, and 90 days. Merge keeps redirect and supersession history, split requires an explicit candidate set, and background reconciliation repairs aggregates and stale suggestions without destructive lifecycle shortcuts.
+
 ## Development
 
 Run the default verification gates:

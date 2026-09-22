@@ -2159,6 +2159,18 @@ public interface IApplicationDbContext
     DbSet<ManagedObjectChunk> ManagedObjectChunks => throw new NotSupportedException();
     DbSet<ManagedTransferSession> ManagedTransferSessions => throw new NotSupportedException();
     DbSet<ManagedTransferOperationRecord> ManagedTransferOperationRecords => throw new NotSupportedException();
+    DbSet<FileAsset> FileAssets => throw new NotSupportedException();
+    DbSet<FileVersion> FileVersions => throw new NotSupportedException();
+    DbSet<FileRelation> FileRelations => throw new NotSupportedException();
+    DbSet<FileProfile> FileProfiles => throw new NotSupportedException();
+    DbSet<FileRepresentation> FileRepresentations => throw new NotSupportedException();
+    DbSet<FileAccessEvent> FileAccessEvents => throw new NotSupportedException();
+    DbSet<FileSecurityFinding> FileSecurityFindings => throw new NotSupportedException();
+    DbSet<FileSearchProjection> FileSearchProjections => throw new NotSupportedException();
+    DbSet<FileDeletionRecord> FileDeletionRecords => throw new NotSupportedException();
+    DbSet<CanonicalTagTelemetryEvent> CanonicalTagTelemetryEvents => throw new NotSupportedException();
+    DbSet<CanonicalTagDailyAggregate> CanonicalTagDailyAggregates => throw new NotSupportedException();
+    DbSet<CanonicalTagGovernanceProposal> CanonicalTagGovernanceProposals => throw new NotSupportedException();
     DbSet<DiscussionThread> DiscussionThreads { get; }
     DbSet<DiscussionParticipant> DiscussionParticipants { get; }
     DbSet<DiscussionMessage> DiscussionMessages { get; }

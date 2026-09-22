@@ -2576,6 +2576,12 @@ public static class DependencyInjection
         services.AddScoped<IPlatformFoundationStore, PlatformFoundationStore>();
         services.AddScoped<IManagedTransferService, ManagedTransferService>();
         services.AddScoped<IManagedObjectReconciliationService, ManagedObjectReconciliationService>();
+        services.AddScoped<IManagedFileService, ManagedFileService>();
+        services.AddScoped<IManagedFileDeletionReconciler, ManagedFileDeletionReconciler>();
+        services.AddScoped<IManagedFileProjectionReconciler, ManagedFileProjectionReconciler>();
+        services.AddScoped<ICanonicalTagGovernanceService, CanonicalTagGovernanceService>();
+        services.AddScoped<ICanonicalTagBackgroundReconciler, CanonicalTagBackgroundReconciler>();
+        services.AddSingleton<IHighAssuranceApprovalVerifier, DenyHighAssuranceApprovalVerifier>();
         services.AddScoped<IRequestActorAccessor, RequestActorAccessor>();
         services.AddScoped<IChunkingService, ChunkingService>();
         services.AddScoped<IContextHubBootstrapService, ContextHubBootstrapService>();

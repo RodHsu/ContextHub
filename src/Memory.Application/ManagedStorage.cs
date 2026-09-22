@@ -56,7 +56,8 @@ public sealed record CreateManagedDownloadRequest(
     string Purpose,
     string IdempotencyKey,
     string? AgentId = null,
-    Guid? ExecutionId = null);
+    Guid? ExecutionId = null,
+    Guid? FileVersionId = null);
 
 public sealed record ManagedChunkWriteRequest(
     Guid SessionId,
@@ -111,6 +112,7 @@ public sealed class ManagedTransferService(
     IClock clock,
     IManagedObjectStore objectStore,
     IManagedFileKeyAuthority keyAuthority,
+    IPlatformFoundationStore foundation,
     IOptions<ManagedTransferOptions> options) : IManagedTransferService
 {
     private const int NonceBytes = 12;
@@ -191,6 +193,32 @@ public sealed class ManagedTransferService(
         if (managedObject.State != ManagedObjectState.Ready)
         {
             throw new InvalidOperationException("Managed object is not available for transfer.");
+        }
+
+        var linkedVersions = await dbContext.FileVersions.Include(x => x.FileAsset)
+            .Where(x => x.ManagedObjectId == managedObject.Id)
+            .ToArrayAsync(cancellationToken);
+        if (linkedVersions.Length > 0)
+        {
+            if (!request.FileVersionId.HasValue) throw new UnauthorizedAccessException("A logical FileVersion reference is required for managed file download.");
+            var linked = linkedVersions.SingleOrDefault(x => x.Id == request.FileVersionId.Value)
+                ?? throw new UnauthorizedAccessException("Managed file download reference is invalid.");
+            if (linked.Lifecycle != FileVersionLifecycle.Ready || linked.NeedsRescan)
+            {
+                throw new UnauthorizedAccessException("Managed file download requires a successfully scanned ready version.");
+            }
+            var classificationDecision = FileSecurityPolicy.Authorize(linked.Classification, FileOperation.Download, request.Purpose, actor.IsAdmin || actor.HasScope(SecurityScopes.SecurityManage));
+            if (!classificationDecision.Allowed) throw new UnauthorizedAccessException("Managed file classification denies download.");
+            if (linked.FileAsset?.ProjectId is string fileProjectId)
+            {
+                var principal = actor.UserId?.ToString("D") ?? actor.Username;
+                var rights = await foundation.EvaluateAsync(fileProjectId, principal, ["download"], "File", linked.FileAssetId.ToString("D"), cancellationToken);
+                if (!rights.Decisions.Single().Allowed) throw new UnauthorizedAccessException("Managed file effective rights deny download.");
+            }
+            else if (!actor.IsAdmin && linked.FileAsset?.OwnerUserId != actor.UserId)
+            {
+                throw new UnauthorizedAccessException("Unassigned files are uploader/admin only.");
+            }
         }
 
         var now = clock.UtcNow;
@@ -306,6 +334,7 @@ public sealed class ManagedTransferService(
                 throw new InvalidOperationException("Managed upload is incomplete.");
             }
 
+            managedObject.PlaintextSha256 = await ComputePlaintextHashAsync(managedObject, transactionToken);
             managedObject.State = ManagedObjectState.Ready;
             managedObject.UpdatedAt = clock.UtcNow;
             session.State = ManagedTransferSessionState.Completed;
@@ -504,6 +533,39 @@ public sealed class ManagedTransferService(
     private byte[] Unwrap(ManagedObject managedObject)
         => keyAuthority.Unwrap(managedObject.Id, managedObject.EncryptionGeneration, Wrapped(managedObject));
 
+    private async Task<string> ComputePlaintextHashAsync(ManagedObject managedObject, CancellationToken cancellationToken)
+    {
+        var dek = Unwrap(managedObject);
+        var ciphertext = ArrayPool<byte>.Shared.Rent(managedObject.ChunkSize);
+        var plaintext = ArrayPool<byte>.Shared.Rent(managedObject.ChunkSize);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        try
+        {
+            foreach (var chunk in managedObject.Chunks.OrderBy(x => x.ChunkIndex))
+            {
+                var read = await objectStore.ReadChunkAsync(managedObject.StorageId, chunk.ChunkIndex, ciphertext.AsMemory(0, chunk.CiphertextLength), cancellationToken);
+                if (read != chunk.CiphertextLength || !FixedEquals(chunk.CiphertextSha256, Convert.ToHexString(SHA256.HashData(ciphertext.AsSpan(0, read))).ToLowerInvariant()))
+                {
+                    managedObject.State = ManagedObjectState.Corrupt;
+                    throw new CryptographicException("Managed object integrity validation failed while finalizing upload.");
+                }
+                using var aes = new AesGcm(dek, TagBytes);
+                aes.Decrypt(chunk.Nonce, ciphertext.AsSpan(0, read), chunk.AuthenticationTag, plaintext.AsSpan(0, chunk.PlaintextLength), BuildAad(managedObject, chunk.ChunkIndex, chunk.PlaintextLength));
+                hash.AppendData(plaintext.AsSpan(0, chunk.PlaintextLength));
+                CryptographicOperations.ZeroMemory(plaintext.AsSpan(0, chunk.PlaintextLength));
+            }
+            return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(dek);
+            CryptographicOperations.ZeroMemory(ciphertext);
+            CryptographicOperations.ZeroMemory(plaintext);
+            ArrayPool<byte>.Shared.Return(ciphertext);
+            ArrayPool<byte>.Shared.Return(plaintext);
+        }
+    }
+
     private static WrappedManagedKey Wrapped(ManagedObject managedObject)
         => new(managedObject.KeyId, managedObject.WrappedDek, managedObject.WrapNonce, managedObject.WrapTag);
 
@@ -556,7 +618,7 @@ public sealed class ManagedTransferService(
     }
 
     private static IQueryable<T> Scope<T>(IQueryable<T> query, ContextHubRequestActor actor) where T : class
-        => !actor.HasUser ? query : actor.IsServiceActor
+        => !actor.HasUser ? query : actor.IsServiceActor || actor.IsAdmin
             ? query.Where(x => EF.Property<Guid?>(x, "TenantId") == actor.TenantId)
             : query.Where(x => EF.Property<Guid?>(x, "TenantId") == actor.TenantId && EF.Property<Guid?>(x, "OwnerUserId") == actor.UserId);
 }

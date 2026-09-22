@@ -62,8 +62,9 @@ public sealed class AgentExecutionMigrationRehearsalTests
             WHERE name IN ('040_agent_skills.sql', '041_scheduled_governance_authority_epochs.sql',
                            '041a_memory_score_reconciliation.sql', '042_memory_score_contract.sql',
                            '043_agent_execution.sql', '044_project_work_item_definition_state.sql',
-                           '045_platform_foundation_a.sql', '046_managed_storage_encryption_gateway.sql');
-            """)).Should().Be(8);
+                           '045_platform_foundation_a.sql', '046_managed_storage_encryption_gateway.sql',
+                           '047_managed_files_dlp_tag_governance.sql');
+            """)).Should().Be(9);
         (await ScalarAsync<long>(connection, """
             SELECT COUNT(*) FROM project_hierarchies
             WHERE parent_project_id = 'legacy-parent' AND child_project_id = 'legacy-child'
@@ -81,6 +82,13 @@ public sealed class AgentExecutionMigrationRehearsalTests
             WHERE table_schema = 'public' AND table_name IN
                 ('managed_objects', 'managed_object_chunks', 'managed_transfer_sessions', 'managed_transfer_operations');
             """)).Should().Be(4);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name IN
+                ('file_assets', 'file_versions', 'file_relations', 'file_profiles', 'file_representations',
+                 'file_access_events', 'file_security_findings', 'file_search_projections', 'file_deletion_records',
+                 'canonical_tag_telemetry_events', 'canonical_tag_daily_aggregates', 'canonical_tag_governance_proposals');
+            """)).Should().Be(12);
 
         var tagDefinitionId = Guid.NewGuid();
         await ExecuteAsync(connection, """
@@ -143,7 +151,40 @@ public sealed class AgentExecutionMigrationRehearsalTests
         await connection.OpenAsync();
         await ApplyRemainingAsync(connection, migrations);
         (await ScalarAsync<long>(connection,
-            "SELECT COUNT(*) FROM schema_migrations WHERE name IN ('043_agent_execution.sql', '044_project_work_item_definition_state.sql', '045_platform_foundation_a.sql', '046_managed_storage_encryption_gateway.sql');")).Should().Be(4);
+            "SELECT COUNT(*) FROM schema_migrations WHERE name IN ('043_agent_execution.sql', '044_project_work_item_definition_state.sql', '045_platform_foundation_a.sql', '046_managed_storage_encryption_gateway.sql', '047_managed_files_dlp_tag_governance.sql');")).Should().Be(5);
+    }
+
+    [DockerRequiredFact]
+    public async Task Migration_047_should_upgrade_a_046_shaped_database_and_replay_idempotently()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true)
+            .WithDatabase("contexthub")
+            .WithUsername("contexthub")
+            .WithPassword("contexthub")
+            .Build();
+        await postgres.StartAsync();
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "046_managed_storage_encryption_gateway.sql");
+
+        var definitionId = Guid.NewGuid();
+        await ExecuteAsync(connection, """
+            INSERT INTO canonical_tag_definitions
+                (id, project_id, canonical_name, normalized_name, description, created_at, updated_at)
+            VALUES (@id, 'wave-3-rehearsal', 'Existing Tag', 'existing-tag', '', NOW(), NOW());
+            """, new NpgsqlParameter<Guid>("id", definitionId));
+
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM canonical_tag_definitions WHERE id = @id AND status = 'Active' AND revision = 1;", new NpgsqlParameter<Guid>("id", definitionId))).Should().Be(1);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '047_managed_files_dlp_tag_governance.sql';")).Should().Be(1);
+
+        await connection.CloseAsync();
+        await connection.OpenAsync();
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '047_managed_files_dlp_tag_governance.sql';")).Should().Be(1);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM canonical_tag_definitions WHERE id = @id;", new NpgsqlParameter<Guid>("id", definitionId))).Should().Be(1);
     }
 
     [DockerRequiredFact]

@@ -76,6 +76,18 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<ManagedObjectChunk> ManagedObjectChunks => Set<ManagedObjectChunk>();
     public DbSet<ManagedTransferSession> ManagedTransferSessions => Set<ManagedTransferSession>();
     public DbSet<ManagedTransferOperationRecord> ManagedTransferOperationRecords => Set<ManagedTransferOperationRecord>();
+    public DbSet<FileAsset> FileAssets => Set<FileAsset>();
+    public DbSet<FileVersion> FileVersions => Set<FileVersion>();
+    public DbSet<FileRelation> FileRelations => Set<FileRelation>();
+    public DbSet<FileProfile> FileProfiles => Set<FileProfile>();
+    public DbSet<FileRepresentation> FileRepresentations => Set<FileRepresentation>();
+    public DbSet<FileAccessEvent> FileAccessEvents => Set<FileAccessEvent>();
+    public DbSet<FileSecurityFinding> FileSecurityFindings => Set<FileSecurityFinding>();
+    public DbSet<FileSearchProjection> FileSearchProjections => Set<FileSearchProjection>();
+    public DbSet<FileDeletionRecord> FileDeletionRecords => Set<FileDeletionRecord>();
+    public DbSet<CanonicalTagTelemetryEvent> CanonicalTagTelemetryEvents => Set<CanonicalTagTelemetryEvent>();
+    public DbSet<CanonicalTagDailyAggregate> CanonicalTagDailyAggregates => Set<CanonicalTagDailyAggregate>();
+    public DbSet<CanonicalTagGovernanceProposal> CanonicalTagGovernanceProposals => Set<CanonicalTagGovernanceProposal>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
     public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
@@ -1409,6 +1421,11 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CanonicalName).HasColumnName("canonical_name");
             entity.Property(x => x.NormalizedName).HasColumnName("normalized_name");
             entity.Property(x => x.Description).HasColumnName("description");
+            entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.RedirectToId).HasColumnName("redirect_to_id");
+            entity.Property(x => x.Revision).HasColumnName("revision").IsConcurrencyToken();
+            entity.Property(x => x.LastUsedAt).HasColumnName("last_used_at");
+            entity.Property(x => x.LastValidatedAt).HasColumnName("last_validated_at");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.NormalizedName }).IsUnique();
@@ -1418,12 +1435,14 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.ToTable("canonical_tag_aliases");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.DefinitionId).HasColumnName("definition_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.Alias).HasColumnName("alias");
             entity.Property(x => x.NormalizedAlias).HasColumnName("normalized_alias");
             entity.HasOne(x => x.Definition).WithMany().HasForeignKey(x => x.DefinitionId).OnDelete(DeleteBehavior.Cascade);
-            entity.HasIndex(x => new { x.ProjectId, x.NormalizedAlias }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.NormalizedAlias }).IsUnique();
         });
         modelBuilder.Entity<CanonicalTagRelation>(entity =>
         {
@@ -1440,12 +1459,19 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.ToTable("canonical_tag_bindings");
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.DefinitionId).HasColumnName("definition_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");
             entity.Property(x => x.ResourceType).HasColumnName("resource_type");
             entity.Property(x => x.ResourceId).HasColumnName("resource_id");
+            entity.Property(x => x.Source).HasColumnName("source");
+            entity.Property(x => x.Confidence).HasColumnName("confidence");
+            entity.Property(x => x.EvidenceRef).HasColumnName("evidence_ref");
+            entity.Property(x => x.Status).HasColumnName("status");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
-            entity.HasIndex(x => new { x.DefinitionId, x.ProjectId, x.ResourceType, x.ResourceId }).IsUnique();
+            entity.Property(x => x.LastValidatedAt).HasColumnName("last_validated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.DefinitionId, x.ProjectId, x.ResourceType, x.ResourceId }).IsUnique();
         });
         modelBuilder.Entity<CanonicalTagSuggestion>(entity =>
         {
@@ -1556,6 +1582,9 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.HasIndex(x => new { x.SessionId, x.RequestId }).IsUnique();
         });
+
+        ConfigureManagedFiles(modelBuilder);
+        ConfigureCanonicalTagGovernance(modelBuilder);
 
         modelBuilder.Entity<DiscussionThread>(entity =>
         {
@@ -1705,6 +1734,236 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
         });
 
         modelBuilder.ConfigureSkillModels();
+    }
+
+    private static void ConfigureManagedFiles(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<FileAsset>(entity =>
+        {
+            entity.ToTable("file_assets");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.LogicalFileName).HasColumnName("logical_file_name");
+            entity.Property(x => x.NormalizedFileName).HasColumnName("normalized_file_name");
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.CreatedByActorId).HasColumnName("created_by_actor_id");
+            entity.Property(x => x.Revision).HasColumnName("revision").IsConcurrencyToken();
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.GovernanceReminderAt).HasColumnName("governance_reminder_at");
+            entity.Property(x => x.DeletedAt).HasColumnName("deleted_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.NormalizedFileName });
+        });
+        modelBuilder.Entity<FileVersion>(entity =>
+        {
+            entity.ToTable("file_versions");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.FileAssetId).HasColumnName("file_asset_id");
+            entity.Property(x => x.ManagedObjectId).HasColumnName("managed_object_id");
+            entity.Property(x => x.VersionNumber).HasColumnName("version_number");
+            entity.Property(x => x.ContentSha256).HasColumnName("content_sha256");
+            entity.Property(x => x.ContentType).HasColumnName("content_type");
+            entity.Property(x => x.DeduplicationScopeKey).HasColumnName("deduplication_scope_key");
+            entity.Property(x => x.Lifecycle).HasColumnName("lifecycle").HasConversion<string>();
+            entity.Property(x => x.Classification).HasColumnName("classification").HasConversion<string>();
+            entity.Property(x => x.ClassificationRevision).HasColumnName("classification_revision").IsConcurrencyToken();
+            entity.Property(x => x.SearchProjectionAllowed).HasColumnName("search_projection_allowed");
+            entity.Property(x => x.EmbeddingAllowed).HasColumnName("embedding_allowed");
+            entity.Property(x => x.NeedsRescan).HasColumnName("needs_rescan");
+            entity.Property(x => x.LastScanAt).HasColumnName("last_scan_at");
+            entity.Property(x => x.ScannerSetVersion).HasColumnName("scanner_set_version");
+            entity.Property(x => x.SecurityPolicyVersion).HasColumnName("security_policy_version");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasOne(x => x.FileAsset).WithMany(x => x.Versions).HasForeignKey(x => x.FileAssetId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(x => x.ManagedObject).WithMany().HasForeignKey(x => x.ManagedObjectId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasIndex(x => new { x.FileAssetId, x.VersionNumber }).IsUnique();
+            entity.HasIndex(x => x.DeduplicationScopeKey).IsUnique();
+            entity.HasIndex(x => x.ManagedObjectId);
+            entity.HasIndex(x => new { x.ContentSha256, x.Classification, x.Lifecycle });
+        });
+        modelBuilder.Entity<FileRelation>(entity =>
+        {
+            entity.ToTable("file_relations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.FileAssetId).HasColumnName("file_asset_id");
+            entity.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>();
+            entity.Property(x => x.TargetProjectId).HasColumnName("target_project_id");
+            entity.Property(x => x.TargetId).HasColumnName("target_id");
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasOne(x => x.FileAsset).WithMany(x => x.Relations).HasForeignKey(x => x.FileAssetId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.FileAssetId, x.Kind, x.TargetProjectId, x.TargetId }).IsUnique();
+        });
+        modelBuilder.Entity<FileProfile>(entity =>
+        {
+            entity.ToTable("file_profiles");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.FileVersionId).HasColumnName("file_version_id");
+            entity.Property(x => x.DetectedContentType).HasColumnName("detected_content_type");
+            entity.Property(x => x.SizeBytes).HasColumnName("size_bytes");
+            entity.Property(x => x.PageCount).HasColumnName("page_count");
+            entity.Property(x => x.MetadataJson).HasColumnName("metadata_json").HasColumnType("jsonb");
+            entity.Property(x => x.ClassificationRevision).HasColumnName("classification_revision");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.FileVersionId, x.ClassificationRevision }).IsUnique();
+        });
+        modelBuilder.Entity<FileRepresentation>(entity =>
+        {
+            entity.ToTable("file_representations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.FileVersionId).HasColumnName("file_version_id");
+            entity.Property(x => x.ManagedObjectId).HasColumnName("managed_object_id");
+            entity.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>();
+            entity.Property(x => x.Classification).HasColumnName("classification").HasConversion<string>();
+            entity.Property(x => x.SourceClassificationRevision).HasColumnName("source_classification_revision");
+            entity.Property(x => x.ContentHash).HasColumnName("content_hash");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.InvalidatedAt).HasColumnName("invalidated_at");
+            entity.HasOne(x => x.FileVersion).WithMany(x => x.Representations).HasForeignKey(x => x.FileVersionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.FileVersionId, x.Kind, x.SourceClassificationRevision });
+        });
+        modelBuilder.Entity<FileAccessEvent>(entity =>
+        {
+            entity.ToTable("file_access_events");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.FileAssetId).HasColumnName("file_asset_id");
+            entity.Property(x => x.FileVersionId).HasColumnName("file_version_id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ActorId).HasColumnName("actor_id");
+            entity.Property(x => x.Operation).HasColumnName("operation").HasConversion<string>();
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.Allowed).HasColumnName("allowed");
+            entity.Property(x => x.ReasonCode).HasColumnName("reason_code");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.ProjectId, x.FileAssetId, x.CreatedAt });
+        });
+        modelBuilder.Entity<FileSecurityFinding>(entity =>
+        {
+            entity.ToTable("file_security_findings");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.FileVersionId).HasColumnName("file_version_id");
+            entity.Property(x => x.ScannerRuleId).HasColumnName("scanner_rule_id");
+            entity.Property(x => x.Category).HasColumnName("category").HasConversion<string>();
+            entity.Property(x => x.Severity).HasColumnName("severity").HasConversion<string>();
+            entity.Property(x => x.Confidence).HasColumnName("confidence");
+            entity.Property(x => x.ScannerVersion).HasColumnName("scanner_version");
+            entity.Property(x => x.DetectedAt).HasColumnName("detected_at");
+            entity.Property(x => x.Disposition).HasColumnName("disposition").HasConversion<string>();
+            entity.Property(x => x.EvidenceHash).HasColumnName("evidence_hash");
+            entity.Property(x => x.RedactedEvidence).HasColumnName("redacted_evidence");
+            entity.HasOne(x => x.FileVersion).WithMany(x => x.Findings).HasForeignKey(x => x.FileVersionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.FileVersionId, x.ScannerRuleId, x.EvidenceHash }).IsUnique();
+        });
+        modelBuilder.Entity<FileSearchProjection>(entity =>
+        {
+            entity.ToTable("file_search_projections");
+            entity.HasKey(x => x.FileVersionId);
+            entity.Property(x => x.FileVersionId).HasColumnName("file_version_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.Classification).HasColumnName("classification").HasConversion<string>();
+            entity.Property(x => x.ClassificationRevision).HasColumnName("classification_revision");
+            entity.Property(x => x.ContentSearchEnabled).HasColumnName("content_search_enabled");
+            entity.Property(x => x.EmbeddingEnabled).HasColumnName("embedding_enabled");
+            entity.Property(x => x.RedactedText).HasColumnName("redacted_text");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.InvalidatedAt).HasColumnName("invalidated_at");
+            entity.HasIndex(x => new { x.ProjectId, x.ContentSearchEnabled, x.ClassificationRevision });
+        });
+        modelBuilder.Entity<FileDeletionRecord>(entity =>
+        {
+            entity.ToTable("file_deletion_records");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.FileAssetId).HasColumnName("file_asset_id");
+            entity.Property(x => x.ManagedObjectId).HasColumnName("managed_object_id");
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.LegalHold).HasColumnName("legal_hold");
+            entity.Property(x => x.ReferenceBlocked).HasColumnName("reference_blocked");
+            entity.Property(x => x.RetainUntil).HasColumnName("retain_until");
+            entity.Property(x => x.Reason).HasColumnName("reason");
+            entity.Property(x => x.RequestId).HasColumnName("request_id");
+            entity.Property(x => x.AttemptCount).HasColumnName("attempt_count");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.PrimaryDeletedAt).HasColumnName("primary_deleted_at");
+            entity.Property(x => x.FullyExpiredAt).HasColumnName("fully_expired_at");
+            entity.Property(x => x.VerifiedAt).HasColumnName("verified_at");
+            entity.HasIndex(x => new { x.FileAssetId, x.ManagedObjectId, x.RequestId }).IsUnique();
+            entity.HasIndex(x => new { x.State, x.RetainUntil });
+        });
+    }
+
+    private static void ConfigureCanonicalTagGovernance(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<CanonicalTagTelemetryEvent>(entity =>
+        {
+            entity.ToTable("canonical_tag_telemetry_events");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.DefinitionId).HasColumnName("definition_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>();
+            entity.Property(x => x.ReasonCode).HasColumnName("reason_code");
+            entity.Property(x => x.QueryHash).HasColumnName("query_hash");
+            entity.Property(x => x.ResourceType).HasColumnName("resource_type");
+            entity.Property(x => x.ActorType).HasColumnName("actor_type");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.DefinitionId, x.CreatedAt });
+        });
+        modelBuilder.Entity<CanonicalTagDailyAggregate>(entity =>
+        {
+            entity.ToTable("canonical_tag_daily_aggregates");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.DefinitionId).HasColumnName("definition_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.Day).HasColumnName("day");
+            entity.Property(x => x.SearchImpressions).HasColumnName("search_impressions");
+            entity.Property(x => x.FilterUses).HasColumnName("filter_uses");
+            entity.Property(x => x.Selections).HasColumnName("selections");
+            entity.Property(x => x.Rejections).HasColumnName("rejections");
+            entity.Property(x => x.Mismatches).HasColumnName("mismatches");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.DefinitionId, x.Day }).IsUnique();
+        });
+        modelBuilder.Entity<CanonicalTagGovernanceProposal>(entity =>
+        {
+            entity.ToTable("canonical_tag_governance_proposals");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>();
+            entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(x => x.SourceDefinitionId).HasColumnName("source_definition_id");
+            entity.Property(x => x.TargetDefinitionId).HasColumnName("target_definition_id");
+            entity.Property(x => x.ProposedValue).HasColumnName("proposed_value");
+            entity.Property(x => x.ReasonCode).HasColumnName("reason_code");
+            entity.Property(x => x.CandidateResourceIdsJson).HasColumnName("candidate_resource_ids_json").HasColumnType("jsonb");
+            entity.Property(x => x.AffectedBindingCount).HasColumnName("affected_binding_count");
+            entity.Property(x => x.Confidence).HasColumnName("confidence");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.AppliedAt).HasColumnName("applied_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Status, x.Kind });
+        });
     }
 
     private static void ConfigureAuthorizationRule<TEntity>(ModelBuilder modelBuilder, string tableName)

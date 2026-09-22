@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -16,6 +17,80 @@ namespace Memory.ApiContractTests;
 
 public sealed class ApiContractTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Managed_file_security_contract_is_provider_neutral_and_does_not_expose_internal_object_identity()
+    {
+        Guid versionId;
+        using (var scope = environment.GetFactory().Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current!;
+            var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var now = DateTimeOffset.UtcNow;
+            var projectId = "api-file-" + Guid.NewGuid().ToString("N");
+            var managedObject = new ManagedObject
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = projectId,
+                State = ManagedObjectState.Ready,
+                StorageId = Convert.ToHexString(SHA256.HashData(Guid.NewGuid().ToByteArray())).ToLowerInvariant(),
+                PlaintextLength = 10,
+                ChunkSize = 65536,
+                ChunkCount = 1,
+                KeyId = "test-key",
+                WrappedDek = new byte[32],
+                WrapNonce = new byte[12],
+                WrapTag = new byte[16],
+                PlaintextSha256 = new string('b', 64),
+                StagedUntil = now.AddHours(1),
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            var file = new FileAsset
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = projectId,
+                LogicalFileName = "contract.txt",
+                NormalizedFileName = "contract.txt",
+                State = FileAssetState.Active,
+                CreatedByActorId = actor.UserId!.Value.ToString("D"),
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.ManagedObjects.Add(managedObject);
+            db.FileAssets.Add(file);
+            await db.SaveChangesAsync();
+            var version = new FileVersion
+            {
+                FileAssetId = file.Id,
+                ManagedObjectId = managedObject.Id,
+                VersionNumber = 1,
+                ContentSha256 = managedObject.PlaintextSha256,
+                ContentType = "text/plain",
+                DeduplicationScopeKey = Convert.ToHexString(SHA256.HashData(Guid.NewGuid().ToByteArray())).ToLowerInvariant(),
+                Lifecycle = FileVersionLifecycle.IntegrityVerified,
+                Classification = FileClassification.Restricted,
+                NeedsRescan = true,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.FileVersions.Add(version);
+            await db.SaveChangesAsync();
+            versionId = version.Id;
+        }
+
+        using var client = environment.GetFactory().CreateClient();
+        var response = await client.PostAsJsonAsync($"/api/files/{versionId:D}/security-assessments",
+            new FileSecurityAssessment(true, true, "scanner-contract", "policy-contract", []));
+        var json = await response.Content.ReadAsStringAsync();
+
+        response.EnsureSuccessStatusCode();
+        json.Should().Contain("fileVersionId").And.Contain("classification");
+        json.Should().NotContain("managedObjectId").And.NotContain("storageId").And.NotContain("provider").And.NotContain("bucket").And.NotContain("wrappedDek");
+    }
+
     [DockerRequiredFact]
     public async Task Skill_Version_Diff_And_Telemetry_Trend_Endpoints_Should_Return_Stable_Contracts()
     {

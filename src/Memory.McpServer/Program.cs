@@ -2126,6 +2126,74 @@ transfers.MapDelete("/{sessionId:guid}", async (Guid sessionId, IManagedTransfer
     return Results.NoContent();
 });
 
+var files = app.MapGroup("/api/files");
+files.RequireAuthIfEnabled(requireAuthentication);
+files.MapPost(string.Empty, async (CreateManagedFileRequest request, IManagedFileService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.CreateAsync(request, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+files.MapGet("/search", async (string projectId, string query, int? limit, IManagedFileService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.SearchAsync(projectId, query, limit ?? 20, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+files.MapPost("/{fileVersionId:guid}/security-assessments", async (Guid fileVersionId, FileSecurityAssessment request, IManagedFileService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.ApplySecurityAssessmentAsync(fileVersionId, request, cancellationToken);
+    return Results.Ok(ToFileVersionContract(result));
+})
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecurityManage);
+files.MapPost("/{fileVersionId:guid}/authorize", async (Guid fileVersionId, FileOperationBody request, IManagedFileService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.AuthorizeOperationAsync(fileVersionId, request.Operation, request.Purpose, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+files.MapPost("/{fileVersionId:guid}/representations", async (Guid fileVersionId, CreateFileRepresentationBody request, IManagedFileService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.AddRepresentationAsync(new CreateFileRepresentationRequest(fileVersionId, request.Kind, request.ContentHash, request.Classification), cancellationToken);
+    return Results.Ok(new { representationId = result.Id, result.FileVersionId, result.Kind, result.Classification, result.SourceClassificationRevision, result.CreatedAt, result.InvalidatedAt });
+})
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+files.MapPost("/{fileVersionId:guid}/quarantine-release", async (Guid fileVersionId, QuarantineReleaseBody request, IManagedFileService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.RequestQuarantineReleaseAsync(new QuarantineReleaseRequest(fileVersionId, request.Reason, request.ExternalApprovalReference, request.ExpectedClassificationRevision), cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecurityManage);
+files.MapPost("/{fileId:guid}/delete", async (Guid fileId, FileDeleteBody request, IManagedFileService service, CancellationToken cancellationToken) =>
+{
+    var result = await service.RequestDeleteAsync(new FileDeleteRequest(fileId, request.Reason, request.RequestId), cancellationToken);
+    return Results.Ok(new
+    {
+        result.RequiresUserDecision,
+        result.State,
+        records = result.Records.Select(record => new { deletionId = record.Id, record.FileAssetId, record.State, record.LegalHold, record.ReferenceBlocked, record.RetainUntil, record.AttemptCount, record.CreatedAt, record.UpdatedAt, record.PrimaryDeletedAt, record.FullyExpiredAt, record.VerifiedAt })
+    });
+})
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
+var canonicalTags = app.MapGroup("/api/canonical-tags");
+canonicalTags.RequireAuthIfEnabled(requireAuthentication);
+canonicalTags.MapPost("/telemetry", async (RecordTagTelemetryRequest request, ICanonicalTagGovernanceService service, CancellationToken cancellationToken) =>
+{
+    await service.RecordAsync(request, cancellationToken);
+    return Results.NoContent();
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+canonicalTags.MapPost("/{projectId}/reconcile", async (string projectId, DateOnly? day, ICanonicalTagGovernanceService service, CancellationToken cancellationToken) =>
+    Results.Ok(new { processed = await service.ReconcileAsync(projectId, day, cancellationToken) }))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecurityManage);
+canonicalTags.MapGet("/{projectId}/quality", async (string projectId, int? days, int? minimumSamples, ICanonicalTagGovernanceService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.GetQualityAsync(projectId, days ?? 30, Math.Clamp(minimumSamples ?? 20, 5, 10000), cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+canonicalTags.MapGet("/{projectId}/merge-preview", async (string projectId, Guid sourceId, Guid targetId, ICanonicalTagGovernanceService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.PreviewMergeAsync(projectId, sourceId, targetId, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+canonicalTags.MapPost("/{projectId}/merge", async (string projectId, CanonicalTagMergeBody request, ICanonicalTagGovernanceService service, CancellationToken cancellationToken) =>
+{
+    await service.ApplyMergeAsync(projectId, request.SourceId, request.TargetId, request.ExpectedSourceRevision, cancellationToken);
+    return Results.NoContent();
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecurityManage);
+canonicalTags.MapPost("/{projectId}/split-preview", async (string projectId, CanonicalTagSplitBody request, ICanonicalTagGovernanceService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.PreviewSplitAsync(projectId, request.SourceId, request.CandidateResourceIds, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecurityManage);
+canonicalTags.MapPost("/{projectId}/lifecycle", async (string projectId, CanonicalTagLifecycleRequest request, ICanonicalTagGovernanceService service, CancellationToken cancellationToken) =>
+{
+    await service.ApplyLifecycleAsync(projectId, request, cancellationToken);
+    return Results.NoContent();
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecurityManage);
+
 var storage = app.MapGroup("/api/storage");
 storage.RequireAuthIfEnabled(requireAuthentication);
 storage.RequireAdminIfEnabled(requireAuthentication);
@@ -2209,6 +2277,26 @@ static long RequireTransferRevision(HttpRequest request)
         ? revision
         : throw new BadHttpRequestException("X-Transfer-Revision must be a positive integer.");
 }
+
+static object ToFileVersionContract(FileVersion result) => new
+{
+    fileVersionId = result.Id,
+    fileId = result.FileAssetId,
+    result.VersionNumber,
+    result.ContentSha256,
+    result.ContentType,
+    result.Lifecycle,
+    result.Classification,
+    result.ClassificationRevision,
+    result.SearchProjectionAllowed,
+    result.EmbeddingAllowed,
+    result.NeedsRescan,
+    result.LastScanAt,
+    result.ScannerSetVersion,
+    result.SecurityPolicyVersion,
+    result.CreatedAt,
+    result.UpdatedAt
+};
 
 app.MapPost("/api/performance/measure", async (PerformanceMeasureRequest request, IPerformanceProbeService service, CancellationToken cancellationToken) =>
 {
@@ -2463,6 +2551,12 @@ internal sealed record ProjectWorkItemGovernanceExclusionBody(string ProjectId, 
 internal sealed record ConversationInsightGovernanceBody(string? GovernanceRunId = null, string? Reason = null);
 internal sealed record ConversationInsightDispositionBody(ConversationInsightDisposition Disposition, string Reason, string? GovernanceRunId = null);
 internal sealed record ProjectHierarchySetChildrenBody(IReadOnlyList<string>? ChildProjectIds);
+internal sealed record FileOperationBody(FileOperation Operation, string Purpose);
+internal sealed record CreateFileRepresentationBody(FileRepresentationKind Kind, string ContentHash, FileClassification Classification);
+internal sealed record QuarantineReleaseBody(string Reason, string ExternalApprovalReference, long ExpectedClassificationRevision);
+internal sealed record FileDeleteBody(string Reason, string RequestId);
+internal sealed record CanonicalTagMergeBody(Guid SourceId, Guid TargetId, long ExpectedSourceRevision);
+internal sealed record CanonicalTagSplitBody(Guid SourceId, IReadOnlyList<string> CandidateResourceIds);
 
 internal sealed record TenantProjectGrantUpsertBody(
     bool CanRead = true,

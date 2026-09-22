@@ -37,6 +37,7 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
             scope.ServiceProvider.GetRequiredService<IClock>(),
             store,
             authority,
+            scope.ServiceProvider.GetRequiredService<IPlatformFoundationStore>(),
             Options.Create(transferSettings));
         try
         {

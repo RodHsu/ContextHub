@@ -243,3 +243,33 @@ public sealed class ManagedObjectReconciliationHostedService(
         }
     }
 }
+
+public sealed class ManagedFileReconciliationHostedService(
+    IServiceScopeFactory scopeFactory,
+    IOptions<ManagedTransferOptions> options,
+    ILogger<ManagedFileReconciliationHostedService> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(Math.Clamp(options.Value.ReconciliationIntervalMinutes, 5, 1440)));
+        while (await timer.WaitForNextTickAsync(stoppingToken))
+        {
+            try
+            {
+                await using var scope = scopeFactory.CreateAsyncScope();
+                var projections = await scope.ServiceProvider.GetRequiredService<IManagedFileProjectionReconciler>().RunAsync(stoppingToken);
+                var deletions = await scope.ServiceProvider.GetRequiredService<IManagedFileDeletionReconciler>().RunAsync(stoppingToken);
+                var tags = await scope.ServiceProvider.GetRequiredService<ICanonicalTagBackgroundReconciler>().RunAsync(stoppingToken);
+                logger.LogInformation("Managed file reconciliation repaired {ProjectionCount} projections, completed {DeletionCount} primary deletions, and reconciled {TagCount} tag rows.", projections, deletions, tags);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "Managed file reconciliation failed closed.");
+            }
+        }
+    }
+}

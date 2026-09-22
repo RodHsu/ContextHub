@@ -94,6 +94,7 @@ public static class DependencyInjection
         if (string.Equals(serviceName, "worker", StringComparison.OrdinalIgnoreCase))
         {
             services.AddHostedService<ManagedObjectReconciliationHostedService>();
+            services.AddHostedService<ManagedFileReconciliationHostedService>();
         }
         services.AddSingleton<ISkillMaterializationStore, FileSystemSkillMaterializationStore>();
         services.AddSingleton<ISkillSandboxSelfTestRunner, FileQueueSkillSandboxSelfTestRunner>();

@@ -4,9 +4,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);1591;SYSLIB5001</NoWarn>
-    <Version>1.1.102</Version>
-    <AssemblyVersion>1.1.16.0</AssemblyVersion>
-    <FileVersion>1.1.16.0</FileVersion>
+    <Version>1.1.103</Version>
+    <AssemblyVersion>1.1.17.0</AssemblyVersion>
+    <FileVersion>1.1.17.0</FileVersion>
     <BuildTimestampUtc Condition="'$(BuildTimestampUtc)' == ''">$([System.DateTimeOffset]::UtcNow.ToString("o"))</BuildTimestampUtc>
     <InformationalVersion>$(Version)</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
