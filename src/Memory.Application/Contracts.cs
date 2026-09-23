@@ -2171,6 +2171,17 @@ public interface IApplicationDbContext
     DbSet<CanonicalTagTelemetryEvent> CanonicalTagTelemetryEvents => throw new NotSupportedException();
     DbSet<CanonicalTagDailyAggregate> CanonicalTagDailyAggregates => throw new NotSupportedException();
     DbSet<CanonicalTagGovernanceProposal> CanonicalTagGovernanceProposals => throw new NotSupportedException();
+    DbSet<Secret> Secrets => throw new NotSupportedException();
+    DbSet<SecretVersion> SecretVersions => throw new NotSupportedException();
+    DbSet<SecretRelation> SecretRelations => throw new NotSupportedException();
+    DbSet<SecretGrant> SecretGrants => throw new NotSupportedException();
+    DbSet<SecretPolicy> SecretPolicies => throw new NotSupportedException();
+    DbSet<SecretLease> SecretLeases => throw new NotSupportedException();
+    DbSet<SecretAccessEvent> SecretAccessEvents => throw new NotSupportedException();
+    DbSet<StepUpAssertion> StepUpAssertions => throw new NotSupportedException();
+    DbSet<StepUpAuthenticationAttempt> StepUpAuthenticationAttempts => throw new NotSupportedException();
+    DbSet<SshCertificateLease> SshCertificateLeases => throw new NotSupportedException();
+    DbSet<SshRevocationRecord> SshRevocationRecords => throw new NotSupportedException();
     DbSet<DiscussionThread> DiscussionThreads { get; }
     DbSet<DiscussionParticipant> DiscussionParticipants { get; }
     DbSet<DiscussionMessage> DiscussionMessages { get; }

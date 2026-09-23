@@ -86,7 +86,8 @@ internal sealed class RequestActorMiddleware(RequestDelegate next)
             tokenActor.AllowedProjectIds,
             true,
             IsServiceActor: false,
-            IsInteractiveUser: true);
+            IsInteractiveUser: true,
+            AuthenticationSessionId: tokenActor.AuthenticationSessionId);
     }
 
     private static ContextHubRequestActor BuildTokenActor(ClaimsPrincipal user)
@@ -94,6 +95,7 @@ internal sealed class RequestActorMiddleware(RequestDelegate next)
         Guid.TryParse(user.FindFirstValue(ContextHubAuthentication.TenantIdClaim), out var tenantId);
         Guid.TryParse(user.FindFirstValue(ContextHubAuthentication.UserIdClaim), out var userId);
         Enum.TryParse<TenantUserRole>(user.FindFirstValue(ClaimTypes.Role), out var role);
+        var authenticationSessionId = user.FindFirstValue(ContextHubAuthentication.TokenIdClaim) ?? string.Empty;
         return new ContextHubRequestActor(
             tenantId == Guid.Empty ? null : tenantId,
             userId == Guid.Empty ? null : userId,
@@ -101,7 +103,8 @@ internal sealed class RequestActorMiddleware(RequestDelegate next)
             role,
             user.FindAll(ContextHubAuthentication.ScopeClaim).Select(x => x.Value).ToArray(),
             user.FindAll(ContextHubAuthentication.ProjectClaim).Select(x => x.Value).ToArray(),
-            true);
+            true,
+            AuthenticationSessionId: authenticationSessionId);
     }
 
     private static bool HasActAsHeaders(HttpContext context)

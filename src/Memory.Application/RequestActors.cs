@@ -11,7 +11,8 @@ public sealed record ContextHubRequestActor(
     IReadOnlyList<string> AllowedProjectIds,
     bool IsAuthenticated,
     bool IsServiceActor = false,
-    bool IsInteractiveUser = false)
+    bool IsInteractiveUser = false,
+    string AuthenticationSessionId = "")
 {
     public static ContextHubRequestActor Unrestricted { get; } = new(
         null,
@@ -57,6 +58,9 @@ public static class SecurityScopes
     public const string AgentExecutionsClaim = "agent-executions:claim";
     public const string AgentExecutionsWrite = "agent-executions:write";
     public const string AgentExecutionsManage = "agent-executions:manage";
+    public const string SecretsRead = "secrets:read";
+    public const string SecretsUse = "secrets:use";
+    public const string SecretsManage = "secrets:manage";
 }
 
 public static class ActorAuthorization

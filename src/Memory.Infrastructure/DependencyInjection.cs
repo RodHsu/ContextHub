@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.Identity;
 using Npgsql;
 using Pgvector;
 using Pgvector.EntityFrameworkCore;
@@ -47,6 +48,9 @@ public static class DependencyInjection
         services.Configure<ManagedObjectStorageOptions>(configuration.GetSection(ManagedObjectStorageOptions.SectionName));
         services.Configure<ManagedFileKeyAuthorityOptions>(configuration.GetSection(ManagedFileKeyAuthorityOptions.SectionName));
         services.Configure<ManagedTransferOptions>(configuration.GetSection(ManagedTransferOptions.SectionName));
+        services.Configure<SecretManagementOptions>(configuration.GetSection(SecretManagementOptions.SectionName));
+        services.Configure<StepUpAuthenticationOptions>(configuration.GetSection(StepUpAuthenticationOptions.SectionName));
+        services.Configure<SecretKeyAuthorityOptions>(configuration.GetSection(SecretKeyAuthorityOptions.SectionName));
         services.Configure<SkillRuntimeOptions>(configuration.GetSection(SkillRuntimeOptions.SectionName));
         services.Configure<SkillSandboxOptions>(configuration.GetSection(SkillSandboxOptions.SectionName));
         services.AddOptions<DockerRuntimeOptions>()
@@ -91,10 +95,15 @@ public static class DependencyInjection
         services.AddSingleton<IProjectArtifactObjectStore, S3CompatibleProjectArtifactObjectStore>();
         services.AddSingleton<IManagedObjectStore, FileSystemManagedObjectStore>();
         services.AddSingleton<IManagedFileKeyAuthority, AesGcmManagedFileKeyAuthority>();
+        services.AddSingleton<ISecretEnvelopeKeyAuthority, SecureFileSecretEnvelopeKeyAuthority>();
+        services.AddSingleton<IPasswordHasher<object>, PasswordHasher<object>>();
+        services.AddSingleton<IPasswordCredentialVerifier, IdentityPasswordCredentialVerifier>();
+        services.AddSingleton<ISshBoundSigner, RsaSshBoundSigner>();
         if (string.Equals(serviceName, "worker", StringComparison.OrdinalIgnoreCase))
         {
             services.AddHostedService<ManagedObjectReconciliationHostedService>();
             services.AddHostedService<ManagedFileReconciliationHostedService>();
+            services.AddHostedService<SecretReconciliationHostedService>();
         }
         services.AddSingleton<ISkillMaterializationStore, FileSystemSkillMaterializationStore>();
         services.AddSingleton<ISkillSandboxSelfTestRunner, FileQueueSkillSandboxSelfTestRunner>();

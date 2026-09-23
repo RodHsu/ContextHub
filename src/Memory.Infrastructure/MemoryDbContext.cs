@@ -88,6 +88,17 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<CanonicalTagTelemetryEvent> CanonicalTagTelemetryEvents => Set<CanonicalTagTelemetryEvent>();
     public DbSet<CanonicalTagDailyAggregate> CanonicalTagDailyAggregates => Set<CanonicalTagDailyAggregate>();
     public DbSet<CanonicalTagGovernanceProposal> CanonicalTagGovernanceProposals => Set<CanonicalTagGovernanceProposal>();
+    public DbSet<Secret> Secrets => Set<Secret>();
+    public DbSet<SecretVersion> SecretVersions => Set<SecretVersion>();
+    public DbSet<SecretRelation> SecretRelations => Set<SecretRelation>();
+    public DbSet<SecretGrant> SecretGrants => Set<SecretGrant>();
+    public DbSet<SecretPolicy> SecretPolicies => Set<SecretPolicy>();
+    public DbSet<SecretLease> SecretLeases => Set<SecretLease>();
+    public DbSet<SecretAccessEvent> SecretAccessEvents => Set<SecretAccessEvent>();
+    public DbSet<StepUpAssertion> StepUpAssertions => Set<StepUpAssertion>();
+    public DbSet<StepUpAuthenticationAttempt> StepUpAuthenticationAttempts => Set<StepUpAuthenticationAttempt>();
+    public DbSet<SshCertificateLease> SshCertificateLeases => Set<SshCertificateLease>();
+    public DbSet<SshRevocationRecord> SshRevocationRecords => Set<SshRevocationRecord>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
     public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
@@ -1902,6 +1913,251 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.VerifiedAt).HasColumnName("verified_at");
             entity.HasIndex(x => new { x.FileAssetId, x.ManagedObjectId, x.RequestId }).IsUnique();
             entity.HasIndex(x => new { x.State, x.RetainUntil });
+        });
+
+        modelBuilder.Entity<Secret>(entity =>
+        {
+            entity.ToTable("secrets");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.Name).HasColumnName("name");
+            entity.Property(x => x.NormalizedName).HasColumnName("normalized_name");
+            entity.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>();
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.CurrentVersionId).HasColumnName("current_version_id");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.RevokedAt).HasColumnName("revoked_at");
+            entity.Property(x => x.CompromisedAt).HasColumnName("compromised_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.NormalizedName }).IsUnique();
+            entity.HasIndex(x => x.CurrentVersionId);
+            entity.HasMany(x => x.Versions).WithOne(x => x.Secret).HasForeignKey(x => x.SecretId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasMany(x => x.Relations).WithOne(x => x.Secret).HasForeignKey(x => x.SecretId).OnDelete(DeleteBehavior.Cascade);
+        });
+        modelBuilder.Entity<SecretVersion>(entity =>
+        {
+            entity.ToTable("secret_versions");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.SecretId).HasColumnName("secret_id");
+            entity.Property(x => x.VersionNumber).HasColumnName("version_number");
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.EnvelopeSchemaVersion).HasColumnName("envelope_schema_version");
+            entity.Property(x => x.EncryptionAlgorithm).HasColumnName("encryption_algorithm");
+            entity.Property(x => x.KeyId).HasColumnName("key_id");
+            entity.Property(x => x.WrappedDek).HasColumnName("wrapped_dek");
+            entity.Property(x => x.WrapNonce).HasColumnName("wrap_nonce");
+            entity.Property(x => x.WrapTag).HasColumnName("wrap_tag");
+            entity.Property(x => x.Ciphertext).HasColumnName("ciphertext");
+            entity.Property(x => x.CiphertextNonce).HasColumnName("ciphertext_nonce");
+            entity.Property(x => x.CiphertextTag).HasColumnName("ciphertext_tag");
+            entity.Property(x => x.CiphertextSha256).HasColumnName("ciphertext_sha256");
+            entity.Property(x => x.PlaintextLength).HasColumnName("plaintext_length");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(x => x.RetiredAt).HasColumnName("retired_at");
+            entity.Property(x => x.RevokedAt).HasColumnName("revoked_at");
+            entity.Property(x => x.CompromisedAt).HasColumnName("compromised_at");
+            entity.HasIndex(x => new { x.SecretId, x.VersionNumber }).IsUnique();
+            entity.HasIndex(x => x.CiphertextSha256);
+        });
+        modelBuilder.Entity<SecretRelation>(entity =>
+        {
+            entity.ToTable("secret_relations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.SecretId).HasColumnName("secret_id");
+            entity.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>();
+            entity.Property(x => x.TargetProjectId).HasColumnName("target_project_id");
+            entity.Property(x => x.TargetId).HasColumnName("target_id");
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.IsStale).HasColumnName("is_stale");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.LastValidatedAt).HasColumnName("last_validated_at");
+            entity.HasIndex(x => new { x.SecretId, x.Kind, x.TargetProjectId, x.TargetId }).IsUnique();
+        });
+        modelBuilder.Entity<SecretGrant>(entity =>
+        {
+            entity.ToTable("secret_grants");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.SecretId).HasColumnName("secret_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.PrincipalId).HasColumnName("principal_id");
+            entity.Property(x => x.Right).HasColumnName("secret_right").HasConversion<string>();
+            entity.Property(x => x.Effect).HasColumnName("effect").HasConversion<string>();
+            entity.Property(x => x.EvidenceRef).HasColumnName("evidence_ref");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.SecretId, x.PrincipalId, x.Right }).IsUnique();
+        });
+        modelBuilder.Entity<SecretPolicy>(entity =>
+        {
+            entity.ToTable("secret_policies");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.SecretId).HasColumnName("secret_id");
+            entity.Property(x => x.PrincipalId).HasColumnName("principal_id");
+            entity.Property(x => x.Right).HasColumnName("secret_right").HasConversion<string>();
+            entity.Property(x => x.Effect).HasColumnName("effect").HasConversion<string>();
+            entity.Property(x => x.EvidenceRef).HasColumnName("evidence_ref");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.SecretId, x.PrincipalId, x.Right }).IsUnique();
+        });
+        modelBuilder.Entity<SecretLease>(entity =>
+        {
+            entity.ToTable("secret_leases");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.SecretId).HasColumnName("secret_id");
+            entity.Property(x => x.SecretVersionId).HasColumnName("secret_version_id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ActorId).HasColumnName("actor_id");
+            entity.Property(x => x.ExecutionId).HasColumnName("execution_id");
+            entity.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>();
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.Target).HasColumnName("target");
+            entity.Property(x => x.CapabilityId).HasColumnName("capability_id");
+            entity.Property(x => x.CapabilityHash).HasColumnName("capability_hash");
+            entity.Property(x => x.AuthorityRevision).HasColumnName("authority_revision");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.MaxUses).HasColumnName("max_uses");
+            entity.Property(x => x.UsedCount).HasColumnName("used_count");
+            entity.Property(x => x.MaxConcurrency).HasColumnName("max_concurrency");
+            entity.Property(x => x.ActiveUses).HasColumnName("active_uses");
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.RevokedAt).HasColumnName("revoked_at");
+            entity.HasIndex(x => x.CapabilityId).IsUnique();
+            entity.HasIndex(x => new { x.SecretId, x.State, x.ExpiresAt });
+        });
+        modelBuilder.Entity<SecretAccessEvent>(entity =>
+        {
+            entity.ToTable("secret_access_events");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.SecretId).HasColumnName("secret_id");
+            entity.Property(x => x.SecretVersionId).HasColumnName("secret_version_id");
+            entity.Property(x => x.LeaseId).HasColumnName("lease_id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ActorId).HasColumnName("actor_id");
+            entity.Property(x => x.Operation).HasColumnName("operation").HasConversion<string>();
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.TargetHash).HasColumnName("target_hash");
+            entity.Property(x => x.RequestId).HasColumnName("request_id");
+            entity.Property(x => x.Allowed).HasColumnName("allowed");
+            entity.Property(x => x.ReasonCode).HasColumnName("reason_code");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.SecretId, x.RequestId }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.ProjectId, x.SecretId, x.CreatedAt });
+        });
+        modelBuilder.Entity<StepUpAssertion>(entity =>
+        {
+            entity.ToTable("step_up_assertions");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.SessionHash).HasColumnName("session_hash");
+            entity.Property(x => x.AuthenticationMethod).HasColumnName("authentication_method").HasConversion<string>();
+            entity.Property(x => x.AssuranceLevel).HasColumnName("assurance_level").HasConversion<string>();
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.ResourceType).HasColumnName("resource_type");
+            entity.Property(x => x.ResourceId).HasColumnName("resource_id");
+            entity.Property(x => x.NonceHash).HasColumnName("nonce_hash");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.MaxUses).HasColumnName("max_uses");
+            entity.Property(x => x.UsedCount).HasColumnName("used_count");
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.AuthTime).HasColumnName("auth_time");
+            entity.Property(x => x.IssuedAt).HasColumnName("issued_at");
+            entity.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(x => x.RevokedAt).HasColumnName("revoked_at");
+            entity.HasIndex(x => new { x.TenantId, x.ActorUserId, x.State, x.ExpiresAt });
+        });
+        modelBuilder.Entity<StepUpAuthenticationAttempt>(entity =>
+        {
+            entity.ToTable("step_up_authentication_attempts");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.SessionHash).HasColumnName("session_hash");
+            entity.Property(x => x.Succeeded).HasColumnName("succeeded");
+            entity.Property(x => x.ReasonCode).HasColumnName("reason_code");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.ActorUserId, x.CreatedAt });
+        });
+        modelBuilder.Entity<SshCertificateLease>(entity =>
+        {
+            entity.ToTable("ssh_certificate_leases");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.SecretLeaseId).HasColumnName("secret_lease_id");
+            entity.Property(x => x.CaSecretId).HasColumnName("ca_secret_id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ActorId).HasColumnName("actor_id");
+            entity.Property(x => x.ExecutionId).HasColumnName("execution_id");
+            entity.Property(x => x.TargetHost).HasColumnName("target_host");
+            entity.Property(x => x.TargetPort).HasColumnName("target_port");
+            entity.Property(x => x.TargetUser).HasColumnName("target_user");
+            entity.Property(x => x.PublicKey).HasColumnName("public_key");
+            entity.Property(x => x.PublicKeyFingerprint).HasColumnName("public_key_fingerprint");
+            entity.Property(x => x.Certificate).HasColumnName("certificate");
+            entity.Property(x => x.CertificateFingerprint).HasColumnName("certificate_fingerprint");
+            entity.Property(x => x.Serial).HasColumnName("serial");
+            entity.Property(x => x.RenewalCount).HasColumnName("renewal_count");
+            entity.Property(x => x.MaxRenewals).HasColumnName("max_renewals");
+            entity.Property(x => x.SessionStartedAt).HasColumnName("session_started_at");
+            entity.Property(x => x.MaxSessionExpiresAt).HasColumnName("max_session_expires_at");
+            entity.Property(x => x.ValidAfter).HasColumnName("valid_after");
+            entity.Property(x => x.ValidBefore).HasColumnName("valid_before");
+            entity.Property(x => x.RenewalEligibleAt).HasColumnName("renewal_eligible_at");
+            entity.Property(x => x.AuthorityRevision).HasColumnName("authority_revision");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            entity.Property(x => x.RevokedAt).HasColumnName("revoked_at");
+            entity.HasIndex(x => x.Serial).IsUnique();
+            entity.HasIndex(x => new { x.SecretLeaseId, x.State, x.ValidBefore });
+        });
+        modelBuilder.Entity<SshRevocationRecord>(entity =>
+        {
+            entity.ToTable("ssh_revocation_records");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.SshCertificateLeaseId).HasColumnName("ssh_certificate_lease_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.Serial).HasColumnName("serial");
+            entity.Property(x => x.CertificateFingerprint).HasColumnName("certificate_fingerprint");
+            entity.Property(x => x.ReasonCode).HasColumnName("reason_code");
+            entity.Property(x => x.KrlRequired).HasColumnName("krl_required");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.ReconciledAt).HasColumnName("reconciled_at");
+            entity.HasIndex(x => x.SshCertificateLeaseId).IsUnique();
+            entity.HasIndex(x => new { x.KrlRequired, x.ReconciledAt });
         });
     }
 

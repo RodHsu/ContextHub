@@ -2582,6 +2582,11 @@ public static class DependencyInjection
         services.AddScoped<ICanonicalTagGovernanceService, CanonicalTagGovernanceService>();
         services.AddScoped<ICanonicalTagBackgroundReconciler, CanonicalTagBackgroundReconciler>();
         services.AddSingleton<IHighAssuranceApprovalVerifier, DenyHighAssuranceApprovalVerifier>();
+        services.AddScoped<IStepUpAuthenticationService, StepUpAuthenticationService>();
+        services.AddScoped<ISecretManagementService, SecretManagementService>();
+        services.AddScoped<ISshCertificateService, SshCertificateService>();
+        services.AddScoped<ISecretReconciliationService, SecretReconciliationService>();
+        services.AddSingleton<ISshCertificateIssuer, DisabledSshCertificateIssuer>();
         services.AddScoped<IRequestActorAccessor, RequestActorAccessor>();
         services.AddScoped<IChunkingService, ChunkingService>();
         services.AddScoped<IContextHubBootstrapService, ContextHubBootstrapService>();

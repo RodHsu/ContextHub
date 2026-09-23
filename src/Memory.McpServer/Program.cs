@@ -2164,6 +2164,126 @@ files.MapPost("/{fileId:guid}/delete", async (Guid fileId, FileDeleteBody reques
 })
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 
+var stepUpAuthentication = app.MapGroup("/api/step-up");
+stepUpAuthentication.RequireAuthIfEnabled(requireAuthentication);
+stepUpAuthentication.MapPost("/password", async (PasswordStepUpBody request, IStepUpAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await service.CreatePasswordAssertionAsync(new PasswordStepUpRequest(
+            request.Password, request.Purpose, request.ResourceType, request.ResourceId, request.MaxUses), cancellationToken));
+    }
+    catch (UnauthorizedAccessException)
+    {
+        return Results.Json(new { outcome = StepUpRequirementOutcome.RequiresStepUp, requiredAssurance = AssuranceLevel.Aal1, reasonCode = "PasswordVerificationFailed" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+});
+
+var secrets = app.MapGroup("/api/secrets");
+secrets.RequireAuthIfEnabled(requireAuthentication);
+secrets.MapGet(string.Empty, async (string projectId, ISecretManagementService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.ListAsync(projectId, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecretsRead);
+secrets.MapPost(string.Empty, async (SecretCreateBody request, ISecretManagementService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await service.CreateAsync(new CreateSecretRequest(request.ProjectId, request.Name, request.Kind, request.StepUp), cancellationToken));
+    }
+    catch (StepUpRequiredException exception)
+    {
+        return ToStepUpResult(exception.Decision);
+    }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecretsManage);
+secrets.MapPost("/{secretId:guid}/versions", async (
+    Guid secretId,
+    HttpRequest request,
+    ISecretManagementService service,
+    IOptions<SecretManagementOptions> secretOptions,
+    CancellationToken cancellationToken) =>
+{
+    if (!request.ContentLength.HasValue || request.ContentLength <= 0 || request.ContentLength > secretOptions.Value.NormalizedMaxSecretBytes)
+        return Results.BadRequest(new { error = "Secret Content-Length is required and exceeds no configured boundary." });
+    var material = new byte[checked((int)request.ContentLength.Value)];
+    try
+    {
+        await request.Body.ReadExactlyAsync(material, cancellationToken);
+        if (await request.Body.ReadAsync(new byte[1], cancellationToken) != 0) return Results.BadRequest(new { error = "Secret body exceeds its declared boundary." });
+        var result = await service.AddVersionAsync(new AddSecretVersionRequest(
+            secretId,
+            material,
+            RequireLongHeader(request, "X-Expected-Secret-Revision"),
+            RequireTransferHeader(request, "X-Request-Id"),
+            TryReadStepUpProof(request),
+            request.Headers["X-External-Approval"].FirstOrDefault(),
+            TryReadDateTimeHeader(request, "X-Secret-Expires-At")), cancellationToken);
+        CryptographicOperations.ZeroMemory(material);
+        material = [];
+        return Results.Ok(result);
+    }
+    catch (StepUpRequiredException exception)
+    {
+        return ToStepUpResult(exception.Decision);
+    }
+    finally
+    {
+        if (material.Length > 0) CryptographicOperations.ZeroMemory(material);
+    }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecretsManage);
+secrets.MapPost("/{secretId:guid}/leases", async (Guid secretId, SecretLeaseCreateBody request, ISecretManagementService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await service.CreateLeaseAsync(new CreateSecretLeaseRequest(secretId, request.Kind, request.Purpose, request.Target,
+            request.RequestId, request.ExpectedSecretRevision, request.MaxUses, request.MaxConcurrency,
+            request.TtlSeconds.HasValue ? TimeSpan.FromSeconds(request.TtlSeconds.Value) : null, request.ExecutionId, request.StepUp), cancellationToken));
+    }
+    catch (StepUpRequiredException exception)
+    {
+        return ToStepUpResult(exception.Decision);
+    }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecretsUse);
+secrets.MapPost("/{secretId:guid}/revoke", async (Guid secretId, SecretRevokeBody request, ISecretManagementService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.RevokeAsync(secretId, request.ExpectedRevision, request.ExternalApprovalReference, request.RequestId, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecretsManage);
+secrets.MapPost("/ssh/sign-authentication", async (SshSignAuthenticationBody request, ISecretManagementService service, CancellationToken cancellationToken) =>
+{
+    byte[] challenge;
+    try { challenge = Convert.FromBase64String(request.ChallengeBase64); }
+    catch (FormatException) { return Results.BadRequest(new { error = "ChallengeBase64 is invalid." }); }
+    try
+    {
+        var result = await service.SignSshAuthenticationAsync(new SshSignerRequest(request.LeaseId, request.Capability,
+            request.ExpectedRevision, request.RequestId, request.SessionId, request.Host, request.Port, request.User, challenge), cancellationToken);
+        return Results.Ok(new { signatureBase64 = Convert.ToBase64String(result.Signature), result.Algorithm, result.Lease });
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(challenge);
+    }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecretsUse);
+
+var sshCertificates = app.MapGroup("/api/ssh-certificates");
+sshCertificates.RequireAuthIfEnabled(requireAuthentication);
+sshCertificates.MapPost(string.Empty, async (SshCertificateIssueBody request, ISshCertificateService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await service.IssueAsync(new IssueSshCertificateRequest(request.CaSecretId, request.PublicKey, request.TargetHost,
+            request.TargetPort, request.TargetUser, request.Purpose, request.RequestId, request.ExpectedSecretRevision, request.ExecutionId, request.StepUp), cancellationToken));
+    }
+    catch (StepUpRequiredException exception)
+    {
+        return ToStepUpResult(exception.Decision);
+    }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecretsUse);
+sshCertificates.MapPost("/{certificateLeaseId:guid}/renew", async (Guid certificateLeaseId, SshCertificateRenewBody request, ISshCertificateService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.RenewAsync(new RenewSshCertificateRequest(certificateLeaseId, request.RenewalCapability, request.ExpectedRevision, request.RequestId), cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecretsUse);
+sshCertificates.MapPost("/{certificateLeaseId:guid}/revoke", async (Guid certificateLeaseId, SshCertificateRevokeBody request, ISshCertificateService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.RevokeAsync(certificateLeaseId, request.ExpectedRevision, request.ExternalApprovalReference, request.Reason, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecretsManage);
+
 var canonicalTags = app.MapGroup("/api/canonical-tags");
 canonicalTags.RequireAuthIfEnabled(requireAuthentication);
 canonicalTags.MapPost("/telemetry", async (RecordTagTelemetryRequest request, ICanonicalTagGovernanceService service, CancellationToken cancellationToken) =>
@@ -2400,6 +2520,38 @@ static void AddTrustedForwarders(ForwardedHeadersOptions options, IConfiguration
     }
 }
 
+static IResult ToStepUpResult(StepUpAuthorizationResult decision)
+    => Results.Json(decision, statusCode: decision.Outcome switch
+    {
+        StepUpRequirementOutcome.RequiresStepUp => StatusCodes.Status428PreconditionRequired,
+        StepUpRequirementOutcome.RequiresExternalApproval => StatusCodes.Status409Conflict,
+        StepUpRequirementOutcome.Disabled => StatusCodes.Status403Forbidden,
+        _ => StatusCodes.Status200OK
+    });
+
+static long RequireLongHeader(HttpRequest request, string name)
+    => long.TryParse(request.Headers[name].FirstOrDefault(), out var value) && value >= 0
+        ? value
+        : throw new BadHttpRequestException($"{name} is required and must be a non-negative integer.");
+
+static DateTimeOffset? TryReadDateTimeHeader(HttpRequest request, string name)
+    => string.IsNullOrWhiteSpace(request.Headers[name].FirstOrDefault())
+        ? null
+        : DateTimeOffset.TryParse(request.Headers[name].FirstOrDefault(), out var value)
+            ? value
+            : throw new BadHttpRequestException($"{name} must be an ISO 8601 timestamp.");
+
+static StepUpProof? TryReadStepUpProof(HttpRequest request)
+{
+    var assertion = request.Headers["X-Step-Up-Assertion-Id"].FirstOrDefault();
+    if (string.IsNullOrWhiteSpace(assertion)) return null;
+    if (!Guid.TryParse(assertion, out var assertionId)) throw new BadHttpRequestException("X-Step-Up-Assertion-Id is invalid.");
+    return new StepUpProof(
+        assertionId,
+        RequireTransferHeader(request, "X-Step-Up-Nonce"),
+        RequireLongHeader(request, "X-Step-Up-Revision"));
+}
+
 static HashSet<string> ResolveAllowedOrigins(IEnumerable<string>? configuredValues)
 {
     var origins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2557,6 +2709,14 @@ internal sealed record QuarantineReleaseBody(string Reason, string ExternalAppro
 internal sealed record FileDeleteBody(string Reason, string RequestId);
 internal sealed record CanonicalTagMergeBody(Guid SourceId, Guid TargetId, long ExpectedSourceRevision);
 internal sealed record CanonicalTagSplitBody(Guid SourceId, IReadOnlyList<string> CandidateResourceIds);
+internal sealed record PasswordStepUpBody(string Password, string Purpose, string? ResourceType = null, string? ResourceId = null, int MaxUses = 1);
+internal sealed record SecretCreateBody(string ProjectId, string Name, SecretKind Kind, StepUpProof StepUp);
+internal sealed record SecretLeaseCreateBody(SecretLeaseKind Kind, string Purpose, string Target, string RequestId, long ExpectedSecretRevision, int MaxUses, int MaxConcurrency, int? TtlSeconds, Guid? ExecutionId, StepUpProof StepUp);
+internal sealed record SecretRevokeBody(long ExpectedRevision, string ExternalApprovalReference, string RequestId);
+internal sealed record SshSignAuthenticationBody(Guid LeaseId, string Capability, long ExpectedRevision, string RequestId, string SessionId, string Host, int Port, string User, string ChallengeBase64);
+internal sealed record SshCertificateIssueBody(Guid CaSecretId, string PublicKey, string TargetHost, int TargetPort, string TargetUser, string Purpose, string RequestId, long ExpectedSecretRevision, Guid? ExecutionId, StepUpProof StepUp);
+internal sealed record SshCertificateRenewBody(string RenewalCapability, long ExpectedRevision, string RequestId);
+internal sealed record SshCertificateRevokeBody(long ExpectedRevision, string ExternalApprovalReference, string Reason);
 
 internal sealed record TenantProjectGrantUpsertBody(
     bool CanRead = true,

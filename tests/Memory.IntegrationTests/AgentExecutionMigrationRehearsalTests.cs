@@ -188,6 +188,64 @@ public sealed class AgentExecutionMigrationRehearsalTests
     }
 
     [DockerRequiredFact]
+    public async Task Migration_048_should_upgrade_a_047_shaped_database_and_replay_idempotently_without_plaintext_columns()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true)
+            .WithDatabase("contexthub")
+            .WithUsername("contexthub")
+            .WithPassword("contexthub")
+            .Build();
+        await postgres.StartAsync();
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "047_managed_files_dlp_tag_governance.sql");
+
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '048_secrets_ssh_password_step_up.sql';")).Should().Be(1);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name IN
+                ('secrets', 'secret_versions', 'secret_relations', 'secret_grants', 'secret_policies', 'secret_leases',
+                 'secret_access_events', 'step_up_assertions', 'step_up_authentication_attempts', 'ssh_certificate_leases', 'ssh_revocation_records');
+            """)).Should().Be(11);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name IN ('secrets', 'secret_versions', 'secret_leases', 'secret_access_events', 'step_up_assertions')
+              AND column_name ~ '(plaintext$|material|password|private_key|kek|session_id)';
+            """)).Should().Be(0, "secret material, passwords, KEKs, private keys, and raw session identifiers must not have persistence columns");
+
+        var secretId = Guid.NewGuid();
+        var versionId = Guid.NewGuid();
+        await ExecuteAsync(connection, """
+            INSERT INTO secrets
+                (id, project_id, name, normalized_name, kind, state, revision, created_at, updated_at)
+            VALUES (@secret_id, 'ContextHub', 'migration-secret', 'migration-secret', 'ApiToken', 'Active', 1, NOW(), NOW());
+            INSERT INTO secret_versions
+                (id, secret_id, version_number, state, envelope_schema_version, encryption_algorithm, key_id,
+                 wrapped_dek, wrap_nonce, wrap_tag, ciphertext, ciphertext_nonce, ciphertext_tag, ciphertext_sha256,
+                 plaintext_length, created_at)
+            VALUES (@version_id, @secret_id, 1, 'Active', 1, 'AES-256-GCM', 'kek-v1',
+                    decode(repeat('11', 32), 'hex'), decode(repeat('22', 12), 'hex'), decode(repeat('33', 16), 'hex'),
+                    decode('aabbccdd', 'hex'), decode(repeat('44', 12), 'hex'), decode(repeat('55', 16), 'hex'),
+                    repeat('a', 64), 4, NOW());
+            UPDATE secrets SET current_version_id = @version_id, revision = 2 WHERE id = @secret_id;
+            """,
+            new NpgsqlParameter<Guid>("secret_id", secretId),
+            new NpgsqlParameter<Guid>("version_id", versionId));
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM secrets WHERE id = @secret_id AND current_version_id = @version_id;",
+            new NpgsqlParameter<Guid>("secret_id", secretId), new NpgsqlParameter<Guid>("version_id", versionId))).Should().Be(1);
+
+        await connection.CloseAsync();
+        await connection.OpenAsync();
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '048_secrets_ssh_password_step_up.sql';")).Should().Be(1);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM secrets WHERE id = @secret_id;", new NpgsqlParameter<Guid>("secret_id", secretId))).Should().Be(1);
+    }
+
+    [DockerRequiredFact]
     public async Task Definition_state_migration_should_fail_closed_on_conflicting_compatibility_tags()
     {
         await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")

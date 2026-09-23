@@ -86,6 +86,20 @@ x-managed-storage-config: &managed-storage-config
   ManagedFileKeyAuthority__CurrentKeyId: ${MANAGED_FILE_KEK_CURRENT_ID:-}
   ManagedFileKeyAuthority__Keys__v1: ${MANAGED_FILE_KEK_V1_BASE64:-}
   ManagedFileKeyAuthority__Keys__v2: ${MANAGED_FILE_KEK_V2_BASE64:-}
+  SecretKeyAuthority__CurrentKeyId: ${SECRET_KEK_CURRENT_ID:-}
+  SecretKeyAuthority__KeyFiles__v1: ${SECRET_KEK_V1_FILE:-}
+  SecretKeyAuthority__KeyFiles__v2: ${SECRET_KEK_V2_FILE:-}
+  SecretManagement__MaxSecretBytes: ${SECRET_MAX_BYTES:-1048576}
+  SecretManagement__DefaultLeaseMinutes: ${SECRET_DEFAULT_LEASE_MINUTES:-10}
+  SecretManagement__MaximumLeaseMinutes: ${SECRET_MAX_LEASE_MINUTES:-30}
+  SecretManagement__ReconciliationIntervalMinutes: ${SECRET_RECONCILIATION_MINUTES:-15}
+  SecretManagement__SshCertificateMinutes: ${SSH_CERTIFICATE_TTL_MINUTES:-10}
+  SecretManagement__SshRenewalWindowSeconds: ${SSH_RENEWAL_WINDOW_SECONDS:-120}
+  SecretManagement__SshMaxSessionMinutes: ${SSH_MAX_SESSION_MINUTES:-60}
+  SecretManagement__SshMaxRenewals: ${SSH_MAX_RENEWALS:-5}
+  StepUpAuthentication__AssertionTtlMinutes: ${STEP_UP_ASSERTION_TTL_MINUTES:-5}
+  StepUpAuthentication__FailureWindowMinutes: ${STEP_UP_FAILURE_WINDOW_MINUTES:-15}
+  StepUpAuthentication__MaxFailuresPerWindow: ${STEP_UP_MAX_FAILURES:-5}
   ManagedTransfers__ChunkBytes: ${MANAGED_TRANSFER_CHUNK_BYTES:-4194304}
   ManagedTransfers__MaxObjectBytes: ${MANAGED_TRANSFER_MAX_OBJECT_BYTES:-5368709120}
   ManagedTransfers__MaxRangeBytes: ${MANAGED_TRANSFER_MAX_RANGE_BYTES:-16777216}
