@@ -246,6 +246,54 @@ public sealed class AgentExecutionMigrationRehearsalTests
     }
 
     [DockerRequiredFact]
+    public async Task Migration_049_should_upgrade_a_048_shaped_database_and_replay_idempotently_without_factor_secrets()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true)
+            .WithDatabase("contexthub")
+            .WithUsername("contexthub")
+            .WithPassword("contexthub")
+            .Build();
+        await postgres.StartAsync();
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "048_secrets_ssh_password_step_up.sql");
+
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '049_mfa_totp_webauthn.sql';")).Should().Be(1);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name IN
+                ('mfa_authority_states', 'totp_factors', 'mfa_recovery_codes', 'webauthn_credentials', 'webauthn_ceremonies', 'mfa_security_events');
+            """)).Should().Be(6);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name IN ('totp_factors', 'mfa_recovery_codes', 'webauthn_credentials', 'webauthn_ceremonies', 'mfa_security_events')
+              AND column_name ~ '(seed|secret|private_key|recovery_code$|raw_session|factor_material)';
+            """)).Should().Be(2, "only opaque foreign-key identifiers seed_secret_id and seed_secret_version_id may mention seed; no factor plaintext column may exist");
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM pg_constraint
+            WHERE conname IN ('ck_step_up_assertions_method', 'ck_step_up_assertions_assurance', 'ck_step_up_assertions_mfa_authority',
+                'ck_mfa_authority_states_revision', 'ck_totp_factors_authority', 'ck_webauthn_ceremonies_authority',
+                'ck_webauthn_ceremonies_hashes', 'ck_mfa_recovery_code_crypto');
+            """)).Should().Be(8);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_schema = 'public' AND
+                ((table_name = 'step_up_assertions' AND column_name IN ('mfa_authority_revision', 'mfa_policy_revision')) OR
+                 (table_name = 'totp_factors' AND column_name IN ('authority_revision_at_start', 'policy_revision_at_start', 'required_assurance_at_start', 'authorization_assertion_id', 'authorization_assertion_revision')) OR
+                 (table_name = 'webauthn_ceremonies' AND column_name IN ('authority_revision_at_start', 'policy_revision_at_start', 'required_assurance_at_start', 'authorization_assertion_id', 'authorization_assertion_revision')));
+            """)).Should().Be(12);
+
+        await connection.CloseAsync();
+        await connection.OpenAsync();
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '049_mfa_totp_webauthn.sql';")).Should().Be(1);
+    }
+
+    [DockerRequiredFact]
     public async Task Definition_state_migration_should_fail_closed_on_conflicting_compatibility_tags()
     {
         await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")

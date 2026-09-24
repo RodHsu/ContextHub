@@ -74,8 +74,8 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
         var lockedCorrectPassword = () => service.CreatePasswordAssertionAsync(new PasswordStepUpRequest(
             "correct-horse-battery-staple", "secret:create", "Project", "ContextHub"), CancellationToken.None);
         await lockedCorrectPassword.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*locked*");
-        StepUpRiskPolicy.Describe(StepUpOperationClass.CredentialRotate).Outcome.Should().Be(StepUpRequirementOutcome.RequiresExternalApproval);
-        StepUpRiskPolicy.Describe(StepUpOperationClass.KekDestructiveOperation).Outcome.Should().Be(StepUpRequirementOutcome.Disabled);
+        StepUpRiskPolicy.Describe(StepUpOperationClass.CredentialRotate).Outcome.Should().Be(StepUpRequirementOutcome.RequiresStepUp);
+        StepUpRiskPolicy.Describe(StepUpOperationClass.KekDestructiveOperation).Outcome.Should().Be(StepUpRequirementOutcome.RequiresStepUp);
     }
 
     [DockerRequiredFact]
@@ -258,6 +258,8 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
         public Task<StepUpAssertionResult> CreatePasswordAssertionAsync(PasswordStepUpRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<StepUpAuthorizationResult> AuthorizeAsync(StepUpOperationClass operation, string purpose, string? resourceType, string? resourceId, StepUpProof? proof, CancellationToken cancellationToken)
             => Task.FromResult(new StepUpAuthorizationResult(StepUpRequirementOutcome.Allowed, AssuranceLevel.Aal1, "Test"));
+        public Task<StepUpAuthorizationResult> AuthorizeRequiredAssuranceAsync(AssuranceLevel requiredAssurance, string purpose, string? resourceType, string? resourceId, StepUpProof? proof, CancellationToken cancellationToken)
+            => Task.FromResult(new StepUpAuthorizationResult(StepUpRequirementOutcome.Allowed, requiredAssurance, "Test"));
     }
 
     private sealed class AllowApproval : IHighAssuranceApprovalVerifier

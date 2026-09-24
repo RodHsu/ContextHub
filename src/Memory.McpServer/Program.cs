@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 LocalDotEnvConfiguration.AddFallbacks(
@@ -2178,6 +2179,66 @@ stepUpAuthentication.MapPost("/password", async (PasswordStepUpBody request, ISt
         return Results.Json(new { outcome = StepUpRequirementOutcome.RequiresStepUp, requiredAssurance = AssuranceLevel.Aal1, reasonCode = "PasswordVerificationFailed" }, statusCode: StatusCodes.Status401Unauthorized);
     }
 });
+stepUpAuthentication.MapPost("/totp/enrollment", async (TotpEnrollmentStartBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.StartTotpEnrollmentAsync(new TotpEnrollmentStartRequest(request.StepUp), cancellationToken)); }
+    catch (StepUpRequiredException exception) { return ToStepUpResult(exception.Decision); }
+});
+stepUpAuthentication.MapPost("/totp/enrollment/confirm", async (TotpEnrollmentConfirmBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.ConfirmTotpEnrollmentAsync(new TotpEnrollmentConfirmRequest(request.FactorId, request.Code, request.Purpose, request.ResourceType, request.ResourceId, request.MaxUses), cancellationToken)); }
+    catch (MfaAuthorityStaleException exception) { return MfaAuthorityFailure(exception); }
+    catch (UnauthorizedAccessException) { return MfaFailure(AssuranceLevel.Aal2, "TotpVerificationFailed"); }
+});
+stepUpAuthentication.MapPost("/totp/verify", async (TotpVerifyBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.VerifyTotpAsync(new TotpVerificationRequest(request.Code, request.Purpose, request.ResourceType, request.ResourceId, request.MaxUses), cancellationToken)); }
+    catch (UnauthorizedAccessException) { return MfaFailure(AssuranceLevel.Aal2, "TotpVerificationFailed"); }
+});
+stepUpAuthentication.MapPost("/recovery-code/verify", async (RecoveryCodeVerifyBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.VerifyRecoveryCodeAsync(new RecoveryCodeVerificationRequest(request.RecoveryCode, request.Purpose, request.ResourceType, request.ResourceId, request.MaxUses), cancellationToken)); }
+    catch (UnauthorizedAccessException) { return MfaFailure(AssuranceLevel.Aal2, "RecoveryVerificationFailed"); }
+});
+stepUpAuthentication.MapPost("/recovery-code/regenerate", async (RecoveryCodeRegenerateBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.RegenerateRecoveryCodesAsync(new RecoveryCodeRegenerationRequest(request.FactorId, request.StepUp), cancellationToken)); }
+    catch (StepUpRequiredException exception) { return ToStepUpResult(exception.Decision); }
+});
+stepUpAuthentication.MapPost("/webauthn/registration/options", async (WebAuthnRegistrationStartBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.StartWebAuthnRegistrationAsync(new WebAuthnRegistrationStartRequest(request.Kind, request.StepUp), cancellationToken);
+        return Results.Ok(new { result.CeremonyId, options = JsonSerializer.Deserialize<JsonElement>(result.OptionsJson), result.ExpiresAt });
+    }
+    catch (StepUpRequiredException exception) { return ToStepUpResult(exception.Decision); }
+});
+stepUpAuthentication.MapPost("/webauthn/registration/complete", async (WebAuthnCompleteBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.CompleteWebAuthnRegistrationAsync(new WebAuthnRegistrationCompleteRequest(request.CeremonyId, request.Credential.GetRawText()), cancellationToken)); }
+    catch (MfaAuthorityStaleException exception) { return MfaAuthorityFailure(exception); }
+    catch (UnauthorizedAccessException) { return MfaFailure(AssuranceLevel.Aal3, "WebAuthnRegistrationFailed"); }
+});
+stepUpAuthentication.MapPost("/webauthn/authentication/options", async (WebAuthnAuthenticationStartBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await service.StartWebAuthnAuthenticationAsync(new WebAuthnAuthenticationStartRequest(request.Purpose, request.ResourceType, request.ResourceId), cancellationToken);
+        return Results.Ok(new { result.CeremonyId, options = JsonSerializer.Deserialize<JsonElement>(result.OptionsJson), result.ExpiresAt });
+    }
+    catch (UnauthorizedAccessException) { return MfaFailure(AssuranceLevel.Aal3, "WebAuthnUnavailable"); }
+});
+stepUpAuthentication.MapPost("/webauthn/authentication/complete", async (WebAuthnAuthenticationCompleteBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.CompleteWebAuthnAuthenticationAsync(new WebAuthnAuthenticationCompleteRequest(request.CeremonyId, request.Credential.GetRawText(), request.MaxUses), cancellationToken)); }
+    catch (MfaAuthorityStaleException exception) { return MfaAuthorityFailure(exception); }
+    catch (UnauthorizedAccessException) { return MfaFailure(AssuranceLevel.Aal3, "WebAuthnAuthenticationFailed"); }
+});
+stepUpAuthentication.MapPost("/totp/{factorId:guid}/remove", async (Guid factorId, FactorRemovalBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.RemoveTotpFactorAsync(new FactorRemovalRequest(factorId, request.StepUp, request.ExternalApprovalReference, request.Reason), cancellationToken)));
+stepUpAuthentication.MapPost("/webauthn/{credentialId:guid}/remove", async (Guid credentialId, FactorRemovalBody request, IMultiFactorAuthenticationService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.RemoveWebAuthnCredentialAsync(new FactorRemovalRequest(credentialId, request.StepUp, request.ExternalApprovalReference, request.Reason), cancellationToken)));
 
 var secrets = app.MapGroup("/api/secrets");
 secrets.RequireAuthIfEnabled(requireAuthentication);
@@ -2529,6 +2590,14 @@ static IResult ToStepUpResult(StepUpAuthorizationResult decision)
         _ => StatusCodes.Status200OK
     });
 
+static IResult MfaFailure(AssuranceLevel requiredAssurance, string reasonCode)
+    => Results.Json(new StepUpAuthorizationResult(StepUpRequirementOutcome.RequiresStepUp, requiredAssurance, reasonCode),
+        statusCode: StatusCodes.Status401Unauthorized);
+
+static IResult MfaAuthorityFailure(MfaAuthorityStaleException exception)
+    => Results.Json(new StepUpAuthorizationResult(StepUpRequirementOutcome.RequiresStepUp, exception.RequiredAssurance, exception.ReasonCode),
+        statusCode: StatusCodes.Status428PreconditionRequired);
+
 static long RequireLongHeader(HttpRequest request, string name)
     => long.TryParse(request.Headers[name].FirstOrDefault(), out var value) && value >= 0
         ? value
@@ -2710,6 +2779,16 @@ internal sealed record FileDeleteBody(string Reason, string RequestId);
 internal sealed record CanonicalTagMergeBody(Guid SourceId, Guid TargetId, long ExpectedSourceRevision);
 internal sealed record CanonicalTagSplitBody(Guid SourceId, IReadOnlyList<string> CandidateResourceIds);
 internal sealed record PasswordStepUpBody(string Password, string Purpose, string? ResourceType = null, string? ResourceId = null, int MaxUses = 1);
+internal sealed record TotpEnrollmentStartBody(StepUpProof StepUp);
+internal sealed record TotpEnrollmentConfirmBody(Guid FactorId, string Code, string Purpose, string? ResourceType = null, string? ResourceId = null, int MaxUses = 1);
+internal sealed record TotpVerifyBody(string Code, string Purpose, string? ResourceType = null, string? ResourceId = null, int MaxUses = 1);
+internal sealed record RecoveryCodeVerifyBody(string RecoveryCode, string Purpose, string? ResourceType = null, string? ResourceId = null, int MaxUses = 1);
+internal sealed record RecoveryCodeRegenerateBody(Guid FactorId, StepUpProof StepUp);
+internal sealed record WebAuthnRegistrationStartBody(WebAuthnCredentialKind Kind, StepUpProof StepUp);
+internal sealed record WebAuthnCompleteBody(Guid CeremonyId, JsonElement Credential);
+internal sealed record WebAuthnAuthenticationStartBody(string Purpose, string? ResourceType = null, string? ResourceId = null);
+internal sealed record WebAuthnAuthenticationCompleteBody(Guid CeremonyId, JsonElement Credential, int MaxUses = 1);
+internal sealed record FactorRemovalBody(StepUpProof? StepUp, string? ExternalApprovalReference, string Reason);
 internal sealed record SecretCreateBody(string ProjectId, string Name, SecretKind Kind, StepUpProof StepUp);
 internal sealed record SecretLeaseCreateBody(SecretLeaseKind Kind, string Purpose, string Target, string RequestId, long ExpectedSecretRevision, int MaxUses, int MaxConcurrency, int? TtlSeconds, Guid? ExecutionId, StepUpProof StepUp);
 internal sealed record SecretRevokeBody(long ExpectedRevision, string ExternalApprovalReference, string RequestId);

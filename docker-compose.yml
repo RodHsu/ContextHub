@@ -100,6 +100,12 @@ x-managed-storage-config: &managed-storage-config
   StepUpAuthentication__AssertionTtlMinutes: ${STEP_UP_ASSERTION_TTL_MINUTES:-5}
   StepUpAuthentication__FailureWindowMinutes: ${STEP_UP_FAILURE_WINDOW_MINUTES:-15}
   StepUpAuthentication__MaxFailuresPerWindow: ${STEP_UP_MAX_FAILURES:-5}
+  StepUpAuthentication__TotpIssuer: ${MFA_TOTP_ISSUER:-ContextHub}
+  StepUpAuthentication__TotpAllowedDriftSteps: ${MFA_TOTP_ALLOWED_DRIFT_STEPS:-1}
+  StepUpAuthentication__MfaPolicyRevision: ${MFA_POLICY_REVISION:-wave4b-v1}
+  StepUpAuthentication__WebAuthnRpId: ${WEBAUTHN_RP_ID:-}
+  StepUpAuthentication__WebAuthnRpName: ${WEBAUTHN_RP_NAME:-ContextHub}
+  StepUpAuthentication__WebAuthnOrigins__0: ${WEBAUTHN_ORIGIN:-}
   ManagedTransfers__ChunkBytes: ${MANAGED_TRANSFER_CHUNK_BYTES:-4194304}
   ManagedTransfers__MaxObjectBytes: ${MANAGED_TRANSFER_MAX_OBJECT_BYTES:-5368709120}
   ManagedTransfers__MaxRangeBytes: ${MANAGED_TRANSFER_MAX_RANGE_BYTES:-16777216}

@@ -97,6 +97,12 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<SecretAccessEvent> SecretAccessEvents => Set<SecretAccessEvent>();
     public DbSet<StepUpAssertion> StepUpAssertions => Set<StepUpAssertion>();
     public DbSet<StepUpAuthenticationAttempt> StepUpAuthenticationAttempts => Set<StepUpAuthenticationAttempt>();
+    public DbSet<MfaAuthorityState> MfaAuthorityStates => Set<MfaAuthorityState>();
+    public DbSet<TotpFactor> TotpFactors => Set<TotpFactor>();
+    public DbSet<MfaRecoveryCode> MfaRecoveryCodes => Set<MfaRecoveryCode>();
+    public DbSet<WebAuthnCredential> WebAuthnCredentials => Set<WebAuthnCredential>();
+    public DbSet<WebAuthnCeremony> WebAuthnCeremonies => Set<WebAuthnCeremony>();
+    public DbSet<MfaSecurityEvent> MfaSecurityEvents => Set<MfaSecurityEvent>();
     public DbSet<SshCertificateLease> SshCertificateLeases => Set<SshCertificateLease>();
     public DbSet<SshRevocationRecord> SshRevocationRecords => Set<SshRevocationRecord>();
     public DbSet<DiscussionThread> DiscussionThreads => Set<DiscussionThread>();
@@ -2084,6 +2090,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.ResourceType).HasColumnName("resource_type");
             entity.Property(x => x.ResourceId).HasColumnName("resource_id");
             entity.Property(x => x.NonceHash).HasColumnName("nonce_hash");
+            entity.Property(x => x.MfaAuthorityRevision).HasColumnName("mfa_authority_revision");
+            entity.Property(x => x.MfaPolicyRevision).HasColumnName("mfa_policy_revision");
             entity.Property(x => x.Revision).HasColumnName("revision");
             entity.Property(x => x.MaxUses).HasColumnName("max_uses");
             entity.Property(x => x.UsedCount).HasColumnName("used_count");
@@ -2104,6 +2112,126 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.SessionHash).HasColumnName("session_hash");
             entity.Property(x => x.Succeeded).HasColumnName("succeeded");
             entity.Property(x => x.ReasonCode).HasColumnName("reason_code");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.ActorUserId, x.CreatedAt });
+        });
+        modelBuilder.Entity<MfaAuthorityState>(entity =>
+        {
+            entity.ToTable("mfa_authority_states");
+            entity.HasKey(x => new { x.TenantId, x.ActorUserId });
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.Revision).HasColumnName("revision").IsConcurrencyToken();
+            entity.Property(x => x.PolicyRevision).HasColumnName("policy_revision");
+            entity.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+        });
+        modelBuilder.Entity<TotpFactor>(entity =>
+        {
+            entity.ToTable("totp_factors");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.SeedSecretId).HasColumnName("seed_secret_id");
+            entity.Property(x => x.SeedSecretVersionId).HasColumnName("seed_secret_version_id");
+            entity.Property(x => x.Issuer).HasColumnName("issuer");
+            entity.Property(x => x.AccountName).HasColumnName("account_name");
+            entity.Property(x => x.AuthorityRevisionAtStart).HasColumnName("authority_revision_at_start");
+            entity.Property(x => x.PolicyRevisionAtStart).HasColumnName("policy_revision_at_start");
+            entity.Property(x => x.RequiredAssuranceAtStart).HasColumnName("required_assurance_at_start").HasConversion<string>();
+            entity.Property(x => x.AuthorizationAssertionId).HasColumnName("authorization_assertion_id");
+            entity.Property(x => x.AuthorizationAssertionRevision).HasColumnName("authorization_assertion_revision");
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.LastAcceptedCounter).HasColumnName("last_accepted_counter");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(x => x.ConfirmedAt).HasColumnName("confirmed_at");
+            entity.Property(x => x.RemovedAt).HasColumnName("removed_at");
+            entity.HasIndex(x => new { x.TenantId, x.ActorUserId, x.State });
+            entity.HasOne<Secret>().WithMany().HasForeignKey(x => x.SeedSecretId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<SecretVersion>().WithMany().HasForeignKey(x => x.SeedSecretVersionId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<StepUpAssertion>().WithMany().HasForeignKey(x => x.AuthorizationAssertionId).OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<MfaRecoveryCode>(entity =>
+        {
+            entity.ToTable("mfa_recovery_codes");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TotpFactorId).HasColumnName("totp_factor_id");
+            entity.Property(x => x.Salt).HasColumnName("salt");
+            entity.Property(x => x.CodeHash).HasColumnName("code_hash");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.UsedAt).HasColumnName("used_at");
+            entity.HasIndex(x => new { x.TotpFactorId, x.UsedAt });
+        });
+        modelBuilder.Entity<WebAuthnCredential>(entity =>
+        {
+            entity.ToTable("webauthn_credentials");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.CredentialId).HasColumnName("credential_id");
+            entity.Property(x => x.PublicKey).HasColumnName("public_key");
+            entity.Property(x => x.UserHandle).HasColumnName("user_handle");
+            entity.Property(x => x.SignCount).HasColumnName("sign_count");
+            entity.Property(x => x.Transports).HasColumnName("transports");
+            entity.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>();
+            entity.Property(x => x.UserVerificationRequired).HasColumnName("user_verification_required");
+            entity.Property(x => x.IsBackupEligible).HasColumnName("is_backup_eligible");
+            entity.Property(x => x.IsBackedUp).HasColumnName("is_backed_up");
+            entity.Property(x => x.AaGuid).HasColumnName("aaguid");
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.LastUsedAt).HasColumnName("last_used_at");
+            entity.Property(x => x.RemovedAt).HasColumnName("removed_at");
+            entity.HasIndex(x => x.CredentialId).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.ActorUserId, x.State });
+        });
+        modelBuilder.Entity<WebAuthnCeremony>(entity =>
+        {
+            entity.ToTable("webauthn_ceremonies");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.SessionHash).HasColumnName("session_hash");
+            entity.Property(x => x.Kind).HasColumnName("kind").HasConversion<string>();
+            entity.Property(x => x.State).HasColumnName("state").HasConversion<string>();
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.ResourceType).HasColumnName("resource_type");
+            entity.Property(x => x.ResourceId).HasColumnName("resource_id");
+            entity.Property(x => x.OptionsJson).HasColumnName("options_json");
+            entity.Property(x => x.ChallengeHash).HasColumnName("challenge_hash");
+            entity.Property(x => x.UserVerificationRequired).HasColumnName("user_verification_required");
+            entity.Property(x => x.AuthorityRevisionAtStart).HasColumnName("authority_revision_at_start");
+            entity.Property(x => x.PolicyRevisionAtStart).HasColumnName("policy_revision_at_start");
+            entity.Property(x => x.RequiredAssuranceAtStart).HasColumnName("required_assurance_at_start").HasConversion<string>();
+            entity.Property(x => x.AuthorizationAssertionId).HasColumnName("authorization_assertion_id");
+            entity.Property(x => x.AuthorizationAssertionRevision).HasColumnName("authorization_assertion_revision");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(x => x.UsedAt).HasColumnName("used_at");
+            entity.HasIndex(x => new { x.TenantId, x.ActorUserId, x.State, x.ExpiresAt });
+            entity.HasOne<StepUpAssertion>().WithMany().HasForeignKey(x => x.AuthorizationAssertionId).OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<MfaSecurityEvent>(entity =>
+        {
+            entity.ToTable("mfa_security_events");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.FactorId).HasColumnName("factor_id");
+            entity.Property(x => x.Action).HasColumnName("action").HasConversion<string>();
+            entity.Property(x => x.AuthenticationMethod).HasColumnName("authentication_method").HasConversion<string>();
+            entity.Property(x => x.AssuranceLevel).HasColumnName("assurance_level").HasConversion<string>();
+            entity.Property(x => x.Purpose).HasColumnName("purpose");
+            entity.Property(x => x.ResourceHash).HasColumnName("resource_hash");
+            entity.Property(x => x.ReasonCode).HasColumnName("reason_code");
+            entity.Property(x => x.Succeeded).HasColumnName("succeeded");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
             entity.HasIndex(x => new { x.TenantId, x.ActorUserId, x.CreatedAt });
         });

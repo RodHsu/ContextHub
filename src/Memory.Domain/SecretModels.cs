@@ -6,7 +6,8 @@ public enum SecretKind
     ApiToken,
     OAuthCredential,
     SshPrivateKeyPkcs8,
-    SshCertificateAuthorityReference
+    SshCertificateAuthorityReference,
+    TotpSeed
 }
 
 public enum SecretState
@@ -77,7 +78,12 @@ public enum SecretAccessOperation
 
 public enum AuthenticationMethod
 {
-    Password
+    Password,
+    Totp,
+    RecoveryCode,
+    WebAuthnPlatform,
+    WebAuthnSecurityKey,
+    Passkey
 }
 
 public enum AssuranceLevel
@@ -111,7 +117,10 @@ public enum StepUpOperationClass
     BreakGlassReveal,
     KekDestructiveOperation,
     SshCaDestructiveOperation,
-    SecurityBoundaryDisable
+    SecurityBoundaryDisable,
+    MfaFactorEnroll,
+    MfaFactorRemove,
+    MfaRecovery
 }
 
 public enum StepUpRequirementOutcome
@@ -281,6 +290,8 @@ public sealed class StepUpAssertion
     public string? ResourceType { get; set; }
     public string? ResourceId { get; set; }
     public string NonceHash { get; set; } = string.Empty;
+    public long MfaAuthorityRevision { get; set; } = 1;
+    public string MfaPolicyRevision { get; set; } = string.Empty;
     public long Revision { get; set; } = 1;
     public int MaxUses { get; set; } = 1;
     public int UsedCount { get; set; }
@@ -299,6 +310,158 @@ public sealed class StepUpAuthenticationAttempt
     public string SessionHash { get; set; } = string.Empty;
     public bool Succeeded { get; set; }
     public string ReasonCode { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public sealed class MfaAuthorityState
+{
+    public Guid TenantId { get; set; }
+    public Guid ActorUserId { get; set; }
+    public long Revision { get; set; } = 1;
+    public string PolicyRevision { get; set; } = string.Empty;
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public enum MfaFactorState
+{
+    Pending,
+    Active,
+    Removed,
+    Revoked
+}
+
+public enum WebAuthnCredentialKind
+{
+    Platform,
+    RoamingSecurityKey,
+    Passkey
+}
+
+public enum WebAuthnCeremonyKind
+{
+    Registration,
+    Authentication
+}
+
+public enum WebAuthnCeremonyState
+{
+    Pending,
+    Used,
+    Expired,
+    Failed
+}
+
+public enum MfaSecurityAction
+{
+    TotpEnrollmentStarted,
+    TotpEnrolled,
+    TotpVerified,
+    TotpReplayRejected,
+    RecoveryCodeUsed,
+    RecoveryCodeReplayRejected,
+    WebAuthnRegistrationStarted,
+    WebAuthnRegistered,
+    WebAuthnAuthenticationStarted,
+    WebAuthnAuthenticated,
+    WebAuthnReplayRejected,
+    FactorRemoved,
+    FactorReset,
+    RecoveryApproved,
+    AssuranceIssued
+}
+
+public sealed class TotpFactor
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public Guid ActorUserId { get; set; }
+    public Guid SeedSecretId { get; set; }
+    public Guid SeedSecretVersionId { get; set; }
+    public string Issuer { get; set; } = string.Empty;
+    public string AccountName { get; set; } = string.Empty;
+    public long AuthorityRevisionAtStart { get; set; } = 1;
+    public string PolicyRevisionAtStart { get; set; } = string.Empty;
+    public AssuranceLevel RequiredAssuranceAtStart { get; set; } = AssuranceLevel.Aal1;
+    public Guid AuthorizationAssertionId { get; set; }
+    public long AuthorizationAssertionRevision { get; set; }
+    public MfaFactorState State { get; set; } = MfaFactorState.Pending;
+    public long? LastAcceptedCounter { get; set; }
+    public long Revision { get; set; } = 1;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset? ConfirmedAt { get; set; }
+    public DateTimeOffset? RemovedAt { get; set; }
+}
+
+public sealed class MfaRecoveryCode
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TotpFactorId { get; set; }
+    public byte[] Salt { get; set; } = [];
+    public byte[] CodeHash { get; set; } = [];
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? UsedAt { get; set; }
+}
+
+public sealed class WebAuthnCredential
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public Guid ActorUserId { get; set; }
+    public byte[] CredentialId { get; set; } = [];
+    public byte[] PublicKey { get; set; } = [];
+    public byte[] UserHandle { get; set; } = [];
+    public uint SignCount { get; set; }
+    public string Transports { get; set; } = string.Empty;
+    public WebAuthnCredentialKind Kind { get; set; }
+    public bool UserVerificationRequired { get; set; } = true;
+    public bool IsBackupEligible { get; set; }
+    public bool IsBackedUp { get; set; }
+    public Guid AaGuid { get; set; }
+    public MfaFactorState State { get; set; } = MfaFactorState.Active;
+    public long Revision { get; set; } = 1;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset LastUsedAt { get; set; }
+    public DateTimeOffset? RemovedAt { get; set; }
+}
+
+public sealed class WebAuthnCeremony
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public Guid ActorUserId { get; set; }
+    public string SessionHash { get; set; } = string.Empty;
+    public WebAuthnCeremonyKind Kind { get; set; }
+    public WebAuthnCeremonyState State { get; set; } = WebAuthnCeremonyState.Pending;
+    public string Purpose { get; set; } = string.Empty;
+    public string? ResourceType { get; set; }
+    public string? ResourceId { get; set; }
+    public string OptionsJson { get; set; } = string.Empty;
+    public string ChallengeHash { get; set; } = string.Empty;
+    public bool UserVerificationRequired { get; set; } = true;
+    public long AuthorityRevisionAtStart { get; set; } = 1;
+    public string PolicyRevisionAtStart { get; set; } = string.Empty;
+    public AssuranceLevel RequiredAssuranceAtStart { get; set; } = AssuranceLevel.Aal3;
+    public Guid? AuthorizationAssertionId { get; set; }
+    public long? AuthorizationAssertionRevision { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset? UsedAt { get; set; }
+}
+
+public sealed class MfaSecurityEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
+    public Guid ActorUserId { get; set; }
+    public Guid? FactorId { get; set; }
+    public MfaSecurityAction Action { get; set; }
+    public AuthenticationMethod? AuthenticationMethod { get; set; }
+    public AssuranceLevel? AssuranceLevel { get; set; }
+    public string Purpose { get; set; } = string.Empty;
+    public string ResourceHash { get; set; } = string.Empty;
+    public string ReasonCode { get; set; } = string.Empty;
+    public bool Succeeded { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 

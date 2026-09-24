@@ -2180,6 +2180,12 @@ public interface IApplicationDbContext
     DbSet<SecretAccessEvent> SecretAccessEvents => throw new NotSupportedException();
     DbSet<StepUpAssertion> StepUpAssertions => throw new NotSupportedException();
     DbSet<StepUpAuthenticationAttempt> StepUpAuthenticationAttempts => throw new NotSupportedException();
+    DbSet<MfaAuthorityState> MfaAuthorityStates => throw new NotSupportedException();
+    DbSet<TotpFactor> TotpFactors => throw new NotSupportedException();
+    DbSet<MfaRecoveryCode> MfaRecoveryCodes => throw new NotSupportedException();
+    DbSet<WebAuthnCredential> WebAuthnCredentials => throw new NotSupportedException();
+    DbSet<WebAuthnCeremony> WebAuthnCeremonies => throw new NotSupportedException();
+    DbSet<MfaSecurityEvent> MfaSecurityEvents => throw new NotSupportedException();
     DbSet<SshCertificateLease> SshCertificateLeases => throw new NotSupportedException();
     DbSet<SshRevocationRecord> SshRevocationRecords => throw new NotSupportedException();
     DbSet<DiscussionThread> DiscussionThreads { get; }

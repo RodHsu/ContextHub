@@ -2582,7 +2582,11 @@ public static class DependencyInjection
         services.AddScoped<ICanonicalTagGovernanceService, CanonicalTagGovernanceService>();
         services.AddScoped<ICanonicalTagBackgroundReconciler, CanonicalTagBackgroundReconciler>();
         services.AddSingleton<IHighAssuranceApprovalVerifier, DenyHighAssuranceApprovalVerifier>();
+        services.AddScoped<IMfaAuthorityCoordinator, MfaAuthorityCoordinator>();
         services.AddScoped<IStepUpAuthenticationService, StepUpAuthenticationService>();
+        services.AddScoped<IStepUpAssertionIssuer>(provider => (StepUpAuthenticationService)provider.GetRequiredService<IStepUpAuthenticationService>());
+        services.AddScoped<IWebAuthnCeremonyVerifier, Fido2WebAuthnCeremonyVerifier>();
+        services.AddScoped<IMultiFactorAuthenticationService, MultiFactorAuthenticationService>();
         services.AddScoped<ISecretManagementService, SecretManagementService>();
         services.AddScoped<ISshCertificateService, SshCertificateService>();
         services.AddScoped<ISecretReconciliationService, SecretReconciliationService>();

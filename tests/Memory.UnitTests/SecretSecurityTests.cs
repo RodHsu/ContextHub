@@ -16,9 +16,11 @@ public sealed class SecretSecurityTests
         StepUpRiskPolicy.Describe(StepUpOperationClass.SecretCreate).Should().BeEquivalentTo(
             new StepUpAuthorizationResult(StepUpRequirementOutcome.RequiresStepUp, AssuranceLevel.Aal1, "FreshPasswordRequired"));
         StepUpRiskPolicy.Describe(StepUpOperationClass.CredentialRotate).Should().BeEquivalentTo(
-            new StepUpAuthorizationResult(StepUpRequirementOutcome.RequiresExternalApproval, AssuranceLevel.Aal2, "Aal2Unavailable"));
+            new StepUpAuthorizationResult(StepUpRequirementOutcome.RequiresStepUp, AssuranceLevel.Aal2, "Aal2Required"));
         StepUpRiskPolicy.Describe(StepUpOperationClass.SecretExport).Should().BeEquivalentTo(
-            new StepUpAuthorizationResult(StepUpRequirementOutcome.Disabled, AssuranceLevel.Aal3, "Aal3Unavailable"));
+            new StepUpAuthorizationResult(StepUpRequirementOutcome.RequiresStepUp, AssuranceLevel.Aal3, "Aal3Required"));
+        StepUpRiskPolicy.Describe(StepUpOperationClass.MfaFactorRemove).RequiredAssurance.Should().Be(AssuranceLevel.Aal2);
+        StepUpRiskPolicy.Describe(StepUpOperationClass.MfaRecovery).Outcome.Should().Be(StepUpRequirementOutcome.RequiresExternalApproval);
     }
 
     [Fact]
