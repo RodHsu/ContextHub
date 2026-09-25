@@ -10,6 +10,7 @@ public sealed class AgentExecutionService(
     IApplicationDbContext dbContext,
     IRequestActorAccessor actorAccessor,
     ISkillService skillService,
+    IAgentExecutionResourceResolver resourceResolver,
     ISecretProtector secretProtector,
     IClock clock) : IAgentExecutionService
 {
@@ -127,6 +128,8 @@ public sealed class AgentExecutionService(
             execution.SkillSnapshotJson = JsonSerializer.Serialize(skillSnapshot, JsonOptions);
         }
 
+        resourceResolver.ValidateRequirements(request.ResourceRequirements, skillSnapshot);
+
         var package = new AgentExecutionPackage(
             AgentExecutionContract.Version,
             execution.Id,
@@ -142,7 +145,9 @@ public sealed class AgentExecutionService(
             execution.AgentType,
             requiredCapabilities,
             AgentExecutionContract.Version,
-            skillSnapshot);
+            skillSnapshot,
+            request.ResourceRequirements,
+            request.ResourceRetryMode);
         execution.PackageJson = JsonSerializer.Serialize(package, JsonOptions);
         execution.PackageHash = Hash(execution.PackageJson);
         await dbContext.AgentExecutions.AddAsync(execution, cancellationToken);
@@ -254,10 +259,69 @@ public sealed class AgentExecutionService(
                 candidate.LeaseVersion++;
                 candidate.LeaseExpiresAt = now.AddSeconds(NormalizeLeaseSeconds(request.LeaseSeconds));
                 candidate.UpdatedAt = now;
-                await AppendEventAsync(candidate, AgentExecutionEventType.Claimed, agentId, new { candidate.LeaseVersion, candidate.LeaseExpiresAt }, ct);
-                result = new AgentExecutionClaimResult(true, "Claimed", Map(candidate), token, false);
+                var package = DeserializePackage(candidate);
+                var resolution = await resourceResolver.ResolveAsync(candidate, package, ct);
+                if (resolution.Snapshot.Outcome != AgentExecutionResolutionOutcome.Resolved)
+                {
+                    candidate.Status = AgentExecutionStatus.Blocked;
+                    candidate.FailureClass = $"ResourceResolution:{resolution.Snapshot.Outcome}";
+                    candidate.StructuredReasonJson = JsonSerializer.Serialize(new
+                    {
+                        resolution.Snapshot.Id,
+                        resolution.Snapshot.Outcome,
+                        resolution.Snapshot.SnapshotHash
+                    }, JsonOptions);
+                    candidate.CompletedAt = now;
+                    ClearLease(candidate);
+                    await AppendEventAsync(candidate, AgentExecutionEventType.ResourceResolutionBlocked, agentId,
+                        new { resolution.Snapshot.Id, resolution.Snapshot.Outcome, resolution.Snapshot.SnapshotHash }, ct);
+                    result = new AgentExecutionClaimResult(false, resolution.Snapshot.Outcome.ToString(), Map(candidate, resolution.Snapshot), null, false, resolution.Snapshot, []);
+                }
+                else
+                {
+                    await AppendEventAsync(candidate, AgentExecutionEventType.ResourcesResolved, agentId,
+                        new { resolution.Snapshot.Id, resolution.Snapshot.SnapshotHash, resolution.Snapshot.RetryMode }, ct);
+                    await AppendEventAsync(candidate, AgentExecutionEventType.Claimed, agentId, new { candidate.LeaseVersion, candidate.LeaseExpiresAt }, ct);
+                    result = new AgentExecutionClaimResult(true, "Claimed", Map(candidate, resolution.Snapshot), token, false,
+                        resolution.Snapshot, resolution.CredentialCapabilities);
+                }
             }
             await StoreOperationAsync(actor, candidate?.Id, "claim-next", agentId, request.IdempotencyKey, requestHash, result, ct);
+            await dbContext.SaveChangesAsync(ct);
+            return result;
+        }, cancellationToken);
+    }
+
+    public async Task<AgentExecutionResult> ApproveResourceAsync(AgentExecutionResourceApprovalRequest request, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureAdminOrScopeAllowed(actor, SecurityScopes.AgentExecutionsManage);
+        ValidateIdempotencyKey(request.IdempotencyKey);
+        var requestHash = HashJson(request);
+        if (await ReplayAsync<AgentExecutionResult>(actor, "approve-resource", "manager", request.IdempotencyKey, requestHash, cancellationToken) is { } replay)
+            return replay;
+
+        return await dbContext.ExecuteInTransactionAsync(async ct =>
+        {
+            await dbContext.AcquireTransactionLockAsync($"agent-execution-mutation:{actor.TenantId}:{request.ExecutionId}", ct);
+            if (await ReplayAsync<AgentExecutionResult>(actor, "approve-resource", "manager", request.IdempotencyKey, requestHash, ct) is { } lockedReplay)
+                return lockedReplay;
+
+            var execution = await GetForMutationAsync(actor, request.ExecutionId, ct);
+            if (execution.Status != AgentExecutionStatus.Blocked)
+                throw new InvalidOperationException("Resource approval requires a blocked execution.");
+            var package = DeserializePackage(execution);
+            await resourceResolver.ApproveAsync(execution, package, request, ct);
+            execution.Status = AgentExecutionStatus.Ready;
+            execution.FailureClass = string.Empty;
+            execution.StructuredReasonJson = "{}";
+            execution.CompletedAt = null;
+            execution.EligibleAt = clock.UtcNow;
+            execution.UpdatedAt = clock.UtcNow;
+            await AppendEventAsync(execution, AgentExecutionEventType.ResourceApprovalGranted, actor.Username,
+                new { request.RequirementId }, ct);
+            var result = Map(execution);
+            await StoreOperationAsync(actor, execution.Id, "approve-resource", "manager", request.IdempotencyKey, requestHash, result, ct);
             await dbContext.SaveChangesAsync(ct);
             return result;
         }, cancellationToken);
@@ -267,7 +331,7 @@ public sealed class AgentExecutionService(
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.AgentExecutionsRead);
-        var entity = await Scope(dbContext.AgentExecutions.AsNoTracking().Include(x => x.Events), actor).SingleOrDefaultAsync(x => x.Id == executionId, cancellationToken);
+        var entity = await Scope(dbContext.AgentExecutions.AsNoTracking().Include(x => x.Events).Include(x => x.ResolutionSnapshots).ThenInclude(x => x.Items), actor).SingleOrDefaultAsync(x => x.Id == executionId, cancellationToken);
         if (entity is null) return null;
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: false);
         return Map(entity);
@@ -279,9 +343,9 @@ public sealed class AgentExecutionService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.AgentExecutionsRead);
         var projectId = NormalizeRequired(request.ProjectId, 200, "ProjectId");
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-        var query = Scope(dbContext.AgentExecutions.AsNoTracking(), actor).Where(x => x.ProjectId == projectId);
+        var query = Scope(dbContext.AgentExecutions.AsNoTracking().Include(x => x.ResolutionSnapshots).ThenInclude(x => x.Items), actor).Where(x => x.ProjectId == projectId);
         if (request.Status.HasValue) query = query.Where(x => x.Status == request.Status.Value);
-        return (await query.OrderByDescending(x => x.UpdatedAt).Skip(Math.Max(0, request.Offset)).Take(Math.Clamp(request.Limit, 1, 200)).ToListAsync(cancellationToken)).Select(Map).ToArray();
+        return (await query.OrderByDescending(x => x.UpdatedAt).Skip(Math.Max(0, request.Offset)).Take(Math.Clamp(request.Limit, 1, 200)).ToListAsync(cancellationToken)).Select(x => Map(x)).ToArray();
     }
 
     public async Task<AgentExecutionDashboardResult> GetDashboardAsync(string projectId, CancellationToken cancellationToken)
@@ -300,7 +364,8 @@ public sealed class AgentExecutionService(
         var activeLeases = await query.CountAsync(item => ActiveStatuses.Contains(item.Status) && item.LeaseExpiresAt >= now, cancellationToken);
         var expiredLeases = await query.CountAsync(item => ActiveStatuses.Contains(item.Status) && item.LeaseExpiresAt < now, cancellationToken);
         var retryableFailures = await query.CountAsync(item => item.Status == AgentExecutionStatus.FailedRetryable, cancellationToken);
-        var recent = (await query.OrderByDescending(item => item.UpdatedAt).Take(25).ToListAsync(cancellationToken)).Select(Map).ToArray();
+        var recent = (await Scope(dbContext.AgentExecutions.AsNoTracking().Include(x => x.ResolutionSnapshots).ThenInclude(x => x.Items), actor)
+            .Where(item => item.ProjectId == projectId).OrderByDescending(item => item.UpdatedAt).Take(25).ToListAsync(cancellationToken)).Select(x => Map(x)).ToArray();
         return new AgentExecutionDashboardResult(
             ProjectContext.Normalize(projectId),
             counts,
@@ -411,12 +476,27 @@ public sealed class AgentExecutionService(
 
             var execution = await GetForMutationAsync(actor, executionId, transactionCancellationToken);
             ValidateLease(execution, agentId, leaseToken, leaseVersion);
-            var skill = await RevalidateSkillsAsync(
+            var package = DeserializePackage(execution);
+            var resourceOutcome = await resourceResolver.RevalidateAsync(execution, package, transactionCancellationToken);
+            var skill = resourceOutcome == AgentExecutionResolutionOutcome.Resolved
+                ? await RevalidateSkillsAsync(
                 execution,
                 normalizedCapabilities,
                 normalizedTools,
-                transactionCancellationToken);
-            if (skill is { Decision: not SkillExecutionSnapshotDecision.Continue })
+                transactionCancellationToken)
+                : null;
+            if (resourceOutcome != AgentExecutionResolutionOutcome.Resolved)
+            {
+                execution.Status = AgentExecutionStatus.Blocked;
+                execution.FailureClass = $"ResourceRevalidation:{resourceOutcome}";
+                execution.StructuredReasonJson = JsonSerializer.Serialize(new { outcome = resourceOutcome }, JsonOptions);
+                execution.UpdatedAt = clock.UtcNow;
+                execution.CompletedAt = clock.UtcNow;
+                ClearLease(execution);
+                await AppendEventAsync(execution, AgentExecutionEventType.ResourceResolutionBlocked, agentId,
+                    new { outcome = resourceOutcome, phase = operation }, transactionCancellationToken);
+            }
+            else if (skill is { Decision: not SkillExecutionSnapshotDecision.Continue })
             {
                 execution.Status = AgentExecutionStatus.Blocked;
                 execution.FailureClass = skill.Decision.ToString();
@@ -437,7 +517,8 @@ public sealed class AgentExecutionService(
                     await AppendEventAsync(execution, AgentExecutionEventType.Started, agentId, new { execution.LeaseVersion }, transactionCancellationToken);
                 await AppendEventAsync(execution, eventType, agentId, payload ?? new { execution.LeaseVersion }, transactionCancellationToken);
             }
-            var result = new AgentExecutionMutationResult(Map(execution), execution.Status == AgentExecutionStatus.Blocked ? "BlockedBySkillPolicy" : operation, skill?.Decision, skill?.Issues ?? [], false);
+            var blockedOutcome = resourceOutcome != AgentExecutionResolutionOutcome.Resolved ? "BlockedByResourceAuthority" : "BlockedBySkillPolicy";
+            var result = new AgentExecutionMutationResult(Map(execution), execution.Status == AgentExecutionStatus.Blocked ? blockedOutcome : operation, skill?.Decision, skill?.Issues ?? [], false);
             await StoreOperationAsync(actor, execution.Id, operation, agentId, idempotencyKey, requestHash, result, transactionCancellationToken);
             await dbContext.SaveChangesAsync(transactionCancellationToken);
             return result;
@@ -463,6 +544,25 @@ public sealed class AgentExecutionService(
 
             var execution = await GetForMutationAsync(actor, request.ExecutionId, transactionCancellationToken);
             ValidateLease(execution, request.AgentId, request.LeaseToken, request.LeaseVersion);
+            var package = DeserializePackage(execution);
+            var resourceOutcome = operation == "complete"
+                ? await resourceResolver.RevalidateAsync(execution, package, transactionCancellationToken)
+                : AgentExecutionResolutionOutcome.Resolved;
+            if (resourceOutcome != AgentExecutionResolutionOutcome.Resolved)
+            {
+                execution.Status = AgentExecutionStatus.Blocked;
+                execution.FailureClass = $"ResourceRevalidation:{resourceOutcome}";
+                execution.StructuredReasonJson = JsonSerializer.Serialize(new { outcome = resourceOutcome }, JsonOptions);
+                execution.UpdatedAt = clock.UtcNow;
+                execution.CompletedAt = clock.UtcNow;
+                ClearLease(execution);
+                await AppendEventAsync(execution, AgentExecutionEventType.ResourceResolutionBlocked, request.AgentId,
+                    new { outcome = resourceOutcome, phase = operation }, transactionCancellationToken);
+                var blocked = new AgentExecutionMutationResult(Map(execution), "BlockedByResourceAuthority", null, [], false);
+                await StoreOperationAsync(actor, execution.Id, operation, request.AgentId, request.IdempotencyKey, requestHash, blocked, transactionCancellationToken);
+                await dbContext.SaveChangesAsync(transactionCancellationToken);
+                return blocked;
+            }
             var skill = operation == "complete"
                 ? await RevalidateSkillsAsync(
                     execution,
@@ -530,7 +630,7 @@ public sealed class AgentExecutionService(
 
     private async Task<AgentExecution> GetForMutationAsync(ContextHubRequestActor actor, Guid executionId, CancellationToken cancellationToken)
     {
-        var execution = await Scope(dbContext.AgentExecutions, actor).SingleOrDefaultAsync(x => x.Id == executionId, cancellationToken)
+        var execution = await Scope(dbContext.AgentExecutions.Include(x => x.ResolutionSnapshots).ThenInclude(x => x.Items), actor).SingleOrDefaultAsync(x => x.Id == executionId, cancellationToken)
             ?? throw new InvalidOperationException($"Agent execution '{executionId}' was not found.");
         ActorAuthorization.EnsureProjectAllowed(actor, execution.ProjectId, write: true);
         return execution;
@@ -598,14 +698,20 @@ public sealed class AgentExecutionService(
                     : (IQueryable<ProjectWorkItem>)(object)query)
                 : query;
 
-    private static AgentExecutionResult Map(AgentExecution entity)
+    private static AgentExecutionResult Map(AgentExecution entity, AgentExecutionResolutionSnapshotResult? resolutionSnapshot = null)
         => new(entity.Id, entity.WorkItemId, entity.ParentExecutionId, entity.ProjectId, entity.RepositoryId, entity.AgentType,
             entity.Status, entity.Priority, entity.Attempt, entity.MaxAttempts, entity.ClaimedByAgentId, entity.LeaseVersion,
             entity.LeaseExpiresAt, entity.FailureClass, entity.StructuredReasonJson, entity.PackageHash,
             JsonSerializer.Deserialize<AgentExecutionPackage>(entity.PackageJson, JsonOptions)
                 ?? throw new InvalidOperationException("Persisted execution package is invalid."),
             entity.CreatedAt, entity.UpdatedAt, entity.StartedAt, entity.CompletedAt,
-            entity.Events.OrderBy(x => x.Sequence).Select(x => new AgentExecutionEventResult(x.Id, x.EventType, x.Sequence, x.AgentId, x.PayloadJson, x.CreatedAt)).ToArray());
+            entity.Events.OrderBy(x => x.Sequence).Select(x => new AgentExecutionEventResult(x.Id, x.EventType, x.Sequence, x.AgentId, x.PayloadJson, x.CreatedAt)).ToArray(),
+            resolutionSnapshot ?? entity.ResolutionSnapshots.OrderByDescending(x => x.Attempt).ThenByDescending(x => x.ResolutionSequence)
+                .Select(AgentExecutionResourceResolver.MapSnapshot).FirstOrDefault());
+
+    private static AgentExecutionPackage DeserializePackage(AgentExecution execution)
+        => JsonSerializer.Deserialize<AgentExecutionPackage>(execution.PackageJson, JsonOptions)
+            ?? throw new InvalidOperationException("Persisted execution package is invalid.");
 
     private static void ClearLease(AgentExecution execution)
     {

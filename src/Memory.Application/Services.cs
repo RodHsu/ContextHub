@@ -2607,6 +2607,8 @@ public static class DependencyInjection
         services.AddScoped<IProjectDiscussionService, ProjectDiscussionService>();
         services.AddScoped<IProjectWorkItemService, ProjectWorkItemService>();
         services.AddScoped<IAgentExecutionService, AgentExecutionService>();
+        services.AddScoped<IAgentExecutionResourceResolver, AgentExecutionResourceResolver>();
+        services.AddScoped<IPlatformProjectionService, PlatformProjectionService>();
         services.AddSingleton<ISkillSandboxSelfTestRunner, DisabledSkillSandboxSelfTestRunner>();
         services.AddScoped<ISkillService, SkillService>();
         services.AddScoped<ISuggestedActionReconciliationService, SuggestedActionReconciliationService>();

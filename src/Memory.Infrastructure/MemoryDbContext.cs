@@ -113,6 +113,15 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<AgentExecution> AgentExecutions => Set<AgentExecution>();
     public DbSet<AgentExecutionEvent> AgentExecutionEvents => Set<AgentExecutionEvent>();
     public DbSet<AgentExecutionOperation> AgentExecutionOperations => Set<AgentExecutionOperation>();
+    public DbSet<AgentExecutionResolutionSnapshot> AgentExecutionResolutionSnapshots => Set<AgentExecutionResolutionSnapshot>();
+    public DbSet<AgentExecutionResolutionItem> AgentExecutionResolutionItems => Set<AgentExecutionResolutionItem>();
+    public DbSet<AgentExecutionResourceApproval> AgentExecutionResourceApprovals => Set<AgentExecutionResourceApproval>();
+    public DbSet<AuthorityOutboxEvent> AuthorityOutboxEvents => Set<AuthorityOutboxEvent>();
+    public DbSet<PlatformOutboxDelivery> PlatformOutboxDeliveries => Set<PlatformOutboxDelivery>();
+    public DbSet<MonitoringActivityProjection> MonitoringActivityProjections => Set<MonitoringActivityProjection>();
+    public DbSet<MonitoringProjectionState> MonitoringProjectionStates => Set<MonitoringProjectionState>();
+    public DbSet<PlatformBackgroundRun> PlatformBackgroundRuns => Set<PlatformBackgroundRun>();
+    public DbSet<PlatformBackgroundEvent> PlatformBackgroundEvents => Set<PlatformBackgroundEvent>();
     public DbSet<Skill> Skills => Set<Skill>();
     public DbSet<SkillVersion> SkillVersions => Set<SkillVersion>();
     public DbSet<SkillVersionDependency> SkillVersionDependencies => Set<SkillVersionDependency>();
@@ -146,6 +155,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
+        CaptureAuthorityOutboxEvents();
         ValidateTrackedMemoryScores();
         return base.SaveChanges(acceptAllChangesOnSuccess);
     }
@@ -154,6 +164,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
         bool acceptAllChangesOnSuccess,
         CancellationToken cancellationToken = default)
     {
+        CaptureAuthorityOutboxEvents();
         ValidateTrackedMemoryScores();
         return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
     }
@@ -170,6 +181,29 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
                      .Where(entry => entry.State is EntityState.Added or EntityState.Modified))
         {
             MemoryScoreContract.Validate(entry.Entity.Importance, entry.Entity.Confidence);
+        }
+    }
+
+    private void CaptureAuthorityOutboxEvents()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var pending = ChangeTracker.Entries()
+            .Where(entry => entry.State is EntityState.Added or EntityState.Modified or EntityState.Deleted)
+            .Where(entry => entry.Entity is not AuthorityOutboxEvent and not PlatformOutboxDelivery and not MonitoringActivityProjection and not MonitoringProjectionState)
+            .Select(entry => AuthorityOutboxCapture.TryCreate(entry, now))
+            .Where(value => value is not null)
+            .Cast<AuthorityOutboxEvent>()
+            .ToArray();
+        if (pending.Length == 0) return;
+
+        var tracked = ChangeTracker.Entries<AuthorityOutboxEvent>()
+            .Where(entry => entry.State == EntityState.Added)
+            .Select(entry => $"{entry.Entity.AggregateType}|{entry.Entity.AggregateId}|{entry.Entity.EventType}")
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var item in pending)
+        {
+            var key = $"{item.AggregateType}|{item.AggregateId}|{item.EventType}";
+            if (tracked.Add(key)) AuthorityOutboxEvents.Add(item);
         }
     }
 
@@ -775,6 +809,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
                 .HasColumnType("jsonb")
                 .HasConversion(JsonDocumentConverter, JsonStringComparer);
             entity.Property(x => x.SecretJsonProtected).HasColumnName("secret_json_protected");
+            entity.Property(x => x.Revision).HasColumnName("revision").IsConcurrencyToken();
             entity.Property(x => x.LastCursor).HasColumnName("last_cursor");
             entity.Property(x => x.LastSuccessfulSyncAt).HasColumnName("last_successful_sync_at");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
@@ -1749,6 +1784,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.HasOne(x => x.Execution).WithMany().HasForeignKey(x => x.ExecutionId).OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(x => new { x.TenantId, x.AgentId, x.Operation, x.IdempotencyKey }).IsUnique();
         });
+
+        modelBuilder.ConfigurePlatformOperations();
 
         modelBuilder.ConfigureSkillModels();
     }

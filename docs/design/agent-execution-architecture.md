@@ -21,6 +21,13 @@ SkillResolution exact pins -> immutable Skill snapshot in Execution Package
                                   |
                                   +-> heartbeat/checkpoint revalidation
                                       Continue | ReResolve | StopRevoked | HumanDecision
+
+Logical File/Credential/ConnectionProfile/Skill requirements
+                                  |
+                                  +-> immutable ResolutionSnapshot per attempt
+                                      ReResolve | ReuseSnapshot
+                                  |
+                                  +-> current authority revalidation -> fail closed
 ```
 
 ## Invariants
@@ -33,6 +40,9 @@ SkillResolution exact pins -> immutable Skill snapshot in Execution Package
 - Every mutation has a bounded idempotency key. Reuse with a different request hash is rejected.
 - Stale and foreign owners fail closed. Expired attempts are audit-recorded and may be safely requeued only while the attempt budget remains.
 - Skills are referenced by existing resolution pins and content hashes. AgentExecution does not duplicate search, dependency, conflict, materialization, or revocation logic.
+- Resource resolution runs inside the existing claim transaction and lease fencing boundary. It does not introduce a second execution, reconciliation, or Skill-resolution framework.
+- Execution Packages contain logical requirements only. Resolution snapshots may contain exact version IDs, integrity identities, authority/policy revisions, and opaque capability lease IDs, but never raw secrets, provider locators, KEKs, DEKs, or capability values.
+- A retry explicitly uses `ReResolve` or `ReuseSnapshot`; reuse never overrides current revocation, classification, integrity, authorization, or security-policy changes.
 - Scheduled Governance remains a separate exactly-four-tool surface. AgentExecution adds no Scheduled Governance tool and has no authority over Automation or governance acceptance.
 
 ## Security

@@ -939,6 +939,15 @@ public sealed class DashboardQueryServiceTests
         public DbSet<AgentExecution> AgentExecutions => throw new NotSupportedException();
         public DbSet<AgentExecutionEvent> AgentExecutionEvents => throw new NotSupportedException();
         public DbSet<AgentExecutionOperation> AgentExecutionOperations => throw new NotSupportedException();
+        public DbSet<AgentExecutionResolutionSnapshot> AgentExecutionResolutionSnapshots => throw new NotSupportedException();
+        public DbSet<AgentExecutionResolutionItem> AgentExecutionResolutionItems => throw new NotSupportedException();
+        public DbSet<AgentExecutionResourceApproval> AgentExecutionResourceApprovals => throw new NotSupportedException();
+        public DbSet<AuthorityOutboxEvent> AuthorityOutboxEvents => throw new NotSupportedException();
+        public DbSet<PlatformOutboxDelivery> PlatformOutboxDeliveries => throw new NotSupportedException();
+        public DbSet<MonitoringActivityProjection> MonitoringActivityProjections => throw new NotSupportedException();
+        public DbSet<MonitoringProjectionState> MonitoringProjectionStates => throw new NotSupportedException();
+        public DbSet<PlatformBackgroundRun> PlatformBackgroundRuns => throw new NotSupportedException();
+        public DbSet<PlatformBackgroundEvent> PlatformBackgroundEvents => throw new NotSupportedException();
         public DbSet<Skill> Skills => throw new NotSupportedException();
         public DbSet<SkillVersion> SkillVersions => throw new NotSupportedException();
         public DbSet<SkillVersionDependency> SkillVersionDependencies => throw new NotSupportedException();

@@ -4,7 +4,7 @@ namespace Memory.Application;
 
 public static class AgentExecutionContract
 {
-    public const string Version = "1.0";
+    public const string Version = "2.0";
     public const int DefaultLeaseSeconds = 300;
     public const int MaximumLeaseSeconds = 1800;
 }
@@ -25,7 +25,20 @@ public sealed record AgentExecutionPrepareRequest(
     int MaxAttempts,
     Guid? SkillResolutionId,
     string IdempotencyKey,
-    Guid? ExecutionId = null);
+    Guid? ExecutionId = null,
+    IReadOnlyList<AgentExecutionResourceRequirement>? ResourceRequirements = null,
+    AgentExecutionResourceRetryMode ResourceRetryMode = AgentExecutionResourceRetryMode.ReResolve);
+
+public sealed record AgentExecutionResourceRequirement(
+    Guid RequirementId,
+    AgentExecutionResourceKind Kind,
+    Guid LogicalResourceId,
+    AgentExecutionResourceResolutionMode ResolutionMode,
+    Guid? RequestedVersionId = null,
+    string? ExpectedIntegrityIdentity = null,
+    string? Purpose = null,
+    long AuthorityRevision = 0,
+    string? PolicyRevision = null);
 
 public sealed record AgentExecutionClaimRequest(
     string ProjectId,
@@ -95,7 +108,49 @@ public sealed record AgentExecutionPackage(
     string AgentType,
     IReadOnlyList<string> RequiredCapabilities,
     string ContextVersion,
-    SkillExecutionSnapshotResult? SkillSnapshot);
+    SkillExecutionSnapshotResult? SkillSnapshot,
+    IReadOnlyList<AgentExecutionResourceRequirement>? ResourceRequirements = null,
+    AgentExecutionResourceRetryMode ResourceRetryMode = AgentExecutionResourceRetryMode.ReResolve);
+
+public sealed record AgentExecutionResolutionItemResult(
+    Guid RequirementId,
+    AgentExecutionResourceKind Kind,
+    AgentExecutionResolutionOutcome Outcome,
+    Guid LogicalResourceId,
+    Guid? ResolvedVersionId,
+    string IntegrityIdentity,
+    long AuthorityRevision,
+    string PolicyRevision,
+    Guid? CapabilityLeaseId,
+    DateTimeOffset? CapabilityExpiresAt,
+    string ReasonCode,
+    IReadOnlyList<string> EvidenceRefs);
+
+public sealed record AgentExecutionResolutionSnapshotResult(
+    Guid Id,
+    Guid ExecutionId,
+    int Attempt,
+    int ResolutionSequence,
+    AgentExecutionResourceRetryMode RetryMode,
+    AgentExecutionResolutionOutcome Outcome,
+    string AuthorityContextHash,
+    string SnapshotHash,
+    IReadOnlyList<string> EvidenceRefs,
+    DateTimeOffset ResolvedAt,
+    IReadOnlyList<AgentExecutionResolutionItemResult> Items);
+
+public sealed record AgentExecutionCredentialCapability(
+    Guid RequirementId,
+    Guid LeaseId,
+    string Capability,
+    long LeaseRevision,
+    DateTimeOffset ExpiresAt);
+
+public sealed record AgentExecutionResourceApprovalRequest(
+    Guid ExecutionId,
+    Guid RequirementId,
+    StepUpProof StepUp,
+    string IdempotencyKey);
 
 public sealed record AgentExecutionEventResult(
     Guid Id,
@@ -127,14 +182,17 @@ public sealed record AgentExecutionResult(
     DateTimeOffset UpdatedAt,
     DateTimeOffset? StartedAt,
     DateTimeOffset? CompletedAt,
-    IReadOnlyList<AgentExecutionEventResult>? Events = null);
+    IReadOnlyList<AgentExecutionEventResult>? Events = null,
+    AgentExecutionResolutionSnapshotResult? ResolutionSnapshot = null);
 
 public sealed record AgentExecutionClaimResult(
     bool HasExecution,
     string Outcome,
     AgentExecutionResult? Execution,
     string? LeaseToken,
-    bool Replayed);
+    bool Replayed,
+    AgentExecutionResolutionSnapshotResult? ResolutionSnapshot = null,
+    IReadOnlyList<AgentExecutionCredentialCapability>? CredentialCapabilities = null);
 
 public sealed record AgentExecutionMutationResult(
     AgentExecutionResult Execution,
@@ -160,6 +218,7 @@ public sealed record AgentExecutionDashboardResult(
 public interface IAgentExecutionService
 {
     Task<AgentExecutionResult> PrepareAsync(AgentExecutionPrepareRequest request, CancellationToken cancellationToken);
+    Task<AgentExecutionResult> ApproveResourceAsync(AgentExecutionResourceApprovalRequest request, CancellationToken cancellationToken);
     Task<AgentExecutionClaimResult> ClaimNextAsync(AgentExecutionClaimRequest request, CancellationToken cancellationToken);
     Task<AgentExecutionResult?> GetAsync(Guid executionId, CancellationToken cancellationToken);
     Task<IReadOnlyList<AgentExecutionResult>> ListAsync(AgentExecutionListRequest request, CancellationToken cancellationToken);

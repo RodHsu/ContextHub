@@ -294,6 +294,47 @@ public sealed class AgentExecutionMigrationRehearsalTests
     }
 
     [DockerRequiredFact]
+    public async Task Migration_050_should_upgrade_a_049_shaped_database_with_isolated_authority_and_rebuildable_monitoring()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true)
+            .WithDatabase("contexthub")
+            .WithUsername("contexthub")
+            .WithPassword("contexthub")
+            .Build();
+        await postgres.StartAsync();
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "049_mfa_totp_webauthn.sql");
+
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '050_platform_foundation_c_agent_resources.sql';")).Should().Be(1);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.tables WHERE
+                (table_schema = 'authority' AND table_name IN ('background_runs', 'agent_execution_resolution_snapshots', 'agent_execution_resolution_items', 'agent_execution_resource_approvals')) OR
+                (table_schema = 'audit' AND table_name IN ('authority_outbox_events', 'background_events')) OR
+                (table_schema = 'monitoring' AND table_name IN ('outbox_deliveries', 'activity_projections', 'projection_states'));
+            """)).Should().Be(9);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_schema = 'authority'
+              AND table_name IN ('agent_execution_resolution_snapshots', 'agent_execution_resolution_items', 'agent_execution_resource_approvals')
+              AND column_name ~ '(raw_secret|provider_locator|kek|dek|capability_token)';
+            """)).Should().Be(0);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname IN
+                ('trg_authority_outbox_immutable', 'trg_background_events_immutable',
+                 'trg_execution_resolution_snapshot_immutable', 'trg_execution_resolution_item_immutable');
+            """)).Should().Be(4);
+
+        await connection.CloseAsync();
+        await connection.OpenAsync();
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '050_platform_foundation_c_agent_resources.sql';")).Should().Be(1);
+    }
+
+    [DockerRequiredFact]
     public async Task Definition_state_migration_should_fail_closed_on_conflicting_compatibility_tags()
     {
         await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")

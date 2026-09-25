@@ -108,6 +108,7 @@ public sealed class SourceConnectionService(
 
         ValidateSourceConfig(entity.SourceKind, entity.ConfigJson);
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
+        entity.Revision = checked(entity.Revision + 1);
         entity.UpdatedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
         return Map(entity);

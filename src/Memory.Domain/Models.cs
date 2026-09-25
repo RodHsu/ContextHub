@@ -720,6 +720,7 @@ public sealed class SourceConnection
     public bool Enabled { get; set; } = true;
     public string ConfigJson { get; set; } = "{}";
     public string SecretJsonProtected { get; set; } = string.Empty;
+    public long Revision { get; set; } = 1;
     public string LastCursor { get; set; } = string.Empty;
     public DateTimeOffset? LastSuccessfulSyncAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }

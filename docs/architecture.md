@@ -6,7 +6,9 @@ ContextHub 是一套給 Codex 使用的外部知識系統。它的目標不是�
 
 Agent Skills 使用同一 Application/Infrastructure boundary：PostgreSQL 保存 stable Skill identity、不可變 SkillVersion、binding、index generation、resolution pin、telemetry 與 metadata proposal；embedding provider 建立 shadow search generation；檔案系統 adapter 只負責 content-addressed cache 與 execution-isolated materialization。完整契約與 lifecycle 見 [Agent Skills](agent-skills.md)。
 
-AgentExecution 也沿用相同 Application/Infrastructure boundary：PostgreSQL 提供 immutable execution package、atomic claim、lease fencing、checkpoint、idempotent receipt 與 append-only audit；既有 Skills snapshot 是唯一 runtime integration boundary。詳見 [Agent Execution](agent-execution.md) 與 [ADR](design/agent-execution-architecture.md)。
+AgentExecution 也沿用相同 Application/Infrastructure boundary：PostgreSQL 提供 immutable execution package、atomic claim、lease fencing、checkpoint、idempotent receipt 與 append-only audit；既有 Skills snapshot 與 attempt-scoped resource ResolutionSnapshot 是 runtime integration boundary。詳見 [Agent Execution](agent-execution.md) 與 [ADR](design/agent-execution-architecture.md)。
+
+Foundation C 以同一 PostgreSQL database 內的 `authority`、`audit`、`monitoring` schema 建立明確責任邊界。Business/authorization mutation 與 sanitized immutable outbox 同 transaction 提交；worker 依 `TenantId + ProjectId` 隔離的 scope 非同步建立可刪除、可完整重建的 monitoring projection。Monitoring 故障不回滾既有 authority commit，也不得作為 business/security 決策來源。背景執行採 bounded scope paging 與 batch、fenced lease、cursor/generation、coverage/counts、retry/backoff/dead-letter 與 append-only run event。
 
 - 長期記憶
 - 專案事實與設計決策

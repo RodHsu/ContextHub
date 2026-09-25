@@ -1508,6 +1508,12 @@ agentExecutions.RequireAuthIfEnabled(requireAuthentication);
 agentExecutions.MapPost("/prepare", async (AgentExecutionPrepareRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
     => Results.Created("/api/agent-executions", await service.PrepareAsync(request, cancellationToken)))
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsManage);
+agentExecutions.MapPost("/{executionId:guid}/resource-approvals", async (Guid executionId, AgentExecutionResourceApprovalRequest request, IAgentExecutionService service, CancellationToken cancellationToken) =>
+{
+    if (executionId != request.ExecutionId)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["executionId"] = ["Route and request execution identifiers must match."] });
+    return Results.Ok(await service.ApproveResourceAsync(request, cancellationToken));
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsManage);
 agentExecutions.MapPost("/claim-next", async (AgentExecutionClaimRequest request, IAgentExecutionService service, CancellationToken cancellationToken)
     => Results.Ok(await service.ClaimNextAsync(request, cancellationToken)))
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.AgentExecutionsClaim);

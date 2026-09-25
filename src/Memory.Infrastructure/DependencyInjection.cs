@@ -142,6 +142,8 @@ public static class DependencyInjection
         services.AddHostedService<DatabaseMigrationHostedService>();
         services.AddHostedService<SecurityBootstrapHostedService>();
         services.AddHostedService<DatabaseLogWriterService>();
+        if (string.Equals(serviceName, "worker", StringComparison.OrdinalIgnoreCase))
+            services.AddHostedService<PlatformProjectionHostedService>();
         services.AddSingleton(sp =>
         {
             var options = sp.GetRequiredService<IOptions<EmbeddingOptions>>().Value;

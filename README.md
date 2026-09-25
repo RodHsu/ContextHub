@@ -20,7 +20,8 @@ The goal is to keep durable context outside the prompt while still letting agent
 - Retrieval telemetry and maintenance APIs for retention, summaries, and reclaim workflows
 - Chat-agent gateway for restricted MCP access with OAuth/OIDC and proposal-gated writes
 - Portable Agent Skills registry with immutable versions, hybrid discovery, exact execution pinning, isolated materialization, and quality telemetry
-- Lease-safe AgentExecution dispatch with immutable packages, atomic claim, checkpoint/retry evidence, and mid-execution Skill revalidation
+- Lease-safe AgentExecution dispatch with immutable packages, atomic claim, attempt-scoped logical resource snapshots, checkpoint/retry evidence, and mid-execution Skill/resource revalidation
+- Transactional sanitized authority outbox with asynchronous, rebuildable monitoring projections and bounded incremental/full reconciliation
 
 ## Repository Layout
 

@@ -27,7 +27,47 @@ public enum AgentExecutionEventType
     Abandoned,
     Expired,
     Cancelled,
-    SkillSnapshotRevalidated
+    SkillSnapshotRevalidated,
+    ResourcesResolved,
+    ResourceResolutionBlocked,
+    ResourceApprovalGranted
+}
+
+public enum AgentExecutionResourceKind
+{
+    File,
+    Credential,
+    ConnectionProfile,
+    Skill
+}
+
+public enum AgentExecutionResourceResolutionMode
+{
+    Exact,
+    LogicalCurrent
+}
+
+public enum AgentExecutionResourceRetryMode
+{
+    ReResolve,
+    ReuseSnapshot
+}
+
+public enum AgentExecutionResolutionOutcome
+{
+    Resolved,
+    RequiresStepUp,
+    RequiresExternalApproval,
+    HumanDecision,
+    Denied
+}
+
+public enum AgentExecutionResourceApprovalStatus
+{
+    Active,
+    Consumed,
+    Expired,
+    Revoked
 }
 
 public sealed class AgentExecution
@@ -63,6 +103,7 @@ public sealed class AgentExecution
     public DateTimeOffset? CompletedAt { get; set; }
     public ProjectWorkItem? WorkItem { get; set; }
     public ICollection<AgentExecutionEvent> Events { get; set; } = [];
+    public ICollection<AgentExecutionResolutionSnapshot> ResolutionSnapshots { get; set; } = [];
 }
 
 public sealed class AgentExecutionEvent
@@ -89,4 +130,56 @@ public sealed class AgentExecutionOperation
     public string ProtectedResultJson { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
     public AgentExecution? Execution { get; set; }
+}
+
+public sealed class AgentExecutionResolutionSnapshot
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ExecutionId { get; set; }
+    public int Attempt { get; set; }
+    public int ResolutionSequence { get; set; }
+    public AgentExecutionResourceRetryMode RetryMode { get; set; }
+    public AgentExecutionResolutionOutcome Outcome { get; set; }
+    public string AuthorityContextHash { get; set; } = string.Empty;
+    public string SnapshotHash { get; set; } = string.Empty;
+    public string EvidenceRefsJson { get; set; } = "[]";
+    public DateTimeOffset ResolvedAt { get; set; }
+    public AgentExecution? Execution { get; set; }
+    public ICollection<AgentExecutionResolutionItem> Items { get; set; } = [];
+}
+
+public sealed class AgentExecutionResolutionItem
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid SnapshotId { get; set; }
+    public Guid RequirementId { get; set; }
+    public AgentExecutionResourceKind Kind { get; set; }
+    public AgentExecutionResolutionOutcome Outcome { get; set; }
+    public Guid LogicalResourceId { get; set; }
+    public Guid? ResolvedVersionId { get; set; }
+    public string IntegrityIdentity { get; set; } = string.Empty;
+    public long AuthorityRevision { get; set; }
+    public string PolicyRevision { get; set; } = string.Empty;
+    public Guid? CapabilityLeaseId { get; set; }
+    public DateTimeOffset? CapabilityExpiresAt { get; set; }
+    public string ReasonCode { get; set; } = string.Empty;
+    public string EvidenceRefsJson { get; set; } = "[]";
+    public DateTimeOffset CreatedAt { get; set; }
+    public AgentExecutionResolutionSnapshot? Snapshot { get; set; }
+}
+
+public sealed class AgentExecutionResourceApproval
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ExecutionId { get; set; }
+    public Guid RequirementId { get; set; }
+    public int Attempt { get; set; }
+    public Guid ApprovedByUserId { get; set; }
+    public Guid AssertionId { get; set; }
+    public long AuthorityRevision { get; set; }
+    public string PolicyRevision { get; set; } = string.Empty;
+    public AgentExecutionResourceApprovalStatus Status { get; set; } = AgentExecutionResourceApprovalStatus.Active;
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }

@@ -48,7 +48,7 @@ public sealed class AgentExecutionContractTests
     [Fact]
     public void Contract_should_keep_lease_and_retry_bounds_explicit()
     {
-        AgentExecutionContract.Version.Should().Be("1.0");
+        AgentExecutionContract.Version.Should().Be("2.0");
         AgentExecutionContract.DefaultLeaseSeconds.Should().BePositive();
         AgentExecutionContract.MaximumLeaseSeconds.Should().BeGreaterThan(AgentExecutionContract.DefaultLeaseSeconds);
     }

@@ -2196,6 +2196,15 @@ public interface IApplicationDbContext
     DbSet<AgentExecution> AgentExecutions { get; }
     DbSet<AgentExecutionEvent> AgentExecutionEvents { get; }
     DbSet<AgentExecutionOperation> AgentExecutionOperations { get; }
+    DbSet<AgentExecutionResolutionSnapshot> AgentExecutionResolutionSnapshots { get; }
+    DbSet<AgentExecutionResolutionItem> AgentExecutionResolutionItems { get; }
+    DbSet<AgentExecutionResourceApproval> AgentExecutionResourceApprovals { get; }
+    DbSet<AuthorityOutboxEvent> AuthorityOutboxEvents { get; }
+    DbSet<PlatformOutboxDelivery> PlatformOutboxDeliveries { get; }
+    DbSet<MonitoringActivityProjection> MonitoringActivityProjections { get; }
+    DbSet<MonitoringProjectionState> MonitoringProjectionStates { get; }
+    DbSet<PlatformBackgroundRun> PlatformBackgroundRuns { get; }
+    DbSet<PlatformBackgroundEvent> PlatformBackgroundEvents { get; }
     DbSet<Skill> Skills { get; }
     DbSet<SkillVersion> SkillVersions { get; }
     DbSet<SkillVersionDependency> SkillVersionDependencies { get; }
