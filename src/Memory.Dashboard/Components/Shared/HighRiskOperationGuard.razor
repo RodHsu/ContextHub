@@ -1,0 +1,74 @@
+@using Memory.Application
+@using Memory.Domain
+
+<section class="panel high-risk-operation" aria-label="@OperationName">
+    <div class="panel-heading-row">
+        <div>
+            <div class="panel-title">@OperationName</div>
+            <div class="panel-heading-meta">@Summary</div>
+        </div>
+        <span class="status-badge @OutcomeClass">@OutcomeText</span>
+    </div>
+
+    <dl class="definition-grid high-risk-operation-grid">
+        <div><dt>Required assurance</dt><dd>@RequiredAssuranceText</dd></div>
+        <div><dt>驗證方式</dt><dd>@AuthenticationMethodText</dd></div>
+        <div><dt>Reason</dt><dd>@Reason</dd></div>
+        <div><dt>Impact preview</dt><dd>@ImpactPreview</dd></div>
+        <div><dt>Outcome read-back</dt><dd>@OutcomeReadBack</dd></div>
+    </dl>
+
+    @if (Decision is null)
+    {
+        <div class="inline-error high-risk-operation-warning">
+            尚未取得 server assurance decision；操作保持停用。前端不會自行推定或降低驗證要求。
+        </div>
+    }
+
+    <div class="detail-actions">
+        <button type="button"
+                class="primary-button"
+                disabled="@(!CanExecute)"
+                @onclick="ExecuteAsync">
+            @ActionLabel
+        </button>
+        @if (!CanExecute)
+        {
+            <span class="detail-actions-copy">@DisabledReason</span>
+        }
+    </div>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public string OperationName { get; set; } = string.Empty;
+    [Parameter] public string Summary { get; set; } = "高風險操作必須由 server 回傳 assurance decision。";
+    [Parameter, EditorRequired] public string Reason { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string ImpactPreview { get; set; } = string.Empty;
+    [Parameter] public string OutcomeReadBack { get; set; } = "尚未執行";
+    [Parameter] public string AuthenticationMethodText { get; set; } = "Password / TOTP / WebAuthn-FIDO / External approval";
+    [Parameter] public string ActionLabel { get; set; } = "執行";
+    [Parameter] public StepUpAuthorizationResult? Decision { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public EventCallback OnExecute { get; set; }
+
+    private bool CanExecute => !Busy && Decision?.Outcome == StepUpRequirementOutcome.Allowed;
+    private string RequiredAssuranceText => Decision?.RequiredAssurance.ToString() ?? "等待 server policy";
+    private string OutcomeText => Decision?.Outcome.ToString() ?? "Fail closed";
+    private string OutcomeClass => Decision?.Outcome switch
+    {
+        StepUpRequirementOutcome.Allowed => "ok",
+        StepUpRequirementOutcome.RequiresStepUp => "warn",
+        StepUpRequirementOutcome.RequiresExternalApproval => "warn",
+        _ => "bad"
+    };
+    private string DisabledReason => Decision?.Outcome switch
+    {
+        StepUpRequirementOutcome.RequiresStepUp => $"需要 {Decision.RequiredAssurance} human step-up。",
+        StepUpRequirementOutcome.RequiresExternalApproval => "需要外部核准。",
+        StepUpRequirementOutcome.Disabled => "此環境未開放這項操作。",
+        StepUpRequirementOutcome.Allowed when Busy => "操作執行中。",
+        _ => "等待 server assurance decision。"
+    };
+
+    private Task ExecuteAsync() => CanExecute ? OnExecute.InvokeAsync() : Task.CompletedTask;
+}

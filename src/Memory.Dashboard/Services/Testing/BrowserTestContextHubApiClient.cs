@@ -224,6 +224,40 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             BuildContextSavings(now)));
     }
 
+    public Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var scope = string.IsNullOrWhiteSpace(projectId) ? ProjectContext.AllProjectIdsSentinel : projectId;
+        return Task.FromResult(new DashboardOperationsResult(
+            "browser-test",
+            "2026.09.26-test",
+            now.AddHours(-2),
+            scope,
+            ["ContextHub", "dashboard-test-secondary"],
+            [
+                new DashboardServiceHealthResult("api", "Healthy", "API ready"),
+                new DashboardServiceHealthResult("worker", "Healthy", "Worker ready"),
+                new DashboardServiceHealthResult("transfer-gateway", "Degraded", "One retry in the current window")
+            ],
+            new DashboardAuthorityStateResult(128, 128, 7, now.AddMinutes(-1)),
+            [
+                new DashboardProjectionStateResult("ContextHub", 12, 128, 126, 2, now.AddMinutes(-2), now.AddMinutes(13), true),
+                new DashboardProjectionStateResult("dashboard-test-secondary", 4, 18, 18, 0, now.AddMinutes(-1), now.AddMinutes(14), false)
+            ],
+            [
+                new DashboardBackgroundRunResult(Guid.NewGuid(), "ContextHub", "activity-v1", PlatformBackgroundMode.Incremental,
+                    PlatformBackgroundRunStatus.Completed, 12, 128, 128, 3, 3, true, 0, 0, 0, 0, 0, 1, 5, now.AddMinutes(-1), now.AddMinutes(-1), string.Empty)
+            ],
+            [
+                new DashboardBackgroundRunResult(Guid.NewGuid(), "ContextHub", "activity-v1", PlatformBackgroundMode.Full,
+                    PlatformBackgroundRunStatus.Completed, 12, 128, 128, 128, 128, true, 2, 1, 1, 126, 0, 1, 5, now.AddHours(-4), now.AddHours(-4), string.Empty)
+            ],
+            new DashboardAgentExecutionQueueResult(4, 1, 2, 1, 1, 0, 32, 0),
+            new DashboardLogicalStorageHealthResult(42, 8_388_608, 39, 1, 1, 1, 0, 2, 18, 1),
+            now,
+            new DashboardPageSnapshotStatusResult(now, false, string.Empty, [])));
+    }
+
     public Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken)
     {
         var memories = BuildMemories().AsEnumerable();

@@ -1,0 +1,305 @@
+@page "/operations"
+@implements IAsyncDisposable
+@inject IContextHubApiClient ApiClient
+
+<PageTitle>Context Hub | 營運中心</PageTitle>
+
+<PageViewport Title="營運中心"
+              Subtitle="集中檢視 authority、rebuildable projection、背景工作、Agent queue 與邏輯儲存健康。"
+              Breadcrumb="ContextHub / Operations"
+              BodyClass="page-viewport-body operations-page-body">
+    <Actions>
+        <div class="page-actions-status">
+            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                           SnapshotAtUtc="_operations?.SnapshotAtUtc"
+                           IsRefreshing="_loading"
+                           WarningText="@_operations?.SnapshotStatus?.Warning" />
+        </div>
+        <div class="page-actions-primary">
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">刷新</button>
+        </div>
+    </Actions>
+    <ChildContent>
+        <DashboardScopeBar ProjectId="@_projectId"
+                           ProjectIdChanged="ChangeProjectAsync"
+                           ProjectIds="@(_operations?.KnownProjectIds ?? [])"
+                           SearchText="@_searchText"
+                           SearchTextChanged="ChangeSearch"
+                           Disabled="@_loading" />
+
+        @if (_operations is null && _loading)
+        {
+            <DashboardAsyncState State="loading" Title="載入營運狀態" Message="正在讀取 authority 與 monitoring projection。" />
+        }
+        else if (_operations is null)
+        {
+            <DashboardAsyncState State="error" Title="無法載入營運狀態" Message="@(_loadError ?? "Operations data unavailable.")">
+                <Action><button class="ghost-button" @onclick="LoadAsync">重試</button></Action>
+            </DashboardAsyncState>
+        }
+        else
+        {
+            @if (!string.IsNullOrWhiteSpace(_loadError))
+            {
+                <DashboardAsyncState State="degraded" Title="顯示上次成功資料" Message="@_loadError" />
+            }
+
+            <section class="operations-authority-grid">
+                <article class="panel operations-authority-card">
+                    <div class="operations-card-kicker">Business authority</div>
+                    <div class="panel-title">Authority commit boundary</div>
+                    <strong>@DashboardFormatting.Integer(_operations.Authority.LatestSequence)</strong>
+                    <span>latest sequence</span>
+                    <dl class="definition-grid">
+                        <div><dt>事件</dt><dd>@DashboardFormatting.Integer(_operations.Authority.EventCount)</dd></div>
+                        <div><dt>Security critical</dt><dd>@DashboardFormatting.Integer(_operations.Authority.SecurityCriticalEventCount)</dd></div>
+                        <div><dt>最後 commit</dt><dd>@if (_operations.Authority.LastCommittedAtUtc.HasValue) { <ClientLocalTime Value="_operations.Authority.LastCommittedAtUtc.Value" /> } else { <span>-</span> }</dd></div>
+                    </dl>
+                    <div class="authority-callout authority-callout-primary">此區為 authority evidence；Monitoring 不得覆寫此狀態。</div>
+                </article>
+
+                <article class="panel operations-authority-card operations-projection-card">
+                    <div class="operations-card-kicker">Rebuildable monitoring</div>
+                    <div class="panel-title">Projection coverage</div>
+                    <strong>@DashboardFormatting.Integer(ProjectionLag())</strong>
+                    <span>event lag</span>
+                    <dl class="definition-grid">
+                        <div><dt>Scopes</dt><dd>@DashboardFormatting.Integer(_operations.Projections.Count)</dd></div>
+                        <div><dt>Stale</dt><dd>@DashboardFormatting.Integer(_operations.Projections.Count(item => item.IsStale))</dd></div>
+                        <div><dt>最高 generation</dt><dd>@DashboardFormatting.Integer(_operations.Projections.Count == 0 ? 0 : _operations.Projections.Max(item => item.Generation))</dd></div>
+                    </dl>
+                    <div class="authority-callout">Projection 可重建，僅供觀測；lag 或 stale 不等於 business state 失效。</div>
+                </article>
+            </section>
+
+            <section class="operations-path-grid">
+                <article class="panel operations-path-card">
+                    <div class="panel-heading-row">
+                        <div>
+                            <div class="panel-title">Precise / Incremental</div>
+                            <div class="panel-heading-meta">Mutation/outbox 觸發的精準投影與失效更新。</div>
+                        </div>
+                        <span class="status-badge @RunHealthClass(FilteredRuns(_operations.IncrementalRuns))">@RunHealthText(FilteredRuns(_operations.IncrementalRuns))</span>
+                    </div>
+                    @RunList(FilteredRuns(_operations.IncrementalRuns))
+                </article>
+
+                <article class="panel operations-path-card">
+                    <div class="panel-heading-row">
+                        <div>
+                            <div class="panel-title">Scheduled full reconciliation</div>
+                            <div class="panel-heading-meta">全量 coverage、drift detection 與 repair，不是 authority。</div>
+                        </div>
+                        <span class="status-badge @RunHealthClass(FilteredRuns(_operations.FullReconciliationRuns))">@RunHealthText(FilteredRuns(_operations.FullReconciliationRuns))</span>
+                    </div>
+                    @RunList(FilteredRuns(_operations.FullReconciliationRuns))
+                </article>
+            </section>
+
+            <section class="panel operations-projection-table">
+                <div class="panel-heading-row">
+                    <div>
+                        <div class="panel-title">Authority / projection revision</div>
+                        <div class="panel-heading-meta">逐 scope 顯示 authority sequence、projection cursor、generation 與 stale/fail-closed 狀態。</div>
+                    </div>
+                </div>
+                <div class="table-scroll-shell">
+                    <table class="data-table">
+                        <thead><tr><th>Project</th><th>Authority</th><th>Projection</th><th>Lag</th><th>Generation</th><th>狀態</th><th>Last success</th><th>Next run</th></tr></thead>
+                        <tbody>
+                            @foreach (var state in FilteredProjections())
+                            {
+                                <tr>
+                                    <td>@state.ProjectId</td>
+                                    <td>@DashboardFormatting.Integer(state.AuthoritySequence)</td>
+                                    <td>@DashboardFormatting.Integer(state.Cursor)</td>
+                                    <td>@DashboardFormatting.Integer(state.Lag)</td>
+                                    <td>@DashboardFormatting.Integer(state.Generation)</td>
+                                    <td><span class="status-badge @(state.IsStale ? "warn" : "ok")">@(state.IsStale ? "Stale / degraded" : "Current")</span></td>
+                                    <td>@if (state.LastSuccessAtUtc.HasValue) { <ClientLocalTime Value="state.LastSuccessAtUtc.Value" /> } else { <span>-</span> }</td>
+                                    <td>@if (state.NextRunAtUtc.HasValue) { <ClientLocalTime Value="state.NextRunAtUtc.Value" /> } else { <span>-</span> }</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="operations-summary-grid">
+                <article class="panel">
+                    <div class="panel-title">AgentExecution queue / workers</div>
+                    <div class="metric-strip operations-metric-strip">
+                        <div><span>Ready</span><strong>@DashboardFormatting.Integer(_operations.AgentExecutions.Ready)</strong></div>
+                        <div><span>Running</span><strong>@DashboardFormatting.Integer(_operations.AgentExecutions.Running)</strong></div>
+                        <div><span>Blocked</span><strong>@DashboardFormatting.Integer(_operations.AgentExecutions.Blocked)</strong></div>
+                    </div>
+                    <dl class="definition-grid">
+                        <div><dt>Claimed</dt><dd>@DashboardFormatting.Integer(_operations.AgentExecutions.Claimed)</dd></div>
+                        <div><dt>Retryable</dt><dd>@DashboardFormatting.Integer(_operations.AgentExecutions.Retryable)</dd></div>
+                        <div><dt>Terminal failures</dt><dd>@DashboardFormatting.Integer(_operations.AgentExecutions.TerminalFailures)</dd></div>
+                        <div><dt>Expired leases</dt><dd>@DashboardFormatting.Integer(_operations.AgentExecutions.ExpiredLeases)</dd></div>
+                    </dl>
+                    <a class="ghost-button button-link" href="/agent-executions">檢視 Agent 執行</a>
+                </article>
+
+                <article class="panel">
+                    <div class="panel-title">Logical storage / transfer health</div>
+                    <div class="metric-strip operations-metric-strip">
+                        <div><span>Objects</span><strong>@DashboardFormatting.Integer(_operations.LogicalStorage.ObjectCount)</strong></div>
+                        <div><span>Logical bytes</span><strong>@DashboardFormatting.Bytes(_operations.LogicalStorage.LogicalBytes)</strong></div>
+                        <div><span>Active transfers</span><strong>@DashboardFormatting.Integer(_operations.LogicalStorage.ActiveTransfers)</strong></div>
+                    </div>
+                    <dl class="definition-grid">
+                        <div><dt>Ready</dt><dd>@DashboardFormatting.Integer(_operations.LogicalStorage.Ready)</dd></div>
+                        <div><dt>Staged</dt><dd>@DashboardFormatting.Integer(_operations.LogicalStorage.Staged)</dd></div>
+                        <div><dt>Orphaned / missing / corrupt</dt><dd>@DashboardFormatting.Integer(_operations.LogicalStorage.Orphaned) / @DashboardFormatting.Integer(_operations.LogicalStorage.Missing) / @DashboardFormatting.Integer(_operations.LogicalStorage.Corrupt)</dd></div>
+                        <div><dt>Expired / revoked transfers</dt><dd>@DashboardFormatting.Integer(_operations.LogicalStorage.FailedOrExpiredTransfers)</dd></div>
+                    </dl>
+                    <div class="authority-callout">僅顯示 ContextHub logical metrics；不暴露 provider、endpoint、bucket、object locator 或 direct URL。</div>
+                </article>
+            </section>
+
+            <section class="panel operations-services-panel">
+                <div class="panel-title">Services / runtime / dependencies</div>
+                <div class="operations-service-list">
+                    @foreach (var service in FilteredServices())
+                    {
+                        <article>
+                            <span class="status-badge @StatusClass(service.Status)">@DashboardText.Status(service.Status)</span>
+                            <strong>@DashboardText.Service(service.Name)</strong>
+                            <span>@service.Description</span>
+                        </article>
+                    }
+                </div>
+                <div class="detail-actions">
+                    <a class="ghost-button button-link" href="/monitoring">進階 telemetry</a>
+                    <a class="ghost-button button-link" href="/runtime">執行參數</a>
+                    <a class="ghost-button button-link" href="/jobs">背景工作控制</a>
+                    <a class="ghost-button button-link" href="/logs">日誌與 diagnostics</a>
+                    <a class="ghost-button button-link" href="/mcp-tools">MCP / API</a>
+                </div>
+            </section>
+
+            <HighRiskOperationGuard OperationName="受控 full reconciliation"
+                                    Summary="只允許 bounded scope、impact preview、audit 與 server-side assurance 決策。"
+                                    Reason="修復已證明的 projection drift"
+                                    ImpactPreview="只重建目前 Project scope 的 monitoring projection；不變更 business authority。"
+                                    OutcomeReadBack="此 Wave 未發布 mutation endpoint，操作維持 fail-closed。"
+                                    ActionLabel="啟動 bounded reconciliation"
+                                    Decision="@null" />
+        }
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private readonly CancellationTokenSource _cts = new();
+    private DashboardOperationsResult? _operations;
+    private string _projectId = ProjectContext.AllProjectIdsSentinel;
+    private string _searchText = string.Empty;
+    private bool _loading;
+    private string? _loadError;
+    private DateTimeOffset? _lastUpdatedAt;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task ChangeProjectAsync(string projectId)
+    {
+        _projectId = projectId;
+        await LoadAsync();
+    }
+
+    private Task ChangeSearch(string value)
+    {
+        _searchText = value;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            _operations = await ApiClient.GetOperationsAsync(_projectId, _cts.Token);
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("營運中心", ex, _operations is not null);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private IReadOnlyList<DashboardProjectionStateResult> FilteredProjections()
+        => _operations?.Projections.Where(item => Matches(item.ProjectId) || Matches(item.IsStale ? "stale degraded" : "current")).ToArray() ?? [];
+
+    private IReadOnlyList<DashboardBackgroundRunResult> FilteredRuns(IReadOnlyList<DashboardBackgroundRunResult> runs)
+        => runs.Where(item => Matches(item.ProjectId) || Matches(item.JobType) || Matches(item.Status.ToString())).Take(3).ToArray();
+
+    private IReadOnlyList<DashboardServiceHealthResult> FilteredServices()
+        => _operations?.Services.Where(item => Matches(item.Name) || Matches(item.Status) || Matches(item.Description)).ToArray() ?? [];
+
+    private bool Matches(string value)
+        => string.IsNullOrWhiteSpace(_searchText) || value.Contains(_searchText.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private long ProjectionLag() => _operations?.Projections.Sum(item => item.Lag) ?? 0;
+
+    private RenderFragment RunList(IReadOnlyList<DashboardBackgroundRunResult> runs) => builder =>
+    {
+        if (runs.Count == 0)
+        {
+            builder.OpenElement(0, "div");
+            builder.AddAttribute(1, "class", "empty-inline");
+            builder.AddContent(2, "目前範圍沒有 run evidence。");
+            builder.CloseElement();
+            return;
+        }
+
+        var sequence = 10;
+        foreach (var run in runs)
+        {
+            builder.OpenElement(sequence++, "article");
+            builder.AddAttribute(sequence++, "class", "operations-run-row");
+            builder.OpenElement(sequence++, "div");
+            builder.OpenElement(sequence++, "strong");
+            builder.AddContent(sequence++, $"{run.ProjectId} / {run.JobType}");
+            builder.CloseElement();
+            builder.OpenElement(sequence++, "span");
+            builder.AddContent(sequence++, $"generation {run.Generation} · cursor {run.Cursor}/{run.AuthoritySequenceBoundary}");
+            builder.CloseElement();
+            builder.CloseElement();
+            builder.OpenElement(sequence++, "span");
+            builder.AddAttribute(sequence++, "class", $"status-badge {StatusClass(run.Status.ToString())}");
+            builder.AddContent(sequence++, run.Status.ToString());
+            builder.CloseElement();
+            builder.CloseElement();
+        }
+    };
+
+    private static string RunHealthText(IReadOnlyList<DashboardBackgroundRunResult> runs)
+        => runs.Count == 0 ? "No evidence" : runs.Any(run => run.Failed > 0 || run.Status is PlatformBackgroundRunStatus.DeadLetter or PlatformBackgroundRunStatus.FailedTerminal) ? "Attention" : "Healthy";
+
+    private static string RunHealthClass(IReadOnlyList<DashboardBackgroundRunResult> runs)
+        => RunHealthText(runs) switch { "Healthy" => "ok", "Attention" => "bad", _ => "neutral" };
+
+    private static string StatusClass(string status) => status.ToLowerInvariant() switch
+    {
+        "healthy" or "ready" or "running" or "completed" => "ok",
+        "degraded" or "warning" or "retryscheduled" or "blocked" => "warn",
+        "failed" or "critical" or "deadletter" or "failedterminal" => "bad",
+        _ => "neutral"
+    };
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+        return ValueTask.CompletedTask;
+    }
+}

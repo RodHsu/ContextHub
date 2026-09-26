@@ -91,6 +91,8 @@ Rules:
 
 ## Dashboard Route Baseline
 
+Wave 6A canonical IA, capability coverage, and bounded cleanup evidence are documented in [Platform Wave 6A Dashboard Inventory](docs/platform-wave-6a-dashboard-inventory.md). The sidebar and command palette share one navigation model. Overview is a concise action surface; `/operations` owns authority-versus-projection state, incremental/full reconciliation, AgentExecution summary, and provider-neutral logical storage health.
+
 | Area | Routes |
 | --- | --- |
 | Operations | `/`, `/monitoring`, `/runtime`, `/logs`, `/jobs`, `/performance` |

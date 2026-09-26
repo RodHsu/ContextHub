@@ -2,674 +2,216 @@
 @implements IAsyncDisposable
 @inject IContextHubApiClient ApiClient
 @inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
-@inject IJSRuntime JsRuntime
-@using Memory.Dashboard.Services
 
 <PageTitle>Context Hub | 總覽</PageTitle>
 
 <PageViewport Title="總覽"
-              Subtitle="集中掌握服務健康、資源趨勢與背景工作狀態。"
-              BodyClass="page-viewport-body home-page-body">
+              Subtitle="只顯示需要注意、需要決策或最值得立即行動的訊號。"
+              Breadcrumb="ContextHub / Overview"
+              BodyClass="page-viewport-body overview-page-body">
     <Actions>
         <div class="page-actions-status">
             <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                           SnapshotAtUtc="PageSnapshotAtUtc()"
+                           SnapshotAtUtc="_overview?.SnapshotAtUtc"
                            IsRefreshing="_loading"
                            PollingIntervalSeconds="@PollingIntervalSeconds"
-                           WarningText="@SnapshotWarningText()" />
+                           WarningText="@_overview?.SnapshotStatus?.Warning" />
         </div>
         <div class="page-actions-primary">
-            <button class="primary-button" @onclick="RefreshAsync" disabled="@_loading">刷新</button>
+            <a class="ghost-button button-link" href="/operations">開啟營運中心</a>
+            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">刷新</button>
         </div>
     </Actions>
     <ChildContent>
-
-    @if (!string.IsNullOrWhiteSpace(_loadError))
-    {
-        <div class="inline-error">@_loadError</div>
-    }
-
-    @if (_overview is null || _docker is null)
-    {
-        <div class="metric-grid">
-            @for (var i = 0; i < 4; i++)
-            {
-                <section class="panel metric-card skeleton-panel">
-                    <div class="skeleton-line skeleton-line-sm"></div>
-                    <div class="skeleton-line skeleton-line-lg"></div>
-                    <div class="skeleton-line skeleton-line-xs"></div>
-                </section>
-            }
-        </div>
-
-        <div class="dashboard-grid page-scroll-host">
-            @for (var i = 0; i < 4; i++)
-            {
-                <section class="panel skeleton-panel @(i == 2 ? "span-2" : string.Empty)">
-                    <div class="skeleton-line skeleton-line-md"></div>
-                    <div class="skeleton-stack">
-                        <div class="skeleton-line skeleton-line-lg"></div>
-                        <div class="skeleton-line skeleton-line-md"></div>
-                        <div class="skeleton-line skeleton-line-sm"></div>
-                    </div>
-                </section>
-            }
-        </div>
-    }
-    else
-    {
-        @if (!string.IsNullOrWhiteSpace(_message))
+        @if (_overview is null && _loading)
         {
-            <DashboardToast Message="@_message" Sequence="@_messageSequence" OnDismiss="ClearMessage" />
+            <DashboardAsyncState State="loading" Title="載入總覽" Message="正在整理最新健康、風險與行動訊號。" />
         }
-
-        <div class="metric-grid">
-            @foreach (var metric in _overview.Metrics)
+        else if (_overview is null)
+        {
+            <DashboardAsyncState State="error" Title="總覽目前不可用" Message="@(_loadError ?? "Overview data unavailable.")">
+                <Action><button class="ghost-button" @onclick="LoadAsync">重試</button></Action>
+            </DashboardAsyncState>
+        }
+        else
+        {
+            @if (!string.IsNullOrWhiteSpace(_loadError))
             {
-                <section class="panel metric-card metric-card-inline" title="@metric.Definition">
-                    <div class="metric-inline-line">
-                        <span class="metric-label-inline">@metric.Label：</span>
-                        <span class="metric-value-inline">@DashboardFormatting.Integer(metric.Value)</span>
-                        <span class="metric-meta-inline">@MetricUnitText(metric.Unit)</span>
-                    </div>
-                </section>
+                <DashboardAsyncState State="degraded" Title="顯示上次成功資料" Message="@_loadError" />
             }
-        </div>
 
-        <div class="home-signal-grid">
-            <section class="panel home-signal-chart-panel">
-                <div class="panel-heading-row">
-                    <div>
-                        <div class="panel-title">系統效能</div>
-                        <div class="panel-heading-meta">CPU 使用率 / 最近 @DashboardFormatting.Integer(ResourceSampleCount) 筆資源樣本</div>
-                    </div>
-                    <div class="home-signal-value">
-                        <strong>@DashboardFormatting.Percent(AverageCpuPercent())</strong>
-                        <span>近期平均</span>
-                    </div>
-                </div>
-                <svg class="home-signal-chart" viewBox="0 0 720 96" preserveAspectRatio="none" role="img" aria-label="System CPU performance trend">
-                    @foreach (var guide in ChartGuideLines())
-                    {
-                        <line class="resource-line-guide" x1="0" y1="@guide" x2="720" y2="@guide"></line>
-                    }
-                    <text class="home-signal-lane-label" x="12" y="20">CPU</text>
-                    <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), PercentChartMax, 720d, 96d)"></polyline>
-                </svg>
-                <div class="resource-chart-legend">
-                    <span class="resource-legend-item"><i class="legend-swatch cpu"></i>CPU</span>
-                </div>
-                <div class="home-signal-footer">
-                    <span>目前 @DashboardFormatting.Percent(CurrentCpuPercent())</span>
-                    <span>每 @DashboardFormatting.Integer(PollingIntervalSeconds) 秒更新</span>
-                </div>
+            <section class="overview-signal-strip" aria-label="高行動價值摘要">
+                @foreach (var metric in _overview.Metrics.Take(3))
+                {
+                    <article class="overview-signal" title="@metric.Definition">
+                        <span>@metric.Label</span>
+                        <strong>@DashboardFormatting.Integer(metric.Value)</strong>
+                        <small>@MetricUnitText(metric.Unit)</small>
+                    </article>
+                }
+                @if (_overview.Metrics.Count == 0)
+                {
+                    <article class="overview-signal overview-signal-empty">
+                        <span>摘要訊號</span>
+                        <strong>0</strong>
+                        <small>等待資料</small>
+                    </article>
+                }
             </section>
 
-            <section class="panel home-alert-panel">
+            <section class="overview-action-grid">
+                <article class="panel overview-health-panel">
+                    <div class="panel-heading-row">
+                        <div>
+                            <div class="panel-title">平台健康</div>
+                            <div class="panel-heading-meta">只列出最多三個需要注意的服務；完整 telemetry 位於 Operations。</div>
+                        </div>
+                        <span class="status-badge @(AttentionServices().Count == 0 ? "ok" : "warn")">
+                            @(AttentionServices().Count == 0 ? "Healthy" : $"{AttentionServices().Count} attention")
+                        </span>
+                    </div>
+
+                    <div class="overview-queue">
+                        @if (AttentionServices().Count == 0)
+                        {
+                            <div class="empty-inline">目前沒有服務健康警示。</div>
+                        }
+                        else
+                        {
+                            @foreach (var service in AttentionServices())
+                            {
+                                <article class="overview-queue-item">
+                                    <span class="status-badge @StatusClass(service.Status)">@DashboardText.Status(service.Status)</span>
+                                    <div><strong>@DashboardText.Service(service.Name)</strong><span>@service.Description</span></div>
+                                </article>
+                            }
+                        }
+                    </div>
+                    <a class="ghost-button button-link" href="/operations">檢視 Operations</a>
+                </article>
+
+                <article class="panel overview-risk-panel">
+                    <div class="panel-heading-row">
+                        <div>
+                            <div class="panel-title">風險與異常</div>
+                            <div class="panel-heading-meta">最新三筆 Error / Critical；不在總覽重複完整 log reader。</div>
+                        </div>
+                        <span class="status-badge @(_overview.RecentErrors.Count == 0 ? "ok" : "bad")">@DashboardFormatting.Integer(_overview.RecentErrors.Count)</span>
+                    </div>
+                    <div class="overview-queue">
+                        @if (_overview.RecentErrors.Count == 0)
+                        {
+                            <div class="empty-inline">目前沒有待檢視異常。</div>
+                        }
+                        else
+                        {
+                            @foreach (var error in _overview.RecentErrors.Take(3))
+                            {
+                                <article class="overview-queue-item">
+                                    <span class="status-badge bad">@error.Level</span>
+                                    <div><strong>@error.ServiceName</strong><span>@error.Message</span></div>
+                                    <ClientRelativeTime Value="error.CreatedAt" />
+                                </article>
+                            }
+                        }
+                    </div>
+                    <a class="ghost-button button-link" href="/logs">檢視日誌與 diagnostics</a>
+                </article>
+
+                <article class="panel overview-decision-panel">
+                    <div class="panel-heading-row">
+                        <div>
+                            <div class="panel-title">需要人員決策</div>
+                            <div class="panel-heading-meta">將 governance、proposal 與 blocked workflow 導向唯一 canonical surface。</div>
+                        </div>
+                    </div>
+                    <div class="overview-decision-links">
+                        <a href="/inbox"><strong>待決事項</strong><span>處理需要人員裁決的 queue</span></a>
+                        <a href="/chatgpt-proposals"><strong>ChatGPT 寫入審核</strong><span>檢視提案、authority 與 read-back</span></a>
+                        <a href="/governance"><strong>治理檢查</strong><span>檢視 coverage、exceptions 與 receipts</span></a>
+                    </div>
+                </article>
+            </section>
+
+            <section class="panel overview-work-panel">
                 <div class="panel-heading-row">
                     <div>
-                        <div class="panel-title">異常佇列</div>
-                        <div class="panel-heading-meta">Error / Critical</div>
+                        <div class="panel-title">進行中工作</div>
+                        <div class="panel-heading-meta">最多三筆；完整 queue、payload 與維護操作留在專屬頁面。</div>
                     </div>
-                    <span class="status-badge @(_overview.RecentErrors.Count == 0 ? "status-success" : "status-error")">@DashboardFormatting.Integer(_overview.RecentErrors.Count)</span>
+                    <span class="status-badge neutral">@DashboardFormatting.Integer(_overview.ActiveJobs.Count)</span>
                 </div>
-                <div class="home-alert-list">
-                    @if (_overview.RecentErrors.Count == 0)
+                <div class="overview-work-list">
+                    @if (_overview.ActiveJobs.Count == 0)
                     {
-                        <div class="empty-inline">目前沒有待檢視異常。</div>
+                        <div class="empty-inline">目前沒有等待中或執行中的背景工作。</div>
                     }
                     else
                     {
-                        @foreach (var error in RecentErrorsPreview())
+                        @foreach (var job in _overview.ActiveJobs.Take(3))
                         {
-                            <article class="home-alert-item">
-                                <div>
-                                    <strong>@error.ServiceName</strong>
-                                    <span>@error.Message</span>
-                                </div>
-                                <ClientRelativeTime Value="error.CreatedAt" />
+                            <article>
+                                <span class="status-badge @StatusClass(job.Status.ToString())">@DashboardText.Label(job.Status)</span>
+                                <div><strong>@DashboardText.Label(job.JobType)</strong><span>受控背景工作；詳細參數僅在授權後顯示。</span></div>
+                                <ClientRelativeTime Value="job.CreatedAt" />
                             </article>
                         }
                     }
                 </div>
-                <a class="ghost-button home-alert-link" href="/logs">檢視全部日誌</a>
+                <a class="ghost-button button-link" href="/jobs">檢視背景工作</a>
             </section>
-        </div>
 
-        @if ((_overview.ContextSavings ?? CreateEmptyContextSavings(_overview.SnapshotAtUtc)) is { } contextSavings)
-        {
-            <section class="panel context-savings-strip @(contextSavings.HasRecentData ? string.Empty : "context-savings-strip-empty")">
-            <div class="context-savings-strip-title">
-                <div>
-                    <div class="panel-title">Token 節省量</div>
-                    <div class="context-savings-note">@ContextSavingsStateText(contextSavings) / @contextSavings.WindowLabel</div>
-                </div>
-                <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">可信度 @ContextSavingsConfidenceText(contextSavings.Confidence)</span>
-            </div>
-            <div class="context-savings-strip-metrics" aria-label="Token savings details">
-                @foreach (var window in ContextSavingsWindows(contextSavings))
-                {
-                    <div class="context-savings-window-card @(window.HasData ? string.Empty : "context-savings-window-empty")"
-                         title="@ContextSavingsTokenModeTooltip(window)">
-                        <span>@window.Label 節省量 / 快取命中率</span>
-                        <strong>@DashboardFormatting.Percent(window.SavingPercent)</strong>
-                        <small>
-                            <span>@FormatTokenCount(window.EstimatedSavedTokens)</span>
-                            <span>快取 @DashboardFormatting.Percent(window.CacheHitPercent)</span>
-                            <span class="context-savings-call-count">有效樣本：@DashboardFormatting.Integer(window.SampleCount) 次</span>
-                            <span class="context-savings-call-count">實際呼叫次數：@DashboardFormatting.Integer(window.ActualToolCallCount) 次</span>
-                        </small>
-                    </div>
-                }
-                <div>
-                    <span>來源覆蓋率</span>
-                    <strong>@DashboardFormatting.Percent(contextSavings.SourceCoveragePercent)</strong>
-                    <small>@DashboardFormatting.Integer(contextSavings.ReturnedTokenEstimate) returned tokens</small>
-                </div>
-                <div class="context-savings-strip-last">
-                    <span>最後樣本</span>
-                    <strong>
-                        @if (contextSavings.LastSampleAtUtc.HasValue)
-                        {
-                            <ClientLocalTime Value="contextSavings.LastSampleAtUtc.Value" />
-                        }
-                        else
-                        {
-                            <span>等待樣本</span>
-                        }
-                    </strong>
-                </div>
-                <div class="context-savings-strip-trend">
-                    <span>趨勢</span>
-                    <svg class="resource-line-chart context-savings-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Token saving percent trend">
-                        @foreach (var guide in new[] { 14, 28, 42 })
-                        {
-                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
-                        }
-                        <polyline class="resource-line savings" points="@BuildLinePoints(contextSavings.Trend.Select(x => x.SavingPercent), 100d)"></polyline>
-                    </svg>
-                </div>
-            </div>
-            </section>
+            <footer class="overview-release-strip">
+                <span>Release identity</span>
+                <strong>@_overview.BuildVersion</strong>
+                <ClientLocalTime Value="_overview.BuildTimestampUtc" />
+                <span>Snapshot <ClientLocalTime Value="_overview.SnapshotAtUtc" /></span>
+            </footer>
         }
-
-        @if ((_overview.DiscussionActivity ?? CreateEmptyDiscussionActivity(_overview.SnapshotAtUtc)) is { } discussionActivity)
-        {
-            <section class="panel discussion-activity-strip">
-                <div class="discussion-activity-title">
-                    <div>
-                        <div class="panel-title">討論對話串</div>
-                        <div class="context-savings-note">跨專案溝通活動，與工具呼叫流量分開計算。</div>
-                    </div>
-                    <a class="ghost-button" href="/discussions">前往討論</a>
-                </div>
-                <div class="discussion-activity-metrics" aria-label="Discussion activity details">
-                    <div>
-                        <span>目前討論串</span>
-                        <strong>@DashboardFormatting.Integer(discussionActivity.ThreadCount)</strong>
-                        <small>@DashboardFormatting.Integer(discussionActivity.OpenThreadCount) 個開啟中</small>
-                    </div>
-                    <div>
-                        <span>近 24 小時溝通</span>
-                        <strong>@DashboardFormatting.Integer(discussionActivity.RecentMessageCount)</strong>
-                        <small>則訊息</small>
-                    </div>
-                    <div class="discussion-activity-hosts">
-                        <span>主要討論專案</span>
-                        @if (discussionActivity.HostProjectCounts.Count == 0)
-                        {
-                            <small>尚無近期溝通</small>
-                        }
-                        else
-                        {
-                            @foreach (var host in discussionActivity.HostProjectCounts)
-                            {
-                                <small>@host.HostProjectId <b>@DashboardFormatting.Integer(host.MessageCount)</b></small>
-                            }
-                        }
-                    </div>
-                    <div class="discussion-activity-trend">
-                        <span>溝通趨勢</span>
-                        <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Discussion messages trend over the last 24 hours">
-                            @foreach (var guide in new[] { 14, 28, 42 })
-                            {
-                                <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
-                            }
-                            <polyline class="resource-line discussion" points="@BuildLinePoints(discussionActivity.Trend.Select(x => (double)x.MessageCount))"></polyline>
-                        </svg>
-                    </div>
-                </div>
-            </section>
-        }
-
-        <div class="dashboard-grid page-scroll-host">
-            <section class="panel">
-                <div class="panel-title">服務健康</div>
-                <div class="badge-strip">
-                    @foreach (var service in _overview.Services)
-                    {
-                        <span class="status-badge @StatusClass(service.Status)">@ServiceDisplayName(service.Name): @StatusText(service.Status)</span>
-                    }
-                </div>
-
-                <dl class="definition-grid">
-                    <div>
-                        <dt>命名空間 (Namespace)</dt>
-                        <dd>@_overview.Namespace</dd>
-                    </div>
-                    <div>
-                        <dt>建置版本 (Build Version)</dt>
-                        <dd>@_overview.BuildVersion</dd>
-                    </div>
-                    <div>
-                        <dt>建置時間 (Build Time)</dt>
-                        <dd><ClientLocalTime Value="_overview.BuildTimestampUtc" /></dd>
-                    </div>
-                    <div>
-                        <dt>向量設定檔 (Embedding Profile)</dt>
-                        <dd>@_overview.EmbeddingProfile</dd>
-                    </div>
-                    <div>
-                        <dt>模型鍵值 (Model Key)</dt>
-                        <dd>@_overview.ModelKey</dd>
-                    </div>
-                    <div>
-                        <dt>維度 (Dimensions)</dt>
-                        <dd>@DashboardFormatting.Integer(_overview.Dimensions)</dd>
-                    </div>
-                    <div>
-                        <dt>最大 Token 數 (Max Tokens)</dt>
-                        <dd>@DashboardFormatting.Integer(_overview.MaxTokens)</dd>
-                    </div>
-                    <div>
-                        <dt>快取版本 (Cache Version)</dt>
-                        <dd>@DashboardFormatting.Integer(_overview.CacheVersion)</dd>
-                    </div>
-                </dl>
-            </section>
-
-            <section class="panel">
-                <div class="panel-title">Docker 主機 (Docker Host)</div>
-                <div class="host-grid">
-                    <div class="host-stat">
-                        <span>狀態</span>
-                        <strong class="@StatusClass(_docker.Status)">@StatusText(_docker.Status)</strong>
-                    </div>
-                    <div class="host-stat">
-                        <span>CPU 核心 (CPU Cores)</span>
-                        <strong>@DashboardFormatting.Integer(_docker.Host.CpuCount) 核</strong>
-                    </div>
-                    <div class="host-stat">
-                        <span>總記憶體</span>
-                        <strong>@DashboardFormatting.Bytes(_docker.Host.TotalMemoryBytes)</strong>
-                    </div>
-                    <div class="host-stat">
-                        <span>估計可用</span>
-                        <strong>@DashboardFormatting.Bytes(_docker.Host.EstimatedAvailableMemoryBytes)</strong>
-                    </div>
-                    <div class="host-stat">
-                        <span>Images</span>
-                        <strong>@DashboardFormatting.Integer(_docker.Host.ImageCount)</strong>
-                    </div>
-                    <div class="host-stat">
-                        <span>Volumes</span>
-                        <strong>@DashboardFormatting.Integer(_docker.Host.VolumeCount)</strong>
-                    </div>
-                </div>
-
-                @if (!string.IsNullOrWhiteSpace(_docker.Error))
-                {
-                    <div class="inline-error">@_docker.Error</div>
-                }
-            </section>
-
-            <section class="panel home-evaluation-panel">
-                <div class="panel-title">評估摘要</div>
-                @if (_overview.EvaluationSummary is null)
-                {
-                    <div class="empty-inline">尚未執行評估。</div>
-                }
-                else
-                {
-                    <dl class="definition-grid">
-                        <div><dt>評估組</dt><dd>@_overview.EvaluationSummary.SuiteName</dd></div>
-                        <div><dt>狀態</dt><dd>@EvaluationStatusText(_overview.EvaluationSummary.Status)</dd></div>
-                        <div><dt>Hit@K</dt><dd>@_overview.EvaluationSummary.HitRate</dd></div>
-                        <div><dt>Recall@K</dt><dd>@_overview.EvaluationSummary.RecallAtK</dd></div>
-                        <div><dt>MRR</dt><dd>@_overview.EvaluationSummary.MeanReciprocalRank</dd></div>
-                        <div><dt>延遲</dt><dd>@DashboardFormatting.Decimal(_overview.EvaluationSummary.AverageLatencyMs) ms</dd></div>
-                    </dl>
-                }
-            </section>
-
-            <section class="panel span-2">
-                <div class="panel-heading-row">
-                    <div class="panel-title">資源狀態圖表</div>
-                    <div class="panel-heading-meta resource-chart-panel-meta">@ResourceChartPanelNote()</div>
-                </div>
-                <div class="resource-chart-grid">
-                <article class="resource-chart-card">
-                    <div class="resource-chart-header">
-                        <div>
-                            <div class="resource-chart-title">CPU 使用率 (CPU Usage)</div>
-                            <div class="resource-chart-value">@DashboardFormatting.Percent(CurrentCpuPercent())</div>
-                            <div class="resource-chart-summary">近期平均 @DashboardFormatting.Percent(AverageCpuPercent()) / 範圍 @PercentRange(_resourceSamples.Select(x => x.CpuPercent))</div>
-                        </div>
-                    </div>
-                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="CPU usage trend">
-                        @foreach (var guide in ChartGuideLines())
-                        {
-                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
-                        }
-                        <polyline class="resource-line cpu" points="@BuildLinePoints(_resourceSamples.Select(x => x.CpuPercent), PercentChartMax)"></polyline>
-                    </svg>
-                    <div class="resource-chart-meta">依 `docker stats` 聚合目前服務群組原始 CPU 使用率 / 0-100% 固定軸 / 主機 @DashboardFormatting.Integer(_docker.Host.CpuCount) 核</div>
-                </article>
-
-                <article class="resource-chart-card">
-                    <div class="resource-chart-header">
-                        <div>
-                            <div class="resource-chart-title">記憶體使用率 (Memory Usage)</div>
-                            <div class="resource-chart-value">@DashboardFormatting.Bytes(CurrentMemoryUsageBytes())</div>
-                            <div class="resource-chart-summary">近期平均 @DashboardFormatting.Bytes(AverageMemoryUsageBytes()) / 範圍 @PercentRange(_resourceSamples.Select(x => x.MemoryPercent))</div>
-                        </div>
-                    </div>
-                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Memory usage trend">
-                        @foreach (var guide in ChartGuideLines())
-                        {
-                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
-                        }
-                        <polyline class="resource-line memory" points="@BuildLinePoints(_resourceSamples.Select(x => x.MemoryPercent), PercentChartMax)"></polyline>
-                    </svg>
-                    <div class="resource-chart-meta">@DashboardFormatting.Bytes(CurrentMemoryUsageBytes()) / @DashboardFormatting.Bytes(_docker.Host.TotalMemoryBytes) (占主機 @DashboardFormatting.Percent(CurrentMemoryPercent())) / 0-100% 固定軸</div>
-                </article>
-
-                <article class="resource-chart-card">
-                    <div class="resource-chart-header">
-                        <div>
-                            <div class="resource-chart-title">網路吞吐量 (Network Throughput)</div>
-                            <div class="resource-chart-stats">
-                                <div class="resource-inline-stat">
-                                    <span>接收 (RX)</span>
-                                    <div class="resource-inline-stat-value">
-                                        <strong>@FormatRate(CurrentNetworkRxBytesPerSecond())</strong>
-                                        <small>平均 @FormatRate(AverageNetworkRxBytesPerSecond())</small>
-                                    </div>
-                                </div>
-                                <div class="resource-inline-stat">
-                                    <span>傳送 (TX)</span>
-                                    <div class="resource-inline-stat-value">
-                                        <strong>@FormatRate(CurrentNetworkTxBytesPerSecond())</strong>
-                                        <small>平均 @FormatRate(AverageNetworkTxBytesPerSecond())</small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Network throughput trend">
-                        @foreach (var guide in ChartGuideLines())
-                        {
-                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
-                        }
-                        <polyline class="resource-line rx" points="@BuildLinePoints(_resourceSamples.Select(x => x.NetworkRxBytesPerSecond), MaxNetworkRate())"></polyline>
-                        <polyline class="resource-line tx" points="@BuildLinePoints(_resourceSamples.Select(x => x.NetworkTxBytesPerSecond), MaxNetworkRate())"></polyline>
-                    </svg>
-                    <div class="resource-chart-legend">
-                        <span class="resource-legend-item"><i class="legend-swatch rx"></i>接收 (RX)</span>
-                        <span class="resource-legend-item"><i class="legend-swatch tx"></i>傳送 (TX)</span>
-                    </div>
-                </article>
-
-                <article class="resource-chart-card">
-                    <div class="resource-chart-header">
-                        <div>
-                            <div class="resource-chart-title">近期呼叫趨勢 (Recent Request Traffic)</div>
-                            <div class="resource-chart-stats">
-                                <div class="resource-inline-stat">
-                                    <span>進站 (Inbound)</span>
-                                    <div class="resource-inline-stat-value">
-                                        <strong>@FormatCountRate(CurrentInboundRequestsPerSecond())</strong>
-                                        <small>平均 @FormatCountRate(AverageInboundRequestsPerSecond())</small>
-                                    </div>
-                                </div>
-                                <div class="resource-inline-stat">
-                                    <span>傳出 (Outbound)</span>
-                                    <div class="resource-inline-stat-value">
-                                        <strong>@FormatCountRate(CurrentOutboundRequestsPerSecond())</strong>
-                                        <small>平均 @FormatCountRate(AverageOutboundRequestsPerSecond())</small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Recent request traffic trend">
-                        @foreach (var guide in ChartGuideLines())
-                        {
-                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
-                        }
-                        <polyline class="resource-line inbound" points="@BuildLinePoints(_overview.RequestTraffic.Select(x => (double)x.InboundRequests), MaxRequestTrafficRate())"></polyline>
-                        <polyline class="resource-line outbound" points="@BuildLinePoints(_overview.RequestTraffic.Select(x => (double)x.OutboundRequests), MaxRequestTrafficRate())"></polyline>
-                    </svg>
-                    <div class="resource-chart-legend">
-                        <span class="resource-legend-item"><i class="legend-swatch inbound"></i>進站 (Inbound)</span>
-                        <span class="resource-legend-item"><i class="legend-swatch outbound"></i>傳出 (Outbound)</span>
-                    </div>
-                </article>
-
-                <article class="resource-chart-card">
-                    <div class="resource-chart-header">
-                        <div>
-                            <div class="resource-chart-title">磁碟吞吐量 (Disk Throughput)</div>
-                            <div class="resource-chart-stats">
-                                <div class="resource-inline-stat">
-                                    <span>讀取 (Read)</span>
-                                    <div class="resource-inline-stat-value">
-                                        <strong>@FormatRate(CurrentDiskReadBytesPerSecond())</strong>
-                                        <small>平均 @FormatRate(AverageDiskReadBytesPerSecond())</small>
-                                    </div>
-                                </div>
-                                <div class="resource-inline-stat">
-                                    <span>寫入 (Write)</span>
-                                    <div class="resource-inline-stat-value">
-                                        <strong>@FormatRate(CurrentDiskWriteBytesPerSecond())</strong>
-                                        <small>平均 @FormatRate(AverageDiskWriteBytesPerSecond())</small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <svg class="resource-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Disk throughput trend">
-                        @foreach (var guide in ChartGuideLines())
-                        {
-                            <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
-                        }
-                        <polyline class="resource-line read" points="@BuildLinePoints(_resourceSamples.Select(x => x.DiskReadBytesPerSecond), MaxDiskRate())"></polyline>
-                        <polyline class="resource-line write" points="@BuildLinePoints(_resourceSamples.Select(x => x.DiskWriteBytesPerSecond), MaxDiskRate())"></polyline>
-                    </svg>
-                    <div class="resource-chart-legend">
-                        <span class="resource-legend-item"><i class="legend-swatch read"></i>讀取 (Read)</span>
-                        <span class="resource-legend-item"><i class="legend-swatch write"></i>寫入 (Write)</span>
-                    </div>
-                </article>
-
-                @{
-                    var redisContainer = RedisContainer();
-                }
-                <article class="resource-chart-card resource-chart-card-redis">
-                    <div class="resource-chart-header">
-                        <div>
-                            <div class="resource-chart-title">Redis 狀態監控 (Redis Status)</div>
-                            <div class="resource-chart-value resource-chart-value-status">
-                                <span class="status-badge @RedisStatusClass(redisContainer)">@RedisStatusText(redisContainer)</span>
-                            </div>
-                            <div class="resource-chart-summary" title="@RedisContainerName(redisContainer)">@RedisContainerName(redisContainer)</div>
-                        </div>
-                    </div>
-                    <div class="resource-redis-chart" role="img" aria-label="Redis resource status chart">
-                        @foreach (var bar in RedisChartBars(redisContainer))
-                        {
-                            <div class="resource-redis-chart-row">
-                                <span class="resource-redis-chart-label">@bar.Label</span>
-                                <span class="resource-redis-bar-bg">
-                                    <span class="resource-redis-bar @bar.CssClass" style="--redis-bar-width: @RedisBarWidth(bar.Percent);"></span>
-                                </span>
-                                <span class="resource-redis-chart-value">@bar.Value</span>
-                            </div>
-                        }
-                    </div>
-                    <div class="resource-chart-meta">@RedisStatusMeta(redisContainer)</div>
-                </article>
-                </div>
-            </section>
-
-            <section class="panel span-2">
-                <div class="panel-title">Compose 服務資源</div>
-                <div class="table-scroll-shell table-scroll-shell-tall">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>服務 (Service)</th>
-                                <th>容器 (Container)</th>
-                                <th>狀態 (State)</th>
-                                <th>CPU</th>
-                                <th>記憶體 (Memory)</th>
-                                <th>網路 (Network)</th>
-                                <th>磁碟 I/O (Disk I/O)</th>
-                                <th>重啟次數 (Restart)</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @foreach (var container in _docker.Containers)
-                            {
-                                <tr>
-                                    <td>@ServiceDisplayName(container.Service)</td>
-                                    <td>@container.Name</td>
-                                    <td>
-                                        <span class="status-badge @StatusClass(container.State)">@StatusText(container.State)</span>
-                                        <span class="status-badge @StatusClass(container.Health)">@StatusText(container.Health)</span>
-                                    </td>
-                                    <td>@DashboardFormatting.Percent(container.CpuPercent)</td>
-                                    <td>@DashboardFormatting.Bytes(container.MemoryUsageBytes) / @DashboardFormatting.Bytes(container.MemoryLimitBytes)</td>
-                                    <td>@DashboardFormatting.Bytes(container.NetworkRxBytes) / @DashboardFormatting.Bytes(container.NetworkTxBytes)</td>
-                                    <td>@DashboardFormatting.Bytes(container.DiskReadBytes) / @DashboardFormatting.Bytes(container.DiskWriteBytes)</td>
-                                    <td>@DashboardFormatting.Integer(container.RestartCount)</td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-
-            <section class="panel">
-                <div class="panel-title">近 24 小時錯誤日誌</div>
-                <div class="stack-scroll-shell">
-                    <div class="stack-list">
-                        @if (_overview.RecentErrors.Count == 0)
-                        {
-                            <div class="empty-inline">近 24 小時沒有 Error / Critical log。</div>
-                        }
-                        else
-                        {
-                            @foreach (var error in RecentErrorsPreview())
-                            {
-                                <article class="stack-item stack-item-split">
-                                    <div class="stack-item-content">
-                                        <div class="stack-item-title">@error.ServiceName / @error.Level</div>
-                                        <div class="stack-item-copy">@error.Message</div>
-                                    </div>
-                                    <div class="stack-item-actions stack-item-actions-inline stack-item-actions-column">
-                                        <button class="ghost-button" @onclick="@(() => CopyLogAsync(error))">複製 JSON</button>
-                                        <div class="stack-item-meta stack-item-meta-compact"><ClientRelativeTime Value="error.CreatedAt" /></div>
-                                    </div>
-                                </article>
-                            }
-                        }
-                    </div>
-                </div>
-            </section>
-
-            <section class="panel">
-                <div class="panel-title">進行中工作</div>
-                <div class="stack-scroll-shell">
-                    <div class="stack-list">
-                        @if (_overview.ActiveJobs.Count == 0)
-                        {
-                            <div class="empty-inline">目前沒有等待中 / 執行中的工作。</div>
-                        }
-                        else
-                        {
-                            @foreach (var job in ActiveJobsPreview())
-                            {
-                                <article class="stack-item stack-item-split">
-                                    <div class="stack-item-content">
-                                        <div class="stack-item-title">@DashboardText.Label(job.JobType) / @DashboardText.Label(job.Status)</div>
-                                        <div class="stack-item-copy">@job.PayloadJson</div>
-                                    </div>
-                                    <div class="stack-item-actions stack-item-actions-inline stack-item-actions-column">
-                                        <button class="ghost-button" @onclick="@(() => CopyJobAsync(job))">複製 JSON</button>
-                                        <div class="stack-item-meta stack-item-meta-compact"><ClientRelativeTime Value="job.CreatedAt" /></div>
-                                    </div>
-                                </article>
-                            }
-                        }
-                    </div>
-                </div>
-            </section>
-        </div>
-    }
     </ChildContent>
 </PageViewport>
 
 @code {
-    private const int MaxResourceSamples = 15;
-    private const double PercentChartMax = 100d;
     private readonly CancellationTokenSource _cts = new();
-    private readonly SemaphoreSlim _refreshGate = new(1, 1);
-    private readonly List<ResourceSample> _resourceSamples = [];
-    private Task? _monitoringTask;
+    private Task? _pollingTask;
     private DashboardOverviewResult? _overview;
-    private DockerStackSnapshotResult? _docker;
     private bool _loading;
     private DateTimeOffset? _lastUpdatedAt;
-    private string? _message;
-    private long _messageSequence;
     private string? _loadError;
     private InstanceSettingsSnapshot? _settingsSnapshot;
-    private RedisCounterSnapshot? _previousRedisCounters;
-    private double _redisNetworkBytesPerSecond;
-    private double _redisDiskBytesPerSecond;
-    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.ResourceChartSeconds ?? 5;
+    private int PollingIntervalSeconds => _settingsSnapshot?.Behavior.SnapshotPolling.StatusCoreSeconds ?? 15;
 
     protected override async Task OnInitializedAsync()
     {
         _settingsSnapshot = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
-        await RefreshAsync();
+        await LoadAsync();
     }
 
     protected override Task OnAfterRenderAsync(bool firstRender)
     {
-        if (firstRender)
+        if (firstRender && PollingIntervalSeconds > 0)
         {
-            StartPollingLoops();
+            _pollingTask = PollAsync();
         }
 
         return Task.CompletedTask;
     }
 
-    private async Task RefreshAsync()
+    private async Task LoadAsync()
     {
         _loading = true;
-        await InvokeAsync(StateHasChanged);
         try
         {
-            await RefreshSnapshotAsync(waitForLock: true);
+            _overview = await ApiClient.GetOverviewAsync(_cts.Token);
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested)
         {
         }
         catch (Exception ex)
         {
-            _loadError = DashboardUiErrorFormatter.BuildLoadError("總覽資料", ex, _overview is not null);
+            _loadError = DashboardUiErrorFormatter.BuildLoadError("總覽", ex, _overview is not null);
         }
         finally
         {
@@ -677,666 +219,62 @@
         }
     }
 
-    private async Task CopyLogAsync(LogEntryResult log)
-    {
-        try
-        {
-            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", LogClipboardFormatter.Format(log));
-            ShowMessage($"已複製日誌 #{log.Id} 的 JSON。");
-            await InvokeAsync(StateHasChanged);
-        }
-        catch (JSException)
-        {
-            ShowMessage("複製失敗，請改用手動複製。");
-            await InvokeAsync(StateHasChanged);
-        }
-    }
-
-    private async Task CopyJobAsync(JobListItemResult job)
-    {
-        try
-        {
-            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", JobClipboardFormatter.Format(job));
-            ShowMessage($"已複製工作 {job.Id} 的 JSON。");
-            await InvokeAsync(StateHasChanged);
-        }
-        catch (JSException)
-        {
-            ShowMessage("複製失敗，請改用手動複製。");
-            await InvokeAsync(StateHasChanged);
-        }
-    }
-
-    private void ShowMessage(string message)
-    {
-        _message = message;
-        _messageSequence++;
-    }
-
-    private void ClearMessage()
-        => _message = null;
-
-    private void StartPollingLoops()
-    {
-        _monitoringTask = PollAsync(PollingIntervalSeconds, () => RefreshSnapshotAsync(waitForLock: false));
-    }
-
-    private Task PollAsync(int intervalSeconds, Func<Task> callback)
-    {
-        if (intervalSeconds <= 0)
-        {
-            return Task.CompletedTask;
-        }
-
-        return Task.Run(async () =>
-        {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
-            try
-            {
-                while (await timer.WaitForNextTickAsync(_cts.Token))
-                {
-                    try
-                    {
-                        await callback();
-                    }
-                    catch (OperationCanceledException) when (_cts.IsCancellationRequested)
-                    {
-                    }
-                    catch (Exception ex)
-                    {
-                        _loadError = DashboardUiErrorFormatter.BuildLoadError("總覽資料", ex, _overview is not null);
-                    }
-
-                    await InvokeAsync(StateHasChanged);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-            }
-        });
-    }
-
-    private async Task LoadOverviewAsync()
-    {
-        _overview = await ApiClient.GetOverviewAsync(_cts.Token);
-        HydrateDockerSnapshot();
-        ApplyResourceSamples();
-        _loadError = null;
-    }
-
-    private static string StatusClass(string status)
-        => status.ToLowerInvariant() switch
-        {
-            "healthy" or "ready" or "running" => "ok",
-            "degraded" or "warning" => "warn",
-            "error" or "critical" or "failed" or "unhealthy" or "exited" => "bad",
-            _ => "neutral"
-        };
-
-    private static string StatusText(string status)
-        => DashboardText.Status(status);
-
-    private static string EvaluationStatusText(EvaluationRunStatus status)
-        => status switch
-        {
-            EvaluationRunStatus.Completed => "已完成",
-            EvaluationRunStatus.Running => "執行中",
-            EvaluationRunStatus.Failed => "失敗",
-            _ => status.ToString()
-        };
-
-    private static string ServiceDisplayName(string name)
-        => DashboardText.Service(name);
-
-    private static string MetricUnitText(string unit)
-        => unit.ToLowerInvariant() switch
-        {
-            "items" => "筆",
-            "jobs" => "項",
-            "logs" => "筆",
-            _ => unit
-        };
-
-    private static string ContextSavingsConfidenceClass(string confidence)
-        => confidence switch
-        {
-            ContextSavingsEstimator.HighConfidence => "ok",
-            ContextSavingsEstimator.MediumConfidence => "warn",
-            ContextSavingsEstimator.LowConfidence => "neutral",
-            _ => "neutral"
-        };
-
-    private static string FormatTokenCount(int value)
-        => $"{DashboardFormatting.Integer(value)} tokens";
-
-    private static DashboardContextSavingsResult CreateEmptyContextSavings(DateTimeOffset now)
-        => new(
-            false,
-            0,
-            0,
-            0,
-            0,
-            0d,
-            ContextSavingsEstimator.LowConfidence,
-            0d,
-            0d,
-            now.AddHours(-24),
-            now,
-            [],
-            false,
-            null,
-            "最近 24 小時",
-            BuildEmptyContextSavingsWindows(now),
-            0d,
-            TokenCountingModes.Approximate);
-
-    private static DashboardDiscussionActivityResult CreateEmptyDiscussionActivity(DateTimeOffset now)
-        => new(
-            0,
-            0,
-            0,
-            now.AddHours(-24),
-            now,
-            null,
-            Enumerable.Range(0, 24)
-                .Select(hour => new DashboardDiscussionActivityTrendPointResult(now.AddHours(-24 + hour), 0))
-                .ToArray(),
-            []);
-
-    private static IReadOnlyList<DashboardContextSavingsWindowResult> ContextSavingsWindows(DashboardContextSavingsResult savings)
-        => savings.Windows is { Count: > 0 }
-            ? savings.Windows
-            :
-            FallbackContextSavingsWindows(savings);
-
-    private static IReadOnlyList<DashboardContextSavingsWindowResult> BuildEmptyContextSavingsWindows(DateTimeOffset now)
-        =>
-        [
-            EmptyContextSavingsWindow("24h", "24H", now.AddHours(-24), now),
-            EmptyContextSavingsWindow("3d", "3D", now.AddDays(-3), now),
-            EmptyContextSavingsWindow("7d", "7D", now.AddDays(-7), now),
-            EmptyContextSavingsWindow("30d", "30D", now.AddDays(-30), now)
-        ];
-
-    private static IReadOnlyList<DashboardContextSavingsWindowResult> FallbackContextSavingsWindows(DashboardContextSavingsResult savings)
-        =>
-        [
-            new DashboardContextSavingsWindowResult(
-                "24h",
-                "24H",
-                savings.HasData,
-                savings.SampleCount,
-                savings.BaselineTokenEstimate,
-                savings.ReturnedTokenEstimate,
-                savings.EstimatedSavedTokens,
-                savings.AverageSavingPercent,
-                savings.Confidence,
-                savings.SourceCoveragePercent,
-                savings.CacheHitPercent,
-                savings.WindowStartedAtUtc,
-                savings.WindowEndedAtUtc,
-                savings.LastSampleAtUtc,
-                savings.ExactCoveragePercent,
-                savings.TokenCountingMode),
-            EmptyContextSavingsWindow("3d", "3D", savings.WindowEndedAtUtc.AddDays(-3), savings.WindowEndedAtUtc),
-            EmptyContextSavingsWindow("7d", "7D", savings.WindowEndedAtUtc.AddDays(-7), savings.WindowEndedAtUtc),
-            EmptyContextSavingsWindow("30d", "30D", savings.WindowEndedAtUtc.AddDays(-30), savings.WindowEndedAtUtc)
-        ];
-
-    private static DashboardContextSavingsWindowResult EmptyContextSavingsWindow(
-        string key,
-        string label,
-        DateTimeOffset startedAt,
-        DateTimeOffset endedAt)
-        => new(
-            key,
-            label,
-            false,
-            0,
-            0,
-            0,
-            0,
-            0d,
-            ContextSavingsEstimator.LowConfidence,
-            0d,
-            0d,
-            startedAt,
-            endedAt,
-            null,
-            0d,
-            TokenCountingModes.Approximate);
-
-    private static string ContextSavingsTokenModeTooltip(DashboardContextSavingsWindowResult window)
-    {
-        var tokenMode = window.TokenCountingMode switch
-        {
-            TokenCountingModes.Exact => $"使用 tokenizer 精準 token 計算，exact coverage {DashboardFormatting.Percent(window.ExactCoveragePercent)}。",
-            TokenCountingModes.Mixed => $"部分樣本使用 tokenizer 精準 token，exact coverage {DashboardFormatting.Percent(window.ExactCoveragePercent)}，不足部分採估算 token。",
-            _ => "目前使用低成本估算 token；embedding tokenizer 無可用精準覆蓋。"
-        };
-
-        return $"{tokenMode} 有效樣本只包含可計算節省量的成功 working-context；實際呼叫次數包含 MCP 與 ChatGPT Gateway 的成功及失敗工具 invocation。";
-    }
-
-    private static string ContextSavingsStateText(DashboardContextSavingsResult savings)
-        => savings.HasRecentData
-            ? "成功的 working-context telemetry"
-            : "等待 working-context telemetry";
-
-    private static string ContextSavingsConfidenceText(string confidence)
-        => confidence switch
-        {
-            ContextSavingsEstimator.HighConfidence => "高",
-            ContextSavingsEstimator.MediumConfidence => "中",
-            ContextSavingsEstimator.LowConfidence => "低",
-            _ => confidence
-        };
-
-    private double CurrentCpuPercent()
-        => _resourceSamples.LastOrDefault()?.CpuPercent ?? 0d;
-
-    private double CurrentMemoryPercent()
-        => _resourceSamples.LastOrDefault()?.MemoryPercent ?? 0d;
-
-    private long CurrentMemoryUsageBytes()
-        => _resourceSamples.LastOrDefault()?.MemoryUsageBytes ?? 0L;
-
-    private double AverageCpuPercent()
-        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.CpuPercent);
-
-    private long AverageMemoryUsageBytes()
-        => _resourceSamples.Count == 0 ? 0L : (long)Math.Round(_resourceSamples.Average(x => x.MemoryUsageBytes));
-
-    private string RawCpuPercentText()
-        => _docker is null
-            ? "0%"
-            : $"{_docker.Containers.Sum(x => x.CpuPercent):0.##}%";
-
-    private double CurrentNetworkRxBytesPerSecond()
-        => _resourceSamples.LastOrDefault()?.NetworkRxBytesPerSecond ?? 0d;
-
-    private double CurrentNetworkTxBytesPerSecond()
-        => _resourceSamples.LastOrDefault()?.NetworkTxBytesPerSecond ?? 0d;
-
-    private double AverageNetworkRxBytesPerSecond()
-        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.NetworkRxBytesPerSecond);
-
-    private double AverageNetworkTxBytesPerSecond()
-        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.NetworkTxBytesPerSecond);
-
-    private double CurrentDiskReadBytesPerSecond()
-        => _resourceSamples.LastOrDefault()?.DiskReadBytesPerSecond ?? 0d;
-
-    private double CurrentDiskWriteBytesPerSecond()
-        => _resourceSamples.LastOrDefault()?.DiskWriteBytesPerSecond ?? 0d;
-
-    private double AverageDiskReadBytesPerSecond()
-        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.DiskReadBytesPerSecond);
-
-    private double AverageDiskWriteBytesPerSecond()
-        => _resourceSamples.Count == 0 ? 0d : _resourceSamples.Average(x => x.DiskWriteBytesPerSecond);
-
-    private int CurrentInboundRequestsPerSecond()
-        => _overview?.RequestTraffic.LastOrDefault()?.InboundRequests ?? 0;
-
-    private int CurrentOutboundRequestsPerSecond()
-        => _overview?.RequestTraffic.LastOrDefault()?.OutboundRequests ?? 0;
-
-    private int AverageInboundRequestsPerSecond()
-        => _overview?.RequestTraffic.Count > 0
-            ? (int)Math.Round(_overview.RequestTraffic.Average(x => x.InboundRequests))
-            : 0;
-
-    private int AverageOutboundRequestsPerSecond()
-        => _overview?.RequestTraffic.Count > 0
-            ? (int)Math.Round(_overview.RequestTraffic.Average(x => x.OutboundRequests))
-            : 0;
-
-    private Memory.Dashboard.Services.DockerContainerMetricResult? RedisContainer()
-        => _docker?.Containers.FirstOrDefault(container =>
-            string.Equals(container.Service, "redis", StringComparison.OrdinalIgnoreCase)
-            || container.Name.Contains("redis", StringComparison.OrdinalIgnoreCase)
-            || container.Image.Contains("redis", StringComparison.OrdinalIgnoreCase));
-
-    private static string RedisStatusClass(Memory.Dashboard.Services.DockerContainerMetricResult? container)
-        => container is null
-            ? "neutral"
-            : StatusClass(string.IsNullOrWhiteSpace(container.Health) ? container.State : container.Health);
-
-    private static string RedisStatusText(Memory.Dashboard.Services.DockerContainerMetricResult? container)
-        => container is null
-            ? "未偵測"
-            : StatusText(string.IsNullOrWhiteSpace(container.Health) ? container.State : container.Health);
-
-    private static string RedisHealthText(Memory.Dashboard.Services.DockerContainerMetricResult? container)
-        => container is null || string.IsNullOrWhiteSpace(container.Health)
-            ? "n/a"
-            : StatusText(container.Health);
-
-    private static string RedisStateText(Memory.Dashboard.Services.DockerContainerMetricResult? container)
-        => container is null || string.IsNullOrWhiteSpace(container.State)
-            ? "n/a"
-            : StatusText(container.State);
-
-    private static string RedisContainerName(Memory.Dashboard.Services.DockerContainerMetricResult? container)
-        => container?.Name ?? "未偵測 Redis container";
-
-    private static string RedisMemoryLimitText(Memory.Dashboard.Services.DockerContainerMetricResult? container)
-        => container is null || container.MemoryLimitBytes <= 0
-            ? "Limit n/a"
-            : $"Limit {DashboardFormatting.Bytes(container.MemoryLimitBytes)}";
-
-    private static string RedisStatusMeta(Memory.Dashboard.Services.DockerContainerMetricResult? container)
-        => container is null
-            ? "Compose snapshot 未回報 Redis container，請檢查 dependency resources snapshot。"
-            : $"Health {RedisHealthText(container)} / State {RedisStateText(container)} / Restart {DashboardFormatting.Integer(container.RestartCount)} / Image {container.Image}";
-
-    private IReadOnlyList<RedisChartBar> RedisChartBars(Memory.Dashboard.Services.DockerContainerMetricResult? container)
-    {
-        if (container is null)
-        {
-            return
-            [
-                new("CPU", "n/a", "cpu", 0d),
-                new("Mem", "n/a", "memory", 0d),
-                new("Net", "n/a", "rx", 0d),
-                new("Disk", "n/a", "read", 0d)
-            ];
-        }
-
-        var memoryPercent = container.MemoryLimitBytes <= 0
-            ? 0d
-            : ((double)container.MemoryUsageBytes / container.MemoryLimitBytes) * 100d;
-        return
-        [
-            new("CPU", DashboardFormatting.Percent(container.CpuPercent), "cpu", container.CpuPercent),
-            new("Mem", DashboardFormatting.Percent(memoryPercent), "memory", memoryPercent),
-            new("Net", FormatRate(_redisNetworkBytesPerSecond), "rx", RedisRatePercent(_redisNetworkBytesPerSecond)),
-            new("Disk", FormatRate(_redisDiskBytesPerSecond), "read", RedisRatePercent(_redisDiskBytesPerSecond))
-        ];
-    }
-
-    private static double RedisRatePercent(double value)
-        => Math.Clamp(Math.Log10(Math.Max(value, 0d) + 1d) * 18d, 0d, 100d);
-
-    private static string RedisBarWidth(double percent)
-        => $"{Math.Clamp(percent, 0d, 100d):0.##}%";
-
-    private int ResourceSampleCount
-        => _resourceSamples.Count;
-
-    private int RequestTrafficSampleCount
-        => _overview?.RequestTraffic.Count ?? 0;
-
-    private IEnumerable<LogEntryResult> RecentErrorsPreview()
-        => _overview?.RecentErrors
-            .OrderByDescending(x => x.CreatedAt)
+    private IReadOnlyList<DashboardServiceHealthResult> AttentionServices()
+        => _overview?.Services
+            .Where(service => !service.Status.Equals("Healthy", StringComparison.OrdinalIgnoreCase) &&
+                              !service.Status.Equals("Ready", StringComparison.OrdinalIgnoreCase))
             .Take(3)
-            ?? [];
+            .ToArray() ?? [];
 
-    private IEnumerable<JobListItemResult> ActiveJobsPreview()
-        => _overview?.ActiveJobs
-            .OrderByDescending(x => x.CreatedAt)
-            .Take(3)
-            ?? [];
-
-    private string ResourceChartPanelNote()
-        => $"每 {DashboardFormatting.Integer(PollingIntervalSeconds)} 秒刷新 / 資源最近 {DashboardFormatting.Integer(ResourceSampleCount)} 筆 / 呼叫最近 {DashboardFormatting.Integer(RequestTrafficSampleCount)} 筆";
-
-    private double MaxNetworkRate()
-        => Math.Max(
-            _resourceSamples.SelectMany(x => new[] { x.NetworkRxBytesPerSecond, x.NetworkTxBytesPerSecond }).DefaultIfEmpty(0d).Max(),
-            1d);
-
-    private double MaxDiskRate()
-        => Math.Max(
-            _resourceSamples.SelectMany(x => new[] { x.DiskReadBytesPerSecond, x.DiskWriteBytesPerSecond }).DefaultIfEmpty(0d).Max(),
-            1d);
-
-    private double MaxRequestTrafficRate()
-        => Math.Max(
-            _overview?.RequestTraffic.SelectMany(x => new[] { (double)x.InboundRequests, x.OutboundRequests }).DefaultIfEmpty(0d).Max() ?? 0d,
-            1d);
-
-    private static string PercentRange(IEnumerable<double> values)
+    private async Task PollAsync()
     {
-        var points = values.ToArray();
-        return points.Length == 0
-            ? "-"
-            : $"{DashboardFormatting.Percent(points.Min())} - {DashboardFormatting.Percent(points.Max())}";
-    }
-
-    private static IEnumerable<int> ChartGuideLines()
-        => [12, 36, 60, 84];
-
-    private static string BuildLinePoints(
-        IEnumerable<double> values,
-        double? fixedMax = null,
-        double width = 240d,
-        double height = 96d)
-    {
-        const double paddingX = 6d;
-        const double paddingY = 8d;
-
-        var points = values.ToArray();
-        if (points.Length == 0)
-        {
-            return string.Empty;
-        }
-
-        var max = fixedMax ?? Math.Max(points.Max(), 1d);
-        max = Math.Max(max, 1d);
-
-        if (points.Length == 1)
-        {
-            var singleY = height - paddingY - ((Math.Clamp(points[0], 0d, max) / max) * (height - (paddingY * 2d)));
-            return $"{paddingX:0.##},{singleY:0.##} {width - paddingX:0.##},{singleY:0.##}";
-        }
-
-        var xStep = (width - (paddingX * 2d)) / (points.Length - 1d);
-        return string.Join(
-            " ",
-            points.Select((value, index) =>
-            {
-                var x = paddingX + (xStep * index);
-                var y = height - paddingY - ((Math.Clamp(value, 0d, max) / max) * (height - (paddingY * 2d)));
-                return $"{x:0.##},{y:0.##}";
-            }));
-    }
-
-    private static string FormatRate(double bytesPerSecond)
-        => $"{DashboardFormatting.Bytes((long)Math.Round(bytesPerSecond))}/s";
-
-    private string FormatCountRate(int value)
-        => $"{DashboardFormatting.Integer(value)}/{DashboardFormatting.Integer(PollingIntervalSeconds)}s";
-
-    private async Task RefreshSnapshotAsync(bool waitForLock)
-    {
-        var entered = false;
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(PollingIntervalSeconds));
         try
         {
-            if (waitForLock)
+            while (await timer.WaitForNextTickAsync(_cts.Token))
             {
-                await _refreshGate.WaitAsync(_cts.Token);
-                entered = true;
+                await LoadAsync();
+                await InvokeAsync(StateHasChanged);
             }
-            else
-            {
-                entered = await _refreshGate.WaitAsync(0, _cts.Token);
-            }
-
-            if (!entered)
-            {
-                return;
-            }
-
-            await LoadOverviewAsync();
-            _lastUpdatedAt = DateTimeOffset.UtcNow;
-        }
-        finally
-        {
-            if (entered)
-            {
-                _refreshGate.Release();
-            }
-        }
-    }
-
-    private void HydrateDockerSnapshot()
-    {
-        if (_overview?.DockerHost is null || _overview.DependencyResources is null)
-        {
-            _docker = null;
-            return;
-        }
-
-        _docker = new DockerStackSnapshotResult(
-            _overview.DockerHost.Status,
-            _overview.DockerHost.Error,
-            new Memory.Dashboard.Services.DockerHostSummaryResult(
-                _overview.DockerHost.Host.HostName,
-                _overview.DockerHost.Host.ServerVersion,
-                _overview.DockerHost.Host.OperatingSystem,
-                _overview.DockerHost.Host.KernelVersion,
-                _overview.DockerHost.Host.CpuCount,
-                _overview.DockerHost.Host.TotalMemoryBytes,
-                _overview.DockerHost.Host.EstimatedAvailableMemoryBytes,
-                _overview.DockerHost.Host.ActiveContainerCount,
-                _overview.DockerHost.Host.ImageCount,
-                _overview.DockerHost.Host.VolumeCount,
-                _overview.DockerHost.Host.CapturedAtUtc),
-            _overview.DependencyResources.Containers
-                .Select(x => new Memory.Dashboard.Services.DockerContainerMetricResult(
-                    x.Name,
-                    x.Service,
-                    x.Image,
-                    x.State,
-                    x.Health,
-                    x.RestartCount,
-                    x.CpuPercent,
-                    x.MemoryUsageBytes,
-                    x.MemoryLimitBytes,
-                    x.NetworkRxBytes,
-                    x.NetworkTxBytes,
-                    x.DiskReadBytes,
-                    x.DiskWriteBytes))
-                .ToArray(),
-            [],
-            _overview.DependencyResources.Volumes
-                .Select(x => new Memory.Dashboard.Services.DockerVolumeSummaryResult(x.Name, x.Driver, x.SizeBytes, x.Mountpoint))
-                .ToArray());
-
-        UpdateRedisRates(_docker.Containers, _docker.Host.CapturedAtUtc);
-    }
-
-    private void UpdateRedisRates(
-        IReadOnlyList<Memory.Dashboard.Services.DockerContainerMetricResult> containers,
-        DateTimeOffset capturedAtUtc)
-    {
-        var redis = containers.FirstOrDefault(container =>
-            string.Equals(container.Service, "redis", StringComparison.OrdinalIgnoreCase)
-            || container.Name.Contains("redis", StringComparison.OrdinalIgnoreCase)
-            || container.Image.Contains("redis", StringComparison.OrdinalIgnoreCase));
-        if (redis is null)
-        {
-            _previousRedisCounters = null;
-            _redisNetworkBytesPerSecond = 0d;
-            _redisDiskBytesPerSecond = 0d;
-            return;
-        }
-
-        var current = new RedisCounterSnapshot(
-            capturedAtUtc,
-            redis.NetworkRxBytes + redis.NetworkTxBytes,
-            redis.DiskReadBytes + redis.DiskWriteBytes);
-        if (_previousRedisCounters is { } previous)
-        {
-            var elapsedSeconds = (current.CapturedAtUtc - previous.CapturedAtUtc).TotalSeconds;
-            if (elapsedSeconds > 0d)
-            {
-                _redisNetworkBytesPerSecond = RateFromCounters(current.NetworkBytes, previous.NetworkBytes, elapsedSeconds);
-                _redisDiskBytesPerSecond = RateFromCounters(current.DiskBytes, previous.DiskBytes, elapsedSeconds);
-            }
-        }
-
-        _previousRedisCounters = current;
-    }
-
-    private static double RateFromCounters(long current, long previous, double elapsedSeconds)
-        => current >= previous && elapsedSeconds > 0d ? (current - previous) / elapsedSeconds : 0d;
-
-    private void ApplyResourceSamples()
-    {
-        _resourceSamples.Clear();
-        foreach (var sample in _overview?.ResourceSamples ?? [])
-        {
-            _resourceSamples.Add(new ResourceSample(
-                sample.TimestampUtc,
-                sample.CpuPercent,
-                sample.MemoryPercent,
-                sample.MemoryUsageBytes,
-                sample.NetworkRxBytesPerSecond,
-                sample.NetworkTxBytesPerSecond,
-                sample.DiskReadBytesPerSecond,
-                sample.DiskWriteBytesPerSecond));
-        }
-
-        while (_resourceSamples.Count > MaxResourceSamples)
-        {
-            _resourceSamples.RemoveAt(0);
-        }
-    }
-
-    private DashboardPageSnapshotStatusResult? PageSnapshotStatus()
-        => _overview?.SnapshotStatus;
-
-    private DateTimeOffset? PageSnapshotAtUtc()
-        => _overview?.SnapshotStatus?.SnapshotAtUtc ?? _overview?.SnapshotAtUtc;
-
-    private string? SnapshotWarningText()
-        => DashboardUiErrorFormatter.BuildSnapshotWarning(PageSnapshotStatus(), "總覽");
-
-    public ValueTask DisposeAsync()
-    {
-        _cts.Cancel();
-        if (_monitoringTask is not null)
-        {
-            _ = CompleteDisposeAsync(_monitoringTask, _cts, _refreshGate);
-            return ValueTask.CompletedTask;
-        }
-
-        _cts.Dispose();
-        _refreshGate.Dispose();
-        return ValueTask.CompletedTask;
-    }
-
-    private static async Task CompleteDisposeAsync(Task monitoringTask, CancellationTokenSource cts, SemaphoreSlim refreshGate)
-    {
-        try
-        {
-            await monitoringTask;
         }
         catch (OperationCanceledException)
         {
         }
-        finally
-        {
-            cts.Dispose();
-            refreshGate.Dispose();
-        }
     }
 
-    private sealed record ResourceSample(
-        DateTimeOffset CapturedAt,
-        double CpuPercent,
-        double MemoryPercent,
-        long MemoryUsageBytes,
-        double NetworkRxBytesPerSecond,
-        double NetworkTxBytesPerSecond,
-        double DiskReadBytesPerSecond,
-        double DiskWriteBytesPerSecond);
+    private static string MetricUnitText(string unit) => unit.ToLowerInvariant() switch
+    {
+        "items" => "筆",
+        "jobs" => "項",
+        "logs" => "筆",
+        _ => unit
+    };
 
-    private sealed record RedisChartBar(string Label, string Value, string CssClass, double Percent);
+    private static string StatusClass(string status) => status.ToLowerInvariant() switch
+    {
+        "healthy" or "ready" or "running" or "completed" => "ok",
+        "degraded" or "warning" or "pending" or "blocked" => "warn",
+        "failed" or "critical" or "error" or "unhealthy" => "bad",
+        _ => "neutral"
+    };
 
-    private sealed record RedisCounterSnapshot(DateTimeOffset CapturedAtUtc, long NetworkBytes, long DiskBytes);
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        if (_pollingTask is not null)
+        {
+            _ = CompleteDisposeAsync(_pollingTask, _cts);
+            return ValueTask.CompletedTask;
+        }
+
+        _cts.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static async Task CompleteDisposeAsync(Task pollingTask, CancellationTokenSource cts)
+    {
+        try { await pollingTask; }
+        catch (OperationCanceledException) { }
+        finally { cts.Dispose(); }
+    }
 }

@@ -174,6 +174,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var context = await client.PostAsJsonAsync("/api/context/build", new WorkingContextRequest("status endpoint", 3, 3));
         var contextPayload = await context.Content.ReadFromJsonAsync<WorkingContextResult>();
         var overview = await client.GetFromJsonAsync<DashboardOverviewResult>("/api/dashboard/overview");
+        var operations = await client.GetFromJsonAsync<DashboardOperationsResult>("/api/dashboard/operations?projectId=ContextHub");
 
         status.Should().NotBeNull();
         status!.Service.Should().Be("mcp-server");
@@ -193,6 +194,10 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         contextPayload.SavingsEstimate!.ApproxBaselineTokens.Should().Be(contextPayload.SavingsEstimate.BaselineTokenEstimate);
         contextPayload.SavingsEstimate.TokenCountingMode.Should().NotBeNullOrWhiteSpace();
         overview.Should().NotBeNull();
+        operations.Should().NotBeNull();
+        operations!.ProjectScope.Should().Be("ContextHub");
+        operations.Authority.IsAuthoritative.Should().BeTrue();
+        operations.Projections.Should().OnlyContain(item => !item.IsAuthoritative);
         overview!.ContextSavings.Should().NotBeNull();
         overview.ContextSavings!.Windows.Should().NotBeNull();
         overview.ContextSavings.Windows!.Select(x => x.Key).Should().Contain(["24h", "3d", "7d", "30d"]);

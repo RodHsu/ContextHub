@@ -180,6 +180,163 @@ public sealed class DashboardQueryService(
             discussionActivity?.Payload.Activity);
     }
 
+    public async Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow();
+        var actor = actorAccessor.Current;
+        var normalizedProjectId = string.IsNullOrWhiteSpace(projectId) ||
+            string.Equals(projectId, ProjectContext.AllProjectIdsSentinel, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : ProjectContext.Normalize(projectId);
+
+        var dependencies = await snapshotStore.GetAsync<DashboardDependenciesHealthSnapshotPayload>(
+            DashboardSnapshotKeys.DependenciesHealth,
+            cancellationToken);
+
+        var authorityQuery = dbContext.AuthorityOutboxEvents.AsNoTracking()
+            .Where(item => !actor.HasUser || item.TenantId == actor.TenantId);
+        var projectionQuery = dbContext.MonitoringProjectionStates.AsNoTracking()
+            .Where(item => !actor.HasUser || item.TenantId == actor.TenantId);
+        var runQuery = dbContext.PlatformBackgroundRuns.AsNoTracking()
+            .Where(item => !actor.HasUser || item.TenantId == actor.TenantId);
+        var executionQuery = dbContext.AgentExecutions.AsNoTracking()
+            .Where(item => !actor.HasUser || item.TenantId == actor.TenantId);
+        var objectQuery = dbContext.ManagedObjects.AsNoTracking()
+            .Where(item => !actor.HasUser || item.TenantId == actor.TenantId);
+        var transferQuery = dbContext.ManagedTransferSessions.AsNoTracking()
+            .Where(item => !actor.HasUser || item.TenantId == actor.TenantId);
+
+        var knownAuthorityProjects = await authorityQuery.Select(item => item.ProjectId).Distinct().ToArrayAsync(cancellationToken);
+        var knownProjectionProjects = await projectionQuery.Select(item => item.ProjectId).Distinct().ToArrayAsync(cancellationToken);
+        var knownRunProjects = await runQuery.Select(item => item.ProjectId).Distinct().ToArrayAsync(cancellationToken);
+        var knownProjects = knownAuthorityProjects
+            .Concat(knownProjectionProjects)
+            .Concat(knownRunProjects)
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (normalizedProjectId is not null)
+        {
+            authorityQuery = authorityQuery.Where(item => item.ProjectId == normalizedProjectId);
+            projectionQuery = projectionQuery.Where(item => item.ProjectId == normalizedProjectId);
+            runQuery = runQuery.Where(item => item.ProjectId == normalizedProjectId);
+            executionQuery = executionQuery.Where(item => item.ProjectId == normalizedProjectId);
+            objectQuery = objectQuery.Where(item => item.ProjectId == normalizedProjectId);
+            transferQuery = transferQuery.Where(item => item.ProjectId == normalizedProjectId);
+        }
+
+        var authorityEventCount = await authorityQuery.LongCountAsync(cancellationToken);
+        var authority = new DashboardAuthorityStateResult(
+            authorityEventCount,
+            await authorityQuery.Select(item => (long?)item.Sequence).MaxAsync(cancellationToken) ?? 0,
+            await authorityQuery.LongCountAsync(item => item.SecurityCritical, cancellationToken),
+            await authorityQuery.Select(item => (DateTimeOffset?)item.OccurredAt).MaxAsync(cancellationToken));
+
+        var projectionStates = await projectionQuery
+            .OrderByDescending(item => item.UpdatedAt)
+            .Take(100)
+            .Select(item => new DashboardProjectionStateResult(
+                item.ProjectId,
+                item.Generation,
+                item.AuthoritySequence,
+                item.Cursor,
+                item.AuthoritySequence > item.Cursor ? item.AuthoritySequence - item.Cursor : 0,
+                item.LastSuccessAt,
+                item.NextRunAt,
+                item.Cursor < item.AuthoritySequence || item.LastSuccessAt == null,
+                false))
+            .ToArrayAsync(cancellationToken);
+
+        var recentRuns = await runQuery
+            .OrderByDescending(item => item.UpdatedAt)
+            .Take(40)
+            .Select(item => new DashboardBackgroundRunResult(
+                item.Id,
+                item.ProjectId,
+                item.JobType,
+                item.Mode,
+                item.Status,
+                item.Generation,
+                item.AuthoritySequenceBoundary,
+                item.Cursor,
+                item.ExpectedCount,
+                item.ScannedCount,
+                item.CoverageComplete,
+                item.StaleCount,
+                item.DriftCount,
+                item.RepairedCount,
+                item.RebuiltCount,
+                item.FailedCount,
+                item.Attempt,
+                item.MaxAttempts,
+                item.UpdatedAt,
+                item.CompletedAt,
+                item.FailureCode,
+                false))
+            .ToArrayAsync(cancellationToken);
+
+        var executionCounts = await executionQuery
+            .GroupBy(item => item.Status)
+            .Select(group => new { Status = group.Key, Count = group.LongCount() })
+            .ToDictionaryAsync(item => item.Status, item => item.Count, cancellationToken);
+        var expiredLeaseCount = await executionQuery.LongCountAsync(item =>
+            item.LeaseExpiresAt != null && item.LeaseExpiresAt <= now &&
+            (item.Status == AgentExecutionStatus.Claimed || item.Status == AgentExecutionStatus.Running), cancellationToken);
+        var agentExecutions = new DashboardAgentExecutionQueueResult(
+            Count(AgentExecutionStatus.Ready),
+            Count(AgentExecutionStatus.Claimed),
+            Count(AgentExecutionStatus.Running),
+            Count(AgentExecutionStatus.Blocked),
+            Count(AgentExecutionStatus.FailedRetryable),
+            Count(AgentExecutionStatus.FailedTerminal),
+            Count(AgentExecutionStatus.Completed),
+            expiredLeaseCount);
+
+        var objectCounts = await objectQuery
+            .GroupBy(item => item.State)
+            .Select(group => new { State = group.Key, Count = group.LongCount() })
+            .ToDictionaryAsync(item => item.State, item => item.Count, cancellationToken);
+        var transferCounts = await transferQuery
+            .GroupBy(item => item.State)
+            .Select(group => new { State = group.Key, Count = group.LongCount() })
+            .ToDictionaryAsync(item => item.State, item => item.Count, cancellationToken);
+        var logicalStorage = new DashboardLogicalStorageHealthResult(
+            await objectQuery.LongCountAsync(cancellationToken),
+            await objectQuery.SumAsync(item => (long?)item.PlaintextLength, cancellationToken) ?? 0,
+            ObjectCount(ManagedObjectState.Ready),
+            ObjectCount(ManagedObjectState.Staged),
+            ObjectCount(ManagedObjectState.Orphaned),
+            ObjectCount(ManagedObjectState.Missing),
+            ObjectCount(ManagedObjectState.Corrupt),
+            TransferCount(ManagedTransferSessionState.Active),
+            TransferCount(ManagedTransferSessionState.Completed),
+            TransferCount(ManagedTransferSessionState.Revoked) + TransferCount(ManagedTransferSessionState.Expired));
+
+        var dependencyStatus = BuildSectionStatus(DashboardSnapshotKeys.DependenciesHealth, "服務與依賴健康", dependencies, now);
+
+        return new DashboardOperationsResult(
+            ProjectContext.DefaultProjectId,
+            BuildMetadata.Current.Version,
+            BuildMetadata.Current.TimestampUtc,
+            normalizedProjectId ?? ProjectContext.AllProjectIdsSentinel,
+            knownProjects,
+            dependencies?.Payload.Services ?? [],
+            authority,
+            projectionStates,
+            recentRuns.Where(item => item.Mode == PlatformBackgroundMode.Incremental).Take(12).ToArray(),
+            recentRuns.Where(item => item.Mode == PlatformBackgroundMode.Full).Take(12).ToArray(),
+            agentExecutions,
+            logicalStorage,
+            dependencyStatus.CapturedAtUtc == DateTimeOffset.MinValue ? now : dependencyStatus.CapturedAtUtc,
+            BuildPageSnapshotStatus([dependencyStatus], now));
+
+        long Count(AgentExecutionStatus status) => executionCounts.GetValueOrDefault(status);
+        long ObjectCount(ManagedObjectState state) => objectCounts.GetValueOrDefault(state);
+        long TransferCount(ManagedTransferSessionState state) => transferCounts.GetValueOrDefault(state);
+    }
+
     private static IReadOnlyList<EmbeddingUsageWindowResult> CreateEmptyEmbeddingUsage(DateTimeOffset now)
         =>
         [
@@ -661,7 +818,6 @@ public sealed class DashboardQueryService(
                 x.CompletedAt,
                 x.ProjectId))
             .ToListAsync(cancellationToken);
-
         var result = new PagedResult<JobListItemResult>(items, normalized.Page, normalized.PageSize, totalCount);
         if (!actor.HasUser)
         {
