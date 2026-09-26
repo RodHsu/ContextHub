@@ -254,6 +254,13 @@ dashboard.MapGet("/monitoring", async (IDashboardQueryService service, HttpConte
     return Results.Ok(result);
 });
 
+dashboard.MapGet("/operations", async (string? projectId, IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
+{
+    var result = await service.GetOperationsAsync(projectId, cancellationToken);
+    SetDataSource(httpContext, "authority+projection");
+    return Results.Ok(result);
+});
+
 var memories = app.MapGroup("/api/memories");
 memories.RequireAuthIfEnabled(requireAuthentication);
 memories.RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);

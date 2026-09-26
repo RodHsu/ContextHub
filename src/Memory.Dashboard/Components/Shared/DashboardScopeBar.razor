@@ -1,0 +1,49 @@
+@using Memory.Application
+
+<section class="panel dashboard-scope-bar" aria-label="@AriaLabel">
+    <label class="dashboard-scope-field">
+        <span>Project scope</span>
+        <select value="@ProjectId" @onchange="HandleProjectChanged" disabled="@Disabled">
+            <option value="@ProjectContext.AllProjectIdsSentinel">全部專案</option>
+            @foreach (var option in ProjectIds.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+            {
+                <option value="@option">@option</option>
+            }
+        </select>
+    </label>
+    <label class="dashboard-scope-field dashboard-scope-search">
+        <span>搜尋目前畫面</span>
+        <input type="search"
+               value="@SearchText"
+               @oninput="HandleSearchChanged"
+               placeholder="@SearchPlaceholder"
+               disabled="@Disabled" />
+    </label>
+    @if (Filters is not null)
+    {
+        <div class="dashboard-scope-filters">@Filters</div>
+    }
+    @if (Actions is not null)
+    {
+        <div class="dashboard-scope-actions">@Actions</div>
+    }
+</section>
+
+@code {
+    [Parameter] public string AriaLabel { get; set; } = "頁面範圍與篩選";
+    [Parameter] public string ProjectId { get; set; } = ProjectContext.AllProjectIdsSentinel;
+    [Parameter] public EventCallback<string> ProjectIdChanged { get; set; }
+    [Parameter] public IReadOnlyList<string> ProjectIds { get; set; } = [];
+    [Parameter] public string SearchText { get; set; } = string.Empty;
+    [Parameter] public EventCallback<string> SearchTextChanged { get; set; }
+    [Parameter] public string SearchPlaceholder { get; set; } = "依名稱或狀態篩選";
+    [Parameter] public RenderFragment? Filters { get; set; }
+    [Parameter] public RenderFragment? Actions { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+
+    private Task HandleProjectChanged(ChangeEventArgs args)
+        => ProjectIdChanged.InvokeAsync(args.Value?.ToString() ?? ProjectContext.AllProjectIdsSentinel);
+
+    private Task HandleSearchChanged(ChangeEventArgs args)
+        => SearchTextChanged.InvokeAsync(args.Value?.ToString() ?? string.Empty);
+}

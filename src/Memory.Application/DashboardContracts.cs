@@ -316,6 +316,86 @@ public sealed record DashboardMonitoringResult(
     IReadOnlyList<EmbeddingUsageWindowResult>? EmbeddingUsage = null,
     DashboardDiscussionActivityResult? DiscussionActivity = null);
 
+public sealed record DashboardAuthorityStateResult(
+    long EventCount,
+    long LatestSequence,
+    long SecurityCriticalEventCount,
+    DateTimeOffset? LastCommittedAtUtc,
+    bool IsAuthoritative = true);
+
+public sealed record DashboardProjectionStateResult(
+    string ProjectId,
+    long Generation,
+    long AuthoritySequence,
+    long Cursor,
+    long Lag,
+    DateTimeOffset? LastSuccessAtUtc,
+    DateTimeOffset? NextRunAtUtc,
+    bool IsStale,
+    bool IsAuthoritative = false);
+
+public sealed record DashboardBackgroundRunResult(
+    Guid RunId,
+    string ProjectId,
+    string JobType,
+    PlatformBackgroundMode Mode,
+    PlatformBackgroundRunStatus Status,
+    long Generation,
+    long AuthoritySequenceBoundary,
+    long Cursor,
+    long Expected,
+    long Scanned,
+    bool CoverageComplete,
+    long Stale,
+    long Drift,
+    long Repaired,
+    long Rebuilt,
+    long Failed,
+    int Attempt,
+    int MaxAttempts,
+    DateTimeOffset UpdatedAtUtc,
+    DateTimeOffset? CompletedAtUtc,
+    string FailureCode,
+    bool IsAuthoritative = false);
+
+public sealed record DashboardAgentExecutionQueueResult(
+    long Ready,
+    long Claimed,
+    long Running,
+    long Blocked,
+    long Retryable,
+    long TerminalFailures,
+    long Completed,
+    long ExpiredLeases);
+
+public sealed record DashboardLogicalStorageHealthResult(
+    long ObjectCount,
+    long LogicalBytes,
+    long Ready,
+    long Staged,
+    long Orphaned,
+    long Missing,
+    long Corrupt,
+    long ActiveTransfers,
+    long CompletedTransfers,
+    long FailedOrExpiredTransfers);
+
+public sealed record DashboardOperationsResult(
+    string Namespace,
+    string BuildVersion,
+    DateTimeOffset BuildTimestampUtc,
+    string ProjectScope,
+    IReadOnlyList<string> KnownProjectIds,
+    IReadOnlyList<DashboardServiceHealthResult> Services,
+    DashboardAuthorityStateResult Authority,
+    IReadOnlyList<DashboardProjectionStateResult> Projections,
+    IReadOnlyList<DashboardBackgroundRunResult> IncrementalRuns,
+    IReadOnlyList<DashboardBackgroundRunResult> FullReconciliationRuns,
+    DashboardAgentExecutionQueueResult AgentExecutions,
+    DashboardLogicalStorageHealthResult LogicalStorage,
+    DateTimeOffset SnapshotAtUtc,
+    DashboardPageSnapshotStatusResult? SnapshotStatus = null);
+
 public sealed record RuntimeConfigurationResult(
     string Namespace,
     string EmbeddingProvider,
@@ -557,6 +637,7 @@ public interface IDashboardQueryService
     Task<DashboardOverviewResult> GetOverviewAsync(CancellationToken cancellationToken);
     Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken);
     Task<DashboardMonitoringResult> GetMonitoringAsync(CancellationToken cancellationToken);
+    Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken);
     Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectSuggestionResult>> GetProjectSuggestionsAsync(string? query, int limit, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);

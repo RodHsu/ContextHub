@@ -1,0 +1,29 @@
+<section class="panel dashboard-async-state @CssClass" role="@Role" aria-live="polite">
+    <div class="dashboard-async-state-icon" aria-hidden="true">@Icon</div>
+    <div>
+        <div class="panel-title">@Title</div>
+        <p>@Message</p>
+        @if (Action is not null)
+        {
+            <div class="detail-actions">@Action</div>
+        }
+    </div>
+</section>
+
+@code {
+    [Parameter] public string State { get; set; } = "loading";
+    [Parameter] public string Title { get; set; } = "載入中";
+    [Parameter] public string Message { get; set; } = "正在取得目前狀態。";
+    [Parameter] public RenderFragment? Action { get; set; }
+
+    private string CssClass => $"dashboard-async-state-{State.ToLowerInvariant()}";
+    private string Role => State.Equals("error", StringComparison.OrdinalIgnoreCase) ? "alert" : "status";
+    private string Icon => State.ToLowerInvariant() switch
+    {
+        "error" => "!",
+        "degraded" => "△",
+        "permission" => "⊘",
+        "empty" => "○",
+        _ => "…"
+    };
+}

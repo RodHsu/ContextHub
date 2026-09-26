@@ -13,6 +13,7 @@ public interface IContextHubApiClient
     Task<DashboardOverviewResult> GetOverviewAsync(CancellationToken cancellationToken);
     Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken);
     Task<DashboardMonitoringResult> GetMonitoringAsync(CancellationToken cancellationToken);
+    Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken);
     Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchConversationCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ChatGptProposalResult>> GetChatGptProposalsAsync(ChatGptProposalListRequest request, CancellationToken cancellationToken);
@@ -138,6 +139,15 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public Task<DashboardMonitoringResult> GetMonitoringAsync(CancellationToken cancellationToken)
         => GetRequiredAsync<DashboardMonitoringResult>("/api/dashboard/monitoring", cancellationToken);
+
+    public Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken)
+    {
+        var query = string.IsNullOrWhiteSpace(projectId) ||
+                    string.Equals(projectId, ProjectContext.AllProjectIdsSentinel, StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : $"?projectId={Uri.EscapeDataString(projectId)}";
+        return GetRequiredAsync<DashboardOperationsResult>($"/api/dashboard/operations{query}", cancellationToken);
+    }
 
     public Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken)
         => GetRequiredAsync<IReadOnlyList<SkillSummaryResult>>(QueryHelpers.AddQueryString("/api/skills", new Dictionary<string, string?>

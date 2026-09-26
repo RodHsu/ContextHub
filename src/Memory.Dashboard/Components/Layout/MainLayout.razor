@@ -5,6 +5,7 @@
     <Authorized Context="auth">
         @{
             var isAdmin = IsDashboardAdmin(auth.User);
+            var groups = DashboardNavigation.VisibleGroups(isAdmin).ToArray();
         }
         <div class="dashboard-shell" data-dashboard-interactive="@(_interactiveReady ? "true" : "false")">
             <div class="shell-progress-strip" aria-hidden="true"></div>
@@ -15,7 +16,8 @@
                 <span class="mobile-nav-button-line"></span>
             </label>
             <label class="mobile-nav-backdrop" for="dashboard-mobile-nav-toggle" aria-hidden="true"></label>
-            <aside class="sidebar">
+
+            <aside class="sidebar" aria-label="主要導覽">
                 <div class="sidebar-inner">
                     <div class="brand">
                         <div class="brand-mark">C</div>
@@ -25,303 +27,19 @@
                         </div>
                     </div>
 
-                    @if (isAdmin)
+                    @foreach (var group in groups)
                     {
-                    <div class="sidebar-section-label">系統維運</div>
-                    <nav class="sidebar-nav">
-                        <NavLink class="nav-item" href="/" Match="NavLinkMatch.All">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M3 10.5 12 3l9 7.5" />
-                                    <path d="M5.25 9.75V21h13.5V9.75" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">總覽</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/monitoring">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M4 18h16" />
-                                    <path d="M6.5 15.5 10 11l3 2.5 4.5-6" />
-                                    <circle cx="6.5" cy="15.5" r="1" />
-                                    <circle cx="10" cy="11" r="1" />
-                                    <circle cx="13" cy="13.5" r="1" />
-                                    <circle cx="17.5" cy="7.5" r="1" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">狀態監控</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/runtime">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M4 6h16" />
-                                    <path d="M4 12h16" />
-                                    <path d="M4 18h10" />
-                                    <path d="M18 16v4" />
-                                    <path d="M16 18h4" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">執行參數</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/logs">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M7 4h10" />
-                                    <path d="M6 8h12" />
-                                    <path d="M6 12h12" />
-                                    <path d="M6 16h7" />
-                                    <path d="M17.5 17.5 20 20" />
-                                    <circle cx="15" cy="15" r="3.25" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">日誌</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/jobs">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <rect x="4" y="5" width="16" height="14" rx="2" />
-                                    <path d="M8 3v4" />
-                                    <path d="M16 3v4" />
-                                    <path d="M8 11h8" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">工作佇列</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/performance">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M4 19h16" />
-                                    <path d="m7 15 3-3 2.5 2.5L17 10" />
-                                    <path d="M17 10h-3" />
-                                    <path d="M17 10v3" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">效能</span>
-                        </NavLink>
-                    </nav>
+                        <div class="sidebar-section-label">@group.Label</div>
+                        <nav class="sidebar-nav" aria-label="@group.Label">
+                            @foreach (var route in group.Items)
+                            {
+                                <NavLink class="nav-item" href="@route.Href" Match="@route.Match" title="@route.Description">
+                                    <span class="nav-icon nav-icon-mark" aria-hidden="true">@route.Mark</span>
+                                    <span class="nav-label">@route.Label</span>
+                                </NavLink>
+                            }
+                        </nav>
                     }
-
-                    <div class="sidebar-section-label">專案工作與知識</div>
-                    <nav class="sidebar-nav">
-                        <NavLink class="nav-item" href="/project-information">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <rect x="4" y="4" width="16" height="16" rx="2" />
-                                    <path d="M8 9h8" />
-                                    <path d="M8 13h8" />
-                                    <path d="M8 17h5" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">專案工作區</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/project-tree">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M6 4v16" />
-                                    <path d="M6 7h7a3 3 0 0 1 3 3v1" />
-                                    <path d="M6 15h7a3 3 0 0 0 3-3v-1" />
-                                    <rect x="15" y="8" width="5" height="5" rx="1" />
-                                    <rect x="15" y="15" width="5" height="5" rx="1" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">專案樹狀圖</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/graph">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="6.5" cy="7" r="2.25" />
-                                    <circle cx="17.5" cy="6.5" r="2.25" />
-                                    <circle cx="12" cy="17" r="2.5" />
-                                    <path d="M8.5 8.1 15.4 7.1" />
-                                    <path d="m8 8.8 2.9 6" />
-                                    <path d="m16.3 8.5-3 5.9" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">記憶圖譜</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/memories">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M6.5 4.5h9A2.5 2.5 0 0 1 18 7v12l-3-1.8L12 19l-3-1.8L6 19V7a2.5 2.5 0 0 1 2.5-2.5Z" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">記憶資料</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/discussions">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M5 5.5h14v10H9l-4 3v-13Z" />
-                                    <path d="M8.5 9.5h7" />
-                                    <path d="M8.5 12.5h4.5" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">跨專案討論</span>
-                        </NavLink>
-                        @if (isAdmin)
-                        {
-                        <NavLink class="nav-item" href="/project-work-items">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <rect x="4" y="4" width="16" height="16" rx="2" />
-                                    <path d="m8 12 2.5 2.5L16 9" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">專案待辦</span>
-                        </NavLink>
-                        }
-                        @if (isAdmin)
-                        {
-                        <NavLink class="nav-item" href="/retention">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M4 6h16" />
-                                    <path d="M4 12h10" />
-                                    <path d="M4 18h8" />
-                                    <path d="m17 11 2 2 3-4" />
-                                    <path d="M17 19h4" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">記憶整理</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/sources">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M8 8h8" />
-                                    <path d="M8 12h8" />
-                                    <path d="M8 16h8" />
-                                    <path d="M4 8h.01" />
-                                    <path d="M4 12h.01" />
-                                    <path d="M4 16h.01" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">資料來源</span>
-                        </NavLink>
-                        }
-                    </nav>
-
-                    @if (isAdmin)
-                    {
-                    <div class="sidebar-section-label">治理與審核</div>
-                    <nav class="sidebar-nav">
-                        <NavLink class="nav-item" href="/skills">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M5 5h14v14H5z" />
-                                    <path d="M8 9h8M8 13h5" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">Agent Skills</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/agent-executions">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M5 7h14M5 12h14M5 17h9" />
-                                    <path d="m16 15 3 2-3 2v-4Z" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">Agent 執行</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/governance">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M12 3 5 6v5c0 4.2 2.8 8 7 10 4.2-2 7-5.8 7-10V6l-7-3Z" />
-                                    <path d="m9.5 12 1.5 1.5 3.5-3.5" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">治理</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/evaluation">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M4 19h16" />
-                                    <path d="M7 15V9" />
-                                    <path d="M12 15V5" />
-                                    <path d="M17 15v-3" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">評估</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/chatgpt-proposals">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M5 5h14v10H7l-2 3V5Z" />
-                                    <path d="M8 9h8" />
-                                    <path d="M8 12h5" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">ChatGPT</span>
-                        </NavLink>
-                    </nav>
-                    }
-
-                    <div class="sidebar-section-label">系統與個人設定</div>
-                    <nav class="sidebar-nav">
-                        <NavLink class="nav-item" href="/preferences">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M12 13a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
-                                    <path d="M4 20a8 8 0 0 1 16 0" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">偏好</span>
-                        </NavLink>
-                        @if (isAdmin)
-                        {
-                        <NavLink class="nav-item" href="/storage">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <ellipse cx="12" cy="6" rx="7" ry="3" />
-                                    <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6" />
-                                    <path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">資料庫檢視</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/security">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M12 3 5 6v5c0 4.2 2.8 8 7 10 4.2-2 7-5.8 7-10V6l-7-3Z" />
-                                    <path d="M9 12h6" />
-                                    <path d="M12 9v6" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">安全管理</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/mcp-tools">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M5 5h14v14H5z" />
-                                    <path d="M8 9h8" />
-                                    <path d="M8 13h5" />
-                                    <path d="M15 13h1" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">MCP 說明</span>
-                        </NavLink>
-                        <NavLink class="nav-item" href="/settings">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="12" cy="12" r="3.25" />
-                                    <path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a2 2 0 1 1-4 0v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a2 2 0 1 1 0-4h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a2 2 0 1 1 4 0v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H20a2 2 0 1 1 0 4h-.2a1 1 0 0 0-.9.6Z" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">系統設定</span>
-                        </NavLink>
-                        }
-                    </nav>
-
-                    <div class="sidebar-section-label">個人帳號</div>
-                    <nav class="sidebar-nav">
-                        <NavLink class="nav-item" href="/account/tokens">
-                            <span class="nav-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M15 7a4 4 0 1 1-2.8 6.8L7 19H4v-3l5.2-5.2A4 4 0 0 1 15 7Z" />
-                                    <path d="m14 10 2 2" />
-                                </svg>
-                            </span>
-                            <span class="nav-label">存取權杖</span>
-                        </NavLink>
-                    </nav>
 
                     <div class="sidebar-bottom">
                         <div class="sidebar-build">
@@ -340,7 +58,7 @@
                             <span class="status-dot"></span>
                             <span>ContextHub</span>
                         </div>
-                        <div class="topbar-subtitle">維運與知識治理</div>
+                        <div class="topbar-subtitle">平台營運與知識治理</div>
                     </div>
 
                     <div class="topbar-actions">
@@ -349,12 +67,7 @@
                                 aria-haspopup="dialog"
                                 aria-expanded="@_commandPaletteOpen"
                                 @onclick="OpenCommandPalette">
-                            <span class="command-button-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                    <circle cx="11" cy="11" r="6" />
-                                    <path d="m16 16 4 4" />
-                                </svg>
-                            </span>
+                            <span class="command-button-icon" aria-hidden="true">⌕</span>
                             <span class="command-button-label">搜尋功能</span>
                             <span class="command-button-kbd">⌘K</span>
                         </button>
@@ -367,12 +80,12 @@
                     </div>
                 </header>
 
-                <main class="content">
+                <main class="content" id="dashboard-main-content">
                     @Body
                 </main>
                 <footer class="dashboard-footer">
                     <span>ContextHub</span>
-                    <span>知識工作與專案協作主控台</span>
+                    <span>平台營運與知識治理主控台</span>
                 </footer>
             </div>
 
@@ -382,25 +95,25 @@
                     <section class="command-palette" role="dialog" aria-modal="true" aria-label="快速切換功能" @onclick:stopPropagation="true">
                         <div class="command-palette-header">
                             <div>
-                                <div class="command-palette-eyebrow">快速操作</div>
+                                <div class="command-palette-eyebrow">Canonical navigation</div>
                                 <h2>快速切換功能</h2>
                             </div>
                             <button type="button" class="icon-button" aria-label="關閉快速切換功能" @onclick="CloseCommandPalette">×</button>
                         </div>
 
                         <div class="command-palette-body">
-                            @foreach (var group in GetVisibleRoutes(isAdmin).GroupBy(route => route.Group))
+                            @foreach (var group in groups)
                             {
                                 <div class="command-group">
-                                    <div class="command-group-title">@group.Key</div>
+                                    <div class="command-group-title">@group.Label</div>
                                     <div class="command-route-grid">
-                                        @foreach (var route in group)
+                                        @foreach (var route in group.Items)
                                         {
                                             <NavLink class="command-route" href="@route.Href" Match="@route.Match" @onclick="CloseCommandPalette">
                                                 <span class="command-route-mark" aria-hidden="true">@route.Mark</span>
                                                 <span class="command-route-copy">
                                                     <span class="command-route-title">@route.Label</span>
-                                                    <span class="command-route-path">@route.Href</span>
+                                                    <span class="command-route-path">@route.Description</span>
                                                 </span>
                                             </NavLink>
                                         }
@@ -419,40 +132,10 @@
     private bool _commandPaletteOpen;
     private bool _interactiveReady;
 
-    private static readonly IReadOnlyList<DashboardRouteItem> Routes =
-    [
-        new("系統維運", "O", "總覽", "/", NavLinkMatch.All, true),
-        new("系統維運", "M", "狀態監控", "/monitoring", NavLinkMatch.Prefix, true),
-        new("系統維運", "R", "執行參數", "/runtime", NavLinkMatch.Prefix, true),
-        new("系統維運", "L", "日誌", "/logs", NavLinkMatch.Prefix, true),
-        new("系統維運", "J", "工作佇列", "/jobs", NavLinkMatch.Prefix, true),
-        new("系統維運", "P", "效能", "/performance", NavLinkMatch.Prefix, true),
-        new("專案工作與知識", "W", "專案工作區", "/project-information", NavLinkMatch.Prefix, false),
-        new("專案工作與知識", "H", "專案樹狀圖", "/project-tree", NavLinkMatch.Prefix, false),
-        new("專案工作與知識", "K", "記憶資料", "/memories", NavLinkMatch.Prefix, false),
-        new("專案工作與知識", "X", "跨專案討論", "/discussions", NavLinkMatch.Prefix, false),
-        new("專案工作與知識", "I", "專案待辦", "/project-work-items", NavLinkMatch.Prefix, true),
-        new("專案工作與知識", "T", "記憶整理", "/retention", NavLinkMatch.Prefix, true),
-        new("專案工作與知識", "G", "記憶圖譜", "/graph", NavLinkMatch.Prefix, false),
-        new("專案工作與知識", "S", "資料來源", "/sources", NavLinkMatch.Prefix, true),
-        new("治理與審核", "V", "治理", "/governance", NavLinkMatch.Prefix, true),
-        new("治理與審核", "E", "評估", "/evaluation", NavLinkMatch.Prefix, true),
-        new("治理與審核", "C", "ChatGPT", "/chatgpt-proposals", NavLinkMatch.Prefix, true),
-        new("系統與個人設定", "U", "偏好", "/preferences", NavLinkMatch.Prefix, false),
-        new("系統與個人設定", "D", "資料庫檢視", "/storage", NavLinkMatch.Prefix, true),
-        new("系統與個人設定", "A", "安全管理", "/security", NavLinkMatch.Prefix, true),
-        new("系統與個人設定", "Q", "MCP 說明", "/mcp-tools", NavLinkMatch.Prefix, true),
-        new("系統與個人設定", "Y", "系統設定", "/settings", NavLinkMatch.Prefix, true),
-        new("個人帳號", "N", "Token", "/account/tokens", NavLinkMatch.Prefix, false)
-    ];
-
     private static bool IsDashboardAdmin(System.Security.Claims.ClaimsPrincipal user)
         => user.IsInRole(TenantUserRole.Owner.ToString()) ||
            user.IsInRole(TenantUserRole.Admin.ToString()) ||
            user.IsInRole("DashboardAdmin");
-
-    private static IEnumerable<DashboardRouteItem> GetVisibleRoutes(bool isAdmin)
-        => Routes.Where(route => isAdmin || !route.RequiresAdmin);
 
     protected override void OnAfterRender(bool firstRender)
     {
@@ -465,17 +148,6 @@
         StateHasChanged();
     }
 
-    private void OpenCommandPalette()
-        => _commandPaletteOpen = true;
-
-    private void CloseCommandPalette()
-        => _commandPaletteOpen = false;
-
-    private sealed record DashboardRouteItem(
-        string Group,
-        string Mark,
-        string Label,
-        string Href,
-        NavLinkMatch Match,
-        bool RequiresAdmin);
+    private void OpenCommandPalette() => _commandPaletteOpen = true;
+    private void CloseCommandPalette() => _commandPaletteOpen = false;
 }

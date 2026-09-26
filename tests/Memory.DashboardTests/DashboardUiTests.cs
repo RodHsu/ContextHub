@@ -156,7 +156,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
     }
 
     [Fact]
-    public async Task Context_Savings_Windows_Should_Render_Explicit_Call_Counts()
+    public async Task Overview_Should_Remain_Concise_And_Direct_To_Canonical_Operations()
     {
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
         {
@@ -168,7 +168,14 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
 
         using var overviewResponse = await client.GetAsync("/");
         overviewResponse.StatusCode.Should().Be(HttpStatusCode.OK);
-        AssertContextSavingsCallCounts(WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync()));
+        var overviewHtml = WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync());
+        overviewHtml.Should().Contain("平台健康");
+        overviewHtml.Should().Contain("風險與異常");
+        overviewHtml.Should().Contain("需要人員決策");
+        overviewHtml.Should().Contain("進行中工作");
+        overviewHtml.Should().Contain("href=\"/operations\"");
+        overviewHtml.Should().NotContain("context-savings-strip");
+        overviewHtml.Should().NotContain("資源狀態圖表");
 
         using var monitoringResponse = await client.GetAsync("/monitoring");
         monitoringResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -290,85 +297,49 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         using var overviewResponse = await client.GetAsync("/");
         overviewResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var overviewHtml = WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync());
-        overviewHtml.Should().Contain("靜默訊號");
-        overviewHtml.Should().Contain("維運與知識治理");
+        overviewHtml.Should().Contain("只顯示需要注意、需要決策或最值得立即行動的訊號");
         overviewHtml.Should().Contain("全 Instance 記憶資料列");
         overviewHtml.Should().Contain("預設專案記憶");
-        overviewHtml.Should().Contain("Docker 主機");
-        overviewHtml.Should().Contain("評估摘要");
-        overviewHtml.Should().Contain("<dt>狀態</dt><dd>失敗</dd>");
-        overviewHtml.Should().NotContain("<dt>狀態</dt><dd>Failed</dd>");
-        overviewHtml.Should().Contain("資源狀態圖表");
-        overviewHtml.Should().NotContain("Agent MCP 延遲");
-        overviewHtml.Should().NotContain("Agent P95");
-        overviewHtml.Should().NotContain("home-signal-lane-divider");
-        overviewHtml.Should().NotContain("<text class=\"home-signal-lane-label\" x=\"12\" y=\"112\">Agent P95</text>");
-        overviewHtml.Should().Contain("近期呼叫趨勢");
-        overviewHtml.Should().Contain("Redis 狀態監控");
-        overviewHtml.Should().Contain("resource-redis-chart");
-        overviewHtml.Should().Contain("Redis resource status chart");
-        overviewHtml.Should().Contain("Token 節省量");
-        overviewHtml.Should().Contain("context-savings-strip");
-        overviewHtml.Should().Contain("24H");
-        overviewHtml.Should().Contain("3D");
-        overviewHtml.Should().Contain("7D");
-        overviewHtml.Should().Contain("30D");
-        overviewHtml.Should().Contain("24H 節省量 / 快取命中率");
-        overviewHtml.Should().Contain("3D 節省量 / 快取命中率");
-        overviewHtml.Should().Contain("7D 節省量 / 快取命中率");
-        overviewHtml.Should().Contain("30D 節省量 / 快取命中率");
-        overviewHtml.Should().Contain("有效樣本：18 次");
-        overviewHtml.Should().Contain("有效樣本：54 次");
-        overviewHtml.Should().Contain("有效樣本：126 次");
-        overviewHtml.Should().Contain("有效樣本：540 次");
-        overviewHtml.Should().Contain("實際呼叫次數：96 次");
-        overviewHtml.Should().Contain("實際呼叫次數：280 次");
-        overviewHtml.Should().Contain("實際呼叫次數：640 次");
-        overviewHtml.Should().Contain("實際呼叫次數：2,500 次");
-        overviewHtml.Should().Contain("精準 token");
-        overviewHtml.Should().NotContain("context-savings-panel");
-        overviewHtml.Should().Contain("contexthub-redis-1");
-        overviewHtml.Should().Contain("近期平均");
-        overviewHtml.Should().Contain("每 5 秒刷新");
-        overviewHtml.Should().Contain("資源最近");
-        overviewHtml.Should().Contain("呼叫最近 15 筆");
-        overviewHtml.Should().Contain("進站 (Inbound)");
-        overviewHtml.Should().Contain("傳出 (Outbound)");
-        overviewHtml.Should().Contain("/5s");
-        overviewHtml.Should().Contain("client-local-time");
-        overviewHtml.Should().Contain("data-local-iso");
-        overviewHtml.Should().Contain("建置版本");
+        overviewHtml.Should().Contain("平台健康");
+        overviewHtml.Should().Contain("風險與異常");
+        overviewHtml.Should().Contain("需要人員決策");
+        overviewHtml.Should().Contain("進行中工作");
+        overviewHtml.Should().Contain("開啟營運中心");
+        overviewHtml.Should().Contain("Release identity");
         overviewHtml.Should().Contain("2026.04.12-test");
-        overviewHtml.Should().Contain("複製 JSON");
-        overviewHtml.Should().Contain("Overview page sample error 4");
-        overviewHtml.Should().Contain("Overview page sample error 3");
+        overviewHtml.Should().Contain("Overview page sample error 1");
         overviewHtml.Should().Contain("Overview page sample error 2");
-        overviewHtml.Should().NotContain("Overview page sample error 1");
-        overviewHtml.Should().Contain("\"job\":\"reindex-4\"");
-        overviewHtml.Should().Contain("\"job\":\"reindex-3\"");
-        overviewHtml.Should().Contain("\"job\":\"reindex-2\"");
-        overviewHtml.Should().NotContain("\"job\":\"reindex-1\"");
+        overviewHtml.Should().Contain("Overview page sample error 3");
+        overviewHtml.Should().NotContain("Overview page sample error 4");
+        overviewHtml.Should().Contain("受控背景工作；詳細參數僅在授權後顯示。");
+        overviewHtml.Should().NotContain("modelKey");
+        overviewHtml.Should().NotContain("intfloat/");
         overviewHtml.Should().Contain("最後更新");
         overviewHtml.Should().Contain("資料快照");
         overviewHtml.Should().Contain("refresh-status-group");
         overviewHtml.Should().Contain("refresh-status-primary");
         overviewHtml.Should().Contain("refresh-status-live");
         overviewHtml.Should().NotContain("refresh-status-build");
-        overviewHtml.Should().Contain("page-scroll-host");
-        overviewHtml.IndexOf("Docker 主機", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("評估摘要", StringComparison.Ordinal));
+        overviewHtml.Should().Contain("overview-page-body");
+        overviewHtml.Should().NotContain("context-savings-strip");
+        overviewHtml.Should().NotContain("資源狀態圖表");
         overviewHtml.IndexOf("sidebar-build", StringComparison.Ordinal).Should().BeGreaterThan(0);
         overviewHtml.Should().NotContain("sidebar-footer");
-        overviewHtml.IndexOf("狀態監控", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("執行參數", StringComparison.Ordinal));
-        overviewHtml.IndexOf("專案工作區", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("專案樹狀圖", StringComparison.Ordinal));
-        overviewHtml.IndexOf("專案樹狀圖", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶圖譜", StringComparison.Ordinal));
-        overviewHtml.IndexOf("記憶圖譜", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
-        overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal));
-        overviewHtml.IndexOf("記憶整理", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("資料來源", StringComparison.Ordinal));
-        overviewHtml.IndexOf("日誌", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("記憶資料", StringComparison.Ordinal));
-        overviewHtml.IndexOf("專案待辦", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("偏好", StringComparison.Ordinal));
-        overviewHtml.IndexOf("資料庫檢視", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("安全管理", StringComparison.Ordinal));
-        overviewHtml.IndexOf("安全管理", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("MCP 說明", StringComparison.Ordinal));
-        overviewHtml.IndexOf("MCP 說明", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("系統設定", StringComparison.Ordinal));
+        overviewHtml.IndexOf("專案與工作", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("檔案與知識", StringComparison.Ordinal));
+        overviewHtml.IndexOf("檔案與知識", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("Agents", StringComparison.Ordinal));
+        overviewHtml.IndexOf("Agents", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("治理與安全", StringComparison.Ordinal));
+        overviewHtml.IndexOf("治理與安全", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("Operations", StringComparison.Ordinal));
+        overviewHtml.IndexOf("Operations", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("個人", StringComparison.Ordinal));
+
+        using var operationsResponse = await client.GetAsync("/operations");
+        operationsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var operationsHtml = WebUtility.HtmlDecode(await operationsResponse.Content.ReadAsStringAsync());
+        operationsHtml.Should().Contain("Business authority");
+        operationsHtml.Should().Contain("Rebuildable monitoring");
+        operationsHtml.Should().Contain("Monitoring 不得覆寫此狀態");
+        operationsHtml.Should().Contain("不暴露 provider、endpoint、bucket、object locator 或 direct URL");
+        operationsHtml.Should().Contain("操作維持 fail-closed");
+        operationsHtml.Should().Contain("disabled");
 
         using var runtimeResponse = await client.GetAsync("/runtime");
         runtimeResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -601,10 +572,11 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         projectInformationHtml.Should().Contain("專案工作區");
         projectInformationHtml.Should().Contain("project-workspace-links");
         projectInformationHtml.Should().Contain("跨專案討論");
-        projectInformationHtml.Should().Contain("系統維運");
-        projectInformationHtml.Should().Contain("專案工作與知識");
-        projectInformationHtml.Should().Contain("治理與審核");
-        projectInformationHtml.Should().Contain("系統與個人設定");
+        projectInformationHtml.Should().Contain("專案與工作");
+        projectInformationHtml.Should().Contain("檔案與知識");
+        projectInformationHtml.Should().Contain("治理與安全");
+        projectInformationHtml.Should().Contain("Operations");
+        projectInformationHtml.Should().Contain("個人");
         projectInformationHtml.Should().Contain("背景注入");
         projectInformationHtml.Should().Contain("顯示範圍");
 
@@ -770,7 +742,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
     }
 
     [Fact]
-    public async Task Main_Navigation_Should_Hide_Agent_Latency_Entry()
+    public async Task Main_Navigation_Should_Use_Canonical_Information_Architecture()
     {
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
         {
@@ -784,8 +756,27 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         response.StatusCode.Should().Be(HttpStatusCode.OK);
 
         var html = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync());
-        html.Should().NotContain("href=\"/connectivity\"");
+        html.Should().Contain("專案與工作");
+        html.Should().Contain("檔案與知識");
+        html.Should().Contain("Agents");
+        html.Should().Contain("治理與安全");
+        html.Should().Contain("Operations");
+        html.Should().Contain("個人");
+        html.Should().Contain("href=\"/operations\"");
+        html.Should().Contain("href=\"/connectivity\"");
         html.Should().NotContain("Agent 延遲");
+
+        var canonicalRoutes = DashboardNavigation.Groups.SelectMany(group => group.Items).Select(item => item.Href).ToArray();
+        canonicalRoutes.Should().Contain("/operations");
+        canonicalRoutes.Should().NotContain("/monitoring");
+        canonicalRoutes.Should().NotContain("/runtime");
+        canonicalRoutes.Should().NotContain("/jobs");
+
+        var nonAdminRoutes = DashboardNavigation.VisibleGroups(false).SelectMany(group => group.Items).Select(item => item.Href).ToArray();
+        nonAdminRoutes.Should().Contain("/project-information");
+        nonAdminRoutes.Should().Contain("/memories");
+        nonAdminRoutes.Should().NotContain("/");
+        nonAdminRoutes.Should().NotContain("/operations");
     }
 
     [Fact]
@@ -1514,6 +1505,31 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
             BuildDependencyResources(),
             BuildResourceSamples(traffic),
             BuildContextSavings(now)));
+    }
+
+    public Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return Task.FromResult(new DashboardOperationsResult(
+            "test",
+            "2026.09.26-test",
+            now.AddHours(-2),
+            projectId ?? ProjectContext.AllProjectIdsSentinel,
+            ["ContextHub"],
+            [
+                new DashboardServiceHealthResult("api", "Healthy", "API ready"),
+                new DashboardServiceHealthResult("worker", "Degraded", "Retry observed")
+            ],
+            new DashboardAuthorityStateResult(128, 128, 7, now.AddMinutes(-1)),
+            [new DashboardProjectionStateResult("ContextHub", 12, 128, 126, 2, now.AddMinutes(-2), now.AddMinutes(13), true)],
+            [new DashboardBackgroundRunResult(Guid.NewGuid(), "ContextHub", "activity-v1", PlatformBackgroundMode.Incremental,
+                PlatformBackgroundRunStatus.Completed, 12, 128, 128, 3, 3, true, 0, 0, 0, 0, 0, 1, 5, now, now, string.Empty)],
+            [new DashboardBackgroundRunResult(Guid.NewGuid(), "ContextHub", "activity-v1", PlatformBackgroundMode.Full,
+                PlatformBackgroundRunStatus.Completed, 12, 128, 128, 128, 128, true, 2, 1, 1, 126, 0, 1, 5, now, now, string.Empty)],
+            new DashboardAgentExecutionQueueResult(4, 1, 2, 1, 1, 0, 32, 0),
+            new DashboardLogicalStorageHealthResult(42, 8_388_608, 39, 1, 1, 1, 0, 2, 18, 1),
+            now,
+            BuildPageSnapshotStatus(now)));
     }
 
     private static DashboardPageSnapshotStatusResult BuildPageSnapshotStatus(DateTimeOffset snapshotAtUtc)

@@ -48,7 +48,8 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
     private static readonly DashboardRouteSpec[] Routes =
     [
-        new("overview", "/", "總覽", [".metric-grid", ".context-savings-strip", ".dashboard-grid", ".resource-chart-grid"], [".page-header", ".metric-grid", ".context-savings-strip", ".dashboard-grid"], [".content", ".dashboard-grid.page-scroll-host"]),
+        new("overview", "/", "總覽", [".overview-signal-strip", ".overview-action-grid", ".overview-work-panel", ".overview-release-strip"], [".page-header", ".overview-signal-strip", ".overview-action-grid", ".overview-work-panel"], [".content"]),
+        new("operations", "/operations", "營運中心", [".dashboard-scope-bar", ".operations-authority-grid", ".operations-path-grid", ".operations-projection-table", ".high-risk-operation"], [".page-header", ".dashboard-scope-bar", ".operations-authority-grid", ".operations-path-grid"], [".content", ".table-scroll-shell"]),
         new("runtime", "/runtime", "執行參數", [".runtime-page-stack", ".runtime-main-panel", ".runtime-parameters-panel"], [".page-header", ".runtime-main-panel", ".runtime-parameters-panel"], [".content", ".runtime-page-stack"]),
         new("monitoring", "/monitoring", "狀態監控", [".monitoring-page-stack", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".page-header", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".content", ".monitoring-page-stack"]),
         new("memories", "/memories", "記憶資料", [".page-actions-secondary .info-popover", ".filter-panel", ".split-layout"], [".page-header", ".filter-panel", ".split-layout"], [".content", ".split-layout"]),
@@ -83,6 +84,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     private static readonly DashboardRouteSpec[] DenseRoutes =
     [
         Routes.Single(route => route.Name == "overview"),
+        Routes.Single(route => route.Name == "operations"),
         Routes.Single(route => route.Name == "runtime"),
         Routes.Single(route => route.Name == "monitoring"),
         Routes.Single(route => route.Name == "memories"),
@@ -141,6 +143,59 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }
 
         failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task Wave6A_Overview_And_Operations_Should_Remain_Provider_Opaque_Responsive_And_Keyboard_Usable()
+    {
+        DashboardViewport[] viewports =
+        [
+            new("high-dpi-equivalent", 1920, 1080),
+            new("desktop", 1366, 768),
+            new("tablet", 800, 1280),
+            new("mobile", 390, 844)
+        ];
+
+        await _fixture.EnsureDashboardRunningAsync();
+        foreach (var viewport in viewports)
+        {
+            await using var context = await _fixture.CreateContextAsync(viewport);
+            var page = await context.NewPageAsync();
+            await LoginAndOpenAsync(page, "/operations?uiProfile=dense");
+            await page.EvaluateAsync("() => document.documentElement.style.fontSize = '125%'");
+            await page.WaitForTimeoutAsync(100);
+
+            await page.Locator(".operations-authority-grid").WaitForAsync();
+            await page.Locator(".operations-projection-table").WaitForAsync();
+            (await page.Locator(".high-risk-operation button").IsDisabledAsync()).Should().BeTrue();
+
+            var bodyText = await page.Locator("body").InnerTextAsync();
+            bodyText.ToLowerInvariant().Should().Contain("business authority");
+            bodyText.ToLowerInvariant().Should().Contain("rebuildable monitoring");
+            bodyText.Should().Contain("操作保持停用");
+            bodyText.ToLowerInvariant().Should().NotContain("intfloat/");
+            bodyText.Should().NotContain("CPUExecutionProvider");
+            bodyText.ToLowerInvariant().Should().NotContain("s3://");
+            bodyText.ToLowerInvariant().Should().NotContain("https://storage");
+
+            var scope = page.Locator(".dashboard-scope-field select");
+            await scope.FocusAsync();
+            (await scope.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+            await page.Keyboard.PressAsync("Tab");
+            (await page.Locator(".dashboard-scope-search input").EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+
+            var layout = await AnalyzeLayoutAsync(
+                page,
+                [".page-header", ".dashboard-scope-bar", ".operations-authority-grid", ".operations-path-grid"],
+                [".content", ".table-scroll-shell"]);
+            layout.DocumentScrollWidth.Should().BeLessThanOrEqualTo(layout.ViewportWidth + 1);
+            layout.BodyScrollWidth.Should().BeLessThanOrEqualTo(layout.ViewportWidth + 1);
+            layout.OverlapWarnings.Should().BeEmpty();
+
+            await page.Locator(".command-button").ClickAsync();
+            await page.Locator(".command-palette").WaitForAsync();
+            (await page.Locator(".command-route[href='/operations']").IsVisibleAsync()).Should().BeTrue();
+        }
     }
 
     [Fact]
@@ -1174,7 +1229,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             @"() => {
                 const root = getComputedStyle(document.documentElement);
                 const sidebar = document.querySelector('.sidebar')?.getBoundingClientRect();
-                const metricGrid = document.querySelector('.metric-grid')?.getBoundingClientRect();
+                const overviewSignalStrip = document.querySelector('.overview-signal-strip')?.getBoundingClientRect();
                 return JSON.stringify({
                     background: root.getPropertyValue('--bg').trim(),
                     surface: root.getPropertyValue('--surface').trim(),
@@ -1183,7 +1238,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     bodyScrollWidth: document.body.scrollWidth,
                     documentScrollWidth: document.documentElement.scrollWidth,
                     sidebarWidth: Math.round(sidebar?.width ?? 0),
-                    metricGridWidth: Math.round(metricGrid?.width ?? 0)
+                    overviewSignalStripWidth: Math.round(overviewSignalStrip?.width ?? 0)
                 });
             }");
 
@@ -1194,7 +1249,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         root.GetProperty("accent").GetString().Should().Be("#2dd4bf", tokenJson);
         root.GetProperty("radius").GetString().Should().Be("8px", tokenJson);
         root.GetProperty("sidebarWidth").GetInt32().Should().BeInRange(246, 250, tokenJson);
-        root.GetProperty("metricGridWidth").GetInt32().Should().BeGreaterThan(900, tokenJson);
+        root.GetProperty("overviewSignalStripWidth").GetInt32().Should().BeGreaterThan(900, tokenJson);
         root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(viewport.Width + 1, tokenJson);
         root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(viewport.Width + 1, tokenJson);
 
@@ -1529,7 +1584,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
-    public async Task Overview_Context_Savings_Should_Not_Overlap_At_App_Browser_Size()
+    public async Task Overview_Action_Surfaces_Should_Not_Overlap_At_App_Browser_Size()
     {
         await _fixture.EnsureDashboardRunningAsync();
         var viewport = new DashboardViewport("app-browser-999", 999, 1270);
@@ -1537,7 +1592,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/?uiProfile=dense");
-        await page.Locator(".context-savings-strip").WaitForAsync(new LocatorWaitForOptions
+        await page.Locator(".overview-signal-strip").WaitForAsync(new LocatorWaitForOptions
         {
             State = WaitForSelectorState.Visible,
             Timeout = 15000
@@ -1561,35 +1616,30 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                     bodyScrollWidth: document.body.scrollWidth,
                     contentScrollWidth: document.querySelector('.content')?.scrollWidth ?? 0,
                     contentClientWidth: document.querySelector('.content')?.clientWidth ?? 0,
-                    metricScrollWidth: document.querySelector('.home-page-body > .metric-grid')?.scrollWidth ?? 0,
-                    metricClientWidth: document.querySelector('.home-page-body > .metric-grid')?.clientWidth ?? 0,
-                    savingsScrollWidth: document.querySelector('.context-savings-strip-metrics')?.scrollWidth ?? 0,
-                    savingsClientWidth: document.querySelector('.context-savings-strip-metrics')?.clientWidth ?? 0,
-                    metrics: rectOf('.home-page-body > .metric-grid'),
-                    savings: rectOf('.context-savings-strip'),
-                    dashboard: rectOf('.home-page-body > .dashboard-grid')
+                    signalScrollWidth: document.querySelector('.overview-signal-strip')?.scrollWidth ?? 0,
+                    signalClientWidth: document.querySelector('.overview-signal-strip')?.clientWidth ?? 0,
+                    actionScrollWidth: document.querySelector('.overview-action-grid')?.scrollWidth ?? 0,
+                    actionClientWidth: document.querySelector('.overview-action-grid')?.clientWidth ?? 0,
+                    signals: rectOf('.overview-signal-strip'),
+                    actions: rectOf('.overview-action-grid'),
+                    work: rectOf('.overview-work-panel')
                 });
             }");
 
         using var document = JsonDocument.Parse(layoutJson);
         var root = document.RootElement;
-        var metrics = root.GetProperty("metrics");
-        var savings = root.GetProperty("savings");
-        var dashboard = root.GetProperty("dashboard");
+        var signals = root.GetProperty("signals");
+        var actions = root.GetProperty("actions");
+        var work = root.GetProperty("work");
 
-        metrics.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(savings.GetProperty("top").GetInt32(), $"metric cards must finish before context savings starts: {layoutJson}");
-        savings.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(dashboard.GetProperty("top").GetInt32(), $"context savings must finish before dashboard grid starts: {layoutJson}");
-        savings.GetProperty("height").GetInt32().Should().BeInRange(70, 180, $"context savings strip should stay compact and readable: {layoutJson}");
+        signals.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(actions.GetProperty("top").GetInt32(), $"signals must finish before action surfaces start: {layoutJson}");
+        actions.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(work.GetProperty("top").GetInt32(), $"action surfaces must finish before active work starts: {layoutJson}");
+        signals.GetProperty("height").GetInt32().Should().BeGreaterThan(60, $"signal strip should remain readable: {layoutJson}");
         root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
         root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
         root.GetProperty("contentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("contentClientWidth").GetInt32() + 1);
-        root.GetProperty("metricScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("metricClientWidth").GetInt32() + 1);
-        root.GetProperty("savingsScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("savingsClientWidth").GetInt32() + 1);
-
-        var lastSampleText = (await page.Locator(".context-savings-strip-last strong").InnerTextAsync()).Trim();
-        lastSampleText.Should().NotContain("UTC");
-        lastSampleText.Should().NotContain("GMT");
-        lastSampleText.Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$");
+        root.GetProperty("signalScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("signalClientWidth").GetInt32() + 1);
+        root.GetProperty("actionScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("actionClientWidth").GetInt32() + 1);
     }
 
     [Fact]
@@ -3317,14 +3367,14 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         var selectionJson = await page.EvaluateAsync<string>(
             @"() => JSON.stringify({
                 panelTitle: getComputedStyle(document.querySelector('.panel-title')).userSelect,
-                chartMeta: getComputedStyle(document.querySelector('.resource-chart-meta')).userSelect,
-                logCopy: getComputedStyle(document.querySelector('.stack-item-copy')).userSelect
+                signalLabel: getComputedStyle(document.querySelector('.overview-signal span')).userSelect,
+                errorCopy: getComputedStyle(document.querySelector('.overview-queue-item div span')).userSelect
             })");
 
         using var document = JsonDocument.Parse(selectionJson);
         document.RootElement.GetProperty("panelTitle").GetString().Should().Be("none");
-        document.RootElement.GetProperty("chartMeta").GetString().Should().Be("none");
-        document.RootElement.GetProperty("logCopy").GetString().Should().NotBe("none");
+        document.RootElement.GetProperty("signalLabel").GetString().Should().Be("none");
+        document.RootElement.GetProperty("errorCopy").GetString().Should().NotBe("none");
     }
 
     [Fact]

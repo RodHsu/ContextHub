@@ -18,36 +18,41 @@ Design source: [Quiet Signal UI baseline](context-hub-quiet-signal-vnext.md).
 ```text
 ContextHub Dashboard
 ├── Shared App Shell
-├── Operations
-│   ├── Overview /
-│   ├── Monitoring /monitoring
-│   ├── Runtime /runtime
-│   ├── Logs /logs
-│   ├── Jobs /jobs
-│   ├── Performance /performance
-│   └── Connectivity /connectivity
-├── Knowledge Work
-│   ├── Graph /graph
-│   ├── Memories /memories
-│   ├── Retention /retention
-│   ├── Sources /sources
-│   └── Project Work Items /project-work-items
-├── Project Collaboration
+├── Overview /
+├── Projects & Work
 │   ├── Project Information /project-information
+│   ├── Project Topology /project-tree
+│   ├── Project Work Items /project-work-items
 │   └── Discussions /discussions
-├── Governance
+├── Files & Knowledge
+│   ├── Memories /memories
+│   ├── Graph /graph
+│   ├── Sources /sources
+│   └── Retention /retention
+├── Agents
+│   ├── Agent Executions /agent-executions
+│   ├── Agent Skills /skills
+│   └── Connectivity /connectivity
+├── Governance & Security
 │   ├── Inbox /inbox
 │   ├── Governance /governance
-│   ├── Evaluation /evaluation
 │   ├── ChatGPT Proposals /chatgpt-proposals
-│   └── MCP Tools /mcp-tools
-├── Administration
-│   ├── Preferences /preferences
+│   ├── Evaluation /evaluation
+│   └── Security /security
+├── Operations
+│   ├── Operations Center /operations
+│   ├── Logs /logs
+│   ├── Performance /performance
 │   ├── Storage /storage
-│   ├── Security /security
+│   ├── MCP Tools /mcp-tools
 │   └── Settings /settings
-├── Account
+├── Personal
+│   ├── Preferences /preferences
 │   └── Tokens /account/tokens
+├── Operations drill-down routes
+│   ├── Monitoring /monitoring
+│   ├── Runtime /runtime
+│   └── Jobs /jobs
 └── Boundary Pages
     ├── /login
     ├── /forbidden
@@ -60,7 +65,7 @@ ContextHub Dashboard
 | Type | Name | Scope | Notes |
 | --- | --- | --- | --- |
 | Function | App shell | All routes | Sidebar, topbar, content scroll host, layout contract |
-| Function | Navigation groups | All routes | Operations, Knowledge Work, Governance, Administration, Account |
+| Function | Navigation groups | All routes | Overview, Projects & Work, Files & Knowledge, Agents, Governance & Security, Operations, Personal |
 | Function | Responsive navigation | All routes | Expanded sidebar, icon rail, overlay drawer |
 | Function | Account chrome | All routes | User identity, theme switcher, logout |
 | Function | Theme switching | All routes | Dark/light mode and persistence |
@@ -76,7 +81,8 @@ ContextHub Dashboard
 
 | Route | Page Purpose | Key Functions | Required States / Guardrails |
 | --- | --- | --- | --- |
-| `/` | System health and pending work summary | Health summary, freshness, token savings, recent activity, alerts | loading, error, stale, empty activity |
+| `/` | Concise action-oriented summary | At most three high-value metrics, health exceptions, latest errors, human decisions, active work | loading, error, stale, degraded, empty activity |
+| `/operations` | Canonical platform operations | Authority revision, projection lag, incremental/full reconciliation, AgentExecution and logical storage health | authority versus projection distinction, stale, degraded, fail-closed operation |
 | `/monitoring` | Runtime snapshot and metrics | Time range controls, refresh cadence, charts, service table, detail drawer | no snapshot, stale, failed refresh |
 | `/runtime` | Effective config and service status | Service cards, dependency map, settings view, detail drawer | degraded, permission denied, secret redaction |
 | `/logs` | Search and inspect runtime logs | Query bar, severity filter, log table, log reader, copy line | empty, validation error, selectable log text |
@@ -84,7 +90,7 @@ ContextHub Dashboard
 | `/performance` | Run and inspect performance probes | Probe form, metrics, charts, payload reader, retry | validation error, measurement failed |
 | `/connectivity` | Inspect agent-to-ContextHub MCP connectivity telemetry | Active policy, recent observations, summaries, and retention context | no sampled observations, stale summary, telemetry disabled |
 
-## Knowledge Work
+## Files & Knowledge
 
 | Route | Page Purpose | Key Functions | Required States / Guardrails |
 | --- | --- | --- | --- |
@@ -94,14 +100,14 @@ ContextHub Dashboard
 | `/sources` | Manage source inventory and sync status | Source table, detail drawer, trigger sync, pause/resume, failed diagnostics | secret redaction, unhealthy source gating |
 | `/project-work-items` | Execute user-managed work for one project | Project and status filters, work list, detail reader, ordered checklist, completion action | checklist completion guard, blocked/cancelled distinction, empty result |
 
-## Project Collaboration
+## Projects & Work
 
 | Route | Page Purpose | Key Functions | Required States / Guardrails |
 | --- | --- | --- | --- |
 | `/project-information` | Inspect and maintain durable project background | Project selector, description editor, lifecycle controls, project hierarchy | hidden/archived distinction, lifecycle confirmation, no implicit scope change |
 | `/discussions` | Read and manage participant-scoped cross-project threads | Project filter, thread list, message reader, create/reply actions, unread state | participant access boundary, closed thread, empty inbox, discussion not presented as knowledge |
 
-## Governance
+## Governance & Security
 
 | Route | Page Purpose | Key Functions | Required States / Guardrails |
 | --- | --- | --- | --- |
@@ -111,7 +117,7 @@ ContextHub Dashboard
 | `/chatgpt-proposals` | Review chat-agent write proposals | Filters, proposal queue, review surface, decision zone, audit trail | pending/applied distinction, no secret exposure |
 | `/mcp-tools` | Explain ContextHub MCP and REST surfaces | Endpoint comparison, tool catalog, suggested task sequence | direct versus proposal-gated writes, no secret-bearing configuration examples |
 
-## Administration
+## Operations and Personal
 
 | Route | Page Purpose | Key Functions | Required States / Guardrails |
 | --- | --- | --- | --- |
