@@ -2,7 +2,7 @@ namespace Memory.Application;
 
 public static class McpPublishedToolCatalog
 {
-    public const string AppFacingCatalogVersion = "2026-09-20-v7";
+    public const string AppFacingCatalogVersion = "2026-09-27-v8";
 
     public static IReadOnlySet<string> RestrictedToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -60,6 +60,8 @@ public static class McpPublishedToolCatalog
         "project_artifacts_list",
         "project_artifacts_search",
         "project_artifact_get",
+        "managed_files_list",
+        "managed_files_search",
         "log_search",
         "log_read",
         "conversation_ingest",
@@ -75,7 +77,7 @@ public static class McpPublishedToolCatalog
         "suggested_action_dismiss",
         "promote_log_slice_to_memory",
         "project_artifact_publish",
-        "project_artifact_upload_object",
+        "managed_file_register",
         "chatgpt_proposals_list",
         "chatgpt_governance_proposal_create",
         "chatgpt_proposal_approve",
@@ -98,7 +100,6 @@ public static class McpPublishedToolCatalog
         "maintenance_lease_heartbeat",
         "maintenance_status",
         "memory_restore",
-        "project_artifacts_prune_expired_objects",
         "user_preference_list"
     };
 
@@ -141,6 +142,8 @@ public static class McpPublishedToolCatalog
         "project_artifacts_list",
         "project_artifacts_search",
         "project_artifact_get",
+        "managed_files_list",
+        "managed_files_search",
         "log_search",
         "log_read",
         "chatgpt_proposals_list",
@@ -162,7 +165,7 @@ public static class McpPublishedToolCatalog
         "suggested_action_dismiss",
         "promote_log_slice_to_memory",
         "project_artifact_publish",
-        "project_artifact_upload_object"
+        "managed_file_register"
     };
 
     public static IReadOnlySet<string> DeleteCapableToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)

@@ -233,7 +233,7 @@
         new("agent_execution_heartbeat / agent_execution_checkpoint / agent_execution_block / agent_execution_complete / agent_execution_fail / agent_execution_abandon", "以 exact lease token/version 更新執行狀態、checkpoint 與 evidence。", "直接寫入", "warn", "stale/foreign owner fail closed；完成 execution 不會改 Work Item 商務狀態。"),
         new("log_search / log_read / promote_log_slice_to_memory", "查詢 runtime logs，或將已驗證的 log slice 升級為 durable memory。", "混合", "warn", "promotion 屬寫入，應避免保存大型原始 log。"),
         new("user_preference_list / user_preference_upsert / user_preference_archive", "管理長期使用者偏好。", "混合", "warn", "只保存明確、可重用且已確認的偏好。"),
-        new("project_artifact_*", "發佈、上傳、搜尋、讀取或清理 project-scoped artifact exchange records。", "混合", "warn", "大型內容應走 managed object pointer，不直接塞進 memory。"),
+        new("project_artifact_* / managed_file_*", "發佈、搜尋或讀取 project-scoped artifact records，並以 logical Managed File contract 註冊、列出與搜尋檔案。", "混合", "warn", "大型內容走 Managed File；公開結果只保留 FileId / FileVersionId，不暴露 provider locator。"),
         new("enqueue_reindex / enqueue_summary_refresh", "排入向量重建或共用綜合層刷新工作。", "維運", "warn", "模型、維度、profile 或 summary 資料需要重建時使用。"),
         new("maintenance_status / maintenance_lease_*", "檢查維護狀態並讓 agent 宣告工作 lease。", "維運", "neutral", "排程維護前後用於降低衝突。"),
         new("chatgpt_proposals_list / chatgpt_proposal_approve / chatgpt_proposal_reject", "檢視、核准或拒絕 ChatGPT gateway 建立的寫入 proposal。", "審核寫入", "warn", "核准時會重新檢查 scope 與權限。")
@@ -247,7 +247,7 @@
         new("memory_retention_preview / project_cleanup_preview", "分類 retention 或 project cleanup 候選。", "讀取", "neutral", "預覽不刪除、不封存。"),
         new("build_working_context / memory_search / memory_get", "讓 ChatGPT 取得授權範圍內的 working context 與記憶內容。", "讀取", "neutral", "適合查詢、彙整、規劃。"),
         new("user_preferences_list / conversation_insights_list / suggested_actions_list", "檢視全域偏好、conversation insights 與 suggested actions。", "讀取", "neutral", "用於整理排程與人工審核前分析。"),
-        new("project_artifacts_list / project_artifacts_search / project_artifact_get", "讀取同 ProjectId agent 共享的 artifact exchange records。", "讀取", "neutral", "不直接暴露未授權專案內容。"),
+        new("project_artifacts_list / project_artifacts_search / project_artifact_get / managed_files_list / managed_files_search", "讀取同 ProjectId agent 共享的 artifact 與 logical Managed File records。", "讀取", "neutral", "重新檢查目前授權與 lifecycle，且不回傳 provider locator。"),
         new("log_search / log_read", "查詢 actor 授權範圍內的 runtime logs。", "讀取", "neutral", "避免把大型 raw log 直接升級為記憶。"),
         new("conversation_ingest", "補送 ChatGPT 對話 checkpoint 到 staging layer。", "直接寫入", "warn", "來源會標記為 ChatGPT gateway。"),
         new("project_hierarchy_get_children / project_hierarchy_set_children", "讀取或設定 OAuth actor 授權範圍內的父子專案管理關係。", "混合", "warn", "不改 memory ACL；設定時以 MCP schema 的 request 物件傳入。"),
@@ -257,7 +257,7 @@
         new("project_cleanup_apply", "建立 project cleanup apply proposal。", "需核准", "warn", "核准後才封存或刪除候選記憶。"),
         new("user_preference_upsert / user_preference_archive", "建立偏好新增、更新、封存或還原 proposal。", "需核准", "warn", "避免聊天代理自行改長期偏好。"),
         new("suggested_action_accept / suggested_action_dismiss", "建立 suggested action 接受或忽略 proposal。", "需核准", "warn", "維持治理決策可追溯。"),
-        new("promote_log_slice_to_memory / project_artifact_publish / project_artifact_upload_object", "建立 log promotion 或 artifact publish proposal。", "需核准", "warn", "避免未審核內容直接進入共享知識庫。"),
+        new("promote_log_slice_to_memory / project_artifact_publish / managed_file_register", "建立 log promotion、artifact publish 或 logical managed-file registration proposal。", "需核准", "warn", "避免未審核內容直接進入共享知識庫。"),
         new("chatgpt_proposals_list / chatgpt_proposal_approve / chatgpt_proposal_reject", "讀取、核准或拒絕 pending proposal。", "審核寫入", "warn", "核准時套用真正的 Application write use case。")
     ];
 

@@ -30,7 +30,7 @@ Capabilities are random bearer values; only SHA-256 hashes are persisted. The st
 
 `Staged`, `Ready`, `Orphaned`, `Missing`, `Corrupt`, and `Tombstoned` are explicit metadata states. The worker reconciliation hook marks expired staged objects as orphaned and detects missing ready chunks. Store outages fail the run without treating unavailable data as absent. Restore requires all three authorities: ciphertext chunks, PostgreSQL encryption metadata including the wrapped DEK, and the matching external Key Authority version.
 
-Migration `046_managed_storage_encryption_gateway.sql` creates only additive Wave 2 tables. It does not rewrite existing artifacts or expose provider mappings. The existing Artifact `Summary`, `Snippet`, `FileReference`, `ExternalObject`, ObjectRef, and upload tool remain unchanged for the authorized Wave 7 cutover.
+Migration `046_managed_storage_encryption_gateway.sql` creates only additive Wave 2 tables. It does not rewrite artifacts or expose provider mappings. Wave 7A later replaced the legacy Artifact/ObjectRef surface with logical Managed File contracts; see [Platform Wave 7A breaking cutover](platform-wave-7a-breaking-cutover.md).
 
 ## Deployment configuration
 

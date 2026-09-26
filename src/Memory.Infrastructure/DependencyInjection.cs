@@ -44,7 +44,6 @@ public static class DependencyInjection
         services.Configure<AgentConnectivityTelemetryOptions>(configuration.GetSection(AgentConnectivityTelemetryOptions.SectionName));
         services.Configure<MemoryDataRetentionOptions>(configuration.GetSection(MemoryDataRetentionOptions.SectionName));
         services.Configure<AutonomousGovernanceOptions>(configuration.GetSection(AutonomousGovernanceOptions.SectionName));
-        services.Configure<ProjectArtifactObjectStorageOptions>(configuration.GetSection(ProjectArtifactObjectStorageOptions.SectionName));
         services.Configure<ManagedObjectStorageOptions>(configuration.GetSection(ManagedObjectStorageOptions.SectionName));
         services.Configure<ManagedFileKeyAuthorityOptions>(configuration.GetSection(ManagedFileKeyAuthorityOptions.SectionName));
         services.Configure<ManagedTransferOptions>(configuration.GetSection(ManagedTransferOptions.SectionName));
@@ -92,7 +91,6 @@ public static class DependencyInjection
         services.AddScoped<IMcpToolCallTelemetryService, DatabaseMcpToolCallTelemetryService>();
         services.AddScoped<IAgentConnectivityService, AgentConnectivityService>();
         services.AddSingleton<IEmbeddingUsageTelemetry, DatabaseEmbeddingUsageTelemetry>();
-        services.AddSingleton<IProjectArtifactObjectStore, S3CompatibleProjectArtifactObjectStore>();
         services.AddSingleton<IManagedObjectStore, FileSystemManagedObjectStore>();
         services.AddSingleton<IManagedFileKeyAuthority, AesGcmManagedFileKeyAuthority>();
         services.AddSingleton<ISecretEnvelopeKeyAuthority, SecureFileSecretEnvelopeKeyAuthority>();
@@ -166,9 +164,6 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
         })
         .AddHttpMessageHandler<RequestTrafficDelegatingHandler>();
-        services.AddHttpClient(nameof(S3CompatibleProjectArtifactObjectStore))
-            .AddHttpMessageHandler<RequestTrafficDelegatingHandler>();
-
         services.AddSingleton<IEmbeddingProvider>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<EmbeddingOptions>>().Value;

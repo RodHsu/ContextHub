@@ -4,6 +4,8 @@
 
 Inventory date: 2026-09-21. Repository baseline: `77551083ac062c2fb27cd1c4ba504b8ce0a76554`.
 
+> Historical evidence only. Wave 7A supersedes the legacy Artifact/ObjectRef surface described below. The current public contract is documented in [Platform Wave 7A breaking cutover](platform-wave-7a-breaking-cutover.md).
+
 ## DefinitionState migration
 
 - Next migration is `044_project_work_item_definition_state.sql` after `043_agent_execution.sql`.
@@ -66,7 +68,7 @@ Current persisted runtime leakage count is 0 because no artifact has a non-null 
 | 0 | Add typed Work Item `DefinitionState`; update DB/domain/application/REST/MCP/ChatGPT/Dashboard/governance projections | No Artifact/ObjectRef cutover; no Managed Files, Secrets, or Storage Gateway |
 | 1 | Add topology edge semantics, effective authorization foundation, revisions/cache validation, and canonical tag base | Legacy hierarchy tools remain compatible; Artifact tools and provider-specific payload remain unchanged |
 | 2+ | Consume the Wave 1 evaluator from Managed Storage/Files/Secrets | No inference of hierarchy from ProjectId names |
-| 7 | Replace provider-specific Artifact/ObjectRef APIs and perform the breaking migration plus catalog/schema/hash bump and host reacceptance | Only this wave may remove the legacy Agent-facing contract |
+| 7A | Replace provider-specific Artifact/ObjectRef APIs, rehearse the breaking migration and rollback, and bump the catalog contract | Release-candidate validation only; Production and external-host acceptance remain out of scope |
 
 ## Wave 1 safe modification boundaries
 

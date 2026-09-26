@@ -366,6 +366,155 @@ public sealed class AgentExecutionMigrationRehearsalTests
             .Should().BeFalse("the failed migration transaction must roll back the schema change");
     }
 
+    [DockerRequiredFact]
+    public async Task Migration_051_should_cut_over_legacy_artifacts_replay_and_preserve_restricted_rollback_evidence()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true)
+            .WithDatabase("contexthub")
+            .WithUsername("contexthub")
+            .WithPassword("contexthub")
+            .Build();
+        await postgres.StartAsync();
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "050_platform_foundation_c_agent_resources.sql");
+
+        var managedObjectId = Guid.NewGuid();
+        var fileId = Guid.NewGuid();
+        var versionId = Guid.NewGuid();
+        var mappedArtifactId = Guid.NewGuid();
+        var externalArtifactId = Guid.NewGuid();
+        var summaryArtifactId = Guid.NewGuid();
+        var contentHash = new string('a', 64);
+        var mappedMetadata = $$$"""
+            {"artifactExchange":true,"kind":"FileReference","sourceSystem":"codex","objectRef":{"provider":"legacy-provider","bucket":"private-bucket","key":"objects/legacy.bin","sha256":"{{{contentHash}}}"},"metadata":{"provider":"legacy-provider","safeLabel":"preserved"}}
+            """;
+        var externalMetadata = """{"artifactExchange":true,"kind":"ExternalObject","sourceSystem":"codex","objectRef":{"provider":"legacy-provider","bucket":"private-bucket","key":"objects/retired.bin"}}""";
+        var summaryMetadata = """{"artifactExchange":true,"kind":"Summary","sourceSystem":"codex","metadata":{"provider":"legacy-provider","safeLabel":"preserved"}}""";
+
+        await ExecuteAsync(connection, """
+            INSERT INTO managed_objects
+                (id, project_id, security_domain, state, storage_id, plaintext_length, chunk_size, chunk_count,
+                 encryption_schema_version, encryption_generation, encryption_algorithm, key_id, wrapped_dek,
+                 wrap_nonce, wrap_tag, plaintext_sha256, staged_until, created_at, updated_at)
+            VALUES
+                (@managed_object_id, 'wave-7a-rehearsal', 'ManagedFile', 'Ready', repeat('1', 64), 1, 65536, 1,
+                 1, 1, 'AES-256-GCM', 'rehearsal-key', decode(repeat('11', 32), 'hex'), decode(repeat('22', 12), 'hex'),
+                 decode(repeat('33', 16), 'hex'), @content_hash, NOW() + INTERVAL '1 hour', NOW(), NOW());
+            INSERT INTO file_assets
+                (id, project_id, logical_file_name, normalized_file_name, state, created_by_actor_id, created_at, updated_at)
+            VALUES (@file_id, 'wave-7a-rehearsal', 'legacy.bin', 'legacy.bin', 'Active', 'migration-rehearsal', NOW(), NOW());
+            INSERT INTO file_versions
+                (id, file_asset_id, managed_object_id, version_number, content_sha256, content_type,
+                 deduplication_scope_key, lifecycle, classification, created_at, updated_at)
+            VALUES (@version_id, @file_id, @managed_object_id, 1, @content_hash, 'application/octet-stream',
+                    repeat('2', 64), 'IntegrityVerified', 'Restricted', NOW(), NOW());
+            INSERT INTO memory_items
+                (id, external_key, scope, memory_type, title, content, summary, tags, source_type, source_ref,
+                 importance, confidence, status, metadata_json, project_id, created_at, updated_at)
+            VALUES
+                (@mapped_id, 'wave7a-mapped', 'Project', 'Artifact', 'Mapped file reference', 'legacy', 'legacy', '{}',
+                 'project-artifact-exchange', 'rehearsal', 0.5, 0.5, 'Active', @mapped_metadata, 'wave-7a-rehearsal', NOW(), NOW()),
+                (@external_id, 'wave7a-external', 'Project', 'Artifact', 'Retired external reference', 'legacy', 'legacy', '{}',
+                 'project-artifact-exchange', 'rehearsal', 0.5, 0.5, 'Active', @external_metadata, 'wave-7a-rehearsal', NOW(), NOW()),
+                (@summary_id, 'wave7a-summary', 'Project', 'Artifact', 'Sanitized summary', 'summary', 'summary', '{}',
+                 'project-artifact-exchange', 'rehearsal', 0.5, 0.5, 'Active', @summary_metadata, 'wave-7a-rehearsal', NOW(), NOW());
+            """,
+            new NpgsqlParameter<Guid>("managed_object_id", managedObjectId),
+            new NpgsqlParameter<Guid>("file_id", fileId),
+            new NpgsqlParameter<Guid>("version_id", versionId),
+            new NpgsqlParameter<Guid>("mapped_id", mappedArtifactId),
+            new NpgsqlParameter<Guid>("external_id", externalArtifactId),
+            new NpgsqlParameter<Guid>("summary_id", summaryArtifactId),
+            new NpgsqlParameter<string>("content_hash", contentHash),
+            new NpgsqlParameter<string>("mapped_metadata", mappedMetadata),
+            new NpgsqlParameter<string>("external_metadata", externalMetadata),
+            new NpgsqlParameter<string>("summary_metadata", summaryMetadata));
+
+        await ApplyRemainingAsync(connection, migrations);
+
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '051_legacy_artifact_managed_file_cutover.sql';")).Should().Be(1);
+        (await ScalarAsync<long>(connection, """
+            SELECT COUNT(*) FROM memory_items
+            WHERE id = @id AND status = 'Active'
+              AND metadata_json::jsonb->>'kind' = 'FileReference'
+              AND metadata_json::jsonb->>'fileId' = @file_id
+              AND metadata_json::jsonb->>'fileVersionId' = @version_id
+              AND metadata_json NOT ILIKE '%provider%' AND metadata_json NOT ILIKE '%bucket%';
+            """,
+            new NpgsqlParameter<Guid>("id", mappedArtifactId),
+            new NpgsqlParameter<string>("file_id", fileId.ToString()),
+            new NpgsqlParameter<string>("version_id", versionId.ToString()))).Should().Be(1);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM memory_items WHERE id = @id AND status = 'Archived';", new NpgsqlParameter<Guid>("id", externalArtifactId))).Should().Be(1);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM memory_items WHERE id = @id AND status = 'Active' AND metadata_json NOT ILIKE '%provider%';", new NpgsqlParameter<Guid>("id", summaryArtifactId))).Should().Be(1);
+        (await ScalarAsync<string>(connection, "SELECT old_metadata_text FROM audit.legacy_artifact_cutover_mappings WHERE memory_id = @id;", new NpgsqlParameter<Guid>("id", mappedArtifactId))).Should().Be(mappedMetadata);
+
+        await ExecuteAsync(connection, "BEGIN; ALTER TABLE memory_items DROP CONSTRAINT ck_memory_items_public_artifact_contract; UPDATE memory_items mi SET metadata_json = mapping.old_metadata_text, status = mapping.old_status FROM audit.legacy_artifact_cutover_mappings mapping WHERE mi.id = mapping.memory_id; ROLLBACK;");
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM memory_items WHERE id = @id AND metadata_json::jsonb->>'kind' = 'FileReference' AND metadata_json::jsonb ? 'objectRef';", new NpgsqlParameter<Guid>("id", mappedArtifactId))).Should().Be(0, "rollback rehearsal must be reversible without mutating the accepted cutover state");
+
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '051_legacy_artifact_managed_file_cutover.sql';")).Should().Be(1);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM audit.legacy_artifact_cutover_mappings;")).Should().Be(2);
+    }
+
+    [DockerRequiredFact]
+    public async Task Migration_051_should_fail_closed_when_a_legacy_file_reference_has_ambiguous_managed_file_matches()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true)
+            .WithDatabase("contexthub")
+            .WithUsername("contexthub")
+            .WithPassword("contexthub")
+            .Build();
+        await postgres.StartAsync();
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "050_platform_foundation_c_agent_resources.sql");
+        var hash = new string('b', 64);
+        var artifactId = Guid.NewGuid();
+
+        await ExecuteAsync(connection, """
+            INSERT INTO managed_objects
+                (id, project_id, security_domain, state, storage_id, plaintext_length, chunk_size, chunk_count,
+                 encryption_schema_version, encryption_generation, encryption_algorithm, key_id, wrapped_dek,
+                 wrap_nonce, wrap_tag, plaintext_sha256, staged_until, created_at, updated_at)
+            SELECT id, 'wave-7a-ambiguous', 'ManagedFile', 'Ready', storage_id, 1, 65536, 1, 1, 1, 'AES-256-GCM',
+                   'rehearsal-key', decode(repeat('11', 32), 'hex'), decode(repeat('22', 12), 'hex'), decode(repeat('33', 16), 'hex'),
+                   @hash, NOW() + INTERVAL '1 hour', NOW(), NOW()
+            FROM (VALUES (@object1::uuid, repeat('3', 64)), (@object2::uuid, repeat('4', 64))) seed(id, storage_id);
+            INSERT INTO file_assets
+                (id, project_id, logical_file_name, normalized_file_name, state, created_by_actor_id, created_at, updated_at)
+            VALUES
+                (@file1, 'wave-7a-ambiguous', 'one.bin', 'one.bin', 'Active', 'migration-rehearsal', NOW(), NOW()),
+                (@file2, 'wave-7a-ambiguous', 'two.bin', 'two.bin', 'Active', 'migration-rehearsal', NOW(), NOW());
+            INSERT INTO file_versions
+                (id, file_asset_id, managed_object_id, version_number, content_sha256, content_type,
+                 deduplication_scope_key, lifecycle, classification, created_at, updated_at)
+            VALUES
+                (@version1, @file1, @object1, 1, @hash, 'application/octet-stream', repeat('5', 64), 'IntegrityVerified', 'Restricted', NOW(), NOW()),
+                (@version2, @file2, @object2, 1, @hash, 'application/octet-stream', repeat('6', 64), 'IntegrityVerified', 'Restricted', NOW(), NOW());
+            INSERT INTO memory_items
+                (id, external_key, scope, memory_type, title, content, summary, tags, source_type, source_ref,
+                 importance, confidence, status, metadata_json, project_id, created_at, updated_at)
+            VALUES
+                (@artifact_id, 'wave7a-ambiguous', 'Project', 'Artifact', 'Ambiguous file reference', 'legacy', 'legacy', '{}',
+                 'project-artifact-exchange', 'rehearsal', 0.5, 0.5, 'Active', @metadata, 'wave-7a-ambiguous', NOW(), NOW());
+            """,
+            new NpgsqlParameter<Guid>("object1", Guid.NewGuid()), new NpgsqlParameter<Guid>("object2", Guid.NewGuid()),
+            new NpgsqlParameter<Guid>("file1", Guid.NewGuid()), new NpgsqlParameter<Guid>("file2", Guid.NewGuid()),
+            new NpgsqlParameter<Guid>("version1", Guid.NewGuid()), new NpgsqlParameter<Guid>("version2", Guid.NewGuid()),
+            new NpgsqlParameter<Guid>("artifact_id", artifactId), new NpgsqlParameter<string>("hash", hash),
+            new NpgsqlParameter<string>("metadata", $$$"""{"artifactExchange":true,"kind":"FileReference","objectRef":{"sha256":"{{{hash}}}"}}"""));
+
+        var apply = () => ApplyRemainingAsync(connection, migrations);
+        (await apply.Should().ThrowAsync<PostgresException>()).Which.MessageText.Should().Contain("ambiguous FileReference mapping");
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM schema_migrations WHERE name = '051_legacy_artifact_managed_file_cutover.sql';")).Should().Be(0);
+        (await ScalarAsync<long>(connection, "SELECT COUNT(*) FROM memory_items WHERE id = @id AND status = 'Active' AND metadata_json::jsonb ? 'objectRef';", new NpgsqlParameter<Guid>("id", artifactId))).Should().Be(1);
+    }
+
     private static IReadOnlyList<(string Name, string Sql)> ReadMigrations()
     {
         var assembly = typeof(MemoryDbContext).Assembly;

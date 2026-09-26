@@ -22,6 +22,7 @@ public sealed class MemoryMcpTools(
     IGovernanceService governanceService,
     IProjectInformationService projectInformationService,
     IProjectArtifactExchangeService artifactExchangeService,
+    IManagedFileService managedFileService,
     IChatGptProposalService chatGptProposalService,
     IMaintenanceCoordinator maintenanceCoordinator)
 {
@@ -67,13 +68,21 @@ public sealed class MemoryMcpTools(
     public Task<ProjectInformationResult> project_information_update_lifecycle(ProjectLifecycleUpdateRequest request, CancellationToken cancellationToken = default)
         => projectInformationService.UpdateLifecycleAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Publish a project-scoped artifact summary, snippet, file reference, or external object pointer for other agents using the same ProjectId.")]
+    [McpServerTool(UseStructuredContent = true), Description("Publish a project-scoped summary, snippet, or logical ContextHub managed-file reference for other agents using the same ProjectId.")]
     public Task<ProjectArtifactResult> project_artifact_publish(ProjectArtifactPublishRequest request, CancellationToken cancellationToken = default)
         => artifactExchangeService.PublishAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Upload managed artifact content to configured object storage, then publish only the expiring object pointer for agents using the same ProjectId.")]
-    public Task<ProjectArtifactResult> project_artifact_upload_object(ProjectArtifactManagedObjectPublishRequest request, CancellationToken cancellationToken = default)
-        => artifactExchangeService.UploadManagedObjectAsync(request, cancellationToken);
+    [McpServerTool(UseStructuredContent = true), Description("Register a completed ContextHub-managed upload as a logical managed file. The request accepts only ContextHub object and file identities, never provider locators.")]
+    public Task<ManagedFileCreateResult> managed_file_register(CreateManagedFileRequest request, CancellationToken cancellationToken = default)
+        => managedFileService.CreateAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List authorized logical managed files for one ProjectId without exposing storage-provider details.")]
+    public Task<IReadOnlyList<ManagedFileInventoryResult>> managed_files_list(string projectId, int limit = 50, CancellationToken cancellationToken = default)
+        => managedFileService.ListAsync(projectId, limit, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Search authorized logical managed files for one ProjectId and return provider-neutral file/version identities and safe snippets.")]
+    public Task<IReadOnlyList<ManagedFileSearchResult>> managed_files_search(string projectId, string query, int limit = 20, CancellationToken cancellationToken = default)
+        => managedFileService.SearchAsync(projectId, query, limit, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("List project-scoped artifact exchange records for the same ProjectId.")]
     public Task<IReadOnlyList<ProjectArtifactResult>> project_artifacts_list(ProjectArtifactListRequest request, CancellationToken cancellationToken = default)
@@ -86,10 +95,6 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("Get one project-scoped artifact exchange record by memory id.")]
     public Task<ProjectArtifactResult?> project_artifact_get(Guid memoryId, CancellationToken cancellationToken = default)
         => artifactExchangeService.GetAsync(memoryId, cancellationToken);
-
-    [McpServerTool(UseStructuredContent = true), Description("Delete expired managed project artifact objects from configured object storage and archive their artifact exchange records. Intended for Codex or agent maintenance, not ChatGPT direct use.")]
-    public Task<ProjectArtifactExpiredObjectPruneResult> project_artifacts_prune_expired_objects(ProjectArtifactExpiredObjectPruneRequest request, CancellationToken cancellationToken = default)
-        => artifactExchangeService.PruneExpiredObjectsAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Create or replace a memory item using an external key.")]
     public Task<MemoryDocument> memory_upsert(MemoryUpsertToolRequest request, CancellationToken cancellationToken = default)

@@ -330,6 +330,7 @@ Notes:
 - [Agent connectivity telemetry](docs/agent-connectivity-telemetry.md)
 - [Platform Wave 4A secrets, SSH, and Password step-up](docs/platform-wave-4a-secrets.md)
 - [Platform Wave 4B MFA and assurance](docs/platform-wave-4b-mfa.md)
+- [Platform Wave 7A logical Managed File breaking cutover](docs/platform-wave-7a-breaking-cutover.md)
 - [Repo onboarding guide](docs/repo-onboarding.md) — initial `ProjectId`／project information setup and data-routing rules
 - [Public Nginx proxy guide](docs/context-hub-public-nginx.md)
 - [Cloudflare edge rules](docs/context-hub-cloudflare-rules.md)

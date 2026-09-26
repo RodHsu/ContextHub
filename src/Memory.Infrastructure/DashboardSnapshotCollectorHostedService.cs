@@ -457,6 +457,9 @@ public sealed class DashboardSnapshotCollectorHostedService(
     private async Task CollectRecentOperationsAsync(int intervalSeconds, CancellationToken cancellationToken)
     {
         await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        await using var snapshotTransaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.RepeatableRead,
+            cancellationToken);
         var recentErrorCutoff = timeProvider.GetUtcNow().AddHours(-24);
 
         var memoryItemCount = await dbContext.MemoryItems.CountAsync(cancellationToken);
@@ -553,6 +556,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 x.CreatedAt,
                 x.ProjectId))
             .ToListAsync(cancellationToken);
+
+        await snapshotTransaction.CommitAsync(cancellationToken);
 
         var payload = new DashboardRecentOperationsSnapshotPayload(
             [

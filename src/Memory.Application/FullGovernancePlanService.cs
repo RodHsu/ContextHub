@@ -157,13 +157,6 @@ public sealed class FullGovernancePlanService(
                 });
             }
         }
-        foreach (var artifact in artifacts.Where(x => HasExpiredObject(x.MetadataJson, clock.UtcNow)))
-        {
-            items.Add(Item($"artifact:{artifact.Id:N}", GovernanceItemKind.Artifact, artifact.ProjectId,
-                "ExpiredExternalObject", "ArtifactReconcile", GovernanceBatchRiskLevel.Medium, true,
-                artifact.Id, ["ARTIFACT_OBJECT_EXPIRED", "AUDIT_CHAIN_REQUIRED"], governanceRunId));
-        }
-
         var discussions = await dbContext.DiscussionThreads.AsNoTracking().Include(x => x.Participants).Include(x => x.Messages)
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.HostProjectId))
             .ToListAsync(cancellationToken);
@@ -509,17 +502,6 @@ public sealed class FullGovernancePlanService(
 
     private static string NormalizeText(string value)
         => string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
-
-    private static bool HasExpiredObject(string metadataJson, DateTimeOffset now)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(metadataJson) ? "{}" : metadataJson);
-            return document.RootElement.TryGetProperty("expiresAt", out var value) &&
-                   value.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(value.GetString(), out var expiresAt) && expiresAt <= now;
-        }
-        catch (JsonException) { return true; }
-    }
 
     private static IReadOnlyList<HierarchyProblem> FindHierarchyProblems(IReadOnlyList<ProjectHierarchy> rows, IReadOnlySet<string> projects)
     {

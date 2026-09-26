@@ -148,19 +148,8 @@ public enum ProjectArtifactKind
 {
     Summary,
     Snippet,
-    FileReference,
-    ExternalObject
+    FileReference
 }
-
-public sealed record ProjectArtifactObjectRef(
-    string Provider,
-    string Bucket,
-    string Key,
-    string? Uri = null,
-    DateTimeOffset? ExpiresAt = null,
-    string? Sha256 = null,
-    long? SizeBytes = null,
-    string? ContentType = null);
 
 public sealed record ProjectArtifactPublishRequest(
     string ProjectId,
@@ -172,22 +161,8 @@ public sealed record ProjectArtifactPublishRequest(
     string SourceRef = "",
     IReadOnlyList<string>? Tags = null,
     string? ExternalKey = null,
-    ProjectArtifactObjectRef? ObjectRef = null,
-    DateTimeOffset? ExpiresAt = null,
-    string MetadataJson = "{}");
-
-public sealed record ProjectArtifactManagedObjectPublishRequest(
-    string ProjectId,
-    string Title,
-    string Summary,
-    string ContentBase64,
-    string FileName,
-    string ContentType,
-    DateTimeOffset ExpiresAt,
-    string SourceSystem = "codex",
-    string SourceRef = "",
-    IReadOnlyList<string>? Tags = null,
-    string? ExternalKey = null,
+    Guid? FileId = null,
+    Guid? FileVersionId = null,
     string MetadataJson = "{}");
 
 public sealed record ProjectArtifactListRequest(
@@ -195,7 +170,6 @@ public sealed record ProjectArtifactListRequest(
     string? Query = null,
     ProjectArtifactKind? Kind = null,
     string? SourceSystem = null,
-    bool IncludeExpired = false,
     int Limit = 50);
 
 public sealed record ProjectArtifactSearchRequest(
@@ -203,7 +177,6 @@ public sealed record ProjectArtifactSearchRequest(
     string Query,
     ProjectArtifactKind? Kind = null,
     string? SourceSystem = null,
-    bool IncludeExpired = false,
     int Limit = 10);
 
 public sealed record ProjectArtifactResult(
@@ -217,51 +190,10 @@ public sealed record ProjectArtifactResult(
     string SourceSystem,
     string SourceRef,
     IReadOnlyList<string> Tags,
-    ProjectArtifactObjectRef? ObjectRef,
-    DateTimeOffset? ExpiresAt,
-    bool IsExpired,
+    Guid? FileId,
+    Guid? FileVersionId,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
-
-public sealed record ProjectArtifactObjectUploadRequest(
-    string ProjectId,
-    string FileName,
-    string ContentType,
-    byte[] Content,
-    DateTimeOffset ExpiresAt,
-    string SourceSystem,
-    string SourceRef,
-    IReadOnlyDictionary<string, string> Metadata);
-
-public sealed record ProjectArtifactExpiredObjectPruneRequest(
-    string? ProjectId = null,
-    int Limit = 100,
-    bool DryRun = false);
-
-public sealed record ProjectArtifactExpiredObjectPruneResult(
-    int ScannedCount,
-    int DeletedObjectCount,
-    int ArchivedArtifactCount,
-    int FailedCount,
-    IReadOnlyList<ProjectArtifactExpiredObjectPruneItem> Items);
-
-public sealed record ProjectArtifactExpiredObjectPruneItem(
-    Guid MemoryId,
-    string ProjectId,
-    string Title,
-    ProjectArtifactKind Kind,
-    string Bucket,
-    string Key,
-    DateTimeOffset? ExpiresAt,
-    bool DeletedObject,
-    bool ArchivedArtifact,
-    string Error);
-
-public interface IProjectArtifactObjectStore
-{
-    Task<ProjectArtifactObjectRef> UploadAsync(ProjectArtifactObjectUploadRequest request, CancellationToken cancellationToken);
-    Task DeleteAsync(ProjectArtifactObjectRef objectRef, CancellationToken cancellationToken);
-}
 
 public sealed record WorkingContextRequest(
     string Query,
@@ -2547,11 +2479,9 @@ public sealed record DurableMemoryGovernanceSnapshotResult(
 public interface IProjectArtifactExchangeService
 {
     Task<ProjectArtifactResult> PublishAsync(ProjectArtifactPublishRequest request, CancellationToken cancellationToken);
-    Task<ProjectArtifactResult> UploadManagedObjectAsync(ProjectArtifactManagedObjectPublishRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectArtifactResult>> ListAsync(ProjectArtifactListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectArtifactResult>> SearchAsync(ProjectArtifactSearchRequest request, CancellationToken cancellationToken);
     Task<ProjectArtifactResult?> GetAsync(Guid memoryId, CancellationToken cancellationToken);
-    Task<ProjectArtifactExpiredObjectPruneResult> PruneExpiredObjectsAsync(ProjectArtifactExpiredObjectPruneRequest request, CancellationToken cancellationToken);
 }
 
 public interface IContextHubBootstrapService

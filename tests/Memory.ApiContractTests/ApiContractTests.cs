@@ -21,6 +21,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     public async Task Managed_file_security_contract_is_provider_neutral_and_does_not_expose_internal_object_identity()
     {
         Guid versionId;
+        Guid fileId;
         string projectId;
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
@@ -94,6 +95,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             db.FileVersions.Add(version);
             await db.SaveChangesAsync();
             versionId = version.Id;
+            fileId = file.Id;
         }
 
         using var client = environment.GetFactory().CreateClient();
@@ -112,6 +114,59 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         inventoryJson.Should().NotContain("managedObjectId").And.NotContain("storageId").And.NotContain("provider")
             .And.NotContain("endpoint").And.NotContain("bucket").And.NotContain("objectKey").And.NotContain("directUrl")
             .And.NotContain("wrappedDek");
+
+        using var artifactScope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(artifactScope.ServiceProvider);
+        var artifacts = artifactScope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>();
+        var published = await artifacts.PublishAsync(
+            new ProjectArtifactPublishRequest(
+                projectId,
+                "Logical managed file reference",
+                "Only ContextHub logical identifiers may cross the artifact contract.",
+                "ContextHub managed file reference.",
+                ProjectArtifactKind.FileReference,
+                FileId: fileId,
+                FileVersionId: versionId,
+                MetadataJson: "{\"safeLabel\":\"contract\"}"),
+            CancellationToken.None);
+        var artifactJson = JsonSerializer.Serialize(published);
+        artifactJson.Should().Contain(fileId.ToString()).And.Contain(versionId.ToString());
+        artifactJson.Should().NotContain("managedObjectId").And.NotContain("storageId").And.NotContain("provider")
+            .And.NotContain("endpoint").And.NotContain("bucket").And.NotContain("objectKey").And.NotContain("directUrl")
+            .And.NotContain("wrappedDek");
+        var readBack = await artifacts.GetAsync(published.MemoryId, CancellationToken.None);
+        readBack.Should().NotBeNull();
+        readBack!.MemoryId.Should().Be(published.MemoryId);
+        readBack.FileId.Should().Be(fileId);
+        readBack.FileVersionId.Should().Be(versionId);
+
+        var leakedMetadata = () => artifacts.PublishAsync(
+            new ProjectArtifactPublishRequest(
+                projectId,
+                "Rejected provider locator",
+                "Provider-specific locator metadata must fail closed.",
+                "ContextHub managed file reference.",
+                ProjectArtifactKind.FileReference,
+                FileId: fileId,
+                FileVersionId: versionId,
+                MetadataJson: "{\"nested\":{\"provider\":\"forbidden\"}}"),
+            CancellationToken.None);
+        await leakedMetadata.Should().ThrowAsync<InvalidOperationException>();
+
+        var artifactDb = artifactScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var referencedFile = await artifactDb.FileAssets.SingleAsync(x => x.Id == fileId);
+        referencedFile.State = FileAssetState.LogicalDeleted;
+        referencedFile.DeletedAt = DateTimeOffset.UtcNow;
+        referencedFile.UpdatedAt = referencedFile.DeletedAt.Value;
+        await artifactDb.SaveChangesAsync();
+        (await artifacts.GetAsync(published.MemoryId, CancellationToken.None)).Should().BeNull(
+            "logical file references must be hidden when the current file lifecycle is no longer active");
+
+        artifactDb.MemoryItems.Remove(await artifactDb.MemoryItems.SingleAsync(x => x.Id == published.MemoryId));
+        artifactDb.ProjectAuthorizationPolicies.RemoveRange(
+            await artifactDb.ProjectAuthorizationPolicies.Where(x => x.ProjectId == projectId).ToArrayAsync());
+        artifactDb.FileAssets.Remove(referencedFile);
+        await artifactDb.SaveChangesAsync();
     }
 
     [DockerRequiredFact]
@@ -339,8 +394,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         bootstrap.Should().NotBeNull();
         bootstrap!.Service.Name.Should().Be("ContextHub");
-        bootstrap.ToolCatalog.BackendToolCount.Should().Be(82);
-        bootstrap.ToolCatalog.AppFacingToolCount.Should().Be(81);
+        bootstrap.ToolCatalog.BackendToolCount.Should().Be(83);
+        bootstrap.ToolCatalog.AppFacingToolCount.Should().Be(83);
         bootstrap.ToolCatalog.DeleteCapableToolCount.Should().Be(3);
         bootstrap.Project.ProjectIdProvided.Should().BeFalse();
         bootstrap.Project.ProjectId.Should().BeNull();

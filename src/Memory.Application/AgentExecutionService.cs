@@ -211,38 +211,56 @@ public sealed class AgentExecutionService(
 
             var capabilities = NormalizeValues(request.Capabilities, 128, 100).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var availableTools = NormalizeValues(request.AvailableTools, 128, 200);
-            var candidates = await scoped
+            var candidateRows = await scoped
                 .Where(x => x.ProjectId == projectId && x.RepositoryId == request.RepositoryId && x.Status == AgentExecutionStatus.Ready && x.EligibleAt <= now)
                 .OrderBy(x => x.EligibleAt)
                 .ThenBy(x => x.CreatedAt)
                 .Take(5000)
+                .Select(x => new
+                {
+                    x.Id,
+                    x.AgentType,
+                    x.RequiredCapabilitiesJson,
+                    x.Priority,
+                    x.EligibleAt,
+                    x.CreatedAt
+                })
                 .ToListAsync(ct);
-            var orderedCandidates = candidates
+            var orderedCandidateIds = candidateRows
                 .Where(x => string.Equals(x.AgentType, request.AgentType, StringComparison.OrdinalIgnoreCase) &&
                     DeserializeValues(x.RequiredCapabilitiesJson).All(capabilities.Contains))
                 .OrderByDescending(x => x.Priority + Math.Min(100, (int)Math.Floor((now - x.EligibleAt).TotalHours)))
                 .ThenBy(x => x.EligibleAt)
                 .ThenBy(x => x.CreatedAt)
+                .Select(x => x.Id)
                 .ToArray();
             AgentExecution? candidate = null;
-            foreach (var item in orderedCandidates)
+            foreach (var candidateIdBatch in orderedCandidateIds.Chunk(128))
             {
-                var skill = await RevalidateSkillsAsync(item, capabilities.ToArray(), availableTools, ct);
-                if (skill is null || skill.Decision == SkillExecutionSnapshotDecision.Continue)
+                var batch = await scoped.Where(x => candidateIdBatch.Contains(x.Id)).ToListAsync(ct);
+                var batchById = batch.ToDictionary(x => x.Id);
+                foreach (var candidateId in candidateIdBatch)
                 {
-                    candidate = item;
-                    break;
+                    var item = batchById[candidateId];
+                    var skill = await RevalidateSkillsAsync(item, capabilities.ToArray(), availableTools, ct);
+                    if (skill is null || skill.Decision == SkillExecutionSnapshotDecision.Continue)
+                    {
+                        candidate = item;
+                        break;
+                    }
+
+                    if (skill.Decision is SkillExecutionSnapshotDecision.StopRevoked or SkillExecutionSnapshotDecision.RequiresHumanDecision)
+                    {
+                        item.Status = AgentExecutionStatus.Blocked;
+                        item.FailureClass = skill.Decision.ToString();
+                        item.StructuredReasonJson = JsonSerializer.Serialize(skill.Issues, JsonOptions);
+                        item.UpdatedAt = now;
+                        item.CompletedAt = now;
+                        await AppendEventAsync(item, AgentExecutionEventType.SkillSnapshotRevalidated, agentId, skill, ct);
+                    }
                 }
 
-                if (skill.Decision is SkillExecutionSnapshotDecision.StopRevoked or SkillExecutionSnapshotDecision.RequiresHumanDecision)
-                {
-                    item.Status = AgentExecutionStatus.Blocked;
-                    item.FailureClass = skill.Decision.ToString();
-                    item.StructuredReasonJson = JsonSerializer.Serialize(skill.Issues, JsonOptions);
-                    item.UpdatedAt = now;
-                    item.CompletedAt = now;
-                    await AppendEventAsync(item, AgentExecutionEventType.SkillSnapshotRevalidated, agentId, skill, ct);
-                }
+                if (candidate is not null) break;
             }
 
             AgentExecutionClaimResult result;

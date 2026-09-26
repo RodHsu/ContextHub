@@ -1074,6 +1074,13 @@ $requiredTools = @(
     "suggested_action_accept",
     "suggested_action_dismiss",
     "promote_log_slice_to_memory",
+    "project_artifact_publish",
+    "project_artifacts_list",
+    "project_artifacts_search",
+    "project_artifact_get",
+    "managed_file_register",
+    "managed_files_list",
+    "managed_files_search",
     "project_work_items_list",
     "project_work_item_set_governance_exclusion",
     "agent_execution_prepare",
@@ -1102,7 +1109,8 @@ $forbiddenTools = @(
     "conversation_sessions_list",
     "maintenance_status",
     "maintenance_lease_acquire",
-    "project_artifacts_prune_expired_objects"
+    "project_artifacts_prune_expired_objects",
+    "project_artifact_upload_object"
 )
 
 foreach ($name in $requiredTools) {

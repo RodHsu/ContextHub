@@ -1626,6 +1626,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "project_artifacts_list",
             "project_artifacts_search",
             "project_artifact_get",
+            "managed_files_list",
+            "managed_files_search",
             "log_search",
             "log_read",
             "conversation_ingest",
@@ -1657,7 +1659,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "suggested_action_dismiss",
             "promote_log_slice_to_memory",
             "project_artifact_publish",
-            "project_artifact_upload_object",
+            "managed_file_register",
             "chatgpt_proposals_list",
             "chatgpt_proposal_approve",
             "chatgpt_proposal_reject"
@@ -4258,11 +4260,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
-        listedToolNames.Should().HaveCount(81);
+        listedToolNames.Should().HaveCount(83);
         var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
         appFacingProjection.IsValid.Should().BeTrue();
-        appFacingProjection.PublishedToolCount.Should().Be(81);
-        appFacingProjection.AppCallableToolCount.Should().Be(81);
+        appFacingProjection.PublishedToolCount.Should().Be(83);
+        appFacingProjection.AppCallableToolCount.Should().Be(83);
         appFacingProjection.MissingPublishedTools.Should().BeEmpty();
         appFacingProjection.UnexpectedPublishedTools.Should().BeEmpty();
         appFacingProjection.MissingAppCallableTools.Should().BeEmpty();
@@ -4272,7 +4274,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_run_get",
             "governance_runs_list"
         };
-        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(78);
+        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(80);
         foreach (var toolName in receiptAndContractTools)
         {
             var projectedTool = appFacingProjection.Tools.Single(tool => tool.Name == toolName);
@@ -4686,159 +4688,6 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         });
         ExtractToolText(gatewayArtifactGet).Should().Contain("Artifact snippet shared from ChatGPT simulation");
 
-        var codexExternalArtifact = await PublishCodexExternalArtifactAsync(
-            "Codex R2 pointer artifact",
-            "Codex published an R2 object pointer for ChatGPT readers.",
-            "example-context-artifacts",
-            $"chatgpt-gateway-tests/{Guid.NewGuid():N}.md",
-            DateTimeOffset.UtcNow.AddHours(1));
-
-        var gatewayCodexArtifactList = await SendMcpAsync(client, sessionId!, 12, "tools/call", new
-        {
-            name = "project_artifacts_list",
-            arguments = new
-            {
-                request = new
-                {
-                    projectId = ProjectId,
-                    query = "Codex R2 pointer",
-                    kind = "ExternalObject",
-                    sourceSystem = "codex",
-                    includeExpired = false,
-                    limit = 5
-                }
-            }
-        });
-        var codexArtifactListText = ExtractToolText(gatewayCodexArtifactList);
-        codexArtifactListText.Should().Contain("Codex R2 pointer artifact");
-        codexArtifactListText.Should().Contain("example-context-artifacts");
-
-        var gatewayCodexArtifactGet = await SendMcpAsync(client, sessionId!, 13, "tools/call", new
-        {
-            name = "project_artifact_get",
-            arguments = new
-            {
-                memoryId = codexExternalArtifact.MemoryId
-            }
-        });
-        var codexArtifactGetText = ExtractToolText(gatewayCodexArtifactGet);
-        codexArtifactGetText.Should().Contain("Codex R2 pointer artifact");
-        codexArtifactGetText.Should().Contain("ExternalObject");
-        codexArtifactGetText.Should().Contain("expiresAt");
-
-        var expiredCodexArtifact = await PublishCodexExternalArtifactAsync(
-            "Expired Codex R2 pointer artifact",
-            "Expired Codex object pointers should be hidden by default.",
-            "fake-bucket",
-            $"chatgpt-gateway-tests/expired-{Guid.NewGuid():N}.md",
-            DateTimeOffset.UtcNow.AddMinutes(-10));
-
-        var nonExpiredOnlyPayload = await SendMcpAsync(client, sessionId!, 14, "tools/call", new
-        {
-            name = "project_artifacts_list",
-            arguments = new
-            {
-                request = new
-                {
-                    projectId = ProjectId,
-                    query = "Expired Codex R2 pointer",
-                    includeExpired = false,
-                    limit = 5
-                }
-            }
-        });
-        ExtractToolText(nonExpiredOnlyPayload).Should().NotContain("Expired Codex R2 pointer artifact");
-
-        var includeExpiredPayload = await SendMcpAsync(client, sessionId!, 15, "tools/call", new
-        {
-            name = "project_artifacts_list",
-            arguments = new
-            {
-                request = new
-                {
-                    projectId = ProjectId,
-                    query = "Expired Codex R2 pointer",
-                    includeExpired = true,
-                    limit = 5
-                }
-            }
-        });
-        var includeExpiredText = ExtractToolText(includeExpiredPayload);
-        includeExpiredText.Should().Contain("Expired Codex R2 pointer artifact");
-        includeExpiredText.Should().Contain("isExpired");
-
-        var dryRunPrune = await PruneExpiredArtifactsAsync(dryRun: true);
-        dryRunPrune.ScannedCount.Should().BeGreaterThanOrEqualTo(1);
-        dryRunPrune.Items.Should().Contain(x => x.MemoryId == expiredCodexArtifact.MemoryId && x.Key == expiredCodexArtifact.ObjectRef!.Key);
-        FakeProjectArtifactObjectStore.Deletes.Should().BeEmpty();
-
-        var actualPrune = await PruneExpiredArtifactsAsync(dryRun: false);
-        actualPrune.DeletedObjectCount.Should().BeGreaterThanOrEqualTo(1);
-        actualPrune.ArchivedArtifactCount.Should().BeGreaterThanOrEqualTo(1);
-        actualPrune.Items.Should().Contain(x => x.MemoryId == expiredCodexArtifact.MemoryId && x.ArchivedArtifact);
-        FakeProjectArtifactObjectStore.Deletes.Should().Contain(expiredCodexArtifact.ObjectRef!);
-        await ProjectArtifactShouldBeArchivedAsync(expiredCodexArtifact.MemoryId);
-
-        var managedUploadProposalPayload = await SendMcpAsync(client, sessionId!, 16, "tools/call", new
-        {
-            name = "project_artifact_upload_object",
-            arguments = new
-            {
-                request = new
-                {
-                    projectId = ProjectId,
-                    title = "ChatGPT managed R2 upload proposal",
-                    summary = "Managed upload should write object storage only after approval.",
-                    contentBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes("Managed artifact content should live in object storage.")),
-                    fileName = "managed-artifact.md",
-                    contentType = "text/markdown",
-                    expiresAt = DateTimeOffset.UtcNow.AddHours(2),
-                    sourceSystem = "chatgpt-mcp-gateway",
-                    sourceRef = $"chatgpt-managed-upload:{Guid.NewGuid():N}",
-                    tags = new[] { "chatgpt", "managed-upload" }
-                }
-            }
-        });
-        var managedUploadProposal = ExtractToolJson(managedUploadProposalPayload);
-        managedUploadProposal.GetProperty("status").GetString().Should().Be("Pending");
-        var managedUploadProposalId = managedUploadProposal.GetProperty("id").GetGuid();
-        FakeProjectArtifactObjectStore.Uploads.Should().BeEmpty();
-        await ProjectArtifactShouldNotExistAsync("ChatGPT managed R2 upload proposal");
-
-        var approveManagedUploadPayload = await SendMcpAsync(client, sessionId!, 17, "tools/call", new
-        {
-            name = "chatgpt_proposal_approve",
-            arguments = new
-            {
-                request = new
-                {
-                    proposalId = managedUploadProposalId,
-                    note = "Approved managed object upload by gateway integration test."
-                }
-            }
-        });
-        ExtractToolJson(approveManagedUploadPayload).GetProperty("status").GetString().Should().Be("Applied");
-        FakeProjectArtifactObjectStore.Uploads.Should().ContainSingle(x => x.FileName == "managed-artifact.md");
-
-        var managedUploadListPayload = await SendMcpAsync(client, sessionId!, 18, "tools/call", new
-        {
-            name = "project_artifacts_list",
-            arguments = new
-            {
-                request = new
-                {
-                    projectId = ProjectId,
-                    query = "ChatGPT managed R2 upload",
-                    includeExpired = false,
-                    limit = 5
-                }
-            }
-        });
-        var managedUploadText = ExtractToolText(managedUploadListPayload);
-        managedUploadText.Should().Contain("ChatGPT managed R2 upload proposal");
-        managedUploadText.Should().Contain("fake-r2");
-        managedUploadText.Should().NotContain("Managed artifact content should live in object storage.");
-
         var rejectProposalPayload = await SendMcpAsync(client, sessionId!, 19, "tools/call", new
         {
             name = "memory_upsert",
@@ -5048,42 +4897,6 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         return artifact;
     }
 
-    private async Task<ProjectArtifactResult> PublishCodexExternalArtifactAsync(
-        string title,
-        string summary,
-        string bucket,
-        string key,
-        DateTimeOffset expiresAt)
-    {
-        using var scope = environment.GetFactory().Services.CreateScope();
-        UseGatewayActor(scope.ServiceProvider);
-        var artifactExchange = scope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>();
-        var artifact = await artifactExchange.PublishAsync(
-            new ProjectArtifactPublishRequest(
-                ProjectId,
-                title,
-                summary,
-                Content: string.Empty,
-                Kind: ProjectArtifactKind.ExternalObject,
-                SourceSystem: "codex",
-                SourceRef: $"codex-r2-pointer:{Guid.NewGuid():N}",
-                Tags: ["codex", "r2-pointer"],
-                ObjectRef: new ProjectArtifactObjectRef(
-                    Provider: "r2",
-                    Bucket: bucket,
-                    Key: key,
-                    ExpiresAt: expiresAt,
-                    ContentType: "text/markdown"),
-                ExpiresAt: expiresAt),
-            CancellationToken.None);
-
-        artifact.Kind.Should().Be(ProjectArtifactKind.ExternalObject);
-        artifact.ObjectRef.Should().NotBeNull();
-        artifact.ObjectRef!.Provider.Should().Be("r2");
-        artifact.ExpiresAt.Should().BeCloseTo(expiresAt, TimeSpan.FromSeconds(1));
-        return artifact;
-    }
-
     private async Task ProjectArtifactShouldNotExistAsync(string title)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -5095,25 +4908,6 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                  x.SourceType == ProjectArtifactExchangeService.SourceType,
             CancellationToken.None);
         exists.Should().BeFalse();
-    }
-
-    private async Task<ProjectArtifactExpiredObjectPruneResult> PruneExpiredArtifactsAsync(bool dryRun)
-    {
-        using var scope = environment.GetFactory().Services.CreateScope();
-        UseGatewayActor(scope.ServiceProvider);
-        var artifactExchange = scope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>();
-        return await artifactExchange.PruneExpiredObjectsAsync(
-            new ProjectArtifactExpiredObjectPruneRequest(ProjectId, Limit: 20, DryRun: dryRun),
-            CancellationToken.None);
-    }
-
-    private async Task ProjectArtifactShouldBeArchivedAsync(Guid memoryId)
-    {
-        using var scope = environment.GetFactory().Services.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
-        var artifact = await dbContext.MemoryItems.SingleAsync(x => x.Id == memoryId, CancellationToken.None);
-        artifact.Status.Should().Be(MemoryStatus.Archived);
-        artifact.Tags.Should().Contain("artifact-object-pruned");
     }
 
     private static async Task ConfigureSelfHostedUserAsync(ChatGptGatewayApplicationFactory factory)
@@ -5455,7 +5249,6 @@ public sealed class ChatGptGatewayTestEnvironment : IAsyncLifetime
         await _postgres.StartAsync();
         await _redis.StartAsync();
 
-        FakeProjectArtifactObjectStore.Reset();
         Factory = new ChatGptGatewayApplicationFactory(_postgres.GetConnectionString(), _redis.GetConnectionString());
         await WaitForReadinessAsync();
     }
@@ -5595,7 +5388,6 @@ public sealed class ChatGptGatewayApplicationFactory(
         });
         builder.ConfigureTestServices(services =>
         {
-            services.AddSingleton<IProjectArtifactObjectStore, FakeProjectArtifactObjectStore>();
             if (clientMetadataFetcher is not null)
             {
                 services.AddSingleton(clientMetadataFetcher);
@@ -5614,39 +5406,4 @@ internal static class ChatGptGatewayTestConstants
 {
     public const string ProjectId = "ContextHubChatGptGatewayTest";
     public const string TestToken = "test-chatgpt-gateway-token";
-}
-
-internal sealed class FakeProjectArtifactObjectStore : IProjectArtifactObjectStore
-{
-    private static readonly List<ProjectArtifactObjectUploadRequest> UploadLog = [];
-    private static readonly List<ProjectArtifactObjectRef> DeleteLog = [];
-
-    public static IReadOnlyList<ProjectArtifactObjectUploadRequest> Uploads => UploadLog.ToArray();
-    public static IReadOnlyList<ProjectArtifactObjectRef> Deletes => DeleteLog.ToArray();
-
-    public static void Reset()
-    {
-        UploadLog.Clear();
-        DeleteLog.Clear();
-    }
-
-    public Task<ProjectArtifactObjectRef> UploadAsync(ProjectArtifactObjectUploadRequest request, CancellationToken cancellationToken)
-    {
-        UploadLog.Add(request);
-        return Task.FromResult(new ProjectArtifactObjectRef(
-            "fake-r2",
-            "fake-bucket",
-            $"managed/{request.ProjectId}/{Guid.NewGuid():N}/{request.FileName}",
-            $"https://r2.example.invalid/managed/{Uri.EscapeDataString(request.FileName)}",
-            request.ExpiresAt,
-            "FAKE-SHA256",
-            request.Content.LongLength,
-            request.ContentType));
-    }
-
-    public Task DeleteAsync(ProjectArtifactObjectRef objectRef, CancellationToken cancellationToken)
-    {
-        DeleteLog.Add(objectRef);
-        return Task.CompletedTask;
-    }
 }

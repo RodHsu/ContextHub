@@ -496,7 +496,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_items_list");
         var governanceBatchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
-        listedTools.GetArrayLength().Should().Be(82);
+        listedTools.GetArrayLength().Should().Be(83);
         var bootstrapResult = ExtractSseJson(bootstrapPayload).GetProperty("result");
 
         toolsPayload.Should().Contain("describe_context_hub");

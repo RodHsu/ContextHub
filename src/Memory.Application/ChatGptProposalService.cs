@@ -13,6 +13,7 @@ public sealed class ChatGptProposalService(
     IMemoryService memoryService,
     IProjectInformationService projectInformationService,
     IProjectArtifactExchangeService artifactExchangeService,
+    IManagedFileService managedFileService,
     IProjectDiscussionService projectDiscussionService,
     IProjectWorkItemService projectWorkItemService,
     ISuggestedActionService suggestedActionService,
@@ -41,7 +42,7 @@ public sealed class ChatGptProposalService(
         "suggested_action_dismiss",
         "promote_log_slice_to_memory",
         "project_artifact_publish",
-        "project_artifact_upload_object",
+        "managed_file_register",
         "project_information_upsert",
         "project_information_update_lifecycle",
         "project_hierarchy_set_children",
@@ -301,7 +302,7 @@ public sealed class ChatGptProposalService(
             "suggested_action_dismiss" => (await suggestedActionService.DismissAsync(Deserialize<HubActionRequest>(payloadJson).Id, cancellationToken)).Id,
             "promote_log_slice_to_memory" => (await memoryService.PromoteLogSliceAsync(Deserialize<PromoteLogSliceRequest>(payloadJson), cancellationToken)).Id,
             "project_artifact_publish" => (await artifactExchangeService.PublishAsync(Deserialize<ProjectArtifactPublishRequest>(payloadJson), cancellationToken)).MemoryId,
-            "project_artifact_upload_object" => (await artifactExchangeService.UploadManagedObjectAsync(Deserialize<ProjectArtifactManagedObjectPublishRequest>(payloadJson), cancellationToken)).MemoryId,
+            "managed_file_register" => await ApplyManagedFileProposalAsync(payloadJson, cancellationToken),
             "project_information_upsert" => (await projectInformationService.UpdateFromAgentAsync(Deserialize<ProjectInformationAgentUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_information_update_lifecycle" => (await projectInformationService.UpdateLifecycleAsync(Deserialize<ProjectLifecycleUpdateRequest>(payloadJson), cancellationToken)).MemoryId,
             "project_hierarchy_set_children" => DeterministicProjectHierarchyResultId(
@@ -317,6 +318,17 @@ public sealed class ChatGptProposalService(
             "enqueue_reindex" => (await memoryService.EnqueueReindexAsync(Deserialize<EnqueueReindexRequest>(payloadJson), cancellationToken)).JobId,
             _ => throw new InvalidOperationException($"Tool '{toolName}' is not supported for proposal approval.")
         };
+    }
+
+    private async Task<Guid> ApplyManagedFileProposalAsync(string payloadJson, CancellationToken cancellationToken)
+    {
+        var result = await managedFileService.CreateAsync(
+            Deserialize<CreateManagedFileRequest>(payloadJson),
+            cancellationToken);
+        if (result.FileId is Guid fileId && result.Outcome is ManagedFileCreateOutcome.Created or ManagedFileCreateOutcome.ExactDuplicate)
+            return fileId;
+        throw new InvalidOperationException(
+            $"Managed File registration requires an explicit caller decision before approval can complete (outcome: {result.Outcome}).");
     }
 
     private async Task<ConversationInsight> LoadProposalForWriteAsync(
@@ -446,7 +458,7 @@ public sealed class ChatGptProposalService(
             case "suggested_action_dismiss": EnsureId(DeserializeStrict<HubActionRequest>(payloadJson).Id, "Id"); break;
             case "promote_log_slice_to_memory": _ = DeserializeStrict<PromoteLogSliceRequest>(payloadJson); break;
             case "project_artifact_publish": _ = DeserializeStrict<ProjectArtifactPublishRequest>(payloadJson); break;
-            case "project_artifact_upload_object": _ = DeserializeStrict<ProjectArtifactManagedObjectPublishRequest>(payloadJson); break;
+            case "managed_file_register": _ = DeserializeStrict<CreateManagedFileRequest>(payloadJson); break;
             case "project_information_upsert": _ = DeserializeStrict<ProjectInformationAgentUpdateRequest>(payloadJson); break;
             case "project_information_update_lifecycle": _ = DeserializeStrict<ProjectLifecycleUpdateRequest>(payloadJson); break;
             case "project_hierarchy_set_children": _ = DeserializeStrict<ProjectHierarchySetChildrenRequest>(payloadJson); break;

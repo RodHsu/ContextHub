@@ -25,6 +25,7 @@ public sealed class ChatGptGatewayTools(
     ISuggestedActionService suggestedActionService,
     IMemoryDataRetentionService retentionService,
     IProjectArtifactExchangeService artifactExchangeService,
+    IManagedFileService managedFileService,
     IChatGptProposalService proposalService,
     IProjectWorkItemService projectWorkItemService,
     IAgentExecutionService agentExecutionService,
@@ -294,13 +295,21 @@ public sealed class ChatGptGatewayTools(
     public Task<IReadOnlyList<ProjectArtifactResult>> project_artifacts_list(ProjectArtifactListRequest request, CancellationToken cancellationToken = default)
         => artifactExchangeService.ListAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Search project-scoped artifact summaries, snippets, file references, or external object pointers shared by agents using the same ProjectId.")]
+    [McpServerTool(UseStructuredContent = true), Description("Search project-scoped summaries, snippets, and logical ContextHub managed-file references shared by agents using the same ProjectId.")]
     public Task<IReadOnlyList<ProjectArtifactResult>> project_artifacts_search(ProjectArtifactSearchRequest request, CancellationToken cancellationToken = default)
         => artifactExchangeService.SearchAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Get one project-scoped artifact exchange record by memory id.")]
     public Task<ProjectArtifactResult?> project_artifact_get(Guid memoryId, CancellationToken cancellationToken = default)
         => artifactExchangeService.GetAsync(memoryId, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("List authorized logical managed files for one ProjectId without exposing storage-provider details.")]
+    public Task<IReadOnlyList<ManagedFileInventoryResult>> managed_files_list(string projectId, int limit = 50, CancellationToken cancellationToken = default)
+        => managedFileService.ListAsync(projectId, limit, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Search authorized logical managed files for one ProjectId and return provider-neutral file/version identities and safe snippets.")]
+    public Task<IReadOnlyList<ManagedFileSearchResult>> managed_files_search(string projectId, string query, int limit = 20, CancellationToken cancellationToken = default)
+        => managedFileService.SearchAsync(projectId, query, limit, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Search runtime logs by text, service, level, or identifiers.")]
     public Task<IReadOnlyList<LogEntryResult>> log_search(LogQueryRequest request, CancellationToken cancellationToken = default)
@@ -365,13 +374,13 @@ public sealed class ChatGptGatewayTools(
     public Task<ChatGptProposalResult> promote_log_slice_to_memory(PromoteLogSliceRequest request, CancellationToken cancellationToken = default)
         => CreateProposalAsync("promote_log_slice_to_memory", request.ProjectId, request.Title, $"Promote logs matching '{request.Query ?? request.TraceId ?? request.ServiceName ?? "selected filters"}'.", request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to publish a project artifact summary, snippet, file reference, or external object pointer. Approval is required before shared project knowledge is changed.")]
+    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to publish a project summary, snippet, or logical ContextHub managed-file reference. Approval is required before shared project knowledge is changed.")]
     public Task<ChatGptProposalResult> project_artifact_publish(ProjectArtifactPublishRequest request, CancellationToken cancellationToken = default)
         => CreateProposalAsync("project_artifact_publish", request.ProjectId, request.Title, request.Summary, request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to upload artifact content to configured object storage, then publish only the expiring object pointer. Approval is required before external storage or shared project knowledge is changed.")]
-    public Task<ChatGptProposalResult> project_artifact_upload_object(ProjectArtifactManagedObjectPublishRequest request, CancellationToken cancellationToken = default)
-        => CreateProposalAsync("project_artifact_upload_object", request.ProjectId, request.Title, request.Summary, request, cancellationToken);
+    [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to register a completed ContextHub-managed upload as a logical managed file. Provider locators are never accepted.")]
+    public Task<ChatGptProposalResult> managed_file_register(CreateManagedFileRequest request, CancellationToken cancellationToken = default)
+        => CreateProposalAsync("managed_file_register", request.ProjectId ?? ProjectContext.DefaultProjectId, request.FileName, request.Purpose, request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("List pending, applied, rejected, or failed ChatGPT write proposals for review.")]
     public Task<IReadOnlyList<ChatGptProposalResult>> chatgpt_proposals_list(ChatGptProposalListRequest request, CancellationToken cancellationToken = default)
