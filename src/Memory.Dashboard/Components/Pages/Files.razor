@@ -1,0 +1,236 @@
+@page "/files"
+@implements IAsyncDisposable
+@inject IContextHubApiClient ApiClient
+@inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
+
+<PageTitle>Context Hub | 受管檔案</PageTitle>
+
+<PageViewport Title="受管檔案"
+              Subtitle="以 ContextHub logical file 檢視 DLP、quarantine、relations、effective rights 與 lifecycle。"
+              Breadcrumb="ContextHub / Files & Knowledge / Managed Files"
+              BodyClass="page-viewport-body domain-page-body">
+    <Actions>
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" WarningText="_loadError" />
+        <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">刷新</button>
+    </Actions>
+    <ChildContent>
+        <DomainSurfaceNav Title="檔案與知識"
+                          Authority="FileAsset / immutable FileVersion / DLP authority"
+                          CurrentHref="/files"
+                          Links="FileLinks" />
+
+        <DashboardScopeBar ProjectId="_projectId"
+                           ProjectIdChanged="ChangeProjectAsync"
+                           ProjectIds="_projectIds"
+                           AllowAllProjects="false"
+                           SearchText="_searchText"
+                           SearchTextChanged="ChangeSearch"
+                           SearchPlaceholder="搜尋 logical file name、classification 或 lifecycle"
+                           Disabled="_loading" />
+
+        @if (_loading && _files.Count == 0)
+        {
+            <DashboardAsyncState State="loading" Title="載入受管檔案" Message="正在讀取檔案 authority 與安全狀態。" />
+        }
+        else if (!string.IsNullOrWhiteSpace(_loadError) && _files.Count == 0)
+        {
+            <DashboardAsyncState State="error" Title="無法載入受管檔案" Message="@_loadError">
+                <Action><button class="ghost-button" @onclick="LoadAsync">重試</button></Action>
+            </DashboardAsyncState>
+        }
+        else
+        {
+            @if (!string.IsNullOrWhiteSpace(_loadError))
+            {
+                <DashboardAsyncState State="degraded" Title="顯示上次成功資料" Message="@_loadError" />
+            }
+
+            <section class="domain-summary-grid" aria-label="受管檔案摘要">
+                <article class="panel"><span>可見檔案</span><strong>@DashboardFormatting.Integer(FilteredFiles.Count)</strong><small>已先套用 project 與 metadata authorization hard filter</small></article>
+                <article class="panel"><span>Quarantine</span><strong>@DashboardFormatting.Integer(_files.Count(x => x.Classification == FileClassification.Quarantined))</strong><small>不進入 extract、embedding 或 transfer</small></article>
+                <article class="panel"><span>需要重掃</span><strong>@DashboardFormatting.Integer(_files.Count(x => x.NeedsRescan))</strong><small>classification revision 必須 read-back</small></article>
+                <article class="panel"><span>Open findings</span><strong>@DashboardFormatting.Integer(_files.Sum(x => x.OpenSecurityFindings))</strong><small>僅顯示正規化的安全分類</small></article>
+            </section>
+
+            @if (_files.Count == 0)
+            {
+                <DashboardAsyncState State="empty" Title="目前範圍沒有可見檔案" Message="未授權資源不會出現在 inventory 或搜尋結果中。" />
+            }
+            else
+            {
+                <section class="domain-workspace-grid">
+                    <article class="panel domain-list-panel">
+                        <div class="panel-heading-row">
+                            <div><div class="panel-title">File inventory</div><div class="panel-heading-meta">Logical identity、DLP 與 lifecycle。</div></div>
+                        </div>
+                        <div class="table-scroll-shell" tabindex="0" aria-label="受管檔案清單">
+                            <table class="data-table">
+                                <thead><tr><th>檔案</th><th>版本</th><th>Classification</th><th>Lifecycle</th><th>Findings</th><th>更新時間</th></tr></thead>
+                                <tbody>
+                                    @foreach (var file in FilteredFiles)
+                                    {
+                                        <tr class="@SelectedClass(file.FileId)" @onclick="@(() => SelectAsync(file))" tabindex="0">
+                                            <td><strong>@file.FileName</strong><small>@file.FileId</small></td>
+                                            <td>v@file.VersionNumber</td>
+                                            <td><span class="status-badge @ClassificationClass(file.Classification)">@file.Classification</span></td>
+                                            <td>@file.Lifecycle</td>
+                                            <td>@file.OpenSecurityFindings</td>
+                                            <td><ClientLocalTime Value="file.UpdatedAt" /></td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </article>
+
+                    <article class="panel domain-detail-panel">
+                        @if (_selected is null)
+                        {
+                            <DashboardAsyncState State="empty" Title="選擇檔案" Message="選取一筆檔案以檢視 DLP、relations 與有效權限來源。" />
+                        }
+                        else
+                        {
+                            <div class="panel-title">@_selected.FileName</div>
+                            <dl class="definition-grid">
+                                <div><dt>Project</dt><dd>@_selected.ProjectId</dd></div>
+                                <div><dt>State</dt><dd>@_selected.State</dd></div>
+                                <div><dt>Classification revision</dt><dd>@_selected.ClassificationRevision</dd></div>
+                                <div><dt>Relations</dt><dd>@_selected.RelationCount</dd></div>
+                                <div><dt>Last scan</dt><dd>@if (_selected.LastScanAt.HasValue) { <ClientLocalTime Value="_selected.LastScanAt.Value" /> } else { <span>尚無 evidence</span> }</dd></div>
+                                <div><dt>Security</dt><dd>@(_selected.NeedsRescan ? "Fail closed / needs rescan" : "Current")</dd></div>
+                            </dl>
+                            <div class="subpanel-title">Effective rights</div>
+                            @if (_rights is null)
+                            {
+                                <DashboardAsyncState State="loading" Title="讀取有效權限" Message="正在取得逐 right authority evidence。" />
+                            }
+                            else
+                            {
+                                <div class="rights-list">
+                                    @foreach (var decision in _rights.Decisions)
+                                    {
+                                        <article><span class="status-badge @(decision.Allowed ? "ok" : "bad")">@(decision.Allowed ? "Allowed" : "Denied")</span><strong>@decision.Right</strong><small>@decision.Tier · @decision.Explanation</small></article>
+                                    }
+                                </div>
+                            }
+                            <div class="authority-callout">所有 transfer 與內容讀取都由 ContextHub logical capability 終止；頁面不呈現底層儲存定位資訊。</div>
+                        }
+                    </article>
+                </section>
+
+                @if (_selected is not null)
+                {
+                    <HighRiskOperationGuard OperationName="解除 quarantine"
+                                            Summary="Restricted file release 必須依 server policy 取得 human assurance。"
+                                            Reason="安全 finding 已完成處置且需要重新掃描"
+                                            ImpactPreview="只影響所選 FileVersion；仍需完成 rescan 才能恢復 search、embedding 或 transfer。"
+                                            OutcomeReadBack="尚未送出 mutation；目前只顯示 server requirement read-back。"
+                                            ActionLabel="要求解除 quarantine"
+                                            Decision="_releaseRequirement"
+                                            ActionAvailable="false"
+                                            UnavailableReason="請由具 security:manage authority 的核准流程送出 external approval 與 reason。" />
+                }
+            }
+        }
+    </ChildContent>
+</PageViewport>
+
+@code {
+    private static readonly IReadOnlyList<DomainSurfaceLink> FileLinks =
+    [
+        new("受管檔案", "/files", "FileAsset、DLP、quarantine 與 effective rights"),
+        new("記憶資料", "/memories", "知識內容與 revisions"),
+        new("記憶圖譜", "/graph", "關係 projection"),
+        new("記憶整理", "/retention", "Retention 與 archive governance"),
+        new("營運健康", "/operations#logical-storage", "Logical storage 與 transfer health")
+    ];
+
+    private readonly CancellationTokenSource _cts = new();
+    private IReadOnlyList<ManagedFileInventoryResult> _files = [];
+    private IReadOnlyList<string> _projectIds = [];
+    private ManagedFileInventoryResult? _selected;
+    private EffectiveRightsResult? _rights;
+    private StepUpAuthorizationResult? _releaseRequirement;
+    private string _projectId = ProjectContext.DefaultProjectId;
+    private string _searchText = string.Empty;
+    private bool _loading;
+    private string? _loadError;
+    private DateTimeOffset? _lastUpdatedAt;
+
+    private IReadOnlyList<ManagedFileInventoryResult> FilteredFiles => _files.Where(file =>
+        string.IsNullOrWhiteSpace(_searchText) ||
+        file.FileName.Contains(_searchText.Trim(), StringComparison.OrdinalIgnoreCase) ||
+        file.Classification.ToString().Contains(_searchText.Trim(), StringComparison.OrdinalIgnoreCase) ||
+        file.Lifecycle.ToString().Contains(_searchText.Trim(), StringComparison.OrdinalIgnoreCase)).ToArray();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var settings = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
+        _projectId = settings.Behavior.DefaultProjectId;
+        var projects = await ApiClient.GetProjectInformationProjectsAsync(false, _cts.Token);
+        _projectIds = projects.Select(x => x.Information.ProjectId).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x).ToArray();
+        await LoadAsync();
+    }
+
+    private async Task ChangeProjectAsync(string projectId)
+    {
+        _projectId = projectId;
+        await LoadAsync();
+    }
+
+    private Task ChangeSearch(string value)
+    {
+        _searchText = value;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            _files = await ApiClient.GetManagedFilesAsync(_projectId, 100, _cts.Token);
+            _selected = _selected is null ? _files.FirstOrDefault() : _files.FirstOrDefault(x => x.FileId == _selected.FileId) ?? _files.FirstOrDefault();
+            await LoadSelectionAsync();
+            _lastUpdatedAt = DateTimeOffset.UtcNow;
+            _loadError = null;
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception ex) { _loadError = DashboardUiErrorFormatter.BuildLoadError("受管檔案", ex, _files.Count > 0); }
+        finally { _loading = false; }
+    }
+
+    private async Task SelectAsync(ManagedFileInventoryResult file)
+    {
+        _selected = file;
+        await LoadSelectionAsync();
+    }
+
+    private async Task LoadSelectionAsync()
+    {
+        if (_selected is null)
+        {
+            _rights = null;
+            _releaseRequirement = null;
+            return;
+        }
+        _rights = await ApiClient.GetEffectiveRightsAsync(_projectId, ["metadata", "read", "download", "searchindex", "securityrelease", "delete"], "File", _selected.FileId.ToString("D"), _cts.Token);
+        _releaseRequirement = await ApiClient.GetStepUpRequirementAsync(StepUpOperationClass.RestrictedRelease, "file:quarantine-release", "FileVersion", _selected.FileVersionId.ToString("D"), _cts.Token);
+    }
+
+    private string SelectedClass(Guid id) => _selected?.FileId == id ? "is-selected" : string.Empty;
+    private static string ClassificationClass(FileClassification value) => value switch
+    {
+        FileClassification.Normal => "ok",
+        FileClassification.Sensitive => "warn",
+        FileClassification.Restricted or FileClassification.Quarantined => "bad",
+        _ => "neutral"
+    };
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+        return ValueTask.CompletedTask;
+    }
+}

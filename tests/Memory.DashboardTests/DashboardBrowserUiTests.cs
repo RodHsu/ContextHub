@@ -53,6 +53,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("runtime", "/runtime", "執行參數", [".runtime-page-stack", ".runtime-main-panel", ".runtime-parameters-panel"], [".page-header", ".runtime-main-panel", ".runtime-parameters-panel"], [".content", ".runtime-page-stack"]),
         new("monitoring", "/monitoring", "狀態監控", [".monitoring-page-stack", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".page-header", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".content", ".monitoring-page-stack"]),
         new("memories", "/memories", "記憶資料", [".page-actions-secondary .info-popover", ".filter-panel", ".split-layout"], [".page-header", ".filter-panel", ".split-layout"], [".content", ".split-layout"]),
+        new("files", "/files", "受管檔案", [".domain-surface-nav", ".domain-summary-grid", ".domain-workspace-grid", ".high-risk-operation"], [".page-header", ".domain-surface-nav", ".domain-summary-grid", ".domain-workspace-grid"], [".content", ".table-scroll-shell"]),
         new("graph", "/graph", "記憶圖譜", [".graph-workspace", ".graph-filter-panel", ".graph-scroll-shell"], [".page-header", ".graph-workspace"], [".content", ".graph-detail-panel"]),
         new("project-information", "/project-information", "專案工作區", [".project-studio", ".project-identity", ".project-editor", ".lifecycle-inspector"], [".page-header", ".project-identity", ".project-editor", ".lifecycle-inspector"], [".content", ".project-studio"]),
         new("project-tree", "/project-tree", "專案樹狀圖", [".project-tree-metrics", ".project-tree-workspace", ".project-tree-panel", ".project-tree-inspector"], [".page-header", ".project-tree-metrics", ".project-tree-workspace"], [".content", ".project-tree-list"]),
@@ -68,6 +69,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("jobs", "/jobs", "工作佇列", [".jobs-operations-panel", ".jobs-list-panel", ".jobs-table", ".detail-panel"], [".page-header", ".jobs-operations-panel", ".jobs-page-body > .split-layout"], [".content", ".jobs-table-shell", ".panel-scroll-body"]),
         new("storage", "/storage", "資料庫檢視", [".storage-layout", ".storage-table-panel", ".storage-detail-panel"], [".storage-table-panel", ".storage-detail-panel"], [".content", ".storage-table-list", ".table-scroll-shell"]),
         new("security", "/security", "安全管理", [".security-layout", ".settings-form-grid", ".table-scroll-shell"], [".page-header", ".security-layout"], [".content", ".security-layout"]),
+        new("secrets", "/secrets", "Secrets 與 MFA", [".domain-surface-nav", ".domain-summary-grid", ".domain-workspace-grid", ".high-risk-grid"], [".page-header", ".domain-surface-nav", ".domain-summary-grid", ".domain-workspace-grid"], [".content", ".table-scroll-shell"]),
         new("mcp-tools", "/mcp-tools", "功能與 MCP API", [".mcp-tools-page-stack", ".mcp-capabilities-panel", ".mcp-capability-grid", ".mcp-tools-overview-panel", ".mcp-tools-table-shell"], [".page-header", ".mcp-capabilities-panel", ".mcp-tools-overview-panel", ".mcp-tools-table-shell"], [".content", ".mcp-tools-page-stack", ".table-scroll-shell"]),
         new("performance", "/performance", "效能", [".performance-form-grid", ".performance-config-footer", ".empty-inline"], [".page-header", ".performance-page-body"], [".content", ".performance-results-shell"]),
         new("settings", "/settings", "系統設定", [".settings-layout", ".settings-form-grid", ".settings-transfer-panel"], [".settings-info-panel", ".settings-auth-panel"], [".content", ".settings-layout"]),
@@ -88,6 +90,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         Routes.Single(route => route.Name == "runtime"),
         Routes.Single(route => route.Name == "monitoring"),
         Routes.Single(route => route.Name == "memories"),
+        Routes.Single(route => route.Name == "files"),
         Routes.Single(route => route.Name == "graph"),
         Routes.Single(route => route.Name == "project-information"),
         Routes.Single(route => route.Name == "project-tree"),
@@ -95,7 +98,8 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         Routes.Single(route => route.Name == "logs"),
         Routes.Single(route => route.Name == "jobs"),
         Routes.Single(route => route.Name == "storage"),
-        Routes.Single(route => route.Name == "performance")
+        Routes.Single(route => route.Name == "performance"),
+        Routes.Single(route => route.Name == "secrets")
     ];
 
     private static readonly DashboardRouteSpec[] EmptyRoutes =
@@ -106,6 +110,8 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         Routes.Single(route => route.Name == "inbox"),
         Routes.Single(route => route.Name == "graph"),
         Routes.Single(route => route.Name == "memories"),
+        new("files", "/files", "受管檔案", [".domain-surface-nav", ".dashboard-async-state-empty"], [".page-header", ".domain-surface-nav", ".dashboard-async-state-empty"], [".content"]),
+        new("secrets", "/secrets", "Secrets 與 MFA", [".domain-surface-nav", ".dashboard-async-state-empty"], [".page-header", ".domain-surface-nav", ".dashboard-async-state-empty"], [".content"]),
         Routes.Single(route => route.Name == "preferences"),
         Routes.Single(route => route.Name == "logs"),
         Routes.Single(route => route.Name == "jobs"),
@@ -195,6 +201,69 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             await page.Locator(".command-button").ClickAsync();
             await page.Locator(".command-palette").WaitForAsync();
             (await page.Locator(".command-route[href='/operations']").IsVisibleAsync()).Should().BeTrue();
+        }
+    }
+
+    [Fact]
+    public async Task Wave6B_Files_And_Secrets_Should_Remain_Provider_Opaque_Responsive_And_Keyboard_Usable()
+    {
+        DashboardViewport[] viewports =
+        [
+            new("desktop", 1366, 768),
+            new("tablet", 800, 1280),
+            new("mobile", 390, 844)
+        ];
+        string[] routes = ["/files?uiProfile=dense", "/secrets?uiProfile=dense"];
+
+        await _fixture.EnsureDashboardRunningAsync();
+        foreach (var viewport in viewports)
+        {
+            foreach (var route in routes)
+            {
+                await using var context = await _fixture.CreateContextAsync(viewport);
+                var page = await context.NewPageAsync();
+                await LoginAndOpenAsync(page, route);
+                await page.EvaluateAsync("() => document.documentElement.style.fontSize = '125%'");
+                await page.WaitForTimeoutAsync(100);
+
+                await page.Locator(".domain-workspace-grid").WaitForAsync();
+                var highRiskButtons = page.Locator(".high-risk-operation button");
+                (await highRiskButtons.CountAsync()).Should().BeGreaterThan(0);
+                for (var index = 0; index < await highRiskButtons.CountAsync(); index++)
+                {
+                    (await highRiskButtons.Nth(index).IsDisabledAsync()).Should().BeTrue("server assurance has not been completed");
+                }
+
+                var bodyText = (await page.Locator("body").InnerTextAsync()).ToLowerInvariant();
+                string[] forbiddenMarkers =
+                [
+                    "amazonaws.com", "blob.core.windows.net", "storage.googleapis.com",
+                    "cloudflarestorage.com", "s3://", "gs://", "x-amz-", "cpuExecutionProvider"
+                ];
+                foreach (var marker in forbiddenMarkers)
+                {
+                    bodyText.Should().NotContain(marker.ToLowerInvariant());
+                }
+
+                var firstDomainLink = page.Locator(".domain-surface-nav a").First;
+                await firstDomainLink.FocusAsync();
+                (await firstDomainLink.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+                var firstRow = page.Locator(".domain-list-panel tbody tr").First;
+                await firstRow.FocusAsync();
+                (await firstRow.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+
+                var layout = await AnalyzeLayoutAsync(
+                    page,
+                    [".domain-summary-grid", ".domain-list-panel", ".domain-detail-panel", ".high-risk-operation"],
+                    [".content", ".table-scroll-shell"]);
+                layout.DocumentScrollWidth.Should().BeLessThanOrEqualTo(layout.ViewportWidth + 1);
+                layout.BodyScrollWidth.Should().BeLessThanOrEqualTo(layout.ViewportWidth + 1);
+                layout.OverlapWarnings.Should().BeEmpty();
+                var usability = await AnalyzeRwdUsabilityAsync(page, [".content", ".table-scroll-shell"]);
+                usability.ScrollTrapWarnings.Should().BeEmpty(usability.RawJson);
+                usability.BadScrollbarWarnings.Should().BeEmpty(usability.RawJson);
+                usability.DoubleScrollbarWarnings.Should().BeEmpty(usability.RawJson);
+            }
         }
     }
 
@@ -745,16 +814,40 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             after.Should().BeGreaterThan(before, "vertical wheel input over the jobs table must reach the page scroll owner");
 
             var settingsLink = page.Locator(".nav-item[href='/settings']");
+            var sidebar = page.Locator(".sidebar");
+            await sidebar.EvaluateAsync("element => element.scrollTop = element.scrollHeight");
+            var sidebarMetrics = await sidebar.EvaluateAsync<string>(
+                @"element => JSON.stringify({
+                    scrollTop: element.scrollTop,
+                    scrollHeight: element.scrollHeight,
+                    clientHeight: element.clientHeight,
+                    height: getComputedStyle(element).height,
+                    overflowY: getComputedStyle(element).overflowY,
+                    innerHeight: element.querySelector('.sidebar-inner')?.getBoundingClientRect().height ?? 0,
+                    settingsTop: element.querySelector('.nav-item[href=""/settings""]')?.getBoundingClientRect().top ?? 0
+                })");
+            using var sidebarDocument = JsonDocument.Parse(sidebarMetrics);
+            sidebarDocument.RootElement.GetProperty("scrollTop").GetDouble().Should().BeGreaterThan(0, $"the compact rail must remain scrollable when canonical navigation grows: {sidebarMetrics}");
             await settingsLink.HoverAsync();
-            var flyoutHit = await settingsLink.EvaluateAsync<bool>(
+            var flyoutJson = await settingsLink.EvaluateAsync<string>(
                 @"element => {
                     const label = element.querySelector('.nav-label');
                     const rect = label?.getBoundingClientRect();
-                    if (!label || !rect || getComputedStyle(label).display === 'none') return false;
+                    if (!label || !rect) return JSON.stringify({ hit: false, reason: 'missing-label' });
+                    const style = getComputedStyle(label);
                     const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-                    return hit === label || !!hit?.closest('.nav-label');
+                    return JSON.stringify({
+                        hit: hit === label || !!hit?.closest('.nav-label'),
+                        display: style.display,
+                        visibility: style.visibility,
+                        opacity: style.opacity,
+                        rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+                        hitTag: hit?.tagName ?? '',
+                        hitClass: hit?.className?.toString() ?? ''
+                    });
                 }");
-            flyoutHit.Should().BeTrue("compact navigation labels must render above the page content");
+            using var flyoutDocument = JsonDocument.Parse(flyoutJson);
+            flyoutDocument.RootElement.GetProperty("hit").GetBoolean().Should().BeTrue($"compact navigation labels must render above the page content: {flyoutJson}");
         }
 
         await using (var context = await _fixture.CreateContextAsync(new DashboardViewport("reported-1205", 1205, 1216)))
@@ -4561,7 +4654,12 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         var dataProtectionPath = CreateRepoTestDataPath("browser-dataprotection", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dataProtectionPath);
 
-        var startInfo = new ProcessStartInfo("dotnet", $"run --no-build --project \"{dashboardProject}\" -- --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
+        var configuration = AppContext.BaseDirectory.Contains(
+            $"{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}",
+            StringComparison.OrdinalIgnoreCase)
+            ? "Release"
+            : "Debug";
+        var startInfo = new ProcessStartInfo("dotnet", $"run --no-build --configuration {configuration} --project \"{dashboardProject}\" -- --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
         {
             WorkingDirectory = repoRoot,
             UseShellExecute = false,

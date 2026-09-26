@@ -1,0 +1,28 @@
+@using Memory.Dashboard.Services
+
+<section class="domain-surface-nav" aria-label="@Title">
+    <div class="domain-surface-nav-copy">
+        <span>@Title</span>
+        <small>Authority：@Authority</small>
+    </div>
+    <nav aria-label="@($"{Title} drill-down")">
+        @foreach (var item in Links)
+        {
+            <a href="@item.Href"
+               title="@item.Purpose"
+               aria-current="@(IsCurrent(item) ? "page" : null)">
+                @item.Label
+            </a>
+        }
+    </nav>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string Authority { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string CurrentHref { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public IReadOnlyList<DomainSurfaceLink> Links { get; set; } = [];
+
+    private bool IsCurrent(DomainSurfaceLink item)
+        => string.Equals(item.Href.Split('?', '#')[0], CurrentHref, StringComparison.OrdinalIgnoreCase);
+}

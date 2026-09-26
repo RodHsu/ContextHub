@@ -19,6 +19,10 @@
         </div>
     </Actions>
     <ChildContent>
+        <DomainSurfaceNav Title="治理與安全"
+                          Authority="Governance findings / receipts / RequiresUserDecision authority"
+                          CurrentHref="/governance"
+                          Links="GovernanceLinks" />
         <div class="governance-page-stack">
             @if (!string.IsNullOrWhiteSpace(_loadError))
             {
@@ -152,6 +156,14 @@
 </PageViewport>
 
 @code {
+    private static readonly IReadOnlyList<DomainSurfaceLink> GovernanceLinks =
+    [
+        new("待決事項", "/inbox", "RequiresUserDecision queue"),
+        new("治理檢查", "/governance", "Findings、coverage 與 receipts"),
+        new("寫入審核", "/chatgpt-proposals", "Proposal authority 與 read-back"),
+        new("安全管理", "/security", "角色、grants 與 audit"),
+        new("Secrets 與 MFA", "/secrets", "Credential assurance 與 security evidence")
+    ];
     private IReadOnlyList<GovernanceFindingResult> _findings = [];
     private GovernanceFindingResult? _selectedFinding;
     private string _projectId = ProjectContext.DefaultProjectId;

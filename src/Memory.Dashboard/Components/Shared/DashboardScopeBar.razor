@@ -4,7 +4,10 @@
     <label class="dashboard-scope-field">
         <span>Project scope</span>
         <select value="@ProjectId" @onchange="HandleProjectChanged" disabled="@Disabled">
-            <option value="@ProjectContext.AllProjectIdsSentinel">全部專案</option>
+            @if (AllowAllProjects)
+            {
+                <option value="@ProjectContext.AllProjectIdsSentinel">全部專案</option>
+            }
             @foreach (var option in ProjectIds.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
             {
                 <option value="@option">@option</option>
@@ -34,6 +37,7 @@
     [Parameter] public string ProjectId { get; set; } = ProjectContext.AllProjectIdsSentinel;
     [Parameter] public EventCallback<string> ProjectIdChanged { get; set; }
     [Parameter] public IReadOnlyList<string> ProjectIds { get; set; } = [];
+    [Parameter] public bool AllowAllProjects { get; set; } = true;
     [Parameter] public string SearchText { get; set; } = string.Empty;
     [Parameter] public EventCallback<string> SearchTextChanged { get; set; }
     [Parameter] public string SearchPlaceholder { get; set; } = "依名稱或狀態篩選";

@@ -11,6 +11,10 @@
         <div class="page-actions-primary"><button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
     </Actions>
     <ChildContent>
+        <DomainSurfaceNav Title="Agents"
+                          Authority="Skill / immutable SkillVersion / binding / invocation authority"
+                          CurrentHref="/skills"
+                          Links="AgentLinks" />
         @if (!string.IsNullOrWhiteSpace(_error)) { <div class="inline-error">@_error</div> }
         @if (!string.IsNullOrWhiteSpace(_notice)) { <div class="inline-success">@_notice</div> }
         <div class="metric-grid">
@@ -86,6 +90,13 @@
 </PageViewport>
 
 @code {
+    private static readonly IReadOnlyList<DomainSurfaceLink> AgentLinks =
+    [
+        new("Agent 執行", "/agent-executions", "Queue、worker、lease、checkpoint 與 evidence"),
+        new("Agent Skills", "/skills", "Registry、governance、sandbox 與 telemetry"),
+        new("連線狀態", "/connectivity", "Agent connectivity projection"),
+        new("營運健康", "/operations#agent-executions", "Canonical queue 與 worker health")
+    ];
     private IReadOnlyList<SkillSummaryResult> _skills = [];
     private readonly Dictionary<int, IReadOnlyList<SkillTelemetryAggregateResult>> _analytics = [];
     private IReadOnlyList<SkillTelemetryTrendPointResult> _trend = [];

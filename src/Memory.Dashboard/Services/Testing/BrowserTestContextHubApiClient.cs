@@ -258,6 +258,58 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             new DashboardPageSnapshotStatusResult(now, false, string.Empty, [])));
     }
 
+    public Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken)
+    {
+        if (Profile == DashboardBrowserTestProfile.Empty)
+        {
+            return Task.FromResult<IReadOnlyList<ManagedFileInventoryResult>>([]);
+        }
+        var now = DateTimeOffset.UtcNow;
+        return Task.FromResult<IReadOnlyList<ManagedFileInventoryResult>>([
+            new(Guid.Parse("aaaaaaaa-1000-0000-0000-000000000001"), Guid.Parse("aaaaaaaa-2000-0000-0000-000000000001"),
+                "release-evidence.pdf", projectId, FileAssetState.Active, 3, FileVersionLifecycle.Ready, FileClassification.Sensitive,
+                7, false, now.AddMinutes(-20), 0, null, 2, now.AddMinutes(-18)),
+            new(Guid.Parse("aaaaaaaa-1000-0000-0000-000000000002"), Guid.Parse("aaaaaaaa-2000-0000-0000-000000000002"),
+                "security-review.zip", projectId, FileAssetState.Active, 1, FileVersionLifecycle.Quarantined, FileClassification.Quarantined,
+                4, true, now.AddHours(-1), 2, SecurityFindingSeverity.High, 1, now.AddMinutes(-55))
+        ]);
+    }
+
+    public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SecretSummary>>(Profile == DashboardBrowserTestProfile.Empty
+            ? []
+            : [
+                new SecretSummary(Guid.Parse("bbbbbbbb-1000-0000-0000-000000000001"), projectId, "deployment-credential", SecretKind.ApiToken, SecretState.Active, 4, 12, DateTimeOffset.UtcNow.AddMinutes(-30)),
+                new SecretSummary(Guid.Parse("bbbbbbbb-1000-0000-0000-000000000002"), projectId, "ssh-signing-authority", SecretKind.SshCertificateAuthorityReference, SecretState.Compromised, 2, 9, DateTimeOffset.UtcNow.AddHours(-3))
+            ]);
+
+    public Task<EffectiveRightsResult> GetEffectiveRightsAsync(
+        string projectId,
+        IReadOnlyList<string> rights,
+        string? resourceType,
+        string? resourceId,
+        CancellationToken cancellationToken)
+        => Task.FromResult(new EffectiveRightsResult(
+            projectId,
+            "browser-test-user",
+            new SecurityRevisionVector(4, 7, 9, 3),
+            rights.Select(right => new EffectiveRightDecision(
+                right,
+                !string.Equals(right, "reveal", StringComparison.OrdinalIgnoreCase),
+                resourceType is null ? "Project" : "Resource",
+                [$"policy:{projectId}:{right}"],
+                string.Equals(right, "reveal", StringComparison.OrdinalIgnoreCase)
+                    ? "Explicit deny keeps secret material non-observable."
+                    : "The current project policy grants this right.")).ToArray()));
+
+    public Task<StepUpAuthorizationResult> GetStepUpRequirementAsync(
+        StepUpOperationClass operation,
+        string purpose,
+        string? resourceType,
+        string? resourceId,
+        CancellationToken cancellationToken)
+        => Task.FromResult(StepUpRiskPolicy.Describe(operation));
+
     public Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken)
     {
         var memories = BuildMemories().AsEnumerable();

@@ -9,6 +9,10 @@
         <div class="page-actions-primary"><button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
     </Actions>
     <ChildContent>
+        <DomainSurfaceNav Title="Agents"
+                          Authority="AgentExecution package / lease / checkpoint / evidence authority"
+                          CurrentHref="/agent-executions"
+                          Links="AgentLinks" />
         @if (!string.IsNullOrWhiteSpace(_error)) { <div class="inline-error">@_error</div> }
         <div class="metric-grid">
             <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Ready：</span><span class="metric-value-inline">@Count(AgentExecutionStatus.Ready)</span></div></section>
@@ -58,6 +62,13 @@
 </PageViewport>
 
 @code {
+    private static readonly IReadOnlyList<DomainSurfaceLink> AgentLinks =
+    [
+        new("Agent 執行", "/agent-executions", "Queue、worker、lease、retry、checkpoint 與 evidence"),
+        new("Agent Skills", "/skills", "Registry、governance、sandbox 與 telemetry"),
+        new("連線狀態", "/connectivity", "Agent connectivity projection"),
+        new("營運健康", "/operations#agent-executions", "Canonical queue 與 worker health")
+    ];
     private string _projectId = "ContextHub";
     private AgentExecutionDashboardResult? _dashboard;
     private AgentExecutionResult? _detail;

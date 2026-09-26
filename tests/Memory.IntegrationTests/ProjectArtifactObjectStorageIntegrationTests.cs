@@ -17,7 +17,9 @@ public sealed class ProjectArtifactObjectStorageIntegrationTests
     [DockerRequiredFact]
     public async Task S3CompatibleStore_Should_Upload_And_Delete_Object_Against_Isolated_Minio()
     {
-        await using var minio = new ContainerBuilder("quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z")
+        // The upstream registry no longer permits anonymous pulls for this release. Pin a
+        // release mirror by immutable manifest digest so the black-box test stays reproducible.
+        await using var minio = new ContainerBuilder("ghcr.io/coollabsio/minio@sha256:a4938f37f1be1841b8e7b627ad0207b265345fd0d063e42d7410c78af0e63e68")
             .WithEnvironment("MINIO_ROOT_USER", "minioadmin")
             .WithEnvironment("MINIO_ROOT_PASSWORD", "minioadmin")
             .WithCommand("server", "/data")

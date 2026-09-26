@@ -17,6 +17,10 @@
         </div>
     </Actions>
     <ChildContent>
+        <DomainSurfaceNav Title="專案與工作"
+                          Authority="Project information / topology / DefinitionState / work authority"
+                          CurrentHref="/project-information"
+                          Links="ProjectLinks" />
         <section class="project-studio">
             <aside class="project-identity">
                 <div class="studio-eyebrow">目前專案</div>
@@ -113,6 +117,15 @@
 </PageViewport>
 
 @code {
+    private static readonly IReadOnlyList<DomainSurfaceLink> ProjectLinks =
+    [
+        new("專案工作區", "/project-information", "Project background 與 lifecycle"),
+        new("專案拓撲", "/project-tree", "Hierarchy、relations 與 authorization impact"),
+        new("專案待辦", "/project-work-items", "WorkStatus、DefinitionState 與 checklist"),
+        new("跨專案討論", "/discussions", "Participant-authorized collaboration"),
+        new("受管檔案", "/files", "Project-scoped file authority"),
+        new("Secrets 與 MFA", "/secrets", "Project-scoped credential authority")
+    ];
     private string _projectId = string.Empty;
     private string _displayName = string.Empty;
     private string _description = string.Empty;

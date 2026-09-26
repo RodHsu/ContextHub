@@ -24,6 +24,8 @@ Related files:
 
 - [Quiet Signal UI baseline](docs/design/context-hub-quiet-signal-vnext.md)
 - [Feature inventory](docs/design/context-hub-feature-inventory.md)
+- [Wave 6A dashboard inventory](docs/platform-wave-6a-dashboard-inventory.md)
+- [Wave 6B domain integration](docs/platform-wave-6b-dashboard-domain-integration.md)
 - [Mockups](docs/design/mockups/quiet-signal/)
 
 Internal design-tool sessions, private project IDs, and one-off implementation QA notes should stay outside tracked public documentation.
@@ -91,14 +93,14 @@ Rules:
 
 ## Dashboard Route Baseline
 
-Wave 6A canonical IA, capability coverage, and bounded cleanup evidence are documented in [Platform Wave 6A Dashboard Inventory](docs/platform-wave-6a-dashboard-inventory.md). The sidebar and command palette share one navigation model. Overview is a concise action surface; `/operations` owns authority-versus-projection state, incremental/full reconciliation, AgentExecution summary, and provider-neutral logical storage health.
+Wave 6A canonical IA and Wave 6B domain integration evidence are documented in [Platform Wave 6A Dashboard Inventory](docs/platform-wave-6a-dashboard-inventory.md) and [Platform Wave 6B Dashboard Domain Integration](docs/platform-wave-6b-dashboard-domain-integration.md). The sidebar and command palette share one navigation model. Overview is a concise action surface; `/operations` owns authority-versus-projection state, incremental/full reconciliation, AgentExecution summary, and provider-neutral logical storage health. `/files` and `/secrets` are authority-backed management surfaces and never treat monitoring as business authority.
 
 | Area | Routes |
 | --- | --- |
 | Operations | `/`, `/monitoring`, `/runtime`, `/logs`, `/jobs`, `/performance` |
-| Knowledge work | `/graph`, `/memories`, `/retention`, `/sources` |
+| Knowledge work | `/files`, `/graph`, `/memories`, `/retention`, `/sources` |
 | Project collaboration | `/project-information`, `/project-work-items`, `/discussions` |
-| Governance | `/inbox`, `/governance`, `/evaluation`, `/chatgpt-proposals`, `/mcp-tools` |
+| Governance | `/inbox`, `/governance`, `/evaluation`, `/chatgpt-proposals`, `/secrets`, `/mcp-tools` |
 | Administration | `/preferences`, `/storage`, `/security`, `/settings`, `/account/tokens` |
 | Operations detail | `/connectivity` |
 | Boundaries | `/login`, `/forbidden`, `/not-found`, `/Error` |
@@ -133,12 +135,11 @@ Every route should have:
 
 Allowed locations:
 
-- System temporary directories
 - Existing repo paths explicitly intended for artifacts
-- `.agent/local/` for local-only evidence and notes
+- `.agent/local/` for ignored local-only evidence and notes
 - `docs/` only for curated public assets such as approved mockups
 
-Do not scatter screenshots, databases, caches, exports, or one-off QA files in the repo root.
+Do not place project-specific screenshots, databases, caches, exports, or one-off QA files in system/global temporary directories, external agent state, the disk root, the repo parent, unrelated repositories, or the repo root.
 
 ## Browser QA
 

@@ -105,7 +105,7 @@
                 </div>
                 <div class="table-scroll-shell">
                     <table class="data-table">
-                        <thead><tr><th>Project</th><th>Authority</th><th>Projection</th><th>Lag</th><th>Generation</th><th>狀態</th><th>Last success</th><th>Next run</th></tr></thead>
+                        <thead><tr><th>Project</th><th>Authority</th><th>Projection</th><th>Lag</th><th>Generation</th><th>狀態</th><th>Last success</th><th>Next run</th><th>Authority drill-down</th></tr></thead>
                         <tbody>
                             @foreach (var state in FilteredProjections())
                             {
@@ -118,6 +118,7 @@
                                     <td><span class="status-badge @(state.IsStale ? "warn" : "ok")">@(state.IsStale ? "Stale / degraded" : "Current")</span></td>
                                     <td>@if (state.LastSuccessAtUtc.HasValue) { <ClientLocalTime Value="state.LastSuccessAtUtc.Value" /> } else { <span>-</span> }</td>
                                     <td>@if (state.NextRunAtUtc.HasValue) { <ClientLocalTime Value="state.NextRunAtUtc.Value" /> } else { <span>-</span> }</td>
+                                    <td><a class="table-link" href="@ProjectAuthorityHref(state.ProjectId)">專案、權限與工作</a></td>
                                 </tr>
                             }
                         </tbody>
@@ -126,7 +127,7 @@
             </section>
 
             <section class="operations-summary-grid">
-                <article class="panel">
+                <article class="panel" id="agent-executions">
                     <div class="panel-title">AgentExecution queue / workers</div>
                     <div class="metric-strip operations-metric-strip">
                         <div><span>Ready</span><strong>@DashboardFormatting.Integer(_operations.AgentExecutions.Ready)</strong></div>
@@ -142,7 +143,7 @@
                     <a class="ghost-button button-link" href="/agent-executions">檢視 Agent 執行</a>
                 </article>
 
-                <article class="panel">
+                <article class="panel" id="logical-storage">
                     <div class="panel-title">Logical storage / transfer health</div>
                     <div class="metric-strip operations-metric-strip">
                         <div><span>Objects</span><strong>@DashboardFormatting.Integer(_operations.LogicalStorage.ObjectCount)</strong></div>
@@ -156,6 +157,10 @@
                         <div><dt>Expired / revoked transfers</dt><dd>@DashboardFormatting.Integer(_operations.LogicalStorage.FailedOrExpiredTransfers)</dd></div>
                     </dl>
                     <div class="authority-callout">僅顯示 ContextHub logical metrics；不暴露 provider、endpoint、bucket、object locator 或 direct URL。</div>
+                    <div class="detail-actions">
+                        <a class="ghost-button button-link" href="/files">受管檔案與 DLP</a>
+                        <a class="ghost-button button-link" href="/secrets">Secrets、leases 與 MFA</a>
+                    </div>
                 </article>
             </section>
 
@@ -249,6 +254,9 @@
         => string.IsNullOrWhiteSpace(_searchText) || value.Contains(_searchText.Trim(), StringComparison.OrdinalIgnoreCase);
 
     private long ProjectionLag() => _operations?.Projections.Sum(item => item.Lag) ?? 0;
+
+    private static string ProjectAuthorityHref(string projectId)
+        => $"/project-information?projectId={Uri.EscapeDataString(projectId)}";
 
     private RenderFragment RunList(IReadOnlyList<DashboardBackgroundRunResult> runs) => builder =>
     {

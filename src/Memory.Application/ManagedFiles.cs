@@ -62,6 +62,22 @@ public sealed record FileSecurityAssessment(
 
 public sealed record FileOperationDecision(bool Allowed, string ReasonCode, FileClassification Classification, long ClassificationRevision);
 public sealed record ManagedFileSearchResult(Guid FileId, Guid FileVersionId, string FileName, string ProjectId, FileClassification Classification, string Snippet);
+public sealed record ManagedFileInventoryResult(
+    Guid FileId,
+    Guid FileVersionId,
+    string FileName,
+    string ProjectId,
+    FileAssetState State,
+    int VersionNumber,
+    FileVersionLifecycle Lifecycle,
+    FileClassification Classification,
+    long ClassificationRevision,
+    bool NeedsRescan,
+    DateTimeOffset? LastScanAt,
+    int OpenSecurityFindings,
+    SecurityFindingSeverity? HighestOpenSeverity,
+    int RelationCount,
+    DateTimeOffset UpdatedAt);
 
 public sealed record CreateFileRepresentationRequest(
     Guid FileVersionId,
@@ -103,6 +119,7 @@ public interface IManagedFileService
     Task<FileRepresentation> AddRepresentationAsync(CreateFileRepresentationRequest request, CancellationToken cancellationToken);
     Task<QuarantineReleaseResult> RequestQuarantineReleaseAsync(QuarantineReleaseRequest request, CancellationToken cancellationToken);
     Task<FileDeleteResult> RequestDeleteAsync(FileDeleteRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ManagedFileInventoryResult>> ListAsync(string projectId, int limit, CancellationToken cancellationToken);
     Task<IReadOnlyList<ManagedFileSearchResult>> SearchAsync(string projectId, string query, int limit, CancellationToken cancellationToken);
 }
 
@@ -465,6 +482,53 @@ public sealed class ManagedFileService(
             if (!effective.Decisions.Single().Allowed) continue;
             results.Add(new(candidate.version.FileAssetId, candidate.version.Id, candidate.version.FileAsset!.LogicalFileName, normalizedProject, candidate.version.Classification,
                 candidate.version.Classification == FileClassification.Sensitive ? string.Empty : candidate.projection.RedactedText));
+            if (results.Count == boundedLimit) break;
+        }
+        return results;
+    }
+
+    public async Task<IReadOnlyList<ManagedFileInventoryResult>> ListAsync(string projectId, int limit, CancellationToken cancellationToken)
+    {
+        var actor = RequireActor(SecurityScopes.MemoryRead);
+        var normalizedProject = ProjectContext.Normalize(projectId);
+        ActorAuthorization.EnsureProjectAllowed(actor, normalizedProject, write: false);
+        var boundedLimit = Math.Clamp(limit, 1, 100);
+        var assets = await Scope(dbContext.FileAssets.AsNoTracking(), actor)
+            .Include(x => x.Relations)
+            .Include(x => x.Versions)
+                .ThenInclude(x => x.Findings)
+            .Where(x => x.ProjectId == normalizedProject && x.State != FileAssetState.LogicalDeleted)
+            .OrderByDescending(x => x.UpdatedAt)
+            .Take(boundedLimit * 3)
+            .ToArrayAsync(cancellationToken);
+        var principal = actor.UserId?.ToString("D") ?? actor.Username;
+        var results = new List<ManagedFileInventoryResult>(boundedLimit);
+        foreach (var asset in assets)
+        {
+            var version = asset.Versions
+                .Where(x => x.Lifecycle != FileVersionLifecycle.LogicalDeleted)
+                .OrderByDescending(x => x.VersionNumber)
+                .FirstOrDefault();
+            if (version is null) continue;
+            var effective = await foundation.EvaluateAsync(normalizedProject, principal, ["metadata"], "File", asset.Id.ToString("D"), cancellationToken);
+            if (!effective.Decisions.Single().Allowed) continue;
+            var openFindings = version.Findings.Where(x => x.Disposition is SecurityFindingDisposition.Open or SecurityFindingDisposition.Confirmed).ToArray();
+            results.Add(new ManagedFileInventoryResult(
+                asset.Id,
+                version.Id,
+                asset.LogicalFileName,
+                normalizedProject,
+                asset.State,
+                version.VersionNumber,
+                version.Lifecycle,
+                version.Classification,
+                version.ClassificationRevision,
+                version.NeedsRescan,
+                version.LastScanAt,
+                openFindings.Length,
+                openFindings.Length == 0 ? null : openFindings.Max(x => x.Severity),
+                asset.Relations.Count,
+                version.UpdatedAt));
             if (results.Count == boundedLimit) break;
         }
         return results;

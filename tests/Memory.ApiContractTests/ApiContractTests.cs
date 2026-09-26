@@ -21,13 +21,14 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     public async Task Managed_file_security_contract_is_provider_neutral_and_does_not_expose_internal_object_identity()
     {
         Guid versionId;
+        string projectId;
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
             UseBootstrapActor(scope.ServiceProvider);
             var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current!;
             var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
             var now = DateTimeOffset.UtcNow;
-            var projectId = "api-file-" + Guid.NewGuid().ToString("N");
+            projectId = "api-file-" + Guid.NewGuid().ToString("N");
             var managedObject = new ManagedObject
             {
                 TenantId = actor.TenantId,
@@ -61,6 +62,20 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
             };
             db.ManagedObjects.Add(managedObject);
             db.FileAssets.Add(file);
+            db.ProjectAuthorizationPolicies.Add(new ProjectAuthorizationPolicy
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = projectId,
+                PrincipalId = actor.UserId!.Value.ToString("D"),
+                Right = "metadata",
+                Effect = AuthorizationEffect.Allow,
+                ResourceType = "File",
+                ResourceId = file.Id.ToString("D"),
+                EvidenceRef = "api-contract:file-metadata",
+                CreatedAt = now,
+                UpdatedAt = now
+            });
             await db.SaveChangesAsync();
             var version = new FileVersion
             {
@@ -89,6 +104,32 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         response.EnsureSuccessStatusCode();
         json.Should().Contain("fileVersionId").And.Contain("classification");
         json.Should().NotContain("managedObjectId").And.NotContain("storageId").And.NotContain("provider").And.NotContain("bucket").And.NotContain("wrappedDek");
+
+        using var inventoryResponse = await client.GetAsync($"/api/files?projectId={Uri.EscapeDataString(projectId)}&limit=25");
+        var inventoryJson = await inventoryResponse.Content.ReadAsStringAsync();
+        inventoryResponse.EnsureSuccessStatusCode();
+        inventoryJson.Should().Contain("contract.txt").And.Contain("classification").And.Contain("openSecurityFindings");
+        inventoryJson.Should().NotContain("managedObjectId").And.NotContain("storageId").And.NotContain("provider")
+            .And.NotContain("endpoint").And.NotContain("bucket").And.NotContain("objectKey").And.NotContain("directUrl")
+            .And.NotContain("wrappedDek");
+    }
+
+    [DockerRequiredFact]
+    public async Task High_risk_requirement_preview_should_preserve_server_assurance_floor()
+    {
+        using var client = environment.GetFactory().CreateClient();
+
+        var reveal = await client.GetFromJsonAsync<StepUpAuthorizationResult>(
+            "/api/step-up/requirements?operation=SecretReveal&purpose=secret%3Areveal&resourceType=Secret&resourceId=contract-secret");
+        var restrictedRelease = await client.GetFromJsonAsync<StepUpAuthorizationResult>(
+            "/api/step-up/requirements?operation=RestrictedRelease&purpose=file%3Aquarantine-release&resourceType=FileVersion&resourceId=contract-version");
+
+        reveal.Should().NotBeNull();
+        reveal!.Outcome.Should().NotBe(StepUpRequirementOutcome.Allowed);
+        ((int)reveal.RequiredAssurance).Should().BeGreaterThanOrEqualTo((int)AssuranceLevel.Aal2);
+        restrictedRelease.Should().NotBeNull();
+        restrictedRelease!.Outcome.Should().NotBe(StepUpRequirementOutcome.Allowed);
+        ((int)restrictedRelease.RequiredAssurance).Should().BeGreaterThanOrEqualTo((int)AssuranceLevel.Aal2);
     }
 
     [DockerRequiredFact]

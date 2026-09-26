@@ -763,9 +763,32 @@ textarea:disabled {
     }
 
     .nav-item {
+        position: relative;
         justify-content: center;
         min-height: 2.75rem;
         padding: 0;
+    }
+
+    .nav-item:hover .nav-icon,
+    .nav-item:focus-visible .nav-icon {
+        opacity: 0;
+    }
+
+    .nav-item:hover .nav-label,
+    .nav-item:focus-visible .nav-label {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        display: grid;
+        place-items: center;
+        padding: 0.18rem;
+        color: var(--text);
+        font-size: 0.64rem;
+        font-weight: 700;
+        line-height: 1.15;
+        text-align: center;
+        white-space: normal;
+        overflow-wrap: anywhere;
     }
 
     .command-button {
@@ -1291,7 +1314,7 @@ textarea:disabled {
     }
 }
 
-@media (min-width: 768px) and (max-width: 1365px) {
+@media (min-width: 1025px) and (max-width: 1365px) {
     .dashboard-shell,
     .main-shell,
     .content {

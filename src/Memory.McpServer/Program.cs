@@ -1691,6 +1691,28 @@ knowledgeReviews.MapGet("/tombstones/{resourceId:guid}", async (Guid resourceId,
 
 var projectHierarchy = app.MapGroup("/api/projects/hierarchy");
 projectHierarchy.RequireAuthIfEnabled(requireAuthentication);
+projectHierarchy.MapGet("/{projectId}/effective-rights", async (
+    string projectId,
+    string rights,
+    string? resourceType,
+    string? resourceId,
+    IPlatformFoundationStore service,
+    IRequestActorAccessor actorAccessor,
+    CancellationToken cancellationToken) =>
+{
+    var requestedRights = rights.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Where(x => x.Length <= 200)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Take(32)
+        .ToArray();
+    if (requestedRights.Length == 0)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["rights"] = ["At least one bounded right is required."] });
+    }
+    var actor = actorAccessor.Current;
+    var principalId = actor.UserId?.ToString("D") ?? actor.Username;
+    return Results.Ok(await service.EvaluateAsync(projectId, principalId, requestedRights, resourceType, resourceId, cancellationToken));
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 projectHierarchy.MapGet("/{parentProjectId}", async (string parentProjectId, IProjectDiscussionService service, CancellationToken cancellationToken)
     => Results.Ok(await service.GetChildrenAsync(parentProjectId, cancellationToken)));
 projectHierarchy.MapPut("/{parentProjectId}", async (string parentProjectId, ProjectHierarchySetChildrenBody body, IProjectDiscussionService service, CancellationToken cancellationToken) =>
@@ -2142,6 +2164,9 @@ transfers.MapDelete("/{sessionId:guid}", async (Guid sessionId, IManagedTransfer
 
 var files = app.MapGroup("/api/files");
 files.RequireAuthIfEnabled(requireAuthentication);
+files.MapGet(string.Empty, async (string projectId, int? limit, IManagedFileService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.ListAsync(projectId, limit ?? 50, cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 files.MapPost(string.Empty, async (CreateManagedFileRequest request, IManagedFileService service, CancellationToken cancellationToken) =>
     Results.Ok(await service.CreateAsync(request, cancellationToken)))
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
@@ -2180,6 +2205,24 @@ files.MapPost("/{fileId:guid}/delete", async (Guid fileId, FileDeleteBody reques
 
 var stepUpAuthentication = app.MapGroup("/api/step-up");
 stepUpAuthentication.RequireAuthIfEnabled(requireAuthentication);
+stepUpAuthentication.MapGet("/requirements", async (
+    string operation,
+    string purpose,
+    string? resourceType,
+    string? resourceId,
+    IStepUpAuthenticationService service,
+    CancellationToken cancellationToken) =>
+{
+    if (!Enum.TryParse<StepUpOperationClass>(operation, true, out var parsedOperation))
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["operation"] = ["Unsupported step-up operation."] });
+    }
+    if (string.IsNullOrWhiteSpace(purpose) || purpose.Length > 200)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["purpose"] = ["A bounded purpose is required."] });
+    }
+    return Results.Ok(await service.AuthorizeAsync(parsedOperation, purpose.Trim(), resourceType, resourceId, null, cancellationToken));
+});
 stepUpAuthentication.MapPost("/password", async (PasswordStepUpBody request, IStepUpAuthenticationService service, CancellationToken cancellationToken) =>
 {
     try

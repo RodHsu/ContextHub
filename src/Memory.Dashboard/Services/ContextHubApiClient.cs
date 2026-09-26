@@ -14,6 +14,10 @@ public interface IContextHubApiClient
     Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken);
     Task<DashboardMonitoringResult> GetMonitoringAsync(CancellationToken cancellationToken);
     Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken);
+    Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken);
+    Task<EffectiveRightsResult> GetEffectiveRightsAsync(string projectId, IReadOnlyList<string> rights, string? resourceType, string? resourceId, CancellationToken cancellationToken);
+    Task<StepUpAuthorizationResult> GetStepUpRequirementAsync(StepUpOperationClass operation, string purpose, string? resourceType, string? resourceId, CancellationToken cancellationToken);
     Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchConversationCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ChatGptProposalResult>> GetChatGptProposalsAsync(ChatGptProposalListRequest request, CancellationToken cancellationToken);
@@ -148,6 +152,45 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
             : $"?projectId={Uri.EscapeDataString(projectId)}";
         return GetRequiredAsync<DashboardOperationsResult>($"/api/dashboard/operations{query}", cancellationToken);
     }
+
+    public Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<ManagedFileInventoryResult>>(QueryHelpers.AddQueryString("/api/files", new Dictionary<string, string?>
+        {
+            ["projectId"] = projectId,
+            ["limit"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        }), cancellationToken);
+
+    public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
+        => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken);
+
+    public Task<EffectiveRightsResult> GetEffectiveRightsAsync(
+        string projectId,
+        IReadOnlyList<string> rights,
+        string? resourceType,
+        string? resourceId,
+        CancellationToken cancellationToken)
+        => GetRequiredAsync<EffectiveRightsResult>(QueryHelpers.AddQueryString(
+            $"/api/projects/hierarchy/{Uri.EscapeDataString(projectId)}/effective-rights",
+            new Dictionary<string, string?>
+            {
+                ["rights"] = string.Join(',', rights),
+                ["resourceType"] = resourceType,
+                ["resourceId"] = resourceId
+            }), cancellationToken);
+
+    public Task<StepUpAuthorizationResult> GetStepUpRequirementAsync(
+        StepUpOperationClass operation,
+        string purpose,
+        string? resourceType,
+        string? resourceId,
+        CancellationToken cancellationToken)
+        => GetRequiredAsync<StepUpAuthorizationResult>(QueryHelpers.AddQueryString("/api/step-up/requirements", new Dictionary<string, string?>
+        {
+            ["operation"] = operation.ToString(),
+            ["purpose"] = purpose,
+            ["resourceType"] = resourceType,
+            ["resourceId"] = resourceId
+        }), cancellationToken);
 
     public Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken)
         => GetRequiredAsync<IReadOnlyList<SkillSummaryResult>>(QueryHelpers.AddQueryString("/api/skills", new Dictionary<string, string?>

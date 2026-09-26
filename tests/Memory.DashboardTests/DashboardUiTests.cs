@@ -182,6 +182,43 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         AssertContextSavingsCallCounts(WebUtility.HtmlDecode(await monitoringResponse.Content.ReadAsStringAsync()));
     }
 
+    [Theory]
+    [InlineData("/files", "受管檔案", "File inventory")]
+    [InlineData("/secrets", "Secrets 與 MFA", "Credential inventory")]
+    public async Task Wave6B_Domain_Surfaces_Should_Render_Authority_Rights_And_Server_Assurance(
+        string route,
+        string heading,
+        string inventoryLabel)
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+        await LoginAsync(client);
+
+        using var response = await client.GetAsync(route);
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var html = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync());
+
+        html.Should().Contain(heading);
+        html.Should().Contain(inventoryLabel);
+        html.Should().Contain("Effective rights");
+        html.Should().Contain("server");
+        html.Should().Contain("domain-surface-nav");
+        AssertProviderOpaque(html);
+    }
+
+    [Fact]
+    public void Wave6B_Canonical_Navigation_Should_Expose_Managed_Files_And_Secrets_Without_Duplicate_Operations()
+    {
+        var canonicalRoutes = DashboardNavigation.Groups.SelectMany(group => group.Items).Select(item => item.Href).ToArray();
+        canonicalRoutes.Should().ContainSingle(route => route == "/files");
+        canonicalRoutes.Should().ContainSingle(route => route == "/secrets");
+        canonicalRoutes.Should().ContainSingle(route => route == "/operations");
+        canonicalRoutes.Should().NotContain(["/monitoring", "/runtime", "/jobs"]);
+    }
+
     [Fact]
     public async Task Anonymous_Blazor_Transport_Should_Not_Be_Redirected_To_Login()
     {
@@ -1072,6 +1109,20 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         cdnValues.Should().ContainSingle("no-store");
     }
 
+    private static void AssertProviderOpaque(string payload)
+    {
+        var normalized = payload.ToLowerInvariant();
+        normalized.Should().NotContain("amazonaws.com");
+        normalized.Should().NotContain("blob.core.windows.net");
+        normalized.Should().NotContain("storage.googleapis.com");
+        normalized.Should().NotContain("cloudflarestorage.com");
+        normalized.Should().NotContain("s3://");
+        normalized.Should().NotContain("gs://");
+        normalized.Should().NotContain("x-amz-");
+        normalized.Should().NotContain("signature=");
+        normalized.Should().NotContain("sig%3d");
+    }
+
     private static void AssertStaticAssetCacheHeaders(HttpResponseMessage response)
     {
         response.Headers.CacheControl?.Public.Should().BeTrue();
@@ -1217,6 +1268,68 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public MemoryListRequest? LastMemoryListRequest { get; private set; }
     public MemoryGraphRequest? LastMemoryGraphRequest { get; private set; }
+
+    public Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<ManagedFileInventoryResult>>
+        ([
+            new ManagedFileInventoryResult(
+                Guid.Parse("aaaaaaaa-1000-0000-0000-000000000001"),
+                Guid.Parse("aaaaaaaa-2000-0000-0000-000000000001"),
+                "release-evidence.pdf",
+                projectId,
+                FileAssetState.Active,
+                3,
+                FileVersionLifecycle.Ready,
+                FileClassification.Sensitive,
+                7,
+                false,
+                DateTimeOffset.UtcNow.AddMinutes(-20),
+                0,
+                null,
+                2,
+                DateTimeOffset.UtcNow.AddMinutes(-18))
+        ]);
+
+    public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<SecretSummary>>
+        ([
+            new SecretSummary(
+                Guid.Parse("bbbbbbbb-1000-0000-0000-000000000001"),
+                projectId,
+                "deployment-credential",
+                SecretKind.ApiToken,
+                SecretState.Active,
+                4,
+                12,
+                DateTimeOffset.UtcNow.AddMinutes(-30))
+        ]);
+
+    public Task<EffectiveRightsResult> GetEffectiveRightsAsync(
+        string projectId,
+        IReadOnlyList<string> rights,
+        string? resourceType,
+        string? resourceId,
+        CancellationToken cancellationToken)
+        => Task.FromResult(new EffectiveRightsResult(
+            projectId,
+            "dashboard-test-user",
+            new SecurityRevisionVector(4, 7, 9, 3),
+            rights.Select(right => new EffectiveRightDecision(
+                right,
+                !string.Equals(right, "reveal", StringComparison.OrdinalIgnoreCase),
+                resourceType is null ? "Project" : "Resource",
+                [$"policy:{projectId}:{right}"],
+                string.Equals(right, "reveal", StringComparison.OrdinalIgnoreCase)
+                    ? "Explicit deny keeps secret material non-observable."
+                    : "The current project policy grants this right.")).ToArray()));
+
+    public Task<StepUpAuthorizationResult> GetStepUpRequirementAsync(
+        StepUpOperationClass operation,
+        string purpose,
+        string? resourceType,
+        string? resourceId,
+        CancellationToken cancellationToken)
+        => Task.FromResult(StepUpRiskPolicy.Describe(operation));
 
     public Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>

@@ -4,6 +4,7 @@ namespace Memory.Dashboard.Services;
 
 public sealed record DashboardNavigationItem(string Mark, string Label, string Href, string Description, NavLinkMatch Match = NavLinkMatch.Prefix, bool RequiresAdmin = true);
 public sealed record DashboardNavigationGroup(string Label, IReadOnlyList<DashboardNavigationItem> Items);
+public sealed record DomainSurfaceLink(string Label, string Href, string Purpose);
 
 public static class DashboardNavigation
 {
@@ -17,6 +18,7 @@ public static class DashboardNavigation
             new("D", "跨專案討論", "/discussions", "參與者範圍內的協作", RequiresAdmin: false)
         ]),
         new("檔案與知識", [
+            new("F", "受管檔案", "/files", "DLP、quarantine、權限與 lifecycle", RequiresAdmin: false),
             new("M", "記憶資料", "/memories", "搜尋、內容與 revisions", RequiresAdmin: false),
             new("G", "記憶圖譜", "/graph", "關係與整合視圖", RequiresAdmin: false),
             new("S", "資料來源", "/sources", "來源與同步狀態"),
@@ -28,6 +30,7 @@ public static class DashboardNavigation
             new("C", "連線狀態", "/connectivity", "Agent connectivity telemetry")
         ]),
         new("治理與安全", [
+            new("Z", "Secrets 與 MFA", "/secrets", "Credential inventory、assurance 與稽核"),
             new("I", "待決事項", "/inbox", "需要人員處理的決策與 queue"),
             new("V", "治理檢查", "/governance", "政策、例外與 receipts"),
             new("Q", "ChatGPT 寫入審核", "/chatgpt-proposals", "提案 review 與 read-back"),

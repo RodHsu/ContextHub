@@ -49,9 +49,11 @@
     [Parameter] public string ActionLabel { get; set; } = "執行";
     [Parameter] public StepUpAuthorizationResult? Decision { get; set; }
     [Parameter] public bool Busy { get; set; }
+    [Parameter] public bool ActionAvailable { get; set; } = true;
+    [Parameter] public string UnavailableReason { get; set; } = "此介面目前只提供 assurance 與 impact read-back。";
     [Parameter] public EventCallback OnExecute { get; set; }
 
-    private bool CanExecute => !Busy && Decision?.Outcome == StepUpRequirementOutcome.Allowed;
+    private bool CanExecute => ActionAvailable && !Busy && Decision?.Outcome == StepUpRequirementOutcome.Allowed;
     private string RequiredAssuranceText => Decision?.RequiredAssurance.ToString() ?? "等待 server policy";
     private string OutcomeText => Decision?.Outcome.ToString() ?? "Fail closed";
     private string OutcomeClass => Decision?.Outcome switch
@@ -63,6 +65,7 @@
     };
     private string DisabledReason => Decision?.Outcome switch
     {
+        StepUpRequirementOutcome.Allowed when !ActionAvailable => UnavailableReason,
         StepUpRequirementOutcome.RequiresStepUp => $"需要 {Decision.RequiredAssurance} human step-up。",
         StepUpRequirementOutcome.RequiresExternalApproval => "需要外部核准。",
         StepUpRequirementOutcome.Disabled => "此環境未開放這項操作。",
