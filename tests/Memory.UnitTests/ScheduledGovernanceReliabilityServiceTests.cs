@@ -59,9 +59,11 @@ public sealed class ScheduledGovernanceReliabilityServiceTests
         projection.ExecutionMode.Should().Be("Scheduled");
         result.GatePassed.Should().BeFalse();
         result.NonQualifyingRuns.Should().ContainSingle();
-        result.NonQualifyingRuns[0].Reasons.Should().Contain("explicit-reset-event");
-        result.LastResetEvent!.Reason.Should()
-            .Be(ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason);
+        result.Runs[0].CountedTowardGate.Should().BeFalse();
+        result.Runs[0].IsIgnored.Should().BeTrue();
+        result.Runs[0].DispatchProvenance.Should().Be("Unproven");
+        result.Runs[0].ExpectedAtUtc.Should().BeNull();
+        result.ResetEvents.Should().BeEmpty();
     }
 
     [Fact]

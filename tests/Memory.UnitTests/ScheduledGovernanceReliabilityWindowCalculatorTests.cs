@@ -172,11 +172,11 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             .Append(changed)
             .Append(QualifyingRun(4)));
 
-        result.ConsecutiveQualifyingRuns.Should().Be(1);
-        result.NonQualifyingRuns.Should().ContainSingle();
-        result.NonQualifyingRuns[0].Reasons.Should().Contain("contract-version-mismatch");
-        result.ResetEvents.Should().ContainSingle(x =>
-            x.Reason == "relevant-deployment-or-configuration-change");
+        // The changed receipt no longer matches its signed provenance. It is
+        // excluded; the next trusted run still detects the missing natural slot.
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.Runs.Single(x => x.GovernanceRunId == "run-3").IsIgnored.Should().BeTrue();
+        result.ResetEvents.Should().ContainSingle(x => x.Reason == "scheduled-cadence-gap");
     }
 
     [Fact]
@@ -185,14 +185,14 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
         var options = new ScheduledGovernanceReliabilityWindowOptions
         {
             ExpectedFirstRunAtUtc = FirstRun,
-            MaximumAllowedDrift = TimeSpan.FromMinutes(15),
+            MaximumAllowedDrift = TimeSpan.FromMinutes(5),
             ExpectedNaturalOriginAuthority = NaturalOriginAuthority
         };
         var result = new ScheduledGovernanceReliabilityWindowCalculator(options)
             .Calculate(new[]
             {
                 QualifyingRun(0),
-                QualifyingRun(1) with { ObservedAtUtc = FirstRun.AddHours(5) },
+                QualifyingRun(1) with { ObservedAtUtc = FirstRun.AddHours(4).AddMinutes(10) },
                 QualifyingRun(2)
             });
 
@@ -200,8 +200,8 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
         result.NonQualifyingRuns.Should().ContainSingle();
         result.NonQualifyingRuns[0].Reasons.Should()
             .Contain("observed-schedule-drift-exceeds-tolerance");
-        result.NonQualifyingRuns[0].AbsoluteDrift.Should().Be(TimeSpan.FromHours(1));
-        result.MaximumAbsoluteDrift.Should().Be(TimeSpan.FromHours(1));
+        result.NonQualifyingRuns[0].AbsoluteDrift.Should().Be(TimeSpan.FromMinutes(10));
+        result.MaximumAbsoluteDrift.Should().Be(TimeSpan.FromMinutes(10));
         result.LatestSignedDrift.Should().Be(TimeSpan.Zero);
     }
 
@@ -212,13 +212,18 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
         var result = Calculate(new[]
         {
             original,
-            original with { ReceiptId = Guid.NewGuid(), CompletedAt = original.CompletedAt.AddSeconds(1) }
+            RebindRun(original, original.GovernanceRunId) with
+            {
+                CompletedAt = original.CompletedAt.AddSeconds(1)
+            }
         });
 
         result.ConsecutiveQualifyingRuns.Should().Be(0);
         result.NonQualifyingRuns.Should().ContainSingle();
         result.NonQualifyingRuns[0].Reasons.Should()
-            .Contain("duplicate-non-replay-governance-run-id");
+              .Contain("duplicate-non-replay-governance-run-id");
+        result.NonQualifyingRuns[0].IsIgnored.Should().BeFalse();
+        result.ResetEvents.Should().ContainSingle();
     }
 
     [Fact]
@@ -230,10 +235,9 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
 
         result.ConsecutiveQualifyingRuns.Should().Be(0);
         result.NonQualifyingRuns.Should().ContainSingle();
-        result.NonQualifyingRuns[0].Reasons.Should().Contain("decision-obedience-not-proven");
-        result.NonQualifyingRuns[0].Reasons.Should().Contain("count-invariant-not-proven");
-        result.NonQualifyingRuns[0].Reasons.Should().Contain("runtime-identity-not-proven");
-        result.NonQualifyingRuns[0].Reasons.Should().Contain("display-name-unchanged-not-proven");
+        result.NonQualifyingRuns[0].Reasons.Should().Contain("dispatch-provenance-unproven-excluded");
+        result.NonQualifyingRuns[0].CountedTowardGate.Should().BeFalse();
+        result.ResetEvents.Should().BeEmpty();
     }
 
     [Fact]
@@ -468,7 +472,8 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
         result.NonQualifyingRuns.Should().HaveCount(2);
         result.NonQualifyingRuns[0].Reasons.Should()
             .Contain("natural-origin-authority-baseline-mismatch");
-        result.NonQualifyingRuns[1].Reasons.Should().Contain("reliability-baseline-changed");
+        result.NonQualifyingRuns[0].IsIgnored.Should().BeTrue();
+        result.NonQualifyingRuns[1].Reasons.Should().Contain("scheduled-cadence-gap");
     }
 
     [Fact]
@@ -519,6 +524,103 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
 
         action.Should().Throw<ArgumentException>()
             .WithMessage("Natural-origin authority is incomplete or malformed.");
+    }
+
+    [Theory]
+    [InlineData("NoOpConverged", false)]
+    [InlineData("ReversibleExecutionRequired", true)]
+    [InlineData("HumanDecisionOnly", false)]
+    [InlineData("Failed", false)]
+    public void Unproven_dedicated_runs_must_not_poison_a_trusted_slot_streak_or_baseline(
+        string outcome, bool executed)
+    {
+        var unproven = QualifyingRun(2) with
+        {
+            GovernanceRunId = "interactive-or-synthetic",
+            NaturalOriginEvidence = null,
+            ObservedAtUtc = FirstRun.AddHours(6),
+            ExpectedAtUtc = FirstRun.AddHours(8),
+            BaselineIdentity = "different-deployment",
+            ResetReason = "legacy-reset",
+            FinalConvergenceStatus = outcome,
+            LatestBatchReceived = executed,
+            Applied = executed ? 1 : 0
+        };
+        var result = Calculate(Enumerable.Range(0, 6).Select(QualifyingRun).Append(unproven));
+
+        result.ConsecutiveQualifyingRuns.Should().Be(6);
+        result.GatePassed.Should().BeTrue();
+        result.ResetEvents.Should().BeEmpty();
+        var excluded = result.Runs.Single(x => x.GovernanceRunId == unproven.GovernanceRunId);
+        excluded.CountedTowardGate.Should().BeFalse();
+        excluded.IsIgnored.Should().BeTrue();
+        excluded.Qualifies.Should().BeFalse();
+        excluded.ProvenanceTrusted.Should().BeFalse();
+        excluded.Surface.Should().Be("ScheduledGovernanceDedicated");
+        excluded.DispatchProvenance.Should().Be("Unproven");
+        excluded.ExpectedAtUtc.Should().BeNull();
+        excluded.NaturalScheduleSlotHash.Should().BeNull();
+        excluded.StreakBefore.Should().Be(2);
+        excluded.StreakAfter.Should().Be(2);
+        excluded.ResetReason.Should().BeNull();
+    }
+
+    [Fact]
+    public void Trusted_success_and_failure_explain_streak_and_safe_provenance_metadata()
+    {
+        var result = Calculate([QualifyingRun(0), QualifyingRun(1) with { Status = "Failed" }]);
+        var success = result.Runs[0];
+        success.DispatchProvenance.Should().Be("NaturalScheduleTrusted");
+        success.ProvenanceTrusted.Should().BeTrue();
+        success.EvidenceReferenceHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        success.NaturalScheduleSlotHash.Should().MatchRegex("^[a-f0-9]{64}$");
+        success.StreakBefore.Should().Be(0);
+        success.StreakAfter.Should().Be(1);
+        var failed = result.Runs[1];
+        failed.CountedTowardGate.Should().BeTrue();
+        failed.StreakBefore.Should().Be(1);
+        failed.StreakAfter.Should().Be(0);
+        failed.ResetReason.Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Trusted_reversible_run_requires_independent_execution_safety(bool snapshotBound)
+    {
+        var run = QualifyingRun(0) with
+        {
+            Decision = ScheduledGovernanceDecision.ReversibleExecutionRequired,
+            LatestBatchReceived = true,
+            Applied = 1,
+            ImmutableSnapshotBound = snapshotBound,
+            FixedReversibleExecutorUsed = true,
+            FinalConvergenceStatus = "Converged"
+        };
+        var result = Calculate([run]);
+        result.Runs.Single().CountedTowardGate.Should().BeTrue();
+        result.Runs.Single().Qualifies.Should().Be(snapshotBound);
+        result.ConsecutiveQualifyingRuns.Should().Be(snapshotBound ? 1 : 0);
+        result.ResetEvents.Should().HaveCount(snapshotBound ? 0 : 1);
+    }
+
+    [Fact]
+    public void Unproven_duplicate_cannot_replace_or_reset_a_trusted_run()
+    {
+        var runs = Enumerable.Range(0, 6).Select(QualifyingRun).ToArray();
+        var duplicate = runs[2] with
+        {
+            ReceiptId = Guid.NewGuid(),
+            ObservedAtUtc = FirstRun.AddHours(9),
+            NaturalOriginEvidence = null,
+            Status = "Failed",
+            ResetReason = "legacy-reset"
+        };
+        var result = Calculate(runs.Append(duplicate));
+        result.GatePassed.Should().BeTrue();
+        result.ConsecutiveQualifyingRuns.Should().Be(6);
+        result.ResetEvents.Should().BeEmpty();
+        result.Runs.Single(x => x.ReceiptId == duplicate.ReceiptId).IsIgnored.Should().BeTrue();
     }
 
     private static ScheduledGovernanceReliabilityWindowResult Calculate(

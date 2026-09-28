@@ -66,9 +66,10 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         evidence.CountInvariantSatisfied.Should().BeTrue();
         evidence.DecisionObeyed.Should().BeTrue();
         evidence.NoGeneralConnectorFallback.Should().BeNull();
-        evidence.NoUnauthorizedMutation.Should().BeNull();
-        evidence.DisplayNameUnchanged.Should().BeNull();
-        evidence.BusinessWorkItemsUntouched.Should().BeNull();
+        evidence.NoUnauthorizedMutation.Should().BeTrue();
+        evidence.NoDuplicateMutation.Should().BeTrue();
+        evidence.DisplayNameUnchanged.Should().BeTrue();
+        evidence.BusinessWorkItemsUntouched.Should().BeTrue();
         evidence.HostDispatchCompleted.Should().BeNull();
 
         var reliability = await scope.ServiceProvider
@@ -77,8 +78,12 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         var reliabilityRun = reliability.Runs.Single(run => run.GovernanceRunId == runId);
         reliabilityRun.Reasons.Should().NotContain("count-invariant-not-proven");
         reliabilityRun.Reasons.Should().NotContain("decision-obedience-not-proven");
-        reliabilityRun.Reasons.Should().Contain("general-connector-fallback-not-proven");
-        reliabilityRun.Reasons.Should().Contain("host-dispatch-not-proven");
+        reliabilityRun.ServerInvariants["noGeneralConnectorFallback"].Should().BeNull();
+        reliabilityRun.ServerInvariants["hostDispatchCompleted"].Should().BeNull();
+        reliabilityRun.ServerInvariants["noUnauthorizedMutation"].Should().BeTrue();
+        reliabilityRun.CountedTowardGate.Should().BeFalse();
+        reliabilityRun.IsIgnored.Should().BeTrue();
+        reliability.ResetEvents.Should().BeEmpty();
         reliabilityRun.Qualifies.Should().BeFalse();
 
         var reliabilityRow = await scope.ServiceProvider.GetRequiredService<MemoryDbContext>()

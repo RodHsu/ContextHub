@@ -218,7 +218,21 @@ public sealed record ScheduledGovernanceReliabilityRunResult(
     IReadOnlyList<string> Reasons,
     string NaturalOriginStatus,
     bool PlatformSignedNaturalOriginAttested,
-    string EvidenceBoundary);
+    string EvidenceBoundary)
+{
+    public string Surface { get; init; } = "General";
+    public string DispatchProvenance { get; init; } = "Unproven";
+    public bool ProvenanceTrusted { get; init; }
+    public string EvidenceKind { get; init; } = "None";
+    public string? EvidenceReferenceHash { get; init; }
+    public string? NaturalScheduleSlotHash { get; init; }
+    public string? ExclusionReason { get; init; }
+    public int StreakBefore { get; init; }
+    public int StreakAfter { get; init; }
+    public string? ResetReason { get; init; }
+    public IReadOnlyDictionary<string, bool?> ServerInvariants { get; init; } =
+        new Dictionary<string, bool?>();
+}
 
 public sealed record ScheduledGovernanceReliabilityResetResult(
     DateTimeOffset AtUtc,
@@ -237,7 +251,12 @@ public sealed record ScheduledGovernanceReliabilityScheduleResult(
 public sealed record ScheduledGovernanceNaturalOriginEvidenceResult(
     bool PlatformSignedAttestationAvailable,
     string Status,
-    string EvidenceBoundary);
+    string EvidenceBoundary)
+{
+    public string? ExternalProvenanceBlocker => Status == "Verified"
+        ? null
+        : "Trusted platform attestation and immutable control-plane audit are unavailable or unverified; natural reliability remains blocked.";
+}
 
 public sealed record ScheduledGovernanceContractResult(
     string ReviewToolName,

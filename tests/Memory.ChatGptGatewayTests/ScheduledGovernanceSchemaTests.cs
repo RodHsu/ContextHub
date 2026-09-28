@@ -55,7 +55,7 @@ public sealed class ScheduledGovernanceSchemaTests
             ScheduledGovernanceToolCatalog.PublishedToolNames);
         methods.Should().HaveCount(4);
         ScheduledGovernanceContract.ToolContractVersion.Should().Be("1.5");
-        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-09-08-automation-v6");
+        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-09-28-automation-v7");
         ScheduledGovernanceContract.FixedReversibleActions.Should().Contain(GovernanceBatchActionType.SkillMetadataProposal);
 
         foreach (var method in methods)
@@ -133,6 +133,14 @@ public sealed class ScheduledGovernanceSchemaTests
         reliabilityProperties.TryGetProperty("naturalOriginEvidence", out _).Should().BeTrue();
         reliabilityProperties.TryGetProperty("schedule", out _).Should().BeTrue();
         reliabilityProperties.TryGetProperty("resetEvents", out _).Should().BeTrue();
+        var runProperties = reliabilityProperties.GetProperty("runs").GetProperty("items")
+            .GetProperty("properties");
+        foreach (var name in new[] { "surface", "dispatchProvenance", "provenanceTrusted",
+                     "evidenceKind", "evidenceReferenceHash", "naturalScheduleSlotHash", "exclusionReason",
+                     "streakBefore", "streakAfter", "resetReason", "serverInvariants" })
+        {
+            runProperties.TryGetProperty(name, out _).Should().BeTrue();
+        }
     }
 
     [Fact]

@@ -453,7 +453,20 @@ public sealed class ScheduledGovernanceReliabilityService(
             PublicReasons(evidence),
             naturalOriginStatus,
             PlatformSignedNaturalOriginAttested: evidence.PlatformSignedNaturalOriginAttested,
-            EvidenceBoundary);
+            EvidenceBoundary)
+        {
+            Surface = evidence.Surface,
+            DispatchProvenance = evidence.DispatchProvenance,
+            ProvenanceTrusted = evidence.ProvenanceTrusted,
+            EvidenceKind = evidence.EvidenceKind,
+            EvidenceReferenceHash = evidence.EvidenceReferenceHash,
+            NaturalScheduleSlotHash = evidence.NaturalScheduleSlotHash,
+            ExclusionReason = evidence.IsIgnored ? evidence.Reasons.LastOrDefault() : null,
+            StreakBefore = evidence.StreakBefore,
+            StreakAfter = evidence.StreakAfter,
+            ResetReason = evidence.ResetReason,
+            ServerInvariants = evidence.ServerInvariants
+        };
     }
 
     private static bool HasRelevantDeploymentOrConfigurationReset(
@@ -478,7 +491,7 @@ public sealed class ScheduledGovernanceReliabilityService(
             "natural-origin-authority-baseline-not-proven",
             "natural-origin-authority-baseline-mismatch"
         };
-        return result.NonQualifyingRuns.Any(x => x.Reasons.Any(relevantReasons.Contains));
+        return result.NonQualifyingRuns.Any(x => x.CountedTowardGate && x.Reasons.Any(relevantReasons.Contains));
     }
 
     internal static ScheduledGovernanceReliabilityReceiptProjection BuildProjection(
@@ -547,9 +560,7 @@ public sealed class ScheduledGovernanceReliabilityService(
         return projection with
         {
             ExecutionMode = "Scheduled",
-            ResetReason = naturalOriginEvidence is null
-                ? NaturalOriginAttestationNotProvenReason
-                : null
+            ResetReason = null
         };
     }
 

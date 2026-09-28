@@ -171,6 +171,21 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             allEventTypesAllowed,
             cancellationToken);
 
+        // Scope these facts to this governance run. A complete known receipt
+        // history with no executor/retention event and zero mutation outcomes
+        // proves this run did not mutate, without claiming host provenance or
+        // that another actor did not change resources concurrently.
+        var zeroMutationRun = reviewLifecycleValid && allEventTypesAllowed &&
+                              events.All(row =>
+                                  row.EventType is not ("BatchReceived" or "BatchCompleted" or
+                                      "BatchReplay" or "BatchStopped" or "InternalRetentionCompleted") &&
+                                  row.Applied == 0 && row.Failed == 0 && row.AuditIdsJson == "[]") &&
+                              !await dbContext.GovernanceBatchExecutions.AsNoTracking().AnyAsync(
+                                  execution => execution.Run!.TenantId == query.TenantId &&
+                                               execution.Run.OwnerUserId == query.OwnerUserId &&
+                                               execution.Run.GovernanceRunId == runId,
+                                  cancellationToken);
+
         return new ScheduledGovernanceServerSafetyEvidenceSnapshot(
             observedReceipt.EventSequence,
             receiptRequestIdentityHash,
@@ -179,10 +194,10 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             countInvariantSatisfied,
             decisionObeyed,
             NoGeneralConnectorFallback: null,
-            NoUnauthorizedMutation: null,
-            NoDuplicateMutation: null,
-            DisplayNameUnchanged: null,
-            BusinessWorkItemsUntouched: null,
+            NoUnauthorizedMutation: zeroMutationRun ? true : null,
+            NoDuplicateMutation: zeroMutationRun ? true : null,
+            DisplayNameUnchanged: zeroMutationRun ? true : null,
+            BusinessWorkItemsUntouched: zeroMutationRun ? true : null,
             HostDispatchCompleted: null,
             ImmutableSnapshotBound: null,
             FixedReversibleExecutorUsed: null);

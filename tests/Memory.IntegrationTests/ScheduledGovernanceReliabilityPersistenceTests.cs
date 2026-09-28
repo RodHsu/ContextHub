@@ -64,9 +64,12 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
         var readBack = await readService.GetAsync(CancellationToken.None);
         var persistedRun = readBack.Runs.Should().ContainSingle(x => x.GovernanceRunId == runId).Subject;
         persistedRun.ReceiptId.Should().Be(receipt.ReceiptId);
-        persistedRun.ExpectedAtUtc.Should().NotBeNull();
-        persistedRun.SignedDrift.Should().Be(TimeSpan.Zero);
-        persistedRun.DriftWithinTolerance.Should().BeTrue();
+        persistedRun.ExpectedAtUtc.Should().BeNull();
+        persistedRun.SignedDrift.Should().BeNull();
+        persistedRun.DriftWithinTolerance.Should().BeNull();
+        persistedRun.IsIgnored.Should().BeTrue();
+        persistedRun.CountedTowardGate.Should().BeFalse();
+        readBack.ResetEvents.Should().BeEmpty();
         persistedRun.Reasons.Should().Contain(
             ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason);
         readBack.Schedule.IntendedTimeZoneId.Should().Be("Asia/Taipei");
@@ -253,7 +256,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
             replay.ConsecutiveQualifyingRuns.Should().Be(0);
             replay.GatePassed.Should().BeFalse();
             replay.IgnoredReplayProjectionCount.Should().Be(1);
-            replay.Runs.Single().CountedTowardGate.Should().BeTrue();
+            replay.Runs.Single().CountedTowardGate.Should().BeFalse();
             replay.Runs.Single().Qualifies.Should().BeFalse();
             replay.NonQualifyingRuns.Should().ContainSingle(x =>
                 x.GovernanceRunId == runId &&
@@ -284,7 +287,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
         row.IsReplay.Should().BeFalse();
         row.ReplayProjectionCount.Should().Be(1);
         DeserializeReplayReceiptIds(row.ReplayReceiptIdsJson).Should().Contain(replayReceipt.ReceiptId);
-        row.CountedTowardGate.Should().BeTrue();
+        row.CountedTowardGate.Should().BeFalse();
         row.Qualifies.Should().BeFalse();
     }
 
@@ -372,7 +375,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
         row.ReceiptId.Should().Be(canonicalReceipt.ReceiptId);
         row.ReplayProjectionCount.Should().Be(1);
         DeserializeReplayReceiptIds(row.ReplayReceiptIdsJson).Should().Contain(replayReceipt.ReceiptId);
-        row.CountedTowardGate.Should().BeTrue();
+        row.CountedTowardGate.Should().BeFalse();
         row.Qualifies.Should().BeFalse();
     }
 
@@ -428,7 +431,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
             .OrderBy(x => x.ObservedAtUtc)
             .ToArrayAsync();
         rows.Should().HaveCount(6);
-        rows.Should().OnlyContain(x => !x.IsReplay && x.CountedTowardGate && !x.Qualifies);
+        rows.Should().OnlyContain(x => !x.IsReplay && !x.CountedTowardGate && x.IsIgnored && !x.Qualifies);
 
         var persistedProjections = rows
             .Select(x => JsonSerializer.Deserialize<ScheduledGovernanceReliabilityReceiptProjection>(
@@ -441,7 +444,51 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
         serverCalculatorReadBack.Runs.Should().HaveCount(6);
         serverCalculatorReadBack.QualifyingRuns.Should().BeEmpty();
         serverCalculatorReadBack.ConsecutiveQualifyingRuns.Should().Be(0);
-        serverCalculatorReadBack.ResetEvents.Should().HaveCount(6);
+        serverCalculatorReadBack.ResetEvents.Should().BeEmpty();
+    }
+
+    [DockerRequiredFact]
+    public async Task Historical_unproven_reset_is_excluded_without_rewriting_persisted_history()
+    {
+        var factory = environment.GetFactory();
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var seed = await db.TenantUsers.AsNoTracking()
+            .SingleAsync(x => x.Username == "contract-test-admin");
+        var actor = await CreateOwnerAsync(db, seed.TenantId, "legacy-provenance-owner");
+        SetActor(scope.ServiceProvider, actor);
+        var receipt = CreateReceipt($"legacy-provenance-{Guid.NewGuid():N}", "Scheduled");
+        await PersistObservedReceiptAsync(scope.ServiceProvider, actor, receipt);
+        var service = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityService>();
+        await service.ObserveAsync(receipt, CancellationToken.None);
+        var row = await db.ScheduledGovernanceReliabilityRuns.SingleAsync(x =>
+            x.TenantId == actor.TenantId && x.OwnerUserId == actor.Id &&
+            x.GovernanceRunId == receipt.GovernanceRunId);
+        var projection = JsonSerializer.Deserialize<ScheduledGovernanceReliabilityReceiptProjection>(
+            row.ProjectionJson, JsonOptions)!;
+        row.ProjectionJson = JsonSerializer.Serialize(projection with
+        {
+            ResetReason = ScheduledGovernanceReliabilityService.NaturalOriginAttestationNotProvenReason
+        }, JsonOptions);
+        row.CountedTowardGate = true;
+        await db.SaveChangesAsync();
+        // PostgreSQL jsonb canonicalizes the representation at persistence.
+        var originalProjection = (await db.ScheduledGovernanceReliabilityRuns.AsNoTracking()
+            .SingleAsync(x => x.Id == row.Id)).ProjectionJson;
+        var receiptEvents = await db.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.GovernanceRunId == receipt.GovernanceRunId).ToArrayAsync();
+        var originalEvents = JsonSerializer.Serialize(receiptEvents, JsonOptions);
+
+        var readBack = await service.GetAsync(CancellationToken.None);
+        readBack.Runs.Single().IsIgnored.Should().BeTrue();
+        readBack.Runs.Single().CountedTowardGate.Should().BeFalse();
+        readBack.Runs.Single().ResetReason.Should().BeNull();
+        readBack.ResetEvents.Should().BeEmpty();
+        (await db.ScheduledGovernanceReliabilityRuns.AsNoTracking().SingleAsync(x => x.Id == row.Id))
+            .ProjectionJson.Should().Be(originalProjection);
+        var afterEvents = await db.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.GovernanceRunId == receipt.GovernanceRunId).ToArrayAsync();
+        JsonSerializer.Serialize(afterEvents, JsonOptions).Should().Be(originalEvents);
     }
 
     [DockerRequiredFact]

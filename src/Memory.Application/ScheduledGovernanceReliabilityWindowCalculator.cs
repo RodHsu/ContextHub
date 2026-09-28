@@ -222,6 +222,16 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
             return null;
         }
 
+        // The dedicated service has already projected its fixed decision into
+        // the immutable receipt. Raw candidate/exception counts need not equal
+        // reversible actionable work and must not relabel a NoOp decision.
+        if (string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
+            Enum.TryParse<ScheduledGovernanceDecision>(receipt.FinalConvergenceStatus,
+                ignoreCase: false, out var projectedDecision))
+        {
+            return projectedDecision;
+        }
+
         if (!receipt.CoverageComplete)
         {
             return ScheduledGovernanceDecision.CoverageIncomplete;
@@ -378,7 +388,20 @@ internal sealed record ScheduledGovernanceReliabilityRunEvidence(
     bool IsFailed,
     IReadOnlyList<string> Reasons,
     string NaturalOriginStatus = "Unattested",
-    bool PlatformSignedNaturalOriginAttested = false);
+    bool PlatformSignedNaturalOriginAttested = false)
+{
+    public string Surface { get; init; } = "General";
+    public string DispatchProvenance { get; init; } = "Unproven";
+    public bool ProvenanceTrusted { get; init; }
+    public string EvidenceKind { get; init; } = "None";
+    public string? EvidenceReferenceHash { get; init; }
+    public string? NaturalScheduleSlotHash { get; init; }
+    public int StreakBefore { get; init; }
+    public int StreakAfter { get; init; }
+    public string? ResetReason { get; init; }
+    public IReadOnlyDictionary<string, bool?> ServerInvariants { get; init; } =
+        new Dictionary<string, bool?>();
+}
 
 internal sealed record ScheduledGovernanceReliabilityResetEvent(
     DateTimeOffset AtUtc,
@@ -490,12 +513,40 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
                     false,
                     true,
                     IsFailed(projection),
-                    ignoredReasons));
+                    ignoredReasons)
+                {
+                    DispatchProvenance = IsManual(projection.ExecutionMode) ? "Manual" : "Unproven",
+                    StreakBefore = currentStreak.Count,
+                    StreakAfter = currentStreak.Count
+                });
                 continue;
             }
 
             var reasons = new List<string>();
             var naturalOrigin = EvaluateNaturalOrigin(projection, observedAt, reasons);
+            // Surface authorization never establishes scheduler dispatch. Excluded
+            // observations must not touch slot, baseline, drift or streak state,
+            // including historical projections with an old explicit reset reason.
+            if (naturalOrigin.Status != "Verified")
+            {
+                reasons.Add("dispatch-provenance-unproven-excluded");
+                var excluded = new ScheduledGovernanceReliabilityRunEvidence(
+                    projection.GovernanceRunId.Trim(), projection.ReceiptId,
+                    projection.ExecutionMode, observedAt,
+                    null, null, null, null, false, false, true, IsFailed(projection),
+                    reasons.Distinct(StringComparer.Ordinal).ToArray(),
+                    naturalOrigin.Status, naturalOrigin.PlatformSignedAttestationVerified)
+                {
+                    Surface = "ScheduledGovernanceDedicated",
+                    StreakBefore = currentStreak.Count,
+                    StreakAfter = currentStreak.Count,
+                    ServerInvariants = ServerInvariants(projection)
+                };
+                runEvidence.Add(excluded);
+                nonQualifyingRuns.Add(excluded);
+                continue;
+            }
+
             var expectedAt = ResolveExpectedAt(projection, observedAt, naturalOrigin.ExpectedAtUtc);
             var signedDrift = expectedAt.HasValue
                 ? (TimeSpan?)(observedAt - expectedAt.Value)
@@ -568,7 +619,21 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
                 failed,
                 reasons.Distinct(StringComparer.Ordinal).ToArray(),
                 naturalOrigin.Status,
-                naturalOrigin.PlatformSignedAttestationVerified);
+                naturalOrigin.PlatformSignedAttestationVerified)
+            {
+                Surface = "ScheduledGovernanceDedicated",
+                DispatchProvenance = "NaturalScheduleTrusted",
+                ProvenanceTrusted = true,
+                EvidenceKind = "PlatformSignedAttestationAndImmutableControlPlaneAudit",
+                EvidenceReferenceHash = ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(
+                    projection.NaturalOriginEvidence!.ControlPlaneAudit!.AuditEventHash),
+                NaturalScheduleSlotHash = ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(
+                    projection.NaturalOriginEvidence.PlatformAttestation!.Binding.ScheduleSlotId),
+                StreakBefore = currentStreak.Count,
+                StreakAfter = qualifies ? currentStreak.Count + 1 : 0,
+                ResetReason = qualifies ? null : ResolveResetReason(projection, baselineChanged, reasons),
+                ServerInvariants = ServerInvariants(projection)
+            };
             runEvidence.Add(evidence);
             if (qualifies)
             {
@@ -628,6 +693,22 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
             maximumAbsoluteDrift,
             latestSignedDrift);
     }
+
+    private static IReadOnlyDictionary<string, bool?> ServerInvariants(
+        ScheduledGovernanceReliabilityReceiptProjection projection)
+        => new Dictionary<string, bool?>
+        {
+            ["countInvariantSatisfied"] = projection.CountInvariantSatisfied,
+            ["decisionObeyed"] = projection.DecisionObeyed,
+            ["noUnauthorizedMutation"] = projection.NoUnauthorizedMutation,
+            ["noDuplicateMutation"] = projection.NoDuplicateMutation,
+            ["displayNameUnchangedByRun"] = projection.DisplayNameUnchanged,
+            ["businessWorkItemsUntouchedByRun"] = projection.BusinessWorkItemsUntouched,
+            ["noGeneralConnectorFallback"] = projection.NoGeneralConnectorFallback,
+            ["hostDispatchCompleted"] = projection.HostDispatchCompleted,
+            ["immutableSnapshotBound"] = projection.ImmutableSnapshotBound,
+            ["fixedReversibleExecutorUsed"] = projection.FixedReversibleExecutorUsed
+        };
 
     private void EvaluateProjection(
         CanonicalProjection item,
@@ -1040,7 +1121,7 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
             ? null
             : projection.BaselineIdentity.Trim();
 
-    private static IReadOnlyList<CanonicalProjection> Canonicalize(
+    private IReadOnlyList<CanonicalProjection> Canonicalize(
         IReadOnlyList<ScheduledGovernanceReliabilityReceiptProjection> source)
     {
         var canonical = new List<CanonicalProjection>();
@@ -1059,10 +1140,25 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
                 continue;
             }
 
-            canonical.Add(new CanonicalProjection(
-                nonReplay[0],
-                group.Count(x => x.IsReplay),
-                nonReplay.Length > 1));
+            var trusted = nonReplay.Where(x => IsScheduled(x.ExecutionMode) &&
+                EvaluateNaturalOrigin(x, ObservedAt(x), new List<string>()).Status == "Verified")
+                .ToArray();
+            if (trusted.Length > 0)
+            {
+                canonical.Add(new CanonicalProjection(
+                    trusted[0], group.Count(x => x.IsReplay), trusted.Length > 1));
+                // Unproven duplicates remain explainable, but cannot poison a
+                // trusted run's identity or trigger its duplicate/reset gate.
+                foreach (var excluded in nonReplay.Except(trusted))
+                {
+                    canonical.Add(new CanonicalProjection(excluded, 0, false));
+                }
+            }
+            else
+            {
+                canonical.Add(new CanonicalProjection(
+                    nonReplay[0], group.Count(x => x.IsReplay), false));
+            }
         }
 
         foreach (var invalid in source.Where(x => string.IsNullOrWhiteSpace(x.GovernanceRunId) && !x.IsReplay))
