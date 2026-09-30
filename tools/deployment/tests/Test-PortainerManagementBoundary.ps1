@@ -37,9 +37,12 @@ function Set-TestAcl {
     $acl=if($UseSyntheticAclFixture) {
         if($Directory){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
     } else { Get-Acl -LiteralPath $Path }
-    $acl.SetOwner($identity);$acl.SetAccessRuleProtection($true,$false)
+    if ($UseSyntheticAclFixture) { $acl.SetOwner($identity) }
+    elseif ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $identity.Value) { throw 'FIXTURE_OWNER_MISMATCH' }
+    $acl.SetAccessRuleProtection($true,$false)
     foreach($existing in @($acl.Access)) { if($existing) { $null=$acl.RemoveAccessRuleSpecific($existing) } }
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity,'FullControl','Allow'))
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl','Allow'))
     if ($UseSyntheticAclFixture) { $syntheticAcl[$Path]=$acl }
     elseif ($Directory) { [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($Path),$acl) }
     else { [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($Path),$acl) }

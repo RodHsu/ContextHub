@@ -53,7 +53,11 @@ function Set-OperatorPrivateAcl {
     param([string]$Path,[bool]$IsDirectory)
     if (-not $PSCmdlet.ShouldProcess($Path,'Set protected operator/SYSTEM ACL')) { return }
     $acl=Get-Acl -LiteralPath $Path
-    $acl.SetOwner($identity); $acl.SetAccessRuleProtection($true,$false)
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $identity.Value) {
+        throw 'PORTAINER_AUTHORITY_OWNER_MISMATCH'
+    }
+    # Do not mark the unchanged owner dirty: persisting it unnecessarily requires WRITE_OWNER.
+    $acl.SetAccessRuleProtection($true,$false)
     foreach($existing in @($acl.Access)) { if($existing) { $null=$acl.RemoveAccessRuleSpecific($existing) } }
     foreach ($sid in @($identity,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
         $rule=if ($IsDirectory) {
@@ -63,6 +67,22 @@ function Set-OperatorPrivateAcl {
     }
     if ($IsDirectory) { [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($Path),$acl) }
     else { [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($Path),$acl) }
+    $readBack=Get-Acl -LiteralPath $Path
+    $rules=@($readBack.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    if (-not $readBack.AreAccessRulesProtected -or
+        $readBack.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $identity.Value -or
+        $rules.Count -ne 2 -or @($rules.IdentityReference.Value | Sort-Object -Unique).Count -ne 2) {
+        throw 'PORTAINER_AUTHORITY_ACL_REJECTED'
+    }
+    foreach ($rule in $rules) {
+        $inheritance=if($IsDirectory){[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'}else{[Security.AccessControl.InheritanceFlags]::None}
+        if ($rule.IsInherited -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.IdentityReference.Value -notin @($identity.Value,'S-1-5-18') -or
+            $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+            $rule.InheritanceFlags -ne $inheritance -or $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+            throw 'PORTAINER_AUTHORITY_ACL_REJECTED'
+        }
+    }
 }
 New-Item -ItemType Directory -Path $directory -Force | Out-Null
 if ((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'PORTAINER_AUTHORITY_REPARSE_REJECTED' }
