@@ -18,7 +18,8 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
         using var scope = environment.GetFactory().Services.CreateScope();
         var actor = UseBootstrapActor(scope.ServiceProvider);
         var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
-        var root = Path.Combine(Path.GetTempPath(), "contexthub-managed-workflow", Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(FindRepositoryRoot(), ".agent", "local", "managed-storage-tests", Guid.NewGuid().ToString("N"));
+        var clock = new MutableClock(DateTimeOffset.UtcNow);
         var keySettings = new ManagedFileKeyAuthorityOptions
         {
             CurrentKeyId = "kek-old",
@@ -34,7 +35,7 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
         var service = new ManagedTransferService(
             db,
             scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>(),
-            scope.ServiceProvider.GetRequiredService<IClock>(),
+            clock,
             store,
             authority,
             scope.ServiceProvider.GetRequiredService<IPlatformFoundationStore>(),
@@ -119,8 +120,12 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
             var secondRateChunk = RandomNumberGenerator.GetBytes(64 * 1024);
             var secondRateChecksum = Convert.ToHexString(SHA256.HashData(secondRateChunk)).ToLowerInvariant();
             var rateExceeded = () => service.UploadChunkAsync(new ManagedChunkWriteRequest(
-                rateLimited.SessionId, rateLimited.Capability, firstRateWrite.Revision, "rate-2", 1, secondRateChunk, secondRateChecksum), CancellationToken.None);
+                rateLimited.SessionId, rateLimited.Capability, firstRateWrite.Revision, "rate-2", 1, secondRateChunk.ToArray(), secondRateChecksum), CancellationToken.None);
             await rateExceeded.Should().ThrowAsync<InvalidOperationException>().WithMessage("*rate limit exceeded*");
+
+            clock.UtcNow = clock.UtcNow.AddSeconds(2);
+            await service.UploadChunkAsync(new ManagedChunkWriteRequest(
+                rateLimited.SessionId, rateLimited.Capability, firstRateWrite.Revision, "rate-2", 1, secondRateChunk, secondRateChecksum), CancellationToken.None);
 
             actor.Username.Should().NotContain("ChatGPT").And.NotContain("Codex").And.NotContain("Gemini");
         }
@@ -128,6 +133,21 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
         {
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
+    }
+
+    private sealed class MutableClock(DateTimeOffset value) : IClock
+    {
+        public DateTimeOffset UtcNow { get; set; } = value;
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "ContextHub.slnx"))) return directory.FullName;
+        }
+
+        throw new InvalidOperationException("Repository-local ignored test artifact root is unavailable.");
     }
 
     private static ContextHubRequestActor UseBootstrapActor(IServiceProvider services)

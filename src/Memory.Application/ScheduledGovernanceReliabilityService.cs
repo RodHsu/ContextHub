@@ -356,6 +356,8 @@ public sealed class ScheduledGovernanceReliabilityService(
                     HostDispatchCompleted = serverSafetyEvidence?.HostDispatchCompleted,
                     ImmutableSnapshotBound = serverSafetyEvidence?.ImmutableSnapshotBound,
                     FixedReversibleExecutorUsed = serverSafetyEvidence?.FixedReversibleExecutorUsed,
+                    ServerInvariantProofs = serverSafetyEvidence?.InvariantProofs ??
+                                            new Dictionary<string, ScheduledGovernanceInvariantProof>(),
                     ResetReason = evidence is null ||
                                   !string.Equals(
                                       projection.ResetReason,
@@ -465,7 +467,8 @@ public sealed class ScheduledGovernanceReliabilityService(
             StreakBefore = evidence.StreakBefore,
             StreakAfter = evidence.StreakAfter,
             ResetReason = evidence.ResetReason,
-            ServerInvariants = evidence.ServerInvariants
+            ServerInvariants = evidence.ServerInvariants,
+            ServerInvariantProofs = evidence.ServerInvariantProofs
         };
     }
 
@@ -544,6 +547,8 @@ public sealed class ScheduledGovernanceReliabilityService(
             HostDispatchCompleted = serverSafetyEvidence?.HostDispatchCompleted,
             ImmutableSnapshotBound = serverSafetyEvidence?.ImmutableSnapshotBound,
             FixedReversibleExecutorUsed = serverSafetyEvidence?.FixedReversibleExecutorUsed,
+            ServerInvariantProofs = serverSafetyEvidence?.InvariantProofs ??
+                                    new Dictionary<string, ScheduledGovernanceInvariantProof>(),
             ExpectedAtUtc = naturalOriginEvidence?.PlatformAttestation?.Binding.ExpectedAtUtc ??
                             naturalOriginEvidence?.ControlPlaneAudit?.Binding.ExpectedAtUtc
         };

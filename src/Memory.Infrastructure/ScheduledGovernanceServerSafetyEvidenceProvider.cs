@@ -67,9 +67,14 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
         }
 
         var allEventTypesAllowed = events.All(row => AllowedReceiptEventTypes.Contains(row.EventType));
+        var contractLineageConsistent = events.All(row =>
+            row.ToolContractVersion == observedReceipt.ToolContractVersion &&
+            row.SchemaHash == observedReceipt.SchemaHash &&
+            row.PublishedCatalogVersion == observedReceipt.PublishedCatalogVersion &&
+            row.ExecutionMode == "Scheduled");
         var observedReceiptIsLatest = events[^1].EventSequence == observedReceipt.EventSequence;
         if (events.Length > 1_000 ||
-            !observedReceiptIsLatest ||
+            !observedReceiptIsLatest || !contractLineageConsistent ||
             !IsCurrentCompletedScheduledReceipt(observedReceipt))
         {
             return Unknown(observedReceipt.EventSequence);
@@ -163,28 +168,65 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
                 DecisionObeyed: false);
         }
 
-        var decisionObeyed = await EvaluateDecisionObedienceAsync(
-            events,
-            decisionReceipt,
-            observedReceipt.EventSequence,
-            reviewLifecycleValid,
-            allEventTypesAllowed,
-            cancellationToken);
-
         // Scope these facts to this governance run. A complete known receipt
         // history with no executor/retention event and zero mutation outcomes
         // proves this run did not mutate, without claiming host provenance or
         // that another actor did not change resources concurrently.
+        var auditRunBinding = JsonSerializer.Serialize(new { governanceRunId = runId });
         var zeroMutationRun = reviewLifecycleValid && allEventTypesAllowed &&
                               events.All(row =>
                                   row.EventType is not ("BatchReceived" or "BatchCompleted" or
                                       "BatchReplay" or "BatchStopped" or "InternalRetentionCompleted") &&
-                                  row.Applied == 0 && row.Failed == 0 && row.AuditIdsJson == "[]") &&
-                              !await dbContext.GovernanceBatchExecutions.AsNoTracking().AnyAsync(
-                                  execution => execution.Run!.TenantId == query.TenantId &&
-                                               execution.Run.OwnerUserId == query.OwnerUserId &&
-                                               execution.Run.GovernanceRunId == runId,
+                                  !row.LatestBatchReceived && row.Applied == 0 && row.Failed == 0 &&
+                                  EmptyAuditIds(row.AuditIdsJson)) &&
+                              !await dbContext.GovernanceBatchRuns.AsNoTracking().AnyAsync(
+                                  run => run.TenantId == query.TenantId &&
+                                         run.GovernanceRunId == runId,
+                                  cancellationToken) &&
+                              !await dbContext.SecurityAuditEvents.AsNoTracking().AnyAsync(
+                                  audit => audit.TenantId == query.TenantId &&
+                                           EF.Functions.JsonContains(audit.DetailsJson, auditRunBinding),
                                   cancellationToken);
+
+        var decisionObeyed = EvaluateDecisionObedience(
+            events, decisionReceipt, observedReceipt.EventSequence,
+            reviewLifecycleValid, allEventTypesAllowed, zeroMutationRun);
+        var proofs = new Dictionary<string, ScheduledGovernanceInvariantProof>
+        {
+            ["decisionObeyed"] = new(decisionObeyed is true ? ScheduledGovernanceInvariantProofStatus.ProvenTrue :
+                    decisionObeyed is false ? ScheduledGovernanceInvariantProofStatus.ProvenFalse : ScheduledGovernanceInvariantProofStatus.Unproven,
+                zeroMutationRun ? decisionObeyed is true ? "prohibited-decision-obeyed-no-execute" :
+                    "reversible-execution-required-but-not-received" : "immutable-decision-and-execution-history",
+                "GovernanceRun"),
+            ["noGeneralConnectorFallback"] = new(ScheduledGovernanceInvariantProofStatus.NotObservable,
+                "separate-host-general-connector-calls-not-observable", "Host"),
+            ["hostDispatchCompleted"] = new(ScheduledGovernanceInvariantProofStatus.Unproven,
+                "trusted-host-dispatch-proof-unavailable", "Host"),
+            ["immutableSnapshotBound"] = new(reviewLifecycleValid
+                    ? ScheduledGovernanceInvariantProofStatus.ProvenTrue : ScheduledGovernanceInvariantProofStatus.Unproven,
+                "immutable-review-and-decision-snapshot-scope-runtime-binding", "GovernanceRun")
+        };
+        if (zeroMutationRun)
+        {
+            foreach (var key in new[] { "noUnauthorizedMutation", "noDuplicateMutation",
+                         "displayNameUnchangedByRun", "businessWorkItemsUntouchedByRun" })
+            {
+                proofs[key] = new(ScheduledGovernanceInvariantProofStatus.ProvenTrue,
+                    "dedicated-contract-and-authoritative-zero-execute-zero-ledger-zero-audit", "GovernanceRun");
+            }
+            proofs["fixedReversibleExecutorUsed"] = new(ScheduledGovernanceInvariantProofStatus.NotApplicable,
+                "no-execute-received-no-executor-required-or-used", "GovernanceRun");
+        }
+
+        // Do not publish a zero-execute proof against an observation that
+        // became stale while its ledger/audit evidence was read.
+        if (await dbContext.GovernanceRunReceipts.AsNoTracking().AnyAsync(row =>
+                row.TenantId == query.TenantId && row.OwnerUserId == query.OwnerUserId &&
+                row.GovernanceRunId == runId && row.EventSequence > observedReceipt.EventSequence,
+                cancellationToken))
+        {
+            return Unknown(observedReceipt.EventSequence);
+        }
 
         return new ScheduledGovernanceServerSafetyEvidenceSnapshot(
             observedReceipt.EventSequence,
@@ -199,8 +241,11 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             DisplayNameUnchanged: zeroMutationRun ? true : null,
             BusinessWorkItemsUntouched: zeroMutationRun ? true : null,
             HostDispatchCompleted: null,
-            ImmutableSnapshotBound: null,
-            FixedReversibleExecutorUsed: null);
+            ImmutableSnapshotBound: reviewLifecycleValid ? true : null,
+            FixedReversibleExecutorUsed: null)
+        {
+            InvariantProofs = proofs
+        };
     }
 
     private static ScheduledGovernanceServerSafetyEvidenceSnapshot SnapshotWithUnknownSafety(
@@ -248,9 +293,13 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
            IsCanonicalReviewRequest(receipt, reviewRequestIdentityHash);
 
     private static bool IsCurrentContract(GovernanceRunReceipt receipt)
+        // Read-only structural interpretation of the explicitly known v7
+        // source is allowed. Live execution/replay still requires the current
+        // catalog at the service and executor gates; no history is relabeled.
         => receipt.ToolContractVersion == ScheduledGovernanceContract.ToolContractVersion &&
            receipt.SchemaHash == ScheduledGovernanceContract.SchemaHash &&
-           receipt.PublishedCatalogVersion == ScheduledGovernanceContract.PublishedCatalogVersion;
+           (receipt.PublishedCatalogVersion == ScheduledGovernanceContract.PublishedCatalogVersion ||
+            receipt.PublishedCatalogVersion == "2026-09-28-automation-v7");
 
     private static ScheduledGovernanceRuntimeIdentity? TryGetCapturedRuntimeIdentity(
         GovernanceRunReceipt received,
@@ -333,11 +382,12 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
            decision.Status == "Completed" &&
            IsCurrentContract(review) &&
            IsCurrentContract(decision) &&
-           review.CoverageComplete &&
-           decision.CoverageComplete &&
+           review.CoverageComplete == decision.CoverageComplete &&
            !string.IsNullOrWhiteSpace(review.FinalSnapshotToken) &&
            string.Equals(review.FinalSnapshotToken, decision.FinalSnapshotToken, StringComparison.Ordinal) &&
            ProjectSetsEqual(review.ProjectIdsJson, decision.ProjectIdsJson) &&
+           review.UserScopeOccurrences == 0 && decision.UserScopeOccurrences == 0 &&
+           review.UserScopeHandledSeparately == true && decision.UserScopeHandledSeparately == true &&
            string.Equals(
                review.AcceptanceEvidenceVersion,
                GovernanceRunReceiptService.ScheduledAcceptanceEvidenceVersion,
@@ -397,10 +447,13 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             var rightSet = right
                 .Where(value => !string.IsNullOrWhiteSpace(value))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            return left.Length > 0 &&
+            return left.Length > 0 && right.Length > 0 &&
                    leftSet.Count == left.Length &&
                    rightSet.Count == right.Length &&
-                   leftSet.SetEquals(rightSet);
+                   rightSet.Count(ProjectContext.IsShared) == 1 &&
+                   !rightSet.Any(ProjectContext.IsUser) &&
+                   leftSet.Where(value => !ProjectContext.IsUser(value)).ToHashSet(StringComparer.OrdinalIgnoreCase)
+                       .SetEquals(rightSet);
         }
         catch (JsonException)
         {
@@ -436,39 +489,56 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
         return recomputed && receipt.CountInvariantSatisfied.Value;
     }
 
-    private static Task<bool?> EvaluateDecisionObedienceAsync(
+    private static bool EmptyAuditIds(string json)
+    {
+        try { return JsonSerializer.Deserialize<Guid[]>(json) is { Length: 0 }; }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool? EvaluateDecisionObedience(
         IReadOnlyList<GovernanceRunReceipt> events,
         GovernanceRunReceipt decisionReceipt,
         long observedEventSequence,
         bool reviewLifecycleValid,
         bool allEventTypesAllowed,
-        CancellationToken cancellationToken)
+        bool zeroMutationRun)
     {
         if (!reviewLifecycleValid || !allEventTypesAllowed)
         {
-            return Task.FromResult<bool?>(false);
+            return false;
         }
 
         if (!Enum.TryParse<ScheduledGovernanceDecision>(
                 decisionReceipt.FinalConvergenceStatus,
                 ignoreCase: false,
-                out var decision))
+                out var decision) || !Enum.IsDefined(decision))
         {
-            return Task.FromResult<bool?>(null);
+            return null;
         }
 
         if (decision == ScheduledGovernanceDecision.ReversibleExecutionRequired)
         {
             // Proving the reversible path requires immutable executor,
             // write-set and replay evidence not present in this receipt schema.
-            return Task.FromResult<bool?>(null);
+            return zeroMutationRun ? false : null;
         }
 
         // The decision is obedient only while no later receipt event exists.
         // In particular, a later unknown event cannot be treated as harmless
         // just because it is absent from the known batch-event list.
-        return Task.FromResult<bool?>(!events.Any(row =>
+        var laterEventExists = events.Any(row =>
             row.EventSequence > decisionReceipt.EventSequence &&
-            row.EventSequence <= observedEventSequence));
+            row.EventSequence <= observedEventSequence);
+        if (laterEventExists) return false;
+        if (zeroMutationRun) return true;
+
+        // A final no-execute decision may follow a previously authorized
+        // reversible batch and re-review. This proves decision compliance,
+        // not the write-set or executor safety of that earlier execution.
+        var batchEvents = events.Where(row => row.EventType is "BatchReceived" or "BatchCompleted" or "BatchReplay").ToArray();
+        return batchEvents.Length > 0 && batchEvents.All(batch =>
+            events.LastOrDefault(row => row.EventSequence < batch.EventSequence &&
+                                        row.EventType == "ScheduledDecisionProjected")?.FinalConvergenceStatus ==
+            nameof(ScheduledGovernanceDecision.ReversibleExecutionRequired));
     }
 }

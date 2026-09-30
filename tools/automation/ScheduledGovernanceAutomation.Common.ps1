@@ -200,14 +200,14 @@ function Test-ScheduledGovernanceAutomationSpec {
     if ($publishedToolSchemasHash -cnotmatch "^[a-f0-9]{64}$") {
         Add-ScheduledGovernanceSpecError $errors "publishedToolSchemasHash must identify the complete four-tool schemas."
     }
-    if ((Get-ScheduledGovernanceProperty $catalog "publishedCatalogVersion") -cne "2026-09-28-automation-v7") {
+    if ((Get-ScheduledGovernanceProperty $catalog "publishedCatalogVersion") -cne "2026-09-28-automation-v8") {
         Add-ScheduledGovernanceSpecError $errors "publishedCatalogVersion does not match the deployed automation contract."
     }
     $runtime = Get-ScheduledGovernanceProperty $catalog "runtimeIdentity"
     if ((Get-ScheduledGovernanceProperty $runtime "serverName") -cne "Memory.ScheduledGovernanceGateway") {
         Add-ScheduledGovernanceSpecError $errors "runtimeIdentity.serverName is not the scheduled gateway."
     }
-    if ((Get-ScheduledGovernanceProperty $runtime "serverVersion") -cne "2026-09-28-automation-v7+$($expectedCatalogHash.Substring(0, 12))") {
+    if ((Get-ScheduledGovernanceProperty $runtime "serverVersion") -cne "2026-09-28-automation-v8+$($expectedCatalogHash.Substring(0, 12))") {
         Add-ScheduledGovernanceSpecError $errors "runtimeIdentity.serverVersion does not match catalog identity."
     }
 

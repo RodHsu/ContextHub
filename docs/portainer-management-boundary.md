@@ -1,0 +1,22 @@
+# Portainer management boundary
+
+Deployment helpers use a Portainer API Access Token via `X-API-Key`. Username/password login, environment fallbacks, token arguments, curl headers and secret-bearing background jobs are not supported.
+
+Source remediation, offline regression and commit preparation do not depend on password rotation. Before Production mutation, the operator must invalidate the compromised password, review and revoke affected tokens/sessions as appropriate, and record non-secret authoritative evidence. Enrollment and management requests currently require those evidence references. Password rotation alone is not proof that every previously issued token or session has been revoked. No helper tests the old password.
+
+An operator can run [New-PortainerManagementAuthority.ps1](../tools/deployment/New-PortainerManagementAuthority.ps1) in a private, non-transcribed PowerShell 7.4+ session on Windows. Its required arguments are non-secret coordinates and evidence references; it prompts for the new token with `Read-Host -AsSecureString`. Do not invoke enrollment through an agent tool or paste the token into chat. Enrollment refuses to overwrite existing authority. Operator-controlled rotation must first revoke the old token, then deliberately replace its secure authority; no runtime refresh or fallback occurs automatically.
+
+Authority is restricted to the ignored directory `.agent/local/security/portainer/`:
+
+- `management-authority.json`: project, HTTPS origin, endpoint, machine identity, permission model, rotation/session-review/approval evidence references, and optional public TLS certificate SHA-256 pin. This pin is a certificate identity, not a credential fingerprint.
+- `management-token.clixml`: Windows DPAPI-encrypted `SecureString`, bound to the enrollment user and machine. No plaintext export or portable credential backup is allowed. Recovery is revocation and operator re-enrollment, not copying plaintext.
+
+Both files and their directory require protected ACLs owned by the current operator, allowing only that identity and SYSTEM. Requests refuse missing/unignored/out-of-bound/reparse/weak-ACL authority. Normal platform TLS validation is required unless the operator supplies an independently verified exact certificate pin. Pinning is per-request origin, never a global validation bypass. Redirects, proxies, cookies, caller authentication headers and requests outside the authorized endpoint's Docker API are rejected. Failure diagnostics never contain request headers, response error bodies or credentials.
+
+Tokens inherit their Portainer user's permissions; they are not independently stack-scoped credentials. Use a dedicated non-administrator identity restricted to the required environment where the installed Portainer edition supports it. Helpers that bind the Docker socket have environment-level management power. Record that capability honestly and obtain operator approval rather than claiming stack-only access.
+
+Enrollment and local tests do not satisfy remote preflight or Production acceptance. Before remote management resumes, the current security prerequisite must confirm invalidation, token/session review and refreshed authority. Read back current compose/image/config and rollback coordinates before any deployment; do not overwrite Production with a stale local compose. The repo agent does not claim host acceptance.
+
+The boundary test defaults to actual OS ACL provisioning and in-memory loopback TLS controls. `-UseSyntheticAclFixture` checks policy only, not real storage permissions. `-SkipLoopbackTlsFixture` explicitly omits TLS positive/negative controls and cannot satisfy the security release gate. Windows Schannel may reject an ephemeral loopback server key (`SEC_E_NO_CREDENTIALS`); do not persist the test private key or weaken production TLS to make this fixture pass. `-TlsFixtureBackend Wsl` uses an existing Ubuntu Python/cryptography/OpenSSL runtime for the synthetic server, with an anonymous `memfd` TLS key, a loopback-only listener and the unchanged Windows production client. It installs nothing, configures no forwarding and emits only public certificate identity and boolean observations; this does not prove real authority ACLs or Portainer permissions. Enrollment fails closed if the repo filesystem cannot enforce the required ACLs; do not fall back to an external secret directory.
+
+Portainer documents [API Access Tokens](https://docs.portainer.io/api/access) and [account token creation/revocation](https://docs.portainer.io/user/account-settings).

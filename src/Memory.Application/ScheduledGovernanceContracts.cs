@@ -232,6 +232,8 @@ public sealed record ScheduledGovernanceReliabilityRunResult(
     public string? ResetReason { get; init; }
     public IReadOnlyDictionary<string, bool?> ServerInvariants { get; init; } =
         new Dictionary<string, bool?>();
+    public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> ServerInvariantProofs { get; init; } =
+        new Dictionary<string, ScheduledGovernanceInvariantProof>();
 }
 
 public sealed record ScheduledGovernanceReliabilityResetResult(

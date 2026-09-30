@@ -46,6 +46,8 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
     public bool? HostDispatchCompleted { get; init; }
     public bool? ImmutableSnapshotBound { get; init; }
     public bool? FixedReversibleExecutorUsed { get; init; }
+    public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> ServerInvariantProofs { get; init; } =
+        new Dictionary<string, ScheduledGovernanceInvariantProof>();
     public bool LatestBatchReceived { get; init; }
     public int InitialGovernanceActionable { get; init; }
     public int FinalGovernanceActionable { get; init; }
@@ -401,6 +403,8 @@ internal sealed record ScheduledGovernanceReliabilityRunEvidence(
     public string? ResetReason { get; init; }
     public IReadOnlyDictionary<string, bool?> ServerInvariants { get; init; } =
         new Dictionary<string, bool?>();
+    public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> ServerInvariantProofs { get; init; } =
+        new Dictionary<string, ScheduledGovernanceInvariantProof>();
 }
 
 internal sealed record ScheduledGovernanceReliabilityResetEvent(
@@ -540,7 +544,8 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
                     Surface = "ScheduledGovernanceDedicated",
                     StreakBefore = currentStreak.Count,
                     StreakAfter = currentStreak.Count,
-                    ServerInvariants = ServerInvariants(projection)
+                    ServerInvariants = ServerInvariants(projection),
+                    ServerInvariantProofs = ServerInvariantProofs(projection)
                 };
                 runEvidence.Add(excluded);
                 nonQualifyingRuns.Add(excluded);
@@ -632,7 +637,8 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
                 StreakBefore = currentStreak.Count,
                 StreakAfter = qualifies ? currentStreak.Count + 1 : 0,
                 ResetReason = qualifies ? null : ResolveResetReason(projection, baselineChanged, reasons),
-                ServerInvariants = ServerInvariants(projection)
+                ServerInvariants = ServerInvariants(projection),
+                ServerInvariantProofs = ServerInvariantProofs(projection)
             };
             runEvidence.Add(evidence);
             if (qualifies)
@@ -709,6 +715,22 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
             ["immutableSnapshotBound"] = projection.ImmutableSnapshotBound,
             ["fixedReversibleExecutorUsed"] = projection.FixedReversibleExecutorUsed
         };
+
+    private static IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> ServerInvariantProofs(
+        ScheduledGovernanceReliabilityReceiptProjection projection)
+        => ServerInvariants(projection).ToDictionary(
+            pair => pair.Key,
+            pair => projection.ServerInvariantProofs.TryGetValue(pair.Key, out var proof)
+                ? proof
+                : new ScheduledGovernanceInvariantProof(
+                    pair.Value is true ? ScheduledGovernanceInvariantProofStatus.ProvenTrue :
+                    pair.Value is false ? ScheduledGovernanceInvariantProofStatus.ProvenFalse :
+                    pair.Key == "noGeneralConnectorFallback" ? ScheduledGovernanceInvariantProofStatus.NotObservable :
+                    ScheduledGovernanceInvariantProofStatus.Unproven,
+                    pair.Value.HasValue ? "server-evidence-projection" :
+                    pair.Key == "noGeneralConnectorFallback" ? "separate-host-connector-calls-not-observable" :
+                    "authoritative-proof-unavailable",
+                    pair.Key is "noGeneralConnectorFallback" or "hostDispatchCompleted" ? "Host" : "GovernanceRun"));
 
     private void EvaluateProjection(
         CanonicalProjection item,

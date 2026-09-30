@@ -12,6 +12,113 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
     : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Zero_execute_decisions_have_typed_structural_proof_with_user_scope_handled_separately()
+    {
+        foreach (var decision in new[] { ScheduledGovernanceDecision.HumanDecisionOnly,
+                     ScheduledGovernanceDecision.NoOpConverged, ScheduledGovernanceDecision.CoverageIncomplete,
+                     ScheduledGovernanceDecision.ReversibleExecutionRequired })
+        {
+            using var scope = environment.GetFactory().Services.CreateScope();
+            var actor = UseBootstrapActor(scope.ServiceProvider);
+            var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+            var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var runId = $"typed-zero-{decision}-{Guid.NewGuid():N}";
+            var snapshot = $"kg:snapshot:{runId}";
+            var complete = decision != ScheduledGovernanceDecision.CoverageIncomplete;
+            var generic = CreateGenericReview(runId, CurrentScheduledIdentity(), snapshot) with
+            {
+                Projects = [new AccessibleProjectResult("ContextHub", true, true),
+                    new AccessibleProjectResult(ProjectContext.SharedProjectId, true, true),
+                    new AccessibleProjectResult(ProjectContext.UserProjectId, true, true)]
+            };
+            generic = generic with
+            {
+                DurableMemoryCoverage = generic.DurableMemoryCoverage! with
+                { GovernanceProjectIds = ["ContextHub", ProjectContext.SharedProjectId] },
+                Convergence = generic.Convergence with { CoverageComplete = complete }
+            };
+            await receipts.RecordReviewStartedAsync(runId, DateTimeOffset.UtcNow, CurrentScheduledIdentity(), CancellationToken.None);
+            await receipts.RecordReviewAsync(generic, DateTimeOffset.UtcNow, CancellationToken.None);
+            var projected = CreateScheduledDecision(runId, snapshot, false, 0) with
+            {
+                Decision = decision,
+                CoverageComplete = complete,
+                ResolvedProjectIds = ["ContextHub", ProjectContext.SharedProjectId]
+            };
+            await receipts.RecordScheduledDecisionAsync(projected, DateTimeOffset.UtcNow, CancellationToken.None);
+            var immutableBefore = await db.GovernanceRunReceipts.AsNoTracking()
+                .Where(row => row.GovernanceRunId == runId).OrderBy(row => row.EventSequence).ToArrayAsync();
+            var beforeJson = System.Text.Json.JsonSerializer.Serialize(immutableBefore);
+            var receipt = (await receipts.GetAsync(runId, CancellationToken.None))!;
+            var evidence = (await scope.ServiceProvider.GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>()
+                .GetAsync(new(actor.TenantId!.Value, actor.UserId!.Value, receipt.ReceiptId, runId), CancellationToken.None))!;
+            evidence.DecisionObeyed.Should().Be(decision != ScheduledGovernanceDecision.ReversibleExecutionRequired);
+            evidence.NoUnauthorizedMutation.Should().BeTrue();
+            evidence.NoDuplicateMutation.Should().BeTrue();
+            evidence.DisplayNameUnchanged.Should().BeTrue();
+            evidence.BusinessWorkItemsUntouched.Should().BeTrue();
+            evidence.ImmutableSnapshotBound.Should().BeTrue();
+            evidence.FixedReversibleExecutorUsed.Should().BeNull();
+            evidence.InvariantProofs["fixedReversibleExecutorUsed"].Status.Should()
+                .Be(ScheduledGovernanceInvariantProofStatus.NotApplicable);
+            evidence.InvariantProofs["noGeneralConnectorFallback"].Status.Should()
+                .Be(ScheduledGovernanceInvariantProofStatus.NotObservable);
+            var service = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityService>();
+            await service.ObserveAsync(receipt, CancellationToken.None);
+            var replay = await service.GetAsync(CancellationToken.None);
+            var run = replay.Runs.Single(row => row.GovernanceRunId == runId);
+            run.ServerInvariantProofs["immutableSnapshotBound"].Status.Should().Be(ScheduledGovernanceInvariantProofStatus.ProvenTrue);
+            run.ServerInvariantProofs["fixedReversibleExecutorUsed"].Status.Should().Be(ScheduledGovernanceInvariantProofStatus.NotApplicable);
+            run.CountedTowardGate.Should().BeFalse(); run.IsIgnored.Should().BeTrue();
+            run.StreakBefore.Should().Be(0); run.StreakAfter.Should().Be(0);
+            replay.ResetEvents.Should().BeEmpty(); replay.GatePassed.Should().BeFalse();
+            var immutableAfter = await db.GovernanceRunReceipts.AsNoTracking()
+                .Where(row => row.GovernanceRunId == runId).OrderBy(row => row.EventSequence).ToArrayAsync();
+            System.Text.Json.JsonSerializer.Serialize(immutableAfter).Should().Be(beforeJson);
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Zero_execute_proof_rejects_orphan_audit_or_unexpected_project_scope()
+    {
+        foreach (var corruptScope in new[] { false, true })
+        {
+            using var scope = environment.GetFactory().Services.CreateScope();
+            var actor = UseBootstrapActor(scope.ServiceProvider);
+            var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+            var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var runId = $"zero-conflict-{Guid.NewGuid():N}";
+            var snapshot = $"kg:snapshot:{runId}";
+            await receipts.RecordReviewStartedAsync(runId, DateTimeOffset.UtcNow, CurrentScheduledIdentity(), CancellationToken.None);
+            var generic = CreateGenericReview(runId, CurrentScheduledIdentity(), snapshot);
+            if (corruptScope)
+                generic = generic with { Projects = [new("UnexpectedScope", true, true), new(ProjectContext.SharedProjectId, true, true)] };
+            await receipts.RecordReviewAsync(generic, DateTimeOffset.UtcNow, CancellationToken.None);
+            await receipts.RecordScheduledDecisionAsync(CreateScheduledDecision(runId, snapshot, false, 0), DateTimeOffset.UtcNow, CancellationToken.None);
+            if (!corruptScope)
+            {
+                db.SecurityAuditEvents.Add(new SecurityAuditEvent
+                {
+                    TenantId = actor.TenantId,
+                    ActorUserId = actor.UserId,
+                    EventType = SecurityAuditEventType.GovernanceBatchExecutionCompleted,
+                    DetailsJson = System.Text.Json.JsonSerializer.Serialize(new { governanceRunId = runId }),
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+                await db.SaveChangesAsync();
+            }
+            var receipt = (await receipts.GetAsync(runId, CancellationToken.None))!;
+            var evidence = (await scope.ServiceProvider.GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>()
+                .GetAsync(new(actor.TenantId!.Value, actor.UserId!.Value, receipt.ReceiptId, runId), CancellationToken.None))!;
+            evidence.DecisionObeyed.Should().BeFalse();
+            evidence.NoUnauthorizedMutation.Should().BeNull();
+            evidence.NoDuplicateMutation.Should().BeNull();
+            evidence.DisplayNameUnchanged.Should().BeNull();
+            evidence.BusinessWorkItemsUntouched.Should().BeNull();
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Scheduled_decision_projection_requires_latest_completed_review()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -26,6 +133,44 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
 
         await action.Should().ThrowAsync<GovernanceBatchException>()
             .Where(x => x.Code == GovernanceBatchErrorCode.ReReviewRequired);
+    }
+
+    [DockerRequiredFact]
+    public async Task Authorized_reversible_execution_then_re_review_is_not_misclassified_as_zero_execute()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"reversible-typed-proof-{Guid.NewGuid():N}";
+        var identity = CurrentScheduledIdentity();
+        var snapshot = $"kg:snapshot:{runId}";
+        await receipts.RecordReviewStartedAsync(runId, DateTimeOffset.UtcNow, identity, CancellationToken.None);
+        await receipts.RecordReviewAsync(CreateGenericReview(runId, identity, snapshot, actionable: 1), DateTimeOffset.UtcNow, CancellationToken.None);
+        await receipts.RecordScheduledDecisionAsync(CreateScheduledDecision(runId, snapshot, false, 1), DateTimeOffset.UtcNow, CancellationToken.None);
+        var request = new GovernanceBatchExecuteRequest(runId, [ProjectContext.SharedProjectId], snapshot,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled,
+            ToolContractVersion: GovernanceToolContract.ToolContractVersion, SchemaHash: GovernanceToolContract.SchemaHash)
+        { ReceiptContractIdentity = identity };
+        await receipts.RecordExecutionStartedAsync(request, DateTimeOffset.UtcNow, CancellationToken.None);
+        await receipts.RecordExecutionAsync(request, CreateNoOpExecution(runId, snapshot), DateTimeOffset.UtcNow, CancellationToken.None);
+        var finalSnapshot = snapshot + ":re-review";
+        await receipts.RecordReviewStartedAsync(runId, DateTimeOffset.UtcNow, identity, CancellationToken.None, isReReview: true);
+        await receipts.RecordReviewAsync(CreateGenericReview(runId, identity, finalSnapshot, isReReview: true), DateTimeOffset.UtcNow, CancellationToken.None);
+        await receipts.RecordScheduledDecisionAsync(CreateScheduledDecision(runId, finalSnapshot, true, 0), DateTimeOffset.UtcNow, CancellationToken.None);
+        var receipt = (await receipts.GetAsync(runId, CancellationToken.None))!;
+        var evidence = (await scope.ServiceProvider.GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>()
+            .GetAsync(new(actor.TenantId!.Value, actor.UserId!.Value, receipt.ReceiptId, runId), CancellationToken.None))!;
+        evidence.DecisionObeyed.Should().BeTrue();
+        evidence.ImmutableSnapshotBound.Should().BeTrue();
+        evidence.NoUnauthorizedMutation.Should().BeNull("executor write-set safety is not proven by a later no-op decision");
+        evidence.FixedReversibleExecutorUsed.Should().BeNull();
+        evidence.InvariantProofs.Should().NotContainKey("fixedReversibleExecutorUsed");
+        var reliability = await scope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityService>()
+            .ObserveAsync(receipt, CancellationToken.None);
+        var run = reliability.Runs.Single(row => row.GovernanceRunId == runId);
+        run.ServerInvariantProofs["fixedReversibleExecutorUsed"].Status.Should().Be(ScheduledGovernanceInvariantProofStatus.Unproven);
+        run.CountedTowardGate.Should().BeFalse(); run.IsIgnored.Should().BeTrue();
+        reliability.ResetEvents.Should().BeEmpty();
     }
 
     [DockerRequiredFact]

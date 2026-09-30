@@ -55,7 +55,7 @@ public sealed class ScheduledGovernanceSchemaTests
             ScheduledGovernanceToolCatalog.PublishedToolNames);
         methods.Should().HaveCount(4);
         ScheduledGovernanceContract.ToolContractVersion.Should().Be("1.5");
-        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-09-28-automation-v7");
+        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-09-28-automation-v8");
         ScheduledGovernanceContract.FixedReversibleActions.Should().Contain(GovernanceBatchActionType.SkillMetadataProposal);
 
         foreach (var method in methods)
@@ -137,10 +137,12 @@ public sealed class ScheduledGovernanceSchemaTests
             .GetProperty("properties");
         foreach (var name in new[] { "surface", "dispatchProvenance", "provenanceTrusted",
                      "evidenceKind", "evidenceReferenceHash", "naturalScheduleSlotHash", "exclusionReason",
-                     "streakBefore", "streakAfter", "resetReason", "serverInvariants" })
+                     "streakBefore", "streakAfter", "resetReason", "serverInvariants", "serverInvariantProofs" })
         {
             runProperties.TryGetProperty(name, out _).Should().BeTrue();
         }
+        runProperties.GetProperty("serverInvariantProofs").GetRawText().Should().Contain("NotApplicable");
+        runProperties.GetProperty("serverInvariantProofs").GetRawText().Should().Contain("NotObservable");
     }
 
     [Fact]

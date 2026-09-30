@@ -29,7 +29,27 @@ public sealed record ScheduledGovernanceServerSafetyEvidenceSnapshot(
     bool? BusinessWorkItemsUntouched,
     bool? HostDispatchCompleted,
     bool? ImmutableSnapshotBound,
-    bool? FixedReversibleExecutorUsed);
+    bool? FixedReversibleExecutorUsed)
+{
+    public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> InvariantProofs { get; init; } =
+        new Dictionary<string, ScheduledGovernanceInvariantProof>();
+}
+
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<ScheduledGovernanceInvariantProofStatus>))]
+public enum ScheduledGovernanceInvariantProofStatus
+{
+    ProvenTrue,
+    ProvenFalse,
+    NotApplicable,
+    Unproven,
+    NotObservable
+}
+
+/// <summary>Non-secret server-derived proof scope, status and explanation.</summary>
+public sealed record ScheduledGovernanceInvariantProof(
+    ScheduledGovernanceInvariantProofStatus Status,
+    string Reason,
+    string Scope);
 
 public sealed record ScheduledGovernanceNaturalOriginAuthoritySnapshot(
     string PlatformIssuer,
