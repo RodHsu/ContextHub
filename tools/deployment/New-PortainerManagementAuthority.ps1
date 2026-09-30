@@ -35,8 +35,11 @@ if (-not $PSCmdlet.ShouldProcess($directory,'Enroll operator-controlled encrypte
 if ((Test-Path -LiteralPath $authorityPath) -or (Test-Path -LiteralPath $tokenPath)) {
     throw 'PORTAINER_AUTHORITY_ALREADY_EXISTS_REFUSING_OVERWRITE'
 }
-& git -C $repoRoot check-ignore --quiet -- $authorityPath $tokenPath
-if ($LASTEXITCODE -ne 0) { throw 'PORTAINER_AUTHORITY_NOT_IGNORED' }
+foreach ($authorityFilePath in @($authorityPath,$tokenPath)) {
+    $relativePath=[IO.Path]::GetRelativePath($repoRoot,$authorityFilePath)
+    & git -C $repoRoot check-ignore --quiet -- $relativePath
+    if ($LASTEXITCODE -ne 0) { throw 'PORTAINER_AUTHORITY_NOT_IGNORED' }
+}
 $cursor=Split-Path $directory -Parent
 while ($cursor.Length -ge $repoRoot.Length) {
     if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
