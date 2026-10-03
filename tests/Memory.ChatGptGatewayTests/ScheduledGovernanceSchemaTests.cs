@@ -55,7 +55,7 @@ public sealed class ScheduledGovernanceSchemaTests
             ScheduledGovernanceToolCatalog.PublishedToolNames);
         methods.Should().HaveCount(4);
         ScheduledGovernanceContract.ToolContractVersion.Should().Be("1.5");
-        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-09-28-automation-v8");
+        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-10-03-automation-v9");
         ScheduledGovernanceContract.FixedReversibleActions.Should().Contain(GovernanceBatchActionType.SkillMetadataProposal);
 
         foreach (var method in methods)
@@ -120,6 +120,14 @@ public sealed class ScheduledGovernanceSchemaTests
         var runGet = JsonSerializer.SerializeToElement(McpServerTool.Create(
             methods[ScheduledGovernanceContract.ReceiptToolName], target, new McpServerToolCreateOptions()).ProtocolTool);
         var outputProperties = runGet.GetProperty("outputSchema").GetProperty("properties");
+        outputProperties.GetProperty("serverInvariants").GetProperty("additionalProperties")
+            .GetProperty("type").EnumerateArray().Select(x => x.GetString()).Should().Contain("null");
+        var proofProperties = outputProperties.GetProperty("serverInvariantProofs")
+            .GetProperty("additionalProperties").GetProperty("properties");
+        proofProperties.GetProperty("status").GetProperty("enum").EnumerateArray()
+            .Select(x => x.GetString()).Should().BeEquivalentTo(Enum.GetNames<ScheduledGovernanceInvariantProofStatus>());
+        proofProperties.TryGetProperty("reason", out _).Should().BeTrue();
+        proofProperties.TryGetProperty("scope", out _).Should().BeTrue();
         outputProperties.TryGetProperty("runExists", out _).Should().BeTrue();
         outputProperties.TryGetProperty("received", out _).Should().BeTrue();
         outputProperties.TryGetProperty("terminal", out _).Should().BeTrue();
@@ -141,8 +149,8 @@ public sealed class ScheduledGovernanceSchemaTests
         {
             runProperties.TryGetProperty(name, out _).Should().BeTrue();
         }
-        runProperties.GetProperty("serverInvariantProofs").GetRawText().Should().Contain("NotApplicable");
-        runProperties.GetProperty("serverInvariantProofs").GetRawText().Should().Contain("NotObservable");
+        runProperties.GetProperty("serverInvariantProofs").GetProperty("additionalProperties")
+            .GetProperty("$ref").GetString().Should().Be("#/properties/serverInvariantProofs/additionalProperties");
     }
 
     [Fact]

@@ -158,6 +158,20 @@ public sealed record ScheduledGovernanceRunResult(
     public ScheduledGovernanceDecision? Decision { get; init; }
     public string Outcome { get; init; } = string.Empty;
     public ScheduledGovernanceReliabilitySummary? Reliability { get; init; }
+    /// <summary>Current receipt proof projection for hosts that collapse nested reliability schemas.</summary>
+    [System.Text.Json.Serialization.JsonPropertyOrder(-2)]
+    public IReadOnlyDictionary<string, bool?> ServerInvariants =>
+        CurrentRunEvidence?.ServerInvariants ?? new Dictionary<string, bool?>();
+    [System.Text.Json.Serialization.JsonPropertyOrder(-1)]
+    public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> ServerInvariantProofs =>
+        CurrentRunEvidence?.ServerInvariantProofs ?? new Dictionary<string, ScheduledGovernanceInvariantProof>();
+
+    // Never borrow evidence from another run, a missing receipt, or rejected lineage.
+    private ScheduledGovernanceReliabilityRunResult? CurrentRunEvidence =>
+        RunExists && Received && Decision.HasValue && ReceiptId != Guid.Empty
+            ? Reliability?.Runs.FirstOrDefault(run => run.ReceiptId == ReceiptId &&
+                string.Equals(run.GovernanceRunId, GovernanceRunId, StringComparison.Ordinal))
+            : null;
     public GovernanceSurfaceCoverageResult SkillCoverage { get; init; } = new(0, 0, 0, 0, 0, 0, 0, false, true);
     public IReadOnlyDictionary<string, int> SkillSignalCounts { get; init; } = new Dictionary<string, int>();
 }

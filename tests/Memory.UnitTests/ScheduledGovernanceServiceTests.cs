@@ -405,6 +405,52 @@ public sealed class ScheduledGovernanceServiceTests
     }
 
     [Fact]
+    public async Task Run_Get_Proof_Projection_Should_Bind_Exact_Receipt_And_Preserve_Unknown_States()
+    {
+        var receipt = CreateDecisionReceipt("proof-run", ScheduledGovernanceDecision.HumanDecisionOnly);
+        var proof = new ScheduledGovernanceInvariantProof(
+            ScheduledGovernanceInvariantProofStatus.NotApplicable, "zero-execute", "GovernanceRun");
+        var evidence = new ScheduledGovernanceReliabilityRunResult(
+            receipt.GovernanceRunId, receipt.ReceiptId, "Scheduled", receipt.StartedAt, null,
+            null, null, null, false, false, true, false, [], "Unproven", false, "server-only")
+        {
+            ServerInvariants = new Dictionary<string, bool?> { ["fixedReversibleExecutorUsed"] = null },
+            ServerInvariantProofs = new Dictionary<string, ScheduledGovernanceInvariantProof>
+            {
+                ["fixedReversibleExecutorUsed"] = proof
+            }
+        };
+        var summary = new ScheduledGovernanceReliabilitySummary(
+            6, 0, false, null, null, null, null, [evidence], [], [], [], [], 0, 0, 1,
+            new("Asia/Taipei", "UTC", TimeSpan.FromHours(4), [], [], "unchanged"),
+            null, null, new(false, "Unproven", "host-owned"), false, null);
+        var reliability = new CountingReliability { Summary = summary };
+        var service = CreateService(new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(), new StubReceipts(receipt), reliability);
+
+        var result = await service.GetReceiptAsync(receipt.GovernanceRunId, CancellationToken.None);
+
+        result.ServerInvariants["fixedReversibleExecutorUsed"].Should().BeNull();
+        result.ServerInvariantProofs["fixedReversibleExecutorUsed"].Should().Be(proof);
+        result.Reliability.Should().BeSameAs(summary);
+        reliability.ObserveCount.Should().Be(0);
+        reliability.GetCount.Should().Be(1);
+        foreach (var rejected in new[]
+                 {
+                     result with { ReceiptId = Guid.NewGuid() },
+                     result with { GovernanceRunId = "other-run" },
+                     result with { RunExists = false },
+                     result with { Received = false },
+                     result with { Decision = null },
+                     result with { Reliability = null }
+                 })
+        {
+            rejected.ServerInvariants.Should().BeEmpty();
+            rejected.ServerInvariantProofs.Should().BeEmpty();
+        }
+    }
+
+    [Fact]
     public async Task GetReceipt_Should_Fail_Closed_When_Generic_Review_Pollutes_Scheduled_Lineage()
     {
         var persisted = CreateReceipt(
@@ -857,6 +903,7 @@ public sealed class ScheduledGovernanceServiceTests
 
     private sealed class CountingReliability : IScheduledGovernanceReliabilityService
     {
+        public ScheduledGovernanceReliabilitySummary? Summary { get; init; }
         public int ObserveCount { get; private set; }
         public int GetCount { get; private set; }
 
@@ -865,13 +912,13 @@ public sealed class ScheduledGovernanceServiceTests
             CancellationToken cancellationToken)
         {
             ObserveCount++;
-            return Task.FromResult<ScheduledGovernanceReliabilitySummary>(null!);
+            return Task.FromResult(Summary!);
         }
 
         public Task<ScheduledGovernanceReliabilitySummary> GetAsync(CancellationToken cancellationToken)
         {
             GetCount++;
-            return Task.FromResult<ScheduledGovernanceReliabilitySummary>(null!);
+            return Task.FromResult(Summary!);
         }
     }
 }

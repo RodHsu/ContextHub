@@ -96,6 +96,22 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
         names.Should().BeEquivalentTo(ScheduledGovernanceToolCatalog.PublishedToolNames);
         names.Should().HaveCount(4);
+        var runGet = tools.EnumerateArray().Single(tool =>
+            tool.GetProperty("name").GetString() == ScheduledGovernanceContract.ReceiptToolName);
+        var output = runGet.GetProperty("outputSchema").GetProperty("properties");
+        output.GetProperty("serverInvariants").GetProperty("additionalProperties")
+            .GetProperty("type").EnumerateArray().Select(value => value.GetString()).Should().Contain("null");
+        var proofs = output.GetProperty("serverInvariantProofs").GetProperty("additionalProperties")
+            .GetProperty("properties");
+        proofs.GetProperty("status").GetProperty("enum").EnumerateArray().Select(value => value.GetString())
+            .Should().BeEquivalentTo(Enum.GetNames<ScheduledGovernanceInvariantProofStatus>());
+        proofs.TryGetProperty("reason", out _).Should().BeTrue();
+        proofs.TryGetProperty("scope", out _).Should().BeTrue();
+        var nestedProofs = output.GetProperty("reliability").GetProperty("properties")
+            .GetProperty("runs").GetProperty("items").GetProperty("properties")
+            .GetProperty("serverInvariantProofs");
+        nestedProofs.GetProperty("additionalProperties").GetProperty("$ref").GetString()
+            .Should().Be("#/properties/serverInvariantProofs/additionalProperties");
         names.Should().NotContain([
             "governance_batch_execute", "memory_delete", "project_cleanup_apply", "governance_tombstone_get",
             "agent_execution_prepare", "agent_execution_claim_next", "agent_execution_get",
