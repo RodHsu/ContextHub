@@ -72,9 +72,40 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             run.CountedTowardGate.Should().BeFalse(); run.IsIgnored.Should().BeTrue();
             run.StreakBefore.Should().Be(0); run.StreakAfter.Should().Be(0);
             replay.ResetEvents.Should().BeEmpty(); replay.GatePassed.Should().BeFalse();
+            var flat = await scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>()
+                .GetReceiptAsync(runId, CancellationToken.None);
+            flat.ReceiptId.Should().Be(receipt.ReceiptId);
+            flat.InitialReviewReceived.Should().BeTrue();
+            flat.InitialReviewReceivedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.ProvenTrue);
+            flat.DecisionObeyed.Should().Be(evidence.DecisionObeyed);
+            flat.DecisionObeyedStatus.Should().Be(run.ServerInvariantProofs["decisionObeyed"].Status);
+            flat.DisplayNameUnchanged.Should().Be(run.ServerInvariants["displayNameUnchangedByRun"]);
+            flat.BusinessWorkItemsUntouched.Should().Be(run.ServerInvariants["businessWorkItemsUntouchedByRun"]);
+            flat.FixedReversibleExecutorUsed.Should().BeNull();
+            flat.FixedReversibleExecutorUsedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.NotApplicable);
+            flat.NoGeneralConnectorFallbackStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.NotObservable);
+            flat.HostDispatchCompletedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.Unproven);
+            flat.ServerInvariantProofs.Should().BeEquivalentTo(run.ServerInvariantProofs);
+            flat.ServerInvariants.Should().BeEquivalentTo(run.ServerInvariants);
+
             var immutableAfter = await db.GovernanceRunReceipts.AsNoTracking()
                 .Where(row => row.GovernanceRunId == runId).OrderBy(row => row.EventSequence).ToArrayAsync();
             System.Text.Json.JsonSerializer.Serialize(immutableAfter).Should().Be(beforeJson);
+            if (decision == ScheduledGovernanceDecision.HumanDecisionOnly)
+            {
+                // The reliability row still references the prior immutable receipt.
+                // A new same-run review must never inherit its zero-execute proof.
+                await receipts.RecordReviewStartedAsync(runId, DateTimeOffset.UtcNow,
+                    CurrentScheduledIdentity(), CancellationToken.None, isReReview: true);
+                var pending = await scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>()
+                    .GetReceiptAsync(runId, CancellationToken.None);
+                pending.ReceiptId.Should().NotBe(receipt.ReceiptId);
+                pending.InitialReviewReceived.Should().BeNull();
+                pending.NoUnauthorizedMutation.Should().BeNull();
+                pending.NoUnauthorizedMutationStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.Unproven);
+                pending.FixedReversibleExecutorUsedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.Unproven);
+            }
+
         }
     }
 
@@ -171,6 +202,14 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         run.ServerInvariantProofs["fixedReversibleExecutorUsed"].Status.Should().Be(ScheduledGovernanceInvariantProofStatus.Unproven);
         run.CountedTowardGate.Should().BeFalse(); run.IsIgnored.Should().BeTrue();
         reliability.ResetEvents.Should().BeEmpty();
+        var flat = await scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>()
+            .GetReceiptAsync(runId, CancellationToken.None);
+        flat.FixedReversibleExecutorUsedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.Unproven);
+        flat.NoUnauthorizedMutation.Should().BeNull();
+        // This fixture retains a batch requiring recovery/re-review; the public
+        // receipt must fail closed until its Decision lineage becomes usable.
+        flat.Decision.Should().BeNull();
+        flat.ServerInvariantProofs.Should().BeEmpty();
     }
 
     [DockerRequiredFact]

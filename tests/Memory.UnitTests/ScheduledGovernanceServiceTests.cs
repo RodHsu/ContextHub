@@ -414,10 +414,11 @@ public sealed class ScheduledGovernanceServiceTests
             receipt.GovernanceRunId, receipt.ReceiptId, "Scheduled", receipt.StartedAt, null,
             null, null, null, false, false, true, false, [], "Unproven", false, "server-only")
         {
-            ServerInvariants = new Dictionary<string, bool?> { ["fixedReversibleExecutorUsed"] = null },
+            ServerInvariants = new Dictionary<string, bool?> { ["fixedReversibleExecutorUsed"] = null, ["initialReviewReceived"] = true },
             ServerInvariantProofs = new Dictionary<string, ScheduledGovernanceInvariantProof>
             {
-                ["fixedReversibleExecutorUsed"] = proof
+                ["fixedReversibleExecutorUsed"] = proof,
+                ["initialReviewReceived"] = new(ScheduledGovernanceInvariantProofStatus.ProvenTrue, "immutable-review", "GovernanceRun")
             }
         };
         var summary = new ScheduledGovernanceReliabilitySummary(
@@ -432,21 +433,39 @@ public sealed class ScheduledGovernanceServiceTests
 
         result.ServerInvariants["fixedReversibleExecutorUsed"].Should().BeNull();
         result.ServerInvariantProofs["fixedReversibleExecutorUsed"].Should().Be(proof);
+        result.FixedReversibleExecutorUsed.Should().BeNull();
+        result.FixedReversibleExecutorUsedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.NotApplicable);
+        result.FixedReversibleExecutorUsedReason.Should().Be(proof.Reason);
+        result.FixedReversibleExecutorUsedScope.Should().Be(proof.Scope);
+        result.InitialReviewReceived.Should().BeTrue();
+        result.InitialReviewReceivedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.ProvenTrue);
+        result.HostDispatchCompleted.Should().BeNull();
+        result.HostDispatchCompletedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.Unproven);
+        result.NoGeneralConnectorFallback.Should().BeNull();
+        result.NoGeneralConnectorFallbackStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.NotObservable);
         result.Reliability.Should().BeSameAs(summary);
         reliability.ObserveCount.Should().Be(0);
         reliability.GetCount.Should().Be(1);
         foreach (var rejected in new[]
                  {
+                     result with { ReceiptId = Guid.Empty },
                      result with { ReceiptId = Guid.NewGuid() },
+                     result with { Reliability = summary with { Runs = [evidence with { ReceiptId = Guid.NewGuid() }] } },
+                     result with { Reliability = summary with { Runs = [evidence with { GovernanceRunId = "stale-run" }] } },
                      result with { GovernanceRunId = "other-run" },
                      result with { RunExists = false },
                      result with { Received = false },
                      result with { Decision = null },
+                     result with { Decision = (ScheduledGovernanceDecision)999 },
                      result with { Reliability = null }
                  })
         {
             rejected.ServerInvariants.Should().BeEmpty();
             rejected.ServerInvariantProofs.Should().BeEmpty();
+            rejected.InitialReviewReceived.Should().BeNull();
+            rejected.InitialReviewReceivedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.Unproven);
+            rejected.FixedReversibleExecutorUsed.Should().BeNull();
+            rejected.FixedReversibleExecutorUsedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.Unproven);
         }
     }
 

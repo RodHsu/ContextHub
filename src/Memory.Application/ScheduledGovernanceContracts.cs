@@ -166,9 +166,77 @@ public sealed record ScheduledGovernanceRunResult(
     public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> ServerInvariantProofs =>
         CurrentRunEvidence?.ServerInvariantProofs ?? new Dictionary<string, ScheduledGovernanceInvariantProof>();
 
+    // Explicit primitive properties survive hosts that collapse complex output schemas.
+    public bool? InitialReviewReceived => ScalarValue("initialReviewReceived");
+    public ScheduledGovernanceInvariantProofStatus InitialReviewReceivedStatus => ScalarProof("initialReviewReceived").Status;
+    public string InitialReviewReceivedReason => ScalarProof("initialReviewReceived").Reason;
+    public string InitialReviewReceivedScope => ScalarProof("initialReviewReceived").Scope;
+
+    public bool? CountInvariantSatisfied => ScalarValue("countInvariantSatisfied");
+    public ScheduledGovernanceInvariantProofStatus CountInvariantSatisfiedStatus => ScalarProof("countInvariantSatisfied").Status;
+    public string CountInvariantSatisfiedReason => ScalarProof("countInvariantSatisfied").Reason;
+    public string CountInvariantSatisfiedScope => ScalarProof("countInvariantSatisfied").Scope;
+
+    public bool? DecisionObeyed => ScalarValue("decisionObeyed");
+    public ScheduledGovernanceInvariantProofStatus DecisionObeyedStatus => ScalarProof("decisionObeyed").Status;
+    public string DecisionObeyedReason => ScalarProof("decisionObeyed").Reason;
+    public string DecisionObeyedScope => ScalarProof("decisionObeyed").Scope;
+
+    public bool? NoGeneralConnectorFallback => ScalarValue("noGeneralConnectorFallback");
+    public ScheduledGovernanceInvariantProofStatus NoGeneralConnectorFallbackStatus => ScalarProof("noGeneralConnectorFallback").Status;
+    public string NoGeneralConnectorFallbackReason => ScalarProof("noGeneralConnectorFallback").Reason;
+    public string NoGeneralConnectorFallbackScope => ScalarProof("noGeneralConnectorFallback").Scope;
+
+    public bool? NoUnauthorizedMutation => ScalarValue("noUnauthorizedMutation");
+    public ScheduledGovernanceInvariantProofStatus NoUnauthorizedMutationStatus => ScalarProof("noUnauthorizedMutation").Status;
+    public string NoUnauthorizedMutationReason => ScalarProof("noUnauthorizedMutation").Reason;
+    public string NoUnauthorizedMutationScope => ScalarProof("noUnauthorizedMutation").Scope;
+
+    public bool? NoDuplicateMutation => ScalarValue("noDuplicateMutation");
+    public ScheduledGovernanceInvariantProofStatus NoDuplicateMutationStatus => ScalarProof("noDuplicateMutation").Status;
+    public string NoDuplicateMutationReason => ScalarProof("noDuplicateMutation").Reason;
+    public string NoDuplicateMutationScope => ScalarProof("noDuplicateMutation").Scope;
+
+    public bool? DisplayNameUnchanged => ScalarValue("displayNameUnchangedByRun");
+    public ScheduledGovernanceInvariantProofStatus DisplayNameUnchangedStatus => ScalarProof("displayNameUnchangedByRun").Status;
+    public string DisplayNameUnchangedReason => ScalarProof("displayNameUnchangedByRun").Reason;
+    public string DisplayNameUnchangedScope => ScalarProof("displayNameUnchangedByRun").Scope;
+
+    public bool? BusinessWorkItemsUntouched => ScalarValue("businessWorkItemsUntouchedByRun");
+    public ScheduledGovernanceInvariantProofStatus BusinessWorkItemsUntouchedStatus => ScalarProof("businessWorkItemsUntouchedByRun").Status;
+    public string BusinessWorkItemsUntouchedReason => ScalarProof("businessWorkItemsUntouchedByRun").Reason;
+    public string BusinessWorkItemsUntouchedScope => ScalarProof("businessWorkItemsUntouchedByRun").Scope;
+
+    public bool? HostDispatchCompleted => ScalarValue("hostDispatchCompleted");
+    public ScheduledGovernanceInvariantProofStatus HostDispatchCompletedStatus => ScalarProof("hostDispatchCompleted").Status;
+    public string HostDispatchCompletedReason => ScalarProof("hostDispatchCompleted").Reason;
+    public string HostDispatchCompletedScope => ScalarProof("hostDispatchCompleted").Scope;
+
+    public bool? ImmutableSnapshotBound => ScalarValue("immutableSnapshotBound");
+    public ScheduledGovernanceInvariantProofStatus ImmutableSnapshotBoundStatus => ScalarProof("immutableSnapshotBound").Status;
+    public string ImmutableSnapshotBoundReason => ScalarProof("immutableSnapshotBound").Reason;
+    public string ImmutableSnapshotBoundScope => ScalarProof("immutableSnapshotBound").Scope;
+
+    public bool? FixedReversibleExecutorUsed => ScalarValue("fixedReversibleExecutorUsed");
+    public ScheduledGovernanceInvariantProofStatus FixedReversibleExecutorUsedStatus => ScalarProof("fixedReversibleExecutorUsed").Status;
+    public string FixedReversibleExecutorUsedReason => ScalarProof("fixedReversibleExecutorUsed").Reason;
+    public string FixedReversibleExecutorUsedScope => ScalarProof("fixedReversibleExecutorUsed").Scope;
+
+    private bool? ScalarValue(string key) =>
+        ServerInvariants.TryGetValue(key, out var value) ? value : null;
+
+    private ScheduledGovernanceInvariantProof ScalarProof(string key) =>
+        ServerInvariantProofs.TryGetValue(key, out var proof) ? proof : new(
+            key == "noGeneralConnectorFallback" ? ScheduledGovernanceInvariantProofStatus.NotObservable :
+                ScheduledGovernanceInvariantProofStatus.Unproven,
+            key == "noGeneralConnectorFallback" ? "separate-host-connector-calls-not-observable" :
+                "current-receipt-proof-unavailable",
+            key is "noGeneralConnectorFallback" or "hostDispatchCompleted" ? "Host" : "GovernanceRun");
+
     // Never borrow evidence from another run, a missing receipt, or rejected lineage.
     private ScheduledGovernanceReliabilityRunResult? CurrentRunEvidence =>
-        RunExists && Received && Decision.HasValue && ReceiptId != Guid.Empty
+        RunExists && Received && Decision.HasValue && Enum.IsDefined(Decision.Value) &&
+        ReceiptId != Guid.Empty && !string.IsNullOrWhiteSpace(GovernanceRunId)
             ? Reliability?.Runs.FirstOrDefault(run => run.ReceiptId == ReceiptId &&
                 string.Equals(run.GovernanceRunId, GovernanceRunId, StringComparison.Ordinal))
             : null;

@@ -82,6 +82,37 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Automation_Kestrel_Public_Http_Schema_Should_Survive_Host_Projection()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString, environment.RedisConnectionString,
+            surface: ChatGptGatewaySurface.Automation);
+        factory.UseKestrel(0);
+        using var http = CreateAuthorizedClient(factory);
+        http.BaseAddress!.Port.Should().BeGreaterThan(0);
+        var raw = ExtractSseJson(await SendMcpAsync(http, null, 1, "tools/list", new { }));
+        var tools = raw.GetProperty("result").GetProperty("tools").EnumerateArray().ToArray();
+        tools.Select(x => x.GetProperty("name").GetString()).Should().BeEquivalentTo(
+            ScheduledGovernanceToolCatalog.PublishedToolNames);
+        var schema = tools.Single(x => x.GetProperty("name").GetString() == ScheduledGovernanceContract.ReceiptToolName)
+            .GetProperty("outputSchema");
+        ScheduledGovernanceSchemaTests.AssertScalarProofSchema(schema);
+        ScheduledGovernanceSchemaTests.AssertScalarProofSchema(ScheduledGovernanceSchemaTests.CollapseComplexHostSchema(schema));
+
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri(http.BaseAddress, "/mcp"),
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, http);
+        await using var client = await McpClient.CreateAsync(transport);
+        var discovered = await client.ListToolsAsync();
+        discovered.Should().HaveCount(4);
+        var receiptTool = discovered.Single(x => x.ProtocolTool.Name == ScheduledGovernanceContract.ReceiptToolName);
+        ScheduledGovernanceSchemaTests.AssertScalarProofSchema(
+            JsonSerializer.SerializeToElement(receiptTool.ProtocolTool).GetProperty("outputSchema"));
+    }
+
+    [DockerRequiredFact]
     public async Task Automation_Surface_Should_Publish_Only_Four_Least_Privilege_Tools()
     {
         await using var factory = new ChatGptGatewayApplicationFactory(
@@ -98,6 +129,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         names.Should().HaveCount(4);
         var runGet = tools.EnumerateArray().Single(tool =>
             tool.GetProperty("name").GetString() == ScheduledGovernanceContract.ReceiptToolName);
+        ScheduledGovernanceSchemaTests.AssertScalarProofSchema(runGet.GetProperty("outputSchema"));
+        ScheduledGovernanceSchemaTests.AssertScalarProofSchema(
+            ScheduledGovernanceSchemaTests.CollapseComplexHostSchema(runGet.GetProperty("outputSchema")));
         var output = runGet.GetProperty("outputSchema").GetProperty("properties");
         output.GetProperty("serverInvariants").GetProperty("additionalProperties")
             .GetProperty("type").EnumerateArray().Select(value => value.GetString()).Should().Contain("null");

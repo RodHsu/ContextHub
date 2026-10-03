@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Schema;
 using FluentAssertions;
 using Memory.Application;
 using Memory.ChatGptGateway;
@@ -55,7 +57,7 @@ public sealed class ScheduledGovernanceSchemaTests
             ScheduledGovernanceToolCatalog.PublishedToolNames);
         methods.Should().HaveCount(4);
         ScheduledGovernanceContract.ToolContractVersion.Should().Be("1.5");
-        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-10-03-automation-v9");
+        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-10-03-automation-v10");
         ScheduledGovernanceContract.FixedReversibleActions.Should().Contain(GovernanceBatchActionType.SkillMetadataProposal);
 
         foreach (var method in methods)
@@ -151,6 +153,71 @@ public sealed class ScheduledGovernanceSchemaTests
         }
         runProperties.GetProperty("serverInvariantProofs").GetProperty("additionalProperties")
             .GetProperty("$ref").GetString().Should().Be("#/properties/serverInvariantProofs/additionalProperties");
+    }
+
+    internal static readonly string[] ScalarProofNames =
+    [
+        "initialReviewReceived", "countInvariantSatisfied", "decisionObeyed", "noGeneralConnectorFallback",
+        "noUnauthorizedMutation", "noDuplicateMutation", "displayNameUnchanged", "businessWorkItemsUntouched",
+        "hostDispatchCompleted", "immutableSnapshotBound", "fixedReversibleExecutorUsed"
+    ];
+
+    internal static void AssertScalarProofSchema(JsonElement schema)
+    {
+        var properties = schema.GetProperty("properties");
+        foreach (var name in ScalarProofNames)
+        {
+            properties.GetProperty(name).GetProperty("type").EnumerateArray().Select(x => x.GetString())
+                .Should().BeEquivalentTo("boolean", "null");
+            var status = properties.GetProperty(name + "Status");
+            // System.Text.Json may omit redundant type when enum contains only strings.
+            if (status.TryGetProperty("type", out var statusType))
+                statusType.GetString().Should().Be("string");
+            status.GetProperty("enum").EnumerateArray().Should().OnlyContain(x => x.ValueKind == JsonValueKind.String);
+            status.GetProperty("enum").EnumerateArray().Select(x => x.GetString()).Should().BeEquivalentTo(
+                "ProvenTrue", "ProvenFalse", "NotApplicable", "Unproven", "NotObservable");
+            foreach (var suffix in new[] { "Reason", "Scope" })
+            {
+                var type = properties.GetProperty(name + suffix).GetProperty("type");
+                var types = type.ValueKind == JsonValueKind.Array
+                    ? type.EnumerateArray().Select(x => x.GetString()).ToArray() : [type.GetString()];
+                types.Should().Contain("string").And.OnlyContain(x => x == "string" || x == "null");
+            }
+        }
+    }
+
+    internal static JsonElement CollapseComplexHostSchema(JsonElement schema)
+    {
+        var node = JsonNode.Parse(schema.GetRawText())!;
+        var properties = node["properties"]!.AsObject();
+        foreach (var property in properties.ToArray())
+        {
+            var value = property.Value!;
+            if (value["properties"] is not null || value["additionalProperties"] is not null ||
+                value["items"] is not null || value["$ref"] is not null)
+            {
+                properties[property.Key] = JsonNode.Parse("{\"type\":[\"object\",\"null\"]}");
+            }
+        }
+        return JsonSerializer.SerializeToElement(node);
+    }
+
+    [Fact]
+    public void Clr_And_Mcp_Scalar_Proof_Schema_Should_Survive_Complex_Host_Collapse()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerOptions.Web);
+        options.MakeReadOnly(populateMissingResolver: true);
+        var clr = JsonSerializer.SerializeToElement(options.GetJsonSchemaAsNode(typeof(ScheduledGovernanceRunResult)));
+        AssertScalarProofSchema(clr);
+        var method = typeof(ScheduledGovernanceTools).GetMethod(nameof(ScheduledGovernanceTools.scheduled_governance_run_get))!;
+        var tool = McpServerTool.Create(method, new ScheduledGovernanceTools(new StubScheduledGovernanceService()),
+            new McpServerToolCreateOptions());
+        var schema = JsonSerializer.SerializeToElement(tool.ProtocolTool).GetProperty("outputSchema");
+        AssertScalarProofSchema(schema);
+        var host = CollapseComplexHostSchema(schema);
+        host.GetProperty("properties").GetProperty("serverInvariantProofs").TryGetProperty("additionalProperties", out _)
+            .Should().BeFalse("the host deliberately erases complex structure");
+        AssertScalarProofSchema(host);
     }
 
     [Fact]

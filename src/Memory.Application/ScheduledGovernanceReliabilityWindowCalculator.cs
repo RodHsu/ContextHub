@@ -704,6 +704,7 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
         ScheduledGovernanceReliabilityReceiptProjection projection)
         => new Dictionary<string, bool?>
         {
+            ["initialReviewReceived"] = projection.InitialReviewReceived,
             ["countInvariantSatisfied"] = projection.CountInvariantSatisfied,
             ["decisionObeyed"] = projection.DecisionObeyed,
             ["noUnauthorizedMutation"] = projection.NoUnauthorizedMutation,
