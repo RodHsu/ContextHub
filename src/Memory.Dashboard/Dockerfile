@@ -9,6 +9,8 @@ COPY src/Memory.Domain/Memory.Domain.csproj src/Memory.Domain/
 COPY src/Memory.Application/Memory.Application.csproj src/Memory.Application/
 COPY src/Memory.Infrastructure/Memory.Infrastructure.csproj src/Memory.Infrastructure/
 COPY src/Memory.Dashboard/Memory.Dashboard.csproj src/Memory.Dashboard/
+# Razor must exist during restore for the SDK to include the Blazor framework assets.
+COPY src/Memory.Dashboard/Components/App.razor src/Memory.Dashboard/Components/
 
 RUN --mount=type=cache,id=contexthub-nuget-dotnet10-v1,target=/root/.nuget/packages,sharing=locked \
     dotnet restore src/Memory.Dashboard/Memory.Dashboard.csproj --disable-parallel

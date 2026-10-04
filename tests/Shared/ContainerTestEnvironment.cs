@@ -42,7 +42,11 @@ public sealed class ContainerTestEnvironment : IAsyncLifetime
 
         await _postgres.StartAsync();
         await _redis.StartAsync();
-        _postgresConnectionString = _postgres.GetConnectionString();
+        // Leave room for readiness and direct test connections alongside the application's pool.
+        _postgresConnectionString = new NpgsqlConnectionStringBuilder(_postgres.GetConnectionString())
+        {
+            MaxPoolSize = 80
+        }.ConnectionString;
         _redisConnectionString = _redis.GetConnectionString();
         PostgresConnectionString = _postgresConnectionString;
         await WaitForDependenciesAsync(_postgresConnectionString, _redisConnectionString);

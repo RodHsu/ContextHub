@@ -52,6 +52,7 @@ public sealed class CacheMetricsIntegrationTests(ContainerTestEnvironment enviro
         {
             Environment = "Local testcontainer; deterministic embedding; empty result; full service calls, not HTTP or production",
             ParallelRequests = 100,
+            ApplicationConnectionPoolLimit = new NpgsqlConnectionStringBuilder(environment.PostgresConnectionString!).MaxPoolSize,
             Cold = new { Sets = afterCold.Sets - before.Sets, OriginAttempts = coldOrigins, Misses = afterCold.Misses - before.Misses, Hits = afterCold.Hits - before.Hits, P50Ms = Percentile(cold, .50), P95Ms = Percentile(cold, .95), P99Ms = Percentile(cold, .99) },
             Warm = new { Sets = afterWarm.Sets - afterCold.Sets, Hits = afterWarm.Hits - afterCold.Hits, P50Ms = Percentile(warm, .50), P95Ms = Percentile(warm, .95), P99Ms = Percentile(warm, .99) },
             Decision = "Cold duplicate sets identify a potential singleflight benefit; deployment needs representative same-key concurrency before adding distributed coordination."

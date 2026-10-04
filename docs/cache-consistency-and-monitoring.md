@@ -90,6 +90,8 @@ Migration 055 的分鐘聚合以 `instance + boot + UTC minute + kind + traffic 
 3. 回退 build 必須保留 v2 actor isolation 與 durable revision；必要時停用最終物件快取降級，不回退到已知不安全的舊 key。不刪除 revision、outbox 或 audit schema。
 4. 正式驗收分開記錄 release SHA、部署健康、authenticated API/UI、MCP host 與同流量負載比較。本機 fixture 與多 coordinator 測試不是 Production 效能或 fresh host 驗收。
 
+Dashboard 發布映像另須通過 `tools/deployment/tests/Test-DashboardPublishedAssets.ps1 -ImageId <sha256 image ID>`。它在無網路、無對外埠、無正式憑證的隔離容器中檢查發布 manifest，並實際驗證 Blazor bootstrap 的一般與 fingerprinted URL 回傳 200。此檢查可攔截 .NET 10 在 Razor 原始檔尚未複製時 restore、再以 `--no-restore` publish 而漏掉 framework assets 的問題；登入頁與 health 成功不能代替瀏覽器互動初始化。Dockerfile 在 restore 前保留 `App.razor`，讓 SDK 正確還原所需資源。發布後仍須以具管理頁面權限的測試帳號完成 authenticated UI 驗收。
+
 讀取版本合併為一次 PostgreSQL statement 與一次 Redis MGET，避免逐專案 Redis round trip。Single-flight 僅在同 key 併發 origin duplication 的量測證明效益後才導入；目前優先消除 Graph 的重複工作與錯誤全域失效，以免多加一套取消與生命週期規則。
 
 實作依據：[PostgreSQL trigger transaction semantics](https://www.postgresql.org/docs/17/trigger-definition.html)、[PostgreSQL CREATE TRIGGER](https://www.postgresql.org/docs/17/sql-createtrigger.html)。
