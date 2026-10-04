@@ -57,7 +57,7 @@ public sealed class ScheduledGovernanceSchemaTests
             ScheduledGovernanceToolCatalog.PublishedToolNames);
         methods.Should().HaveCount(4);
         ScheduledGovernanceContract.ToolContractVersion.Should().Be("1.5");
-        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-10-03-automation-v10");
+        ScheduledGovernanceContract.PublishedCatalogVersion.Should().Be("2026-10-04-automation-v11");
         ScheduledGovernanceContract.FixedReversibleActions.Should().Contain(GovernanceBatchActionType.SkillMetadataProposal);
 
         foreach (var method in methods)
@@ -164,6 +164,7 @@ public sealed class ScheduledGovernanceSchemaTests
 
     internal static void AssertScalarProofSchema(JsonElement schema)
     {
+        AssertExactOrderAndHostBudget(schema);
         var properties = schema.GetProperty("properties");
         foreach (var name in ScalarProofNames)
         {
@@ -184,6 +185,72 @@ public sealed class ScheduledGovernanceSchemaTests
                 types.Should().Contain("string").And.OnlyContain(x => x == "string" || x == "null");
             }
         }
+    }
+
+    // 42 is one observed legacy declaration size, not a platform contract.
+    // The complete A1 prefix is 25 fields, leaving 17 slots below that observation.
+    internal static void AssertExactOrderAndHostBudget(JsonElement schema)
+    {
+        var expected = ReadNames("RunGetSchemaOrder.json");
+        var properties = schema.GetProperty("properties");
+        properties.EnumerateObject().Select(x => x.Name).Should().Equal(expected);
+        expected.Should().HaveCount(86);
+        expected.Take(11).Should().Equal(ScalarProofNames.Select(x => x + "Status"));
+        foreach (var budget in new[] { 25, 32, 42 })
+        {
+            var projected = ProjectHost(schema, budget);
+            AssertA1(projected);
+            projected.GetProperty("properties").EnumerateObject().Should().HaveCount(budget);
+        }
+    }
+
+    private static string[] ReadNames(string file) => JsonSerializer.Deserialize<string[]>(File.ReadAllText(
+        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", file)))!;
+
+    private static JsonElement ProjectHost(JsonElement schema, int budget)
+    {
+        var collapsed = CollapseComplexHostSchema(schema);
+        // Simulate selection before the alphabetic presentation observed in the host declaration.
+        var selected = collapsed.GetProperty("properties").EnumerateObject().Take(budget)
+            .OrderBy(x => x.Name, StringComparer.Ordinal);
+        var properties = new JsonObject();
+        foreach (var property in selected)
+            properties.Add(property.Name, JsonNode.Parse(property.Value.GetRawText()));
+        return JsonSerializer.SerializeToElement(new JsonObject { ["type"] = "object", ["properties"] = properties });
+    }
+
+    private static void AssertA1(JsonElement schema)
+    {
+        var properties = schema.GetProperty("properties");
+        foreach (var name in ScalarProofNames)
+        {
+            properties.GetProperty(name + "Status").GetProperty("enum").EnumerateArray()
+                .Select(x => x.GetString()).Should().Equal(
+                    "ProvenTrue", "ProvenFalse", "NotApplicable", "Unproven", "NotObservable");
+        }
+        foreach (var name in new[] { "receiptId", "governanceRunId", "runExists", "received", "decision",
+                     "coverageComplete", "applied", "failed", "auditIds", "latestBatchReceived",
+                     "requestIdentityHash", "toolContractVersion", "schemaHash", "publishedCatalogVersion" })
+            properties.TryGetProperty(name, out _).Should().BeTrue(name + " is required by A1");
+    }
+
+    [Fact]
+    public void Observed_Legacy_Host_Selection_Is_Not_A_Raw_Ordered_Prefix_And_Must_Fail_A1()
+    {
+        var observed = ReadNames("HostRegistryObservedNames.json");
+        var baseline = ReadNames("RunGetSchema107Order.json");
+        observed.Should().HaveCount(42);
+        observed.Should().Equal(observed.Order(StringComparer.Ordinal));
+        observed.Should().BeEquivalentTo(baseline.Where(x => !ScalarProofNames.Any(
+            proof => x == proof || x == proof + "Status" || x == proof + "Reason" || x == proof + "Scope")));
+        observed.Should().Contain(baseline[84]).And.Contain(baseline[85]);
+        observed.Should().NotContain(baseline[40]).And.NotContain(baseline[41]);
+        observed.Should().NotBeEquivalentTo(baseline.Take(42));
+        var properties = new JsonObject();
+        foreach (var name in observed) properties.Add(name, new JsonObject());
+        var stale = JsonSerializer.SerializeToElement(new JsonObject { ["properties"] = properties });
+        Action gate = () => AssertA1(stale);
+        gate.Should().Throw<KeyNotFoundException>("an old registry cannot attest a new static contract");
     }
 
     internal static JsonElement CollapseComplexHostSchema(JsonElement schema)

@@ -23,12 +23,12 @@
       "scheduled_governance_execute",
       "scheduled_governance_run_get"
     ],
-    "publishedCatalogVersion": "2026-10-03-automation-v10",
+    "publishedCatalogVersion": "2026-10-04-automation-v11",
     "publishedCatalogHash": "e1735f23777f85b9d56826ee32d7d1434ce3394801abb999889aa91a8b1a9c92",
-    "publishedToolSchemasHash": "76434222f6f106df2dd8d4f0176008c4098fea2e748b9b96a22e6c717ada3122",
+    "publishedToolSchemasHash": "987f05c33b6503f5b16666b3293b5a905ea36fa8a8c033e5078ebbc08313a25a",
     "runtimeIdentity": {
       "serverName": "Memory.ScheduledGovernanceGateway",
-      "serverVersion": "2026-10-03-automation-v10+e1735f23777f"
+      "serverVersion": "2026-10-04-automation-v11+e1735f23777f"
     }
   },
   "contract": {
