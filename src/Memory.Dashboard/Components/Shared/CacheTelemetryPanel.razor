@@ -1,0 +1,244 @@
+@implements IDisposable
+@inject IContextHubApiClient ApiClient
+
+<section class="panel cache-telemetry-panel" aria-labelledby="cache-telemetry-title" aria-busy="@_loading.ToString().ToLowerInvariant()">
+    <div class="cache-telemetry-heading">
+        <div>
+            <h2 id="cache-telemetry-title" class="panel-title">分層快取觀測</h2>
+            <p class="cache-telemetry-note">期間數值依命中與未命中總數加權；最終互動結果、各快取層與背景刷新分開統計。</p>
+        </div>
+        <div class="cache-periods" role="group" aria-label="快取統計期間">
+            @foreach (var period in Periods)
+            {
+                <button type="button" class="ghost-button @(_period == period ? "is-selected" : null)"
+                        aria-pressed="@(_period == period ? "true" : "false")" @onclick="() => ChangePeriodAsync(period)">@period</button>
+            }
+        </div>
+    </div>
+    @if (_metricsError is not null)
+    {
+        <div class="inline-error" role="status">@_metricsError</div>
+    }
+    @if (_metrics is not { Supported: true })
+    {
+        <div class="empty-inline cache-metrics-unavailable">@(_loading ? "正在載入期間快取統計…" : "期間快取統計未知：目前 API 未提供此能力或資料暫不可用。")</div>
+    }
+    else
+    {
+        var interactive = CacheTelemetryPresentation.InteractiveResults(_metrics.Series);
+        <div class="cache-window-status" role="status">
+            <span class="status-badge @(_metrics.CoverageStatus == "Observed" ? "neutral" : "warn")">@CacheTelemetryPresentation.Coverage(_metrics.CoverageStatus)</span>
+            <span>完整分鐘 <ClientLocalTime Value="_metrics.StartedAtUtc" /> — <ClientLocalTime Value="_metrics.EndedAtUtc" /></span>
+            <span>觀測 <ClientLocalTime Value="_metrics.ObservedAtUtc" /></span>
+        </div>
+        <p class="cache-telemetry-note">預期副本清單未知；覆蓋率僅含已觀測實例。</p>
+        <div class="cache-summary-grid">
+            <article class="cache-summary-card" data-testid="interactive-cache-rate">
+                <span>互動最終結果命中率</span>
+                <strong>@CacheTelemetryPresentation.Rate(interactive)</strong>
+                <small>@DashboardFormatting.Integer(interactive.Hits) 命中 / @DashboardFormatting.Integer(interactive.Samples) 次判定</small>
+                <small>僅互動請求；不含巢狀查詢或圖譜背景流量</small>
+            </article>
+            <article class="cache-summary-card">
+                <span>已觀測程序啟動批次</span>
+                <strong>@DashboardFormatting.Integer(_metrics.Instances.Count)</strong>
+                <small>以 instance 與 boot 分開累計；重啟不覆寫歷史</small>
+            </article>
+            <article class="cache-summary-card">
+                <span>實例啟動後累計丟棄</span>
+                <strong>@DashboardFormatting.Integer(_metrics.DroppedSamples)</strong>
+                <small>窗口內已觀測啟動批次的累計值；不等於期間遺失量。正常每 @_metrics.FlushIntervalSeconds 秒落盤；異常終止或儲存故障造成的未落盤遺失量未知</small>
+            </article>
+        </div>
+        @if (_metrics.CoverageStartedAtUtc is { } coverageStart)
+        {
+            <p class="cache-telemetry-note">可用觀測起點 <ClientLocalTime Value="coverageStart" />；所選期間超出觀測歷史時，只顯示已有資料。</p>
+        }
+        <div class="cache-series-grid">
+            @foreach (var series in _metrics.Series.Where(x => !IsLatency(x.Kind) && !CacheMetricKinds.IsOrigin(x.Kind)).OrderBy(x => x.TrafficClass).ThenBy(x => x.Kind))
+            {
+                <article class="cache-series-card">
+                    <div class="cache-series-heading"><strong>@CacheTelemetryPresentation.Kind(series.Kind)</strong><span>@CacheTelemetryPresentation.Traffic(series.TrafficClass)</span></div>
+                    <div class="cache-series-rate">@CacheTelemetryPresentation.Rate(series)</div>
+                    @if (series.HitRate is { } rate)
+                    {
+                        <meter min="0" max="100" value="@rate.ToString(System.Globalization.CultureInfo.InvariantCulture)" aria-label="@(CacheTelemetryPresentation.Kind(series.Kind) + " " + CacheTelemetryPresentation.Traffic(series.TrafficClass) + "命中率")">@CacheTelemetryPresentation.Rate(series)</meter>
+                    }
+                    <div class="cache-series-detail">命中 @DashboardFormatting.Integer(series.Hits) · 未命中 @DashboardFormatting.Integer(series.Misses) · 寫入 @DashboardFormatting.Integer(series.Sets)</div>
+                    <div class="cache-series-detail">略過 @DashboardFormatting.Integer(series.Bypasses) · 錯誤 @DashboardFormatting.Integer(series.Errors) · 無效內容 @DashboardFormatting.Integer(series.InvalidPayloads)</div>
+                </article>
+            }
+        </div>
+        <h3 class="cache-latency-title">期間回源次數</h3>
+        @if (!_metrics.Series.Any(x => CacheMetricKinds.IsOrigin(x.Kind)))
+        {
+            <p class="cache-telemetry-note">目前期間沒有回源樣本；不能據此判定回源為零。</p>
+        }
+        <div class="cache-series-grid" data-testid="cache-origin-load">
+            @foreach (var series in _metrics.Series.Where(x => CacheMetricKinds.IsOrigin(x.Kind)).OrderBy(x => x.Kind).ThenBy(x => x.TrafficClass))
+            {
+                <article class="cache-series-card">
+                    <div class="cache-series-heading"><strong>@CacheTelemetryPresentation.Kind(series.Kind)</strong><span>@CacheTelemetryPresentation.Traffic(series.TrafficClass)</span></div>
+                    <div class="cache-series-rate">@DashboardFormatting.Integer(series.Observations) 次</div>
+                    <small>實際進入回源路徑；包含之後失敗的嘗試</small>
+                </article>
+            }
+        </div>
+        <p class="cache-telemetry-note">各層在開始回源時獨立計數，並非由未命中、略過或錯誤推算。工作脈絡重建可能使用其他層快取；各層次數不能相加當作使用者請求或 SQL 指令總數。</p>
+        <h3 class="cache-latency-title">期間延遲</h3>
+        @if (!_metrics.Series.Any(x => IsLatency(x.Kind)))
+        {
+            <p class="cache-telemetry-note">目前期間沒有延遲樣本。</p>
+        }
+        <div class="cache-series-grid">
+            @foreach (var series in _metrics.Series.Where(x => IsLatency(x.Kind)).OrderBy(x => x.Kind).ThenBy(x => x.TrafficClass))
+            {
+                <article class="cache-series-card">
+                    <div class="cache-series-heading"><strong>@LatencyLabel(series.Kind)</strong><span>@CacheTelemetryPresentation.Traffic(series.TrafficClass)</span></div>
+                    <div class="cache-series-rate">@(series.Observations > 0 ? $"{DashboardFormatting.Decimal(series.DurationMs / series.Observations)} ms" : "無樣本")</div>
+                    <small>累計耗時加權平均 · @DashboardFormatting.Integer(series.Observations) 次</small>
+                </article>
+            }
+        </div>
+        <p class="cache-telemetry-note">查詢計算、遙測寫入與伺服器回應各有獨立母體；伺服器耗時含回應處理，但不包含用戶端網路與畫面呈現。HTTP MCP transport 可能包含非檢索呼叫，不將各均值相加。</p>
+        <details class="cache-instance-details">
+            <summary>程序、重啟與落盤覆蓋</summary>
+            <div class="cache-instance-scroll" tabindex="0" role="region" aria-label="程序快取指標覆蓋表，可水平捲動">
+                <table class="cache-instance-table">
+                    <thead><tr><th scope="col">Instance</th><th scope="col">Boot</th><th scope="col">啟動</th><th scope="col">最近落盤</th><th scope="col">觀測 / 預期分鐘</th><th scope="col">待落盤（最後成功快照）</th><th scope="col">啟動後丟棄</th><th scope="col">狀態</th></tr></thead>
+                    <tbody>
+                        @foreach (var instance in _metrics.Instances)
+                        {
+                            <tr><th scope="row">@instance.InstanceId</th><td>@instance.BootId</td><td><ClientLocalTime Value="instance.StartedAtUtc" /></td><td><ClientLocalTime Value="instance.LastFlushedAtUtc" /></td><td>@instance.ObservedMinutes / @instance.ExpectedMinutes</td><td>@instance.PendingBuckets</td><td>@instance.DroppedSamples</td><td>@(instance.UncleanShutdown ? "失聯或非正常結束，可能遺失資料" : instance.StoppedAtUtc.HasValue ? "已正常停止" : "已觀測")</td></tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </details>
+    }
+    <div class="cache-graph-section">
+        <h3>圖譜刷新</h3>
+        @if (_graphError is not null)
+        {
+            <div class="inline-error" role="status">@_graphError</div>
+        }
+        @if (_graph is null)
+        {
+            <p class="cache-telemetry-note">@(_loading ? "正在載入刷新狀態…" : "刷新狀態未知：API 未提供或暫不可用。")</p>
+        }
+        else
+        {
+            <div class="cache-graph-grid">
+                <div><span>最近刷新嘗試 Generation</span><strong>@_graph.Generation</strong><small>@(_graph.Stale ? "待更新或尚無快照" : "資料有效") · @_graph.Scope</small></div>
+                <div><span>刷新模式</span><strong>@_graph.Mode</strong><small>@(_graph.LeaseActive ? "刷新租約使用中" : "無執行中的租約")</small></div>
+                <div><span>待更新專案</span><strong>@_graph.DirtyProjectCount</strong><small>@(_graph.DirtyAgeSeconds.HasValue ? $"最久等待 {DashboardFormatting.Decimal(_graph.DirtyAgeSeconds.Value)} 秒" : "等待時間未知")</small></div>
+                <div><span>增量 / 完整刷新</span><strong>@_graph.IncrementalBuilds / @_graph.FullBuilds</strong><small>累積完成次數</small></div>
+                <div><span>略過 / 合併請求</span><strong>@_graph.Skipped / @_graph.Deduplicated</strong><small>無變更略過與併發合併</small></div>
+                <div><span>失敗</span><strong>@_graph.Failures</strong><small>@(string.IsNullOrWhiteSpace(_graph.LastError) ? "未記錄錯誤" : _graph.LastError)</small></div>
+            </div>
+            <div class="cache-window-status">
+                <span>最近成功 @if (_graph.LastSuccessAtUtc is { } successAt) { <ClientLocalTime Value="successAt" /> } else { <span>未知</span> }</span>
+                <span>最近完整刷新 @if (_graph.LastFullAtUtc is { } fullAt) { <ClientLocalTime Value="fullAt" /> } else { <span>未知</span> }</span>
+                <span>最近檢查 @if (_graph.LastCheckedAtUtc is { } checkedAt) { <ClientLocalTime Value="checkedAt" /> } else { <span>未知</span> }</span>
+            </div>
+        }
+    </div>
+    <p class="cache-telemetry-note">下方 Redis keyspace 與 PostgreSQL buffer 為各服務統計重設後的累積值，母體與此期間圖表不同，請勿直接比較命中率。</p>
+</section>
+
+@code {
+    [Parameter] public DateTimeOffset? RefreshAt { get; set; }
+    private static readonly string[] Periods = ["24H", "3D", "7D", "14D", "30D"];
+    private string _period = "24H";
+    private bool _loading;
+    private bool _initialized;
+    private DateTimeOffset? _previousRefresh;
+    private CacheMetricsWindowResult? _metrics;
+    private DashboardGraphRefreshStatus? _graph;
+    private string? _metricsError;
+    private string? _graphError;
+    private CancellationTokenSource? _loadCancellation;
+    private long _generation;
+
+    private static bool IsLatency(string kind) => kind is "query-compute" or "telemetry-write" or "server-request";
+    private static string LatencyLabel(string kind) => kind switch
+    {
+        "query-compute" => "查詢計算",
+        "telemetry-write" => "遙測寫入",
+        _ => "伺服器回應"
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!_initialized || RefreshAt != _previousRefresh)
+        {
+            _initialized = true;
+            _previousRefresh = RefreshAt;
+            await LoadAsync();
+        }
+    }
+
+    private async Task ChangePeriodAsync(string period)
+    {
+        if (_period == period) return;
+        _period = period;
+        _metrics = null;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loadCancellation?.Cancel();
+        _loadCancellation?.Dispose();
+        _loadCancellation = new CancellationTokenSource();
+        var token = _loadCancellation.Token;
+        var generation = ++_generation;
+        var period = _period;
+        _loading = true;
+        await Task.WhenAll(LoadMetricsAsync(), LoadGraphAsync());
+        if (generation == _generation) _loading = false;
+
+        async Task LoadMetricsAsync()
+        {
+            try
+            {
+                var metrics = await ApiClient.GetCacheMetricsAsync(period, token);
+                if (generation != _generation) return;
+                _metrics = metrics;
+                _metricsError = null;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception)
+            {
+                if (generation != _generation) return;
+                _metrics = null;
+                _metricsError = "期間統計載入失敗，請稍後刷新；目前無法判斷命中率。";
+            }
+        }
+
+        async Task LoadGraphAsync()
+        {
+            try
+            {
+                var graph = await ApiClient.GetGraphRefreshStatusAsync(token);
+                if (generation != _generation) return;
+                _graph = graph;
+                _graphError = null;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception)
+            {
+                if (generation != _generation) return;
+                _graph = null;
+                _graphError = "圖譜刷新狀態載入失敗；目前無法判斷資料新鮮度。";
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        ++_generation;
+        _loadCancellation?.Cancel();
+        _loadCancellation?.Dispose();
+    }
+}

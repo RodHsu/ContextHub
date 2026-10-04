@@ -22,6 +22,8 @@ The goal is to keep durable context outside the prompt while still letting agent
 - Portable Agent Skills registry with immutable versions, hybrid discovery, exact execution pinning, isolated materialization, and quality telemetry
 - Lease-safe AgentExecution dispatch with immutable packages, atomic claim, attempt-scoped logical resource snapshots, checkpoint/retry evidence, and mid-execution Skill/resource revalidation
 - Transactional sanitized authority outbox with asynchronous, rebuildable monitoring projections and bounded incremental/full reconciliation
+- [Transaction-scoped cache revisions, coordinated graph refresh, and durable per-layer cache monitoring](docs/cache-consistency-and-monitoring.md)
+- [Shared background observability, scoped projection freshness, capacity inventory, and safe cache bypass](docs/background-observability-contract.md)
 
 ## Repository Layout
 

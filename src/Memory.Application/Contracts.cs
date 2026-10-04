@@ -2257,7 +2257,7 @@ public sealed record CacheVersionStamp(
 
 public sealed record RedisCacheLookup<T>(bool Hit, T? Value);
 
-public sealed record RedisCacheKindTelemetry(long Hits, long Misses, long Sets, long Bypasses, long Errors);
+public sealed record RedisCacheKindTelemetry(long Hits, long Misses, long Sets, long Bypasses, long Errors, long InvalidPayloads = 0);
 
 public sealed record RedisCacheTelemetrySnapshot(
     long Hits,
@@ -2265,7 +2265,8 @@ public sealed record RedisCacheTelemetrySnapshot(
     long Sets,
     long Bypasses,
     long Errors,
-    IReadOnlyDictionary<string, RedisCacheKindTelemetry> Kinds);
+    IReadOnlyDictionary<string, RedisCacheKindTelemetry> Kinds,
+    long InvalidPayloads = 0);
 
 public interface IRedisObjectCache
 {

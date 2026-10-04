@@ -368,15 +368,35 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             CancellationToken.None);
         actorAccessor.Current = ContextHubRequestActor.Unrestricted;
 
-        var processed = await processor.ProcessNextAsync(CancellationToken.None);
+        // This fixture shares a queue with the other workflow tests. Processing one
+        // arbitrary pending job does not prove that this owner's reindex ran.
+        var targetJob = await dbContext.MemoryJobs.AsNoTracking()
+            .SingleAsync(job => job.ProjectId == projectId && job.JobType == MemoryJobType.Reindex);
+        var pendingCount = await dbContext.MemoryJobs.CountAsync(job => job.Status == MemoryJobStatus.Pending);
+        JobResult? processed = null;
+        for (var attempt = 0; attempt <= pendingCount; attempt++)
+        {
+            processed = await processor.ProcessNextAsync(CancellationToken.None);
+            if (processed?.Id == targetJob.Id) break;
+        }
 
         processed.Should().NotBeNull();
+        processed!.Id.Should().Be(targetJob.Id);
         processed!.Status.Should().Be(MemoryJobStatus.Completed);
         processed.Error.Should().BeEmpty();
 
-        var snapshot = await snapshotStore.GetAsync<DashboardMemoryGraphIndexSnapshotPayload>(
-            DashboardSnapshotKeys.MemoryGraphIndex,
-            CancellationToken.None);
+        // Event refresh may be coalesced with an in-flight collector, whose old
+        // generation must then be fenced out. Wait for the existing scheduled retry;
+        // do not force a manual rebuild that could hide a broken event/actor path.
+        DashboardSnapshotEnvelope<DashboardMemoryGraphIndexSnapshotPayload>? snapshot = null;
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(60);
+        do
+        {
+            snapshot = await snapshotStore.GetAsync<DashboardMemoryGraphIndexSnapshotPayload>(
+                DashboardSnapshotKeys.MemoryGraphIndex, CancellationToken.None);
+            if (snapshot?.Payload.Graph.Nodes.Any(node => node.Id == created.Id) == true) break;
+            await Task.Delay(100);
+        } while (DateTimeOffset.UtcNow < deadline);
         snapshot.Should().NotBeNull();
         snapshot!.Payload.Graph.Nodes.Should().Contain(node => node.Id == created.Id);
 

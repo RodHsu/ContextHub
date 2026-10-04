@@ -46,6 +46,7 @@
     else
     {
         <div class="monitoring-page-stack page-scroll-host monitoring-workspace-section">
+            <CacheTelemetryPanel RefreshAt="_lastUpdatedAt" />
             <div class="monitoring-top-grid">
                 <section class="panel">
                     <div class="panel-title">核心狀態</div>
@@ -374,13 +375,13 @@
                         </article>
                         <article class="runtime-dependency-kpi">
                             <span class="metric-label-with-info">Redis 命中率 <InfoPopover Label="顯示 Redis 命中率說明" Icon="i" Title="Redis 命中率" Text="Redis server keyspace hits / (hits + misses)。這是 Redis 端實際 key lookup 的命中率，可用來判斷 Redis 內部快取是否有效服務讀取。" /></span>
-                            <strong>@DashboardFormatting.Percent(_monitoring.Redis.KeyspaceHitPercent)</strong>
-                            <small>@DashboardFormatting.Integer(_monitoring.Redis.KeyspaceLookups) lookups</small>
+                            <strong>@(_monitoring.Redis.KeyspaceLookups == 0 ? "無樣本" : DashboardFormatting.Percent(_monitoring.Redis.KeyspaceHitPercent))</strong>
+                            <small>Redis 啟動後累積 · @DashboardFormatting.Integer(_monitoring.Redis.KeyspaceLookups) lookups</small>
                         </article>
                         <article class="runtime-dependency-kpi">
-                            <span class="metric-label-with-info">應用快取命中率 <InfoPopover Label="顯示應用快取命中率說明" Icon="i" Title="應用快取命中率" Text="ContextHub 透過 IRedisObjectCache 記錄的 hits / (hits + misses)。這是應用層快取使用成效，和 Redis server keyspace hit rate 互補。" /></span>
-                            <strong>@DashboardFormatting.Percent(_monitoring.Redis.CacheHitPercent)</strong>
-                            <small>@DashboardFormatting.Integer(_monitoring.Redis.CacheLookups) lookups</small>
+                            <span class="metric-label-with-info">應用程序累積命中率 <InfoPopover Label="顯示應用快取命中率說明" Icon="i" Title="應用程序累積命中率" Text="快照收集程序自啟動後的 hits / (hits + misses)，重啟會歸零；不是叢集或所選期間統計。期間統計請看上方分層快取觀測。" /></span>
+                            <strong>@(_monitoring.Redis.CacheLookups == 0 ? "無樣本" : DashboardFormatting.Percent(_monitoring.Redis.CacheHitPercent))</strong>
+                            <small>單一收集程序 · @DashboardFormatting.Integer(_monitoring.Redis.CacheLookups) lookups</small>
                         </article>
                         <article class="runtime-dependency-kpi">
                             <span class="metric-label-with-info">鍵數 <InfoPopover Label="顯示鍵數說明" Icon="i" Title="鍵數" Text="目前 Redis 內可見 key 的數量。突然暴增通常代表 cache key 維度過寬、TTL 不合理，或背景工作產生過多暫存資料。" /></span>
@@ -433,8 +434,8 @@
                         </article>
                         <article class="runtime-dependency-kpi">
                             <span class="metric-label-with-info">緩衝命中率 <InfoPopover Label="顯示緩衝命中率說明" Icon="i" Title="緩衝命中率" Text="PostgreSQL shared buffer hits / (hits + disk reads)。命中率下降通常代表 working set 變大、查詢掃描過多、索引不足或資料庫記憶體配置不足。" /></span>
-                            <strong>@DashboardFormatting.Percent(_monitoring.Postgres.BlockCacheHitPercent)</strong>
-                            <small>@DashboardFormatting.Integer(_monitoring.Postgres.BlockAccesses) 次資料區塊存取</small>
+                            <strong>@(_monitoring.Postgres.BlockAccesses == 0 ? "無樣本" : DashboardFormatting.Percent(_monitoring.Postgres.BlockCacheHitPercent))</strong>
+                            <small>PostgreSQL 統計重設後累積 · @DashboardFormatting.Integer(_monitoring.Postgres.BlockAccesses) 次區塊存取</small>
                         </article>
                         <article class="runtime-dependency-kpi">
                             <span class="metric-label-with-info">連線數 <InfoPopover Label="顯示連線數說明" Icon="i" Title="連線數" Text="目前連到 PostgreSQL 的 active connections 數量。短暫升高通常正常；長時間接近連線上限時，可能是連線池設定、慢查詢或未釋放連線造成。" /></span>

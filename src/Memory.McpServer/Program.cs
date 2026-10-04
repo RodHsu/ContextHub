@@ -95,6 +95,22 @@ var allowedMcpOrigins = ResolveAllowedOrigins(
 app.UseForwardedHeaders();
 app.Use(async (context, next) =>
 {
+    if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/mcp"))
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        var metrics = context.RequestServices.GetRequiredService<ICacheMetricsRecorder>();
+        // OnCompleted includes telemetry waits and response serialization. This is server HTTP time,
+        // not a retrieval-only latency or the client's network round trip (MCP includes non-tool requests).
+        context.Response.OnCompleted(() =>
+        {
+            metrics.Record("server-request", CacheMetricOutcome.Observation, "application", Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+            return Task.CompletedTask;
+        });
+    }
+    await next();
+});
+app.Use(async (context, next) =>
+{
     if (context.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) &&
         !IsAllowedMcpOrigin(context.Request, allowedMcpOrigins))
     {
@@ -233,6 +249,7 @@ app.MapGet("/api/status", async (
 var dashboard = app.MapGroup("/api/dashboard");
 dashboard.RequireAuthIfEnabled(requireAuthentication);
 dashboard.RequireAdminIfEnabled(requireAuthentication);
+dashboard.MapCacheTelemetryEndpoints();
 dashboard.MapGet("/overview", async (IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
 {
     var result = await service.GetOverviewAsync(cancellationToken);
@@ -390,7 +407,7 @@ memories.MapGet("/graph", async (
             parsedStatus,
             sourceType),
         cancellationToken);
-    SetDataSource(httpContext, "redis");
+    SetDataSource(httpContext, "database-projection");
     return Results.Ok(result);
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 

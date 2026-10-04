@@ -393,7 +393,8 @@ public sealed class MemoryService(
     IRequestActorAccessor actorAccessor,
     IMaintenanceCoordinator maintenanceCoordinator,
     IProjectInformationService projectInformationService,
-    ISuggestedActionReconciliationService suggestedActionReconciliationService) : IMemoryService
+    ISuggestedActionReconciliationService suggestedActionReconciliationService,
+    ICacheMetricsRecorder? cacheMetrics = null) : IMemoryService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -757,6 +758,9 @@ public sealed class MemoryService(
 
     public async Task<IReadOnlyList<MemorySearchHit>> SearchAsync(MemorySearchRequest request, CancellationToken cancellationToken)
     {
+        using var traffic = CacheMetricsTrafficScope.Begin(
+            request.Telemetry?.EntryPoint == "dashboard.memory_graph_index" || CacheMetricsTrafficScope.Current == "graph-background"
+                ? "graph-background" : "interactive");
         var stopwatch = Stopwatch.StartNew();
         var actor = actorAccessor.Current;
         EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
@@ -777,6 +781,7 @@ public sealed class MemoryService(
 
         try
         {
+            cacheMetrics?.Record(CacheMetricKinds.OriginSearch, CacheMetricOutcome.Observation);
             var searchScope = new MemorySearchScope(allowedProjects);
             var keywordHits = await searchStore.SearchKeywordChunksAsync(request.Query, request.Limit * 4, searchScope, cancellationToken);
             var semanticHits = await SearchSemanticHitsAsync(request.Query, request.Limit * 4, version, actor, allowedProjects, searchScope, cancellationToken);
@@ -804,6 +809,7 @@ public sealed class MemoryService(
 
     public async Task<WorkingContextResult> BuildWorkingContextAsync(WorkingContextRequest request, CancellationToken cancellationToken)
     {
+        using var traffic = CacheMetricsTrafficScope.Begin("interactive");
         var stopwatch = Stopwatch.StartNew();
         var actor = actorAccessor.Current;
         EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
@@ -822,7 +828,12 @@ public sealed class MemoryService(
 
         var allowedProjects = ProjectContext.ResolveSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
         EnsureProjectsAllowed(actor, allowedProjects, write: false);
-        var version = await cacheStore.GetVersionStampAsync(allowedProjects, actor, request.UseSummaryLayer, cancellationToken);
+        // SummaryOnly still includes primary-project metadata and logs in the final context.
+        // Authorize and version that dependency before consulting a cached result.
+        EnsureProjectAllowed(actor, ProjectContext.Normalize(request.ProjectId), write: false);
+        var contextProjects = allowedProjects.Append(ProjectContext.Normalize(request.ProjectId))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var version = await cacheStore.GetVersionStampAsync(contextProjects, actor, request.UseSummaryLayer, cancellationToken);
         var cacheKey = RedisCacheKeyBuilder.WorkingContext(version, request, actor, allowedProjects, embeddingProvider.ModelKey);
         var cached = await objectCache.GetAsync<WorkingContextResult>(cacheKey, "working-context-final", cancellationToken);
         var cacheHit = cached.Hit;
@@ -837,6 +848,7 @@ public sealed class MemoryService(
         var usedFallback = false;
         try
         {
+            cacheMetrics?.Record(CacheMetricKinds.OriginContext, CacheMetricOutcome.Observation);
             hits = await SearchAsync(
                 new MemorySearchRequest(
                     request.Query,
@@ -1095,6 +1107,7 @@ public sealed class MemoryService(
         }
 
         var queryVector = await EmbedQueryAsync(query, cancellationToken);
+        cacheMetrics?.Record(CacheMetricKinds.OriginSemantic, CacheMetricOutcome.Observation);
         var semanticHits = await searchStore.SearchVectorChunksAsync(queryVector, limit, searchScope, cancellationToken);
         await objectCache.SetAsync(cacheKey, "semantic-hits", semanticHits.Select(x => x.ToCached()).ToArray(), cachePolicy.SemanticHitTtl, cancellationToken);
         return semanticHits;
@@ -1109,6 +1122,7 @@ public sealed class MemoryService(
             return cached.Value;
         }
 
+        cacheMetrics?.Record(CacheMetricKinds.OriginEmbedding, CacheMetricOutcome.Observation);
         var vector = await embeddingProvider.EmbedAsync(query, EmbeddingPurpose.Query, cancellationToken);
         await objectCache.SetAsync(cacheKey, "embedding-query", vector, cachePolicy.EmbeddingTtl, cancellationToken);
         return vector;
@@ -2293,7 +2307,6 @@ public sealed class BackgroundJobProcessor(
         {
             case MemoryJobType.Reindex:
                 await cacheStore.IncrementProjectAsync(job.ProjectId, cancellationToken);
-                await cacheStore.IncrementAsync(cancellationToken);
                 break;
             case MemoryJobType.RefreshSummary:
                 await cacheStore.IncrementSharedAsync(cancellationToken);

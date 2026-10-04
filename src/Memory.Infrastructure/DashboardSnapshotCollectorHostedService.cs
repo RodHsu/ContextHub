@@ -1250,6 +1250,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
 
     private async Task TryUpdateLastErrorAsync<TPayload>(string key, int intervalSeconds, string error, CancellationToken cancellationToken)
     {
+        // Graph failures and lease state belong to its fenced durable coordinator.
+        if (key == DashboardSnapshotKeys.MemoryGraphIndex) return;
         try
         {
             await UpdateLastErrorAsync<TPayload>(key, intervalSeconds, error, cancellationToken);

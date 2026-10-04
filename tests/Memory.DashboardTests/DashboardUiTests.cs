@@ -403,6 +403,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var monitoringHtml = WebUtility.HtmlDecode(await monitoringResponse.Content.ReadAsStringAsync());
         monitoringHtml.Should().Contain("狀態監控");
+        monitoringHtml.Should().Contain("分層快取觀測");
+        monitoringHtml.Should().Contain("期間快取統計未知");
+        monitoringHtml.Should().Contain("刷新狀態未知");
         monitoringHtml.Should().Contain("refresh-status-group");
         monitoringHtml.Should().Contain("資料快照");
         monitoringHtml.Should().Contain("Redis");
@@ -429,7 +432,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("Redis 命中 / 未命中");
         monitoringHtml.Should().Contain("快取略過 / 錯誤");
         monitoringHtml.Should().Contain("緩衝命中率");
-        monitoringHtml.Should().Contain("次資料區塊存取");
+        monitoringHtml.Should().Contain("次區塊存取");
         monitoringHtml.Should().Contain("資源趨勢");
         monitoringHtml.Should().NotContain("Agent MCP 延遲");
         monitoringHtml.Should().NotContain("Agent 最近");

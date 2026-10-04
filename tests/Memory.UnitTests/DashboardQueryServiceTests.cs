@@ -116,7 +116,9 @@ public sealed class DashboardQueryServiceTests
             new FakeDashboardMemoryGraphIndexBuilder(expectedGraph),
             snapshotStore,
             new FixedBehaviorSettingsAccessor(23),
-            new FixedTimeProvider(now));
+            new FixedTimeProvider(now),
+            new TestDashboardGraphRefreshCoordinator(snapshotStore),
+            new RequestActorAccessor());
 
         var result = await service.RefreshAsync("manual", null, CancellationToken.None);
         var snapshot = await snapshotStore.GetAsync<DashboardMemoryGraphIndexSnapshotPayload>(

@@ -54,7 +54,7 @@ Memory.McpServer
     |      - runtime logs
     |
     +--> Redis
-    |      - cache version
+    |      - reconstructible cache and signals
     |      - search/context cache
     |      - job signal
     |
@@ -266,7 +266,7 @@ Memory.Dashboard
 
 用途：
 
-- cache version
+- search/context validity 依 PostgreSQL transactional scope revision；Redis 不作版本權威
 - search/context cache
 - job signal
 

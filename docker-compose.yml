@@ -254,6 +254,7 @@ services:
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
       ConnectionStrings__Redis: redis:6379
       Memory__Namespace: contexthub
+      Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
       DatabaseLogging__MinimumLevel: Warning
       ContextHub__Skills__Sandbox__Enabled: "true"
       ContextHub__Skills__Sandbox__QueueRoot: /var/lib/contexthub-skill-sandbox
@@ -355,6 +356,7 @@ services:
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
       ConnectionStrings__Redis: redis:6379
       Memory__Namespace: contexthub
+      Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
       DatabaseLogging__MinimumLevel: Warning
     depends_on:
       mcp-server:
@@ -407,6 +409,7 @@ services:
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
       ConnectionStrings__Redis: redis:6379
       Memory__Namespace: contexthub
+      Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
       DatabaseLogging__MinimumLevel: Warning
     depends_on:
       mcp-server:
@@ -444,6 +447,7 @@ services:
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
       ConnectionStrings__Redis: redis:6379
       Memory__Namespace: contexthub
+      Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
       DatabaseLogging__MinimumLevel: Warning
     depends_on:
       embedding-service:
@@ -485,6 +489,7 @@ services:
       Dashboard__DataProtectionPath: /var/lib/contexthub-dashboard/keys
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
       Memory__Namespace: contexthub
+      Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
     depends_on:
       mcp-server:
         condition: service_healthy

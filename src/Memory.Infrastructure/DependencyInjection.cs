@@ -128,16 +128,20 @@ public static class DependencyInjection
         services.AddSingleton<IRedisCachePolicy, RedisCachePolicy>();
         services.AddSingleton<IRedisObjectCache, RedisObjectCache>();
         services.AddSingleton<ICacheVersionStore, RedisCacheVersionStore>();
+        services.AddSingleton<DurableCacheRevisionStore>();
         services.AddSingleton<RedisMaintenanceModeStore>();
         services.AddSingleton<IMaintenanceModeStore>(sp => sp.GetRequiredService<RedisMaintenanceModeStore>());
         services.AddSingleton<IMaintenanceCoordinator>(sp => sp.GetRequiredService<RedisMaintenanceModeStore>());
-        services.AddSingleton<IDashboardSnapshotStore, RedisDashboardSnapshotStore>();
+        services.AddSingleton<RedisDashboardSnapshotStore>();
+        services.AddSingleton<IDashboardGraphRefreshCoordinator, NpgsqlDashboardGraphRefreshCoordinator>();
+        services.AddSingleton<IDashboardSnapshotStore, CoordinatedDashboardSnapshotStore>();
         services.AddSingleton<DockerRuntimeMetricsService>();
         services.AddSingleton(TimeProvider.System);
 
         services.AddSingleton<DatabaseLogQueue>();
         services.AddSingleton<ILoggerProvider, DatabaseLoggerProvider>();
         services.AddHostedService<DatabaseMigrationHostedService>();
+        services.AddCacheMetrics();
         services.AddHostedService<SecurityBootstrapHostedService>();
         services.AddHostedService<DatabaseLogWriterService>();
         if (string.Equals(serviceName, "worker", StringComparison.OrdinalIgnoreCase))

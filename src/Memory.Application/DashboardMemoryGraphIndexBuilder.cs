@@ -6,13 +6,17 @@ namespace Memory.Application;
 
 public sealed class DashboardMemoryGraphIndexBuilder(
     IApplicationDbContext dbContext,
-    IMemoryService memoryService) : IDashboardMemoryGraphIndexBuilder
+    IMemoryService memoryService) : IIncrementalDashboardMemoryGraphIndexBuilder
 {
     private const int MaxSimilaritySourceNodes = 160;
     private const int SimilaritySearchLimit = 10;
     private const int MaxSimilarityNeighborsPerNode = 2;
 
-    public async Task<DashboardMemoryGraphIndexSnapshotPayload> BuildAsync(CancellationToken cancellationToken)
+    public Task<DashboardMemoryGraphIndexSnapshotPayload> BuildAsync(CancellationToken cancellationToken) => BuildCoreAsync(null, null, cancellationToken);
+
+    public Task<DashboardMemoryGraphIndexSnapshotPayload> BuildIncrementalAsync(DashboardMemoryGraphIndexSnapshotPayload previous, IReadOnlySet<string> dirtyProjects, CancellationToken cancellationToken) => BuildCoreAsync(previous, dirtyProjects, cancellationToken);
+
+    private async Task<DashboardMemoryGraphIndexSnapshotPayload> BuildCoreAsync(DashboardMemoryGraphIndexSnapshotPayload? previous, IReadOnlySet<string>? dirtyProjects, CancellationToken cancellationToken)
     {
         var items = await dbContext.MemoryItems
             .AsNoTracking()
@@ -33,7 +37,8 @@ public sealed class DashboardMemoryGraphIndexBuilder(
         var explicitEdgeKeys = explicitEdges
             .Select(edge => BuildUndirectedEdgeKey(edge.FromId, edge.ToId, "explicit"))
             .ToHashSet(StringComparer.Ordinal);
-        var similarityEdges = await BuildSimilarityEdgesAsync(items, byId, explicitEdgeKeys, cancellationToken);
+        var selectedSourceIds = new List<Guid>();
+        var similarityEdges = await BuildSimilarityEdgesAsync(items, byId, explicitEdgeKeys, previous, dirtyProjects, selectedSourceIds, cancellationToken);
         var edges = explicitEdges
             .Concat(similarityEdges)
             .ToArray();
@@ -54,7 +59,8 @@ public sealed class DashboardMemoryGraphIndexBuilder(
             new MemoryGraphResult(
                 nodes,
                 edges,
-                new MemoryGraphStatsResult(0, nodes.Length, edges.Length, false)));
+                new MemoryGraphStatsResult(0, nodes.Length, edges.Length, false)),
+            selectedSourceIds);
     }
 
     private async Task<IReadOnlyList<MemoryGraphEdgeResult>> BuildExplicitEdgesAsync(
@@ -77,6 +83,9 @@ public sealed class DashboardMemoryGraphIndexBuilder(
         IReadOnlyList<MemoryItem> items,
         IReadOnlyDictionary<Guid, MemoryItem> byId,
         IReadOnlySet<string> explicitEdgeKeys,
+        DashboardMemoryGraphIndexSnapshotPayload? previous,
+        IReadOnlySet<string>? dirtyProjects,
+        List<Guid> selectedSourceIds,
         CancellationToken cancellationToken)
     {
         var degreeMap = BuildScopedDegreeMap(items.Select(item => item.Id).ToHashSet(), explicitEdgeKeys);
@@ -85,13 +94,44 @@ public sealed class DashboardMemoryGraphIndexBuilder(
             .OrderByDescending(item => degreeMap.GetValueOrDefault(item.Id))
             .ThenByDescending(item => item.Importance)
             .ThenByDescending(item => item.UpdatedAt)
+            .ThenBy(item => item.Id)
             .Take(MaxSimilaritySourceNodes)
             .ToArray();
         var edges = new List<MemoryGraphEdgeResult>();
         var edgeKeys = new HashSet<string>(StringComparer.Ordinal);
 
+        selectedSourceIds.AddRange(sourceItems.Select(source => source.Id));
+        var affectedProjects = dirtyProjects?.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (previous?.SimilaritySourceIds is not null && affectedProjects is not null)
+        {
+            var changedSources = previous.SimilaritySourceIds.ToHashSet();
+            changedSources.SymmetricExceptWith(selectedSourceIds);
+            foreach (var changedSource in changedSources)
+            {
+                var project = byId.GetValueOrDefault(changedSource)?.ProjectId
+                    ?? previous.Graph.Nodes.FirstOrDefault(node => node.Id == changedSource)?.ProjectId;
+                if (project is not null) affectedProjects.Add(project);
+            }
+        }
         foreach (var source in sourceItems)
         {
+            if (previous is not null && affectedProjects is not null && !affectedProjects.Contains(source.ProjectId))
+            {
+                // A changed project invalidates every source in that project. Unchanged sources
+                // retain their computed edges; newly selected sources still require a search.
+                if (previous.SimilaritySourceIds?.Contains(source.Id) == true)
+                {
+                    foreach (var edge in previous.Graph.Edges.Where(edge => edge.EdgeType == "similar" && edge.FromId == source.Id))
+                    {
+                        if (byId.ContainsKey(edge.ToId) && edgeKeys.Add(BuildUndirectedEdgeKey(edge.FromId, edge.ToId, "similar")))
+                        {
+                            edges.Add(edge);
+                        }
+                    }
+                    continue;
+                }
+            }
+
             var query = BuildSimilarityQuery(source);
             if (string.IsNullOrWhiteSpace(query))
             {
@@ -114,7 +154,7 @@ public sealed class DashboardMemoryGraphIndexBuilder(
                         DetailLevel: RetrievalTelemetryDetailLevel.SummaryOnly)),
                 cancellationToken);
             var searchCandidates = hits
-                .Where(hit => byId.ContainsKey(hit.MemoryId))
+                .Where(hit => byId.TryGetValue(hit.MemoryId, out var candidate) && string.Equals(candidate.ProjectId, source.ProjectId, StringComparison.OrdinalIgnoreCase))
                 .Select(hit => new ScoredMemoryItem(byId[hit.MemoryId], hit.Score))
                 .GroupBy(candidate => candidate.Item.Id)
                 .Select(group => group.OrderByDescending(candidate => candidate.Score).First())

@@ -332,7 +332,8 @@ public sealed record DashboardProjectionStateResult(
     DateTimeOffset? LastSuccessAtUtc,
     DateTimeOffset? NextRunAtUtc,
     bool IsStale,
-    bool IsAuthoritative = false);
+    bool IsAuthoritative = false,
+    long? ObservedAuthoritySequence = null);
 
 public sealed record DashboardBackgroundRunResult(
     Guid RunId,

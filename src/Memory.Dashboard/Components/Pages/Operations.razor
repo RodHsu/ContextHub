@@ -111,7 +111,7 @@
                             {
                                 <tr>
                                     <td>@state.ProjectId</td>
-                                    <td>@DashboardFormatting.Integer(state.AuthoritySequence)</td>
+                                    <td>@DashboardFormatting.Integer(state.ObservedAuthoritySequence ?? state.AuthoritySequence)</td>
                                     <td>@DashboardFormatting.Integer(state.Cursor)</td>
                                     <td>@DashboardFormatting.Integer(state.Lag)</td>
                                     <td>@DashboardFormatting.Integer(state.Generation)</td>

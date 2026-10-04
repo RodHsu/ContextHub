@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Memory.Domain;
 
 namespace Memory.Application;
@@ -14,7 +15,7 @@ public static class RedisCacheKeyBuilder
         string modelKey)
         => string.Join(
             ':',
-            "cache:search",
+            "cache:v2:search",
             AuthorityAwareRetrievalReranker.RankingVersion,
             Hash(version.Value),
             Hash(request.Query),
@@ -23,7 +24,7 @@ public static class RedisCacheKeyBuilder
             request.QueryMode,
             request.UseSummaryLayer,
             Hash(Actor(actor)),
-            Hash(ProjectSet(allowedProjects)),
+            Hash(RetrievalProjectSet(allowedProjects)),
             Hash(modelKey));
 
     public static string WorkingContext(
@@ -34,7 +35,7 @@ public static class RedisCacheKeyBuilder
         string modelKey)
         => string.Join(
             ':',
-            "cache:context",
+            "cache:v2:context",
             AuthorityAwareRetrievalReranker.RankingVersion,
             Hash(version.Value),
             Hash(request.Query),
@@ -42,8 +43,9 @@ public static class RedisCacheKeyBuilder
             request.RecentLogLimit,
             request.QueryMode,
             request.UseSummaryLayer,
+            Hash(ProjectContext.Normalize(request.ProjectId)),
             Hash(Actor(actor)),
-            Hash(ProjectSet(allowedProjects)),
+            Hash(RetrievalProjectSet(allowedProjects)),
             Hash(modelKey));
 
     public static string Embedding(string modelKey, EmbeddingPurpose purpose, string text)
@@ -58,46 +60,60 @@ public static class RedisCacheKeyBuilder
         IReadOnlyList<string> allowedProjects)
         => string.Join(
             ':',
-            "cache:semantic",
+            "cache:v2:semantic",
             Hash(version.Value),
             Hash(modelKey),
             Hash(query),
             limit,
             Hash(Actor(actor)),
-            Hash(ProjectSet(allowedProjects)));
+            Hash(RetrievalProjectSet(allowedProjects)));
 
     public static string DashboardMemories(CacheVersionStamp version, MemoryListRequest request, ContextHubRequestActor actor)
-        => $"cache:dashboard:memories:{Hash(version.Value)}:{Hash(Actor(actor))}:{Hash(DashboardMemoryRequest(request))}";
+        => $"cache:v2:dashboard:memories:{Hash(version.Value)}:{Hash(Actor(actor))}:{Hash(DashboardMemoryRequest(request))}";
 
     public static string DashboardMemoryDetails(CacheVersionStamp version, Guid id, ContextHubRequestActor actor)
-        => $"cache:dashboard:memory-details:{Hash(version.Value)}:{Hash(Actor(actor))}:{id:N}";
+        => $"cache:v2:dashboard:memory-details:{Hash(version.Value)}:{Hash(Actor(actor))}:{id:N}";
 
     public static string DashboardJobs(long jobVersion, JobListRequest request)
         => $"cache:dashboard:jobs:{jobVersion}:{Hash($"{request.Status}:{request.JobType}:{request.Page}:{request.PageSize}")}";
 
     public static string DashboardLogs(LogQueryRequest request, ContextHubRequestActor actor)
-        => $"cache:dashboard:logs:{Hash(Actor(actor))}:{Hash($"{request.Query}:{request.ServiceName}:{request.Level}:{request.TraceId}:{request.RequestId}:{request.From?.ToString("O")}:{request.To?.ToString("O")}:{request.Limit}:{request.ProjectId}")}";
+        => $"cache:v2:dashboard:logs:{Hash(Actor(actor))}:{Hash(JsonSerializer.Serialize(request))}";
 
     public static string Hash(string? value)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value ?? string.Empty))).ToLowerInvariant();
 
     public static string Actor(ContextHubRequestActor actor)
-        => actor.HasUser
-            ? $"{actor.TenantId!.Value:N}:{actor.UserId!.Value:N}:{string.Join(",", actor.Scopes.Order(StringComparer.OrdinalIgnoreCase))}"
-            : "unrestricted";
+        => JsonSerializer.Serialize(new
+        {
+            actor.TenantId,
+            actor.UserId,
+            actor.Role,
+            actor.IsAuthenticated,
+            actor.IsServiceActor,
+            actor.IsInteractiveUser,
+            Scopes = actor.Scopes.Distinct(StringComparer.OrdinalIgnoreCase)
+                .Order(StringComparer.OrdinalIgnoreCase).Select(x => x.ToLowerInvariant()).ToArray(),
+            Projects = ProjectSet(actor.AllowedProjectIds)
+        });
 
     public static string ProjectSet(IReadOnlyList<string> projects)
-        => string.Join(
-            "|",
+        => JsonSerializer.Serialize(
             projects
                 .Select(x => ProjectContext.Normalize(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-                .Select(x => x.ToLowerInvariant()));
+                .Select(x => x.ToLowerInvariant()).ToArray());
+
+    // The database selector uses exact project strings. Do not merge differently cased selectors
+    // merely because authorization grants are compared case-insensitively.
+    private static string RetrievalProjectSet(IReadOnlyList<string> projects)
+        => JsonSerializer.Serialize(projects.Select(x => ProjectContext.Normalize(x))
+            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
 
     private static string DashboardMemoryRequest(MemoryListRequest request)
-        => string.Join(
-            ':',
+        => JsonSerializer.Serialize(new
+        {
             request.Query,
             request.Scope,
             request.MemoryType,
@@ -106,11 +122,12 @@ public static class RedisCacheKeyBuilder
             request.Tag,
             request.ProjectId,
             request.ProjectQuery,
-            ProjectSet(request.IncludedProjectIds ?? []),
+            Projects = RetrievalProjectSet(request.IncludedProjectIds ?? []),
             request.QueryMode,
             request.UseSummaryLayer,
             request.Page,
-            request.PageSize);
+            request.PageSize
+        });
 }
 
 public sealed record CachedChunkSearchHit(

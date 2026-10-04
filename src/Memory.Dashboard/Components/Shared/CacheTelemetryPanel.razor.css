@@ -1,0 +1,27 @@
+.cache-telemetry-panel { min-width: 0; }
+.cache-telemetry-heading { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 1rem; }
+.cache-telemetry-heading > div:first-child { flex: 1 1 20rem; min-width: 0; }
+.cache-telemetry-note { color: var(--text-muted); font-size: .85rem; line-height: 1.6; overflow-wrap: anywhere; margin: .6rem 0; }
+.cache-periods { display: flex; flex-wrap: wrap; gap: .35rem; }
+.cache-periods button { min-height: 44px; min-width: 44px; padding: .5rem .75rem; }
+.cache-periods .is-selected { border-color: var(--accent, #7c9cff); box-shadow: inset 0 0 0 1px var(--accent, #7c9cff); }
+.cache-periods button:focus-visible, summary:focus-visible, .cache-instance-scroll:focus-visible { outline: 2px solid var(--accent, #7c9cff); outline-offset: 3px; }
+.cache-window-status { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; font-size: .8rem; margin: .8rem 0; }
+.cache-window-status .status-badge { white-space: normal; }
+.cache-summary-grid, .cache-series-grid, .cache-graph-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: .75rem; }
+.cache-summary-card, .cache-series-card, .cache-graph-grid > div { min-width: 0; display: flex; flex-direction: column; gap: .4rem; padding: .85rem; border: 1px solid var(--border, #727b8c50); border-radius: .65rem; overflow-wrap: anywhere; }
+.cache-summary-card > strong { font-size: 1.65rem; }
+.cache-summary-card small, .cache-series-detail, .cache-series-heading span, .cache-graph-grid small { font-size: .8rem; color: var(--text-muted); line-height: 1.5; }
+.cache-series-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .5rem; }
+.cache-series-rate { font-size: 1.3rem; font-weight: 650; }
+.cache-latency-title { margin: 1rem 0 .65rem; font-size: 1rem; }
+.cache-series-card meter { width: 100%; height: .65rem; }
+.cache-instance-details { margin-top: 1rem; }
+.cache-instance-details summary { cursor: pointer; min-height: 44px; padding: .65rem 0; }
+.cache-instance-scroll { max-width: 100%; overflow-x: auto; }
+.cache-instance-table { width: 100%; font-size: .8rem; border-collapse: collapse; }
+.cache-instance-table th, .cache-instance-table td { white-space: nowrap; padding: .7rem; text-align: left; border-bottom: 1px solid var(--border, #727b8c50); }
+.cache-instance-table th:first-child { position: sticky; left: 0; background: var(--surface, #172131); z-index: 1; }
+.cache-graph-section { margin-top: 1rem; border-top: 1px solid var(--border, #727b8c50); padding-top: .65rem; }
+.cache-graph-section h3 { margin: 0 0 .65rem; font-size: 1rem; }
+@media (max-width: 600px) { .cache-telemetry-heading { gap: .4rem; } .cache-periods { width: 100%; } }

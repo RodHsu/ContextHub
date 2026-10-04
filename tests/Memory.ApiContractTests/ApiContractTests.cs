@@ -2815,11 +2815,18 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         using var scope = environment.GetFactory().Services.CreateScope();
         UseBootstrapActor(scope.ServiceProvider);
         var builder = scope.ServiceProvider.GetRequiredService<IDashboardMemoryGraphIndexBuilder>();
-        var snapshotStore = scope.ServiceProvider.GetRequiredService<IDashboardSnapshotStore>();
+        var coordinator = scope.ServiceProvider.GetRequiredService<IDashboardGraphRefreshCoordinator>();
+        DashboardGraphRefreshLease? lease = null;
+        for (var attempt = 0; attempt < 100 && lease is null; attempt++)
+        {
+            lease = await coordinator.TryAcquireAsync(true, CancellationToken.None);
+            if (lease is null) await Task.Delay(50);
+        }
+        lease.Should().NotBeNull("the graph fixture must acquire a publication lease");
         var capturedAtUtc = DateTimeOffset.UtcNow;
         var payload = await builder.BuildAsync(CancellationToken.None);
 
-        await snapshotStore.SetAsync(
+        var published = await coordinator.PublishAsync(lease!,
             new DashboardSnapshotEnvelope<DashboardMemoryGraphIndexSnapshotPayload>(
                 DashboardSnapshotKeys.MemoryGraphIndex,
                 capturedAtUtc,
@@ -2828,6 +2835,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 string.Empty,
                 payload),
             CancellationToken.None);
+        published.Should().BeTrue("the fixture snapshot must pass generation and revision fencing");
     }
 
     [DockerRequiredFact]

@@ -152,6 +152,51 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
+    public async Task Cache_Telemetry_Should_Keep_Periods_Populations_And_Keyboard_Usable_In_Compact_Layouts()
+    {
+        DashboardViewport[] viewports = [new("cache-desktop", 1366, 768), new("cache-short", 1024, 600), new("cache-mobile", 390, 844)];
+        await _fixture.EnsureDashboardRunningAsync();
+        foreach (var viewport in viewports)
+        {
+            await using var context = await _fixture.CreateContextAsync(viewport);
+            var page = await context.NewPageAsync();
+            await LoginAndOpenAsync(page, "/monitoring?uiProfile=normal");
+            await page.EvaluateAsync("document.documentElement.style.fontSize = '150%'");
+            var panel = page.Locator(".cache-telemetry-panel");
+            await panel.WaitForAsync();
+            await panel.Locator("[data-testid='interactive-cache-rate']").WaitForAsync();
+            (await panel.Locator("[data-testid='interactive-cache-rate']").InnerTextAsync()).Should().Contain("1.5%");
+            (await panel.InnerTextAsync()).Should().Contain("圖譜");
+            var originLoad = panel.Locator("[data-testid='cache-origin-load']");
+            (await originLoad.InnerTextAsync()).Should().Contain("搜尋回源").And.Contain("42");
+            await page.ScreenshotAsync(new() { Path = Path.Combine(_fixture.ArtifactDirectory, $"{viewport.Name}-summary-150percent.png"), FullPage = true });
+            foreach (var period in new[] { "24H", "3D", "7D", "14D", "30D" })
+            {
+                var button = panel.GetByRole(AriaRole.Button, new() { Name = period, Exact = true });
+                await button.FocusAsync();
+                await page.Keyboard.PressAsync("Enter");
+                await page.WaitForFunctionAsync("period => document.querySelector('.cache-periods button[aria-pressed=true]')?.textContent === period", period);
+                var bounds = await button.BoundingBoxAsync();
+                bounds!.Width.Should().BeGreaterThanOrEqualTo(44);
+                bounds.Height.Should().BeGreaterThanOrEqualTo(44);
+            }
+            (await panel.InnerTextAsync()).Should().Contain("部分資料");
+            await panel.Locator("summary").FocusAsync();
+            await page.Keyboard.PressAsync("Enter");
+            (await panel.Locator("details").GetAttributeAsync("open")).Should().NotBeNull();
+            await panel.Locator(".cache-instance-scroll").FocusAsync();
+            (await page.EvaluateAsync<bool>("document.activeElement.classList.contains('cache-instance-scroll')")).Should().BeTrue();
+            var overflow = await page.EvaluateAsync<bool>("document.documentElement.scrollWidth > innerWidth + 1");
+            overflow.Should().BeFalse($"{viewport.Name} at 150% font should keep horizontal scrolling inside the instance table");
+            await page.ScreenshotAsync(new() { Path = Path.Combine(_fixture.ArtifactDirectory, $"{viewport.Name}-150percent.png"), FullPage = true });
+            await panel.Locator(".cache-graph-section").ScrollIntoViewIfNeededAsync();
+            await page.ScreenshotAsync(new() { Path = Path.Combine(_fixture.ArtifactDirectory, $"{viewport.Name}-graph-150percent.png"), FullPage = true });
+            await originLoad.ScrollIntoViewIfNeededAsync();
+            await page.ScreenshotAsync(new() { Path = Path.Combine(_fixture.ArtifactDirectory, $"{viewport.Name}-origin-150percent.png"), FullPage = true });
+        }
+    }
+
+    [Fact]
     public async Task Wave6A_Overview_And_Operations_Should_Remain_Provider_Opaque_Responsive_And_Keyboard_Usable()
     {
         DashboardViewport[] viewports =
