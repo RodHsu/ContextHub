@@ -2990,14 +2990,32 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 shellWidth: Math.round(document.querySelector('.graph-scroll-shell')?.getBoundingClientRect().width ?? 0),
                 shellHeight: Math.round(document.querySelector('.graph-scroll-shell')?.getBoundingClientRect().height ?? 0),
                 contentWidth: Math.round(document.querySelector('.graph-pan-content')?.offsetWidth ?? 0),
-                contentHeight: Math.round(document.querySelector('.graph-pan-content')?.offsetHeight ?? 0)
+                contentHeight: Math.round(document.querySelector('.graph-pan-content')?.offsetHeight ?? 0),
+                paintedNodes: [...document.querySelectorAll('.graph-view-node')].map(node => {
+                    const circle=node.querySelector('circle'), label=node.querySelector('.graph-node-title'), hit=node.querySelector('.graph-view-node-hit');
+                    const c=circle.getBoundingClientRect(), t=label.getBoundingClientRect(), h=hit.getBoundingClientRect();
+                    const matrix=circle.getScreenCTM(), scale=Math.hypot(matrix.a,matrix.b);
+                    const stroke=parseFloat(getComputedStyle(circle).strokeWidth)*scale;
+                    const shell=document.querySelector('.graph-scroll-shell').getBoundingClientRect();
+                    const contained=[c,t].every(r=>r.left-stroke/2>=shell.left-1 && r.top-stroke/2>=shell.top-1 && r.right+stroke/2<=shell.right+1 && r.bottom+stroke/2<=shell.bottom+1);
+                    return {circleWidth:c.width+stroke,circleHeight:c.height+stroke,labelWidth:t.width,labelHeight:t.height,effectiveFont:parseFloat(getComputedStyle(label).fontSize)*scale,hitWidth:h.width,hitHeight:h.height,contained};
+                })
             })");
 
+        await File.WriteAllTextAsync(Path.Combine(_fixture.ArtifactDirectory, "graph-normal-painted-measurements.json"), layoutJson);
         using var document = JsonDocument.Parse(layoutJson);
         document.RootElement.GetProperty("scale").GetDouble().Should().BeGreaterThan(0.58d, $"layout was {layoutJson}");
         document.RootElement.GetProperty("nodeWidth").GetInt32().Should().BeGreaterThanOrEqualTo(28);
         document.RootElement.GetProperty("nodeHeight").GetInt32().Should().BeGreaterThanOrEqualTo(18);
-        document.RootElement.GetProperty("nodeHeight").GetInt32().Should().BeLessThan(46);
+        // The anchor also contains the invisible hit target; measure painted content separately.
+        foreach (var node in document.RootElement.GetProperty("paintedNodes").EnumerateArray())
+        {
+            node.GetProperty("circleHeight").GetDouble().Should().BeInRange(18, 64);
+            node.GetProperty("effectiveFont").GetDouble().Should().BeGreaterThanOrEqualTo(14);
+            node.GetProperty("hitWidth").GetDouble().Should().BeGreaterThanOrEqualTo(24);
+            node.GetProperty("hitHeight").GetDouble().Should().BeGreaterThanOrEqualTo(24);
+            node.GetProperty("contained").GetBoolean().Should().BeTrue($"painted content was {layoutJson}");
+        }
         document.RootElement.GetProperty("circleRadius").GetDouble().Should().BeGreaterThanOrEqualTo(9d);
         document.RootElement.GetProperty("titleWidth").GetInt32().Should().BeGreaterThanOrEqualTo(40);
         document.RootElement.GetProperty("legacyLabelCount").GetInt32().Should().Be(0);

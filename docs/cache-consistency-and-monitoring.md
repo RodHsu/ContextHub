@@ -60,6 +60,14 @@ Migration 054 保存可重建的 global graph projection、revision checkpoint�
 - 增量重算 dirty project 的 similarity sources，並處理 global top-160 選入／移除的來源。無邊來源也保存已選清單。節點 metadata 與 explicit edges 仍讀取完整 scope；此處的增量是昂貴的 similarity 部分，並非所有 metadata 均已分片。
 - 以 revision ledger 的最新 scope 狀態追蹤 dirty，避免將 outbox sequence 配置次序當成交易 commit 次序而漏事件。畫面提供 generation、mode、dirty age、lease active、skip、dedup、失敗與最後成功時間；60 秒為 stale 提示，不是已證明的 Production SLA。
 
+## 圖譜畫布
+
+「適應視圖」以可見節點、完整標題及連線的實際 SVG 範圍計算縮放與中心，包含線條寬度，不把空白布局畫布或透明點擊區域當作顯示內容。資料、字級或視窗尺寸改變時會重新量測；使用者已平移或縮放後保留其視角，直到再次操作「適應視圖」。完整入框可能需要低於一般縮放下限的比例，之後「縮小」仍會降低比例。
+
+窄畫布將控制列移到繪圖區外並保留至少 44px 的操作按鈕。窄畫布或原有標題發生碰撞時，多節點的完整標題排列於獨立一列，以輔助連線對應原節點；節點位置、原始資料與關聯不變。較寬的畫布在原有標題不再碰撞時恢復原有標題位置。可直接點選可見標題或節點，或以鍵盤聚焦節點後按 Enter 開啟明細。密集圖的完整入框不保證所有標題都能閱讀，仍需放大與平移。
+
+瀏覽器驗證須區分透明 SVG anchor 的外接矩形與實際可點選圖形；外接矩形中心可能落在空白區。選取驗證應點擊可見標題或節點，並比對所選節點 ID 與 API 完整內容，不以標題前綴推定選取正確。
+
 ## 監控母體與資料完整性
 
 Migration 055 的分鐘聚合以 `instance + boot + UTC minute + kind + traffic class` 為唯一鍵。程序內 staging 上限 4096 buckets，每 15 秒 flush；資料庫 upsert 寫入累計值並以 revision 拒絕舊快照，重送不重複加總。程序重啟產生新 boot，instance 顯示不可逆 opaque identifier。

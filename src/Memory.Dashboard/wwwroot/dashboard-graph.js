@@ -13,11 +13,161 @@
         return instances.get(viewport);
     }
 
+    // Keep full titles separate on narrow canvases or when inline titles collide.
+    function arrangeLabels(instance) {
+        const svg = instance.content.querySelector(".graph-view-svg");
+        if (!svg) {
+            return;
+        }
+        instance.contentObserver?.disconnect();
+        try {
+            for (const leader of svg.querySelectorAll(".graph-label-leader")) {
+                leader.remove();
+            }
+            const labels = [...svg.querySelectorAll(".graph-node-title")];
+            for (const label of labels) {
+                const original = instance.labelTransforms.get(label);
+                if (original !== undefined) {
+                    if (original === null) {
+                        label.removeAttribute("transform");
+                    }
+                    else {
+                        label.setAttribute("transform", original);
+                    }
+                }
+            }
+            if (labels.length < 2) {
+                return;
+            }
+            const inverse = svg.getScreenCTM()?.inverse();
+            if (!inverse) {
+                return;
+            }
+            const rows = [];
+            for (const label of labels) {
+                const node = label.closest(".graph-view-node");
+                const circle = node?.querySelector("circle");
+                const style = getComputedStyle(label);
+                if (!circle || style.display === "none" || style.visibility === "hidden") {
+                    continue;
+                }
+                const box = label.getBBox();
+                const matrix = label.getScreenCTM();
+                const circleMatrix = circle.getScreenCTM();
+                if (!matrix || !circleMatrix) {
+                    continue;
+                }
+                const transform = inverse.multiply(matrix);
+                const origin = new DOMPoint(box.x, box.y).matrixTransform(transform);
+                const corner = new DOMPoint(box.x + box.width, box.y + box.height).matrixTransform(transform);
+                const center = new DOMPoint(circle.cx.baseVal.value, circle.cy.baseVal.value)
+                    .matrixTransform(inverse.multiply(circleMatrix));
+                const radius = circle.r.baseVal.value;
+                rows.push({ label, node, origin, center, radius, width: Math.abs(corner.x - origin.x), height: Math.abs(corner.y - origin.y), transform });
+                if (!instance.labelTransforms.has(label)) {
+                    instance.labelTransforms.set(label, label.getAttribute("transform"));
+                }
+            }
+            if (rows.length < 2) {
+                return;
+            }
+            const collides = rows.some((a, i) => rows.slice(i + 1).some(b =>
+                a.origin.x < b.origin.x + b.width + 4 && a.origin.x + a.width + 4 > b.origin.x &&
+                a.origin.y < b.origin.y + b.height + 4 && a.origin.y + a.height + 4 > b.origin.y));
+            if (instance.viewport.clientWidth > 760 && !collides) {
+                return;
+            }
+            rows.sort((a, b) => a.center.y - b.center.y || a.center.x - b.center.x);
+            const gap = 8;
+            const x = Math.max(...rows.map(row => row.center.x + row.radius)) + 24;
+            const totalHeight = rows.reduce((sum, row) => sum + row.height, 0) + gap * (rows.length - 1);
+            let y = (rows[0].center.y + rows[rows.length - 1].center.y - totalHeight) / 2;
+            for (const row of rows) {
+                const from = new DOMPoint(x, y).matrixTransform(row.transform.inverse());
+                const box = row.label.getBBox();
+                const shift = `translate(${from.x - box.x} ${from.y - box.y})`;
+                const original = instance.labelTransforms.get(row.label);
+                row.label.setAttribute("transform", original ? `${original} ${shift}` : shift);
+                const leader = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                leader.setAttribute("class", "graph-label-leader");
+                leader.setAttribute("aria-hidden", "true");
+                const parentInverse = row.node.getScreenCTM().inverse();
+                const svgMatrix = svg.getScreenCTM();
+                const start = new DOMPoint(row.center.x + row.radius, row.center.y).matrixTransform(svgMatrix).matrixTransform(parentInverse);
+                const end = new DOMPoint(x - 5, y + row.height / 2).matrixTransform(svgMatrix).matrixTransform(parentInverse);
+                leader.setAttribute("x1", start.x);
+                leader.setAttribute("y1", start.y);
+                leader.setAttribute("x2", end.x);
+                leader.setAttribute("y2", end.y);
+                leader.style.cssText = "stroke:currentColor;stroke-width:1;opacity:.35;pointer-events:none";
+                row.node.insertBefore(leader, row.label);
+                y += row.height + gap;
+            }
+        }
+        finally {
+            instance.contentObserver?.observe(instance.content, { subtree: true, childList: true, characterData: true, attributes: true });
+        }
+    }
+
     function getContentMetrics(instance) {
-        return {
+        const fallback = {
+            x: 0,
+            y: 0,
             width: Math.max(instance.content.offsetWidth || 0, 1),
             height: Math.max(instance.content.offsetHeight || 0, 1)
         };
+        const svg = instance.content.querySelector(".graph-view-svg");
+        if (!svg) {
+            return fallback;
+        }
+
+        // Measure painted semantic content, not the layout canvas or invisible hit targets.
+        // Screen matrices cancel the current pan/zoom and include nested SVG transforms.
+        try {
+            const svgMatrix = svg.getScreenCTM();
+            if (!svgMatrix) {
+                return fallback;
+            }
+            const inverse = svgMatrix.inverse();
+            const points = [];
+            for (const element of svg.querySelectorAll(".graph-edge, .graph-label-leader, .graph-view-node circle, .graph-view-node text")) {
+                const style = getComputedStyle(element);
+                if (style.display === "none" || style.visibility === "hidden") {
+                    continue;
+                }
+                const matrix = element.getScreenCTM();
+                if (!matrix) {
+                    continue;
+                }
+                const box = element.getBBox();
+                const stroke = style.stroke === "none" ? 0 : (parseFloat(style.strokeWidth) || 0) / 2;
+                const transform = inverse.multiply(matrix);
+                for (const x of [box.x - stroke, box.x + box.width + stroke]) {
+                    for (const y of [box.y - stroke, box.y + box.height + stroke]) {
+                        points.push(new DOMPoint(x, y).matrixTransform(transform));
+                    }
+                }
+            }
+            if (!points.length || points.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
+                return fallback;
+            }
+            const x = Math.min(...points.map(point => point.x));
+            const y = Math.min(...points.map(point => point.y));
+            const width = Math.max(...points.map(point => point.x)) - x;
+            const height = Math.max(...points.map(point => point.y)) - y;
+            return width > 0 && height > 0 ? { x, y, width, height } : fallback;
+        }
+        catch {
+            return fallback;
+        }
+    }
+
+    function fitScale(instance, metrics) {
+        const width = Math.max(instance.viewport.clientWidth, 1);
+        const height = Math.max(instance.viewport.clientHeight, 1);
+        const inset = Math.min(width < 480 ? 16 : padding, width / 4, height / 4);
+        // Fit may be below the interactive zoom floor: every label and edge must still fit.
+        return Math.min((width - inset * 2) / metrics.width, (height - inset * 2) / metrics.height, maxScale);
     }
 
     function publishState(instance) {
@@ -44,16 +194,12 @@
     function centerContent(instance) {
         const viewportWidth = Math.max(instance.viewport.clientWidth || 0, 1);
         const viewportHeight = Math.max(instance.viewport.clientHeight || 0, 1);
-        const { width, height } = getContentMetrics(instance);
+        const { x, y, width, height } = getContentMetrics(instance);
         const scaledWidth = width * instance.state.scale;
         const scaledHeight = height * instance.state.scale;
 
-        instance.state.panX = scaledWidth < viewportWidth - (padding * 2)
-            ? (viewportWidth - scaledWidth) / 2
-            : padding;
-        instance.state.panY = scaledHeight < viewportHeight - (padding * 2)
-            ? (viewportHeight - scaledHeight) / 2
-            : padding;
+        instance.state.panX = (viewportWidth - scaledWidth) / 2 - x * instance.state.scale;
+        instance.state.panY = (viewportHeight - scaledHeight) / 2 - y * instance.state.scale;
     }
 
     function fitContent(viewport) {
@@ -62,13 +208,8 @@
             return;
         }
 
-        const viewportWidth = Math.max(viewport.clientWidth || 0, 1);
-        const viewportHeight = Math.max(viewport.clientHeight || 0, 1);
-        const { width, height } = getContentMetrics(instance);
-        const nextScale = clamp(
-            Math.min((viewportWidth - (padding * 2)) / width, (viewportHeight - (padding * 2)) / height),
-            minScale,
-            maxScale);
+        arrangeLabels(instance);
+        const nextScale = fitScale(instance, getContentMetrics(instance));
 
         instance.state.scale = Number.isFinite(nextScale) ? nextScale : 1;
         instance.state.hasInteracted = false;
@@ -82,6 +223,7 @@
             return;
         }
 
+        arrangeLabels(instance);
         instance.state.scale = 1;
         instance.state.hasInteracted = false;
         centerContent(instance);
@@ -98,8 +240,9 @@
         const localX = clientX - rect.left;
         const localY = clientY - rect.top;
         const previousScale = instance.state.scale;
-        const nextScale = clamp(previousScale * multiplier, minScale, maxScale);
-        if (Math.abs(nextScale - previousScale) < 0.0001) {
+        const lowerBound = Math.min(minScale, previousScale, fitScale(instance, getContentMetrics(instance)) / 4);
+        const nextScale = clamp(previousScale * multiplier, lowerBound, maxScale);
+        if (Math.abs(nextScale - previousScale) < Number.EPSILON) {
             return;
         }
 
@@ -123,10 +266,12 @@
         }
 
         const existing = getInstance(viewport);
-        if (existing) {
-            existing.content = content;
+        if (existing && existing.content === content) {
             applyTransform(existing);
             return;
+        }
+        if (existing) {
+            unregister(viewport);
         }
 
         const instance = {
@@ -147,7 +292,11 @@
                 hasMoved: false,
                 suppressNextClick: false
             },
-            cleanup: []
+            cleanup: [],
+            frame: null,
+            disposed: false,
+            labelTransforms: new WeakMap(),
+            contentObserver: null
         };
 
         const handleWheel = (event) => {
@@ -243,14 +392,30 @@
             fitContent(viewport);
         };
 
-        const resizeObserver = new ResizeObserver(() => {
-            if (instance.state.hasInteracted) {
-                applyTransform(instance);
+        const scheduleRefresh = () => {
+            if (instance.disposed || instance.frame !== null) {
+                return;
             }
-            else {
-                fitContent(viewport);
+            instance.frame = requestAnimationFrame(() => {
+                instance.frame = null;
+                if (!instance.disposed) {
+                    refresh(viewport);
+                }
+            });
+        };
+        const resizeObserver = new ResizeObserver(scheduleRefresh);
+        // Do not observe the pan element's style: applyTransform would trigger a feedback loop.
+        const contentObserver = new MutationObserver(records => {
+            if (records.some(record => !(record.target === instance.content && record.type === "attributes" && record.attributeName === "style"))) {
+                scheduleRefresh();
             }
         });
+        instance.contentObserver = contentObserver;
+        contentObserver.observe(content, { subtree: true, childList: true, characterData: true, attributes: true });
+        const fontObserver = new MutationObserver(scheduleRefresh);
+        fontObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "class"] });
+        document.fonts?.addEventListener("loadingdone", scheduleRefresh);
+        document.fonts?.ready.then(scheduleRefresh);
 
         viewport.addEventListener("wheel", handleWheel, { passive: false });
         viewport.addEventListener("pointerdown", handlePointerDown);
@@ -269,6 +434,9 @@
         instance.cleanup.push(() => viewport.removeEventListener("click", handleClick, true));
         instance.cleanup.push(() => viewport.removeEventListener("dblclick", handleDoubleClick));
         instance.cleanup.push(() => resizeObserver.disconnect());
+        instance.cleanup.push(() => contentObserver.disconnect());
+        instance.cleanup.push(() => fontObserver.disconnect());
+        instance.cleanup.push(() => document.fonts?.removeEventListener("loadingdone", scheduleRefresh));
 
         instances.set(viewport, instance);
         resetContent(viewport);
@@ -280,8 +448,25 @@
             return;
         }
 
+        instance.disposed = true;
+        if (instance.frame !== null) {
+            cancelAnimationFrame(instance.frame);
+        }
         for (const dispose of instance.cleanup) {
             dispose();
+        }
+
+        for (const leader of instance.content.querySelectorAll(".graph-label-leader")) {
+            leader.remove();
+        }
+        for (const label of instance.content.querySelectorAll(".graph-node-title")) {
+            const original = instance.labelTransforms.get(label);
+            if (original === null) {
+                label.removeAttribute("transform");
+            }
+            else if (original !== undefined) {
+                label.setAttribute("transform", original);
+            }
         }
 
         instances.delete(viewport);
@@ -294,6 +479,7 @@
         }
 
         if (instance.state.hasInteracted) {
+            arrangeLabels(instance);
             applyTransform(instance);
         }
         else {

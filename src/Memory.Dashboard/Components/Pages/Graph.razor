@@ -239,79 +239,81 @@
                     }
                 </div>
 
-                <div class="graph-scroll-shell" @ref="_viewportRef">
-                    <div class="graph-pan-content" @ref="_panContentRef" style="@PanContentDimensionsStyle">
-                        @if (_graph is null)
-                        {
-                            <div class="graph-empty-state graph-empty-state-rich">
-                                <div class="graph-empty-kicker">圖譜載入中</div>
-                                <strong>正在讀取記憶關聯 snapshot</strong>
-                                <p>這裡會呈現 explicit links、similarity layer 與目前篩選下的 hub 節點。</p>
-                            </div>
-                        }
-                        else if (_graph.Nodes.Count == 0)
-                        {
-                            <div class="graph-empty-state graph-empty-state-rich">
-                                <div class="graph-empty-kicker">目前沒有可繪製節點</div>
-                                <strong>這通常是資料或篩選狀態，不是圖形引擎問題</strong>
-                                <p>@GraphEmptyStateMessage</p>
-                                <div class="graph-empty-actions">
-                                    <span>@CurrentProjectScopeLabel</span>
-                                    <span>@GraphModeLabel</span>
-                                    <span>@(string.IsNullOrWhiteSpace(_viewQuery) ? "未套用搜尋" : $"搜尋：{_viewQuery}")</span>
+                <div class="graph-viewport-frame">
+                    <div class="graph-scroll-shell" @ref="_viewportRef">
+                        <div class="graph-pan-content" @ref="_panContentRef" style="@PanContentDimensionsStyle">
+                            @if (_graph is null)
+                            {
+                                <div class="graph-empty-state graph-empty-state-rich">
+                                    <div class="graph-empty-kicker">圖譜載入中</div>
+                                    <strong>正在讀取記憶關聯 snapshot</strong>
+                                    <p>這裡會呈現 explicit links、similarity layer 與目前篩選下的 hub 節點。</p>
                                 </div>
-                            </div>
-                        }
-                        else
-                        {
-                            <div class="graph-canvas" style="@($"width:{Canvas.Width}px;height:{Canvas.Height}px;")">
-                                <svg class="graph-view-svg" viewBox="@Canvas.ViewBox" role="img" aria-label="記憶關聯圖">
-                                    @foreach (var edge in Canvas.Edges)
-                                    {
-                                        <line class="graph-edge @EdgeVisualClass(edge)"
-                                              style="@BuildEdgeStyle(edge)"
-                                              x1="@edge.FromCenterX"
-                                              y1="@edge.FromCenterY"
-                                              x2="@edge.ToCenterX"
-                                              y2="@edge.ToCenterY" />
-                                    }
-                                    @foreach (var node in Canvas.Nodes)
-                                    {
-                                        var nodeId = node.Node.Id;
-                                        <a @key="nodeId"
-                                           href="@BuildNodeSelectionHref(nodeId)"
-                                           class="@BuildNodeVisualClass(node)"
-                                           style="@BuildNodeStyle(node)"
-                                           transform="@BuildNodeTransform(node)"
-                                           @onclick="() => SelectNodeAsync(nodeId)"
-                                           role="button"
-                                           aria-label="@BuildNodeAccessibleLabel(node.Node)"
-                                           data-graph-node-id="@nodeId"
-                                           data-graph-node-weight="@FormatInvariant(NodeWeight(node.Node))">
-                                            <title>@BuildNodeAccessibleLabel(node.Node)</title>
-                                            <rect class="graph-view-node-hit"
-                                                  x="@FormatInvariant(BuildNodeHitX(node.Node))"
-                                                  y="@FormatInvariant(BuildNodeHitY(node.Node))"
-                                                  width="@FormatInvariant(BuildNodeHitWidth(node.Node))"
-                                                  height="@FormatInvariant(BuildNodeHitHeight(node.Node))"
-                                                  rx="6" />
-                                            <circle r="@FormatInvariant(BuildNodeRadius(node.Node))" />
-                                            <svg:text class="graph-view-node-initial"
-                                                      x="0"
-                                                      y="0"
-                                                      aria-hidden="true">
-                                                @AbbreviateSource(node.Node.SourceLabel)
-                                            </svg:text>
-                                            <svg:text class="@BuildNodeTitleClass()"
-                                                      x="@FormatInvariant(BuildNodeRadius(node.Node) + 5d)"
-                                                      y="4">
-                                                @node.Node.Title
-                                            </svg:text>
-                                        </a>
-                                    }
-                                </svg>
-                            </div>
-                        }
+                            }
+                            else if (_graph.Nodes.Count == 0)
+                            {
+                                <div class="graph-empty-state graph-empty-state-rich">
+                                    <div class="graph-empty-kicker">目前沒有可繪製節點</div>
+                                    <strong>這通常是資料或篩選狀態，不是圖形引擎問題</strong>
+                                    <p>@GraphEmptyStateMessage</p>
+                                    <div class="graph-empty-actions">
+                                        <span>@CurrentProjectScopeLabel</span>
+                                        <span>@GraphModeLabel</span>
+                                        <span>@(string.IsNullOrWhiteSpace(_viewQuery) ? "未套用搜尋" : $"搜尋：{_viewQuery}")</span>
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="graph-canvas" style="@($"width:{Canvas.Width}px;height:{Canvas.Height}px;")">
+                                    <svg class="graph-view-svg" viewBox="@Canvas.ViewBox" role="img" aria-label="記憶關聯圖">
+                                        @foreach (var edge in Canvas.Edges)
+                                        {
+                                            <line class="graph-edge @EdgeVisualClass(edge)"
+                                                  style="@BuildEdgeStyle(edge)"
+                                                  x1="@edge.FromCenterX"
+                                                  y1="@edge.FromCenterY"
+                                                  x2="@edge.ToCenterX"
+                                                  y2="@edge.ToCenterY" />
+                                        }
+                                        @foreach (var node in Canvas.Nodes)
+                                        {
+                                            var nodeId = node.Node.Id;
+                                            <a @key="nodeId"
+                                               href="@BuildNodeSelectionHref(nodeId)"
+                                               class="@BuildNodeVisualClass(node)"
+                                               style="@BuildNodeStyle(node)"
+                                               transform="@BuildNodeTransform(node)"
+                                               @onclick="() => SelectNodeAsync(nodeId)"
+                                               role="button"
+                                               aria-label="@BuildNodeAccessibleLabel(node.Node)"
+                                               data-graph-node-id="@nodeId"
+                                               data-graph-node-weight="@FormatInvariant(NodeWeight(node.Node))">
+                                                <title>@BuildNodeAccessibleLabel(node.Node)</title>
+                                                <rect class="graph-view-node-hit"
+                                                      x="@FormatInvariant(BuildNodeHitX(node.Node))"
+                                                      y="@FormatInvariant(BuildNodeHitY(node.Node))"
+                                                      width="@FormatInvariant(BuildNodeHitWidth(node.Node))"
+                                                      height="@FormatInvariant(BuildNodeHitHeight(node.Node))"
+                                                      rx="6" />
+                                                <circle r="@FormatInvariant(BuildNodeRadius(node.Node))" />
+                                                <svg:text class="graph-view-node-initial"
+                                                          x="0"
+                                                          y="0"
+                                                          aria-hidden="true">
+                                                    @AbbreviateSource(node.Node.SourceLabel)
+                                                </svg:text>
+                                                <svg:text class="@BuildNodeTitleClass()"
+                                                          x="@FormatInvariant(BuildNodeRadius(node.Node) + 5d)"
+                                                          y="4">
+                                                    @node.Node.Title
+                                                </svg:text>
+                                            </a>
+                                        }
+                                    </svg>
+                                </div>
+                            }
+                        </div>
                     </div>
                     <div class="graph-viewport-controls" role="toolbar" aria-label="圖面視角操作">
                         <div class="graph-pan-pad">
@@ -443,7 +445,7 @@
                                         @foreach (var revision in _selectedDetails.Revisions.Take(4))
                                         {
                                             <article class="stack-item">
-                                                <div class="stack-item-title">v@revision.Version / @revision.ChangedBy</div>
+                                                <div class="stack-item-title">v@(revision.Version) / @revision.ChangedBy</div>
                                                 <div class="stack-item-copy">@revision.Title</div>
                                                 <div class="stack-item-meta"><ClientLocalTime Value="revision.CreatedAt" /></div>
                                             </article>
