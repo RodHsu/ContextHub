@@ -60,6 +60,16 @@ Migration 054 保存可重建的 global graph projection、revision checkpoint�
 - 增量重算 dirty project 的 similarity sources，並處理 global top-160 選入／移除的來源。無邊來源也保存已選清單。節點 metadata 與 explicit edges 仍讀取完整 scope；此處的增量是昂貴的 similarity 部分，並非所有 metadata 均已分片。
 - 以 revision ledger 的最新 scope 狀態追蹤 dirty，避免將 outbox sequence 配置次序當成交易 commit 次序而漏事件。畫面提供 generation、mode、dirty age、lease active、skip、dedup、失敗與最後成功時間；60 秒為 stale 提示，不是已證明的 Production SLA。
 
+## Redis 故障時的讀取降級
+
+單次搜尋、working context 的結果快取流程與一次 Graph 重建，各自建立可丟棄快取的操作範圍；巢狀搜尋共用該範圍。首次 Redis 連線失敗或 timeout 後，這次操作的後續物件快取 GET/SET 與 invalidation signal 讀取會 bypass，避免每一層、每個 Graph 節點重複等待同一故障。下一次操作重新嘗試 Redis，不保存跨請求的故障狀態。
+
+每次版本讀取仍先取得 PostgreSQL 的 committed revision；資料庫不可用時維持 fail-closed。未取得 Redis signals 時沿用不可重用的 unknown-signals stamp，不以舊版本或舊物件換取速度。授權、actor/project/tenant/owner 過濾、cache key、Graph lease/generation 與原 timeout 不變。
+
+真正嘗試而失敗的物件快取操作計為 error，未嘗試的計為 bypass；signals 的 MGET 不納入物件快取 error counter。JSON、payload validation、序列化與 Redis command error 不會標記整個操作離線。Caller cancellation 優先傳遞，即使已 bypass 仍會拋出；已在途的並行 Redis 操作不會被這個旗標取消。
+
+這項降級只涵蓋可丟棄快取，不改 locks、job signals、寫入失效通知或維護協調契約。Working context 在結果快取之前仍有維護協調等依賴，因此不代表整條 working context 流程在 Redis 故障下皆可用。原始 DB 與 embedding 負載可能增加，須以同流量與實際故障測試評估，不能只用 bypass 比例或單一合成圖的耗時宣稱 Production SLA。
+
 ## 圖譜畫布
 
 「適應視圖」以可見節點、完整標題及連線的實際 SVG 範圍計算縮放與中心，包含線條寬度，不把空白布局畫布或透明點擊區域當作顯示內容。資料、字級或視窗尺寸改變時會重新量測；使用者已平移或縮放後保留其視角，直到再次操作「適應視圖」。完整入框可能需要低於一般縮放下限的比例，之後「縮小」仍會降低比例。

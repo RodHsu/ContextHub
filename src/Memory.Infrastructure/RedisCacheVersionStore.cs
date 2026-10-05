@@ -184,6 +184,8 @@ public sealed class RedisCacheVersionStore(
         CacheVersionStamp durable, IReadOnlyList<string> projects, ContextHubRequestActor actor,
         bool includeShared, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (RedisCacheOperationScope.IsBypassed) return UnknownSignals(durable);
         // Application invalidations can occur inside an outer business transaction. They remain
         // Redis signals: writing the DB revision on another connection would wait on our own trigger.
         // The committed DB revision is always part of the key, so early/lost/restored signals cannot
@@ -200,13 +202,18 @@ public sealed class RedisCacheVersionStore(
             var signals = redisKeys.Select((key, index) => new { Key = key.ToString(), Value = values[index].ToString() }).ToArray();
             return durable with { Value = durable.Value + ";signals=" + JsonSerializer.Serialize(signals) };
         }
-        catch (RedisException)
+        catch (Exception ex) when (ex is RedisException or RedisTimeoutException)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // Unknown operational signals cannot address any existing object cache entry. Authority
             // remains the DB snapshot; origin reads may continue while Redis is unavailable.
-            return durable with { Value = durable.Value + ";signals-unavailable=" + Guid.NewGuid().ToString("N") };
+            if (ex is RedisConnectionException or RedisTimeoutException) RedisCacheOperationScope.MarkTransportFailure();
+            return UnknownSignals(durable);
         }
     }
+
+    private static CacheVersionStamp UnknownSignals(CacheVersionStamp durable)
+        => durable with { Value = durable.Value + ";signals-unavailable=" + Guid.NewGuid().ToString("N") };
 
     private async Task EnsureJobSignalSubscriptionAsync(CancellationToken cancellationToken)
     {
@@ -265,7 +272,7 @@ public sealed class RedisObjectCache(
     public async Task<RedisCacheLookup<T>> GetAsync<T>(string key, string kind, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!_options.RedisCache.Enabled)
+        if (!_options.RedisCache.Enabled || RedisCacheOperationScope.IsBypassed)
         {
             telemetry.RecordBypass(kind);
             return new RedisCacheLookup<T>(false, default);
@@ -296,11 +303,14 @@ public sealed class RedisObjectCache(
         }
         catch (JsonException)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             telemetry.RecordInvalidPayload(kind);
             return new RedisCacheLookup<T>(false, default);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ex is RedisConnectionException or RedisTimeoutException) RedisCacheOperationScope.MarkTransportFailure();
             telemetry.RecordError(kind);
             return new RedisCacheLookup<T>(false, default);
         }
@@ -326,7 +336,7 @@ public sealed class RedisObjectCache(
     public async Task SetAsync<T>(string key, string kind, T value, TimeSpan ttl, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!_options.RedisCache.Enabled)
+        if (!_options.RedisCache.Enabled || RedisCacheOperationScope.IsBypassed)
         {
             telemetry.RecordBypass(kind);
             return;
@@ -342,8 +352,10 @@ public sealed class RedisObjectCache(
         {
             throw;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ex is RedisConnectionException or RedisTimeoutException) RedisCacheOperationScope.MarkTransportFailure();
             telemetry.RecordError(kind);
         }
     }

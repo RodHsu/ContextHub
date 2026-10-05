@@ -766,6 +766,7 @@ public sealed class MemoryService(
         EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var allowedProjects = ProjectContext.ResolveSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
         EnsureProjectsAllowed(actor, allowedProjects, write: false);
+        using var cacheOperation = RedisCacheOperationScope.BeginOrJoin();
         IReadOnlyList<string> archivedProjects = request.IncludeArchived
             ? []
             : await projectInformationService.GetArchivedProjectIdsAsync(allowedProjects, cancellationToken);
@@ -831,6 +832,7 @@ public sealed class MemoryService(
         // SummaryOnly still includes primary-project metadata and logs in the final context.
         // Authorize and version that dependency before consulting a cached result.
         EnsureProjectAllowed(actor, ProjectContext.Normalize(request.ProjectId), write: false);
+        using var cacheOperation = RedisCacheOperationScope.BeginOrJoin();
         var contextProjects = allowedProjects.Append(ProjectContext.Normalize(request.ProjectId))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var version = await cacheStore.GetVersionStampAsync(contextProjects, actor, request.UseSummaryLayer, cancellationToken);

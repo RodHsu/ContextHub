@@ -31,6 +31,7 @@ public sealed class DashboardMemoryGraphIndexRefreshService(
             actorAccessor.Current = new ContextHubRequestActor(null, null, "dashboard-graph-projection", null,
                 [SecurityScopes.MemoryRead], [], IsAuthenticated: true, IsServiceActor: true);
             using var traffic = CacheMetricsTrafficScope.Begin("graph-background");
+            using var cacheOperation = RedisCacheOperationScope.BeginOrJoin();
             var payload = !lease.Full && lease.Previous is not null && builder is IIncrementalDashboardMemoryGraphIndexBuilder incremental
                 ? await incremental.BuildIncrementalAsync(lease.Previous.Payload, lease.DirtyProjects, buildTimeout.Token)
                 : await builder.BuildAsync(buildTimeout.Token);
