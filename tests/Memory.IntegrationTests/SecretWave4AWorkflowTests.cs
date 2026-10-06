@@ -228,13 +228,75 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
         => new(db, actorAccessor, new SystemClock(), new AllowFoundationStore(), new AllowStepUp(), approval, keys, new RsaSshBoundSigner(),
             Options.Create(new SecretManagementOptions()));
 
-    private static async Task SeedRulesAsync(MemoryDbContext db, TenantUser user, Guid secretId, string principal, SecretRight right, AuthorizationEffect effect)
+    [DockerRequiredFact]
+    public async Task Secret_project_grants_use_frozen_unicode_identity_and_preserve_owner_isolation()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var user = await db.TenantUsers.SingleAsync(x => x.Username == "contract-test-admin");
+        var actor = Actor(user, interactive: true);
+        accessor.Current = actor;
+        var service = CreateSecretService(db, accessor, new TestSecretKeyAuthority(), new AllowApproval());
+        var suffix = "-" + Guid.NewGuid().ToString("N");
+        var created = await service.CreateAsync(new("µ" + suffix, "identity-control", SecretKind.Opaque, Proof()), default);
+        foreach (var alias in new[] { "µ", "μ", "Μ" })
+        {
+            accessor.Current = actor with { AllowedProjectIds = [alias + suffix] };
+            var items = await service.ListAsync("Μ" + suffix, default);
+            items.Should().ContainSingle().Which.Id.Should().Be(created.Id);
+            items[0].ProjectId.Should().Be("µ" + suffix);
+        }
+        foreach (var foreign in new[] { actor with { UserId = Guid.NewGuid() }, actor with { TenantId = Guid.NewGuid() } })
+        {
+            accessor.Current = foreign with { AllowedProjectIds = ["Μ" + suffix] };
+            (await service.ListAsync("Μ" + suffix, default)).Should().BeEmpty();
+        }
+        accessor.Current = actor with { AllowedProjectIds = ["M" + suffix] };
+        var denied = () => service.ListAsync("Μ" + suffix, default);
+        await denied.Should().ThrowAsync<UnauthorizedAccessException>();
+    }
+
+    [DockerRequiredFact]
+    public async Task Ssh_project_grants_use_frozen_unicode_identity_for_issue_and_revoke()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var user = await db.TenantUsers.SingleAsync(x => x.Username == "contract-test-admin");
+        var actor = Actor(user, interactive: true);
+        accessor.Current = actor;
+        var secretService = CreateSecretService(db, accessor, new TestSecretKeyAuthority(), new AllowApproval());
+        var suffix = "-" + Guid.NewGuid().ToString("N");
+        var project = "µ" + suffix;
+        var ca = await secretService.CreateAsync(new(project, "identity-ca", SecretKind.SshCertificateAuthorityReference, Proof()), default);
+        foreach (var right in new[] { SecretRight.SshIssue, SecretRight.Revoke })
+            await SeedRulesAsync(db, user, ca.Id, user.Id.ToString("D"), right, AuthorizationEffect.Allow, project);
+        var service = new SshCertificateService(db, accessor, new SystemClock(), new AllowFoundationStore(), new AllowStepUp(),
+            new AllowApproval(), new TestSshCertificateIssuer(), Options.Create(new SecretManagementOptions()));
+        accessor.Current = actor with { AllowedProjectIds = ["Μ" + suffix] };
+        var issued = await service.IssueAsync(new(ca.Id, TestPublicKey, "host.example.test", 22, "deploy",
+            "identity-control", "identity-issue", ca.Revision, null, Proof()), default);
+        foreach (var foreign in new[] { actor with { UserId = Guid.NewGuid() }, actor with { TenantId = Guid.NewGuid() },
+                     actor with { AllowedProjectIds = ["M" + suffix] } })
+        {
+            accessor.Current = foreign;
+            var denied = () => service.RevokeAsync(issued.CertificateLeaseId, issued.Revision, "approved", "identity-control", default);
+            await denied.Should().ThrowAsync<UnauthorizedAccessException>();
+            (await db.SshCertificateLeases.AsNoTracking().SingleAsync(x => x.Id == issued.CertificateLeaseId)).State.Should().Be(SshCertificateState.Active);
+        }
+        accessor.Current = actor with { AllowedProjectIds = ["μ" + suffix] };
+        (await service.RevokeAsync(issued.CertificateLeaseId, issued.Revision, "approved", "identity-control", default)).Applied.Should().BeTrue();
+        (await db.SshCertificateLeases.AsNoTracking().SingleAsync(x => x.Id == issued.CertificateLeaseId)).ProjectId.Should().Be(project);
+    }
+
+    private static async Task SeedRulesAsync(MemoryDbContext db, TenantUser user, Guid secretId, string principal, SecretRight right, AuthorizationEffect effect, string projectId = "ContextHub")
     {
         db.SecretPolicies.Add(new SecretPolicy
         {
             TenantId = user.TenantId,
             OwnerUserId = user.Id,
-            ProjectId = "ContextHub",
+            ProjectId = projectId,
             SecretId = secretId,
             PrincipalId = principal,
             Right = right,

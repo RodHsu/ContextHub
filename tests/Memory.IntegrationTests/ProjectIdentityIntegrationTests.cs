@@ -105,6 +105,69 @@ public sealed class ProjectIdentityIntegrationTests(ContainerTestEnvironment env
     }
 
     [DockerRequiredFact]
+    public async Task Sql_and_application_trim_every_supported_project_input_whitespace_character()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var source = scope.ServiceProvider.GetRequiredService<NpgsqlDataSource>();
+        foreach (var whitespace in "\t\n\u000b\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000")
+        {
+            var value = $"{whitespace}Tt{whitespace}";
+            await using var command = source.CreateCommand("SELECT public.project_identity_key(@value)");
+            command.Parameters.AddWithValue("value", value);
+            ((string)(await command.ExecuteScalarAsync())!).Should().Be("TT");
+            ProjectContext.IdentityKey(value).Should().Be("TT");
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Migration_identity_function_preserves_whitespace_and_unicode_when_checkout_line_endings_change()
+    {
+        var assembly = typeof(MemoryDbContext).Assembly;
+        var resource = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Sql.Migrations.056_project_identity.sql", StringComparison.Ordinal));
+        using var migrationReader = new StreamReader(assembly.GetManifestResourceStream(resource)!);
+        var migration = await migrationReader.ReadToEndAsync();
+        var functionEnd = migration.IndexOf("CREATE OR REPLACE FUNCTION public.project_identity_equals", StringComparison.Ordinal);
+        functionEnd.Should().BeGreaterThan(0);
+        var definition = migration[..functionEnd]
+            .Replace("public.project_identity_key", "pg_temp.project_identity_key", StringComparison.Ordinal)
+            .ReplaceLineEndings("\n");
+        var samples = "\t\n\u000b\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+            .SelectMany(whitespace => new[] { "Tt", "µ", "μ", "Σ", "\U00010428", "Å" }
+                .Select(project => $"{whitespace}{project}{whitespace}"))
+            .ToArray();
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var source = scope.ServiceProvider.GetRequiredService<NpgsqlDataSource>();
+        foreach (var lineEnding in new[] { "\n", "\r\n" })
+        {
+            await using var connection = await source.OpenConnectionAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
+            await using (var create = new NpgsqlCommand(
+                "CREATE TEMP TABLE project_identity_line_endings_probe (value text) ON COMMIT DROP;\n" +
+                definition.ReplaceLineEndings(lineEnding), connection, transaction))
+                await create.ExecuteNonQueryAsync();
+            await using (var query = new NpgsqlCommand("""
+                SELECT value, pg_temp.project_identity_key(value)
+                FROM unnest(@samples) WITH ORDINALITY AS inputs(value, ordinal)
+                ORDER BY ordinal;
+                """, connection, transaction))
+            {
+                query.Parameters.AddWithValue("samples", samples);
+                await using var reader = await query.ExecuteReaderAsync();
+                var count = 0;
+                while (await reader.ReadAsync())
+                {
+                    reader.GetString(0).Should().Be(samples[count]);
+                    reader.GetString(1).Should().Be(ProjectContext.IdentityKey(samples[count]));
+                    count++;
+                }
+                count.Should().Be(samples.Length);
+            }
+            await transaction.RollbackAsync();
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Legacy_revision_aliases_and_redis_signals_invalidate_every_case_variant()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

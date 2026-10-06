@@ -13,6 +13,13 @@ accents, combine Unicode normalization forms or expand ligatures. Malformed UTF-
 is rejected. Other identifiers, query text and embedding model keys retain their
 own contracts.
 
+Secrets and SSH certificate project-grant filters use this same identity,
+including Unicode case classes such as `µ`, `μ` and `Μ`; database locale-dependent
+lowercasing is not a substitute. Input whitespace includes CR as well as LF.
+The migration represents whitespace with explicit SQL escapes so LF and CRLF
+checkouts load identical rules. Its mapping fingerprint is SHA-256 over UTF-8
+`Source + LF + Target + LF + Whitespace`.
+
 The SQL map resolves common ASCII characters before its frozen Unicode pairs.
 ASCII lowercase retains its uppercase mapping; uppercase, digits, punctuation and
 supported control characters have explicit identity pairs. This avoids scanning

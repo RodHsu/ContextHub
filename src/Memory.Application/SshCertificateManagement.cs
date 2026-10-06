@@ -320,10 +320,10 @@ public sealed class SshCertificateService(
             ? query.Where(x => EF.Property<Guid?>(x, "TenantId") == actor.TenantId)
             : query.Where(x => EF.Property<Guid?>(x, "TenantId") == actor.TenantId && EF.Property<Guid?>(x, "OwnerUserId") == actor.UserId);
         if (actor.AllowedProjectIds.Count == 0) return query;
-        var allowed = actor.AllowedProjectIds.Select(x => ProjectContext.Normalize(x).ToLowerInvariant()).ToArray();
-        return query.Where(x => allowed.Contains(EF.Property<string>(x, "ProjectId").ToLower()) ||
-                                Memory.Application.ProjectContext.Matches(EF.Property<string>(x, "ProjectId").ToLower(), ProjectContext.SharedProjectId) ||
-                                Memory.Application.ProjectContext.Matches(EF.Property<string>(x, "ProjectId").ToLower(), ProjectContext.UserProjectId));
+        var allowed = ProjectContext.IdentityKeys(actor.AllowedProjectIds);
+        return query.Where(x => allowed.Contains(ProjectContext.IdentityKey(EF.Property<string>(x, "ProjectId"))) ||
+                                ProjectContext.Matches(EF.Property<string>(x, "ProjectId"), ProjectContext.SharedProjectId) ||
+                                ProjectContext.Matches(EF.Property<string>(x, "ProjectId"), ProjectContext.UserProjectId));
     }
 
     private static void ValidateTarget(string host, int port, string user)

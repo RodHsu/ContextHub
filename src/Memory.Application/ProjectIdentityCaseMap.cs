@@ -7,8 +7,9 @@ namespace Memory.Application;
 // requires a versioned identity/index/cache migration, not a locale or runtime update.
 internal static class ProjectIdentityCaseMap
 {
-    internal const string Fingerprint = "C738366E5613E67DCB077E25D7F6CCCDD2E9EDC1FADEF7DF15A4D3E9CEC53513";
-    private const string Whitespace = "\t\n\u000b\f\n \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000";
+    // SHA256 of UTF-8 Source + LF + Target + LF + Whitespace.
+    internal const string Fingerprint = "C85D57E7A15245D7D90AA07B2388E6DB9FA1F9F7A0001BCB7FE1B3BB5D718ECE";
+    private const string Whitespace = "\t\n\u000b\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000";
     private const string Source = "abcdefghijklmnopqrstuvwxyzµàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿāăąćĉċčďđēĕėęěĝğġģĥħĩīĭįĳĵķĺļľŀłńņňŋōŏőœŕŗ"
         + "řśŝşšţťŧũūŭůűųŵŷźżžſƀƃƅƈƌƒƕƙƚƞơƣƥƨƭưƴƶƹƽƿǅǆǈǉǋǌǎǐǒǔǖǘǚǜǝǟǡǣǥǧǩǫǭǯǲǳǵǹǻǽǿȁȃȅȇȉȋȍȏȑȓȕȗșțȝȟȣȥȧȩȫȭȯȱȳȼȿɀ"
         + "ɂɇɉɋɍɏɐɑɒɓɔɖɗəɛɜɠɡɣɥɦɨɩɪɫɬɯɱɲɵɽʀʂʃʇʈʉʊʋʌʒʝʞͅͱͳͷͻͼͽάέήίαβγδεζηθικλμνξοπρςστυφχψωϊϋόύώϐϑϕϖϗϙϛϝϟϡϣϥϧϩϫϭ"
