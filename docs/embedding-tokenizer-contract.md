@@ -14,6 +14,10 @@ Blank embedding requests remain invalid.
 The asset fingerprint covers each profile asset's relative name, byte length and
 SHA-256 in a sorted `e5-asset-bundle-v1` JSON envelope. Startup verifies the bundle
 before loading it. Release assets must remain immutable after verification.
+Offline startup requires prepopulating every declared asset and controlling
+network egress. The existing bootstrap can download missing assets from the
+configured profile's fixed model repository before checking the pinned bundle;
+SHA verification is not an application-wide offline network policy.
 Candidate model keys include the asset digest, vector dimensions, maximum token
 length and tokenizer contract. Cache and vector identities cannot reuse a legacy
 model key. Embedding HTTP responses must match the configured key, dimensions,

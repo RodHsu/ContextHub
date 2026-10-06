@@ -8,7 +8,7 @@
 flowchart TD
     Auth["驗證 actor 與實際專案權限"]
     Rev["PostgreSQL 單一查詢讀取 scope revision"]
-    Key["v2 actor／主專案／查詢／模型快取鍵"]
+    Key["檢索 v4：actor／主專案同一性／查詢／模型快取鍵"]
     Redis["Redis 讀取並解碼"]
     Source["關鍵字、向量與資料庫結果"]
     Mutation["資料、索引或權限修改"]
@@ -22,8 +22,8 @@ flowchart TD
     Commit --> Rev
 ```
 
-- `search-final`、`working-context-final`、`semantic-hits` 及 Dashboard 物件使用新鍵格式。Embedding 仍以模型、用途與完整文字決定，可跨資料 revision 重用。既有 TTL 不變：最終結果 15 分鐘、semantic hits 10 分鐘、query embedding 24 小時；命中不延長 TTL。
-- actor identity 採結構化序列化，包含 tenant、user、role、service/interactive/authenticated 狀態、有效 scopes 與 grants。Session ID 不影響內容，因此不作為易變的 key dimension。實際檢索專案保留大小寫，與 SQL 的 selector 一致；集合順序與重複項目不影響 key。
+- `search-final`、`working-context-final`、`semantic-hits` 使用 v4 檢索鍵；Dashboard memory、details 與 logs 使用 v3 鍵。Embedding 仍以模型、用途與完整文字決定，可跨資料 revision 重用。既有 TTL 不變：最終結果 15 分鐘、semantic hits 10 分鐘、query embedding 24 小時；命中不延長 TTL。
+- actor identity 採結構化序列化，包含 tenant、user、role、service/interactive/authenticated 狀態、有效 scopes 與 grants。Session ID 不影響內容，因此不作為易變的 key dimension。ProjectId 在資料與回應中保留原始寫法；檢索、授權引用與快取鍵使用相同的固定同一性契約，`TT`、`Tt`、`tT`、`tt` 視為同一專案。集合順序與重複項目不影響 key；tenant、user、principal、resource、permission、查詢文字與模型鍵仍遵守各自的契約。完整規則見 [Project identity](project-identity-contract.md)。
 - Working context 額外包含 primary project。`SummaryOnly` 的檢索來自 shared，但主專案的 metadata/log 仍須先授權，並將主專案 revision 納入 stamp。維護狀態每次重新讀取；既有 recent-log 快照依 context TTL 更新，runtime logs 不會引發每筆全專案失效。
 - 成功反序列化、必要欄位與集合元素有效且非 null 才算 hit；空陣列有效。格式錯誤和 null 算 `InvalidPayload`，與 Redis transport error、miss、bypass 分開。取消會向呼叫端傳遞。
 - production DI 必須提供 `DurableCacheRevisionStore`；Redis-only fallback 只供直接建構的相容測試使用。版本未知或 PostgreSQL 無法讀取時，讀取失敗，不以未知 stamp 重用快取。
@@ -48,7 +48,7 @@ Migration 053 建立 `cache_scope_revisions` 與資料庫 trigger，涵蓋 EF �
 
 讀取使用一次 SQL 取得同一 committed snapshot 的所有相關版本，再以一次 Redis MGET 合併既有顯式失效訊號。業務流程的版本通知維持 Redis 訊號，避免在外層交易未提交時以另一條 DB connection 等待自己的 revision row lock；真正的資料失效由同交易 trigger 保證。Redis 訊號無法讀取時使用不可重用的 stamp，降級回來源。單筆 reindex 不再增加 global；Redis 中斷、重啟或回存舊 Redis revision 不會恢復舊資料的有效性。與讀取同時發生的提交可能使正在進行的請求返回其讀取起點的內容，但提交完成後啟動的新請求會取得新 revision。既有 key 留至 TTL 自行淘汰，不需清空 Redis。
 
-Project scope 保留 trim 後的原始大小寫與 Unicode，避免 PostgreSQL lower 和 .NET Unicode 大小寫映射差異造成漏失效。Scope 以 project 為單位，同名 project 在不同 tenant 的修改會保守地共同失效；結果仍以 tenant/user/actor 隔離。這個選擇增加少量失效，避免在既有全域 graph 和 legacy consumer 尚未完整切分時引入第二套 tenant revision 規則。版本 row 會序列化同 scope 的並行 writer，須在正式負載驗收觀察等待時間。
+既有 `project:<原始寫法>` revision rows 保留，不改寫或重設。讀取時以固定的 .NET／SQL ProjectId 同一性規則，在同一 committed snapshot 加總所有大小寫別名的 revisions；不能取最大值取代加總。失效訊號與有效 cache scope 也使用相同規則，不依賴 PostgreSQL locale lower。Scope 以 project 為單位，同名 project 在不同 tenant 的修改會保守地共同失效；結果仍以 tenant/user/actor 隔離。這個選擇增加少量失效，避免在既有全域 graph 和 legacy consumer 尚未完整切分時引入第二套 tenant revision 規則。版本 row 會序列化同 scope 的並行 writer，須在正式負載驗收觀察等待時間。
 
 ## 圖譜刷新
 
@@ -103,9 +103,9 @@ Migration 055 的分鐘聚合以 `instance + boot + UTC minute + kind + traffic 
 
 共用 background run、Projection freshness、唯讀容量檢查及驗收重跑方式見[背景工作與監控契約](background-observability-contract.md)。
 
-1. 遷移採 additive forward-only；053–055 不取代任何已發布 migration，052 保留給獨立治理變更。先驗 migration replay 與完整 solution，再由正式 main release 流程發布。
+1. 遷移採 additive forward-only；053–056 不取代任何已發布 migration，052 保留給獨立治理變更。先驗 migration replay 與完整 solution，再由正式 main release 流程發布。056 另須通過所有權威範圍的同一性 collision preflight，並評估 functional indexes 的建置時間、額外容量、WAL 與鎖定成本。
 2. 新舊 API 混用時，Dashboard 對缺少 endpoint 顯示未支援或未知。舊程序無法解讀 durable revision，因此正式切換須協調 reader/worker rollout；不能允許舊 reader 持續供應舊 key 並聲稱已取得新一致性保證。
-3. 回退 build 必須保留 v2 actor isolation 與 durable revision；必要時停用最終物件快取降級，不回退到已知不安全的舊 key。不刪除 revision、outbox 或 audit schema。
+3. 回退 build 必須保留 actor isolation、ProjectId 同一性與 durable revision；必要時停用最終物件快取降級，不回退到已知不安全的舊 key。不刪除 revision、outbox 或 audit schema。056 啟用別名寫入後，舊版 exact-selector reader 可能看不到已接受的資料，不能只更換舊映像回退；必須使用相容的 forward fix，或經核准的整庫復原與新增寫入對帳。相容讀者切換及正式備份／復原須另行驗證。
 4. 正式驗收分開記錄 release SHA、部署健康、authenticated API/UI、MCP host 與同流量負載比較。本機 fixture 與多 coordinator 測試不是 Production 效能或 fresh host 驗收。
 
 Dashboard 發布映像另須通過 `tools/deployment/tests/Test-DashboardPublishedAssets.ps1 -ImageId <sha256 image ID>`。它在無網路、無對外埠、無正式憑證的隔離容器中檢查發布 manifest，並實際驗證 Blazor bootstrap 的一般與 fingerprinted URL 回傳 200。此檢查可攔截 .NET 10 在 Razor 原始檔尚未複製時 restore、再以 `--no-restore` publish 而漏掉 framework assets 的問題；登入頁與 health 成功不能代替瀏覽器互動初始化。Dockerfile 在 restore 前保留 `App.razor`，讓 SDK 正確還原所需資源。發布後仍須以具管理頁面權限的測試帳號完成 authenticated UI 驗收。
