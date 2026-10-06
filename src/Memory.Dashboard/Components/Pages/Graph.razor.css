@@ -1,10 +1,6 @@
-::deep .graph-page-body {
-    min-height: 0;
+.graph-workspace {
     container-type: inline-size;
     container-name: graph-page;
-}
-
-.graph-workspace {
     display: grid;
     grid-template-columns: minmax(248px, 0.62fr) minmax(0, 2.15fr) minmax(280px, 0.78fr);
     grid-template-areas: "filter canvas detail";
@@ -1353,6 +1349,29 @@
 }
 
 @container graph-page (max-width: 760px) {
+    .graph-panel-header-copy {
+        width: 100%;
+        max-width: 100%;
+    }
+
+    .graph-status-chip {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    .graph-view-field,
+    .graph-view-toolbar-metrics {
+        flex: 1 1 100%;
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .graph-view-toolbar-metrics {
+        flex-wrap: wrap;
+        justify-content: flex-start;
+        white-space: normal;
+    }
+
     .graph-detail-scroll {
         overflow-x: clip;
         overflow-y: visible;
@@ -1464,4 +1483,31 @@
     .graph-canvas-panel-expanded {
         inset: 0.65rem;
     }
+}
+
+/* Keep the complete canvas and its controls within the actual scroll owner's visible height. */
+.graph-viewport-frame[data-physical-height] {
+    flex: 0 0 auto;
+    min-height: 0;
+}
+
+.graph-viewport-frame[data-physical-height] .graph-scroll-shell {
+    flex: 0 0 auto;
+    min-height: 0;
+    height: var(--graph-physical-height);
+}
+
+.graph-viewport-frame[data-physical-height] .graph-viewport-controls {
+    position: static;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    margin-top: 0.5rem;
+    box-shadow: none;
+}
+
+.graph-viewport-frame[data-physical-height] .graph-pan-pad,
+.graph-viewport-frame[data-physical-height] .graph-zoom-pad {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
 }

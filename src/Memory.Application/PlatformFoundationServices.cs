@@ -45,7 +45,7 @@ public sealed class PlatformFoundationStore(
     {
         var parent = ProjectContext.Normalize(request.ParentProjectId);
         var child = ProjectContext.Normalize(request.ChildProjectId);
-        if (string.Equals(parent, child, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("A project cannot be its own parent.");
+        if (ProjectContext.Matches(parent, child)) throw new InvalidOperationException("A project cannot be its own parent.");
         if (ProjectContext.IsShared(parent) || ProjectContext.IsUser(parent) || ProjectContext.IsShared(child) || ProjectContext.IsUser(child)) throw new InvalidOperationException("Topology edges require regular projects.");
         var dimension = RequireText(request.Dimension, nameof(request.Dimension), 100);
         var actor = actorAccessor.Current;
@@ -54,7 +54,7 @@ public sealed class PlatformFoundationStore(
         ActorAuthorization.EnsureProjectAllowed(actor, parent, write: false);
         var scoped = Scope(dbContext.ProjectHierarchies, actor);
         var current = await scoped.AsNoTracking().Where(x => x.Dimension == dimension).Select(MapEdgeExpression).ToListAsync(cancellationToken);
-        var entity = await scoped.SingleOrDefaultAsync(x => x.Dimension == dimension && x.ParentProjectId == parent && x.ChildProjectId == child, cancellationToken);
+        var entity = await scoped.SingleOrDefaultAsync(x => x.Dimension == dimension && Memory.Application.ProjectContext.Matches(x.ParentProjectId, parent) && Memory.Application.ProjectContext.Matches(x.ChildProjectId, child), cancellationToken);
         var currentRevision = entity?.Revision ?? 0;
         if (currentRevision != request.ExpectedRevision) throw new DbUpdateConcurrencyException("Topology revision conflict; reload before retrying.");
         var replacement = new AuthorizationTopologyEdge(parent, child, dimension, request.AuthorizationInheritable, currentRevision + 1);
@@ -113,13 +113,13 @@ public sealed class PlatformFoundationStore(
             .ToArrayAsync(cancellationToken);
         var relevantProjects = FindAuthorizationAncestors(project, edges);
         var policies = await Scope(dbContext.ProjectAuthorizationPolicies.AsNoTracking(), actor)
-            .Where(x => relevantProjects.Contains(x.ProjectId) && (x.PrincipalId == principalId || x.PrincipalId == "*") && rights.Contains(x.Right))
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(relevantProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && (x.PrincipalId == principalId || x.PrincipalId == "*") && rights.Contains(x.Right))
             .ToArrayAsync(cancellationToken);
         var grants = await Scope(dbContext.ProjectExplicitGrants.AsNoTracking(), actor)
-            .Where(x => relevantProjects.Contains(x.ProjectId) && (x.PrincipalId == principalId || x.PrincipalId == "*") && rights.Contains(x.Right))
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(relevantProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && (x.PrincipalId == principalId || x.PrincipalId == "*") && rights.Contains(x.Right))
             .ToArrayAsync(cancellationToken);
         var revisionRows = await Scope(dbContext.ProjectSecurityRevisions.AsNoTracking(), actor)
-            .Where(x => relevantProjects.Contains(x.ProjectId))
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(relevantProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .ToArrayAsync(cancellationToken);
         var revisions = new SecurityRevisionVector(
             CheckedSum(revisionRows.Select(x => x.TopologyRevision)),
@@ -208,7 +208,7 @@ public sealed class PlatformFoundationStore(
     private async Task BumpRevisionAsync(string projectId, Action<ProjectSecurityRevision> bump, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
-        var row = await Scope(dbContext.ProjectSecurityRevisions, actor).SingleOrDefaultAsync(x => x.ProjectId == projectId, cancellationToken);
+        var row = await Scope(dbContext.ProjectSecurityRevisions, actor).SingleOrDefaultAsync(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId), cancellationToken);
         if (row is null)
         {
             row = new ProjectSecurityRevision { TenantId = actor.TenantId, OwnerUserId = actor.UserId, ProjectId = projectId };
@@ -234,12 +234,12 @@ public sealed class PlatformFoundationStore(
 
     private static HashSet<string> FindAuthorizationAncestors(string projectId, IReadOnlyList<AuthorizationTopologyEdge> edges)
     {
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { projectId };
+        var result = new HashSet<string>(ProjectContext.IdentityComparer) { projectId };
         var queue = new Queue<string>();
         queue.Enqueue(projectId);
         while (queue.TryDequeue(out var child))
         {
-            foreach (var parent in edges.Where(x => x.AuthorizationInheritable && string.Equals(x.ChildProjectId, child, StringComparison.OrdinalIgnoreCase)).Select(x => x.ParentProjectId))
+            foreach (var parent in edges.Where(x => x.AuthorizationInheritable && Memory.Application.ProjectContext.Matches(x.ChildProjectId, child)).Select(x => x.ParentProjectId))
             {
                 if (result.Add(parent)) queue.Enqueue(parent);
             }
@@ -249,13 +249,13 @@ public sealed class PlatformFoundationStore(
 
     private static HashSet<string> FindAuthorizationDescendants(string projectId, IEnumerable<AuthorizationTopologyEdge> edges)
     {
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { projectId };
+        var result = new HashSet<string>(ProjectContext.IdentityComparer) { projectId };
         var queue = new Queue<string>();
         queue.Enqueue(projectId);
         var edgeArray = edges.Where(x => x.AuthorizationInheritable).ToArray();
         while (queue.TryDequeue(out var parent))
         {
-            foreach (var child in edgeArray.Where(x => string.Equals(x.ParentProjectId, parent, StringComparison.OrdinalIgnoreCase)).Select(x => x.ChildProjectId))
+            foreach (var child in edgeArray.Where(x => Memory.Application.ProjectContext.Matches(x.ParentProjectId, parent)).Select(x => x.ChildProjectId))
             {
                 if (result.Add(child)) queue.Enqueue(child);
             }
@@ -364,7 +364,7 @@ public sealed class EffectiveRightsEvaluator : IEffectiveRightsEvaluator
 
     public void InvalidateProjects(IEnumerable<string> projectIds)
     {
-        foreach (var projectId in projectIds.Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var projectId in projectIds.Distinct(ProjectContext.IdentityComparer))
         {
             InvalidateProject(projectId);
         }
@@ -412,7 +412,7 @@ public sealed class EffectiveRightsEvaluator : IEffectiveRightsEvaluator
         var targetResource = resourceType is null || resourceId is null
             ? []
             : rules.Where(rule =>
-                string.Equals(Normalize(rule.ProjectId), projectId, StringComparison.OrdinalIgnoreCase) &&
+                Memory.Application.ProjectContext.Matches(Normalize(rule.ProjectId), projectId) &&
                 string.Equals(rule.Right, right, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(rule.ResourceType, resourceType, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(rule.ResourceId, resourceId, StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -439,13 +439,13 @@ public sealed class EffectiveRightsEvaluator : IEffectiveRightsEvaluator
     {
         var parents = edges
             .Where(x => x.AuthorizationInheritable)
-            .GroupBy(x => Normalize(x.ChildProjectId), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(x => Normalize(x.ChildProjectId), ProjectContext.IdentityComparer)
             .ToDictionary(
                 group => group.Key,
-                group => group.Select(x => Normalize(x.ParentProjectId)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray(),
-                StringComparer.OrdinalIgnoreCase);
+                group => group.Select(x => Normalize(x.ParentProjectId)).Distinct(ProjectContext.IdentityComparer).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray(),
+                ProjectContext.IdentityComparer);
         var results = new List<IReadOnlyList<string>>();
-        Walk(projectId, [], new HashSet<string>(StringComparer.OrdinalIgnoreCase) { projectId });
+        Walk(projectId, [], new HashSet<string>(ProjectContext.IdentityComparer) { projectId });
         return results;
 
         void Walk(string current, List<string> path, HashSet<string> visiting)
@@ -472,7 +472,7 @@ public sealed class EffectiveRightsEvaluator : IEffectiveRightsEvaluator
     }
 
     private static bool IsProjectRule(AuthorizationRule rule, string projectId, string right)
-        => string.Equals(Normalize(rule.ProjectId), projectId, StringComparison.OrdinalIgnoreCase)
+        => Memory.Application.ProjectContext.Matches(Normalize(rule.ProjectId), projectId)
             && string.Equals(rule.Right, right, StringComparison.OrdinalIgnoreCase)
             && rule.ResourceType is null
             && rule.ResourceId is null;
@@ -592,8 +592,8 @@ public static class AuthorizationTopologyValidator
     {
         if (replacement.Revision != expectedRevision + 1) throw new InvalidOperationException("Topology revision conflict; reload before retrying.");
         var candidate = current.Where(x => !(string.Equals(x.Dimension, replacement.Dimension, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(x.ParentProjectId, replacement.ParentProjectId, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(x.ChildProjectId, replacement.ChildProjectId, StringComparison.OrdinalIgnoreCase))).Append(replacement).ToArray();
+            && Memory.Application.ProjectContext.Matches(x.ParentProjectId, replacement.ParentProjectId)
+            && Memory.Application.ProjectContext.Matches(x.ChildProjectId, replacement.ChildProjectId))).Append(replacement).ToArray();
         _ = new EffectiveRightsEvaluator().Evaluate(new EffectiveRightsRequest(
             replacement.ChildProjectId,
             "topology-validation",

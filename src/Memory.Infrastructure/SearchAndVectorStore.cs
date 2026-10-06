@@ -7,7 +7,7 @@ using Memory.Domain;
 
 namespace Memory.Infrastructure;
 
-public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<NpgsqlSearchStore> logger) : IHybridSearchStore, IVectorStore
+public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<NpgsqlSearchStore> logger, IRequestActorAccessor actorAccessor) : IHybridSearchStore, IVectorStore
 {
     public async Task<IReadOnlyList<ChunkSearchHit>> SearchKeywordChunksAsync(string query, int limit, MemorySearchScope scope, CancellationToken cancellationToken)
     {
@@ -19,7 +19,8 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
             FROM memory_item_chunks c
             JOIN memory_items i ON i.id = c.memory_item_id
             WHERE c.content_tsv @@ websearch_to_tsquery('simple', @query)
-              AND (cardinality(@project_ids) = 0 OR i.project_id = ANY(@project_ids))
+              AND (cardinality(@project_ids) = 0 OR public.project_identity_key(i.project_id) = ANY(@project_ids))
+              AND (@unscoped_actor OR (i.tenant_id = @tenant_id AND (@service_actor OR i.owner_user_id = @owner_user_id)))
             ORDER BY score DESC
             LIMIT @limit;
             """;
@@ -28,7 +29,8 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
         await using var command = dataSource.CreateCommand(sql);
         command.Parameters.Add(new NpgsqlParameter<string>("query", query));
         command.Parameters.Add(new NpgsqlParameter<int>("limit", limit));
-        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", scope.NormalizedProjectIds.ToArray()));
+        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", ProjectContext.IdentityKeys(scope.NormalizedProjectIds)));
+        AddActorScope(command, actorAccessor.Current);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -55,7 +57,8 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
             JOIN memory_items i ON i.id = c.memory_item_id
             WHERE v.model_key = @model_key
               AND v.status = 'Active'
-              AND (cardinality(@project_ids) = 0 OR i.project_id = ANY(@project_ids))
+              AND (cardinality(@project_ids) = 0 OR public.project_identity_key(i.project_id) = ANY(@project_ids))
+              AND (@unscoped_actor OR (i.tenant_id = @tenant_id AND (@service_actor OR i.owner_user_id = @owner_user_id)))
             ORDER BY v.embedding <=> @embedding
             LIMIT @limit;
             """;
@@ -68,7 +71,8 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
         });
         command.Parameters.Add(new NpgsqlParameter<string>("model_key", vector.ModelKey));
         command.Parameters.Add(new NpgsqlParameter<int>("limit", limit));
-        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", scope.NormalizedProjectIds.ToArray()));
+        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", ProjectContext.IdentityKeys(scope.NormalizedProjectIds)));
+        AddActorScope(command, actorAccessor.Current);
 
         try
         {
@@ -88,6 +92,21 @@ public sealed class NpgsqlSearchStore(NpgsqlDataSource dataSource, ILogger<Npgsq
         }
 
         return results;
+    }
+
+    private static void AddActorScope(NpgsqlCommand command, ContextHubRequestActor actor)
+    {
+        if (actor.IsAuthenticated && !actor.HasUser && !actor.IsServiceActor)
+        {
+            throw new UnauthorizedAccessException("Authenticated requests must resolve to a tenant user.");
+        }
+
+        // Snapshot the current actor per read: graph refresh temporarily enters a service scope.
+        // Filter before LIMIT so higher scoring foreign chunks cannot consume eligible candidates.
+        command.Parameters.Add(new NpgsqlParameter<bool>("unscoped_actor", !actor.HasUser));
+        command.Parameters.Add(new NpgsqlParameter<bool>("service_actor", actor.IsServiceActor));
+        command.Parameters.Add(new NpgsqlParameter<Guid>("tenant_id", actor.TenantId ?? Guid.Empty));
+        command.Parameters.Add(new NpgsqlParameter<Guid>("owner_user_id", actor.UserId ?? Guid.Empty));
     }
 
     public async Task ReplaceChunkVectorAsync(Guid chunkId, EmbeddingVector vector, CancellationToken cancellationToken)

@@ -160,7 +160,7 @@ public sealed class MemoryTransferService(
             query = query.Where(x => x.Tags.Contains(request.Tag));
         }
 
-        query = query.Where(x => allowedProjects.Contains(x.ProjectId));
+        query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(allowedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
 
         return query;
     }
@@ -190,12 +190,12 @@ public sealed class MemoryTransferService(
             })
             .ToListAsync(cancellationToken);
 
-        var existingByKey = existing.ToDictionary(x => $"{x.ProjectId}:{x.ExternalKey}", StringComparer.Ordinal);
+        var existingByKey = existing.ToDictionary(x => (ProjectId: ProjectContext.IdentityKey(x.ProjectId), x.ExternalKey));
         var conflicts = bundle.Items
-            .Where(x => existingByKey.ContainsKey($"{ResolveTargetProjectId(x.ProjectId, request.TargetProjectId)}:{x.ExternalKey}"))
+            .Where(x => existingByKey.ContainsKey((ProjectContext.IdentityKey(ResolveTargetProjectId(x.ProjectId, request.TargetProjectId)), x.ExternalKey)))
             .Select(x =>
             {
-                var matched = existingByKey[$"{ResolveTargetProjectId(x.ProjectId, request.TargetProjectId)}:{x.ExternalKey}"];
+                var matched = existingByKey[(ProjectContext.IdentityKey(ResolveTargetProjectId(x.ProjectId, request.TargetProjectId)), x.ExternalKey)];
                 return new MemoryImportConflictResult(
                     matched.ProjectId,
                     x.ExternalKey,

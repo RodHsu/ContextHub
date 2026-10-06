@@ -220,14 +220,14 @@ public sealed class ConversationAutomationService(
         query = ApplySessionActorScope(query, actor);
         if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
             ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-            query = query.Where(x => x.ProjectId == projectId);
+            query = query.Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
         }
 
         if (!string.IsNullOrWhiteSpace(request.SourceSystem))
@@ -266,14 +266,14 @@ public sealed class ConversationAutomationService(
         query = ApplyInsightActorScope(query, actor);
         if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
             ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-            query = query.Where(x => x.ProjectId == projectId);
+            query = query.Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
         }
 
         if (!string.IsNullOrWhiteSpace(request.ConversationId))
@@ -336,7 +336,7 @@ public sealed class ConversationAutomationService(
         var query = ApplyInsightActorScope(dbContext.ConversationInsights.AsNoTracking(), actor);
         if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
         var insight = await query.FirstOrDefaultAsync(x => x.Id == insightId, cancellationToken);
@@ -534,14 +534,14 @@ public sealed class ConversationAutomationService(
         var query = ApplyCheckpointActorScope(dbContext.ConversationCheckpoints.AsNoTracking(), actor);
         if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
             ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-            query = query.Where(x => x.ProjectId == projectId);
+            query = query.Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
         }
 
         if (!string.IsNullOrWhiteSpace(request.ConversationId))
@@ -572,7 +572,7 @@ public sealed class ConversationAutomationService(
                 .Where(x => x.CheckpointId == checkpoint.Id);
             if (actor.AllowedProjectIds.Count > 0)
             {
-                insightsQuery = insightsQuery.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+                insightsQuery = insightsQuery.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
             }
 
             var insights = await insightsQuery
@@ -669,9 +669,9 @@ public sealed class ConversationAutomationService(
         var jobQuery = ApplyJobActorScope(dbContext.MemoryJobs.AsNoTracking(), actor);
         if (actor.AllowedProjectIds.Count > 0)
         {
-            checkpointQuery = checkpointQuery.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
-            insightQuery = insightQuery.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
-            jobQuery = jobQuery.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            checkpointQuery = checkpointQuery.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
+            insightQuery = insightQuery.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
+            jobQuery = jobQuery.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
         var recentCheckpoints = await checkpointQuery.CountAsync(x => x.CreatedAt >= since, cancellationToken);
@@ -836,11 +836,11 @@ public sealed class ConversationAutomationService(
 
         if (normalizedProjectId is not null)
         {
-            query = query.Where(x => x.ProjectId == normalizedProjectId);
+            query = query.Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId));
         }
         else if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
         var itemIds = await query
@@ -1021,7 +1021,7 @@ public sealed class ConversationAutomationService(
         if (job.JobType != MemoryJobType.PromoteConversationInsights ||
             job.TenantId != actor.TenantId ||
             job.OwnerUserId != actor.UserId ||
-            !string.Equals(job.ProjectId, projectId, StringComparison.Ordinal))
+            !ProjectContext.Matches(job.ProjectId, projectId))
         {
             throw new InvalidOperationException(
                 $"Promotion job idempotency reservation '{job.Id}' collided with an unrelated job.");
@@ -1030,7 +1030,7 @@ public sealed class ConversationAutomationService(
         var payload = TryDeserialize<ConversationPromotionJobPayload>(job.PayloadJson);
         if (payload is null ||
             !string.Equals(payload.ConversationId, conversationId, StringComparison.Ordinal) ||
-            !string.Equals(ProjectContext.Normalize(payload.ProjectId), projectId, StringComparison.Ordinal))
+            !ProjectContext.Matches(ProjectContext.Normalize(payload.ProjectId), projectId))
         {
             throw new InvalidOperationException(
                 $"Promotion job idempotency reservation '{job.Id}' has an invalid or mismatched payload.");
@@ -1060,7 +1060,7 @@ public sealed class ConversationAutomationService(
         var query = ApplyInsightActorScope(dbContext.ConversationInsights, actor);
         if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
         var insight = await query
@@ -1314,10 +1314,7 @@ public sealed class ConversationAutomationService(
         var metadata = TryDeserialize<ConversationCheckpointMetadata>(checkpoint.MetadataJson);
         var authorizedProjects = metadata?.CandidateProjectIds ?? [];
         if (!authorizedProjects.Any(projectId =>
-                string.Equals(
-                    ProjectContext.Normalize(projectId, checkpoint.ProjectId),
-                    candidateProjectId,
-                    StringComparison.OrdinalIgnoreCase)))
+                Memory.Application.ProjectContext.Matches(ProjectContext.Normalize(projectId, checkpoint.ProjectId), candidateProjectId)))
         {
             throw new UnauthorizedAccessException(
                 $"Conversation checkpoint '{checkpoint.Id}' does not authorize candidate project '{candidateProjectId}'.");
@@ -1360,7 +1357,7 @@ public sealed class ConversationAutomationService(
         var normalizedProjectId = ProjectContext.Normalize(projectId);
         var jobs = await ApplyJobActorScope(dbContext.MemoryJobs.AsNoTracking(), actor)
             .Where(x => x.JobType == MemoryJobType.PromoteConversationInsights)
-            .Where(x => x.ProjectId == normalizedProjectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId))
             .OrderByDescending(x => x.CreatedAt)
             .Take(1000)
             .ToListAsync(cancellationToken);
@@ -1370,7 +1367,7 @@ public sealed class ConversationAutomationService(
             var payload = TryDeserialize<ConversationPromotionJobPayload>(job.PayloadJson);
             if (payload is not null &&
                 string.Equals(payload.ConversationId, conversationId, StringComparison.Ordinal) &&
-                string.Equals(ProjectContext.Normalize(payload.ProjectId), normalizedProjectId, StringComparison.Ordinal))
+                ProjectContext.Matches(ProjectContext.Normalize(payload.ProjectId), normalizedProjectId))
             {
                 return job;
             }
@@ -1386,7 +1383,7 @@ public sealed class ConversationAutomationService(
             .Where(x => x.Id == checkpointId);
         if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(x => actor.AllowedProjectIds.Contains(x.ProjectId));
+            query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
         return await query.FirstOrDefaultAsync(cancellationToken);
@@ -1516,7 +1513,7 @@ public sealed class ConversationAutomationService(
         var jobs = await ApplyJobActorScope(dbContext.MemoryJobs.AsNoTracking(), actor)
             .Where(x => x.JobType == MemoryJobType.PromoteConversationInsights &&
                         (x.Status == MemoryJobStatus.Pending || x.Status == MemoryJobStatus.Running) &&
-                        x.ProjectId == projectId)
+                        Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
             .ToListAsync(cancellationToken);
 
         foreach (var job in jobs)
@@ -1524,7 +1521,7 @@ public sealed class ConversationAutomationService(
             var payload = TryDeserialize<ConversationPromotionJobPayload>(job.PayloadJson);
             if (payload is not null &&
                 string.Equals(payload.ConversationId, conversationId, StringComparison.Ordinal) &&
-                string.Equals(ProjectContext.Normalize(payload.ProjectId), projectId, StringComparison.Ordinal))
+                ProjectContext.Matches(ProjectContext.Normalize(payload.ProjectId), projectId))
             {
                 return true;
             }

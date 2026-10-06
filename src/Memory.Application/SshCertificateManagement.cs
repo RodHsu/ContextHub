@@ -276,7 +276,7 @@ public sealed class SshCertificateService(
         var principal = ActorId(actor);
         var now = clock.UtcNow;
         var grants = await Scope(dbContext.SecretGrants.AsNoTracking(), actor).Where(x => x.SecretId == secret.Id && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == right && (x.ExpiresAt == null || x.ExpiresAt > now)).Select(x => x.Effect).ToArrayAsync(cancellationToken);
-        var policies = await Scope(dbContext.SecretPolicies.AsNoTracking(), actor).Where(x => x.ProjectId == secret.ProjectId && (x.SecretId == secret.Id || x.SecretId == null) && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == right).Select(x => new { x.SecretId, x.Effect }).ToArrayAsync(cancellationToken);
+        var policies = await Scope(dbContext.SecretPolicies.AsNoTracking(), actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, secret.ProjectId) && (x.SecretId == secret.Id || x.SecretId == null) && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == right).Select(x => new { x.SecretId, x.Effect }).ToArrayAsync(cancellationToken);
         var secretTier = policies.Where(x => x.SecretId == secret.Id).Select(x => x.Effect).ToArray();
         var tier = grants.Length > 0 ? grants : secretTier.Length > 0 ? secretTier : policies.Where(x => x.SecretId == null).Select(x => x.Effect).ToArray();
         if (tier.Length == 0 || tier.Contains(AuthorizationEffect.Deny) || !tier.Contains(AuthorizationEffect.Allow)) throw Unavailable();
@@ -322,8 +322,8 @@ public sealed class SshCertificateService(
         if (actor.AllowedProjectIds.Count == 0) return query;
         var allowed = actor.AllowedProjectIds.Select(x => ProjectContext.Normalize(x).ToLowerInvariant()).ToArray();
         return query.Where(x => allowed.Contains(EF.Property<string>(x, "ProjectId").ToLower()) ||
-                                EF.Property<string>(x, "ProjectId").ToLower() == ProjectContext.SharedProjectId ||
-                                EF.Property<string>(x, "ProjectId").ToLower() == ProjectContext.UserProjectId);
+                                Memory.Application.ProjectContext.Matches(EF.Property<string>(x, "ProjectId").ToLower(), ProjectContext.SharedProjectId) ||
+                                Memory.Application.ProjectContext.Matches(EF.Property<string>(x, "ProjectId").ToLower(), ProjectContext.UserProjectId));
     }
 
     private static void ValidateTarget(string host, int port, string user)

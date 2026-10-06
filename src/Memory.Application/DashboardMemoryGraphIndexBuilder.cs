@@ -115,7 +115,7 @@ public sealed class DashboardMemoryGraphIndexBuilder(
         }
         foreach (var source in sourceItems)
         {
-            if (previous is not null && affectedProjects is not null && !affectedProjects.Contains(source.ProjectId))
+            if (previous is not null && affectedProjects is not null && !Memory.Application.ProjectContext.IdentityKeys(affectedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(source.ProjectId)))
             {
                 // A changed project invalidates every source in that project. Unchanged sources
                 // retain their computed edges; newly selected sources still require a search.
@@ -154,7 +154,7 @@ public sealed class DashboardMemoryGraphIndexBuilder(
                         DetailLevel: RetrievalTelemetryDetailLevel.SummaryOnly)),
                 cancellationToken);
             var searchCandidates = hits
-                .Where(hit => byId.TryGetValue(hit.MemoryId, out var candidate) && string.Equals(candidate.ProjectId, source.ProjectId, StringComparison.OrdinalIgnoreCase))
+                .Where(hit => byId.TryGetValue(hit.MemoryId, out var candidate) && Memory.Application.ProjectContext.Matches(candidate.ProjectId, source.ProjectId))
                 .Select(hit => new ScoredMemoryItem(byId[hit.MemoryId], hit.Score))
                 .GroupBy(candidate => candidate.Item.Id)
                 .Select(group => group.OrderByDescending(candidate => candidate.Score).First())
@@ -164,7 +164,7 @@ public sealed class DashboardMemoryGraphIndexBuilder(
                 .ToHashSet();
             var lexicalCandidates = RankItemsByLexicalSimilarity(
                     query,
-                    byId.Values.Where(item => string.Equals(item.ProjectId, source.ProjectId, StringComparison.OrdinalIgnoreCase)),
+                    byId.Values.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, source.ProjectId)),
                     SimilaritySearchLimit * 2)
                 .Where(candidate => !searchCandidateIds.Contains(candidate.Item.Id));
             var taken = 0;

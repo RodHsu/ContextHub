@@ -71,10 +71,10 @@ public sealed class PlatformProjectionService(IApplicationDbContext dbContext, I
         {
             return await dbContext.ExecuteInTransactionAsync(async ct =>
             {
-                await dbContext.AcquireTransactionLockAsync($"platform-projection:{tenantScopeKey}:{projectId}:{PlatformProjectionContract.ProjectionName}", ct);
+                await dbContext.AcquireTransactionLockAsync($"platform-projection:{tenantScopeKey}:{ProjectContext.IdentityKey(projectId)}:{PlatformProjectionContract.ProjectionName}", ct);
                 var now = clock.UtcNow;
                 var state = await dbContext.MonitoringProjectionStates.SingleOrDefaultAsync(
-                    x => x.ProjectionName == PlatformProjectionContract.ProjectionName && x.TenantScopeKey == tenantScopeKey && x.ProjectId == projectId, ct);
+                    x => x.ProjectionName == PlatformProjectionContract.ProjectionName && x.TenantScopeKey == tenantScopeKey && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId), ct);
                 if (state is null)
                 {
                     state = new MonitoringProjectionState
@@ -90,7 +90,7 @@ public sealed class PlatformProjectionService(IApplicationDbContext dbContext, I
 
                 var run = await dbContext.PlatformBackgroundRuns
                     .Include(x => x.Events)
-                    .Where(x => x.TenantId == request.TenantId && x.ProjectId == projectId && x.JobType == PlatformProjectionContract.ProjectionName && x.Mode == request.Mode &&
+                    .Where(x => x.TenantId == request.TenantId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.JobType == PlatformProjectionContract.ProjectionName && x.Mode == request.Mode &&
                                 (x.Status == PlatformBackgroundRunStatus.Running || x.Status == PlatformBackgroundRunStatus.RetryScheduled))
                     .OrderByDescending(x => x.CreatedAt)
                     .FirstOrDefaultAsync(ct);
@@ -104,7 +104,7 @@ public sealed class PlatformProjectionService(IApplicationDbContext dbContext, I
                 if (run is null)
                 {
                     var boundary = await dbContext.AuthorityOutboxEvents
-                        .Where(x => x.TenantId == request.TenantId && x.ProjectId == projectId)
+                        .Where(x => x.TenantId == request.TenantId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
                         .Select(x => (long?)x.Sequence).MaxAsync(ct) ?? 0;
                     var startCursor = request.Mode == PlatformBackgroundMode.Incremental ? state.Cursor : 0;
                     run = new PlatformBackgroundRun
@@ -112,14 +112,14 @@ public sealed class PlatformProjectionService(IApplicationDbContext dbContext, I
                         TenantId = request.TenantId,
                         ProjectId = projectId,
                         JobType = PlatformProjectionContract.ProjectionName,
-                        ScopeKey = $"{tenantScopeKey}:{projectId}",
+                        ScopeKey = $"{tenantScopeKey}:{ProjectContext.IdentityKey(projectId)}",
                         Mode = request.Mode,
                         Status = PlatformBackgroundRunStatus.Running,
                         Generation = request.Mode == PlatformBackgroundMode.Full ? checked(state.Generation + 1) : state.Generation,
                         AuthoritySequenceBoundary = boundary,
                         Cursor = startCursor,
                         ExpectedCount = await dbContext.AuthorityOutboxEvents.LongCountAsync(
-                            x => x.TenantId == request.TenantId && x.ProjectId == projectId && x.Sequence > startCursor && x.Sequence <= boundary, ct),
+                            x => x.TenantId == request.TenantId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Sequence > startCursor && x.Sequence <= boundary, ct),
                         OwnerId = ownerId,
                         LeaseVersion = 1,
                         EligibleAt = now,
@@ -147,7 +147,7 @@ public sealed class PlatformProjectionService(IApplicationDbContext dbContext, I
                 }
 
                 var batch = await dbContext.AuthorityOutboxEvents.AsNoTracking()
-                    .Where(x => x.TenantId == request.TenantId && x.ProjectId == projectId && x.Sequence > run.Cursor && x.Sequence <= run.AuthoritySequenceBoundary)
+                    .Where(x => x.TenantId == request.TenantId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Sequence > run.Cursor && x.Sequence <= run.AuthoritySequenceBoundary)
                     .OrderBy(x => x.Sequence)
                     .Take(batchSize)
                     .ToArrayAsync(ct);
@@ -270,22 +270,35 @@ public sealed class PlatformProjectionService(IApplicationDbContext dbContext, I
         await dbContext.ExecuteInTransactionAsync(async ct =>
         {
             var tenantScopeKey = TenantScopeKey(tenantId);
-            await dbContext.AcquireTransactionLockAsync($"platform-projection:{tenantScopeKey}:{projectId}:{PlatformProjectionContract.ProjectionName}", ct);
+            await dbContext.AcquireTransactionLockAsync($"platform-projection:{tenantScopeKey}:{ProjectContext.IdentityKey(projectId)}:{PlatformProjectionContract.ProjectionName}", ct);
             var now = clock.UtcNow;
             var run = await dbContext.PlatformBackgroundRuns.Include(x => x.Events)
-                .Where(x => x.TenantId == tenantId && x.ProjectId == projectId && x.JobType == PlatformProjectionContract.ProjectionName && x.Mode == mode &&
+                .Where(x => x.TenantId == tenantId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.JobType == PlatformProjectionContract.ProjectionName && x.Mode == mode &&
                             (x.Status == PlatformBackgroundRunStatus.Running || x.Status == PlatformBackgroundRunStatus.RetryScheduled))
                 .OrderByDescending(x => x.CreatedAt).FirstOrDefaultAsync(ct);
             if (run is null)
             {
+                // The failed first transaction rolled back its new run. Reconstruct a durable
+                // boundary before retrying so a default zero boundary cannot report false coverage.
+                var state = await dbContext.MonitoringProjectionStates.AsNoTracking().SingleOrDefaultAsync(
+                    x => x.ProjectionName == PlatformProjectionContract.ProjectionName && x.TenantScopeKey == tenantScopeKey && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId), ct);
+                var boundary = await dbContext.AuthorityOutboxEvents
+                    .Where(x => x.TenantId == tenantId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
+                    .Select(x => (long?)x.Sequence).MaxAsync(ct) ?? 0;
+                var startCursor = mode == PlatformBackgroundMode.Incremental ? state?.Cursor ?? 0 : 0;
                 run = new PlatformBackgroundRun
                 {
                     TenantId = tenantId,
                     ProjectId = projectId,
                     JobType = PlatformProjectionContract.ProjectionName,
-                    ScopeKey = $"{tenantScopeKey}:{projectId}",
+                    ScopeKey = $"{tenantScopeKey}:{ProjectContext.IdentityKey(projectId)}",
                     Mode = mode,
                     Status = PlatformBackgroundRunStatus.RetryScheduled,
+                    Generation = mode == PlatformBackgroundMode.Full ? checked((state?.Generation ?? 0) + 1) : state?.Generation ?? 0,
+                    AuthoritySequenceBoundary = boundary,
+                    Cursor = startCursor,
+                    ExpectedCount = await dbContext.AuthorityOutboxEvents.LongCountAsync(
+                        x => x.TenantId == tenantId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Sequence > startCursor && x.Sequence <= boundary, ct),
                     Attempt = 1,
                     MaxAttempts = 5,
                     OwnerId = string.Empty,

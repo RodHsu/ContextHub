@@ -468,13 +468,13 @@ public sealed class DashboardSnapshotCollectorHostedService(
             cancellationToken);
         var legacyOwnerlessMemoryItemCount = memoryItemCount - ownedMemoryItemCount;
         var defaultProjectMemoryItemCount = await dbContext.MemoryItems.CountAsync(
-            x => x.ProjectId == ProjectContext.DefaultProjectId,
+            x => Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.DefaultProjectId),
             cancellationToken);
         var sharedProjectMemoryItemCount = await dbContext.MemoryItems.CountAsync(
-            x => x.ProjectId == ProjectContext.SharedProjectId,
+            x => Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.SharedProjectId),
             cancellationToken);
         var userProjectMemoryItemCount = await dbContext.MemoryItems.CountAsync(
-            x => x.ProjectId == ProjectContext.UserProjectId,
+            x => Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId),
             cancellationToken);
         var regularProjectMemoryItemCount = memoryItemCount - defaultProjectMemoryItemCount -
                                             sharedProjectMemoryItemCount - userProjectMemoryItemCount;
@@ -639,9 +639,9 @@ public sealed class DashboardSnapshotCollectorHostedService(
         await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
         var projectRows = await dbContext.MemoryItems
             .AsNoTracking()
-            .Where(x => x.ProjectId != ProjectContext.SharedProjectId && x.ProjectId != ProjectContext.UserProjectId)
-            .GroupBy(x => x.ProjectId)
-            .Select(group => new { ProjectId = group.Key, ItemCount = group.Count() })
+            .Where(x => !ProjectContext.Matches(x.ProjectId, ProjectContext.SharedProjectId) && !ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId))
+            .GroupBy(x => ProjectContext.IdentityKey(x.ProjectId))
+            .Select(group => new { ProjectId = group.Min(x => x.ProjectId)!, ItemCount = group.Count() })
             .OrderByDescending(x => x.ItemCount)
             .ThenBy(x => x.ProjectId)
             .Take(100)
@@ -786,7 +786,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
             })
             .ToArray();
         var hostProjectCounts = recentMessages
-            .GroupBy(x => x.HostProjectId, StringComparer.Ordinal)
+            .GroupBy(x => x.HostProjectId, ProjectContext.IdentityComparer)
             .Select(group => new DashboardDiscussionHostCountResult(group.Key, group.Count()))
             .OrderByDescending(x => x.MessageCount)
             .ThenBy(x => x.HostProjectId, StringComparer.Ordinal)

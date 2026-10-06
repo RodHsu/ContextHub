@@ -526,6 +526,7 @@
     private string? _message;
     private long _messageSequence;
     private bool _fitGraphPending = true;
+    private bool _revealGraphPending;
     private bool _isCanvasExpanded;
     private bool _viewportRegistered;
     private ElementReference _viewportRef;
@@ -623,8 +624,9 @@
             {
                 if (_fitGraphPending)
                 {
-                    await JSRuntime.InvokeVoidAsync("contextHubGraph.fit", _viewportRef);
+                    await JSRuntime.InvokeVoidAsync("contextHubGraph.fit", _viewportRef, _revealGraphPending);
                     _fitGraphPending = false;
+                    _revealGraphPending = false;
                 }
                 else
                 {
@@ -788,7 +790,7 @@
         => await InvokeViewportCommandAsync("zoomOut");
 
     private async Task FitGraphAsync()
-        => await InvokeViewportCommandAsync("fit");
+        => await InvokeViewportCommandAsync("fit", reveal: true);
 
     private async Task ResetGraphAsync()
         => await InvokeViewportCommandAsync("reset");
@@ -816,10 +818,11 @@
     {
         _isCanvasExpanded = !_isCanvasExpanded;
         _fitGraphPending = true;
+        _revealGraphPending = true;
         await InvokeAsync(StateHasChanged);
     }
 
-    private async Task InvokeViewportCommandAsync(string command)
+    private async Task InvokeViewportCommandAsync(string command, bool reveal = false)
     {
         if (_graph?.Nodes.Count is not > 0)
         {
@@ -828,7 +831,7 @@
 
         try
         {
-            await JSRuntime.InvokeVoidAsync($"contextHubGraph.{command}", _viewportRef);
+            await JSRuntime.InvokeVoidAsync($"contextHubGraph.{command}", _viewportRef, reveal);
         }
         catch (JSDisconnectedException)
         {

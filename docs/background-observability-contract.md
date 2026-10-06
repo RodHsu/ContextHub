@@ -26,6 +26,12 @@ ContextHub 共用 `audit.authority_outbox_events`、`monitoring` projection 與 
 
 共用 Activity run 提供 scope、mode、generation、authority boundary、cursor、expected/scanned、coverage、stale/drift/repaired/rebuilt/failed、attempt/max attempts、last success、eligible time 與 terminal status。Domain 有專用 receipt 或安全資訊時，維持專用契約；未提供的欄位不能捏造為零或 Complete。
 
+首次投影交易失敗時，持久化的 retry 必須保留同 tenant/project 已提交的 authority boundary、起始 cursor、generation 與 expected count；既有 checkpoint 重試則保留原 run 邊界。不能使用未初始化的零邊界宣稱已完整投影。
+
+Activity 的 24 小時 Full reconciliation 以最近完成的 Full run 為時間基準；尚未有 Full 時使用首次完成的 run。每次 Incremental 更新的 `LastSuccessAt` 不重設這個期限。既有 projection state 缺少 completed run 歷史時採 Full 修復。
+
+Outbox sequence 的取得順序不保證 transaction commit 順序。Incremental 的 `CoverageComplete` 表示該 run 所見的 sequence 邊界已處理，不保證較小 sequence 在稍後提交時立即被補齊；這類缺口由 Full 重播修復。`Lag=0` 也不能當作不存在晚提交缺口的證明。Monitoring 保持可重建的衍生資料，不用這些欄位替代 domain authority 或安全 audit。
+
 `GET /api/dashboard/operations` 是受保護的共用入口。Projection 的 `AuthoritySequence` 保留 projector 保存的邊界；新增 `ObservedAuthoritySequence` 表示本次觀測的同 tenant/project authority 邊界。Lag、IsStale 依該新邊界與 cursor 判定，因此新提交、尚未投影的事件不會被顯示為 Current。舊客戶端仍能讀舊欄位；新 UI 使用 observed 值，缺少時相容回舊欄位。Lag 是 sequence distance，不能當作精確待處理事件數或秒數。
 
 ## 健康與覆蓋率

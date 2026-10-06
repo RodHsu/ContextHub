@@ -131,7 +131,7 @@ public sealed class ManagedTransferService(
         }
 
         var existing = await Scope(dbContext.ManagedTransferSessions.AsNoTracking(), actor)
-            .Where(x => x.Operation == ManagedTransferOperation.Upload && x.ProjectId == projectId && x.Purpose == request.Purpose)
+            .Where(x => x.Operation == ManagedTransferOperation.Upload && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Purpose == request.Purpose)
             .Join(dbContext.ManagedTransferOperationRecords, session => session.Id, operation => operation.SessionId, (session, operation) => new { session, operation })
             .SingleOrDefaultAsync(x => x.operation.RequestId == request.IdempotencyKey, cancellationToken);
         if (existing is not null)
@@ -188,7 +188,7 @@ public sealed class ManagedTransferService(
         var actor = RequireActor(projectId, write: false);
         ValidatePurposeAndIdempotency(request.Purpose, request.IdempotencyKey);
         var managedObject = await Scope(dbContext.ManagedObjects, actor)
-            .SingleOrDefaultAsync(x => x.Id == request.ObjectId && x.ProjectId == projectId, cancellationToken)
+            .SingleOrDefaultAsync(x => x.Id == request.ObjectId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId), cancellationToken)
             ?? throw new KeyNotFoundException("Managed object was not found.");
         if (managedObject.State != ManagedObjectState.Ready)
         {

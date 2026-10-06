@@ -369,14 +369,14 @@ public sealed class ChatGptProposalService(
         if (projectIds is not null)
         {
             var scopedProjects = projectIds.ToArray();
-            query = query.Where(x => scopedProjects.Contains(x.ProjectId));
+            query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(scopedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
         else if (actor.AllowedProjectIds.Count > 0)
         {
             var allowedProjects = actor.AllowedProjectIds.ToArray();
-            query = query.Where(x => allowedProjects.Contains(x.ProjectId) ||
-                                     x.ProjectId == ProjectContext.SharedProjectId ||
-                                     x.ProjectId == ProjectContext.UserProjectId);
+            query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(allowedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) ||
+                                     Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.SharedProjectId) ||
+                                     Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId));
         }
 
         if (status.HasValue)

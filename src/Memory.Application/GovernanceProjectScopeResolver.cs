@@ -17,14 +17,14 @@ public sealed class GovernanceProjectScopeResolver(
         var requested = requestedProjectIds?
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => ProjectContext.Normalize(x))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(ProjectContext.IdentityComparer)
             .ToArray();
         var durableGrants = actor.TenantId.HasValue
             ? await dbContext.TenantProjectGrants
                 .AsNoTracking()
                 .Where(x => x.TenantId == actor.TenantId.Value)
-                .ToDictionaryAsync(x => x.ProjectId, StringComparer.OrdinalIgnoreCase, cancellationToken)
-            : new Dictionary<string, TenantProjectGrant>(StringComparer.OrdinalIgnoreCase);
+                .ToDictionaryAsync(x => x.ProjectId, ProjectContext.IdentityComparer, cancellationToken)
+            : new Dictionary<string, TenantProjectGrant>(ProjectContext.IdentityComparer);
 
         if (requested is { Length: > 0 })
         {
@@ -38,7 +38,7 @@ public sealed class GovernanceProjectScopeResolver(
                     CanWrite: actor.HasScope(SecurityScopes.MemoryWrite) &&
                               (grant?.CanWrite ?? true) &&
                               (actor.AllowedProjectIds.Count == 0 ||
-                               actor.AllowedProjectIds.Contains(projectId, StringComparer.OrdinalIgnoreCase)));
+                               actor.AllowedProjectIds.Contains(projectId, Memory.Application.ProjectContext.IdentityComparer)));
             }).ToArray();
         }
 
@@ -46,7 +46,7 @@ public sealed class GovernanceProjectScopeResolver(
         var durableProjectIds = await dbContext.MemoryItems
             .AsNoTracking()
             .ForActor(actor)
-            .Where(x => x.ProjectId != ProjectContext.SharedProjectId && x.ProjectId != ProjectContext.UserProjectId)
+            .Where(x => !ProjectContext.Matches(x.ProjectId, ProjectContext.SharedProjectId) && !ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId))
             .Select(x => x.ProjectId)
             .Distinct()
             .ToListAsync(cancellationToken);
@@ -55,8 +55,8 @@ public sealed class GovernanceProjectScopeResolver(
             .Concat(durableProjectIds)
             .Select(x => ProjectContext.Normalize(x))
             .Where(projectId => actor.AllowedProjectIds.Count == 0 ||
-                                actor.AllowedProjectIds.Contains(projectId, StringComparer.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+                                actor.AllowedProjectIds.Contains(projectId, Memory.Application.ProjectContext.IdentityComparer))
+            .Distinct(ProjectContext.IdentityComparer)
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -69,7 +69,7 @@ public sealed class GovernanceProjectScopeResolver(
                 CanWrite: actor.HasScope(SecurityScopes.MemoryWrite) &&
                           (grant?.CanWrite ?? true) &&
                           (actor.AllowedProjectIds.Count == 0 ||
-                           actor.AllowedProjectIds.Contains(projectId, StringComparer.OrdinalIgnoreCase)));
+                           actor.AllowedProjectIds.Contains(projectId, Memory.Application.ProjectContext.IdentityComparer)));
         })
             .ToArray();
     }

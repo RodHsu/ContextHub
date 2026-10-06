@@ -39,13 +39,10 @@ public sealed class RedisCacheVersionStore(
         var globalVersion = await GetVersionAsync(cancellationToken);
         var securityVersion = await GetOrCreateVersionAsync("version:security", cancellationToken);
         var sharedVersion = includeShared ? await GetOrCreateVersionAsync("version:shared", cancellationToken) : 0L;
-        var normalizedProjects = (projectIds ?? [])
-            .Select(x => ProjectContext.Normalize(x))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        var normalizedProjects = ProjectContext.IdentityKeys((projectIds ?? [])
+            .Select(x => ProjectContext.Normalize(x)));
 
-        var projectVersions = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        var projectVersions = new Dictionary<string, long>(ProjectContext.IdentityComparer);
         foreach (var projectId in normalizedProjects)
         {
             projectVersions[projectId] = await GetOrCreateVersionAsync(ScopedProjectVersionKey(projectId), cancellationToken);
@@ -244,7 +241,7 @@ public sealed class RedisCacheVersionStore(
     }
 
     private static string ProjectVersionKey(string projectId)
-        => $"version:project:{RedisCacheKeyBuilder.Hash(ProjectContext.Normalize(projectId))}";
+        => $"version:project-identity-v1:{RedisCacheKeyBuilder.Hash(ProjectContext.IdentityKey(ProjectContext.Normalize(projectId)))}";
 
     private static string ScopedProjectVersionKey(string projectId)
         => ProjectContext.IsUser(projectId)

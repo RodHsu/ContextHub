@@ -417,7 +417,7 @@ public sealed class MemoryService(
         EnsureProjectAllowed(actor, projectId, write: true);
 
         var entity = await dbContext.MemoryItems
-            .Where(x => x.ProjectId == projectId && x.ExternalKey == externalKey)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.ExternalKey == externalKey)
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .FirstOrDefaultAsync(cancellationToken);
         var previousType = entity?.MemoryType;
@@ -442,7 +442,7 @@ public sealed class MemoryService(
                 Importance = request.Importance,
                 Confidence = request.Confidence,
                 MetadataJson = metadataJson,
-                IsReadOnly = projectId == ProjectContext.SharedProjectId,
+                IsReadOnly = Memory.Application.ProjectContext.Matches(projectId, ProjectContext.SharedProjectId),
                 CreatedAt = now,
                 UpdatedAt = now,
                 ValidFrom = now
@@ -463,7 +463,7 @@ public sealed class MemoryService(
             entity.Importance = request.Importance;
             entity.Confidence = request.Confidence;
             entity.MetadataJson = metadataJson;
-            entity.IsReadOnly = projectId == ProjectContext.SharedProjectId;
+            entity.IsReadOnly = Memory.Application.ProjectContext.Matches(projectId, ProjectContext.SharedProjectId);
             entity.Version += 1;
             entity.UpdatedAt = clock.UtcNow;
         }
@@ -496,7 +496,7 @@ public sealed class MemoryService(
         var actor = actorAccessor.Current;
         EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var entity = await dbContext.MemoryItems
-            .Where(x => x.Id == request.Id && (projectId == null || x.ProjectId == projectId))
+            .Where(x => x.Id == request.Id && (projectId == null || Memory.Application.ProjectContext.Matches(x.ProjectId, projectId)))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .FirstOrDefaultAsync(cancellationToken)
             ?? throw new InvalidOperationException($"Memory item '{request.Id}' was not found.");
@@ -584,14 +584,14 @@ public sealed class MemoryService(
         var entity = await LoadMemoryForWriteAsync(request.Id, request.SourceProjectId, actor, cancellationToken);
         EnsureMemoryWritable(entity);
         var sourceProjectId = entity.ProjectId;
-        if (string.Equals(sourceProjectId, targetProjectId, StringComparison.OrdinalIgnoreCase))
+        if (ProjectContext.Matches(sourceProjectId, targetProjectId))
         {
             return Map(entity);
         }
 
         var duplicateExists = await dbContext.MemoryItems.AnyAsync(
             x => x.Id != entity.Id &&
-                 x.ProjectId == targetProjectId &&
+                 Memory.Application.ProjectContext.Matches(x.ProjectId, targetProjectId) &&
                  x.OwnerUserId == entity.OwnerUserId &&
                  x.ExternalKey == entity.ExternalKey,
             cancellationToken);
@@ -655,7 +655,7 @@ public sealed class MemoryService(
 
         var query = dbContext.MemoryItems
             .AsNoTracking()
-            .Where(x => x.ProjectId == projectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId));
         if (!request.IncludeArchived)
         {
@@ -688,7 +688,7 @@ public sealed class MemoryService(
         }
 
         var items = await dbContext.MemoryItems
-            .Where(x => requestedIds.Contains(x.Id) && x.ProjectId == projectId)
+            .Where(x => requestedIds.Contains(x.Id) && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .ToListAsync(cancellationToken);
         var itemMap = items.ToDictionary(x => x.Id);
@@ -790,8 +790,8 @@ public sealed class MemoryService(
             var itemIds = keywordHits.Select(x => x.MemoryId).Concat(semanticHits.Select(x => x.MemoryId)).Distinct().ToArray();
             var items = await dbContext.MemoryItems
                 .Where(x => itemIds.Contains(x.Id))
-                .Where(x => allowedProjects.Contains(x.ProjectId))
-                .Where(x => archivedProjects.Count == 0 || !archivedProjects.Contains(x.ProjectId))
+                .Where(x => Memory.Application.ProjectContext.IdentityKeys(allowedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
+                .Where(x => archivedProjects.Count == 0 || !Memory.Application.ProjectContext.IdentityKeys(archivedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
                 .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
                 .ToDictionaryAsync(x => x.Id, cancellationToken);
             var merged = HybridSearchComposer.Compose(keywordHits, semanticHits, items, request.Limit, request.IncludeArchived);
@@ -834,7 +834,7 @@ public sealed class MemoryService(
         EnsureProjectAllowed(actor, ProjectContext.Normalize(request.ProjectId), write: false);
         using var cacheOperation = RedisCacheOperationScope.BeginOrJoin();
         var contextProjects = allowedProjects.Append(ProjectContext.Normalize(request.ProjectId))
-            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            .Distinct(ProjectContext.IdentityComparer).ToArray();
         var version = await cacheStore.GetVersionStampAsync(contextProjects, actor, request.UseSummaryLayer, cancellationToken);
         var cacheKey = RedisCacheKeyBuilder.WorkingContext(version, request, actor, allowedProjects, embeddingProvider.ModelKey);
         var cached = await objectCache.GetAsync<WorkingContextResult>(cacheKey, "working-context-final", cancellationToken);
@@ -944,8 +944,8 @@ public sealed class MemoryService(
 
         var items = await dbContext.MemoryItems
             .AsNoTracking()
-            .Where(x => allowedProjects.Contains(x.ProjectId))
-            .Where(x => archivedProjects.Count == 0 || !archivedProjects.Contains(x.ProjectId))
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(allowedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
+            .Where(x => archivedProjects.Count == 0 || !Memory.Application.ProjectContext.IdentityKeys(archivedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
             .Where(x => x.Status != MemoryStatus.Archived)
             .OrderByDescending(x => x.Importance)
@@ -1288,6 +1288,7 @@ public sealed class MemoryService(
         await EnsureWriteAllowedUnlessServiceAsync("enqueue_reindex", cancellationToken);
         var actor = actorAccessor.Current;
         EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        var modelKey = EmbeddingModelIdentity.RequireConfigured(request.ModelKey, embeddingProvider.ModelKey);
         var projectId = ProjectContext.Normalize(request.ProjectId);
         if (request.MemoryItemId.HasValue)
         {
@@ -1315,7 +1316,7 @@ public sealed class MemoryService(
             JobType = MemoryJobType.Reindex,
             Status = MemoryJobStatus.Pending,
             PayloadJson = JsonSerializer.Serialize(
-                new ReindexJobPayload(request.ModelKey ?? embeddingProvider.ModelKey, request.MemoryItemId, projectId),
+                new ReindexJobPayload(modelKey, request.MemoryItemId, projectId),
                 JsonOptions),
             CreatedAt = clock.UtcNow
         };
@@ -1337,7 +1338,7 @@ public sealed class MemoryService(
             : (request.IncludedProjectIds ?? [])
             .Select(x => ProjectContext.Normalize(x))
             .Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(ProjectContext.IdentityComparer)
             .ToArray();
 
         var job = new MemoryJob
@@ -1365,7 +1366,7 @@ public sealed class MemoryService(
         }
 
         var hasPending = await dbContext.MemoryJobs.AnyAsync(
-            x => x.ProjectId == normalizedProjectId &&
+            x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId) &&
                  x.JobType == MemoryJobType.RefreshSummary &&
                  x.Status == MemoryJobStatus.Pending,
             cancellationToken);
@@ -1483,7 +1484,7 @@ public sealed class MemoryService(
         }
 
         if (actor.AllowedProjectIds.Count == 0 ||
-            actor.AllowedProjectIds.Any(x => string.Equals(x, projectId, StringComparison.OrdinalIgnoreCase)))
+            actor.AllowedProjectIds.Any(x => ProjectContext.Matches(x, projectId)))
         {
             return;
         }
@@ -1598,7 +1599,7 @@ public sealed class MemoryService(
         var actor = actorAccessor.Current;
         EnsureScopeAllowed(actor, SecurityScopes.PreferencesRead);
         var items = await dbContext.MemoryItems
-            .Where(x => x.ProjectId == ProjectContext.UserProjectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .Where(x => x.Scope == MemoryScope.User && x.MemoryType == MemoryType.Preference)
             .Where(x => request.IncludeArchived || x.Status == MemoryStatus.Active)
@@ -1624,7 +1625,7 @@ public sealed class MemoryService(
         var entity = await dbContext.MemoryItems
             .FirstOrDefaultAsync(
                 x => x.Id == request.Id &&
-                     x.ProjectId == ProjectContext.UserProjectId &&
+                     Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId) &&
                      (!actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)) &&
                      x.Scope == MemoryScope.User &&
                      x.MemoryType == MemoryType.Preference,
@@ -1677,7 +1678,7 @@ public sealed class MemoryService(
     {
         var normalizedProjectId = projectId == null ? null : ProjectContext.Normalize(projectId);
         var entity = await dbContext.MemoryItems
-            .Where(x => x.Id == id && (normalizedProjectId == null || x.ProjectId == normalizedProjectId))
+            .Where(x => x.Id == id && (normalizedProjectId == null || Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId)))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .FirstOrDefaultAsync(cancellationToken)
             ?? throw new InvalidOperationException($"Memory item '{id}' was not found.");
@@ -1801,7 +1802,7 @@ public sealed class MemoryService(
         var itemIds = keywordHits.Select(x => x.MemoryId).Concat(semanticHits.Select(x => x.MemoryId)).Distinct().ToArray();
         var items = await dbContext.MemoryItems
             .Where(x => itemIds.Contains(x.Id))
-            .Where(x => x.ProjectId == ProjectContext.UserProjectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .Where(x => x.Scope == MemoryScope.User && x.MemoryType == MemoryType.Preference && x.Status == MemoryStatus.Active)
             .ToDictionaryAsync(x => x.Id, cancellationToken);
@@ -1815,7 +1816,7 @@ public sealed class MemoryService(
         }
 
         var fallback = await dbContext.MemoryItems
-            .Where(x => x.ProjectId == ProjectContext.UserProjectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
             .Where(x => x.Scope == MemoryScope.User && x.MemoryType == MemoryType.Preference && x.Status == MemoryStatus.Active)
             .OrderByDescending(x => x.Importance)
@@ -1908,7 +1909,7 @@ public sealed class MemoryService(
         var entity = await dbContext.MemoryItems
             .FirstOrDefaultAsync(
                 x => x.Id == id &&
-                     x.ProjectId == ProjectContext.UserProjectId &&
+                     Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId) &&
                      (!actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)) &&
                      x.Scope == MemoryScope.User &&
                      x.MemoryType == MemoryType.Preference,
@@ -2030,7 +2031,7 @@ public sealed class LogQueryService(IApplicationDbContext dbContext, IRequestAct
         var serviceNames = SplitFilterValues(request.ServiceName);
         var levels = SplitFilterValues(request.Level);
 
-        query = query.Where(x => x.ProjectId == projectId);
+        query = query.Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
 
         if (serviceNames.Length > 0)
         {
@@ -2108,7 +2109,7 @@ public sealed class LogQueryService(IApplicationDbContext dbContext, IRequestAct
             .Where(x => x.Id == id)
             .Where(x => actor.IsAdmin ||
                         actor.AllowedProjectIds.Count == 0 ||
-                        actor.AllowedProjectIds.Contains(x.ProjectId))
+                        Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .Select(x => new LogEntryResult(
                 x.Id,
                 x.ServiceName,
@@ -2327,26 +2328,28 @@ public sealed class BackgroundJobProcessor(
     {
         var payload = JsonSerializer.Deserialize<ReindexJobPayload>(job.PayloadJson, JsonOptions)
             ?? new ReindexJobPayload(null, null, job.ProjectId);
+        EmbeddingModelIdentity.RequireConfigured(payload.ModelKey, embeddingProvider.ModelKey);
         var chunks = dbContext.MemoryItemChunks.AsQueryable();
+
+        if (job.TenantId.HasValue)
+        {
+            chunks = chunks.Where(x => x.MemoryItem!.TenantId == job.TenantId);
+        }
+
+        if (job.OwnerUserId.HasValue)
+        {
+            chunks = chunks.Where(x => x.MemoryItem!.OwnerUserId == job.OwnerUserId);
+        }
 
         if (payload.MemoryItemId.HasValue)
         {
             chunks = chunks.Where(x => x.MemoryItemId == payload.MemoryItemId.Value);
-            chunks = chunks.Where(x => x.MemoryItem!.ProjectId == job.ProjectId);
-            if (job.TenantId.HasValue)
-            {
-                chunks = chunks.Where(x => x.MemoryItem!.TenantId == job.TenantId);
-            }
-
-            if (job.OwnerUserId.HasValue)
-            {
-                chunks = chunks.Where(x => x.MemoryItem!.OwnerUserId == job.OwnerUserId);
-            }
+            chunks = chunks.Where(x => Memory.Application.ProjectContext.Matches(x.MemoryItem!.ProjectId, job.ProjectId));
         }
         else
         {
             var projectId = ProjectContext.Normalize(payload.ProjectId, job.ProjectId);
-            chunks = chunks.Where(x => x.MemoryItem!.ProjectId == projectId);
+            chunks = chunks.Where(x => Memory.Application.ProjectContext.Matches(x.MemoryItem!.ProjectId, projectId));
         }
 
         var list = await chunks
@@ -2360,13 +2363,21 @@ public sealed class BackgroundJobProcessor(
                 batch.Select(chunk => new BatchEmbeddingItem(chunk.ChunkText, EmbeddingPurpose.Document, "reindex-chunk")).ToArray(),
                 cancellationToken);
 
+            if (embeddings.Count != batch.Length || embeddings.Any(embedding =>
+                !string.Equals(embedding.ModelKey, embeddingProvider.ModelKey, StringComparison.Ordinal) ||
+                embedding.Dimensions != embeddingProvider.Dimensions ||
+                embedding.Values.Length != embedding.Dimensions || embedding.Values.Any(value => !float.IsFinite(value))))
+            {
+                throw new InvalidOperationException("Reindex embedding batch does not match the configured provider contract.");
+            }
+
             for (var index = 0; index < batch.Length; index++)
             {
                 var chunk = batch[index];
                 var embedding = embeddings[index];
                 await vectorStore.ReplaceChunkVectorAsync(
                     chunk.Id,
-                    embedding with { ModelKey = string.IsNullOrWhiteSpace(payload.ModelKey) ? embedding.ModelKey : payload.ModelKey },
+                    embedding,
                     cancellationToken);
             }
         }
@@ -2385,6 +2396,7 @@ public sealed class BackgroundJobProcessor(
                 .OrderBy(x => x)
                 .ToListAsync(cancellationToken))
                 .Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x))
+                .Distinct(ProjectContext.IdentityComparer)
                 .ToList();
 
             foreach (var projectId in projectIds)
@@ -2411,11 +2423,30 @@ public sealed class BackgroundJobProcessor(
             .Select(x => ProjectContext.Normalize(x))
             .Append(normalizedProjectId)
             .Where(x => !ProjectContext.IsShared(x) && !ProjectContext.IsUser(x))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(ProjectContext.IdentityComparer)
             .ToArray();
 
+        var matchingSummaries = await dbContext.MemoryItems
+            .Where(x => ProjectContext.Matches(x.ProjectId, ProjectContext.SharedProjectId) &&
+                        x.TenantId == null && x.OwnerUserId == null &&
+                        x.MemoryType == MemoryType.Summary && x.SourceType == "summary-layer" &&
+                        x.ExternalKey != null && x.ExternalKey.StartsWith(SharedSummaryExternalKeyPrefix) &&
+                        ProjectContext.Matches(x.ExternalKey.Substring(SharedSummaryExternalKeyPrefix.Length), normalizedProjectId))
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        if (matchingSummaries.Count > 1)
+        {
+            throw new InvalidOperationException("Multiple shared summaries exist for the same project identity.");
+        }
+        var entity = matchingSummaries.SingleOrDefault();
+        if (entity is not null && !ProjectContext.Matches(entity.SourceRef, normalizedProjectId))
+        {
+            throw new InvalidOperationException("Shared summary source reference does not match its project identity.");
+        }
+        var summaryProjectId = entity?.SourceRef ?? normalizedProjectId;
+
         var sourceItems = await dbContext.MemoryItems
-            .Where(x => projectIds.Contains(x.ProjectId))
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(projectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .Where(x => x.Status == MemoryStatus.Active)
             .Where(x =>
                 x.MemoryType == MemoryType.Fact ||
@@ -2434,14 +2465,8 @@ public sealed class BackgroundJobProcessor(
             ? "No reusable project knowledge is available yet."
             : string.Join(Environment.NewLine, sourceItems.Select(x => $"- [{x.ProjectId}] {x.Title}: {x.Summary}"));
         var summary = sourceItems.Count == 0
-            ? $"No shared summary is available for project '{normalizedProjectId}'."
-            : $"Shared summary for project '{normalizedProjectId}' and {Math.Max(0, projectIds.Length - 1)} referenced project(s).";
-
-        var entity = await dbContext.MemoryItems
-            .FirstOrDefaultAsync(
-                x => x.ProjectId == ProjectContext.SharedProjectId &&
-                     x.ExternalKey == BuildSharedSummaryExternalKey(normalizedProjectId),
-                cancellationToken);
+            ? $"No shared summary is available for project '{summaryProjectId}'."
+            : $"Shared summary for project '{summaryProjectId}' and {Math.Max(0, projectIds.Length - 1)} referenced project(s).";
 
         if (entity is null)
         {
@@ -2462,10 +2487,10 @@ public sealed class BackgroundJobProcessor(
             await dbContext.MemoryItems.AddAsync(entity, cancellationToken);
         }
 
-        entity.Title = $"Shared summary for {normalizedProjectId}";
+        entity.Title = $"Shared summary for {summaryProjectId}";
         entity.Content = content;
         entity.Summary = summary;
-        entity.Tags = ["summary-layer", $"project:{normalizedProjectId}"];
+        entity.Tags = ["summary-layer", $"project:{summaryProjectId}"];
         entity.Importance = 0.85m;
         entity.Confidence = 0.8m;
         entity.Version = entity.Version <= 0 ? 1 : entity.Version + 1;
@@ -2568,8 +2593,10 @@ public sealed class BackgroundJobProcessor(
     private static IReadOnlyList<ChunkDraft> ChunkingServiceChunk(string content)
         => new ChunkingService().Chunk(MemoryType.Summary, "summary-layer", content);
 
+    private const string SharedSummaryExternalKeyPrefix = "shared-summary:";
+
     private static string BuildSharedSummaryExternalKey(string projectId)
-        => $"shared-summary:{ProjectContext.Normalize(projectId)}";
+        => SharedSummaryExternalKeyPrefix + ProjectContext.Normalize(projectId);
 
     private sealed record ReindexJobPayload(string? ModelKey, Guid? MemoryItemId, string ProjectId);
     private sealed record SummaryRefreshJobPayload(string? ProjectId, IReadOnlyList<string> IncludedProjectIds, bool RebuildAll);

@@ -10,7 +10,7 @@ namespace Memory.Infrastructure;
 public sealed class NpgsqlDashboardGraphRefreshCoordinator(NpgsqlDataSource dataSource, IOptions<MemoryOptions> options) : IDashboardGraphRefreshCoordinator
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly string _scope = options.Value.Namespace + ":global";
+    private readonly string _scope = options.Value.Namespace + ":project-identity-v1:global";
 
     public async Task<DashboardGraphRefreshLease?> TryAcquireAsync(bool forceFull, CancellationToken cancellationToken)
     {
@@ -169,8 +169,13 @@ public sealed class NpgsqlDashboardGraphRefreshCoordinator(NpgsqlDataSource data
         var result = new RevisionState();
         while (await reader.ReadAsync(cancellationToken))
         {
-            result.Revisions.Add(reader.GetString(0), reader.GetInt64(1));
-            result.UpdatedAt.Add(reader.GetString(0), reader.GetFieldValue<DateTimeOffset>(2));
+            var scope = reader.GetString(0);
+            var identityScope = scope.StartsWith("project:", StringComparison.Ordinal)
+                ? DurableCacheRevisionStore.ProjectScope(scope[8..]) : scope;
+            result.Revisions[identityScope] = checked(result.Revisions.GetValueOrDefault(identityScope) + reader.GetInt64(1));
+            var updatedAt = reader.GetFieldValue<DateTimeOffset>(2);
+            if (!result.UpdatedAt.TryGetValue(identityScope, out var previous) || previous < updatedAt)
+                result.UpdatedAt[identityScope] = updatedAt;
         }
         return result;
     }

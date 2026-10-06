@@ -202,12 +202,62 @@
         instance.state.panY = (viewportHeight - scaledHeight) / 2 - y * instance.state.scale;
     }
 
-    function fitContent(viewport) {
+    function physicalOwner(instance) {
+        return instance.viewport.closest(".graph-canvas-panel-expanded") || instance.viewport.closest(".content");
+    }
+
+    function ownerBounds(owner) {
+        const rect = owner.getBoundingClientRect();
+        const style = getComputedStyle(owner);
+        const visual = window.visualViewport;
+        return {
+            top: Math.max(rect.top + owner.clientTop, visual?.offsetTop || 0) + (parseFloat(style.paddingTop) || 0),
+            bottom: Math.min(rect.top + owner.clientTop + owner.clientHeight, (visual?.offsetTop || 0) + (visual?.height || innerHeight)) - (parseFloat(style.paddingBottom) || 0)
+        };
+    }
+
+    function sizePhysicalViewport(instance) {
+        const frame = instance.viewport.closest(".graph-viewport-frame");
+        const controls = frame?.querySelector(".graph-viewport-controls");
+        const owner = physicalOwner(instance);
+        if (!frame || !controls || !owner) {
+            return;
+        }
+        frame.dataset.physicalHeight = "true";
+        const bounds = ownerBounds(owner);
+        const style = getComputedStyle(controls);
+        const frameStyle = getComputedStyle(frame);
+        const controlsHeight = controls.getBoundingClientRect().height + (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+        const frameInsets = ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"]
+            .reduce((sum, key) => sum + (parseFloat(frameStyle[key]) || 0), 0);
+        const height = Math.max(1, Math.floor(bounds.bottom - bounds.top - controlsHeight - frameInsets));
+        const value = `${height}px`;
+        if (frame.style.getPropertyValue("--graph-physical-height") !== value) {
+            frame.style.setProperty("--graph-physical-height", value);
+        }
+    }
+
+    function revealPhysicalViewport(instance) {
+        const frame = instance.viewport.closest(".graph-viewport-frame");
+        const owner = physicalOwner(instance);
+        if (!frame || !owner) {
+            return;
+        }
+        const bounds = ownerBounds(owner);
+        const rect = frame.getBoundingClientRect();
+        const delta = rect.top < bounds.top ? rect.top - bounds.top : rect.bottom > bounds.bottom ? rect.bottom - bounds.bottom : 0;
+        if (Math.abs(delta) > 0.5) {
+            owner.scrollTop += delta;
+        }
+    }
+
+    function fitContent(viewport, reveal = false) {
         const instance = getInstance(viewport);
         if (!instance) {
             return;
         }
 
+        sizePhysicalViewport(instance);
         arrangeLabels(instance);
         const nextScale = fitScale(instance, getContentMetrics(instance));
 
@@ -215,6 +265,9 @@
         instance.state.hasInteracted = false;
         centerContent(instance);
         applyTransform(instance);
+        if (reveal) {
+            revealPhysicalViewport(instance);
+        }
     }
 
     function resetContent(viewport) {
@@ -404,6 +457,9 @@
             });
         };
         const resizeObserver = new ResizeObserver(scheduleRefresh);
+        const physicalFrame = viewport.closest(".graph-viewport-frame");
+        const previousPhysicalHeight = physicalFrame?.style.getPropertyValue("--graph-physical-height");
+        const previousPhysicalAttribute = physicalFrame?.getAttribute("data-physical-height");
         // Do not observe the pan element's style: applyTransform would trigger a feedback loop.
         const contentObserver = new MutationObserver(records => {
             if (records.some(record => !(record.target === instance.content && record.type === "attributes" && record.attributeName === "style"))) {
@@ -425,6 +481,12 @@
         viewport.addEventListener("click", handleClick, true);
         viewport.addEventListener("dblclick", handleDoubleClick);
         resizeObserver.observe(viewport);
+        for (const element of [viewport.closest(".content"), viewport.closest(".graph-canvas-panel"), physicalFrame?.querySelector(".graph-viewport-controls")]) {
+            if (element) {
+                resizeObserver.observe(element);
+            }
+        }
+        window.visualViewport?.addEventListener("resize", scheduleRefresh);
 
         instance.cleanup.push(() => viewport.removeEventListener("wheel", handleWheel));
         instance.cleanup.push(() => viewport.removeEventListener("pointerdown", handlePointerDown));
@@ -434,6 +496,23 @@
         instance.cleanup.push(() => viewport.removeEventListener("click", handleClick, true));
         instance.cleanup.push(() => viewport.removeEventListener("dblclick", handleDoubleClick));
         instance.cleanup.push(() => resizeObserver.disconnect());
+        instance.cleanup.push(() => window.visualViewport?.removeEventListener("resize", scheduleRefresh));
+        instance.cleanup.push(() => {
+            if (physicalFrame) {
+                if (previousPhysicalHeight) {
+                    physicalFrame.style.setProperty("--graph-physical-height", previousPhysicalHeight);
+                }
+                else {
+                    physicalFrame.style.removeProperty("--graph-physical-height");
+                }
+                if (previousPhysicalAttribute === null) {
+                    physicalFrame.removeAttribute("data-physical-height");
+                }
+                else {
+                    physicalFrame.setAttribute("data-physical-height", previousPhysicalAttribute);
+                }
+            }
+        });
         instance.cleanup.push(() => contentObserver.disconnect());
         instance.cleanup.push(() => fontObserver.disconnect());
         instance.cleanup.push(() => document.fonts?.removeEventListener("loadingdone", scheduleRefresh));
@@ -478,6 +557,7 @@
             return;
         }
 
+        sizePhysicalViewport(instance);
         if (instance.state.hasInteracted) {
             arrangeLabels(instance);
             applyTransform(instance);

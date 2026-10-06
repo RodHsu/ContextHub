@@ -81,7 +81,8 @@ app.MapGet("/info", (IResolvedEmbeddingProfileAccessor profileAccessor) =>
         profileAccessor.Current.InferenceThreads,
         profileAccessor.Current.BatchSize,
         true,
-        runtime.IsReady)));
+        runtime.IsReady,
+        profileAccessor.Current.TokenizerContract)));
 
 app.MapPost("/embed", async (EmbeddingServiceEmbedRequest request, CancellationToken cancellationToken) =>
 {

@@ -9,6 +9,102 @@ namespace Memory.IntegrationTests;
 public sealed class AgentExecutionMigrationRehearsalTests
 {
     [DockerRequiredFact]
+    public async Task Generated_summary_alias_collision_and_inconsistent_reference_fail_migration_without_merging()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true).WithDatabase("contexthub")
+            .WithUsername("contexthub").WithPassword("contexthub").Build();
+        await postgres.StartAsync();
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "055_cache_metrics.sql");
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        await ExecuteAsync(connection, """
+            INSERT INTO memory_items
+                (id, project_id, external_key, scope, memory_type, title, content, summary,
+                 source_type, source_ref, status, created_at, updated_at)
+            VALUES (@first, 'shared', 'shared-summary:Tt', 'Project', 'Summary', 'First', 'First', 'First',
+                    'summary-layer', 'Tt', 'Active', now(), now()),
+                   (@second, 'shared', 'shared-summary:tt', 'Project', 'Summary', 'Second', 'Second', 'Second',
+                    'summary-layer', 'tt', 'Active', now(), now());
+            """, new NpgsqlParameter<Guid>("first", first), new NpgsqlParameter<Guid>("second", second));
+        var migrate = () => ApplyRemainingAsync(connection, migrations);
+        (await migrate.Should().ThrowAsync<PostgresException>()).Which.MessageText
+            .Should().StartWith("PROJECT_IDENTITY_COLLISION:");
+        (await ScalarAsync<long>(connection, "SELECT count(*) FROM memory_items")).Should().Be(2);
+        (await ScalarAsync<bool>(connection, "SELECT to_regprocedure('public.project_identity_key(text)') IS NULL"))
+            .Should().BeTrue();
+        (await ScalarAsync<long>(connection, "SELECT count(*) FROM schema_migrations WHERE name = '056_project_identity.sql'"))
+            .Should().Be(0);
+        // Resolve only owned synthetic fixture data; Production collisions require an operator decision.
+        await ExecuteAsync(connection, "DELETE FROM memory_items WHERE id = @second",
+            new NpgsqlParameter<Guid>("second", second));
+        await ExecuteAsync(connection, "UPDATE memory_items SET source_ref = 'DifferentProject' WHERE id = @first",
+            new NpgsqlParameter<Guid>("first", first));
+        (await migrate.Should().ThrowAsync<PostgresException>()).Which.MessageText
+            .Should().Be("PROJECT_IDENTITY_REFERENCE_CONTRACT: shared summary");
+        (await ScalarAsync<bool>(connection, "SELECT to_regprocedure('public.project_identity_key(text)') IS NULL"))
+            .Should().BeTrue();
+        await ExecuteAsync(connection, "UPDATE memory_items SET source_ref = 'Tt' WHERE id = @first",
+            new NpgsqlParameter<Guid>("first", first));
+        await ApplyRemainingAsync(connection, migrations);
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<string>(connection, "SELECT external_key FROM memory_items WHERE id = @first",
+            new NpgsqlParameter<Guid>("first", first))).Should().Be("shared-summary:Tt");
+        (await ScalarAsync<string>(connection, "SELECT source_ref FROM memory_items WHERE id = @first",
+            new NpgsqlParameter<Guid>("first", first))).Should().Be("Tt");
+    }
+
+    [DockerRequiredFact]
+    public async Task Project_identity_migration_rejects_legacy_collisions_atomically_and_replays_after_controlled_resolution()
+    {
+        await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+            .WithPortBinding(5432, true).WithDatabase("contexthub")
+            .WithUsername("contexthub").WithPassword("contexthub").Build();
+        await postgres.StartAsync();
+        await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
+        await connection.OpenAsync();
+        var migrations = ReadMigrations();
+        await ApplyThroughAsync(connection, migrations, "055_cache_metrics.sql");
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        await ExecuteAsync(connection, """
+            INSERT INTO project_security_revisions(id, project_id, updated_at)
+            VALUES (@first, 'Tt', now()), (@second, 'tt', now());
+            """, new NpgsqlParameter<Guid>("first", first), new NpgsqlParameter<Guid>("second", second));
+        var migrate = () => ApplyRemainingAsync(connection, migrations);
+        var rejected = await migrate.Should().ThrowAsync<PostgresException>();
+        rejected.Which.SqlState.Should().Be(PostgresErrorCodes.RaiseException);
+        rejected.Which.MessageText.Should().StartWith("PROJECT_IDENTITY_COLLISION:");
+        (await ScalarAsync<long>(connection, "SELECT count(*) FROM project_security_revisions")).Should().Be(2);
+        (await ScalarAsync<long>(connection, "SELECT count(*) FROM schema_migrations WHERE name = '056_project_identity.sql'")).Should().Be(0);
+        (await ScalarAsync<bool>(connection, "SELECT to_regprocedure('public.project_identity_key(text)') IS NULL")).Should().BeTrue();
+        (await ScalarAsync<long>(connection, "SELECT count(*) FROM pg_indexes WHERE indexname LIKE 'pi1_%'")).Should().Be(0);
+
+        // Explicitly resolve only this synthetic fixture; the migration never chooses a winner.
+        await ExecuteAsync(connection, "DELETE FROM project_security_revisions WHERE id = @second",
+            new NpgsqlParameter<Guid>("second", second));
+        await ApplyRemainingAsync(connection, migrations);
+        await ApplyRemainingAsync(connection, migrations);
+        (await ScalarAsync<long>(connection, "SELECT count(*) FROM schema_migrations WHERE name = '056_project_identity.sql'")).Should().Be(1);
+        (await ScalarAsync<string>(connection, "SELECT project_id FROM project_security_revisions WHERE id = @first",
+            new NpgsqlParameter<Guid>("first", first))).Should().Be("Tt");
+        var duplicate = () => ExecuteAsync(connection, """
+            INSERT INTO project_security_revisions(id, project_id, updated_at) VALUES (@id, 'tT', now())
+            """, new NpgsqlParameter<Guid>("id", Guid.NewGuid()));
+        (await duplicate.Should().ThrowAsync<PostgresException>()).Which.SqlState.Should().Be(PostgresErrorCodes.UniqueViolation);
+        await ExecuteAsync(connection, "SET enable_seqscan = off");
+        var plan = await ScalarAsync<string>(connection, """
+            EXPLAIN (FORMAT JSON) SELECT * FROM project_security_revisions
+            WHERE tenant_id IS NULL AND owner_user_id IS NULL
+                AND public.project_identity_equals(project_id, 'TT')
+            """);
+        plan.Should().Contain("pi1_ix_project_security_revisions_owner_project", "identity lookup must remain indexable");
+    }
+
+    [DockerRequiredFact]
     public async Task Production_like_039_database_should_upgrade_through_definition_state_and_agent_execution_and_replay_cleanly()
     {
         await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
