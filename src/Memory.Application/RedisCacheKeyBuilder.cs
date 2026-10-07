@@ -15,7 +15,7 @@ public static class RedisCacheKeyBuilder
         string modelKey)
         => string.Join(
             ':',
-            "cache:v2:search",
+            "cache:v4:search",
             AuthorityAwareRetrievalReranker.RankingVersion,
             Hash(version.Value),
             Hash(request.Query),
@@ -35,7 +35,7 @@ public static class RedisCacheKeyBuilder
         string modelKey)
         => string.Join(
             ':',
-            "cache:v2:context",
+            "cache:v4:context",
             AuthorityAwareRetrievalReranker.RankingVersion,
             Hash(version.Value),
             Hash(request.Query),
@@ -43,7 +43,7 @@ public static class RedisCacheKeyBuilder
             request.RecentLogLimit,
             request.QueryMode,
             request.UseSummaryLayer,
-            Hash(ProjectContext.Normalize(request.ProjectId)),
+            Hash(ProjectContext.IdentityKey(ProjectContext.Normalize(request.ProjectId))),
             Hash(Actor(actor)),
             Hash(RetrievalProjectSet(allowedProjects)),
             Hash(modelKey));
@@ -60,7 +60,7 @@ public static class RedisCacheKeyBuilder
         IReadOnlyList<string> allowedProjects)
         => string.Join(
             ':',
-            "cache:v2:semantic",
+            "cache:v4:semantic",
             Hash(version.Value),
             Hash(modelKey),
             Hash(query),
@@ -69,16 +69,16 @@ public static class RedisCacheKeyBuilder
             Hash(RetrievalProjectSet(allowedProjects)));
 
     public static string DashboardMemories(CacheVersionStamp version, MemoryListRequest request, ContextHubRequestActor actor)
-        => $"cache:v2:dashboard:memories:{Hash(version.Value)}:{Hash(Actor(actor))}:{Hash(DashboardMemoryRequest(request))}";
+        => $"cache:v3:dashboard:memories:{Hash(version.Value)}:{Hash(Actor(actor))}:{Hash(DashboardMemoryRequest(request))}";
 
     public static string DashboardMemoryDetails(CacheVersionStamp version, Guid id, ContextHubRequestActor actor)
-        => $"cache:v2:dashboard:memory-details:{Hash(version.Value)}:{Hash(Actor(actor))}:{id:N}";
+        => $"cache:v3:dashboard:memory-details:{Hash(version.Value)}:{Hash(Actor(actor))}:{id:N}";
 
     public static string DashboardJobs(long jobVersion, JobListRequest request)
         => $"cache:dashboard:jobs:{jobVersion}:{Hash($"{request.Status}:{request.JobType}:{request.Page}:{request.PageSize}")}";
 
     public static string DashboardLogs(LogQueryRequest request, ContextHubRequestActor actor)
-        => $"cache:v2:dashboard:logs:{Hash(Actor(actor))}:{Hash(JsonSerializer.Serialize(request))}";
+        => $"cache:v3:dashboard:logs:{Hash(Actor(actor))}:{Hash(JsonSerializer.Serialize(request with { ProjectId = ProjectContext.IdentityKey(ProjectContext.Normalize(request.ProjectId)) }))}";
 
     public static string Hash(string? value)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value ?? string.Empty))).ToLowerInvariant();
@@ -98,18 +98,11 @@ public static class RedisCacheKeyBuilder
         });
 
     public static string ProjectSet(IReadOnlyList<string> projects)
-        => JsonSerializer.Serialize(
-            projects
-                .Select(x => ProjectContext.Normalize(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-                .Select(x => x.ToLowerInvariant()).ToArray());
+        => JsonSerializer.Serialize(ProjectContext.IdentityKeys(projects.Select(x => ProjectContext.Normalize(x))));
 
-    // The database selector uses exact project strings. Do not merge differently cased selectors
-    // merely because authorization grants are compared case-insensitively.
+    // Retrieval, authorization and cache scopes use the same versioned project identity contract.
     private static string RetrievalProjectSet(IReadOnlyList<string> projects)
-        => JsonSerializer.Serialize(projects.Select(x => ProjectContext.Normalize(x))
-            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
+        => ProjectSet(projects);
 
     private static string DashboardMemoryRequest(MemoryListRequest request)
         => JsonSerializer.Serialize(new
@@ -120,7 +113,7 @@ public static class RedisCacheKeyBuilder
             request.Status,
             request.SourceType,
             request.Tag,
-            request.ProjectId,
+            ProjectId = string.IsNullOrWhiteSpace(request.ProjectId) ? null : ProjectContext.IdentityKey(request.ProjectId),
             request.ProjectQuery,
             Projects = RetrievalProjectSet(request.IncludedProjectIds ?? []),
             request.QueryMode,

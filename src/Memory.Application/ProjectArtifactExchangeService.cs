@@ -68,7 +68,7 @@ public sealed class ProjectArtifactExchangeService(
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
 
         var query = dbContext.MemoryItems.AsNoTracking()
-            .Where(x => x.ProjectId == projectId && x.MemoryType == MemoryType.Artifact &&
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.MemoryType == MemoryType.Artifact &&
                         x.SourceType == SourceType && x.Status == MemoryStatus.Active);
         if (!string.IsNullOrWhiteSpace(request.Query))
         {
@@ -140,7 +140,7 @@ public sealed class ProjectArtifactExchangeService(
             throw new InvalidOperationException("FileReference requires non-empty FileId and FileVersionId values.");
 
         var version = await dbContext.FileVersions.AsNoTracking().Include(x => x.FileAsset).SingleOrDefaultAsync(
-            x => x.Id == request.FileVersionId.Value && x.FileAssetId == request.FileId.Value && x.FileAsset!.ProjectId == projectId &&
+            x => x.Id == request.FileVersionId.Value && x.FileAssetId == request.FileId.Value && Memory.Application.ProjectContext.Matches(x.FileAsset!.ProjectId, projectId) &&
                  x.FileAsset.State == FileAssetState.Active && x.Lifecycle != FileVersionLifecycle.LogicalDeleted,
             cancellationToken) ?? throw new InvalidOperationException("The logical managed file reference is unavailable or does not belong to the requested project.");
         var decision = await managedFileService.AuthorizeOperationAsync(version.Id, FileOperation.Metadata, "artifact-file-reference", cancellationToken);
@@ -234,7 +234,7 @@ public sealed class ProjectArtifactExchangeService(
         if (result is null || result.Kind != ProjectArtifactKind.FileReference) return result;
 
         var exists = await dbContext.FileVersions.AsNoTracking().AnyAsync(
-            x => x.Id == result.FileVersionId && x.FileAssetId == result.FileId && x.FileAsset!.ProjectId == item.ProjectId &&
+            x => x.Id == result.FileVersionId && x.FileAssetId == result.FileId && Memory.Application.ProjectContext.Matches(x.FileAsset!.ProjectId, item.ProjectId) &&
                  x.FileAsset.State == FileAssetState.Active && x.Lifecycle != FileVersionLifecycle.LogicalDeleted,
             cancellationToken);
         if (!exists) return null;

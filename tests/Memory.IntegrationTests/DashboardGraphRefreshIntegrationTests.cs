@@ -25,7 +25,7 @@ public sealed class DashboardGraphRefreshIntegrationTests(ContainerTestEnvironme
         var oldLease = results.Single(result => result is not null)!;
         await using (var expire = source.CreateCommand("UPDATE dashboard_graph_projection SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE scope=@scope"))
         {
-            expire.Parameters.AddWithValue("scope", options.Value.Namespace + ":global");
+            expire.Parameters.AddWithValue("scope", options.Value.Namespace + ":project-identity-v1:global");
             await expire.ExecuteNonQueryAsync();
         }
         var newLease = (await second.TryAcquireAsync(false, default))!;
@@ -41,7 +41,7 @@ public sealed class DashboardGraphRefreshIntegrationTests(ContainerTestEnvironme
         status.Deduplicated.Should().Be(1);
         await using (var overdue = source.CreateCommand("UPDATE dashboard_graph_projection SET last_full_at=clock_timestamp()-interval '25 hours' WHERE scope=@scope"))
         {
-            overdue.Parameters.AddWithValue("scope", options.Value.Namespace + ":global");
+            overdue.Parameters.AddWithValue("scope", options.Value.Namespace + ":project-identity-v1:global");
             await overdue.ExecuteNonQueryAsync();
         }
         var full = (await restarted.TryAcquireAsync(false, default))!;
@@ -65,7 +65,7 @@ public sealed class DashboardGraphRefreshIntegrationTests(ContainerTestEnvironme
         (await coordinator.PublishAsync(lease, EmptySnapshot(), default)).Should().BeFalse();
         (await coordinator.ReadSnapshotAsync(default)).Should().BeNull();
         var retry = (await coordinator.TryAcquireAsync(false, default))!;
-        retry.DirtyProjects.Should().Contain(project);
+        retry.DirtyProjects.Should().Contain(ProjectContext.IdentityKey(project));
         (await coordinator.PublishAsync(retry, EmptySnapshot(), default)).Should().BeTrue();
     }
 

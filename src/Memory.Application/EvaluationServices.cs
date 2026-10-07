@@ -23,7 +23,7 @@ public sealed class EvaluationService(
             .AsNoTracking()
             .ForActor(actor)
             .Include(x => x.Cases)
-            .Where(x => x.ProjectId == normalizedProjectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId))
             .OrderByDescending(x => x.UpdatedAt)
             .ToListAsync(cancellationToken);
         return suites.Select(MapSuite).ToArray();
@@ -134,7 +134,7 @@ public sealed class EvaluationService(
                     var resolvedIds = await dbContext.MemoryItems
                         .AsNoTracking()
                         .ForActor(actor)
-                        .Where(x => x.ProjectId == suite.ProjectId)
+                        .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, suite.ProjectId))
                         .Where(x => evaluationCase.ExpectedExternalKeys.Contains(x.ExternalKey))
                         .Select(x => x.Id)
                         .ToListAsync(cancellationToken);
@@ -251,7 +251,7 @@ public sealed class EvaluationService(
         var run = await dbContext.EvaluationRuns
             .AsNoTracking()
             .Include(x => x.Items)
-            .Where(x => x.ProjectId == normalizedProjectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId))
             .Where(x => dbContext.EvaluationSuites
                 .ForActor(actor)
                 .Any(suite => suite.Id == x.SuiteId))
@@ -285,7 +285,7 @@ public sealed class EvaluationService(
         var exists = await dbContext.SuggestedActions.AnyAsync(
             x => x.TenantId == suite.TenantId &&
                  x.OwnerUserId == suite.OwnerUserId &&
-                 x.ProjectId == suite.ProjectId &&
+                 Memory.Application.ProjectContext.Matches(x.ProjectId, suite.ProjectId) &&
                  x.Status == SuggestedActionStatus.Pending &&
                  x.PayloadJson.Contains(dedupKey),
             cancellationToken);

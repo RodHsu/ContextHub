@@ -113,7 +113,7 @@ public sealed class SecretManagementService(
 
         await using var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         await dbContext.AcquireTransactionLockAsync($"secret-name:{actor.TenantId:D}:{projectId}:{normalizedName}", cancellationToken);
-        var exists = await Scope(dbContext.Secrets, actor).AnyAsync(x => x.ProjectId == projectId && x.NormalizedName == normalizedName && x.State == SecretState.Active, cancellationToken);
+        var exists = await Scope(dbContext.Secrets, actor).AnyAsync(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.NormalizedName == normalizedName && x.State == SecretState.Active, cancellationToken);
         if (exists) throw new InvalidOperationException("An active secret with the same name already exists.");
         await dbContext.Secrets.AddAsync(secret, cancellationToken);
         await AddAccessEventAsync(secret, null, null, actor, SecretAccessOperation.Create, "secret:create", projectId, Guid.NewGuid().ToString("N"), true, "Created", cancellationToken);
@@ -305,7 +305,7 @@ public sealed class SecretManagementService(
                         x.ValidBefore > clock.UtcNow)
             .ToArrayAsync(cancellationToken);
         var existingRevocations = await dbContext.SshRevocationRecords
-            .Where(x => x.ProjectId == secret.ProjectId && issuedCertificates.Select(c => c.Id).Contains(x.SshCertificateLeaseId))
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, secret.ProjectId) && issuedCertificates.Select(c => c.Id).Contains(x.SshCertificateLeaseId))
             .Select(x => x.SshCertificateLeaseId)
             .ToArrayAsync(cancellationToken);
         var revokedCertificateIds = existingRevocations.ToHashSet();
@@ -368,7 +368,7 @@ public sealed class SecretManagementService(
         var project = ProjectContext.Normalize(projectId);
         ActorAuthorization.EnsureProjectAllowed(actor, project, write: false);
         await EnsureFoundationRightAsync(actor, project, SecretRight.Metadata, null, cancellationToken);
-        return await Scope(dbContext.Secrets.AsNoTracking(), actor).Where(x => x.ProjectId == project)
+        return await Scope(dbContext.Secrets.AsNoTracking(), actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, project))
             .OrderBy(x => x.NormalizedName)
             .Select(x => new SecretSummary(x.Id, x.ProjectId, x.Name, x.Kind, x.State,
                 x.CurrentVersionId == null ? null : x.Versions.Where(v => v.Id == x.CurrentVersionId).Select(v => (int?)v.VersionNumber).FirstOrDefault(),
@@ -490,10 +490,10 @@ public sealed class SecretManagementService(
             .Where(x => x.SecretId == secret.Id && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == right && (x.ExpiresAt == null || x.ExpiresAt > now))
             .Select(x => x.Effect).ToArrayAsync(cancellationToken);
         var secretPolicies = await Scope(dbContext.SecretPolicies.AsNoTracking(), actor)
-            .Where(x => x.ProjectId == secret.ProjectId && x.SecretId == secret.Id && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == right)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, secret.ProjectId) && x.SecretId == secret.Id && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == right)
             .Select(x => x.Effect).ToArrayAsync(cancellationToken);
         var projectPolicies = await Scope(dbContext.SecretPolicies.AsNoTracking(), actor)
-            .Where(x => x.ProjectId == secret.ProjectId && x.SecretId == null && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == right)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, secret.ProjectId) && x.SecretId == null && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == right)
             .Select(x => x.Effect).ToArrayAsync(cancellationToken);
         var tier = grants.Length > 0 ? grants : secretPolicies.Length > 0 ? secretPolicies : projectPolicies;
         if (tier.Length == 0 || tier.Contains(AuthorizationEffect.Deny) || !tier.Contains(AuthorizationEffect.Allow)) throw Unavailable();
@@ -542,10 +542,10 @@ public sealed class SecretManagementService(
             ? query.Where(x => EF.Property<Guid?>(x, "TenantId") == actor.TenantId)
             : query.Where(x => EF.Property<Guid?>(x, "TenantId") == actor.TenantId && EF.Property<Guid?>(x, "OwnerUserId") == actor.UserId);
         if (actor.AllowedProjectIds.Count == 0) return query;
-        var allowed = actor.AllowedProjectIds.Select(x => ProjectContext.Normalize(x).ToLowerInvariant()).ToArray();
-        return query.Where(x => allowed.Contains(EF.Property<string>(x, "ProjectId").ToLower()) ||
-                                EF.Property<string>(x, "ProjectId").ToLower() == ProjectContext.SharedProjectId ||
-                                EF.Property<string>(x, "ProjectId").ToLower() == ProjectContext.UserProjectId);
+        var allowed = ProjectContext.IdentityKeys(actor.AllowedProjectIds);
+        return query.Where(x => allowed.Contains(ProjectContext.IdentityKey(EF.Property<string>(x, "ProjectId"))) ||
+                                ProjectContext.Matches(EF.Property<string>(x, "ProjectId"), ProjectContext.SharedProjectId) ||
+                                ProjectContext.Matches(EF.Property<string>(x, "ProjectId"), ProjectContext.UserProjectId));
     }
 
     private ContextHubRequestActor RequireActor(string scope)

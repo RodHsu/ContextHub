@@ -8,7 +8,7 @@ namespace Memory.Infrastructure;
 public sealed class DurableCacheRevisionStore(NpgsqlDataSource dataSource)
 {
     public static string ProjectScope(string projectId)
-        => $"project:{ProjectContext.Normalize(projectId)}";
+        => $"project:{ProjectContext.IdentityKey(ProjectContext.Normalize(projectId))}";
 
     public static string UserScope(ContextHubRequestActor actor)
         => actor.HasUser ? $"user:{actor.TenantId:N}:{actor.UserId:N}" : ProjectScope(ProjectContext.UserProjectId);
@@ -16,12 +16,19 @@ public sealed class DurableCacheRevisionStore(NpgsqlDataSource dataSource)
     public async Task<CacheVersionStamp> ReadAsync(
         IReadOnlyList<string> projectIds, ContextHubRequestActor actor, bool includeShared, CancellationToken cancellationToken)
     {
-        var projects = projectIds.Select(x => ProjectContext.Normalize(x)).Distinct(StringComparer.Ordinal)
-            .Order(StringComparer.Ordinal).ToArray();
+        var projects = ProjectContext.IdentityKeys(projectIds.Select(x => ProjectContext.Normalize(x)));
         var scopes = projects.Select(ProjectScope).Append("global").Append("security").Append(UserScope(actor));
         if (includeShared) scopes = scopes.Append(ProjectScope(ProjectContext.SharedProjectId));
         // A single statement gives every dimension the same committed snapshot. Missing scopes are revision zero.
-        await using var command = dataSource.CreateCommand("SELECT scope, revision FROM cache_scope_revisions WHERE scope = ANY(@scopes) OR (@all_projects AND scope LIKE 'project:%') ORDER BY scope");
+        // Preserve every legacy alias row. Summing positive revisions keeps every committed
+        // increment visible, including mutations from an older writer using another spelling.
+        await using var command = dataSource.CreateCommand("""
+            SELECT public.project_cache_scope(scope) AS identity_scope, SUM(revision)::bigint
+            FROM cache_scope_revisions
+            WHERE public.project_cache_scope(scope) = ANY(@scopes) OR (@all_projects AND scope LIKE 'project:%')
+            GROUP BY public.project_cache_scope(scope)
+            ORDER BY identity_scope
+            """);
         command.Parameters.AddWithValue("scopes", scopes.Distinct(StringComparer.Ordinal).ToArray());
         command.Parameters.AddWithValue("all_projects", projects.Length == 0);
         var revisions = new Dictionary<string, long>(StringComparer.Ordinal);
@@ -29,15 +36,15 @@ public sealed class DurableCacheRevisionStore(NpgsqlDataSource dataSource)
         while (await reader.ReadAsync(cancellationToken)) revisions[reader.GetString(0)] = reader.GetInt64(1);
         // An unfiltered Dashboard catalog depends on all existing scopes and on newly created ones.
         var projectVersions = projects.Length == 0
-            ? revisions.Where(x => x.Key.StartsWith("project:", StringComparison.Ordinal)).ToDictionary(x => x.Key[8..], x => x.Value, StringComparer.Ordinal)
-            : projects.ToDictionary(x => x, x => revisions.GetValueOrDefault(ProjectScope(x)), StringComparer.Ordinal);
+            ? revisions.Where(x => x.Key.StartsWith("project:", StringComparison.Ordinal)).ToDictionary(x => x.Key[8..], x => x.Value, ProjectContext.IdentityComparer)
+            : projects.ToDictionary(x => x, x => revisions.GetValueOrDefault(ProjectScope(x)), ProjectContext.IdentityComparer);
         var global = revisions.GetValueOrDefault("global");
         var security = revisions.GetValueOrDefault("security");
         var shared = includeShared ? revisions.GetValueOrDefault(ProjectScope(ProjectContext.SharedProjectId)) : 0;
         var user = revisions.GetValueOrDefault(UserScope(actor));
         var value = JsonSerializer.Serialize(new
         {
-            Contract = "durable-v1",
+            Contract = "durable-v2-project-identity-v1",
             Global = global,
             Security = security,
             Shared = shared,
@@ -49,7 +56,7 @@ public sealed class DurableCacheRevisionStore(NpgsqlDataSource dataSource)
 
     public async Task<long> ReadScopeAsync(string scope, CancellationToken cancellationToken)
     {
-        await using var command = dataSource.CreateCommand("SELECT COALESCE((SELECT revision FROM cache_scope_revisions WHERE scope = @scope), 0)");
+        await using var command = dataSource.CreateCommand("SELECT COALESCE(SUM(revision), 0)::bigint FROM cache_scope_revisions WHERE public.project_cache_scope(scope) = public.project_cache_scope(@scope)");
         command.Parameters.AddWithValue("scope", scope);
         return (long)(await command.ExecuteScalarAsync(cancellationToken))!;
     }

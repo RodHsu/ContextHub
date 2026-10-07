@@ -477,7 +477,7 @@ projectInformation.MapGet("/{projectId}", async (string projectId, IProjectInfor
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 projectInformation.MapPut("/{projectId}", async (string projectId, ProjectInformationUpdateRequest request, IProjectInformationService service, CancellationToken cancellationToken) =>
 {
-    if (!string.Equals(ProjectContext.Normalize(projectId), ProjectContext.Normalize(request.ProjectId), StringComparison.OrdinalIgnoreCase))
+    if (!ProjectContext.Matches(ProjectContext.Normalize(projectId), ProjectContext.Normalize(request.ProjectId)))
     {
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["projectId"] = ["Route and request ProjectId must match."] });
     }
@@ -486,7 +486,7 @@ projectInformation.MapPut("/{projectId}", async (string projectId, ProjectInform
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 projectInformation.MapPost("/{projectId}/lifecycle", async (string projectId, ProjectLifecycleUpdateRequest request, IProjectInformationService service, CancellationToken cancellationToken) =>
 {
-    if (!string.Equals(ProjectContext.Normalize(projectId), ProjectContext.Normalize(request.ProjectId), StringComparison.OrdinalIgnoreCase))
+    if (!ProjectContext.Matches(ProjectContext.Normalize(projectId), ProjectContext.Normalize(request.ProjectId)))
     {
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["projectId"] = ["Route and request ProjectId must match."] });
     }

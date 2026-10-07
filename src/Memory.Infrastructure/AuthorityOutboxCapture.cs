@@ -14,17 +14,41 @@ internal static class AuthorityOutboxCapture
         var entity = entry.Entity;
         var category = Category(entity);
         if (category is null) return null;
-        var aggregateType = entity.GetType().Name;
+        if (Identity(entry).Length == 0) return null;
+        var projectId = ReadString(entry, "ProjectId") ?? ReadString(entry, "TargetProjectId") ?? string.Empty;
+        // Project Skill bindings are handled separately with the owning root's tenant.
+        // Other unscoped children must never become global monitoring events.
+        if (projectId.Length == 0) return null;
+        return Create(entry, occurredAt, category, projectId, ReadGuid(entry, "TenantId"));
+    }
+
+    internal sealed record ProjectBindingScope(EntityEntry Entry, Guid SkillId, string ProjectId, bool Original);
+
+    public static IEnumerable<ProjectBindingScope> ProjectBindingScopes(EntityEntry<SkillBinding> entry)
+    {
+        if (entry.State is not (EntityState.Added or EntityState.Modified or EntityState.Deleted)) yield break;
+        if (entry.State != EntityState.Deleted && entry.Entity.Scope == SkillBindingScope.Project)
+            yield return new(entry, entry.Entity.SkillId, RequireProject(entry.Entity.ScopeValue), false);
+        if (entry.State != EntityState.Added && entry.Property(x => x.Scope).OriginalValue == SkillBindingScope.Project)
+            yield return new(entry, entry.Property(x => x.SkillId).OriginalValue, RequireProject(entry.Property(x => x.ScopeValue).OriginalValue), true);
+    }
+
+    public static AuthorityOutboxEvent CreateProjectBinding(ProjectBindingScope scope, Guid? tenantId, DateTimeOffset occurredAt)
+        => Create(scope.Entry, occurredAt, "Skills", scope.ProjectId, tenantId);
+
+    private static string RequireProject(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? throw new InvalidOperationException("Project Skill binding requires an explicit project scope.")
+            : value.Trim();
+
+    private static AuthorityOutboxEvent Create(EntityEntry entry, DateTimeOffset occurredAt, string category, string projectId, Guid? tenantId)
+    {
+        var aggregateType = entry.Entity.GetType().Name;
         var aggregateId = Identity(entry);
-        if (aggregateId.Length == 0) return null;
+        if (aggregateId.Length == 0)
+            throw new InvalidOperationException("Authority outbox requires an aggregate identity.");
         var revision = ReadLong(entry, "Revision") ?? ReadLong(entry, "ClassificationRevision") ??
             ReadLong(entry, "LeaseVersion") ?? ReadLong(entry, "AuthorityRevision") ?? 0;
-        var projectId = ReadString(entry, "ProjectId") ?? ReadString(entry, "TargetProjectId") ?? string.Empty;
-        // Child evidence without its own project identity is represented by the root authority
-        // mutation in the same unit of work. Never emit an unscoped event that could merge
-        // otherwise isolated projects in monitoring.
-        if (projectId.Length == 0) return null;
-        var tenantId = ReadGuid(entry, "TenantId");
         var eventType = entry.State.ToString();
         var securityCritical = category is "Authorization" or "ManagedFiles" or "Secrets" or "Connections" or "Mfa" or "AgentExecution" or "Skills";
         return new AuthorityOutboxEvent

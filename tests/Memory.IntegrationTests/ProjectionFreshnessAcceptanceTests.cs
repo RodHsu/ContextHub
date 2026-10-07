@@ -41,7 +41,7 @@ public sealed class ProjectionFreshnessAcceptanceTests(ContainerTestEnvironment 
         var current = (await client.GetFromJsonAsync<DashboardOperationsResult>(uri))!.Projections.Single();
         current.IsStale.Should().BeFalse();
         current.Lag.Should().Be(0);
-        var pending = Event(project);
+        var pending = Event(project.ToUpperInvariant());
         db.AuthorityOutboxEvents.Add(pending);
         await db.SaveChangesAsync();
         var unrelated = Event(project + "-unrelated");

@@ -17,7 +17,21 @@ public sealed class RedisCacheTests
         var request = new WorkingContextRequest("query", ProjectId: "A", QueryMode: mode);
         var a = RedisCacheKeyBuilder.WorkingContext(Version, request, ContextHubRequestActor.Unrestricted, ["A", "B"], "model");
         var b = RedisCacheKeyBuilder.WorkingContext(Version, request with { ProjectId = "B" }, ContextHubRequestActor.Unrestricted, ["B", "A"], "model");
-        a.Should().StartWith("cache:v2:context:").And.NotBe(b);
+        a.Should().StartWith("cache:v4:context:").And.NotBe(b);
+    }
+
+    [Fact]
+    public void Actor_scoped_candidates_should_not_reuse_legacy_retrieval_results()
+    {
+        var actor = ContextHubRequestActor.Unrestricted;
+        RedisCacheKeyBuilder.Search(Version, new MemorySearchRequest("query"), actor, ["A"], "model")
+            .Should().StartWith("cache:v4:search:");
+        RedisCacheKeyBuilder.WorkingContext(Version, new WorkingContextRequest("query"), actor, ["A"], "model")
+            .Should().StartWith("cache:v4:context:");
+        RedisCacheKeyBuilder.SemanticHits(Version, "model", "query", 10, actor, ["A"])
+            .Should().StartWith("cache:v4:semantic:");
+        RedisCacheKeyBuilder.Embedding("model", EmbeddingPurpose.Query, "query")
+            .Should().Be($"cache:embedding:{RedisCacheKeyBuilder.Hash("model")}:Query:{RedisCacheKeyBuilder.Hash("query")}");
     }
 
     [Fact]
@@ -90,8 +104,8 @@ public sealed class RedisCacheTests
         baseline.Should().NotBe(otherProject);
         baseline.Should().NotBe(otherQuery);
         baseline.Should().NotBe(otherActor);
-        baseline.Should().NotBe(RedisCacheKeyBuilder.Search(version, request, actor, ["contexthub"], "model-a"),
-            "case-sensitive database selectors must not share final results");
+        baseline.Should().Be(RedisCacheKeyBuilder.Search(version, request, actor, ["contexthub"], "model-a"),
+            "project aliases must share the same identity while actor and model boundaries remain isolated");
     }
 
     [Fact]
@@ -101,6 +115,29 @@ public sealed class RedisCacheTests
         var second = RedisCacheKeyBuilder.ProjectSet(["shared", "ContextHub"]);
 
         first.Should().Be(second);
+    }
+
+    [Fact]
+    public void Case_aliases_share_context_semantic_and_dashboard_keys_without_changing_model_identity()
+    {
+        var actor = ContextHubRequestActor.Unrestricted;
+        foreach (var project in new[] { "TT", "Tt", "tT", "tt" })
+        {
+            RedisCacheKeyBuilder.WorkingContext(Version, new("query", ProjectId: project), actor, [project], "model")
+                .Should().Be(RedisCacheKeyBuilder.WorkingContext(Version, new("query", ProjectId: "TT"), actor, ["TT"], "model"));
+            RedisCacheKeyBuilder.SemanticHits(Version, "model", "query", 10, actor, [project])
+                .Should().Be(RedisCacheKeyBuilder.SemanticHits(Version, "model", "query", 10, actor, ["TT"]));
+            RedisCacheKeyBuilder.DashboardMemories(Version, new(ProjectId: project), actor)
+                .Should().Be(RedisCacheKeyBuilder.DashboardMemories(Version, new(ProjectId: "TT"), actor));
+            RedisCacheKeyBuilder.DashboardLogs(new(ProjectId: project), actor)
+                .Should().StartWith("cache:v3:dashboard:logs:")
+                .And.Be(RedisCacheKeyBuilder.DashboardLogs(new(ProjectId: "TT"), actor));
+            DurableCacheRevisionStore.ProjectScope(project).Should().Be("project:TT");
+        }
+        RedisCacheKeyBuilder.Embedding("model", EmbeddingPurpose.Query, "TT")
+            .Should().NotBe(RedisCacheKeyBuilder.Embedding("model", EmbeddingPurpose.Query, "tt"));
+        RedisCacheKeyBuilder.Embedding("model", EmbeddingPurpose.Query, "TT")
+            .Should().NotBe(RedisCacheKeyBuilder.Embedding("MODEL", EmbeddingPurpose.Query, "TT"));
     }
 
     [Fact]

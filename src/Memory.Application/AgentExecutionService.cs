@@ -54,7 +54,7 @@ public sealed class AgentExecutionService(
         var workItem = await Scope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor)
             .SingleOrDefaultAsync(x => x.Id == request.WorkItemId, cancellationToken)
             ?? throw new InvalidOperationException($"Project work item '{request.WorkItemId}' was not found.");
-        if (!string.Equals(workItem.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
+        if (!Memory.Application.ProjectContext.Matches(workItem.ProjectId, projectId))
         {
             throw new InvalidOperationException("Work item ProjectId does not match the execution package.");
         }
@@ -113,7 +113,7 @@ public sealed class AgentExecutionService(
             skillSnapshot = await skillService.CreateExecutionSnapshotAsync(
                 new SkillExecutionSnapshotCreateRequest(execution.Id, request.SkillResolutionId.Value, AgentExecutionContract.Version),
                 cancellationToken);
-            if (!string.Equals(skillSnapshot.ProjectId, projectId, StringComparison.OrdinalIgnoreCase) ||
+            if (!Memory.Application.ProjectContext.Matches(skillSnapshot.ProjectId, projectId) ||
                 !string.Equals(skillSnapshot.RepositoryId, execution.RepositoryId, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(skillSnapshot.AgentType, execution.AgentType, StringComparison.OrdinalIgnoreCase))
             {
@@ -212,7 +212,7 @@ public sealed class AgentExecutionService(
             var capabilities = NormalizeValues(request.Capabilities, 128, 100).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var availableTools = NormalizeValues(request.AvailableTools, 128, 200);
             var candidateRows = await scoped
-                .Where(x => x.ProjectId == projectId && x.RepositoryId == request.RepositoryId && x.Status == AgentExecutionStatus.Ready && x.EligibleAt <= now)
+                .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.RepositoryId == request.RepositoryId && x.Status == AgentExecutionStatus.Ready && x.EligibleAt <= now)
                 .OrderBy(x => x.EligibleAt)
                 .ThenBy(x => x.CreatedAt)
                 .Take(5000)
@@ -361,7 +361,7 @@ public sealed class AgentExecutionService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.AgentExecutionsRead);
         var projectId = NormalizeRequired(request.ProjectId, 200, "ProjectId");
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-        var query = Scope(dbContext.AgentExecutions.AsNoTracking().Include(x => x.ResolutionSnapshots).ThenInclude(x => x.Items), actor).Where(x => x.ProjectId == projectId);
+        var query = Scope(dbContext.AgentExecutions.AsNoTracking().Include(x => x.ResolutionSnapshots).ThenInclude(x => x.Items), actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
         if (request.Status.HasValue) query = query.Where(x => x.Status == request.Status.Value);
         return (await query.OrderByDescending(x => x.UpdatedAt).Skip(Math.Max(0, request.Offset)).Take(Math.Clamp(request.Limit, 1, 200)).ToListAsync(cancellationToken)).Select(x => Map(x)).ToArray();
     }
@@ -372,7 +372,7 @@ public sealed class AgentExecutionService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.AgentExecutionsRead);
         projectId = NormalizeRequired(projectId, 200, "ProjectId");
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-        var query = Scope(dbContext.AgentExecutions.AsNoTracking(), actor).Where(item => item.ProjectId == projectId);
+        var query = Scope(dbContext.AgentExecutions.AsNoTracking(), actor).Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, projectId));
         var now = clock.UtcNow;
         var groupedCounts = await query.GroupBy(item => item.Status)
             .Select(group => new { Status = group.Key, Count = group.Count() })
@@ -383,7 +383,7 @@ public sealed class AgentExecutionService(
         var expiredLeases = await query.CountAsync(item => ActiveStatuses.Contains(item.Status) && item.LeaseExpiresAt < now, cancellationToken);
         var retryableFailures = await query.CountAsync(item => item.Status == AgentExecutionStatus.FailedRetryable, cancellationToken);
         var recent = (await Scope(dbContext.AgentExecutions.AsNoTracking().Include(x => x.ResolutionSnapshots).ThenInclude(x => x.Items), actor)
-            .Where(item => item.ProjectId == projectId).OrderByDescending(item => item.UpdatedAt).Take(25).ToListAsync(cancellationToken)).Select(x => Map(x)).ToArray();
+            .Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, projectId)).OrderByDescending(item => item.UpdatedAt).Take(25).ToListAsync(cancellationToken)).Select(x => Map(x)).ToArray();
         return new AgentExecutionDashboardResult(
             ProjectContext.Normalize(projectId),
             counts,

@@ -21,7 +21,7 @@ public sealed class GovernanceService(
         var projectId = ProjectContext.Normalize(request.ProjectId);
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-        var query = dbContext.GovernanceFindings.AsNoTracking().ForActor(actor).Where(x => x.ProjectId == projectId);
+        var query = dbContext.GovernanceFindings.AsNoTracking().ForActor(actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
 
         if (request.Type.HasValue)
         {
@@ -228,8 +228,8 @@ public sealed class GovernanceService(
         }
 
         var sourceQuery = dbContext.SourceConnections.AsNoTracking().ForActor(actor)
-            .Where(x => x.ProjectId == normalizedProjectId);
-        var memoryQuery = dbContext.MemoryItems.AsNoTracking().Where(x => x.ProjectId == normalizedProjectId);
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId));
+        var memoryQuery = dbContext.MemoryItems.AsNoTracking().Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId));
         if (actor.HasUser)
         {
             memoryQuery = memoryQuery.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
@@ -397,7 +397,7 @@ public sealed class GovernanceService(
             var expectedProjectId = TryGetMetadataString(memory.MetadataJson, "expectedProjectId") ??
                                     TryGetMetadataString(memory.MetadataJson, "targetProjectId");
             if (!string.IsNullOrWhiteSpace(expectedProjectId) &&
-                !string.Equals(ProjectContext.Normalize(expectedProjectId), normalizedProjectId, StringComparison.OrdinalIgnoreCase))
+                !Memory.Application.ProjectContext.Matches(ProjectContext.Normalize(expectedProjectId), normalizedProjectId))
             {
                 var targetProjectId = ProjectContext.Normalize(expectedProjectId);
                 findings.Add(CreateMemoryDraft(
@@ -561,7 +561,7 @@ public sealed class GovernanceService(
             .ForActor(actor)
             .Include(x => x.Chunks)
                 .ThenInclude(x => x.Vectors)
-            .Where(x => x.ProjectId == normalizedProjectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId))
             .Where(x => x.Status == MemoryStatus.Active)
             .Where(x => x.MemoryType == MemoryType.Artifact)
             .Where(x => x.ExternalKey != DurableMemoryGovernancePolicy.ProjectInformationExternalKey)
@@ -597,7 +597,7 @@ public sealed class GovernanceService(
             IsolationLevel.Serializable,
             cancellationToken);
         var existingQuery = dbContext.GovernanceFindings.ForActor(actor)
-            .Where(x => x.ProjectId == normalizedProjectId);
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId));
         if (actor.HasUser)
         {
             var memoryIds = memories.Select(x => x.Id).ToArray();
@@ -770,7 +770,7 @@ public sealed class GovernanceService(
         var dedupKey = BuildSuggestedActionDedupKey(actionType.Value, draft);
         var matchingActions = await dbContext.SuggestedActions
             .ForActor(actorAccessor.Current)
-            .Where(x => x.ProjectId == projectId && x.Type == actionType.Value)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Type == actionType.Value)
             .ToListAsync(cancellationToken);
         var probe = new SuggestedAction
         {
@@ -787,7 +787,7 @@ public sealed class GovernanceService(
         var identity = SuggestedActionEquivalence.GetIdentity(probe);
         var equivalents = matchingActions
             .Concat(ForActor(dbContext.SuggestedActions.Local, actorAccessor.Current)
-                .Where(x => x.ProjectId == projectId && x.Type == actionType.Value))
+                .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Type == actionType.Value))
             .DistinctBy(x => x.Id)
             .Where(x => string.Equals(SuggestedActionEquivalence.GetIdentity(x), identity, StringComparison.Ordinal))
             .ToArray();
@@ -981,7 +981,7 @@ public sealed class GovernanceService(
         var executedActions = await dbContext.SuggestedActions
             .AsNoTracking()
             .ForActor(actorAccessor.Current)
-            .Where(x => x.ProjectId == projectId &&
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
                         x.Type == SuggestedActionType.MergeDuplicateCandidate &&
                         x.Status == SuggestedActionStatus.Executed)
             .Select(x => x.PayloadJson)
@@ -1042,7 +1042,7 @@ public sealed class GovernanceService(
     {
         var pending = await dbContext.SuggestedActions
             .ForActor(actorAccessor.Current)
-            .Where(x => x.ProjectId == projectId &&
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
                         (x.Status == SuggestedActionStatus.Pending || x.Status == SuggestedActionStatus.Accepted))
             .ToListAsync(cancellationToken);
         foreach (var action in pending.Where(x => PayloadReferencesFinding(x.PayloadJson, findingDedupKey)))
@@ -1056,11 +1056,11 @@ public sealed class GovernanceService(
     {
         var actions = await dbContext.SuggestedActions
             .ForActor(actorAccessor.Current)
-            .Where(x => x.ProjectId == projectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
             .ToListAsync(cancellationToken);
         foreach (var group in actions
                      .Concat(ForActor(dbContext.SuggestedActions.Local, actorAccessor.Current)
-                         .Where(x => x.ProjectId == projectId))
+                         .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId)))
                      .DistinctBy(x => x.Id)
                      .Where(x => !string.IsNullOrWhiteSpace(SuggestedActionEquivalence.GetIdentity(x)))
                      .GroupBy(SuggestedActionEquivalence.GetIdentity, StringComparer.Ordinal))
@@ -1572,8 +1572,8 @@ internal static class SuccessorEvidencePolicy
         => left.TenantId.HasValue && right.TenantId.HasValue && left.TenantId == right.TenantId &&
            left.OwnerUserId.HasValue && right.OwnerUserId.HasValue && left.OwnerUserId == right.OwnerUserId &&
            left.Scope == right.Scope &&
-           string.Equals(NormalizeProjectId(left.ProjectId), NormalizeProjectId(right.ProjectId), StringComparison.Ordinal);
+           ProjectContext.Matches(NormalizeProjectId(left.ProjectId), NormalizeProjectId(right.ProjectId));
 
     private static string NormalizeProjectId(string? projectId)
-        => (projectId ?? string.Empty).Trim().ToLowerInvariant();
+        => (projectId ?? string.Empty).Trim();
 }

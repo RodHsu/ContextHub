@@ -15,15 +15,39 @@ public static class ProjectContext
     public const string SharedProjectId = "shared";
     public const string UserProjectId = "user";
     public const string AllProjectIdsSentinel = "*";
+    public const int IdentityContractVersion = 1;
+    public static IEqualityComparer<string> IdentityComparer { get; } = new ProjectIdentityComparer();
 
     public static string Normalize(string? projectId, string fallback = DefaultProjectId)
         => string.IsNullOrWhiteSpace(projectId) ? fallback : projectId.Trim();
 
+    /// <summary>Identity is separate from the spelling stored and returned by the API.</summary>
+    public static string IdentityKey(string projectId)
+    {
+        ArgumentNullException.ThrowIfNull(projectId);
+        return ProjectIdentityCaseMap.Fold(projectId);
+    }
+
+    public static bool Matches(string? left, string? right)
+        => left is not null && right is not null &&
+           string.Equals(IdentityKey(left), IdentityKey(right), StringComparison.Ordinal);
+
+    public static string[] IdentityKeys(IEnumerable<string> projectIds)
+        => projectIds.Select(IdentityKey).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+
+    private sealed class ProjectIdentityComparer : IEqualityComparer<string>
+    {
+        public bool Equals(string? left, string? right)
+            => left is null ? right is null : Matches(left, right);
+
+        public int GetHashCode(string value) => StringComparer.Ordinal.GetHashCode(IdentityKey(value));
+    }
+
     public static bool IsShared(string? projectId)
-        => string.Equals(Normalize(projectId), SharedProjectId, StringComparison.OrdinalIgnoreCase);
+        => Matches(Normalize(projectId), SharedProjectId);
 
     public static bool IsUser(string? projectId)
-        => string.Equals(Normalize(projectId), UserProjectId, StringComparison.OrdinalIgnoreCase);
+        => Matches(Normalize(projectId), UserProjectId);
 
     public static IReadOnlyList<string> ResolveSearchProjects(
         string? currentProjectId,
@@ -32,7 +56,7 @@ public static class ProjectContext
         bool useSummaryLayer)
     {
         var current = Normalize(currentProjectId);
-        var values = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var values = new HashSet<string>(IdentityComparer);
 
         switch (queryMode)
         {

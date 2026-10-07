@@ -586,7 +586,7 @@ public sealed class GovernanceRunReceiptService(
             var projectId = ProjectContext.Normalize(request.ProjectId);
             ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
             latest = latest.Where(x => DeserializeStrings(x.ProjectIdsJson)
-                .Contains(projectId, StringComparer.OrdinalIgnoreCase));
+                .Contains(projectId, Memory.Application.ProjectContext.IdentityComparer));
         }
 
         var page = latest.OrderByDescending(x => x.EventSequence).Skip(offset).Take(limit).ToArray();
@@ -1497,7 +1497,7 @@ public sealed class GovernanceRunReceiptService(
         if (projectIds.Count == 0) return false;
         return projectIds.All(projectId =>
             ProjectContext.IsShared(projectId) || ProjectContext.IsUser(projectId) ||
-            actor.AllowedProjectIds.Contains(projectId, StringComparer.OrdinalIgnoreCase));
+            actor.AllowedProjectIds.Contains(projectId, Memory.Application.ProjectContext.IdentityComparer));
     }
 
     private static void EnsureReceiptProjectsAllowed(ContextHubRequestActor actor, IReadOnlyList<string> projectIds)

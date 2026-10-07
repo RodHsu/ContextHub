@@ -151,7 +151,7 @@ public sealed class TenantSecurityService(
         }
 
         var grant = await dbContext.TenantProjectGrants
-            .FirstOrDefaultAsync(x => x.TenantId == request.TenantId && x.ProjectId == projectId, cancellationToken);
+            .FirstOrDefaultAsync(x => x.TenantId == request.TenantId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId), cancellationToken);
 
         if (grant is null)
         {
@@ -560,7 +560,7 @@ public sealed class TenantSecurityService(
         var unauthorizedProjects = normalized
             .Where(projectId => !ProjectContext.IsShared(projectId) &&
                                 !ProjectContext.IsUser(projectId) &&
-                                !effectiveAllowedProjects.Any(allowed => string.Equals(allowed, projectId, StringComparison.OrdinalIgnoreCase)))
+                                !effectiveAllowedProjects.Any(allowed => Memory.Application.ProjectContext.Matches(allowed, projectId)))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (unauthorizedProjects.Length > 0)

@@ -350,9 +350,14 @@ public sealed class SkillService(
 
         var skill = await ScopedSkills(includeArchived: false).SingleOrDefaultAsync(item => item.Id == request.SkillId, cancellationToken)
             ?? throw new KeyNotFoundException("Skill was not found.");
-        var scopeValue = NormalizeScopeValue(request.ScopeValue);
+        var scopeValue = request.Scope == SkillBindingScope.Project
+            ? ProjectContext.Normalize(request.ScopeValue)
+            : NormalizeScopeValue(request.ScopeValue);
         var binding = await dbContext.SkillBindings.SingleOrDefaultAsync(
-            item => item.SkillId == skill.Id && item.Scope == request.Scope && item.ScopeValue == scopeValue,
+            item => item.SkillId == skill.Id && item.Scope == request.Scope &&
+                (request.Scope == SkillBindingScope.Project
+                    ? ProjectContext.Matches(item.ScopeValue, scopeValue)
+                    : item.ScopeValue == scopeValue),
             cancellationToken);
         var now = timeProvider.GetUtcNow();
         if (binding is null)
@@ -748,12 +753,12 @@ public sealed class SkillService(
 
         if (actor.AllowedProjectIds.Count > 0)
         {
-            query = query.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
+            query = query.Where(item => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(item.ProjectId)));
         }
 
         if (normalizedProjectId is not null)
         {
-            query = query.Where(item => item.ProjectId == normalizedProjectId);
+            query = query.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, normalizedProjectId));
         }
 
         var resolutions = await query.OrderByDescending(item => item.UpdatedAt).Take(limit).ToListAsync(cancellationToken);
@@ -1360,16 +1365,16 @@ public sealed class SkillService(
             aggregateQuery = aggregateQuery.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
             if (actor.AllowedProjectIds.Count > 0)
             {
-                eventQuery = eventQuery.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
-                aggregateQuery = aggregateQuery.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
+                eventQuery = eventQuery.Where(item => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(item.ProjectId)));
+                aggregateQuery = aggregateQuery.Where(item => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(item.ProjectId)));
             }
         }
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
             ActorAuthorization.EnsureProjectAllowed(actor, projectId, false);
-            eventQuery = eventQuery.Where(item => item.ProjectId == projectId);
-            aggregateQuery = aggregateQuery.Where(item => item.ProjectId == projectId);
+            eventQuery = eventQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, projectId));
+            aggregateQuery = aggregateQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, projectId));
         }
         if (!string.IsNullOrWhiteSpace(request.RepositoryId))
         {
@@ -1430,16 +1435,16 @@ public sealed class SkillService(
             aggregateQuery = aggregateQuery.Where(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId);
             if (actor.AllowedProjectIds.Count > 0)
             {
-                eventQuery = eventQuery.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
-                aggregateQuery = aggregateQuery.Where(item => actor.AllowedProjectIds.Contains(item.ProjectId));
+                eventQuery = eventQuery.Where(item => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(item.ProjectId)));
+                aggregateQuery = aggregateQuery.Where(item => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(item.ProjectId)));
             }
         }
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var normalized = ProjectContext.Normalize(request.ProjectId);
             ActorAuthorization.EnsureProjectAllowed(actor, normalized, false);
-            eventQuery = eventQuery.Where(item => item.ProjectId == normalized);
-            aggregateQuery = aggregateQuery.Where(item => item.ProjectId == normalized);
+            eventQuery = eventQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, normalized));
+            aggregateQuery = aggregateQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, normalized));
         }
         if (!string.IsNullOrWhiteSpace(request.RepositoryId))
         {
@@ -2081,7 +2086,7 @@ public sealed class SkillService(
         => binding.Scope switch
         {
             SkillBindingScope.Tenant => true,
-            SkillBindingScope.Project => string.Equals(binding.ScopeValue, projectId, StringComparison.OrdinalIgnoreCase),
+            SkillBindingScope.Project => ProjectContext.Matches(binding.ScopeValue, projectId),
             SkillBindingScope.Repository => string.Equals(binding.ScopeValue, NormalizeScopeValue(request.RepositoryId), StringComparison.OrdinalIgnoreCase),
             SkillBindingScope.AgentType => string.Equals(binding.ScopeValue, NormalizeScopeValue(request.AgentType), StringComparison.OrdinalIgnoreCase),
             SkillBindingScope.Execution => string.Equals(binding.ScopeValue, request.ExecutionId.ToString("D"), StringComparison.OrdinalIgnoreCase),
@@ -2174,7 +2179,7 @@ public sealed class SkillService(
         => binding.Scope switch
         {
             SkillBindingScope.Tenant => true,
-            SkillBindingScope.Project => string.Equals(binding.ScopeValue, resolution.ProjectId, StringComparison.OrdinalIgnoreCase),
+            SkillBindingScope.Project => ProjectContext.Matches(binding.ScopeValue, resolution.ProjectId),
             SkillBindingScope.Repository => string.Equals(binding.ScopeValue, resolution.RepositoryId, StringComparison.OrdinalIgnoreCase),
             SkillBindingScope.AgentType => string.Equals(binding.ScopeValue, resolution.AgentType, StringComparison.OrdinalIgnoreCase),
             SkillBindingScope.Execution => string.Equals(binding.ScopeValue, resolution.ExecutionId.ToString("D"), StringComparison.OrdinalIgnoreCase),

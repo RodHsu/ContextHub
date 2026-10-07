@@ -18,6 +18,49 @@ namespace Memory.McpProtocolTests;
 public sealed class McpProtocolTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Streamable_http_project_aliases_update_one_record_and_preserve_its_original_spelling()
+    {
+        var factory = environment.GetFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri(client.BaseAddress!, "/mcp"),
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, client);
+        await using var mcpClient = await McpClient.CreateAsync(transport);
+        _ = await mcpClient.ListToolsAsync();
+        var suffix = "-" + Guid.NewGuid().ToString("N");
+        var originalProject = "Tt" + suffix;
+        string? originalId = null;
+        var callId = 10;
+        foreach (var prefix in new[] { "Tt", "TT", "tT", "tt" })
+        {
+            var alias = prefix + suffix;
+            var updated = await SendMcpAsync(client, null!, callId++, "tools/call", new
+            {
+                name = "project_information_upsert",
+                arguments = new { request = new { projectId = alias, description = "Project alias protocol fixture" } }
+            });
+            var id = ExtractToolJsonField(updated, "memoryId");
+            originalId ??= id;
+            id.Should().Be(originalId);
+            ExtractToolJsonField(updated, "projectId").Should().Be(originalProject);
+            var read = await SendMcpAsync(client, null!, callId++, "tools/call", new
+            {
+                name = "project_information_get",
+                arguments = new { projectId = alias }
+            });
+            ExtractToolJsonField(read, "memoryId").Should().Be(originalId);
+            ExtractToolJsonField(read, "projectId").Should().Be(originalProject);
+        }
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        (await db.MemoryItems.CountAsync(x => ProjectContext.Matches(x.ProjectId, originalProject)
+            && x.ExternalKey == "system:project-information")).Should().Be(1);
+    }
+
+    [DockerRequiredFact]
     public async Task Raw_Http_Mcp_Should_Reject_Anonymous_Request()
     {
         using var client = environment.GetFactory().CreateClient();

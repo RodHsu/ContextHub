@@ -214,7 +214,7 @@ public sealed class DurableCacheIntegrationTests(ContainerTestEnvironment enviro
         await db.Database.ExecuteSqlInterpolatedAsync($"DELETE FROM memory_links WHERE id = {linkId}");
         (await revisions.ReadScopeAsync(bScope, default)).Should().BeGreaterThan(linked);
         await using var command = services.GetRequiredService<NpgsqlDataSource>().CreateCommand(
-            "SELECT COUNT(*) FROM audit.authority_outbox_events WHERE category = 'KnowledgeRevision' AND aggregate_id = @scope");
+            "SELECT COUNT(*) FROM audit.authority_outbox_events WHERE category = 'KnowledgeRevision' AND public.project_cache_scope(aggregate_id) = @scope");
         command.Parameters.AddWithValue("scope", aScope);
         ((long)(await command.ExecuteScalarAsync())!).Should().BeGreaterThan(0);
     }
@@ -297,7 +297,7 @@ public sealed class DurableCacheIntegrationTests(ContainerTestEnvironment enviro
         await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE memory_items SET content = 'new state' WHERE id = {item.Id}");
         var ns = services.GetRequiredService<IOptions<MemoryOptions>>().Value.Namespace;
         var redis = services.GetRequiredService<IConnectionMultiplexer>().GetDatabase();
-        await redis.StringSetAsync($"memory:{ns}:version:project:{RedisCacheKeyBuilder.Hash(item.ProjectId)}", 1);
+        await redis.StringSetAsync($"memory:{ns}:version:project-identity-v1:{RedisCacheKeyBuilder.Hash(ProjectContext.IdentityKey(item.ProjectId))}", 1);
         await redis.StringSetAsync($"memory:{ns}:version:global", 1);
         (await store.GetVersionStampAsync([item.ProjectId], actor, false, default)).Value.Should().NotBe(oldStamp.Value);
     }

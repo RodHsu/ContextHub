@@ -851,7 +851,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     }
 
     [DockerRequiredFact]
-    public async Task Enqueue_Reindex_Should_Write_New_Model_Key_Vectors()
+    public async Task Enqueue_Reindex_Should_Assert_Provider_Identity_And_Preserve_Vector_Provenance()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         UseBootstrapActor(scope.ServiceProvider);
@@ -879,12 +879,24 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
 
         await processor.ProcessNextAsync(CancellationToken.None);
 
+        var jobsBefore = await dbContext.MemoryJobs.CountAsync();
+        var mismatched = () => memoryService.EnqueueReindexAsync(
+            new EnqueueReindexRequest("intfloat/multilingual-e5-base", created.Id), CancellationToken.None);
+        await mismatched.Should().ThrowAsync<InvalidOperationException>().WithMessage("*configured embedding provider*");
+        (await dbContext.MemoryJobs.CountAsync()).Should().Be(jobsBefore);
+
+        var modelKey = scope.ServiceProvider.GetRequiredService<IEmbeddingProvider>().ModelKey;
         var reindex = await memoryService.EnqueueReindexAsync(
-            new EnqueueReindexRequest("intfloat/multilingual-e5-base", created.Id),
+            new EnqueueReindexRequest(modelKey, created.Id),
             CancellationToken.None);
 
         reindex.Status.Should().Be(MemoryJobStatus.Pending);
-        await DrainConversationAutomationAsync(processor, dbContext, "conversation-1", CancellationToken.None);
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            await processor.ProcessNextAsync(CancellationToken.None);
+            if (await dbContext.MemoryJobs.AnyAsync(job => job.Id == reindex.JobId && job.Status == MemoryJobStatus.Completed)) break;
+        }
+        (await dbContext.MemoryJobs.SingleAsync(job => job.Id == reindex.JobId)).Status.Should().Be(MemoryJobStatus.Completed);
 
         var chunkIds = await dbContext.MemoryItemChunks
             .Where(x => x.MemoryItemId == created.Id)
@@ -896,8 +908,8 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             .Where(x => chunkIds.Contains(x.ChunkId))
             .ToListAsync(CancellationToken.None);
 
-        vectors.Should().Contain(x => x.ModelKey == "deterministic-384" && x.Status == VectorStatus.Active.ToString());
-        vectors.Count(x => x.ModelKey == "intfloat/multilingual-e5-base" && x.Status == VectorStatus.Active.ToString())
+        vectors.Should().OnlyContain(x => x.ModelKey == modelKey);
+        vectors.Count(x => x.ModelKey == modelKey && x.Status == VectorStatus.Active.ToString())
             .Should().Be(chunkIds.Count);
     }
 

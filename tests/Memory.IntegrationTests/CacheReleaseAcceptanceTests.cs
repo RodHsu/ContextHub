@@ -47,7 +47,7 @@ public sealed class CacheReleaseAcceptanceTests(ContainerTestEnvironment environ
                 .SearchAsync(new("probe", ProjectId: "rollback-denied", UseSummaryLayer: false), default));
             var stamp = await services.GetRequiredService<ICacheVersionStore>()
                 .GetVersionStampAsync(["rollback-allowed"], actor.Current, false, default);
-            stamp.Value.Should().Contain("durable-v1");
+            stamp.Value.Should().Contain("\"Contract\":\"durable-v2-project-identity-v1\"");
         }
         finally { options.Enabled = enabled; }
         (await cache.GetAsync<string[]>(key, "search-final", default)).Value.Should().Equal("old-payload");
