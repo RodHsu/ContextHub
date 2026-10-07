@@ -63,6 +63,10 @@ builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
     {
         var startedAt = Stopwatch.GetTimestamp();
         var success = false;
+        var httpContext = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
+        var parentSequence = httpContext?.Items[typeof(RequestArrivalLease)] is long sequence ? sequence : 0;
+        var observation = context.Services?.GetService<RequestArrivalObservations>()?.Begin(
+            "mcp-tool", context.Params?.Name ?? string.Empty, parentSequence);
         try
         {
             var result = await next(context, cancellationToken);
@@ -71,6 +75,7 @@ builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
         }
         finally
         {
+            observation?.Complete(success ? "success" : cancellationToken.IsCancellationRequested ? "cancelled" : "error");
             await McpToolCallTelemetry.TryRecordAsync(
                 context.Services,
                 "mcp-server",
@@ -93,6 +98,7 @@ var allowedMcpOrigins = ResolveAllowedOrigins(
     builder.Configuration.GetSection("ContextHub:Security:AllowedMcpOrigins").Get<string[]>());
 
 app.UseForwardedHeaders();
+app.UseRequestArrivalObservations();
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/mcp"))

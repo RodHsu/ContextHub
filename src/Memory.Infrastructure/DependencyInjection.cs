@@ -22,6 +22,12 @@ public static class DependencyInjection
         string serviceName)
     {
         services.Configure<MemoryOptions>(configuration.GetSection(MemoryOptions.SectionName));
+        services.Configure<RequestArrivalObservationOptions>(configuration.GetSection(RequestArrivalObservationOptions.SectionName));
+        services.AddSingleton<RequestArrivalObservations>();
+        if (string.Equals(serviceName, "mcp-server", StringComparison.Ordinal))
+        {
+            services.AddSingleton<RequestArrivalObservationStore>();
+        }
         services.AddOptions<ContextHubOptions>()
             .Bind(configuration.GetSection(ContextHubOptions.SectionName))
             .PostConfigure(options =>
@@ -141,6 +147,8 @@ public static class DependencyInjection
         services.AddSingleton<DatabaseLogQueue>();
         services.AddSingleton<ILoggerProvider, DatabaseLoggerProvider>();
         services.AddHostedService<DatabaseMigrationHostedService>();
+        if (string.Equals(serviceName, "mcp-server", StringComparison.Ordinal))
+            services.AddHostedService<RequestArrivalObservationFlushService>();
         services.AddCacheMetrics();
         services.AddHostedService<SecurityBootstrapHostedService>();
         services.AddHostedService<DatabaseLogWriterService>();
