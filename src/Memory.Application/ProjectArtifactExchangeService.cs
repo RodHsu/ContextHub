@@ -67,7 +67,7 @@ public sealed class ProjectArtifactExchangeService(
         var projectId = ProjectContext.Normalize(request.ProjectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
 
-        var query = dbContext.MemoryItems.AsNoTracking()
+        var query = ReadableMemories(actor)
             .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.MemoryType == MemoryType.Artifact &&
                         x.SourceType == SourceType && x.Status == MemoryStatus.Active);
         if (!string.IsNullOrWhiteSpace(request.Query))
@@ -103,7 +103,7 @@ public sealed class ProjectArtifactExchangeService(
             .Select(x => x.MemoryId).Distinct().ToArray();
         if (ids.Length == 0) return [];
 
-        var rows = await dbContext.MemoryItems.AsNoTracking().Where(x => ids.Contains(x.Id)).ToListAsync(cancellationToken);
+        var rows = await ReadableMemories(actor).Where(x => ids.Contains(x.Id)).ToListAsync(cancellationToken);
         var byRank = ids.Select((id, index) => new { id, index }).ToDictionary(x => x.id, x => x.index);
         var visible = await FilterAuthorizedAsync(rows, cancellationToken);
         return visible
@@ -116,12 +116,22 @@ public sealed class ProjectArtifactExchangeService(
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
-        var entity = await dbContext.MemoryItems.AsNoTracking().FirstOrDefaultAsync(
+        var entity = await ReadableMemories(actor).FirstOrDefaultAsync(
             x => x.Id == memoryId && x.MemoryType == MemoryType.Artifact && x.SourceType == SourceType && x.Status == MemoryStatus.Active,
             cancellationToken);
         if (entity is null) return null;
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: false);
         return await ToAuthorizedResultAsync(entity, cancellationToken);
+    }
+
+    private IQueryable<MemoryItem> ReadableMemories(ContextHubRequestActor actor)
+    {
+        if (actor.IsAuthenticated && !actor.HasUser && !actor.IsServiceActor)
+            throw new UnauthorizedAccessException("Authenticated requests must resolve to a tenant user.");
+
+        return dbContext.MemoryItems.AsNoTracking()
+            .Where(item => !actor.HasUser || (item.TenantId == actor.TenantId &&
+                (actor.IsServiceActor || item.OwnerUserId == actor.UserId)));
     }
 
     private async Task<LogicalFileReference?> ValidateLogicalReferenceAsync(
