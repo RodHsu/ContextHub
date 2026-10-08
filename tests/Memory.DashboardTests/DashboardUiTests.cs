@@ -1205,7 +1205,7 @@ public sealed class DashboardApplicationFactory : WebApplicationFactory<Program>
                 ["Dashboard:ComposeProject"] = "contexthub",
                 ["Dashboard:DataProtectionPath"] = CreateRepoTestDataPath("dataprotection", Guid.NewGuid().ToString("N")),
                 ["Memory:Namespace"] = "context-hub-test",
-                ["ConnectionStrings:Postgres"] = "Host=127.0.0.1;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub"
+                ["ConnectionStrings:Postgres"] = "Host=127.0.0.1;Port=5432;Database=contexthub;Username=contexthub;Password=ContextHub_TestFixture_Only"
             });
         });
         builder.ConfigureServices(services =>

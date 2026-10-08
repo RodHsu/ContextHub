@@ -354,6 +354,7 @@ Notes:
 - Use bearer tokens or OAuth/OIDC for external agent access.
 - Treat Docker socket access as privileged, even when mounted read-only.
 - Compose routes Docker API access through isolated, repo-built policy proxies based on a digest-pinned Alpine image; do not publish their port or replace them with direct socket mounts.
+- PostgreSQL has no bundled usable password. Set the required `POSTGRES_PASSWORD` through protected runtime configuration before running Compose. Direct .NET service startup requires an injected `ConnectionStrings:Postgres`; the committed defaults are empty. Preserve the configured embedding profile when rotating database credentials.
 - Never commit `.env`, tokens, password hashes, OAuth secrets, signing keys, or private keys.
 
 The current MCP requirement matrix and security review are documented in [MCP 2026-07-28 compliance](docs/mcp-2026-07-28-compliance.md).

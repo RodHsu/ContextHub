@@ -33,7 +33,7 @@ public sealed class ContainerTestEnvironment : IAsyncLifetime
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
-            .WithPassword("contexthub")
+            .WithPassword("ContextHub_TestFixture_Only")
             .Build();
 
         _redis = new RedisBuilder("redis:7.4-alpine")
