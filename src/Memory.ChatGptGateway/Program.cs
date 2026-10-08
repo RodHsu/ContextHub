@@ -170,6 +170,18 @@ var mcpServerBuilder = builder.Services.AddMcpServer(options => options.ServerIn
         var startedAt = Stopwatch.GetTimestamp();
         var success = false;
         var toolName = context.Params?.Name ?? string.Empty;
+        RequestArrivalLease? arrivalObservation = null;
+        try
+        {
+            var httpContext = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
+            var parentSequence = httpContext?.Items[typeof(RequestArrivalLease)] is long sequence ? sequence : 0;
+            arrivalObservation = context.Services?.GetService<RequestArrivalObservations>()?.Begin(
+                "mcp-tool", toolName, parentSequence);
+        }
+        catch (Exception)
+        {
+            // Arrival capture is best-effort and must not change MCP dispatch behavior.
+        }
         var governanceRunId = McpToolCallTelemetry.ResolveGovernanceRunId(context.Params?.Arguments);
         var traceId = Activity.Current?.TraceId.ToString() ?? string.Empty;
         var logger = context.Services?.GetService<ILoggerFactory>()
@@ -204,6 +216,16 @@ var mcpServerBuilder = builder.Services.AddMcpServer(options => options.ServerIn
         }
         finally
         {
+            try
+            {
+                arrivalObservation?.Complete(success ? "success"
+                    : cancellationToken.IsCancellationRequested ? "cancelled" : "error");
+            }
+            catch (Exception)
+            {
+                // Arrival capture is best-effort and must not suppress existing telemetry or MCP results.
+            }
+
             await McpToolCallTelemetry.TryRecordAsync(
                 context.Services,
                 "chatgpt-gateway",
@@ -232,6 +254,7 @@ var allowedMcpOrigins = ResolveAllowedOrigins(
     gatewayOptions.PublicMcpUrl);
 
 app.UseForwardedHeaders();
+app.UseMiddleware<GatewayRequestArrivalObservationMiddleware>();
 app.UseRouting();
 app.UseRateLimiter();
 app.Use(async (context, next) =>

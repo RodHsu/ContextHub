@@ -16,21 +16,7 @@ public sealed class HeaderViewportTests(DashboardBrowserFixture fixture, ITestOu
     public async Task Header_controls_should_remain_visible_and_keyboard_operable_after_dense_graph_navigation(int width, int height, int fontPercent)
     {
         await using var context = await fixture.CreateContextAsync(new($"header-{width}-{fontPercent}", width, height));
-        var page = await context.NewPageAsync();
-        await page.GotoAsync(new Uri(fixture.BaseUri, "/login?returnUrl=%2Fgraph%3FuiProfile%3Ddense").ToString());
-        // Authenticate through the real local endpoint and shared cookie jar; this test targets layout, not login hydration.
-        var form = context.APIRequest.CreateFormData();
-        form.Set("Username", "admin");
-        form.Set("Password", "ContextHub!123");
-        form.Set("ReturnUrl", "/graph?uiProfile=dense");
-        form.Set("__RequestVerificationToken", await page.Locator("input[name='__RequestVerificationToken']").InputValueAsync());
-        var loginResponse = await context.APIRequest.PostAsync(new Uri(fixture.BaseUri, "/account/login").ToString(), new() { Form = form, MaxRedirects = 0 });
-        Assert.Equal(302, loginResponse.Status);
-        Assert.Equal("/graph?uiProfile=dense", loginResponse.Headers["location"]);
-        await loginResponse.DisposeAsync();
-        await page.GotoAsync(new Uri(fixture.BaseUri, "/graph?uiProfile=dense").ToString());
-        await page.Locator(".dashboard-shell[data-dashboard-interactive='true']").WaitForAsync();
-        await page.Locator(".graph-view-node").First.WaitForAsync();
+        var page = await LoginGraphAsync(context);
         await page.EvaluateAsync("percent => document.documentElement.style.fontSize=percent+'%'", fontPercent);
         await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale)>0");
 
@@ -118,6 +104,55 @@ public sealed class HeaderViewportTests(DashboardBrowserFixture fixture, ITestOu
         await AssertHeaderAsync(page, "after-content-wheel");
         await AssertVisibleBoundsAsync(page.Locator(".dashboard-footer"), "footer", requireTarget: false);
         await page.ScreenshotAsync(new() { Path = Path.Combine(fixture.ArtifactDirectory, $"header-{width}-{height}-{fontPercent}.png") });
+    }
+
+    [Fact]
+    public async Task Background_graph_refresh_should_publish_completion_without_user_interaction()
+    {
+        await using var context = await fixture.CreateContextAsync(new("graph-poll-completion", 320, 844));
+        var page = await LoginGraphAsync(context);
+        await page.EvaluateAsync("percent => document.documentElement.style.fontSize=percent+'%'", 150);
+        await page.Locator(".refresh-status-time time[data-local-iso]").WaitForAsync();
+        await page.EvaluateAsync("""
+            () => {
+                const time = () => document.querySelector('.refresh-status-time time[data-local-iso]')?.dataset.localIso;
+                const button = () => document.querySelector('.page-actions-primary button');
+                const proof = window.__graphPollingProof = {initial: time(), completed: []};
+                proof.observer = new MutationObserver(() => {
+                    const value = time();
+                    if (value && value !== proof.initial && button() && !button().disabled && !proof.completed.includes(value)) {
+                        proof.completed.push(value);
+                    }
+                });
+                proof.observer.observe(document.body, {subtree: true, childList: true, attributes: true, attributeFilter: ['disabled', 'data-local-iso']});
+            }
+            """);
+        // The fixture polls every second. Only observe DOM; do not trigger a render or refresh.
+        await page.WaitForFunctionAsync("() => window.__graphPollingProof.completed.length >= 2", null, new() { Timeout = 10000 });
+        var completed = await page.EvaluateAsync<string[]>("() => { const proof=window.__graphPollingProof; proof.observer.disconnect(); return proof.completed; }");
+        Assert.True(completed.Length >= 2);
+        Assert.True(DateTimeOffset.Parse(completed[1]) > DateTimeOffset.Parse(completed[0]));
+        output.WriteLine($"Passive polling completion timestamps: {string.Join(", ", completed)}");
+    }
+
+    private async Task<IPage> LoginGraphAsync(IBrowserContext context)
+    {
+        var page = await context.NewPageAsync();
+        await page.GotoAsync(new Uri(fixture.BaseUri, "/login?returnUrl=%2Fgraph%3FuiProfile%3Ddense").ToString());
+        // Authenticate through the real local endpoint and shared cookie jar; this test targets layout, not login hydration.
+        var form = context.APIRequest.CreateFormData();
+        form.Set("Username", "admin");
+        form.Set("Password", "ContextHub!123");
+        form.Set("ReturnUrl", "/graph?uiProfile=dense");
+        form.Set("__RequestVerificationToken", await page.Locator("input[name='__RequestVerificationToken']").InputValueAsync());
+        var loginResponse = await context.APIRequest.PostAsync(new Uri(fixture.BaseUri, "/account/login").ToString(), new() { Form = form, MaxRedirects = 0 });
+        Assert.Equal(302, loginResponse.Status);
+        Assert.Equal("/graph?uiProfile=dense", loginResponse.Headers["location"]);
+        await loginResponse.DisposeAsync();
+        await page.GotoAsync(new Uri(fixture.BaseUri, "/graph?uiProfile=dense").ToString());
+        await page.Locator(".dashboard-shell[data-dashboard-interactive='true']").WaitForAsync();
+        await page.Locator(".graph-view-node").First.WaitForAsync();
+        return page;
     }
 
     private async Task AssertHeaderAsync(IPage page, string stage)

@@ -725,6 +725,11 @@
         {
             _loading = false;
             _refreshGate.Release();
+            // Background polling does not receive an EventCallback completion render.
+            if (!_cts.IsCancellationRequested)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
         }
     }
 

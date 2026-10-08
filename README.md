@@ -61,9 +61,14 @@ dashboard
   -> optional read-only Docker socket for local compose metrics
 
 chatgpt-gateway
-  -> restricted /mcp-chat gateway
-  -> mcp-server REST APIs
+  -> restricted MCP endpoint (internal /mcp)
+  -> Memory.Application
+  -> PostgreSQL + pgvector
+  -> Redis
+  -> embedding-service
 ```
+
+The Gateway hosts its restricted tools directly through the shared `Memory.Application` use cases and infrastructure. The public `/mcp-chat` path is routed to its internal `/mcp` endpoint by the [reverse proxy configuration](docs/context-hub-public-nginx.md). Dashboard requests use the main service's REST APIs.
 
 ## Services
 

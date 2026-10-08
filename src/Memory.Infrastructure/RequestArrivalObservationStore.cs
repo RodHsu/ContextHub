@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -90,6 +91,17 @@ public sealed class RequestArrivalObservationFlushService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!buffer.Enabled) return;
+        try
+        {
+            logger.LogInformation(new EventId(5701, "RequestArrivalCaptureStarted"),
+                "Request arrival capture started: SchemaVersion={SchemaVersion}, ObservationBootId={ObservationBootId}, StartedAtUtc={StartedAtUtc}, UntilUtc={UntilUtc}, TimestampFrequency={TimestampFrequency}, ProcessId={ProcessId}",
+                1, buffer.BootId.ToString("D"), buffer.StartedAtUtc.ToString("O", CultureInfo.InvariantCulture),
+                buffer.UntilUtc.ToString("O", CultureInfo.InvariantCulture), time.TimestampFrequency, Environment.ProcessId);
+        }
+        catch (Exception)
+        {
+            // Optional source-binding evidence must not prevent capture when a logging provider fails.
+        }
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2), time);
         do
         {
