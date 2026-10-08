@@ -13,7 +13,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
     {
         await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
             .WithPortBinding(5432, true).WithDatabase("contexthub")
-            .WithUsername("contexthub").WithPassword("contexthub").Build();
+            .WithUsername("contexthub").WithPassword("ContextHub_TestFixture_Only").Build();
         await postgres.StartAsync();
         await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
         await connection.OpenAsync();
@@ -62,7 +62,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
     {
         await using var postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
             .WithPortBinding(5432, true).WithDatabase("contexthub")
-            .WithUsername("contexthub").WithPassword("contexthub").Build();
+            .WithUsername("contexthub").WithPassword("ContextHub_TestFixture_Only").Build();
         await postgres.StartAsync();
         await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
         await connection.OpenAsync();
@@ -111,7 +111,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
-            .WithPassword("contexthub")
+            .WithPassword("ContextHub_TestFixture_Only")
             .Build();
         await postgres.StartAsync();
 
@@ -257,7 +257,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
-            .WithPassword("contexthub")
+            .WithPassword("ContextHub_TestFixture_Only")
             .Build();
         await postgres.StartAsync();
         await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
@@ -290,7 +290,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
-            .WithPassword("contexthub")
+            .WithPassword("ContextHub_TestFixture_Only")
             .Build();
         await postgres.StartAsync();
         await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
@@ -348,7 +348,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
-            .WithPassword("contexthub")
+            .WithPassword("ContextHub_TestFixture_Only")
             .Build();
         await postgres.StartAsync();
         await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
@@ -396,7 +396,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
-            .WithPassword("contexthub")
+            .WithPassword("ContextHub_TestFixture_Only")
             .Build();
         await postgres.StartAsync();
         await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
@@ -437,7 +437,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
-            .WithPassword("contexthub")
+            .WithPassword("ContextHub_TestFixture_Only")
             .Build();
         await postgres.StartAsync();
 
@@ -469,7 +469,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
-            .WithPassword("contexthub")
+            .WithPassword("ContextHub_TestFixture_Only")
             .Build();
         await postgres.StartAsync();
         await using var connection = new NpgsqlConnection(postgres.GetConnectionString());
@@ -562,7 +562,7 @@ public sealed class AgentExecutionMigrationRehearsalTests
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
-            .WithPassword("contexthub")
+            .WithPassword("ContextHub_TestFixture_Only")
             .Build();
         await postgres.StartAsync();
         await using var connection = new NpgsqlConnection(postgres.GetConnectionString());

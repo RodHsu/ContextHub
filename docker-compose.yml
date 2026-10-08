@@ -190,7 +190,7 @@ services:
     environment:
       POSTGRES_DB: contexthub
       POSTGRES_USER: contexthub
-      POSTGRES_PASSWORD: contexthub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     ports:
       - "${POSTGRES_HOST_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
@@ -251,7 +251,7 @@ services:
       Dashboard__ComposeProject: ${DASHBOARD_COMPOSE_PROJECT:-contexthub}
       Dashboard__DockerEndpoint: http://mcp-docker-proxy:2375
       ASPNETCORE_URLS: http://0.0.0.0:8080
-      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       ConnectionStrings__Redis: redis:6379
       Memory__Namespace: contexthub
       Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
@@ -353,7 +353,7 @@ services:
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
       ASPNETCORE_URLS: http://0.0.0.0:8083
-      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       ConnectionStrings__Redis: redis:6379
       Memory__Namespace: contexthub
       Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
@@ -406,7 +406,7 @@ services:
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
       ASPNETCORE_URLS: http://0.0.0.0:8083
-      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       ConnectionStrings__Redis: redis:6379
       Memory__Namespace: contexthub
       Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
@@ -444,7 +444,7 @@ services:
       ASPNETCORE_URLS: http://0.0.0.0:8082
       Embeddings__Provider: Http
       Embeddings__BaseUrl: http://embedding-service:8081
-      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       ConnectionStrings__Redis: redis:6379
       Memory__Namespace: contexthub
       Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
@@ -487,7 +487,7 @@ services:
       Dashboard__BaseUrl: http://mcp-server:8080
       Dashboard__DockerEndpoint: http://dashboard-docker-proxy:2375
       Dashboard__DataProtectionPath: /var/lib/contexthub-dashboard/keys
-      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=contexthub;Username=contexthub;Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       Memory__Namespace: contexthub
       Memory__RedisCache__Enabled: ${REDIS_CACHE_ENABLED:-true}
     depends_on:
