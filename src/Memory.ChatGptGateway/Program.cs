@@ -175,8 +175,10 @@ var mcpServerBuilder = builder.Services.AddMcpServer(options => options.ServerIn
         {
             var httpContext = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
             var parentSequence = httpContext?.Items[typeof(RequestArrivalLease)] is long sequence ? sequence : 0;
-            arrivalObservation = context.Services?.GetService<RequestArrivalObservations>()?.Begin(
-                "mcp-tool", toolName, parentSequence);
+            var buffer = context.Services?.GetService<RequestArrivalObservations>();
+            if (buffer?.Enabled is true)
+                arrivalObservation = RequestArrivalCapture.TryBegin(buffer, "mcp-tool", toolName, parentSequence,
+                    ArrivalRequestClassification.ForTool(toolName));
         }
         catch (Exception)
         {

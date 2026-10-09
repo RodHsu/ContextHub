@@ -1,4 +1,5 @@
 using Memory.Infrastructure;
+using Microsoft.AspNetCore.Routing;
 
 namespace Memory.McpServer;
 
@@ -16,13 +17,26 @@ public static class RequestArrivalObservationMiddleware
             var operation = path == "/api/memories/search" ? "rest-memory-search"
                 : path == "/api/context/build" ? "rest-working-context"
                 : path.StartsWithSegments("/mcp") ? "http-mcp" : "other";
-            var observation = context.RequestServices.GetRequiredService<RequestArrivalObservations>().Begin("http", operation);
+            RequestArrivalLease? observation = null;
+            try
+            {
+                var buffer = context.RequestServices.GetRequiredService<RequestArrivalObservations>();
+                if (buffer.Enabled)
+                    observation = RequestArrivalCapture.TryBegin(buffer, "http", operation, classification:
+                        ArrivalRequestClassification.ForHttp(context.Request.Method,
+                            (context.GetEndpoint() as RouteEndpoint)?.RoutePattern.RawText,
+                            context.Request.ContentLength, path == "/mcp" || path == "/mcp/"));
+            }
+            catch (Exception)
+            {
+                // Capture and classification are best-effort; do not change HTTP behavior or log request data.
+            }
             if (observation is not null) context.Items[typeof(RequestArrivalLease)] = observation.Sequence;
             var completed = false;
             try { await next(); completed = true; }
             finally
             {
-                observation?.Complete(context.RequestAborted.IsCancellationRequested ? "cancelled"
+                RequestArrivalCapture.TryComplete(observation, context.RequestAborted.IsCancellationRequested ? "cancelled"
                     : completed && context.Response.StatusCode < 400 ? "success" : "error");
             }
         });

@@ -23,6 +23,7 @@ public static class DependencyInjection
     {
         services.Configure<MemoryOptions>(configuration.GetSection(MemoryOptions.SectionName));
         services.Configure<RequestArrivalObservationOptions>(configuration.GetSection(RequestArrivalObservationOptions.SectionName));
+        services.AddSingleton<IRequestArrivalClock, LinuxRequestArrivalClock>();
         services.AddSingleton<RequestArrivalObservations>();
         if (string.Equals(serviceName, "mcp-server", StringComparison.Ordinal) ||
             string.Equals(serviceName, "chatgpt-gateway", StringComparison.Ordinal))

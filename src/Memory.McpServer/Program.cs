@@ -63,10 +63,20 @@ builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
     {
         var startedAt = Stopwatch.GetTimestamp();
         var success = false;
-        var httpContext = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
-        var parentSequence = httpContext?.Items[typeof(RequestArrivalLease)] is long sequence ? sequence : 0;
-        var observation = context.Services?.GetService<RequestArrivalObservations>()?.Begin(
-            "mcp-tool", context.Params?.Name ?? string.Empty, parentSequence);
+        RequestArrivalLease? observation = null;
+        try
+        {
+            var httpContext = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
+            var parentSequence = httpContext?.Items[typeof(RequestArrivalLease)] is long sequence ? sequence : 0;
+            var buffer = context.Services?.GetService<RequestArrivalObservations>();
+            if (buffer?.Enabled is true)
+                observation = RequestArrivalCapture.TryBegin(buffer, "mcp-tool", context.Params?.Name ?? string.Empty,
+                    parentSequence, ArrivalRequestClassification.ForTool(context.Params?.Name));
+        }
+        catch (Exception)
+        {
+            // Capture is best-effort and must not change MCP dispatch behavior.
+        }
         try
         {
             var result = await next(context, cancellationToken);
@@ -75,7 +85,7 @@ builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
         }
         finally
         {
-            observation?.Complete(success ? "success" : cancellationToken.IsCancellationRequested ? "cancelled" : "error");
+            RequestArrivalCapture.TryComplete(observation, success ? "success" : cancellationToken.IsCancellationRequested ? "cancelled" : "error");
             await McpToolCallTelemetry.TryRecordAsync(
                 context.Services,
                 "mcp-server",

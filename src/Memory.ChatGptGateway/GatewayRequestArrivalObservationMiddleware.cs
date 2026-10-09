@@ -16,7 +16,10 @@ internal sealed class GatewayRequestArrivalObservationMiddleware(RequestDelegate
         RequestArrivalLease? observation = null;
         try
         {
-            observation = observations.Begin("http", "http-mcp");
+            if (observations.Enabled)
+                observation = RequestArrivalCapture.TryBegin(observations, "http", "http-mcp", classification:
+                    ArrivalRequestClassification.ForHttp(context.Request.Method, null,
+                        context.Request.ContentLength, mcpEnvelope: true));
         }
         catch (Exception)
         {
