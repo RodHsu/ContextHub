@@ -179,6 +179,8 @@ Memory.Dashboard
 
 - 提供高資訊密度的 operations dashboard
 - 以 cookie auth 提供單一 admin 登入
+- `/login` 採 static SSR，保留一般 HTTP POST 與 antiforgery 驗證；不在登入頁建立會被提交導頁中止的 Blazor circuit。
+- 登入頁以 `ExcludeFromInteractiveRouting` 切換呈現方式；登入後的 Dashboard 頁面維持 `InteractiveServer`，包含 Graph 更新與鍵盤互動。
 - 顯示 runtime 參數、Docker / Compose 資源、memory/log/job/storage explorer
 - 透過 `mcp-server` 的 REST API 讀取業務資料
 - 透過唯讀 Docker socket 顯示容器即時狀態

@@ -93,6 +93,81 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         sessionScript.Should().Contain("/account/session/refresh");
     }
 
+    [Theory]
+    [InlineData("/login")]
+    [InlineData("/login?error=invalid&returnUrl=%2Fgraph")]
+    public async Task Login_Page_Should_Use_Static_Rendering_And_Preserve_Post_Form(string path)
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        using var response = await client.GetAsync(path);
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertNoStoreHeaders(response);
+        var html = await response.Content.ReadAsStringAsync();
+
+        html.Should().Contain("action=\"/account/login\"");
+        html.Should().Contain("name=\"__RequestVerificationToken\"");
+        html.Should().NotMatchRegex("<!--Blazor:\\{[^>]*\\\"type\\\":\\\"server\\\"");
+    }
+
+    [Fact]
+    public async Task Login_Should_Still_Issue_Cookie_And_Enter_Interactive_Graph()
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        await LoginAsync(client);
+        using var response = await client.GetAsync("/graph");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertNoStoreHeaders(response);
+        var html = await response.Content.ReadAsStringAsync();
+        html.Should().Contain("graph-workspace");
+        html.Should().MatchRegex("<!--Blazor:\\{[^>]*\\\"type\\\":\\\"server\\\"");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("invalid-antiforgery-token")]
+    public async Task Static_Login_Post_Should_Reject_Missing_Or_Invalid_Antiforgery(string? verificationToken)
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+        using var loginPage = await client.GetAsync("/login");
+        loginPage.StatusCode.Should().Be(HttpStatusCode.OK);
+        var values = new Dictionary<string, string>
+        {
+            ["Username"] = "admin",
+            ["Password"] = "ContextHub!123",
+            ["ReturnUrl"] = "/graph"
+        };
+        if (verificationToken is not null) values["__RequestVerificationToken"] = verificationToken;
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/account/login")
+        {
+            Content = new FormUrlEncodedContent(values)
+        };
+        request.Headers.Add("Cookie", BuildAntiforgeryCookie(loginPage.Headers));
+        using var response = await client.SendAsync(request);
+        var sessionIssued = response.Headers.TryGetValues("Set-Cookie", out var cookies) &&
+                            cookies.Any(value => value.StartsWith("contexthub.dashboard=", StringComparison.Ordinal));
+        sessionIssued.Should().BeFalse("an invalid antiforgery request must never establish a dashboard session");
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        response.Headers.Location!.ToString().Should().StartWith("/login?returnUrl=");
+        using var graphResponse = await client.GetAsync("/graph");
+        graphResponse.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        graphResponse.Headers.Location!.ToString().Should().StartWith("/login?returnUrl=");
+    }
+
     [Fact]
     public void Dashboard_Api_Client_Should_Send_Service_Token_When_Configured()
     {
