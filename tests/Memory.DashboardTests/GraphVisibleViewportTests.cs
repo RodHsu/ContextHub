@@ -23,16 +23,22 @@ public sealed class GraphVisibleViewportTests(DashboardBrowserFixture fixture, I
         Assert.True(ids.Length > 1, "The dense fixture must exercise multiple visible nodes.");
         var titles = await page.Locator(".graph-node-title").AllTextContentsAsync();
         var fit = page.GetByRole(AriaRole.Button, new() { Name = "適應視圖", Exact = true });
+        var completedFits = await CompletedFitsAsync(page);
         await fit.FocusAsync();
         await page.Keyboard.PressAsync("Enter");
+        await WaitForFitAndStableGeometryAsync(page, completedFits, expanded: false);
         await AssertPhysicalAsync(page, "normal");
         var expand = page.GetByRole(AriaRole.Button, new() { Name = "全螢幕顯示", Exact = true });
+        completedFits = await CompletedFitsAsync(page);
         await expand.ClickAsync();
         await page.Locator(".graph-canvas-panel-expanded").WaitForAsync();
+        await WaitForFitAndStableGeometryAsync(page, completedFits, expanded: true);
         await AssertPhysicalAsync(page, "expanded");
+        completedFits = await CompletedFitsAsync(page);
         await expand.FocusAsync();
         await page.Keyboard.PressAsync("Enter");
         await page.Locator(".graph-canvas-panel-expanded").WaitForAsync(new() { State = WaitForSelectorState.Detached });
+        await WaitForFitAndStableGeometryAsync(page, completedFits, expanded: false);
         await AssertPhysicalAsync(page, "collapsed");
         Assert.Equal(ids, await NodeIdsAsync(page));
         Assert.Equal(titles, await page.Locator(".graph-node-title").AllTextContentsAsync());
@@ -115,6 +121,7 @@ public sealed class GraphVisibleViewportTests(DashboardBrowserFixture fixture, I
     private async Task<IPage> LoginAsync(IBrowserContext context)
     {
         var page = await context.NewPageAsync();
+        await ObserveFitCompletionAsync(page);
         await page.GotoAsync(new Uri(fixture.BaseUri, "/login?returnUrl=%2Fgraph%3FuiProfile%3Ddense").ToString());
         var form = context.APIRequest.CreateFormData();
         form.Set("Username", "admin");
@@ -133,10 +140,91 @@ public sealed class GraphVisibleViewportTests(DashboardBrowserFixture fixture, I
     private static Task<string[]> NodeIdsAsync(IPage page)
         => page.Locator("[data-graph-node-id]").EvaluateAllAsync<string[]>("nodes=>nodes.map(n=>n.dataset.graphNodeId).sort()");
 
+    private static Task ObserveFitCompletionAsync(IPage page) => page.AddInitScriptAsync("""
+        (() => {
+            let graphApi;
+            window.__graphFitCompletion={completed:0,settling:null};
+            // Observe the initial export, before Blazor can resolve and cache its fit function.
+            Object.defineProperty(window,'contextHubGraph',{configurable:true,
+                get:()=>graphApi,
+                set:api=>{
+                    const original=api.fit;
+                    api.fit=function(...args) {
+                        const result=original.apply(this,args);
+                        // The shipped fit is synchronous; count after size/transform/reveal returns.
+                        window.__graphFitCompletion.completed++;
+                        return result;
+                    };
+                    graphApi=api;
+                }});
+        })();
+        """);
+
+    private static Task<int> CompletedFitsAsync(IPage page)
+        => page.EvaluateAsync<int>("window.__graphFitCompletion.completed");
+
+    private async Task WaitForFitAndStableGeometryAsync(IPage page, int previousFits, bool expanded)
+    {
+        try
+        {
+            await page.WaitForFunctionAsync("""
+                expected => {
+                    const observation=window.__graphFitCompletion;
+                    const panel=document.querySelector('.graph-canvas-panel-expanded');
+                    const shell=document.querySelector('.graph-scroll-shell');
+                    const frame=shell?.closest('.graph-viewport-frame');
+                    const content=shell?.querySelector('.graph-pan-content');
+                    const owner=panel??document.querySelector('.content');
+                    if (!observation || observation.completed<=expected.previousFits || !!panel!==expected.expanded ||
+                        !shell || !frame || !content || !owner || document.fonts.status!=='loaded' ||
+                        frame.dataset.physicalHeight!=='true') return false;
+                    // The shipped pan-content has a CSS transform transition; a quiet easing tail is not completion.
+                    if (content.getAnimations({subtree:true}).some(animation=>animation.pending || animation.playState==='running')) {
+                        observation.settling=null;
+                        return false;
+                    }
+                    const controls=[...document.querySelectorAll('.graph-viewport-controls button')];
+                    if (controls.length!==8) return false;
+                    const elements=[owner,frame,shell,...controls,...shell.querySelectorAll(
+                        '.graph-edge,.graph-label-leader,.graph-view-node circle,.graph-view-node text')];
+                    const values=[innerWidth,innerHeight,owner.scrollTop,owner.scrollLeft,
+                        window.visualViewport?.offsetTop??0,window.visualViewport?.offsetLeft??0,
+                        window.visualViewport?.height??innerHeight,window.visualViewport?.width??innerWidth,
+                        ...elements.flatMap(e=>{const r=e.getBoundingClientRect();return [r.x,r.y,r.width,r.height];})];
+                    if (!values.every(Number.isFinite) || shell.clientHeight<=0 || shell.clientWidth<=0) return false;
+                    const transform=[content.style.transform,getComputedStyle(content).transform,
+                        shell.dataset.scale,shell.dataset.panX,shell.dataset.panY,
+                        frame.style.getPropertyValue('--graph-physical-height')].join('|');
+                    const key=expected.previousFits+':'+expected.expanded;
+                    const prior=observation.settling;
+                    const stable=prior?.key===key && prior.completed===observation.completed &&
+                        prior.transform===transform && prior.values.length===values.length &&
+                        values.every((value,index)=>Math.abs(value-prior.values[index])<=0.25);
+                    observation.settling={key,completed:observation.completed,transform,values,
+                        frames:stable?prior.frames+1:1};
+                    // RAF polling observes three consecutive stable frames; it never waits for the oracle to pass.
+                    return observation.settling.frames>=3;
+                }
+                """, new { previousFits, expanded }, new() { Timeout = 10_000 });
+        }
+        catch (Exception exception) when (exception is PlaywrightException or System.TimeoutException)
+        {
+            var state = await page.EvaluateAsync<JsonElement>("""
+                () => ({completedFits:window.__graphFitCompletion?.completed??0,
+                    stableFrames:window.__graphFitCompletion?.settling?.frames??0,
+                    expanded:!!document.querySelector('.graph-canvas-panel-expanded'),
+                    fontLoaded:document.fonts.status==='loaded',
+                    activeAnimations:document.querySelector('.graph-pan-content')?.getAnimations({subtree:true})
+                        .filter(animation=>animation.pending || animation.playState==='running').length??0,
+                    physicalHeightReady:document.querySelector('.graph-viewport-frame')?.dataset.physicalHeight==='true'})
+                """);
+            output.WriteLine($"fit/geometry completion timeout: {state}");
+            throw;
+        }
+    }
+
     private async Task AssertPhysicalAsync(IPage page, string phase)
     {
-        // Allow the UI's scheduled fit to settle, without scrolling or taking an element screenshot.
-        await page.WaitForTimeoutAsync(350);
         var state = await page.EvaluateAsync<JsonElement>("""
             () => {
                 const shell=document.querySelector('.graph-scroll-shell'), expanded=document.querySelector('.graph-canvas-panel-expanded');
