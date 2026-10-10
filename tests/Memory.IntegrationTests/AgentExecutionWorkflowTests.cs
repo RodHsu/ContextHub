@@ -144,6 +144,25 @@ public sealed class AgentExecutionWorkflowTests(ContainerTestEnvironment environ
             "Management cancellation fixture",
             ["test:cancel"],
             "cancel-prepare");
+        var actorAccessor = manager.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var managerActor = actorAccessor.Current;
+        actorAccessor.Current = managerActor with
+        {
+            Role = TenantUserRole.Member,
+            Scopes = [SecurityScopes.AgentExecutionsRead, SecurityScopes.AgentExecutionsWrite],
+            AllowedProjectIds = [projectId]
+        };
+        await FluentActions.Awaiting(() => service.CancelAsync(cancelRequest, CancellationToken.None))
+            .Should().ThrowAsync<UnauthorizedAccessException>();
+        actorAccessor.Current = managerActor with
+        {
+            Role = TenantUserRole.Member,
+            Scopes = [SecurityScopes.AgentExecutionsManage],
+            AllowedProjectIds = ["another-project"]
+        };
+        await FluentActions.Awaiting(() => service.CancelAsync(cancelRequest, CancellationToken.None))
+            .Should().ThrowAsync<UnauthorizedAccessException>();
+        actorAccessor.Current = managerActor;
         var cancelled = await service.CancelAsync(cancelRequest, CancellationToken.None);
         cancelled.Execution.Status.Should().Be(AgentExecutionStatus.Cancelled);
         cancelled.Replayed.Should().BeFalse();

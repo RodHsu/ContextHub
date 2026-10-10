@@ -150,7 +150,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_batch_execute", "memory_delete", "project_cleanup_apply", "governance_tombstone_get",
             "agent_execution_prepare", "agent_execution_claim_next", "agent_execution_get",
             "agent_execution_heartbeat", "agent_execution_checkpoint", "agent_execution_block",
-            "agent_execution_complete", "agent_execution_fail", "agent_execution_abandon"
+            "agent_execution_complete", "agent_execution_fail", "agent_execution_abandon",
+            "agent_execution_cancel"
         ]);
 
         foreach (var tool in tools.EnumerateArray())
@@ -544,7 +545,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
         _ = ExtractToolJson(await SendMcpAsync(client, null, 108, "tools/call", new
         {
-            name = "agent_execution_abandon",
+            name = "agent_execution_block",
             arguments = new
             {
                 request = new
@@ -553,13 +554,73 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                     agentId,
                     leaseToken,
                     leaseVersion,
-                    reasonClass = "RegressionCleanup",
-                    reason = "Restricted projection regression completed.",
+                    reasonClass = "AuthorityDecisionRequired",
+                    reason = "Blocked package must be cancelled before preparing revised authority.",
                     evidenceRefs = new[] { "test:restricted-projection" },
                     retryable = false,
-                    idempotencyKey = $"gateway-abandon-{Guid.NewGuid():N}",
+                    idempotencyKey = $"gateway-block-{Guid.NewGuid():N}",
                     currentCapabilities = Array.Empty<string>(),
                     currentTools = Array.Empty<string>()
+                }
+            }
+        }));
+
+        var cancelArguments = new
+        {
+            request = new
+            {
+                executionId,
+                reasonClass = "SupersededByApprovedAuthority",
+                reason = "Approved authority replaced the blocked execution package.",
+                evidenceRefs = new[] { "test:restricted-manager-recovery" },
+                idempotencyKey = $"gateway-cancel-{Guid.NewGuid():N}"
+            }
+        };
+        var cancelled = ExtractToolJson(await SendMcpAsync(client, null, 109, "tools/call", new
+        {
+            name = "agent_execution_cancel",
+            arguments = cancelArguments
+        }));
+        cancelled.GetProperty("execution").GetProperty("status").GetString().Should().Be(nameof(AgentExecutionStatus.Cancelled));
+        cancelled.GetProperty("execution").GetProperty("packageHash").GetString().Should().Be(prepared.GetProperty("packageHash").GetString());
+        cancelled.GetProperty("execution").GetProperty("claimedByAgentId").GetString().Should().BeEmpty();
+        (cancelled.GetProperty("execution").TryGetProperty("leaseExpiresAt", out var cancelledLeaseExpiry) &&
+         cancelledLeaseExpiry.ValueKind != JsonValueKind.Null).Should().BeFalse();
+        var cancelReplay = ExtractToolJson(await SendMcpAsync(client, null, 110, "tools/call", new
+        {
+            name = "agent_execution_cancel",
+            arguments = cancelArguments
+        }));
+        cancelReplay.GetProperty("replayed").GetBoolean().Should().BeTrue();
+        var replacement = ExtractToolJson(await SendMcpAsync(client, null, 111, "tools/call", new
+        {
+            name = "agent_execution_prepare",
+            arguments = new { request = prepareArguments.request with { idempotencyKey = $"gateway-reprepare-{Guid.NewGuid():N}" } }
+        }));
+        replacement.GetProperty("id").GetGuid().Should().NotBe(executionId);
+        var replacementClaim = ExtractToolJson(await SendMcpAsync(client, null, 112, "tools/call", new
+        {
+            name = "agent_execution_claim_next",
+            arguments = new { request = claimArguments.request with { idempotencyKey = $"gateway-reclaim-{Guid.NewGuid():N}" } }
+        }));
+        replacementClaim.GetProperty("hasExecution").GetBoolean().Should().BeTrue();
+        replacementClaim.GetProperty("execution").GetProperty("id").GetGuid().Should().Be(replacement.GetProperty("id").GetGuid());
+        _ = ExtractToolJson(await SendMcpAsync(client, null, 113, "tools/call", new
+        {
+            name = "agent_execution_abandon",
+            arguments = new
+            {
+                request = new
+                {
+                    executionId = replacement.GetProperty("id").GetGuid(),
+                    agentId,
+                    leaseToken = replacementClaim.GetProperty("leaseToken").GetString(),
+                    leaseVersion = replacementClaim.GetProperty("execution").GetProperty("leaseVersion").GetInt64(),
+                    reasonClass = "RegressionCleanup",
+                    reason = "Replacement claim verified.",
+                    evidenceRefs = new[] { "test:restricted-manager-recovery" },
+                    retryable = false,
+                    idempotencyKey = $"gateway-replacement-cleanup-{Guid.NewGuid():N}"
                 }
             }
         }));
@@ -568,6 +629,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var db = verificationScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         (await db.ProjectWorkItems.SingleAsync(item => item.Id == workItemId)).Status
             .Should().Be(ProjectWorkItemStatus.Pending);
+        (await db.AgentExecutions.CountAsync(item => item.WorkItemId == workItemId)).Should().Be(2);
+        (await db.AgentExecutionEvents.CountAsync(item => item.ExecutionId == executionId && item.EventType == AgentExecutionEventType.Cancelled)).Should().Be(1);
     }
 
     [DockerRequiredFact]
@@ -4310,11 +4373,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
-        listedToolNames.Should().HaveCount(83);
+        listedToolNames.Should().HaveCount(84);
         var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
         appFacingProjection.IsValid.Should().BeTrue();
-        appFacingProjection.PublishedToolCount.Should().Be(83);
-        appFacingProjection.AppCallableToolCount.Should().Be(83);
+        appFacingProjection.PublishedToolCount.Should().Be(84);
+        appFacingProjection.AppCallableToolCount.Should().Be(84);
         appFacingProjection.MissingPublishedTools.Should().BeEmpty();
         appFacingProjection.UnexpectedPublishedTools.Should().BeEmpty();
         appFacingProjection.MissingAppCallableTools.Should().BeEmpty();
@@ -4324,7 +4387,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_run_get",
             "governance_runs_list"
         };
-        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(80);
+        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(81);
         foreach (var toolName in receiptAndContractTools)
         {
             var projectedTool = appFacingProjection.Tools.Single(tool => tool.Name == toolName);
@@ -4373,6 +4436,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "agent_execution_complete",
             "agent_execution_fail",
             "agent_execution_abandon",
+            "agent_execution_cancel",
             "conversation_insight_status",
             "conversation_insight_retry",
             "conversation_insight_skip",
@@ -4391,7 +4455,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "agent_execution_block",
             "agent_execution_complete",
             "agent_execution_fail",
-            "agent_execution_abandon"
+            "agent_execution_abandon",
+            "agent_execution_cancel"
         };
         foreach (var toolName in agentExecutionToolNames)
         {

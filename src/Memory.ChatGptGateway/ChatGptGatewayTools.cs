@@ -259,6 +259,11 @@ public sealed class ChatGptGatewayTools(
     public Task<AgentExecutionMutationResult> agent_execution_abandon(AgentExecutionTerminalRequest request, CancellationToken cancellationToken = default)
         => agentExecutionService.AbandonAsync(request, cancellationToken);
 
+    /// <summary>Expose the existing manager cancellation use case without changing work item lifecycle.</summary>
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Management-only cancellation of an execution with preserved history and audit. Requires Admin or AgentExecutionsManage and project write authority; does not change the business work item.")]
+    public Task<AgentExecutionMutationResult> agent_execution_cancel(AgentExecutionCancelRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.CancelAsync(request, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Create a user-managed project work item for one explicitly authorized ProjectId.")]
     public Task<ProjectWorkItemResult> project_work_item_create(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.CreateAsync(request, cancellationToken);
