@@ -2,6 +2,23 @@
 
 This guide explains how agents and developers should use ContextHub through MCP.
 
+## Recovering a blocked execution
+
+An execution in `Blocked` still occupies its work item. A manager may call
+`agent_execution_cancel` with the execution UUID, a reason, bounded evidence
+references, and an idempotency key before preparing a replacement package.
+The operation requires Admin or `AgentExecutionsManage`, plus project write
+authority. It preserves the immutable package, execution events, and audit;
+it never deletes or completes the business work item. Lease holders must use
+the regular lease lifecycle; cancellation is a management operation.
+
+After cancellation, read back `Cancelled` and the released lease, then
+`Prepare` and `Claim` the replacement with its current authority and allowed
+actions. Do not reuse a cancelled lease or infer business acceptance from
+successful execution recovery. The tool is available on the backend and
+restricted General surfaces, and is absent from the four-tool Automation
+surface. Publishing it does not grant ordinary agents management authority.
+
 For execution-time Skill discovery, use `skills_search_for_execution` at startup, optionally perform bounded evidence-driven re-search after `skills_resolution_feedback`, then pin exact versions with `skills_select_for_execution`. `skill_version_get` and `skill_version_materialize` require the selected `contentHash`; revoked versions fail closed. Record invocation evidence and call `skills_materialization_cleanup` at execution termination. See [Agent Skills](agent-skills.md).
 
 ContextHub is not a prompt dump. It is a structured knowledge system that lets an agent retrieve and write durable context when that context has real future value.

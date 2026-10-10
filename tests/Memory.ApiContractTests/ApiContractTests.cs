@@ -394,8 +394,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         bootstrap.Should().NotBeNull();
         bootstrap!.Service.Name.Should().Be("ContextHub");
-        bootstrap.ToolCatalog.BackendToolCount.Should().Be(83);
-        bootstrap.ToolCatalog.AppFacingToolCount.Should().Be(83);
+        bootstrap.ToolCatalog.BackendToolCount.Should().Be(84);
+        bootstrap.ToolCatalog.AppFacingToolCount.Should().Be(84);
         bootstrap.ToolCatalog.DeleteCapableToolCount.Should().Be(3);
         bootstrap.Project.ProjectIdProvided.Should().BeFalse();
         bootstrap.Project.ProjectId.Should().BeNull();

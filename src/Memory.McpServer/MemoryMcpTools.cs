@@ -285,6 +285,11 @@ public sealed class MemoryMcpTools(
     public Task<AgentExecutionMutationResult> agent_execution_abandon(AgentExecutionTerminalRequest request, CancellationToken cancellationToken = default)
         => agentExecutionService.AbandonAsync(request, cancellationToken);
 
+    /// <summary>Expose the existing manager cancellation use case without changing work item lifecycle.</summary>
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Management-only cancellation of an execution with preserved history and audit. Requires Admin or AgentExecutionsManage and project write authority; does not change the business work item.")]
+    public Task<AgentExecutionMutationResult> agent_execution_cancel(AgentExecutionCancelRequest request, CancellationToken cancellationToken = default)
+        => agentExecutionService.CancelAsync(request, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Return a bounded Top-N set of legal SkillVersion candidates for one execution after ACL, lifecycle, binding, capability, risk, version, and policy hard filters. The agent remains responsible for final applicability judgment.")]
     public Task<SkillSearchForExecutionResult> skills_search_for_execution(SkillSearchForExecutionRequest request, CancellationToken cancellationToken = default)
         => skillService.SearchForExecutionAsync(request, cancellationToken);
