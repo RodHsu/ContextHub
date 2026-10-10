@@ -8,7 +8,8 @@
 
     const refreshWhenActive = () => {
         const now = Date.now();
-        if (document.visibilityState !== "visible" ||
+        if (!document.querySelector(".dashboard-shell[data-dashboard-interactive='true']") ||
+            document.visibilityState !== "visible" ||
             now - lastActivityAt > activeWindowMilliseconds ||
             now - lastRefreshAt < minimumRequestIntervalMilliseconds ||
             refreshInFlight) {
@@ -20,13 +21,15 @@
             credentials: "same-origin",
             cache: "no-store"
         })
-            .then(response => {
-                if (response.ok) {
+            .then(async response => {
+                if (response.status === 204) {
+                    // Complete the empty response body before recording a successful refresh.
+                    await response.arrayBuffer();
                     lastRefreshAt = Date.now();
                 }
             })
             .catch(() => {
-                // The next user action retries; preserve the current session on transient failures.
+                // A later active timer retries; preserve the current session on transient failures.
             })
             .finally(() => {
                 refreshInFlight = false;
@@ -35,7 +38,7 @@
 
     const recordActivity = () => {
         lastActivityAt = Date.now();
-        refreshWhenActive();
+        // Refresh on the periodic timer; user input may immediately navigate or submit.
     };
 
     for (const eventName of ["pointerdown", "keydown", "touchstart"]) {
