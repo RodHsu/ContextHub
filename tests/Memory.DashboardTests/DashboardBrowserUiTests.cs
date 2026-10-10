@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -4063,11 +4064,45 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             }})();");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync(new Uri(_fixture.BaseUri, route.Route).ToString(), new PageGotoOptions
+        var pendingRequests = new ConcurrentDictionary<IRequest, string>();
+        var failedRequests = new ConcurrentQueue<string>();
+        void TrackRequest(object? sender, IRequest request)
         {
-            WaitUntil = WaitUntilState.NetworkIdle,
-            Timeout = 15000
-        });
+            pendingRequests[request] = $"{request.ResourceType}: {new Uri(request.Url).AbsolutePath}";
+        }
+
+        void FinishRequest(object? sender, IRequest request) => pendingRequests.TryRemove(request, out _);
+        void FailRequest(object? sender, IRequest request)
+        {
+            if (pendingRequests.TryRemove(request, out var path))
+            {
+                failedRequests.Enqueue(path);
+            }
+        }
+
+        page.Request += TrackRequest;
+        page.RequestFinished += FinishRequest;
+        page.RequestFailed += FailRequest;
+        try
+        {
+            await page.GotoAsync(new Uri(_fixture.BaseUri, route.Route).ToString(), new PageGotoOptions
+            {
+                WaitUntil = WaitUntilState.NetworkIdle,
+                Timeout = 15000
+            });
+        }
+        catch (TimeoutException exception)
+        {
+            throw new TimeoutException(
+                $"Public navigation timed out; pending requests: [{string.Join(", ", pendingRequests.Values.Order())}]; " +
+                $"failed requests: [{string.Join(", ", failedRequests)}]", exception);
+        }
+        finally
+        {
+            page.Request -= TrackRequest;
+            page.RequestFinished -= FinishRequest;
+            page.RequestFailed -= FailRequest;
+        }
 
         await page.GetByRole(AriaRole.Heading, new() { Name = route.Title })
             .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
