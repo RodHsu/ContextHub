@@ -47,6 +47,9 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
         await db.SaveChangesAsync();
         var expected = await db.MemoryItems.AsNoTracking().ForActor(actor)
             .Where(x => x.ProjectId == project || x.ProjectId == "shared").Select(x => x.Id).ToListAsync();
+        var expectedMetadata = await db.MemoryItems.AsNoTracking().ForActor(actor)
+            .Where(x => x.ProjectId == project || x.ProjectId == "shared")
+            .Select(x => new { MemoryId = x.Id, x.ProjectId, x.Version, x.Status, x.UpdatedAt }).ToListAsync();
         var businessBefore = await BusinessCounts(db);
         var request = new MemoryManifestReadRequest(project, Guid.NewGuid(), PageSize: 73, AllAuthorizedProjects: false);
         var first = await service.ReadAsync(request, default);
@@ -75,17 +78,24 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
         var retry = await service.ReadAsync(request, default);
         retry.Should().BeEquivalentTo(first);
         var ids = first.Items.Select(x => x.MemoryId).ToList();
+        var entries = first.Items.ToList();
         var cursor = first.NextCursor;
         while (cursor is not null)
         {
             var page = await service.ReadAsync(request with { SnapshotId = first.SnapshotId, Cursor = cursor }, default);
             page.CountInvariantSatisfied.Should().BeTrue();
             page.AuthorizedTotal.Should().Be(first.AuthorizedTotal);
+            // A lost continuation response is retried with the exact same cursor.
+            (await service.ReadAsync(request with { SnapshotId = first.SnapshotId, Cursor = cursor }, default))
+                .Should().BeEquivalentTo(page);
             ids.AddRange(page.Items.Select(x => x.MemoryId));
+            entries.AddRange(page.Items);
             cursor = page.NextCursor;
         }
         ids.Order().Should().Equal(expected.Order());
         ids.Distinct().Should().HaveCount(expected.Count);
+        entries.Select(x => new { x.MemoryId, x.ProjectId, x.Version, x.Status, x.UpdatedAt })
+            .Should().BeEquivalentTo(expectedMetadata);
         var serialized = JsonSerializer.Serialize(first);
         serialized.Should().NotContain("stopped-fixture-content").And.NotContain("private-fixture");
         var verification = await service.VerifyAsync(new(project, first.SnapshotId, [changed.Id, archived.Id, moved.Id]), default);
@@ -98,6 +108,11 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
         var next = await recreated.ReadAsync(request with { RequestId = Guid.NewGuid() }, default);
         next.SnapshotId.Should().NotBe(first.SnapshotId);
         next.AuthorizedTotal.Should().Be(first.AuthorizedTotal);
+        var freshChanged = await recreated.VerifyAsync(new(project, next.SnapshotId, [changed.Id, archived.Id, inserted.Id]), default);
+        freshChanged.Should().OnlyContain(x => x.State == "Unchanged");
+        freshChanged.Single(x => x.MemoryId == changed.Id).CurrentVersion.Should().Be(changed.Version);
+        var movedNotInNew = () => recreated.VerifyAsync(new(project, next.SnapshotId, [moved.Id]), default);
+        (await movedNotInNew.Should().ThrowAsync<MemoryManifestException>()).Which.Code.Should().Be("memory-not-in-snapshot");
         (await BusinessCounts(db)).Should().BeEquivalentTo(businessBefore with { Memories = businessBefore.Memories + 1 });
         // A read-only freeze must never become an executable review or a tracker exclusion authority.
         var stored = await db.KnowledgeGovernanceSnapshots.AsNoTracking().SingleAsync(x => x.Id == first.SnapshotId);
@@ -112,6 +127,74 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
         restartedAccessor.Current = actor;
         var restartedService = restartedScope.ServiceProvider.GetRequiredService<IMemoryManifestService>();
         (await restartedService.ReadAsync(request, default)).Should().BeEquivalentTo(first);
+    }
+
+    [DockerRequiredFact]
+    public async Task Case_alias_inventory_and_verification_use_existing_identity_without_crossing_actor_boundaries()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var (db, actor, service, project) = Setup(scope.ServiceProvider);
+        var aliases = new[] { project, project.ToUpperInvariant(), "Manifest-" + project[9..], "MANIFEST-" + project[9..] };
+        var tenant = new Tenant { Slug = "manifest-" + Guid.NewGuid().ToString("N"), DisplayName = "Manifest fixture isolation" };
+        var otherOwner = new TenantUser { TenantId = actor.TenantId!.Value, Username = "manifest-owner-" + Guid.NewGuid().ToString("N") };
+        var foreignOwner = new TenantUser { TenantId = tenant.Id, Username = "manifest-foreign-" + Guid.NewGuid().ToString("N") };
+        db.Tenants.Add(tenant);
+        db.TenantUsers.AddRange(otherOwner, foreignOwner);
+        await db.SaveChangesAsync();
+        var now = DateTimeOffset.UtcNow;
+        var rows = aliases.Select(alias => new MemoryItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = alias,
+            ExternalKey = Guid.NewGuid().ToString(),
+            Scope = MemoryScope.Project,
+            MemoryType = MemoryType.Fact,
+            Status = MemoryStatus.Active,
+            Version = 3,
+            CreatedAt = now,
+            UpdatedAt = now
+        }).ToArray();
+        db.MemoryItems.AddRange(rows);
+        db.MemoryItems.Add(new MemoryItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = otherOwner.Id,
+            ProjectId = aliases[1],
+            ExternalKey = Guid.NewGuid().ToString(),
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        db.MemoryItems.Add(new MemoryItem
+        {
+            TenantId = tenant.Id,
+            OwnerUserId = foreignOwner.Id,
+            ProjectId = aliases[0],
+            ExternalKey = Guid.NewGuid().ToString(),
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        var request = new MemoryManifestReadRequest(aliases[2], Guid.NewGuid(), PageSize: 2, AllAuthorizedProjects: false);
+        var first = await service.ReadAsync(request, default);
+        var entries = first.Items.ToList();
+        var cursor = first.NextCursor;
+        while (cursor is not null)
+        {
+            var page = await service.ReadAsync(request with { SnapshotId = first.SnapshotId, Cursor = cursor }, default);
+            entries.AddRange(page.Items);
+            cursor = page.NextCursor;
+        }
+        entries.Where(x => ProjectContext.Matches(x.ProjectId, project)).Select(x => x.MemoryId)
+            .Should().BeEquivalentTo(rows.Select(x => x.Id));
+        entries.Where(x => ProjectContext.Matches(x.ProjectId, project)).Select(x => x.ProjectId)
+            .Should().BeEquivalentTo(aliases);
+        var verified = await service.VerifyAsync(new(aliases[1], first.SnapshotId, rows.Select(x => x.Id).ToArray()), default);
+        verified.Should().OnlyContain(x => x.State == "Unchanged" && x.CurrentVersion == 3);
+        db.TenantProjectGrants.Add(new TenantProjectGrant { TenantId = actor.TenantId!.Value, ProjectId = aliases[1], CanRead = false });
+        await db.SaveChangesAsync();
+        var revoked = () => service.ReadAsync(request with { SnapshotId = first.SnapshotId }, default);
+        (await revoked.Should().ThrowAsync<MemoryManifestException>()).Which.Code.Should().Be("manifest-access-changed");
     }
 
     [DockerRequiredFact]

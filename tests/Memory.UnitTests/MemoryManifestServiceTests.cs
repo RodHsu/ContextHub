@@ -10,6 +10,30 @@ namespace Memory.UnitTests;
 public sealed class MemoryManifestServiceTests
 {
     [Fact]
+    public async Task Alias_members_are_complete_and_keep_original_spelling_and_actor_isolation()
+    {
+        await using var fixture = new Fixture();
+        var aliases = new[] { "TT", "Tt", "tT", "tt" };
+        var rows = aliases.Select(x => fixture.Item(x, MemoryStatus.Active)).ToArray();
+        var foreignOwner = fixture.Item("tt", MemoryStatus.Active);
+        foreignOwner.OwnerUserId = Guid.NewGuid();
+        var foreignTenant = fixture.Item("TT", MemoryStatus.Active);
+        foreignTenant.TenantId = Guid.NewGuid();
+        fixture.Db.MemoryItems.AddRange(rows.Concat([foreignOwner, foreignTenant, fixture.Item("TT-1", MemoryStatus.Active)]));
+        await fixture.Db.SaveChangesAsync();
+        var request = new MemoryManifestReadRequest("Tt", Guid.NewGuid(), PageSize: 2, AllAuthorizedProjects: false);
+        var first = await fixture.Service.ReadAsync(request, default);
+        first.AuthorizedTotal.Should().Be(4);
+        var second = await fixture.Service.ReadAsync(request with { SnapshotId = first.SnapshotId, Cursor = first.NextCursor }, default);
+        var entries = first.Items.Concat(second.Items).ToArray();
+        entries.Select(x => x.MemoryId).Should().BeEquivalentTo(rows.Select(x => x.Id));
+        entries.Select(x => x.ProjectId).Should().BeEquivalentTo(aliases);
+        second.EndOfSnapshot.Should().BeTrue();
+        var verification = await fixture.Service.VerifyAsync(new("tt", first.SnapshotId, rows.Select(x => x.Id).ToArray()), default);
+        verification.Should().OnlyContain(x => x.State == "Unchanged");
+    }
+
+    [Fact]
     public async Task Application_freeze_and_continuation_use_persisted_members_without_business_mutation()
     {
         await using var fixture = new Fixture();

@@ -169,8 +169,8 @@ public sealed class MemoryManifestService(
     internal IQueryable<MemoryManifestEntry> ProjectEntries(ContextHubRequestActor actor, IReadOnlyList<string> projects,
         IReadOnlyList<Guid>? ids = null)
         => (ids is null
-                ? dbContext.MemoryItems.AsNoTracking().ForActor(actor).Where(x => projects.Contains(x.ProjectId))
-                : dbContext.MemoryItems.AsNoTracking().ForActor(actor).Where(x => projects.Contains(x.ProjectId) && ids.Contains(x.Id)))
+                ? dbContext.MemoryItems.AsNoTracking().ForActor(actor).Where(x => ProjectContext.IdentityKeys(projects).Contains(ProjectContext.IdentityKey(x.ProjectId)))
+                : dbContext.MemoryItems.AsNoTracking().ForActor(actor).Where(x => ProjectContext.IdentityKeys(projects).Contains(ProjectContext.IdentityKey(x.ProjectId)) && ids.Contains(x.Id)))
             .Select(x => new MemoryManifestEntry(x.Id, x.ProjectId, x.MemoryType, x.Scope, x.Status, x.Version,
                 x.UpdatedAt, x.IsReadOnly, x.Revisions.Where(r => r.Version == x.Version).Select(r => (Guid?)r.Id).FirstOrDefault(),
                 x.Id.ToString() + ":v" + x.Version,
@@ -187,8 +187,8 @@ public sealed class MemoryManifestService(
             actor.UserId,
             actor.Role,
             Scopes = actor.Scopes.Select(x => x.ToLowerInvariant()).Distinct().Order().ToArray(),
-            Allowed = actor.AllowedProjectIds.Select(x => x.ToLowerInvariant()).Distinct().Order().ToArray(),
-            Projects = projects.Select(x => x.ToLowerInvariant()).Distinct().Order().ToArray()
+            Allowed = ProjectContext.IdentityKeys(actor.AllowedProjectIds),
+            Projects = ProjectContext.IdentityKeys(projects)
         })));
 
     private async Task<string> CurrentAccessIdentityAsync(ContextHubRequestActor actor, IReadOnlyList<string> projects,
@@ -200,11 +200,11 @@ public sealed class MemoryManifestService(
         {
             Actor = AccessIdentity(actor, projects),
             Grants = grants.Where(x => projects.Contains(x.ProjectId, ProjectContext.IdentityComparer))
-                .OrderBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => ProjectContext.IdentityKey(x.ProjectId), StringComparer.Ordinal)
                 .Select(x => new
                 {
                     x.Id,
-                    Project = x.ProjectId.ToLowerInvariant(),
+                    Project = ProjectContext.IdentityKey(x.ProjectId),
                     x.CanRead,
                     x.CanWrite,
                     UpdatedAt = x.UpdatedAt.ToUniversalTime()

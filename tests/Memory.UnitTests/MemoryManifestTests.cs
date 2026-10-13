@@ -62,6 +62,9 @@ public sealed class MemoryManifestTests
             [SecurityScopes.MemoryRead], ["TT"], true);
         var identity = MemoryManifestService.AccessIdentity(actor, ["TT", "shared"]);
         MemoryManifestService.AccessIdentity(actor with { AllowedProjectIds = ["tt"] }, ["tt", "shared"]).Should().Be(identity);
+        var unicodeActor = actor with { AllowedProjectIds = ["Σ"] };
+        MemoryManifestService.AccessIdentity(unicodeActor, ["Σ", "shared"]).Should().Be(
+            MemoryManifestService.AccessIdentity(unicodeActor with { AllowedProjectIds = ["ς"] }, ["ς", "shared"]));
         MemoryManifestService.AccessIdentity(actor with { UserId = Guid.NewGuid() }, ["TT", "shared"]).Should().NotBe(identity);
         MemoryManifestService.AccessIdentity(actor with { TenantId = Guid.NewGuid() }, ["TT", "shared"]).Should().NotBe(identity);
         MemoryManifestService.AccessIdentity(actor with { AllowedProjectIds = [] }, ["TT", "shared"]).Should().NotBe(identity);

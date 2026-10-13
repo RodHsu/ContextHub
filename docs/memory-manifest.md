@@ -4,6 +4,8 @@ The authenticated general MCP tools `memory_manifest_read` and `memory_manifest_
 
 Start with an explicit non-default `projectId` and a caller-generated UUID `requestId`. By default the service freezes all authorized governance projects, including hidden, archived, default and legacy projects, plus Shared exactly once. User-project preferences stay on their independent surface. Set `allAuthorizedProjects=false` to freeze the context project and explicit `includedProjectIds`, plus Shared. The same resolver and durable grants apply to both modes.
 
+Membership queries and access identities use the existing ProjectId identity contract, including Unicode case equivalence; `TT`, `Tt`, `tT` and `tt` members are all included while each entry retains its stored spelling. Tenant and owner filters remain independent. A snapshot whose saved access fingerprint no longer matches the current identity contract fails closed with `manifest-access-changed`; it is never silently replaced or backfilled.
+
 ```json
 {
   "projectId": "ExampleProject",
