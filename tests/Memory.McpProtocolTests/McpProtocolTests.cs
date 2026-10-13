@@ -17,6 +17,53 @@ namespace Memory.McpProtocolTests;
 
 public sealed class McpProtocolTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
+    [Fact]
+    public async Task Manifest_tool_preserves_explicit_failure_code_instead_of_generic_server_error()
+    {
+        var type = typeof(Memory.McpServer.MemoryMcpTools);
+        var args = type.GetConstructors().Single().GetParameters()
+            .Select(p => p.ParameterType == typeof(IMemoryManifestService) ? (object)new RejectManifest() : null).ToArray();
+        var tools = (Memory.McpServer.MemoryMcpTools)Activator.CreateInstance(type, args)!;
+        var read = () => tools.memory_manifest_read(new("ContextHub", Guid.NewGuid()));
+        (await read.Should().ThrowAsync<ModelContextProtocol.McpException>()).Which.Message.Should().Be("manifest-expired");
+        var verify = () => tools.memory_manifest_verify(new("ContextHub", Guid.NewGuid(), [Guid.NewGuid()]));
+        (await verify.Should().ThrowAsync<ModelContextProtocol.McpException>()).Which.Message.Should().Be("manifest-access-changed");
+    }
+
+    private sealed class RejectManifest : IMemoryManifestService
+    {
+        public Task<MemoryManifestPage> ReadAsync(MemoryManifestReadRequest request, CancellationToken cancellationToken)
+            => throw new MemoryManifestException("manifest-expired");
+        public Task<IReadOnlyList<MemoryManifestVerification>> VerifyAsync(MemoryManifestVerifyRequest request, CancellationToken cancellationToken)
+            => throw new MemoryManifestException("manifest-access-changed");
+    }
+
+    [DockerRequiredFact]
+    public async Task Streamable_http_manifest_contract_is_published_and_replays_one_snapshot()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri(client.BaseAddress!, "/mcp"),
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, client);
+        await using var mcp = await McpClient.CreateAsync(transport);
+        var tools = await mcp.ListToolsAsync();
+        tools.Select(x => x.Name).Should().Contain(["memory_manifest_read", "memory_manifest_verify"]);
+        var requestId = Guid.NewGuid();
+        var args = new { name = "memory_manifest_read", arguments = new { request = new { projectId = "ContextHub", requestId, allAuthorizedProjects = false, pageSize = 100 } } };
+        var first = ExtractToolJson(await SendMcpAsync(client, null!, 30, "tools/call", args));
+        var replay = ExtractToolJson(await SendMcpAsync(client, null!, 31, "tools/call", args));
+        replay.GetProperty("snapshotId").GetString().Should().Be(first.GetProperty("snapshotId").GetString());
+        first.GetProperty("countInvariantSatisfied").GetBoolean().Should().BeTrue();
+        foreach (var item in first.GetProperty("items").EnumerateArray())
+        {
+            item.TryGetProperty("content", out _).Should().BeFalse();
+            item.TryGetProperty("summary", out _).Should().BeFalse();
+            item.TryGetProperty("sourceRef", out _).Should().BeFalse();
+        }
+    }
+
     [DockerRequiredFact]
     public async Task Streamable_http_project_aliases_update_one_record_and_preserve_its_original_spelling()
     {
@@ -539,7 +586,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_items_list");
         var governanceBatchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
-        listedTools.GetArrayLength().Should().Be(84);
+        listedTools.GetArrayLength().Should().Be(86);
         var bootstrapResult = ExtractSseJson(bootstrapPayload).GetProperty("result");
 
         toolsPayload.Should().Contain("describe_context_hub");

@@ -297,6 +297,16 @@ dashboard.MapGet("/operations", async (string? projectId, IDashboardQueryService
 var memories = app.MapGroup("/api/memories");
 memories.RequireAuthIfEnabled(requireAuthentication);
 memories.RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+memories.MapPost("/manifest/read", async (MemoryManifestReadRequest request, IMemoryManifestService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.ReadAsync(request, cancellationToken)); }
+    catch (MemoryManifestException ex) { return Results.Problem(title: ex.Code, statusCode: StatusCodes.Status409Conflict); }
+});
+memories.MapPost("/manifest/verify", async (MemoryManifestVerifyRequest request, IMemoryManifestService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.VerifyAsync(request, cancellationToken)); }
+    catch (MemoryManifestException ex) { return Results.Problem(title: ex.Code, statusCode: StatusCodes.Status409Conflict); }
+});
 memories.MapGet(string.Empty, async (
     string? query,
     string? scope,

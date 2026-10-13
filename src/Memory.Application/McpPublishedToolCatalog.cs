@@ -2,10 +2,12 @@ namespace Memory.Application;
 
 public static class McpPublishedToolCatalog
 {
-    public const string AppFacingCatalogVersion = "2026-10-10-v10";
+    public const string AppFacingCatalogVersion = "2026-10-13-v11";
 
     public static IReadOnlySet<string> RestrictedToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
+        "memory_manifest_read",
+        "memory_manifest_verify",
         "describe_context_hub",
         "projects_list",
         "daily_memory_review",
@@ -118,6 +120,8 @@ public static class McpPublishedToolCatalog
 
     public static IReadOnlySet<string> QueryToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
+        "memory_manifest_read",
+        "memory_manifest_verify",
         "describe_context_hub",
         "projects_list",
         "daily_memory_review",

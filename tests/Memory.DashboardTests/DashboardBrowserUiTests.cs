@@ -2978,6 +2978,10 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         });
         await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0) > 0");
 
+        // The published target scale precedes the 220ms CSS paint transition.
+        await page.EvaluateAsync("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+        await page.WaitForFunctionAsync("() => { const content = document.querySelector('.graph-pan-content'); return content && content.getAnimations().every(animation => animation.playState !== 'running' && !animation.pending); }");
+
         var layoutJson = await page.EvaluateAsync<string>(
             @"() => JSON.stringify({
                 scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
@@ -4609,6 +4613,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
     private IPlaywright? _playwright;
     private IBrowser? _browser;
     private Process? _process;
+    private int _listeningPort;
     private readonly int _port = GetFreeTcpPort();
 
     public Uri BaseUri => new($"http://127.0.0.1:{_port}/");
@@ -4722,10 +4727,11 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
             StringComparison.OrdinalIgnoreCase)
             ? "Release"
             : "Debug";
-        var startInfo = new ProcessStartInfo("dotnet", $"run --no-build --configuration {configuration} --project \"{dashboardProject}\" -- --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
+        var startInfo = new ProcessStartInfo("dotnet", $"run --no-build --no-launch-profile --configuration {configuration} --project \"{dashboardProject}\" -- --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
         {
             WorkingDirectory = repoRoot,
             UseShellExecute = false,
+            CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
@@ -4744,7 +4750,15 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         startInfo.Environment["Memory__Namespace"] = "context-hub-browser";
 
         _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start dashboard process for browser tests.");
-        _ = _process.StandardOutput.ReadToEndAsync();
+        _process.OutputDataReceived += (_, entry) =>
+        {
+            const string marker = "Now listening on: ";
+            var line = entry.Data;
+            var offset = line?.IndexOf(marker, StringComparison.Ordinal) ?? -1;
+            if (offset >= 0 && Uri.TryCreate(line![(offset + marker.Length)..].Trim(), UriKind.Absolute, out var address) && address.IsLoopback)
+                Interlocked.Exchange(ref _listeningPort, address.Port);
+        };
+        _process.BeginOutputReadLine();
         _ = _process.StandardError.ReadToEndAsync();
     }
 
@@ -4768,6 +4782,8 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "browser-test-dashboard-token");
 
         var deadline = DateTime.UtcNow.AddSeconds(30);
+        int? lastStatus = null;
+        string? lastFailure = null;
         while (DateTime.UtcNow < deadline)
         {
             if (_process is not null && _process.HasExited)
@@ -4778,19 +4794,21 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
             try
             {
                 using var response = await client.GetAsync(new Uri(BaseUri, "/health/live"));
+                lastStatus = (int)response.StatusCode;
                 if (response.StatusCode == HttpStatusCode.OK)
                 {
                     return;
                 }
             }
-            catch
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
             {
+                lastFailure = exception.GetType().Name;
             }
 
             await Task.Delay(500);
         }
 
-        throw new TimeoutException("Timed out waiting for dashboard browser test host to become ready.");
+        throw new TimeoutException($"Dashboard browser test host readiness failed: listeningPort={_listeningPort}, expectedPort={_port}, lastStatus={lastStatus}, lastFailure={lastFailure}.");
     }
 
     private static int GetFreeTcpPort()

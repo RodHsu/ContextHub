@@ -2470,6 +2470,7 @@ public sealed record DurableMemoryGovernanceSnapshotResult(
     IReadOnlyList<KnowledgeGovernanceCandidateResult> ProjectCandidates,
     IReadOnlyList<KnowledgeGovernanceCandidateResult> SharedCandidates)
 {
+    public MemoryManifestData? ReadManifest { get; init; }
     public int DeferredCount { get; init; }
     public int RequiresUserDecisionCount { get; init; }
     public int HostBlockedCount { get; init; }

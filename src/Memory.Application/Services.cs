@@ -2645,6 +2645,7 @@ public static class DependencyInjection
         services.AddScoped<IFullGovernancePlanService, FullGovernancePlanService>();
         services.AddScoped<IGovernanceBatchExecutor, GovernanceBatchExecutor>();
         services.AddScoped<IDurableMemoryGovernanceService, DurableMemoryGovernanceService>();
+        services.AddScoped<IMemoryManifestService, MemoryManifestService>();
         services.AddScoped<IProjectInformationService, ProjectInformationService>();
         services.AddScoped<IProjectDiscussionService, ProjectDiscussionService>();
         services.AddScoped<IProjectWorkItemService, ProjectWorkItemService>();

@@ -438,3 +438,6 @@ ContextHub is useful only when these remain true:
 - Forgetting to reindex after embedding changes
 - Treating health checks as a substitute for search quality and job status
 - Exposing `/mcp` to untrusted chat agents instead of using `/mcp-chat`
+# Metadata-only full memory inventory
+
+For immutable full ID/version enumeration, use the general `memory_manifest_read` and `memory_manifest_verify` tools. Follow [the manifest contract](memory-manifest.md) for stable continuation, current ACL checks, expiry, version drift and historical-snapshot limitations. A live memory search/list/export is not an immutable inventory; a manifest does not complete content review. These tools do not extend the dedicated Scheduled Governance surface.

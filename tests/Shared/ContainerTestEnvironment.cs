@@ -218,6 +218,14 @@ public sealed class DockerRequiredFactAttribute : FactAttribute
 }
 
 public sealed record DockerAvailabilityResult(bool IsAvailable, string Reason);
+public sealed class DockerRequiredTheoryAttribute : TheoryAttribute
+{
+    public DockerRequiredTheoryAttribute()
+    {
+        if (!DockerTestGate.Current.IsAvailable)
+            Skip = DockerTestGate.Current.Reason;
+    }
+}
 
 public static class DockerTestGate
 {
