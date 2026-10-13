@@ -172,7 +172,7 @@ public sealed class MemoryManifestService(
                 ? dbContext.MemoryItems.AsNoTracking().ForActor(actor).Where(x => ProjectContext.IdentityKeys(projects).Contains(ProjectContext.IdentityKey(x.ProjectId)))
                 : dbContext.MemoryItems.AsNoTracking().ForActor(actor).Where(x => ProjectContext.IdentityKeys(projects).Contains(ProjectContext.IdentityKey(x.ProjectId)) && ids.Contains(x.Id)))
             .Select(x => new MemoryManifestEntry(x.Id, x.ProjectId, x.MemoryType, x.Scope, x.Status, x.Version,
-                x.UpdatedAt, x.IsReadOnly, x.Revisions.Where(r => r.Version == x.Version).Select(r => (Guid?)r.Id).FirstOrDefault(),
+                x.UpdatedAt, x.IsReadOnly, x.Revisions.Where(r => r.Version == x.Version).OrderBy(r => r.Id).Select(r => (Guid?)r.Id).FirstOrDefault(),
                 x.Id.ToString() + ":v" + x.Version,
                 x.ExternalKey == DurableMemoryGovernancePolicy.ProjectInformationExternalKey
                     ? (x.Content.Trim(WhiteSpaceCharacters) == "" && x.Summary.Trim(WhiteSpaceCharacters) == ""

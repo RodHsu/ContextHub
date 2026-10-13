@@ -34,6 +34,26 @@ public sealed class MemoryManifestServiceTests
     }
 
     [Fact]
+    public async Task Available_revision_identity_is_stable_with_duplicate_versions_and_missing_revisions()
+    {
+        await using var fixture = new Fixture();
+        var item = fixture.Item("TT", MemoryStatus.Active);
+        var missing = fixture.Item("TT", MemoryStatus.Active);
+        var selected = Guid.Parse("11111111-1111-4111-8111-111111111111");
+        item.Revisions.Add(new MemoryItemRevision { Id = Guid.Parse("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"), Version = 1 });
+        item.Revisions.Add(new MemoryItemRevision { Id = selected, Version = 1 });
+        item.Revisions.Add(new MemoryItemRevision { Id = Guid.Empty, Version = 2 });
+        fixture.Db.MemoryItems.AddRange(item, missing);
+        await fixture.Db.SaveChangesAsync();
+        var request = new MemoryManifestReadRequest("TT", Guid.NewGuid(), AllAuthorizedProjects: false);
+        var page = await fixture.Service.ReadAsync(request, default);
+        page.Items.Single(x => x.MemoryId == item.Id).RevisionId.Should().Be(selected);
+        page.Items.Single(x => x.MemoryId == missing.Id).RevisionId.Should().BeNull();
+        (await fixture.Service.VerifyAsync(new("TT", page.SnapshotId, [item.Id, missing.Id]), default))
+            .Should().OnlyContain(x => x.State == "Unchanged");
+    }
+
+    [Fact]
     public async Task Application_freeze_and_continuation_use_persisted_members_without_business_mutation()
     {
         await using var fixture = new Fixture();

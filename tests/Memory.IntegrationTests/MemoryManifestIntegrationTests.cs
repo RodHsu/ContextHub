@@ -7,12 +7,163 @@ using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Memory.IntegrationTests;
 
 public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Concurrent_freezes_with_one_request_id_recover_the_same_persisted_winner()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var (db, actor, _, project) = Setup(scope.ServiceProvider);
+        var before = await BusinessCounts(db);
+        var request = new MemoryManifestReadRequest(project, Guid.NewGuid(), AllAuthorizedProjects: false);
+        var barrier = new FreezeBarrier(2);
+        await using var firstDb = InterceptedDb(scope.ServiceProvider, barrier);
+        await using var secondDb = InterceptedDb(scope.ServiceProvider, barrier);
+        var first = ManifestService(firstDb, actor);
+        var second = ManifestService(secondDb, actor);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var firstRead = first.ReadAsync(request, timeout.Token);
+        var secondRead = second.ReadAsync(request, timeout.Token);
+        try
+        {
+            await barrier.Arrived.WaitAsync(timeout.Token);
+            barrier.Release();
+            var pages = await Task.WhenAll(firstRead, secondRead);
+            pages[0].Should().BeEquivalentTo(pages[1]);
+            (await db.KnowledgeGovernanceSnapshots.CountAsync(x => x.Id == pages[0].SnapshotId)).Should().Be(1);
+            (await db.KnowledgeGovernanceSnapshots.CountAsync(x => x.GovernanceRunId ==
+                MemoryManifestService.StoragePrefix + request.RequestId.ToString("N"))).Should().Be(1);
+            firstDb.ChangeTracker.Entries().Should().NotContain(x => x.State == EntityState.Added);
+            secondDb.ChangeTracker.Entries().Should().NotContain(x => x.State == EntityState.Added);
+            (await BusinessCounts(db)).Should().BeEquivalentTo(before);
+        }
+        finally
+        {
+            barrier.Release();
+            await timeout.CancelAsync();
+            await ObserveCompletion(firstRead, secondRead);
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Revocation_after_projection_before_save_returns_no_page_and_never_refreezes_the_request()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var (db, actor, _, project) = Setup(scope.ServiceProvider);
+        var request = new MemoryManifestReadRequest(project, Guid.NewGuid(), AllAuthorizedProjects: false);
+        var barrier = new FreezeBarrier(1);
+        await using var freezingDb = InterceptedDb(scope.ServiceProvider, barrier);
+        var service = ManifestService(freezingDb, actor);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var pending = service.ReadAsync(request, timeout.Token);
+        try
+        {
+            await barrier.Arrived.WaitAsync(timeout.Token);
+            var grant = new TenantProjectGrant { TenantId = actor.TenantId!.Value, ProjectId = project, CanRead = false };
+            db.TenantProjectGrants.Add(grant);
+            await db.SaveChangesAsync(timeout.Token);
+            barrier.Release();
+            var denied = () => pending;
+            (await denied.Should().ThrowAsync<MemoryManifestException>()).Which.Code.Should().Be("manifest-access-changed");
+            var savedCount = await db.KnowledgeGovernanceSnapshots.CountAsync();
+            grant.CanRead = true;
+            grant.UpdatedAt = grant.UpdatedAt.AddSeconds(1);
+            await db.SaveChangesAsync(timeout.Token);
+            var retry = () => service.ReadAsync(request, timeout.Token);
+            (await retry.Should().ThrowAsync<MemoryManifestException>()).Which.Code.Should().Be("manifest-access-changed");
+            (await db.KnowledgeGovernanceSnapshots.CountAsync()).Should().Be(savedCount);
+            (await service.ReadAsync(request with { RequestId = Guid.NewGuid() }, timeout.Token)).CountInvariantSatisfied.Should().BeTrue();
+        }
+        finally
+        {
+            barrier.Release();
+            await timeout.CancelAsync();
+            await ObserveCompletion(pending);
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Cancellation_before_save_allows_fresh_context_retry_of_the_same_request_id()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var (db, actor, _, project) = Setup(scope.ServiceProvider);
+        var request = new MemoryManifestReadRequest(project, Guid.NewGuid(), AllAuthorizedProjects: false);
+        var before = await db.KnowledgeGovernanceSnapshots.CountAsync();
+        var barrier = new FreezeBarrier(1);
+        await using var cancelledDb = InterceptedDb(scope.ServiceProvider, barrier);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var pending = ManifestService(cancelledDb, actor).ReadAsync(request, cancellation.Token);
+        try
+        {
+            await barrier.Arrived.WaitAsync(cancellation.Token);
+            await cancellation.CancelAsync();
+            var cancelled = () => pending;
+            await cancelled.Should().ThrowAsync<OperationCanceledException>();
+            (await db.KnowledgeGovernanceSnapshots.CountAsync()).Should().Be(before);
+            await using var retryDb = InterceptedDb(scope.ServiceProvider, new FreezeBarrier(0));
+            var service = ManifestService(retryDb, actor);
+            var page = await service.ReadAsync(request, default);
+            (await service.ReadAsync(request, default)).Should().BeEquivalentTo(page);
+            (await db.KnowledgeGovernanceSnapshots.CountAsync()).Should().Be(before + 1);
+        }
+        finally
+        {
+            barrier.Release();
+            await cancellation.CancelAsync();
+            await ObserveCompletion(pending);
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Available_revision_identity_is_deterministic_in_postgresql_without_body_projection()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var (db, _, service, project) = Setup(scope.ServiceProvider);
+        var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
+        var selected = Guid.Parse("11111111-1111-4111-8111-111111111111");
+        var item = new MemoryItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = project,
+            ExternalKey = Guid.NewGuid().ToString(),
+            Version = 2
+        };
+        var missing = new MemoryItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = project,
+            ExternalKey = Guid.NewGuid().ToString(),
+            Version = 2
+        };
+        item.Revisions.Add(new MemoryItemRevision { Id = Guid.NewGuid(), Version = 1, Content = "private-revision-body" });
+        item.Revisions.Add(new MemoryItemRevision { Id = Guid.Parse("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"), Version = 2, Content = "private-revision-body" });
+        item.Revisions.Add(new MemoryItemRevision { Id = selected, Version = 2, Content = "private-revision-body" });
+        db.MemoryItems.AddRange(item, missing);
+        await db.SaveChangesAsync();
+        var request = new MemoryManifestReadRequest(project, Guid.NewGuid(), AllAuthorizedProjects: false);
+        var first = await service.ReadAsync(request, default);
+        var entries = first.Items.ToList();
+        var cursor = first.NextCursor;
+        while (cursor is not null)
+        {
+            var page = await service.ReadAsync(request with { SnapshotId = first.SnapshotId, Cursor = cursor }, default);
+            entries.AddRange(page.Items);
+            cursor = page.NextCursor;
+        }
+        entries.Single(x => x.MemoryId == item.Id).RevisionId.Should().Be(selected);
+        entries.Single(x => x.MemoryId == missing.Id).RevisionId.Should().BeNull();
+        JsonSerializer.Serialize(first).Should().NotContain("private-revision-body");
+        (await service.VerifyAsync(new(project, first.SnapshotId, [item.Id, missing.Id]), default))
+            .Should().OnlyContain(x => x.State == "Unchanged");
+    }
+
     [DockerRequiredFact]
     public async Task Full_frozen_inventory_survives_live_changes_timeout_replay_and_new_service_instance()
     {
@@ -280,6 +431,51 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
             [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite], [], true);
         services.GetRequiredService<IRequestActorAccessor>().Current = actor;
         return (db, actor, services.GetRequiredService<IMemoryManifestService>(), "manifest-" + Guid.NewGuid().ToString("N"));
+    }
+
+    private static MemoryDbContext InterceptedDb(IServiceProvider services, FreezeBarrier barrier)
+        => new(new DbContextOptionsBuilder<MemoryDbContext>(services.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .AddInterceptors(barrier).Options);
+
+    private static MemoryManifestService ManifestService(MemoryDbContext db, ContextHubRequestActor actor)
+    {
+        var accessor = new RequestActorAccessor { Current = actor };
+        return new(db, new GovernanceProjectScopeResolver(db, new EmptyProjects(), accessor), accessor,
+            new TestClock { UtcNow = DateTimeOffset.UtcNow });
+    }
+
+    private static async Task ObserveCompletion(params Task[] tasks)
+    {
+        try { await Task.WhenAll(tasks); }
+        catch (OperationCanceledException) { }
+        catch (MemoryManifestException) { }
+    }
+
+    private sealed class EmptyProjects : IAccessibleProjectService
+    {
+        public Task<IReadOnlyList<AccessibleProjectResult>> ListAsync(int limit, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<AccessibleProjectResult>>([]);
+    }
+
+    private sealed class FreezeBarrier(int participants) : SaveChangesInterceptor
+    {
+        private readonly TaskCompletionSource arrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly bool shouldWait = participants > 0;
+        private int remaining = participants;
+        public Task Arrived => arrived.Task;
+        public void Release() => release.TrySetResult();
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (shouldWait && eventData.Context!.ChangeTracker.Entries<KnowledgeGovernanceSnapshot>()
+                .Any(x => x.State == EntityState.Added))
+            {
+                if (Interlocked.Decrement(ref remaining) == 0) arrived.TrySetResult();
+                await release.Task.WaitAsync(cancellationToken);
+            }
+            return result;
+        }
     }
 
     private sealed class TestClock : IClock { public DateTimeOffset UtcNow { get; set; } }
