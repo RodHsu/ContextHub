@@ -17,7 +17,11 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
     public async Task Full_frozen_inventory_survives_live_changes_timeout_replay_and_new_service_instance()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
-        var (db, actor, service, project) = Setup(scope.ServiceProvider);
+        var (db, actor, _, project) = Setup(scope.ServiceProvider);
+        var clock = new TestClock { UtcNow = DateTimeOffset.UtcNow.AddTicks(7) };
+        clock.UtcNow = clock.UtcNow.AddTicks(7 - clock.UtcNow.Ticks % 10);
+        var service = new MemoryManifestService(db, scope.ServiceProvider.GetRequiredService<IGovernanceProjectScopeResolver>(),
+            scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>(), clock);
         var now = DateTimeOffset.UtcNow;
         var rows = Enumerable.Range(0, 3281).Select(i => new MemoryItem
         {
@@ -102,6 +106,12 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
         await executeRead.Should().ThrowAsync<GovernanceBatchException>();
         var analyze = () => durable.GetOrCreateSnapshotAsync([project], stored.GovernanceRunId, false, default);
         await analyze.Should().ThrowAsync<InvalidOperationException>();
+        await environment.RestartApplicationAsync();
+        using var restartedScope = environment.GetFactory().Services.CreateScope();
+        var restartedAccessor = restartedScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        restartedAccessor.Current = actor;
+        var restartedService = restartedScope.ServiceProvider.GetRequiredService<IMemoryManifestService>();
+        (await restartedService.ReadAsync(request, default)).Should().BeEquivalentTo(first);
     }
 
     [DockerRequiredFact]

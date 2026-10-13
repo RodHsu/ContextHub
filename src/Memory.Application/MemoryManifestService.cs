@@ -46,7 +46,9 @@ public sealed class MemoryManifestService(
             var entries = await ProjectEntries(actor, projects).ToListAsync(cancellationToken);
             // Sorting the materialized projection gives provider-independent, immutable positions.
             entries = entries.OrderBy(x => x.MemoryId).ToList();
-            var now = clock.UtcNow;
+            // PostgreSQL timestamps retain microseconds; first response and persisted replay must agree.
+            var now = clock.UtcNow.ToUniversalTime();
+            now = now.AddTicks(-(now.Ticks % 10));
             var manifest = new MemoryManifestData(project, request.AllAuthorizedProjects, requested, projects,
                 identity, now.AddHours(24), Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), entries);
             var id = Guid.NewGuid();
