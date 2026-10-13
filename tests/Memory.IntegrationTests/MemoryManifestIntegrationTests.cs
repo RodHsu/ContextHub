@@ -194,6 +194,7 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
         }).ToArray();
         rows[0].ExternalKey = DurableMemoryGovernancePolicy.ProjectInformationExternalKey;
         rows[0].Content = rows[0].Summary = "";
+        rows[1].ExternalKey = DurableMemoryGovernancePolicy.ProjectInformationExternalKey;
         db.MemoryItems.AddRange(rows);
         await db.SaveChangesAsync();
         var expected = await db.MemoryItems.AsNoTracking().ForActor(actor)
@@ -201,10 +202,27 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
         var expectedMetadata = await db.MemoryItems.AsNoTracking().ForActor(actor)
             .Where(x => x.ProjectId == project || x.ProjectId == "shared")
             .Select(x => new { MemoryId = x.Id, x.ProjectId, x.Version, x.Status, x.UpdatedAt }).ToListAsync();
+        expected.Order().Should().Equal(rows.Select(x => x.Id).Order());
+        // Classification comes from explicitly designated seed IDs, not manifest pages or product classification logic.
+        var seedClassifications = new Dictionary<Guid, string>
+        {
+            [rows[0].Id] = "SystemNonRetrieval",
+            [rows[1].Id] = "SystemMetadata"
+        };
+        // Materialize the oracle before any live mutations to the seed records.
+        var expectedPartitions = rows.SelectMany(x => new[]
+        {
+            "status:" + x.Status,
+            "project:" + x.ProjectId,
+            "classification:" + seedClassifications.GetValueOrDefault(x.Id, "Knowledge")
+        }).GroupBy(key => key).ToDictionary(group => group.Key, group => group.Count());
         var businessBefore = await BusinessCounts(db);
         var request = new MemoryManifestReadRequest(project, Guid.NewGuid(), PageSize: 73, AllAuthorizedProjects: false);
         var first = await service.ReadAsync(request, default);
         first.AuthorizedTotal.Should().Be(expected.Count);
+        first.PartitionCounts.Should().BeEquivalentTo(expectedPartitions);
+        (first.PartitionCounts["classification:SystemMetadata"] + first.PartitionCounts["classification:SystemNonRetrieval"]).Should().Be(2);
+        first.PartitionCounts["classification:SystemNonRetrieval"].Should().Be(1);
         var changed = rows.First(x => x.ProjectId == project);
         changed.Version++;
         changed.UpdatedAt = now.AddSeconds(1);
@@ -236,6 +254,9 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
             var page = await service.ReadAsync(request with { SnapshotId = first.SnapshotId, Cursor = cursor }, default);
             page.CountInvariantSatisfied.Should().BeTrue();
             page.AuthorizedTotal.Should().Be(first.AuthorizedTotal);
+            page.PartitionCounts.Should().BeEquivalentTo(expectedPartitions);
+            (page.PartitionCounts["classification:SystemMetadata"] + page.PartitionCounts["classification:SystemNonRetrieval"]).Should().Be(2);
+            page.PartitionCounts["classification:SystemNonRetrieval"].Should().Be(1);
             // A lost continuation response is retried with the exact same cursor.
             (await service.ReadAsync(request with { SnapshotId = first.SnapshotId, Cursor = cursor }, default))
                 .Should().BeEquivalentTo(page);
@@ -267,6 +288,10 @@ public sealed class MemoryManifestIntegrationTests(ContainerTestEnvironment envi
         (await BusinessCounts(db)).Should().BeEquivalentTo(businessBefore with { Memories = businessBefore.Memories + 1 });
         // A read-only freeze must never become an executable review or a tracker exclusion authority.
         var stored = await db.KnowledgeGovernanceSnapshots.AsNoTracking().SingleAsync(x => x.Id == first.SnapshotId);
+        var saved = JsonSerializer.Deserialize<DurableMemoryGovernanceSnapshotResult>(stored.ResultJson,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        saved.Coverage.SystemMetadataCount.Should().Be(2);
+        saved.Coverage.NonRetrievalSystemMetadataCount.Should().Be(1);
         var durable = scope.ServiceProvider.GetRequiredService<IDurableMemoryGovernanceService>();
         var executeRead = () => durable.GetSnapshotAsync(stored.GovernanceRunId, "manifest:" + stored.Id.ToString("N"), false, true, default);
         await executeRead.Should().ThrowAsync<GovernanceBatchException>();
