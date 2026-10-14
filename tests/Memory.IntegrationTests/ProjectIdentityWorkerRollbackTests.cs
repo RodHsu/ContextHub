@@ -28,6 +28,14 @@ public sealed class WorkerRollbackFactAttribute : FactAttribute
     }
 }
 
+public sealed class WorkerRollbackTheoryAttribute : TheoryAttribute
+{
+    public WorkerRollbackTheoryAttribute()
+    {
+        Skip = new WorkerRollbackFactAttribute().Skip;
+    }
+}
+
 public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment environment)
     : IClassFixture<ContainerTestEnvironment>
 {
@@ -131,6 +139,170 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
         CreatedAt = DateTimeOffset.UtcNow.AddDays(-1)
     };
 
+    [WorkerRollbackTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Interrupted_candidate_vector_transaction_recovers_the_same_stale_job_in_a_compatible_worker(bool afterSupersede)
+    {
+        using var compatible = await WorkerBundle.Open("COMPATIBLE", "b348ddc35bea2d3e8d2fb07dfa3430f9eb98f617");
+        using var candidate = await WorkerBundle.Open("CANDIDATE", "900b4fefecf2fda3e449b99c244c9e580e10f8bc");
+        var factory = environment.GetFactory();
+        using var seed = factory.Services.CreateScope();
+        var db = seed.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var services = seed.ServiceProvider;
+        var owner = await db.TenantUsers.SingleAsync(x => x.Username == "contract-test-admin");
+        var peer = new TenantUser { TenantId = owner.TenantId, Username = "interruption-peer-" + Guid.NewGuid().ToString("N") };
+        db.TenantUsers.Add(peer);
+        await db.SaveChangesAsync();
+        var suffix = "-" + Guid.NewGuid().ToString("N");
+        var chunks = new List<MemoryItemChunk>();
+        foreach (var (actor, spelling) in new[] { (owner, "TT"), (owner, "Tt"), (peer, "tt") })
+        {
+            var item = new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.Id,
+                ProjectId = spelling + suffix,
+                ExternalKey = "interruption-fixture-" + chunks.Count,
+                Title = "Interruption fixture",
+                Content = "Deterministic interruption fixture " + chunks.Count,
+                Summary = "Interruption fixture",
+                Status = MemoryStatus.Active
+            };
+            var chunk = new MemoryItemChunk { MemoryItem = item, ChunkText = item.Content, ChunkKind = ChunkKind.Document };
+            db.MemoryItems.Add(item);
+            db.MemoryItemChunks.Add(chunk);
+            chunks.Add(chunk);
+        }
+        await db.SaveChangesAsync();
+        var provider = services.GetRequiredService<IEmbeddingProvider>();
+        foreach (var chunk in chunks)
+            await services.GetRequiredService<IVectorStore>().ReplaceChunkVectorAsync(chunk.Id,
+                await provider.EmbedAsync(chunk.ChunkText, EmbeddingPurpose.Document, default), default);
+        var allIds = chunks.Select(x => x.Id).ToArray();
+        var before = await Snapshot(services, allIds);
+        var foreignBefore = await Snapshot(services, [chunks[2].Id]);
+        var config = services.GetRequiredService<IConfiguration>();
+        var source = services.GetRequiredService<NpgsqlDataSource>();
+        var applicationName = "owned-worker-interruption-" + Guid.NewGuid().ToString("N");
+        var job = NewJob(owner, "tT" + suffix, provider.ModelKey);
+
+        await using (var worker = await RunningWorker.Start(candidate.Dll, config, applicationName))
+        {
+            var advisoryKey = Random.Shared.NextInt64(1, long.MaxValue);
+            await using var insertionFault = afterSupersede ? await InsertFault.Create(source, applicationName, advisoryKey) : null;
+            await using var blocker = await source.OpenConnectionAsync();
+            await using var transaction = await blocker.BeginTransactionAsync();
+            await using var command = new NpgsqlCommand(afterSupersede
+                ? "SELECT pg_advisory_xact_lock(@key);"
+                : "LOCK TABLE memory_chunk_vectors IN SHARE MODE;", blocker, transaction);
+            if (afterSupersede) command.Parameters.AddWithValue("key", advisoryKey);
+            await command.ExecuteNonQueryAsync();
+            db.MemoryJobs.Add(job);
+            await db.SaveChangesAsync();
+            await WaitForVectorLock(source, applicationName, afterSupersede);
+            (await db.MemoryJobs.AsNoTracking().SingleAsync(x => x.Id == job.Id)).Status.Should().Be(MemoryJobStatus.Running);
+            await worker.DisposeAsync(); // Only this test's exact child process is interrupted.
+            (await Snapshot(services, allIds)).SequenceEqual(before).Should().BeTrue();
+            await transaction.CommitAsync();
+        }
+        await WaitForDisconnectedWorker(source, applicationName);
+        (await Snapshot(services, allIds)).SequenceEqual(before).Should().BeTrue();
+        using (var recovery = factory.Services.CreateScope())
+        {
+            var recoveryDb = recovery.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var interrupted = await recoveryDb.MemoryJobs.SingleAsync(x => x.Id == job.Id);
+            interrupted.Status.Should().Be(MemoryJobStatus.Running);
+            // Simulate elapsed time in this isolated fixture. The production 30-minute rule and clocks are unchanged.
+            interrupted.StartedAt = DateTimeOffset.UtcNow.AddMinutes(-31);
+            await recoveryDb.SaveChangesAsync();
+        }
+        await using (var rollback = await RunningWorker.Start(compatible.Dll, config))
+        {
+            await WaitForJob(factory.Services, job.Id, MemoryJobStatus.Completed);
+            using var read = factory.Services.CreateScope();
+            var finalDb = read.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var recovered = await finalDb.MemoryJobs.AsNoTracking().SingleAsync(x => x.Id == job.Id);
+            recovered.ProjectId.Should().Be(job.ProjectId);
+            recovered.TenantId.Should().Be(owner.TenantId);
+            recovered.OwnerUserId.Should().Be(owner.Id);
+            recovered.StartedAt.Should().BeAfter(DateTimeOffset.UtcNow.AddMinutes(-5));
+            (await Snapshot(read.ServiceProvider, [chunks[2].Id])).SequenceEqual(foreignBefore).Should().BeTrue();
+            foreach (var chunk in chunks.Take(2))
+                (await finalDb.MemoryChunkVectors.CountAsync(x => x.ChunkId == chunk.Id && x.Status == "Active" && x.ModelKey == provider.ModelKey))
+                    .Should().Be(1);
+        }
+        var ledger = await JobLedger(services, [job.Id]);
+        var vectorsAfter = await Snapshot(services, allIds);
+        await using (var forward = await RunningWorker.Start(candidate.Dll, config))
+        {
+            (await JobLedger(services, [job.Id]) == ledger).Should().BeTrue();
+            (await Snapshot(services, allIds)).SequenceEqual(vectorsAfter).Should().BeTrue();
+        }
+    }
+
+    private static async Task WaitForVectorLock(NpgsqlDataSource source, string applicationName, bool afterSupersede)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        while (!deadline.IsCancellationRequested)
+        {
+            await using var command = source.CreateCommand("""
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity AS activity
+                    JOIN pg_locks AS waiting ON waiting.pid = activity.pid
+                    WHERE activity.application_name = @name AND activity.wait_event_type = 'Lock'
+                      AND NOT waiting.granted
+                      AND ((@after_supersede AND waiting.locktype = 'advisory')
+                           OR (NOT @after_supersede AND waiting.relation = 'memory_chunk_vectors'::regclass)));
+                """);
+            command.Parameters.AddWithValue("name", applicationName);
+            command.Parameters.AddWithValue("after_supersede", afterSupersede);
+            if ((bool)(await command.ExecuteScalarAsync(deadline.Token))!) return;
+            await Task.Delay(100, deadline.Token);
+        }
+        throw new TimeoutException("OWNED_WORKER_VECTOR_LOCK_NOT_OBSERVED");
+    }
+
+    private static async Task WaitForDisconnectedWorker(NpgsqlDataSource source, string applicationName)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (!deadline.IsCancellationRequested)
+        {
+            await using var command = source.CreateCommand("SELECT count(*) FROM pg_stat_activity WHERE application_name = @name;");
+            command.Parameters.AddWithValue("name", applicationName);
+            if ((long)(await command.ExecuteScalarAsync(deadline.Token))! == 0) return;
+            await Task.Delay(100, deadline.Token);
+        }
+        throw new TimeoutException("OWNED_WORKER_CONNECTION_NOT_RELEASED");
+    }
+
+    private sealed class InsertFault(NpgsqlDataSource source, string name) : IAsyncDisposable
+    {
+        public static async Task<InsertFault> Create(NpgsqlDataSource source, string applicationName, long key)
+        {
+            var name = "owned_vector_insert_fault_" + Guid.NewGuid().ToString("N");
+            // Identifiers, application name and lock key are generated fixture values; no production schema is touched.
+            await using var command = source.CreateCommand(FormattableString.Invariant($$"""
+                CREATE FUNCTION public.{{name}}() RETURNS trigger LANGUAGE plpgsql AS $body$
+                BEGIN
+                    IF current_setting('application_name') = '{{applicationName}}' THEN
+                        PERFORM pg_advisory_xact_lock({{key}});
+                    END IF;
+                    RETURN NEW;
+                END $body$;
+                CREATE TRIGGER {{name}} BEFORE INSERT ON memory_chunk_vectors
+                FOR EACH ROW EXECUTE FUNCTION public.{{name}}();
+                """));
+            await command.ExecuteNonQueryAsync();
+            return new(source, name);
+        }
+        public async ValueTask DisposeAsync()
+        {
+            await using var command = source.CreateCommand($"DROP TRIGGER IF EXISTS {name} ON memory_chunk_vectors; DROP FUNCTION IF EXISTS public.{name}();");
+            await command.ExecuteNonQueryAsync();
+        }
+    }
+
     private static async Task WaitForJob(IServiceProvider services, Guid id, MemoryJobStatus expected)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
@@ -230,13 +402,14 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
         private readonly Process process;
         private readonly Task stdout;
         private readonly Task stderr;
+        private bool disposed;
         private RunningWorker(Process process)
         {
             this.process = process;
             stdout = Drain(process.StandardOutput);
             stderr = Drain(process.StandardError);
         }
-        public static async Task<RunningWorker> Start(string dll, IConfiguration config)
+        public static async Task<RunningWorker> Start(string dll, IConfiguration config, string? applicationName = null)
         {
             var start = new ProcessStartInfo("dotnet")
             {
@@ -253,6 +426,9 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
                          "ContextHub:Security:BootstrapUsername", "ContextHub:Security:BootstrapAllowedProjectIds", "ContextHub:Security:AllowedMcpOrigins:0" })
                 start.Environment[key.Replace(":", "__", StringComparison.Ordinal)] = config[key];
             foreach (var key in new[] { "ASPNETCORE_ENVIRONMENT", "DOTNET_ENVIRONMENT" }) start.Environment[key] = "Testing";
+            if (applicationName is not null)
+                start.Environment["ConnectionStrings__Postgres"] = new NpgsqlConnectionStringBuilder(config.GetConnectionString("Postgres"))
+                { ApplicationName = applicationName }.ConnectionString;
             start.Environment["Logging__LogLevel__Default"] = "None";
             start.Environment["DatabaseLogging__MinimumLevel"] = "Critical";
             start.Environment["TelemetryRetention__Enabled"] = "false";
@@ -282,13 +458,12 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
         }
         public async ValueTask DisposeAsync()
         {
-            try
-            {
-                if (!process.HasExited) process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
-                await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(15));
-            }
-            finally { process.Dispose(); }
+            if (disposed) return;
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(15));
+            process.Dispose();
+            disposed = true;
         }
         private static async Task Drain(StreamReader reader)
         {
