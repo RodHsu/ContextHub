@@ -34,6 +34,16 @@ public sealed class ManifestRollbackFactAttribute : FactAttribute
 public sealed class MemoryManifestRollbackIntegrationTests(ContainerTestEnvironment environment)
     : IClassFixture<ContainerTestEnvironment>
 {
+    [Fact]
+    public async Task Compatible_readiness_retries_a_probe_timeout_within_the_existing_startup_budget()
+    {
+        using var handler = new TimeoutThenReadyHandler();
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1/") };
+        using var process = Process.GetCurrentProcess();
+        await WaitForReady(client, process);
+        handler.Attempts.Should().Be(2);
+    }
+
     [ManifestRollbackFact]
     public async Task Compatible_app_rejects_manifest_execution_and_roll_forward_replays_every_frozen_page()
     {
@@ -265,18 +275,35 @@ public sealed class MemoryManifestRollbackIntegrationTests(ContainerTestEnvironm
     private static async Task WaitForReady(HttpClient client, Process process)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
-        while (!timeout.IsCancellationRequested)
+        try
         {
-            if (process.HasExited) throw new InvalidOperationException("COMPATIBLE_TEST_APP_EXITED_BEFORE_READY");
-            try
+            while (!timeout.IsCancellationRequested)
             {
-                using var response = await client.GetAsync("/health/ready", timeout.Token);
-                if (response.IsSuccessStatusCode) return;
+                if (process.HasExited) throw new InvalidOperationException("COMPATIBLE_TEST_APP_EXITED_BEFORE_READY");
+                try
+                {
+                    using var response = await client.GetAsync("/health/ready", timeout.Token);
+                    if (response.IsSuccessStatusCode) return;
+                }
+                catch (HttpRequestException) { }
+                catch (OperationCanceledException) when (!timeout.IsCancellationRequested) { }
+                await Task.Delay(200, timeout.Token);
             }
-            catch (HttpRequestException) { }
-            await Task.Delay(200, timeout.Token);
         }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
         throw new TimeoutException("COMPATIBLE_TEST_APP_READY_TIMEOUT");
+    }
+
+    private sealed class TimeoutThenReadyHandler : HttpMessageHandler
+    {
+        public int Attempts { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Attempts++;
+            return Attempts == 1
+                ? Task.FromException<HttpResponseMessage>(new TaskCanceledException("Test readiness probe timeout."))
+                : Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        }
     }
 
     private static async Task Drain(StreamReader reader)
