@@ -2978,6 +2978,10 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         });
         await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0) > 0");
 
+        // The published target scale precedes the 220ms CSS paint transition.
+        await page.EvaluateAsync("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+        await page.WaitForFunctionAsync("() => { const content = document.querySelector('.graph-pan-content'); return content && content.getAnimations().every(animation => animation.playState !== 'running' && !animation.pending); }");
+
         var layoutJson = await page.EvaluateAsync<string>(
             @"() => JSON.stringify({
                 scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
@@ -3942,70 +3946,77 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         bool enableRwdUsabilityChecks = false)
     {
         await _fixture.EnsureDashboardRunningAsync();
-        await using var context = await _fixture.CreateContextAsync(viewport);
-        await context.AddInitScriptAsync(
-            $@"(() => {{
+        var context = await _fixture.CreateContextAsync(viewport);
+        try
+        {
+            await context.AddInitScriptAsync(
+                $@"(() => {{
                 localStorage.setItem('contextHub.dashboard.theme', '{theme.PreferenceValue}');
                 document.documentElement.dataset.themePreference = '{theme.PreferenceValue}';
                 document.documentElement.dataset.theme = '{theme.PreferenceValue}';
                 document.documentElement.style.colorScheme = '{theme.PreferenceValue}';
             }})();");
-        var page = await context.NewPageAsync();
+            var page = await context.NewPageAsync();
 
-        var targetUrl = BuildRouteUrl(route.Route, profile);
-        await LoginAndOpenAsync(page, targetUrl);
+            var targetUrl = BuildRouteUrl(route.Route, profile);
+            await LoginAndOpenAsync(page, targetUrl);
 
-        var heading = page.GetByRole(AriaRole.Heading, new() { Name = route.Title });
-        await heading.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+            var heading = page.GetByRole(AriaRole.Heading, new() { Name = route.Title });
+            await heading.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
 
-        foreach (var selector in route.RequiredSelectors)
-        {
-            await page.Locator(selector).First.WaitForAsync(new LocatorWaitForOptions
+            foreach (var selector in route.RequiredSelectors)
             {
-                State = WaitForSelectorState.Visible,
-                Timeout = 15000
-            });
+                await page.Locator(selector).First.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 15000
+                });
+            }
+
+            if (enableInteractions)
+            {
+                await PerformInteractiveChecksAsync(page, route.Name);
+            }
+
+            var screenshotPath = await CaptureScreenshotAsync(page, route.Name, profile, viewport, theme);
+            var snapshot = await AnalyzeLayoutAsync(page, route.OverlapSelectors, route.ScrollSelectors);
+
+            snapshot.ResolvedTheme.Should().Be(theme.PreferenceValue,
+                $"theme mismatch on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+
+            snapshot.DocumentScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+                $"unexpected horizontal overflow on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.BodyScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+                $"body width overflow on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+
+            snapshot.MissingSelectors.Should().BeEmpty($"missing expected selectors on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.OverlapWarnings.Should().BeEmpty($"detected overlapping panels on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.VisibleRectCount.Should().BeGreaterThan(0, $"no visible key panels detected on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+
+            if (expectScrollableOverflow)
+            {
+                snapshot.ScrollTargets.Any(target => target.CanScrollY).Should().BeTrue(
+                    $"expected at least one scrollable container with vertical overflow on {route.Name}; screenshot: {screenshotPath}");
+            }
+            else
+            {
+                snapshot.ScrollTargets.Should().NotBeEmpty($"missing scroll targets on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            }
+
+            if (enableRwdUsabilityChecks)
+            {
+                var usability = await AnalyzeRwdUsabilityAsync(page, route.ScrollSelectors);
+                usability.ScrollTrapWarnings.Should().BeEmpty(
+                    $"scroll traps on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+                usability.BadScrollbarWarnings.Should().BeEmpty(
+                    $"expected visible or usable scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+                usability.DoubleScrollbarWarnings.Should().BeEmpty(
+                    $"unexpected double vertical scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+            }
         }
-
-        if (enableInteractions)
+        finally
         {
-            await PerformInteractiveChecksAsync(page, route.Name);
-        }
-
-        var screenshotPath = await CaptureScreenshotAsync(page, route.Name, profile, viewport, theme);
-        var snapshot = await AnalyzeLayoutAsync(page, route.OverlapSelectors, route.ScrollSelectors);
-
-        snapshot.ResolvedTheme.Should().Be(theme.PreferenceValue,
-            $"theme mismatch on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-
-        snapshot.DocumentScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
-            $"unexpected horizontal overflow on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.BodyScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
-            $"body width overflow on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-
-        snapshot.MissingSelectors.Should().BeEmpty($"missing expected selectors on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.OverlapWarnings.Should().BeEmpty($"detected overlapping panels on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.VisibleRectCount.Should().BeGreaterThan(0, $"no visible key panels detected on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-
-        if (expectScrollableOverflow)
-        {
-            snapshot.ScrollTargets.Any(target => target.CanScrollY).Should().BeTrue(
-                $"expected at least one scrollable container with vertical overflow on {route.Name}; screenshot: {screenshotPath}");
-        }
-        else
-        {
-            snapshot.ScrollTargets.Should().NotBeEmpty($"missing scroll targets on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        }
-
-        if (enableRwdUsabilityChecks)
-        {
-            var usability = await AnalyzeRwdUsabilityAsync(page, route.ScrollSelectors);
-            usability.ScrollTrapWarnings.Should().BeEmpty(
-                $"scroll traps on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
-            usability.BadScrollbarWarnings.Should().BeEmpty(
-                $"expected visible or usable scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
-            usability.DoubleScrollbarWarnings.Should().BeEmpty(
-                $"unexpected double vertical scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+            await context.CloseAsync().WaitAsync(TimeSpan.FromSeconds(30));
         }
     }
 
@@ -4609,6 +4620,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
     private IPlaywright? _playwright;
     private IBrowser? _browser;
     private Process? _process;
+    private int _listeningPort;
     private readonly int _port = GetFreeTcpPort();
 
     public Uri BaseUri => new($"http://127.0.0.1:{_port}/");
@@ -4651,21 +4663,31 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_browser is not null)
+        try
         {
-            await _browser.CloseAsync();
-            _browser = null;
+            if (_browser is not null)
+            {
+                await _browser.CloseAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                _browser = null;
+            }
         }
-
-        if (_process is not null && !_process.HasExited)
+        finally
         {
-            _process.Kill(entireProcessTree: true);
-            await _process.WaitForExitAsync();
-            _process.Dispose();
-            _process = null;
+            try
+            {
+                if (_process is not null && !_process.HasExited)
+                {
+                    _process.Kill(entireProcessTree: true);
+                    await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                    _process.Dispose();
+                    _process = null;
+                }
+            }
+            finally
+            {
+                _playwright?.Dispose();
+            }
         }
-
-        _playwright?.Dispose();
     }
 
     internal async Task<IBrowserContext> CreateContextAsync(DashboardViewport viewport)
@@ -4688,6 +4710,14 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
     private static string? FindBrowserExecutable()
     {
+        var configuredPath = Environment.GetEnvironmentVariable("CONTEXTHUB_TEST_BROWSER_EXECUTABLE");
+        if (!string.IsNullOrWhiteSpace(configuredPath))
+        {
+            if (!Path.IsPathFullyQualified(configuredPath) || !File.Exists(configuredPath))
+                throw new InvalidOperationException("The explicitly selected test browser must be an existing absolute executable path.");
+            return configuredPath;
+        }
+
         var candidates = new[]
         {
             @"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -4722,10 +4752,11 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
             StringComparison.OrdinalIgnoreCase)
             ? "Release"
             : "Debug";
-        var startInfo = new ProcessStartInfo("dotnet", $"run --no-build --configuration {configuration} --project \"{dashboardProject}\" -- --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
+        var startInfo = new ProcessStartInfo("dotnet", $"run --no-build --no-launch-profile --configuration {configuration} --project \"{dashboardProject}\" -- --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
         {
             WorkingDirectory = repoRoot,
             UseShellExecute = false,
+            CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
@@ -4744,7 +4775,15 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         startInfo.Environment["Memory__Namespace"] = "context-hub-browser";
 
         _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start dashboard process for browser tests.");
-        _ = _process.StandardOutput.ReadToEndAsync();
+        _process.OutputDataReceived += (_, entry) =>
+        {
+            const string marker = "Now listening on: ";
+            var line = entry.Data;
+            var offset = line?.IndexOf(marker, StringComparison.Ordinal) ?? -1;
+            if (offset >= 0 && Uri.TryCreate(line![(offset + marker.Length)..].Trim(), UriKind.Absolute, out var address) && address.IsLoopback)
+                Interlocked.Exchange(ref _listeningPort, address.Port);
+        };
+        _process.BeginOutputReadLine();
         _ = _process.StandardError.ReadToEndAsync();
     }
 
@@ -4768,6 +4807,8 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "browser-test-dashboard-token");
 
         var deadline = DateTime.UtcNow.AddSeconds(30);
+        int? lastStatus = null;
+        string? lastFailure = null;
         while (DateTime.UtcNow < deadline)
         {
             if (_process is not null && _process.HasExited)
@@ -4778,19 +4819,21 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
             try
             {
                 using var response = await client.GetAsync(new Uri(BaseUri, "/health/live"));
+                lastStatus = (int)response.StatusCode;
                 if (response.StatusCode == HttpStatusCode.OK)
                 {
                     return;
                 }
             }
-            catch
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
             {
+                lastFailure = exception.GetType().Name;
             }
 
             await Task.Delay(500);
         }
 
-        throw new TimeoutException("Timed out waiting for dashboard browser test host to become ready.");
+        throw new TimeoutException($"Dashboard browser test host readiness failed: listeningPort={_listeningPort}, expectedPort={_port}, lastStatus={lastStatus}, lastFailure={lastFailure}.");
     }
 
     private static int GetFreeTcpPort()
