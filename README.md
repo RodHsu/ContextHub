@@ -356,5 +356,6 @@ Notes:
 - Compose routes Docker API access through isolated, repo-built policy proxies based on a digest-pinned Alpine image; do not publish their port or replace them with direct socket mounts.
 - PostgreSQL has no bundled usable password. Set the required `POSTGRES_PASSWORD` through protected runtime configuration before running Compose. Direct .NET service startup requires an injected `ConnectionStrings:Postgres`; the committed defaults are empty. Preserve the configured embedding profile when rotating database credentials.
 - Never commit `.env`, tokens, password hashes, OAuth secrets, signing keys, or private keys.
+- .NET service images pin SDK 10.0.402 and ASP.NET Core runtime 10.0.13 by manifest digest. Security releases must update both application packages and shared frameworks, and rebuild the compatible rollback images from the same patched bases; a package audit alone does not verify the deployed runtime.
 
 The current MCP requirement matrix and security review are documented in [MCP 2026-07-28 compliance](docs/mcp-2026-07-28-compliance.md).
