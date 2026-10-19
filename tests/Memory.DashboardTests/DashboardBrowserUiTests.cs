@@ -4622,6 +4622,8 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
     private Process? _process;
     private int _listeningPort;
     private readonly int _port = GetFreeTcpPort();
+    private readonly List<DashboardProcessStartupDiagnostics> _startupDiagnostics = [];
+    private DashboardProcessStartupDiagnostics? _currentStartupDiagnostics;
 
     public Uri BaseUri => new($"http://127.0.0.1:{_port}/");
 
@@ -4629,19 +4631,30 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        Directory.CreateDirectory(ArtifactDirectory);
-        StartDashboardProcess();
-        await WaitForDashboardAsync();
-
-        var executablePath = FindBrowserExecutable()
-            ?? throw new InvalidOperationException("No Chromium-based browser executable was found for dashboard browser tests.");
-
-        _playwright = await Playwright.CreateAsync();
-        _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        try
         {
-            Headless = true,
-            ExecutablePath = executablePath
-        });
+            Directory.CreateDirectory(ArtifactDirectory);
+            StartDashboardProcess();
+            await WaitForDashboardAsync();
+
+            var executablePath = FindBrowserExecutable()
+                ?? throw new InvalidOperationException("No Chromium-based browser executable was found for dashboard browser tests.");
+
+            _playwright = await Playwright.CreateAsync();
+            _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+            {
+                Headless = true,
+                ExecutablePath = executablePath
+            });
+            _currentStartupDiagnostics?.RecordInitializationCompleted();
+        }
+        catch
+        {
+            _currentStartupDiagnostics?.RecordInitializationFailed();
+            _currentStartupDiagnostics?.ObserveProcessExit(_process);
+            _currentStartupDiagnostics?.TryPersist(ArtifactDirectory);
+            throw;
+        }
     }
 
     internal async Task EnsureDashboardRunningAsync()
@@ -4653,40 +4666,63 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
         if (_process is not null)
         {
+            _currentStartupDiagnostics?.ObserveProcessExit(_process);
             _process.Dispose();
             _process = null;
         }
 
-        StartDashboardProcess();
-        await WaitForDashboardAsync();
+        try
+        {
+            StartDashboardProcess();
+            await WaitForDashboardAsync();
+        }
+        catch
+        {
+            _currentStartupDiagnostics?.RecordInitializationFailed();
+            _currentStartupDiagnostics?.ObserveProcessExit(_process);
+            _currentStartupDiagnostics?.TryPersist(ArtifactDirectory);
+            throw;
+        }
     }
 
     public async Task DisposeAsync()
     {
+        var disposalCompleted = false;
         try
-        {
-            if (_browser is not null)
-            {
-                await _browser.CloseAsync().WaitAsync(TimeSpan.FromSeconds(30));
-                _browser = null;
-            }
-        }
-        finally
         {
             try
             {
-                if (_process is not null && !_process.HasExited)
+                if (_browser is not null)
                 {
-                    _process.Kill(entireProcessTree: true);
-                    await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
-                    _process.Dispose();
-                    _process = null;
+                    await _browser.CloseAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                    _browser = null;
                 }
             }
             finally
             {
-                _playwright?.Dispose();
+                try
+                {
+                    if (_process is not null && !_process.HasExited)
+                    {
+                        _process.Kill(entireProcessTree: true);
+                        await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                        _currentStartupDiagnostics?.ObserveProcessExit(_process);
+                        _process.Dispose();
+                        _process = null;
+                    }
+                }
+                finally
+                {
+                    _playwright?.Dispose();
+                }
             }
+            disposalCompleted = true;
+        }
+        finally
+        {
+            _currentStartupDiagnostics?.ObserveProcessExit(_process);
+            foreach (var diagnostics in _startupDiagnostics) diagnostics.RecordDisposal(disposalCompleted);
+            PersistStartupDiagnostics();
         }
     }
 
@@ -4761,6 +4797,18 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
             RedirectStandardError = true
         };
 
+        _currentStartupDiagnostics = null;
+        if (_startupDiagnostics.Count < DashboardProcessStartupDiagnostics.MaximumAttempts)
+        {
+            _currentStartupDiagnostics = DashboardProcessStartupDiagnostics.TryCreate(dashboardProject, configuration, BaseUri, _port);
+            if (_currentStartupDiagnostics is not null) _startupDiagnostics.Add(_currentStartupDiagnostics);
+        }
+        else
+        {
+            _startupDiagnostics[^1].RecordOmittedAttempt();
+        }
+        var diagnostics = _currentStartupDiagnostics;
+
         startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Testing";
         startInfo.Environment["Dashboard__UseBrowserTestDoubles"] = "true";
         startInfo.Environment["ContextHub__InstanceId"] = "browser-test-instance";
@@ -4775,6 +4823,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         startInfo.Environment["Memory__Namespace"] = "context-hub-browser";
 
         _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start dashboard process for browser tests.");
+        diagnostics?.ObserveStartedProcess(_process);
         _process.OutputDataReceived += (_, entry) =>
         {
             const string marker = "Now listening on: ";
@@ -4783,8 +4832,15 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
             if (offset >= 0 && Uri.TryCreate(line![(offset + marker.Length)..].Trim(), UriKind.Absolute, out var address) && address.IsLoopback)
                 Interlocked.Exchange(ref _listeningPort, address.Port);
         };
+        _process.OutputDataReceived += (_, entry) => diagnostics?.ObserveOutput(entry.Data, standardError: false);
+        _process.ErrorDataReceived += (_, entry) => diagnostics?.ObserveOutput(entry.Data, standardError: true);
         _process.BeginOutputReadLine();
-        _ = _process.StandardError.ReadToEndAsync();
+        _process.BeginErrorReadLine();
+    }
+
+    private void PersistStartupDiagnostics()
+    {
+        foreach (var diagnostics in _startupDiagnostics) diagnostics.TryPersist(ArtifactDirectory);
     }
 
     private static string CreateRepoTestDataPath(params string[] segments)
@@ -4800,6 +4856,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
     private async Task WaitForDashboardAsync()
     {
+        _currentStartupDiagnostics?.RecordReadinessStarted();
         using var client = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(3)
@@ -4813,26 +4870,33 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         {
             if (_process is not null && _process.HasExited)
             {
+                _currentStartupDiagnostics?.ObserveProcessExit(_process);
                 throw new InvalidOperationException($"Dashboard process exited early with code {_process.ExitCode}.");
             }
 
             try
             {
+                _currentStartupDiagnostics?.RecordHttpAttempt();
                 using var response = await client.GetAsync(new Uri(BaseUri, "/health/live"));
                 lastStatus = (int)response.StatusCode;
+                _currentStartupDiagnostics?.RecordHttpStatus((int)response.StatusCode);
                 if (response.StatusCode == HttpStatusCode.OK)
                 {
+                    _currentStartupDiagnostics?.RecordListeningPort(_listeningPort);
+                    _currentStartupDiagnostics?.RecordReady();
                     return;
                 }
             }
             catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
             {
                 lastFailure = exception.GetType().Name;
+                _currentStartupDiagnostics?.RecordHttpFailure(exception is TaskCanceledException);
             }
 
             await Task.Delay(500);
         }
 
+        _currentStartupDiagnostics?.RecordListeningPort(_listeningPort);
         throw new TimeoutException($"Dashboard browser test host readiness failed: listeningPort={_listeningPort}, expectedPort={_port}, lastStatus={lastStatus}, lastFailure={lastFailure}.");
     }
 
