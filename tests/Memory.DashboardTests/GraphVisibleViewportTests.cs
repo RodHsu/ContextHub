@@ -16,6 +16,8 @@ public sealed class GraphVisibleViewportTests(DashboardBrowserFixture fixture, I
     public async Task Native_fit_and_expansion_should_expose_painted_graph_and_all_controls(int width, int height, int fontPercent)
     {
         await using var context = await fixture.CreateContextAsync(new($"graph-visible-{width}-{fontPercent}", width, height));
+        var observerKey = $"graph-fit-observer-{Guid.NewGuid():N}";
+        await InstallKeyboardFitObserverAsync(context, observerKey);
         var page = await LoginAsync(context);
         await page.EvaluateAsync("percent => document.documentElement.style.fontSize=percent+'%'", fontPercent);
         await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale)>0");
@@ -24,7 +26,7 @@ public sealed class GraphVisibleViewportTests(DashboardBrowserFixture fixture, I
         var titles = await page.Locator(".graph-node-title").AllTextContentsAsync();
         var fit = page.GetByRole(AriaRole.Button, new() { Name = "適應視圖", Exact = true });
         await fit.FocusAsync();
-        await page.Keyboard.PressAsync("Enter");
+        await PressKeyboardFitAndWaitAsync(page, observerKey);
         await AssertPhysicalAsync(page, "normal");
         var expand = page.GetByRole(AriaRole.Button, new() { Name = "全螢幕顯示", Exact = true });
         await expand.ClickAsync();
@@ -36,6 +38,119 @@ public sealed class GraphVisibleViewportTests(DashboardBrowserFixture fixture, I
         await AssertPhysicalAsync(page, "collapsed");
         Assert.Equal(ids, await NodeIdsAsync(page));
         Assert.Equal(titles, await page.Locator(".graph-node-title").AllTextContentsAsync());
+    }
+
+    private static Task InstallKeyboardFitObserverAsync(IBrowserContext context, string observerKey)
+        => context.AddInitScriptAsync("""
+            (() => {
+                const key = Symbol.for(__OBSERVER_KEY__);
+                let active = { armed: false, shell: null, completed: false, unsupportedReturn: false };
+                const control = active;
+                Object.defineProperty(window, key, { value: control, configurable: true });
+                if (Object.getOwnPropertyDescriptor(window, 'contextHubGraph')) {
+                    control.sourceRejected = true;
+                    return;
+                }
+                Object.defineProperty(window, 'contextHubGraph', {
+                    configurable: true,
+                    enumerable: true,
+                    set(api) {
+                        // Preserve the product assignment's normal data property before any framework lookup.
+                        Object.defineProperty(window, 'contextHubGraph', {
+                            value: api, writable: true, configurable: true, enumerable: true
+                        });
+                        const descriptor = api && Object.getOwnPropertyDescriptor(api, 'fit');
+                        if (!descriptor || !descriptor.writable || typeof descriptor.value !== 'function') {
+                            control.sourceRejected = true;
+                            return;
+                        }
+                        const original = descriptor.value;
+                        function observedFit(...args) {
+                            const result = Reflect.apply(original, this, args);
+                            if (active?.armed && args[0] === active.shell && args[1] === true) {
+                                // The pinned synchronous fit returns undefined; never inspect or await a thenable.
+                                if (result === undefined) active.completed = true;
+                                else active.unsupportedReturn = true;
+                            }
+                            return result;
+                        }
+                        control.isCurrent = () => window.contextHubGraph === api && api.fit === observedFit;
+                        control.arm = shell => {
+                            if (!active || !shell || !control.isCurrent()) throw new Error('FIT_OBSERVER_SOURCE_REQUIRED');
+                            control.shell = shell;
+                            control.armed = true;
+                        };
+                        control.restore = () => {
+                            active = null;
+                            control.armed = false;
+                            control.shell = null;
+                            try {
+                                if (api.fit === observedFit) api.fit = original;
+                            } finally {
+                                if (window[key] === control) delete window[key];
+                                control.arm = null;
+                                control.isCurrent = null;
+                                control.restore = null;
+                            }
+                        };
+                        api.fit = observedFit;
+                    }
+                });
+            })();
+            """.Replace("__OBSERVER_KEY__", JsonSerializer.Serialize(observerKey)));
+
+    private async Task PressKeyboardFitAndWaitAsync(IPage page, string observerKey)
+    {
+        var observation = await page.EvaluateHandleAsync("""
+            observerKey => {
+                const key = Symbol.for(observerKey), control = window[key];
+                if (!control || control.sourceRejected || typeof control.arm !== 'function')
+                    throw new Error('FIT_OBSERVER_SOURCE_REQUIRED');
+                delete window[key];
+                return control;
+            }
+            """, observerKey);
+        Exception? primaryFailure = null;
+        try
+        {
+            await observation.EvaluateAsync("control => control.arm(document.querySelector('.graph-scroll-shell'))");
+            await page.Keyboard.PressAsync("Enter");
+            await using var completion = await page.WaitForFunctionAsync(
+                "control => control.completed || control.unsupportedReturn || !control.isCurrent()", observation);
+            if (await observation.EvaluateAsync<bool>("control => control.unsupportedReturn || !control.isCurrent()"))
+                throw new InvalidOperationException("FIT_OBSERVER_SYNCHRONOUS_SOURCE_REQUIRED");
+        }
+        catch (Exception error)
+        {
+            primaryFailure = error;
+            throw;
+        }
+        finally
+        {
+            Exception? cleanupFailure = null;
+            try
+            {
+                await observation.EvaluateAsync("control => control.restore()");
+            }
+            catch (Exception error)
+            {
+                cleanupFailure = error;
+            }
+            try
+            {
+                await observation.DisposeAsync();
+            }
+            catch (Exception error)
+            {
+                if (cleanupFailure is null) cleanupFailure = error;
+                else output.WriteLine($"Fit observer handle cleanup also failed: {error.GetType().Name}.");
+            }
+            if (cleanupFailure is not null)
+            {
+                if (primaryFailure is null) throw cleanupFailure;
+                output.WriteLine($"Fit observer cleanup failed while preserving the primary error: {cleanupFailure.GetType().Name}.");
+            }
+        }
     }
 
     [Fact]
