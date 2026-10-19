@@ -89,7 +89,6 @@ public sealed class PlatformProjectionService(IApplicationDbContext dbContext, I
                 }
 
                 var run = await dbContext.PlatformBackgroundRuns
-                    .Include(x => x.Events)
                     .Where(x => x.TenantId == request.TenantId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.JobType == PlatformProjectionContract.ProjectionName && x.Mode == request.Mode &&
                                 (x.Status == PlatformBackgroundRunStatus.Running || x.Status == PlatformBackgroundRunStatus.RetryScheduled))
                     .OrderByDescending(x => x.CreatedAt)
@@ -152,9 +151,21 @@ public sealed class PlatformProjectionService(IApplicationDbContext dbContext, I
                     .Take(batchSize)
                     .ToArrayAsync(ct);
 
+                var batchIds = batch.Select(x => x.Id).ToArray();
+                var projections = batchIds.Length == 0
+                    ? new Dictionary<Guid, MonitoringActivityProjection>()
+                    : await dbContext.MonitoringActivityProjections
+                        .Where(x => batchIds.Contains(x.OutboxEventId))
+                        .ToDictionaryAsync(x => x.OutboxEventId, ct);
+                var deliveries = batchIds.Length == 0
+                    ? new Dictionary<Guid, PlatformOutboxDelivery>()
+                    : await dbContext.PlatformOutboxDeliveries
+                        .Where(x => batchIds.Contains(x.OutboxEventId) && x.Consumer == PlatformProjectionContract.ProjectionName)
+                        .ToDictionaryAsync(x => x.OutboxEventId, ct);
+
                 foreach (var authorityEvent in batch)
                 {
-                    var projection = await dbContext.MonitoringActivityProjections.SingleOrDefaultAsync(x => x.OutboxEventId == authorityEvent.Id, ct);
+                    projections.TryGetValue(authorityEvent.Id, out var projection);
                     if (projection is null)
                     {
                         projection = Map(authorityEvent, run.Generation, now);
@@ -173,8 +184,7 @@ public sealed class PlatformProjectionService(IApplicationDbContext dbContext, I
                         run.StaleCount++;
                     }
 
-                    var delivery = await dbContext.PlatformOutboxDeliveries.SingleOrDefaultAsync(
-                        x => x.OutboxEventId == authorityEvent.Id && x.Consumer == PlatformProjectionContract.ProjectionName, ct);
+                    deliveries.TryGetValue(authorityEvent.Id, out var delivery);
                     if (delivery is null)
                     {
                         delivery = new PlatformOutboxDelivery
