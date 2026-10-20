@@ -174,7 +174,7 @@ public sealed class AgentExecutionService(
 
         return await dbContext.ExecuteInTransactionAsync(async ct =>
         {
-            await dbContext.AcquireTransactionLockAsync($"agent-execution-claim:{actor.TenantId}:{projectId}:{request.RepositoryId}", ct);
+            await dbContext.AcquireTransactionLockAsync($"agent-execution-claim:{actor.TenantId}:{ProjectContext.IdentityKey(projectId)}:{request.RepositoryId}", ct);
             if (await ReplayAsync<AgentExecutionClaimResult>(actor, "claim-next", agentId, request.IdempotencyKey, requestHash, ct) is { } lockedReplay)
             {
                 return lockedReplay with { Replayed = true };

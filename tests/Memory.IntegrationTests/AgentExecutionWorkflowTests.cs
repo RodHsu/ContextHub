@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -8,6 +10,7 @@ using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace Memory.IntegrationTests;
 
@@ -109,6 +112,167 @@ public sealed class AgentExecutionWorkflowTests(ContainerTestEnvironment environ
         var staleVersion = () => service.HeartbeatAsync(new(
             winner.Execution!.Id, winner.Execution.ClaimedByAgentId, winner.LeaseToken!, winner.Execution.LeaseVersion + 1, 300, "stale-heartbeat"), CancellationToken.None);
         await staleVersion.Should().ThrowAsync<UnauthorizedAccessException>();
+    }
+
+    [DockerRequiredFact]
+    public async Task Concurrent_project_alias_claims_should_serialize_and_preserve_one_valid_lease()
+    {
+        var projectId = $"agent-alias-race-{Guid.NewGuid():N}";
+        var alias = projectId.ToUpperInvariant();
+        ProjectContext.Matches(projectId, alias).Should().BeTrue();
+        Guid executionId;
+        ProjectWorkItem businessBefore;
+        AgentExecution executionBefore;
+        long eventMaxBefore;
+        int eventCountBefore;
+        int snapshotCountBefore;
+        await using (var setup = environment.GetFactory().Services.CreateAsyncScope())
+        {
+            UseAgentActor(setup.ServiceProvider);
+            var workItem = await setup.ServiceProvider.GetRequiredService<IProjectWorkItemService>().CreateAsync(
+                new(projectId, "Alias claim race fixture", string.Empty, [], [], 100), CancellationToken.None);
+            var prepared = await setup.ServiceProvider.GetRequiredService<IAgentExecutionService>().PrepareAsync(
+                Prepare(workItem.Id, projectId, "repo-alias-race", "alias-prepare"), CancellationToken.None);
+            executionId = prepared.Id;
+            var db = setup.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            businessBefore = await db.ProjectWorkItems.AsNoTracking().SingleAsync(x => x.Id == workItem.Id);
+            executionBefore = await db.AgentExecutions.AsNoTracking().SingleAsync(x => x.Id == executionId);
+            eventMaxBefore = await db.AgentExecutionEvents.Where(x => x.ExecutionId == executionId)
+                .Select(x => (long?)x.Sequence).MaxAsync() ?? 0;
+            eventCountBefore = await db.AgentExecutionEvents.CountAsync(x => x.ExecutionId == executionId);
+            snapshotCountBefore = await db.AgentExecutionResolutionSnapshots.CountAsync(x => x.ExecutionId == executionId);
+        }
+
+        var schedule = new AliasClaimSchedule();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        Task<AgentExecutionClaimResult>? firstClaim = null;
+        Task<AgentExecutionClaimResult>? secondClaim = null;
+        Exception? primaryFailure = null;
+        async Task<AgentExecutionClaimResult> ClaimFromAsync(bool first, string spelling, string worker, string key)
+        {
+            await using var scope = environment.GetFactory().Services.CreateAsyncScope();
+            UseAgentActor(scope.ServiceProvider);
+            var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            await db.Database.OpenConnectionAsync(cancellation.Token);
+            var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+            (first ? schedule.FirstBackend : schedule.SecondBackend).TrySetResult(connection.ProcessID);
+            var originalResolver = scope.ServiceProvider.GetRequiredService<IAgentExecutionResourceResolver>();
+            var resolver = new PausedAliasClaimResolver(originalResolver, schedule, first);
+            var service = ActivatorUtilities.CreateInstance<AgentExecutionService>(scope.ServiceProvider, resolver);
+            return await service.ClaimNextAsync(
+                Claim(spelling, "repo-alias-race", worker, key), cancellation.Token);
+        }
+
+        try
+        {
+            firstClaim = ClaimFromAsync(true, projectId, "alias-worker-a", "alias-claim-a");
+            await schedule.FirstResolverEntered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            secondClaim = ClaimFromAsync(false, alias, "alias-worker-b", "alias-claim-b");
+            var firstPid = await schedule.FirstBackend.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            var secondPid = await schedule.SecondBackend.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            firstPid.Should().NotBe(secondPid);
+
+            // Observe a real advisory-lock wait, or prove that the second call passed the lock.
+            // On the old raw key, keep B before its real resolver until A has committed so
+            // duplicate event/snapshot sequence errors cannot accidentally hide the stale claim.
+            var secondWaitedForFirst = await WaitForAliasClaimLockOrResolverAsync(
+                environment.GetFactory().Services.GetRequiredService<NpgsqlDataSource>(),
+                firstPid, secondPid, schedule.SecondResolverEntered.Task, cancellation.Token);
+            schedule.ReleaseFirst.TrySetResult();
+            var first = await firstClaim.WaitAsync(TimeSpan.FromSeconds(15));
+            schedule.ReleaseSecond.TrySetResult();
+            var second = await secondClaim.WaitAsync(TimeSpan.FromSeconds(15));
+
+            var secondOutcome = second.Outcome switch
+            {
+                "Claimed" => "Claimed",
+                "NoEligibleWork" => "NoEligibleWork",
+                _ => "Other"
+            };
+            secondWaitedForFirst.Should().BeTrue(
+                "equivalent project spellings must share the transaction lock; " +
+                "observed lockWait={0}; firstHasExecution={1}; secondHasExecution={2}; secondOutcome={3}",
+                secondWaitedForFirst, first.HasExecution, second.HasExecution, secondOutcome);
+            first.HasExecution.Should().BeTrue();
+            second.HasExecution.Should().BeFalse();
+            second.Outcome.Should().Be("NoEligibleWork");
+            (second.LeaseToken is null).Should().BeTrue();
+            (first.LeaseToken is { Length: > 0 }).Should().BeTrue();
+            first.Execution!.LeaseVersion.Should().Be(executionBefore.LeaseVersion + 1);
+
+            await using (var verify = environment.GetFactory().Services.CreateAsyncScope())
+            {
+                UseAgentActor(verify.ServiceProvider);
+                var db = verify.ServiceProvider.GetRequiredService<MemoryDbContext>();
+                var stored = await db.AgentExecutions.AsNoTracking().SingleAsync(x => x.Id == executionId);
+                stored.Status.Should().Be(AgentExecutionStatus.Claimed);
+                stored.ClaimedByAgentId.Should().Be("alias-worker-a");
+                stored.LeaseVersion.Should().Be(first.Execution.LeaseVersion);
+                stored.LeaseExpiresAt.Should().NotBeNull();
+                var tokenMatches = CryptographicOperations.FixedTimeEquals(
+                    Convert.FromHexString(stored.LeaseTokenHash),
+                    SHA256.HashData(Encoding.UTF8.GetBytes(first.LeaseToken!)));
+                tokenMatches.Should().BeTrue("only the successful caller's lease may remain valid");
+                (await db.AgentExecutions.CountAsync(x => x.WorkItemId == stored.WorkItemId &&
+                    (x.Status == AgentExecutionStatus.Claimed || x.Status == AgentExecutionStatus.Running))).Should().Be(1);
+                var snapshots = await db.AgentExecutionResolutionSnapshots.AsNoTracking()
+                    .Where(x => x.ExecutionId == executionId).ToArrayAsync();
+                snapshots.Length.Should().Be(snapshotCountBefore + 1);
+                snapshots.Select(x => (x.Attempt, x.ResolutionSequence)).Should().OnlyHaveUniqueItems();
+                var events = await db.AgentExecutionEvents.AsNoTracking().Where(x => x.ExecutionId == executionId)
+                    .OrderBy(x => x.Sequence).Select(x => new { x.Sequence, x.EventType }).ToArrayAsync();
+                events.Length.Should().Be(eventCountBefore + 2);
+                events.Select(x => x.Sequence).Should().OnlyHaveUniqueItems();
+                events.Skip(eventCountBefore).Select(x => x.Sequence).Should()
+                    .Equal(eventMaxBefore + 1, eventMaxBefore + 2);
+                events.Skip(eventCountBefore).Select(x => x.EventType).Should()
+                    .Equal(AgentExecutionEventType.ResourcesResolved, AgentExecutionEventType.Claimed);
+                var businessAfter = await db.ProjectWorkItems.AsNoTracking().SingleAsync(x => x.Id == stored.WorkItemId);
+                businessAfter.Status.Should().Be(businessBefore.Status);
+                businessAfter.UpdatedAt.Should().Be(businessBefore.UpdatedAt);
+                businessAfter.Title.Should().Be(businessBefore.Title);
+                businessAfter.Priority.Should().Be(businessBefore.Priority);
+            }
+
+            async Task<AgentExecutionMutationResult> HeartbeatFromAsync(string worker, long version, string key)
+            {
+                await using var scope = environment.GetFactory().Services.CreateAsyncScope();
+                UseAgentActor(scope.ServiceProvider);
+                return await scope.ServiceProvider.GetRequiredService<IAgentExecutionService>().HeartbeatAsync(
+                    new(executionId, worker, first.LeaseToken!, version, 300, key), cancellation.Token);
+            }
+
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                HeartbeatFromAsync("foreign-worker", first.Execution.LeaseVersion, "alias-foreign-heartbeat"));
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                HeartbeatFromAsync("alias-worker-a", first.Execution.LeaseVersion + 1, "alias-stale-heartbeat"));
+            var heartbeat = await HeartbeatFromAsync("alias-worker-a", first.Execution.LeaseVersion, "alias-valid-heartbeat");
+            heartbeat.Execution.Status.Should().Be(AgentExecutionStatus.Running);
+        }
+        catch (Exception failure)
+        {
+            primaryFailure = failure;
+        }
+        finally
+        {
+            schedule.ReleaseFirst.TrySetResult();
+            schedule.ReleaseSecond.TrySetResult();
+            cancellation.Cancel();
+            foreach (var claim in new[] { firstClaim, secondClaim }.OfType<Task<AgentExecutionClaimResult>>())
+            {
+                try
+                {
+                    await claim.WaitAsync(TimeSpan.FromSeconds(15));
+                }
+                catch (Exception cleanupFailure)
+                {
+                    if (primaryFailure is null) primaryFailure = cleanupFailure;
+                    else primaryFailure.Data["AliasClaimCleanupFailureType"] = cleanupFailure.GetType().FullName;
+                }
+            }
+        }
+
+        if (primaryFailure is not null) ExceptionDispatchInfo.Capture(primaryFailure).Throw();
     }
 
     [DockerRequiredFact]
@@ -377,6 +541,66 @@ public sealed class AgentExecutionWorkflowTests(ContainerTestEnvironment environ
             .Where(x => x.ProjectId == projectId && (x.Status == AgentExecutionStatus.Claimed || x.Status == AgentExecutionStatus.Running))
             .GroupBy(x => x.WorkItemId).Where(x => x.Count() > 1).CountAsync();
         duplicateOwners.Should().Be(0);
+    }
+
+    private static async Task<bool> WaitForAliasClaimLockOrResolverAsync(
+        NpgsqlDataSource dataSource, int firstPid, int secondPid, Task secondResolverEntered,
+        CancellationToken cancellationToken)
+    {
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bounded.CancelAfter(TimeSpan.FromSeconds(15));
+        await using var connection = await dataSource.OpenConnectionAsync(bounded.Token);
+        await using var command = new NpgsqlCommand("""
+            SELECT EXISTS (
+                SELECT 1 FROM pg_locks
+                WHERE pid = @second
+                  AND locktype = 'advisory'
+                  AND NOT granted
+                  AND @first = ANY(pg_blocking_pids(pid)));
+            """, connection) { CommandTimeout = 5 };
+        command.Parameters.AddWithValue("first", firstPid);
+        command.Parameters.AddWithValue("second", secondPid);
+        while (true)
+        {
+            if (secondResolverEntered.IsCompleted) return false;
+            if (await command.ExecuteScalarAsync(bounded.Token) is true) return true;
+            await Task.Delay(TimeSpan.FromMilliseconds(25), bounded.Token);
+        }
+    }
+
+    private sealed class AliasClaimSchedule
+    {
+        public TaskCompletionSource<int> FirstBackend { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<int> SecondBackend { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource FirstResolverEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource SecondResolverEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseFirst { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseSecond { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed class PausedAliasClaimResolver(
+        IAgentExecutionResourceResolver original, AliasClaimSchedule schedule, bool first) : IAgentExecutionResourceResolver
+    {
+        public void ValidateRequirements(
+            IReadOnlyList<AgentExecutionResourceRequirement>? requirements, SkillExecutionSnapshotResult? skillSnapshot)
+            => original.ValidateRequirements(requirements, skillSnapshot);
+
+        public async Task<AgentExecutionResourceResolution> ResolveAsync(
+            AgentExecution execution, AgentExecutionPackage package, CancellationToken cancellationToken)
+        {
+            (first ? schedule.FirstResolverEntered : schedule.SecondResolverEntered).TrySetResult();
+            await (first ? schedule.ReleaseFirst : schedule.ReleaseSecond).Task.WaitAsync(cancellationToken);
+            return await original.ResolveAsync(execution, package, cancellationToken);
+        }
+
+        public Task<AgentExecutionResolutionOutcome> RevalidateAsync(
+            AgentExecution execution, AgentExecutionPackage package, CancellationToken cancellationToken)
+            => original.RevalidateAsync(execution, package, cancellationToken);
+
+        public Task ApproveAsync(
+            AgentExecution execution, AgentExecutionPackage package, AgentExecutionResourceApprovalRequest request,
+            CancellationToken cancellationToken)
+            => original.ApproveAsync(execution, package, request, cancellationToken);
     }
 
     private static AgentExecutionPrepareRequest Prepare(Guid workItemId, string projectId, string repositoryId, string key)
