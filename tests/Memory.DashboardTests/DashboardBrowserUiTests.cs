@@ -12,7 +12,7 @@ using Xunit.Abstractions;
 
 namespace Memory.DashboardTests;
 
-public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixture>
+public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixture>
 {
     private static readonly DashboardTheme[] Themes =
     [

@@ -12,13 +12,14 @@
         textarea.style.top = "-1000px";
         textarea.style.left = "-1000px";
 
-        document.body.appendChild(textarea);
-        textarea.select();
-
         try {
-            document.execCommand("copy");
+            document.body.appendChild(textarea);
+            textarea.select();
+            if (!document.execCommand("copy")) {
+                throw new Error("Clipboard copy failed.");
+            }
         } finally {
-            document.body.removeChild(textarea);
+            textarea.remove();
         }
     }
 

@@ -535,8 +535,15 @@
             return;
         }
 
-        await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", text);
-        ShowMessage(message);
+        try
+        {
+            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", text);
+            ShowMessage(message);
+        }
+        catch (JSException)
+        {
+            ShowMessage("複製失敗，請改用手動複製內容。");
+        }
     }
 
     private async Task HandleProjectIdInputAsync()
