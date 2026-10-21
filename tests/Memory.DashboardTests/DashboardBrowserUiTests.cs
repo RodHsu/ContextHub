@@ -3,10 +3,12 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.Playwright;
+using Xunit.Abstractions;
 
 namespace Memory.DashboardTests;
 
@@ -119,10 +121,15 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     ];
 
     private readonly DashboardBrowserFixture _fixture;
+    private readonly ITestOutputHelper _output;
+    private long _generalLoginDiagnosticSequence;
+    private int _generalLoginDropReported;
 
-    public DashboardBrowserUiTests(DashboardBrowserFixture fixture)
+    public DashboardBrowserUiTests(DashboardBrowserFixture fixture, ITestOutputHelper output)
     {
         _fixture = fixture;
+        _output = output;
+        fixture.BindTestClass(DashboardFixtureTestClass.DashboardBrowserUiTests);
     }
 
     [Fact]
@@ -1995,22 +2002,34 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     {
         await _fixture.EnsureDashboardRunningAsync();
         await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        await context.GrantPermissionsAsync(new[] { "clipboard-write" }, new BrowserContextGrantPermissionsOptions
+        {
+            Origin = _fixture.BaseUri.GetLeftPart(UriPartial.Authority)
+        });
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/logs?uiProfile=normal");
         await page.Locator(".data-table-clickable tbody tr").First.ClickAsync();
         await page.GetByRole(AriaRole.Button, new() { Name = "複製 JSON" }).ClickAsync();
 
-        var toast = page.Locator(".toast").First;
-        await toast.WaitForAsync(new LocatorWaitForOptions
+        try
         {
-            State = WaitForSelectorState.Visible,
-            Timeout = 15000
-        });
+            var toast = page.Locator(".toast").First;
+            await toast.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 15000
+            });
 
-        var text = await toast.InnerTextAsync();
-        text.Should().Contain("已複製日誌 #");
-        text.Should().NotContain("_message");
+            var text = await toast.InnerTextAsync();
+            text.Should().Contain("已複製日誌 #");
+            text.Should().NotContain("_message");
+        }
+        catch
+        {
+            await RecordClipboardFailureCapabilityAsync(page);
+            throw;
+        }
     }
 
     [Fact]
@@ -2382,6 +2401,10 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         };
 
         await using var context = await _fixture.CreateContextAsync(viewports[0]);
+        await context.GrantPermissionsAsync(new[] { "clipboard-write" }, new BrowserContextGrantPermissionsOptions
+        {
+            Origin = _fixture.BaseUri.GetLeftPart(UriPartial.Authority)
+        });
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
@@ -2492,13 +2515,21 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }
 
         await page.GetByRole(AriaRole.Button, new() { Name = "複製內容" }).ClickAsync();
-        var toast = page.Locator(".toast").First;
-        await toast.WaitForAsync(new LocatorWaitForOptions
+        try
         {
-            State = WaitForSelectorState.Visible,
-            Timeout = 15000
-        });
-        (await toast.InnerTextAsync()).Should().Contain("已複製 memory 內容");
+            var toast = page.Locator(".toast").First;
+            await toast.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 15000
+            });
+            (await toast.InnerTextAsync()).Should().Contain("已複製 memory 內容");
+        }
+        catch
+        {
+            await RecordClipboardFailureCapabilityAsync(page);
+            throw;
+        }
     }
 
     [Fact]
@@ -4074,33 +4105,205 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             }})();");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync(new Uri(_fixture.BaseUri, route.Route).ToString(), new PageGotoOptions
+        var navigation = DashboardNavigationDiagnostics.TryAttach(page, _fixture.BaseUri, theme.Name, viewport.Name, route.Route);
+        try
         {
-            WaitUntil = WaitUntilState.NetworkIdle,
-            Timeout = 15000
-        });
-
-        await page.GetByRole(AriaRole.Heading, new() { Name = route.Title })
-            .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
-
-        foreach (var selector in route.RequiredSelectors)
-        {
-            await page.Locator(selector).First.WaitForAsync(new LocatorWaitForOptions
+            const float readinessBudgetMilliseconds = 15000;
+            var readinessStarted = Stopwatch.GetTimestamp();
+            var gotoSucceeded = false;
+            try
             {
-                State = WaitForSelectorState.Visible,
-                Timeout = 15000
+                await page.GotoAsync(new Uri(_fixture.BaseUri, route.Route).ToString(), new PageGotoOptions
+                {
+                    WaitUntil = WaitUntilState.Load,
+                    Timeout = readinessBudgetMilliseconds
+                });
+                gotoSucceeded = true;
+            }
+            finally
+            {
+                navigation?.Detach(gotoSucceeded);
+            }
+            var remainingReadinessMilliseconds = readinessBudgetMilliseconds
+                - Stopwatch.GetElapsedTime(readinessStarted).TotalMilliseconds;
+            if (remainingReadinessMilliseconds <= 0)
+                throw new TimeoutException("PUBLIC_ROUTE_VISUAL_READINESS_BUDGET_EXHAUSTED");
+            await page.WaitForFunctionAsync("""
+                async () => {
+                    if (document.readyState !== 'complete' || !document.fonts)
+                        return false;
+                    const stylesheets = Array.from(document.querySelectorAll('head link[rel="stylesheet"]'));
+                    if (stylesheets.length === 0 || stylesheets.some(link => link.sheet === null))
+                        return false;
+                    await document.fonts.ready;
+                    return document.fonts.status === 'loaded'
+                        && Array.from(document.fonts).every(face => face.status !== 'error');
+                }
+                """, null, new PageWaitForFunctionOptions
+            {
+                Timeout = (float)remainingReadinessMilliseconds
             });
+
+            await page.GetByRole(AriaRole.Heading, new() { Name = route.Title })
+                .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+
+            foreach (var selector in route.RequiredSelectors)
+            {
+                await page.Locator(selector).First.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 15000
+                });
+            }
+
+            var screenshotPath = await CaptureScreenshotAsync(page, route.Name, DashboardUiProfile.Normal, viewport, theme);
+            var snapshot = await AnalyzePublicLayoutAsync(page, route.OverlapSelectors);
+
+            snapshot.DocumentScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+                $"unexpected horizontal overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.BodyScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+                $"body width overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.MissingSelectors.Should().BeEmpty($"missing expected selectors on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.OverlapWarnings.Should().BeEmpty($"detected overlapping panels on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
         }
+        finally
+        {
+            navigation?.Detach();
+            navigation?.TryPersist();
+        }
+    }
 
-        var screenshotPath = await CaptureScreenshotAsync(page, route.Name, DashboardUiProfile.Normal, viewport, theme);
-        var snapshot = await AnalyzePublicLayoutAsync(page, route.OverlapSelectors);
+    private async Task RecordClipboardFailureCapabilityAsync(IPage page)
+    {
+        const string unavailable = """{"schemaVersion":1,"kind":"ClipboardWriteFailureCapability","outcome":"Unavailable"}""";
+        var diagnostic = unavailable;
+        try
+        {
+            var task = page.EvaluateAsync<JsonElement>("""
+                async () => {
+                    let permission='Unavailable',queryError='None';
+                    try {
+                        if (navigator.permissions && typeof navigator.permissions.query==='function') {
+                            const result=await navigator.permissions.query({name:'clipboard-write'});
+                            permission=['granted','denied','prompt'].includes(result.state) ? result.state : 'Unavailable';
+                        } else queryError='Unsupported';
+                    } catch (error) {
+                        queryError=['NotAllowedError','SecurityError','TypeError','NotSupportedError','InvalidStateError'].includes(error?.name) ? error.name : 'Other';
+                    }
+                    return {secureContext:window.isSecureContext,
+                        writeTextAvailable:typeof navigator.clipboard?.writeText==='function',
+                        visibility:['visible','hidden'].includes(document.visibilityState) ? document.visibilityState : 'Unavailable',
+                        hasFocus:document.hasFocus(),activationActive:navigator.userActivation?.isActive ?? null,
+                        activationEver:navigator.userActivation?.hasBeenActive ?? null,
+                        permission:permission,queryError:queryError};
+                }
+                """);
+            // A timed-out diagnostic RPC can finish later; observe faults without writing late output.
+            _ = task.ContinueWith(static completed => { _ = completed.Exception; }, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            var observed = await task.WaitAsync(TimeSpan.FromSeconds(2));
+            var projected = JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                kind = "ClipboardWriteFailureCapability",
+                outcome = "Observed",
+                secureContext = ClipboardProbeBoolean(observed, "secureContext"),
+                writeTextAvailable = ClipboardProbeBoolean(observed, "writeTextAvailable"),
+                visibility = ClipboardProbeEnum(observed, "visibility", "visible", "hidden"),
+                hasFocus = ClipboardProbeBoolean(observed, "hasFocus"),
+                activationActive = ClipboardProbeBoolean(observed, "activationActive"),
+                activationEver = ClipboardProbeBoolean(observed, "activationEver"),
+                permission = ClipboardProbeEnum(observed, "permission", "granted", "denied", "prompt"),
+                queryError = ClipboardProbeEnum(observed, "queryError", "None", "Unsupported", "NotAllowedError", "SecurityError", "TypeError", "NotSupportedError", "InvalidStateError", "Other")
+            });
+            if (Encoding.UTF8.GetByteCount(projected) <= 4 * 1024) diagnostic = projected;
+        }
+        catch
+        {
+            // Diagnostic failures never replace the original test failure or publish exception payloads.
+        }
+        WriteBoundedDiagnostic(diagnostic, 4 * 1024);
+    }
 
-        snapshot.DocumentScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
-            $"unexpected horizontal overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.BodyScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
-            $"body width overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.MissingSelectors.Should().BeEmpty($"missing expected selectors on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.OverlapWarnings.Should().BeEmpty($"detected overlapping panels on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+    private static bool? ClipboardProbeBoolean(JsonElement snapshot, string property)
+        => snapshot.TryGetProperty(property, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean() : null;
+
+    private static string ClipboardProbeEnum(JsonElement snapshot, string property, params string[] allowed)
+    {
+        if (!snapshot.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.String) return "Unavailable";
+        var candidate = value.GetString();
+        foreach (var item in allowed)
+            if (string.Equals(candidate, item, StringComparison.Ordinal)) return item;
+        return "Unavailable";
+    }
+
+    private (long Sequence, DateTimeOffset? StartedAtUtc, long? StartedTimestamp) BeginGeneralLoginDiagnostic()
+    {
+        var sequence = Interlocked.Increment(ref _generalLoginDiagnosticSequence);
+        try { return (sequence, DateTimeOffset.UtcNow, Stopwatch.GetTimestamp()); }
+        catch { return (sequence, null, null); }
+    }
+
+    private static string ClassifyGeneralLoginFailure(Exception exception)
+    {
+        if (exception is TimeoutException) return "Timeout";
+        try
+        {
+            if (exception is PlaywrightException && exception.Message.Contains("net::ERR_NETWORK_CHANGED", StringComparison.Ordinal))
+                return "NetworkChanged";
+        }
+        catch { }
+        return "Other";
+    }
+
+    private void RecordGeneralLoginDiagnostic(
+        (long Sequence, DateTimeOffset? StartedAtUtc, long? StartedTimestamp) started, string outcome)
+    {
+        try
+        {
+            if (started.Sequence > 2047)
+            {
+                // Reserve the final output slot for the first drop; later totals remain explicitly unknown.
+                if (Interlocked.CompareExchange(ref _generalLoginDropReported, 1, 0) == 0)
+                    WriteBoundedDiagnostic(JsonSerializer.Serialize(new
+                    {
+                        schemaVersion = 1,
+                        kind = "GeneralLoginNavigation",
+                        sequence = started.Sequence,
+                        diagnosticStatus = "Dropped",
+                        outcome = "Other",
+                        droppedAtLeast = 1,
+                        additionalDroppedCount = "Unknown"
+                    }), 1024);
+                return;
+            }
+            var endedAtUtc = DateTimeOffset.UtcNow;
+            var elapsed = started.StartedTimestamp.HasValue
+                ? (double?)Stopwatch.GetElapsedTime(started.StartedTimestamp.Value).TotalMilliseconds : null;
+            WriteBoundedDiagnostic(JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                kind = "GeneralLoginNavigation",
+                sequence = started.Sequence,
+                diagnosticStatus = started.StartedAtUtc.HasValue && elapsed.HasValue ? "Observed" : "Unavailable",
+                startedAtUtc = started.StartedAtUtc,
+                endedAtUtc,
+                elapsedMilliseconds = elapsed.HasValue && double.IsFinite(elapsed.Value) ? elapsed : null,
+                outcome = outcome is "Completed" or "NetworkChanged" or "Timeout" ? outcome : "Other",
+                clockQualification = "Unverified"
+            }), 1024);
+        }
+        catch { }
+    }
+
+    private void WriteBoundedDiagnostic(string diagnostic, int maximumBytes)
+    {
+        try
+        {
+            if (Encoding.UTF8.GetByteCount(diagnostic) <= maximumBytes) _output.WriteLine(diagnostic);
+        }
+        catch { }
     }
 
     private async Task LoginAndOpenAsync(IPage page, string relativeUrlWithProfile)
@@ -4109,7 +4312,22 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         for (var loginAttempt = 0; loginAttempt < 2; loginAttempt++)
         {
             var loginUrl = new Uri(_fixture.BaseUri, $"/login?returnUrl={Uri.EscapeDataString(relativeUrlWithProfile)}");
-            await page.GotoAsync(loginUrl.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            var navigationDiagnostic = BeginGeneralLoginDiagnostic();
+            var navigationOutcome = "Other";
+            try
+            {
+                await page.GotoAsync(loginUrl.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                navigationOutcome = "Completed";
+            }
+            catch (Exception exception)
+            {
+                navigationOutcome = ClassifyGeneralLoginFailure(exception);
+                throw;
+            }
+            finally
+            {
+                RecordGeneralLoginDiagnostic(navigationDiagnostic, navigationOutcome);
+            }
             await page.WaitForTimeoutAsync(350);
             await page.Locator("input[name='Username']").FillAsync("admin");
             await page.Locator("input[name='Password']").FillAsync("ContextHub!123");
@@ -4624,6 +4842,42 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
     private readonly int _port = GetFreeTcpPort();
     private readonly List<DashboardProcessStartupDiagnostics> _startupDiagnostics = [];
     private DashboardProcessStartupDiagnostics? _currentStartupDiagnostics;
+    private DashboardFixtureTestClass? _fixtureTestClass;
+
+    public DashboardBrowserFixture()
+    {
+    }
+
+    internal DashboardBrowserFixture(Process ownedProcess)
+    {
+        ArgumentNullException.ThrowIfNull(ownedProcess);
+        _process = ownedProcess;
+    }
+
+    internal void BindTestClass(DashboardFixtureTestClass testClass)
+    {
+        lock (_startupDiagnostics)
+        {
+            _fixtureTestClass = _fixtureTestClass is null || _fixtureTestClass == testClass
+                ? testClass : DashboardFixtureTestClass.Unknown;
+            foreach (var diagnostics in _startupDiagnostics)
+                diagnostics.RecordFixtureTestClass(_fixtureTestClass.Value);
+        }
+    }
+
+    internal void RegisterStartupDiagnostics(DashboardProcessStartupDiagnostics diagnostics)
+    {
+        lock (_startupDiagnostics)
+        {
+            if (_startupDiagnostics.Count >= DashboardProcessStartupDiagnostics.MaximumAttempts)
+            {
+                _startupDiagnostics[^1].RecordOmittedAttempt();
+                return;
+            }
+            if (_fixtureTestClass is { } testClass) diagnostics.RecordFixtureTestClass(testClass);
+            _startupDiagnostics.Add(diagnostics);
+        }
+    }
 
     public Uri BaseUri => new($"http://127.0.0.1:{_port}/");
 
@@ -4688,14 +4942,34 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
     public async Task DisposeAsync()
     {
         var disposalCompleted = false;
+        Task? closeTask = null;
         try
         {
             try
             {
-                if (_browser is not null)
+                if (_browser is { } browser)
                 {
-                    await _browser.CloseAsync().WaitAsync(TimeSpan.FromSeconds(30));
-                    _browser = null;
+                    _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.BrowserClose, DashboardTeardownOutcome.Started);
+                    _currentStartupDiagnostics?.ObserveBrowserCloseStart(() => browser.IsConnected);
+                    try
+                    {
+                        closeTask = browser.CloseAsync();
+                        await closeTask.WaitAsync(TimeSpan.FromSeconds(30));
+                        _browser = null;
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.BrowserClose, DashboardTeardownOutcome.Completed);
+                    }
+                    catch (Exception exception)
+                    {
+                        if (exception is TimeoutException)
+                            _currentStartupDiagnostics?.ObserveBrowserCloseTimeout(() => browser.IsConnected, closeTask);
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.BrowserClose,
+                            DashboardTeardownOutcome.Failed, DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+                        throw;
+                    }
+                }
+                else
+                {
+                    _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.BrowserClose, DashboardTeardownOutcome.Skipped);
                 }
             }
             finally
@@ -4704,22 +4978,74 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
                 {
                     if (_process is not null && !_process.HasExited)
                     {
-                        _process.Kill(entireProcessTree: true);
-                        await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostKill, DashboardTeardownOutcome.Started);
+                        try
+                        {
+                            _process.Kill(entireProcessTree: true);
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostKill, DashboardTeardownOutcome.Completed);
+                        }
+                        catch (Exception exception)
+                        {
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostKill,
+                                DashboardTeardownOutcome.Failed, DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+                            throw;
+                        }
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostWait, DashboardTeardownOutcome.Started);
+                        try
+                        {
+                            await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostWait, DashboardTeardownOutcome.Completed);
+                        }
+                        catch (Exception exception)
+                        {
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostWait,
+                                DashboardTeardownOutcome.Failed, DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+                            throw;
+                        }
                         _currentStartupDiagnostics?.ObserveProcessExit(_process);
                         _process.Dispose();
                         _process = null;
                     }
+                    else
+                    {
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostKill, DashboardTeardownOutcome.Skipped);
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostWait, DashboardTeardownOutcome.Skipped);
+                        if (_process is { } process)
+                        {
+                            _currentStartupDiagnostics?.ObserveProcessExit(process);
+                            process.Dispose();
+                            _process = null;
+                        }
+                    }
                 }
                 finally
                 {
-                    _playwright?.Dispose();
+                    _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.PlaywrightDispose,
+                        _playwright is null ? DashboardTeardownOutcome.Skipped : DashboardTeardownOutcome.Started);
+                    try
+                    {
+                        _playwright?.Dispose();
+                        if (_playwright is not null)
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.PlaywrightDispose, DashboardTeardownOutcome.Completed);
+                    }
+                    catch (Exception exception)
+                    {
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.PlaywrightDispose,
+                            DashboardTeardownOutcome.Failed, DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+                        throw;
+                    }
                 }
             }
             disposalCompleted = true;
         }
+        catch (Exception exception)
+        {
+            _currentStartupDiagnostics?.RecordTeardownOuterFailure(DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+            throw;
+        }
         finally
         {
+            if (closeTask is not null) _currentStartupDiagnostics?.ObserveBrowserCloseAfterCleanup(closeTask);
             _currentStartupDiagnostics?.ObserveProcessExit(_process);
             foreach (var diagnostics in _startupDiagnostics) diagnostics.RecordDisposal(disposalCompleted);
             PersistStartupDiagnostics();
@@ -4788,9 +5114,28 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
             StringComparison.OrdinalIgnoreCase)
             ? "Release"
             : "Debug";
-        var startInfo = new ProcessStartInfo("dotnet", $"run --no-build --no-launch-profile --configuration {configuration} --project \"{dashboardProject}\" -- --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
+        var dashboardDirectory = Path.GetDirectoryName(dashboardProject)!;
+        var targetFramework = Path.GetFileName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
+        if (targetFramework != "net10.0")
+            throw new NotSupportedException("DASHBOARD_BUILT_LAUNCH_TARGET_FRAMEWORK_UNSUPPORTED");
+        var outputDirectory = Path.Combine(dashboardDirectory, "bin", configuration, targetFramework);
+        var dashboardAssembly = Path.Combine(outputDirectory, "Memory.Dashboard.dll");
+        foreach (var fileName in new[]
         {
-            WorkingDirectory = repoRoot,
+            "Memory.Dashboard.dll", "Memory.Dashboard.deps.json", "Memory.Dashboard.runtimeconfig.json",
+            "Memory.Dashboard.staticwebassets.runtime.json", "Memory.Dashboard.staticwebassets.endpoints.json",
+            "appsettings.json"
+        })
+        {
+            var artifactPath = Path.Combine(outputDirectory, fileName);
+            if (!File.Exists(artifactPath))
+                throw new FileNotFoundException("DASHBOARD_BUILT_LAUNCH_ARTIFACT_MISSING", artifactPath);
+        }
+        if (!Directory.Exists(Path.Combine(dashboardDirectory, "wwwroot")))
+            throw new DirectoryNotFoundException("DASHBOARD_BUILT_LAUNCH_WEB_ROOT_MISSING");
+        var startInfo = new ProcessStartInfo("dotnet", $"\"{dashboardAssembly}\" --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
+        {
+            WorkingDirectory = dashboardDirectory,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
@@ -4800,8 +5145,9 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         _currentStartupDiagnostics = null;
         if (_startupDiagnostics.Count < DashboardProcessStartupDiagnostics.MaximumAttempts)
         {
-            _currentStartupDiagnostics = DashboardProcessStartupDiagnostics.TryCreate(dashboardProject, configuration, BaseUri, _port);
-            if (_currentStartupDiagnostics is not null) _startupDiagnostics.Add(_currentStartupDiagnostics);
+            _currentStartupDiagnostics = DashboardProcessStartupDiagnostics.TryCreate(dashboardAssembly, configuration, BaseUri, _port);
+            if (_currentStartupDiagnostics is not null)
+                RegisterStartupDiagnostics(_currentStartupDiagnostics);
         }
         else
         {

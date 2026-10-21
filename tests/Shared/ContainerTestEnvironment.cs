@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Http.Headers;
+using DotNet.Testcontainers.Images;
 using Memory.Application;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -29,14 +30,14 @@ public sealed class ContainerTestEnvironment : IAsyncLifetime
             return;
         }
 
-        _postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+        _postgres = new PostgreSqlBuilder(new DockerImage(repository: "pgvector/pgvector", tag: "pg17"))
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
             .WithPassword("ContextHub_TestFixture_Only")
             .Build();
 
-        _redis = new RedisBuilder("redis:7.4-alpine")
+        _redis = new RedisBuilder(new DockerImage(repository: "redis", tag: "7.4-alpine"))
             .WithPortBinding(6379, true)
             .Build();
 

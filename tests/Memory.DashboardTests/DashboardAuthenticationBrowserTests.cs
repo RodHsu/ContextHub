@@ -3,9 +3,16 @@ using Microsoft.Playwright;
 
 namespace Memory.DashboardTests;
 
-public sealed class DashboardAuthenticationBrowserTests(DashboardBrowserFixture fixture)
-    : IClassFixture<DashboardBrowserFixture>
+public sealed class DashboardAuthenticationBrowserTests : IClassFixture<DashboardBrowserFixture>
 {
+    private readonly DashboardBrowserFixture fixture;
+
+    public DashboardAuthenticationBrowserTests(DashboardBrowserFixture fixture)
+    {
+        this.fixture = fixture;
+        fixture.BindTestClass(DashboardFixtureTestClass.DashboardAuthenticationBrowserTests);
+    }
+
     [Theory]
     [InlineData("chromium")]
     [InlineData("firefox")]

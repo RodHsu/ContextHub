@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using DotNet.Testcontainers.Images;
 using FluentAssertions;
 using Memory.Application;
 using Memory.ChatGptGateway;
@@ -5350,14 +5351,14 @@ public sealed class ChatGptGatewayTestEnvironment : IAsyncLifetime
             return;
         }
 
-        _postgres = new PostgreSqlBuilder("pgvector/pgvector:pg17")
+        _postgres = new PostgreSqlBuilder(new DockerImage(repository: "pgvector/pgvector", tag: "pg17"))
             .WithPortBinding(5432, true)
             .WithDatabase("contexthub")
             .WithUsername("contexthub")
             .WithPassword("ContextHub_TestFixture_Only")
             .Build();
 
-        _redis = new RedisBuilder("redis:7.4-alpine")
+        _redis = new RedisBuilder(new DockerImage(repository: "redis", tag: "7.4-alpine"))
             .WithPortBinding(6379, true)
             .Build();
 

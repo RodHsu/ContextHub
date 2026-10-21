@@ -5,8 +5,18 @@ using Xunit.Abstractions;
 namespace Memory.DashboardTests;
 
 // Shipped UI and real browser interactions, with the existing local API fixture.
-public sealed class GraphVisibleViewportTests(DashboardBrowserFixture fixture, ITestOutputHelper output) : IClassFixture<DashboardBrowserFixture>
+public sealed class GraphVisibleViewportTests : IClassFixture<DashboardBrowserFixture>
 {
+    private readonly DashboardBrowserFixture fixture;
+    private readonly ITestOutputHelper output;
+
+    public GraphVisibleViewportTests(DashboardBrowserFixture fixture, ITestOutputHelper output)
+    {
+        this.fixture = fixture;
+        this.output = output;
+        fixture.BindTestClass(DashboardFixtureTestClass.GraphVisibleViewportTests);
+    }
+
     [Theory]
     [InlineData(1366, 768, 150)]
     [InlineData(1024, 600, 150)]

@@ -42,8 +42,8 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
     [WorkerRollbackFact]
     public async Task Actual_workers_preserve_alias_data_and_owner_tenant_model_boundaries_across_rollback_restart_and_roll_forward()
     {
-        using var compatible = await WorkerBundle.Open("COMPATIBLE", "bb015acb792250fecd7500aff558fa2b360dfae6");
-        using var candidate = await WorkerBundle.Open("CANDIDATE", "8b840d37bf35686af43f8d23f12cd3584ffe9dca");
+        using var compatible = await WorkerBundle.Open("COMPATIBLE", "16db49d08e9ee64fd7b7ee7893ad46276f1d91a0");
+        using var candidate = await WorkerBundle.Open("CANDIDATE", "80ff15d2481762003b65cca13a359f6c3f8f58ca");
         var factory = environment.GetFactory();
         using var seed = factory.Services.CreateScope();
         var db = seed.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -98,6 +98,10 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
             await using var worker = await RunningWorker.Start(bundle.Dll, config);
             (await Snapshot(seed.ServiceProvider, ownedIds)).SequenceEqual(beforeRestartVectors).Should().BeTrue();
             (await JobLedger(seed.ServiceProvider, settled) == beforeRestartLedger).Should().BeTrue();
+            var activeVectorIdsBefore = await db.MemoryChunkVectors.AsNoTracking()
+                .Where(x => ownedIds.Contains(x.ChunkId) && x.Status == "Active" && x.ModelKey == provider.ModelKey)
+                .ToDictionaryAsync(x => x.ChunkId, x => x.Id);
+            activeVectorIdsBefore.Keys.Should().BeEquivalentTo(ownedIds);
             var job = NewJob(owner, spelling + suffix, provider.ModelKey);
             db.MemoryJobs.Add(job);
             await db.SaveChangesAsync();
@@ -108,8 +112,15 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
             var current = read.ServiceProvider.GetRequiredService<MemoryDbContext>();
             (await Snapshot(read.ServiceProvider, foreignIds)).SequenceEqual(foreignBefore).Should().BeTrue();
             foreach (var id in ownedIds)
+            {
                 (await current.MemoryChunkVectors.CountAsync(x => x.ChunkId == id && x.Status == "Active" && x.ModelKey == provider.ModelKey))
                     .Should().Be(1);
+                (await current.MemoryChunkVectors.AsNoTracking()
+                    .Where(x => x.ChunkId == id && x.Status == "Active" && x.ModelKey == provider.ModelKey)
+                    .Select(x => x.Id).SingleAsync()).Should().NotBe(activeVectorIdsBefore[id]);
+                (await current.MemoryChunkVectors.CountAsync(x => x.Id == activeVectorIdsBefore[id] && x.ChunkId == id
+                    && x.Status == "Superseded" && x.ModelKey == provider.ModelKey)).Should().Be(1);
+            }
             (await current.MemoryJobs.CountAsync(x => completed.Contains(x.Id) && x.Status == MemoryJobStatus.Completed))
                 .Should().Be(completed.Count);
             var beforeFailure = await Snapshot(read.ServiceProvider, ownedIds);
@@ -144,8 +155,8 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
     [InlineData(true)]
     public async Task Interrupted_candidate_vector_transaction_recovers_the_same_stale_job_in_a_compatible_worker(bool afterSupersede)
     {
-        using var compatible = await WorkerBundle.Open("COMPATIBLE", "bb015acb792250fecd7500aff558fa2b360dfae6");
-        using var candidate = await WorkerBundle.Open("CANDIDATE", "8b840d37bf35686af43f8d23f12cd3584ffe9dca");
+        using var compatible = await WorkerBundle.Open("COMPATIBLE", "16db49d08e9ee64fd7b7ee7893ad46276f1d91a0");
+        using var candidate = await WorkerBundle.Open("CANDIDATE", "80ff15d2481762003b65cca13a359f6c3f8f58ca");
         var factory = environment.GetFactory();
         using var seed = factory.Services.CreateScope();
         var db = seed.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -179,6 +190,11 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
         foreach (var chunk in chunks)
             await services.GetRequiredService<IVectorStore>().ReplaceChunkVectorAsync(chunk.Id,
                 await provider.EmbedAsync(chunk.ChunkText, EmbeddingPurpose.Document, default), default);
+        var ownedIds = chunks.Take(2).Select(x => x.Id).ToArray();
+        var activeVectorIdsBefore = await db.MemoryChunkVectors.AsNoTracking()
+            .Where(x => ownedIds.Contains(x.ChunkId) && x.Status == "Active" && x.ModelKey == provider.ModelKey)
+            .ToDictionaryAsync(x => x.ChunkId, x => x.Id);
+        activeVectorIdsBefore.Keys.Should().BeEquivalentTo(ownedIds);
         var allIds = chunks.Select(x => x.Id).ToArray();
         var before = await Snapshot(services, allIds);
         var foreignBefore = await Snapshot(services, [chunks[2].Id]);
@@ -229,8 +245,15 @@ public sealed class ProjectIdentityWorkerRollbackTests(ContainerTestEnvironment 
             recovered.StartedAt.Should().BeAfter(DateTimeOffset.UtcNow.AddMinutes(-5));
             (await Snapshot(read.ServiceProvider, [chunks[2].Id])).SequenceEqual(foreignBefore).Should().BeTrue();
             foreach (var chunk in chunks.Take(2))
+            {
                 (await finalDb.MemoryChunkVectors.CountAsync(x => x.ChunkId == chunk.Id && x.Status == "Active" && x.ModelKey == provider.ModelKey))
                     .Should().Be(1);
+                (await finalDb.MemoryChunkVectors.AsNoTracking()
+                    .Where(x => x.ChunkId == chunk.Id && x.Status == "Active" && x.ModelKey == provider.ModelKey)
+                    .Select(x => x.Id).SingleAsync()).Should().NotBe(activeVectorIdsBefore[chunk.Id]);
+                (await finalDb.MemoryChunkVectors.CountAsync(x => x.Id == activeVectorIdsBefore[chunk.Id] && x.ChunkId == chunk.Id
+                    && x.Status == "Superseded" && x.ModelKey == provider.ModelKey)).Should().Be(1);
+            }
         }
         var ledger = await JobLedger(services, [job.Id]);
         var vectorsAfter = await Snapshot(services, allIds);

@@ -1,8 +1,74 @@
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Win32.SafeHandles;
 
 namespace Memory.DashboardTests;
+
+internal enum DashboardTeardownStep
+{
+    BrowserClose,
+    HostKill,
+    HostWait,
+    PlaywrightDispose
+}
+
+internal enum DashboardTeardownOutcome
+{
+    NotReached,
+    Started,
+    Completed,
+    Failed,
+    Skipped
+}
+
+internal enum DashboardTeardownFailureKind
+{
+    Unknown,
+    Timeout,
+    Canceled,
+    Other
+}
+
+internal enum DashboardBrowserCloseTaskState
+{
+    Pending,
+    RanToCompletion,
+    Canceled,
+    Faulted,
+    Unavailable
+}
+
+internal enum DashboardFixtureTestClass
+{
+    Unknown,
+    DashboardBrowserUiTests,
+    GraphViewportTests,
+    GraphVisibleViewportTests,
+    HeaderViewportTests,
+    DashboardAuthenticationBrowserTests
+}
+
+internal enum DashboardHostObservationOutcome
+{
+    NotObserved,
+    Observed,
+    MissingPath,
+    InvalidPath,
+    GetterFailed
+}
+
+internal enum DashboardHostObservationStage
+{
+    None,
+    ProcessId,
+    StartTime,
+    MainModulePath,
+    PathValidation
+}
 
 internal sealed class DashboardProcessStartupDiagnostics
 {
@@ -18,6 +84,21 @@ internal sealed class DashboardProcessStartupDiagnostics
     private readonly HashSet<string> _sdkCodes = new(StringComparer.Ordinal);
     private readonly string[]? _requestedArguments;
     private readonly int _expectedPort;
+    private readonly TeardownStepState[] _teardownSteps = [new(), new(), new(), new()];
+    private bool _teardownObserved;
+    private bool _browserCloseStartObserved;
+    private bool _browserCloseTimeoutObserved;
+    private bool? _browserConnectedBeforeClose;
+    private bool? _browserConnectedAtTimeout;
+    private DashboardBrowserCloseTaskState? _browserCloseTaskStateAtTimeout;
+    private DashboardBrowserCloseTaskState? _browserCloseTaskStateAfterCleanup;
+    private bool _browserCloseAfterCleanupObserved;
+    private DashboardFixtureTestClass _fixtureTestClass;
+    private bool _fixtureTestClassConflicted;
+    private bool _firstTeardownFailureObserved;
+    private DashboardTeardownStep? _firstTeardownFailureStep;
+    private DashboardTeardownFailureKind? _firstTeardownFailureKind;
+    private DashboardTeardownFailureKind? _outerTeardownFailureKind;
     private readonly long _startupTimestamp = Stopwatch.GetTimestamp();
     private long? _readinessTimestamp;
     private double? _startupElapsedMillisecondsAtReadinessOutcome;
@@ -26,6 +107,8 @@ internal sealed class DashboardProcessStartupDiagnostics
     private int? _processId;
     private DateTime? _processStartedAtUtc;
     private string? _resolvedHostPath;
+    private DashboardHostObservationOutcome _hostObservationOutcome;
+    private DashboardHostObservationStage _hostObservationFailedStage;
     private int? _exitCode;
     private int _stdoutLines;
     private int _stderrLines;
@@ -47,18 +130,20 @@ internal sealed class DashboardProcessStartupDiagnostics
     private string _fixtureDisposal = "Unknown";
     private string _lastHttpFailure = "Unknown";
 
-    private DashboardProcessStartupDiagnostics(string projectPath, string configuration, Uri baseUri, int expectedPort)
+    private DashboardProcessStartupDiagnostics(string assemblyPath, string configuration, Uri baseUri, int expectedPort)
     {
         _expectedPort = expectedPort;
-        if (projectPath.Length <= MaximumPathCharacters && Path.IsPathFullyQualified(projectPath)
-            && Path.GetFileName(projectPath) == "Memory.Dashboard.csproj"
+        if (assemblyPath.Length <= MaximumPathCharacters && Path.IsPathFullyQualified(assemblyPath)
+            && Path.GetFileName(assemblyPath) == "Memory.Dashboard.dll"
+            && Path.GetFileName(Path.GetDirectoryName(assemblyPath)) == "net10.0"
+            && Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(assemblyPath))) == configuration
+            && Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(assemblyPath)))) == "bin"
             && configuration is "Debug" or "Release" && baseUri.IsLoopback
             && baseUri.Scheme == Uri.UriSchemeHttp && baseUri.Port == expectedPort
             && baseUri.AbsolutePath == "/" && baseUri.Query.Length == 0 && baseUri.Fragment.Length == 0
             && baseUri.UserInfo.Length == 0)
         {
-            _requestedArguments = ["run", "--no-build", "--no-launch-profile", "--configuration", configuration,
-                "--project", projectPath, "--", "--urls", baseUri.AbsoluteUri.TrimEnd('/')];
+            _requestedArguments = [assemblyPath, "--urls", baseUri.AbsoluteUri.TrimEnd('/')];
         }
         else
         {
@@ -66,28 +151,78 @@ internal sealed class DashboardProcessStartupDiagnostics
         }
     }
 
-    internal static DashboardProcessStartupDiagnostics? TryCreate(string projectPath, string configuration, Uri baseUri, int expectedPort)
+    internal static DashboardProcessStartupDiagnostics? TryCreate(string assemblyPath, string configuration, Uri baseUri, int expectedPort)
     {
-        try { return new(projectPath, configuration, baseUri, expectedPort); }
+        try { return new(assemblyPath, configuration, baseUri, expectedPort); }
         catch { return null; }
     }
 
     internal void ObserveStartedProcess(Process process)
+        => ObserveStartedProcess(() => process.Id, () => process.StartTime, () => ReadHostImagePath(process));
+
+    private static string? ReadHostImagePath(Process process)
     {
+        if (!OperatingSystem.IsWindows()) return process.MainModule?.FileName;
+
+        var path = new char[MaximumPathCharacters + 1];
+        var length = (uint)path.Length;
+        if (!QueryFullProcessImageNameW(process.SafeHandle, 0, path, ref length))
+            throw new Win32Exception(Marshal.GetLastPInvokeError());
+        if (length > MaximumPathCharacters)
+            throw new InvalidOperationException("The observed process image path exceeded the diagnostic bound.");
+        return new string(path, 0, (int)length);
+    }
+
+    [SupportedOSPlatform("windows")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageNameW(
+        SafeProcessHandle process, uint flags, [Out] char[] imageName, ref uint size);
+
+    internal void ObserveStartedProcess(Func<int> readProcessId, Func<DateTime> readStartTime, Func<string?> readHostPath)
+    {
+        var stage = DashboardHostObservationStage.ProcessId;
         try
         {
             lock (_gate)
             {
-                _processId = process.Id;
-                _processStartedAtUtc = process.StartTime.ToUniversalTime();
-                var hostPath = process.MainModule?.FileName;
-                if (hostPath is not null && hostPath.Length <= MaximumPathCharacters && Path.IsPathFullyQualified(hostPath))
-                    _resolvedHostPath = hostPath;
-                else
+                _processId = readProcessId();
+                stage = DashboardHostObservationStage.StartTime;
+                _processStartedAtUtc = readStartTime().ToUniversalTime();
+                stage = DashboardHostObservationStage.MainModulePath;
+                var hostPath = readHostPath();
+                if (hostPath is null)
+                {
+                    _hostObservationOutcome = DashboardHostObservationOutcome.MissingPath;
+                    _hostObservationFailedStage = stage;
                     _incomplete = true;
+                    return;
+                }
+                stage = DashboardHostObservationStage.PathValidation;
+                if (hostPath.Length <= MaximumPathCharacters && Path.IsPathFullyQualified(hostPath))
+                {
+                    _resolvedHostPath = hostPath;
+                    _hostObservationOutcome = DashboardHostObservationOutcome.Observed;
+                    _hostObservationFailedStage = DashboardHostObservationStage.None;
+                }
+                else
+                {
+                    _hostObservationOutcome = DashboardHostObservationOutcome.InvalidPath;
+                    _hostObservationFailedStage = stage;
+                    _incomplete = true;
+                }
             }
         }
-        catch { MarkIncomplete(); }
+        catch
+        {
+            lock (_gate)
+            {
+                _hostObservationOutcome = DashboardHostObservationOutcome.GetterFailed;
+                _hostObservationFailedStage = stage;
+                _incomplete = true;
+            }
+        }
     }
 
     // The Process line-event reader owns its temporary line buffer. No line is retained here.
@@ -178,6 +313,210 @@ internal sealed class DashboardProcessStartupDiagnostics
     internal void RecordOmittedAttempt() { lock (_gate) { Increment(ref _omittedAttempts); _incomplete = true; } }
     internal void MarkIncomplete() { lock (_gate) _incomplete = true; }
 
+    internal static DashboardTeardownFailureKind ClassifyTeardownFailure(Exception? failure) => failure switch
+    {
+        TimeoutException => DashboardTeardownFailureKind.Timeout,
+        OperationCanceledException => DashboardTeardownFailureKind.Canceled,
+        null => DashboardTeardownFailureKind.Unknown,
+        _ => DashboardTeardownFailureKind.Other
+    };
+
+    internal void RecordFixtureTestClass(DashboardFixtureTestClass testClass)
+    {
+        try
+        {
+            lock (_gate)
+            {
+                if (_fixtureTestClassConflicted) return;
+                if (!Enum.IsDefined(testClass) || testClass == DashboardFixtureTestClass.Unknown
+                    || (_fixtureTestClass != DashboardFixtureTestClass.Unknown && _fixtureTestClass != testClass))
+                {
+                    _fixtureTestClass = DashboardFixtureTestClass.Unknown;
+                    _fixtureTestClassConflicted = true;
+                    _incomplete = true;
+                    return;
+                }
+                _fixtureTestClass = testClass;
+            }
+        }
+        catch { MarkIncomplete(); }
+    }
+
+    internal void ObserveBrowserCloseAfterCleanup(Task? closeTask)
+    {
+        try
+        {
+            lock (_gate)
+            {
+                if (_browserCloseAfterCleanupObserved || closeTask is null
+                    || _teardownSteps[(int)DashboardTeardownStep.BrowserClose].Outcome
+                        is not (DashboardTeardownOutcome.Completed or DashboardTeardownOutcome.Failed)
+                    || _teardownSteps[(int)DashboardTeardownStep.PlaywrightDispose].Outcome
+                        is not (DashboardTeardownOutcome.Completed or DashboardTeardownOutcome.Failed or DashboardTeardownOutcome.Skipped))
+                {
+                    _incomplete = true;
+                    return;
+                }
+                _browserCloseAfterCleanupObserved = true;
+                _browserCloseTaskStateAfterCleanup = ClassifyBrowserCloseTaskState(closeTask.Status);
+            }
+        }
+        catch { MarkIncomplete(); }
+    }
+
+    internal void ObserveBrowserCloseStart(Func<bool>? readIsConnected)
+    {
+        try
+        {
+            lock (_gate)
+            {
+                if (_browserCloseStartObserved
+                    || _teardownSteps[(int)DashboardTeardownStep.BrowserClose].Outcome != DashboardTeardownOutcome.Started)
+                {
+                    _incomplete = true;
+                    return;
+                }
+                _browserCloseStartObserved = true;
+            }
+
+            var connected = ReadBrowserConnection(readIsConnected);
+            lock (_gate) _browserConnectedBeforeClose = connected;
+        }
+        catch { MarkIncomplete(); }
+    }
+
+    internal void ObserveBrowserCloseTimeout(Func<bool>? readIsConnected, Task? closeTask)
+    {
+        try
+        {
+            lock (_gate)
+            {
+                if (!_browserCloseStartObserved || _browserCloseTimeoutObserved
+                    || _teardownSteps[(int)DashboardTeardownStep.BrowserClose].Outcome != DashboardTeardownOutcome.Started)
+                {
+                    _incomplete = true;
+                    return;
+                }
+                _browserCloseTimeoutObserved = true;
+            }
+
+            var connected = ReadBrowserConnection(readIsConnected);
+            var taskState = ClassifyBrowserCloseTaskState(closeTask?.Status);
+            lock (_gate)
+            {
+                _browserConnectedAtTimeout = connected;
+                _browserCloseTaskStateAtTimeout = taskState;
+                if (taskState == DashboardBrowserCloseTaskState.Unavailable) _incomplete = true;
+            }
+        }
+        catch { MarkIncomplete(); }
+    }
+
+    internal static DashboardBrowserCloseTaskState ClassifyBrowserCloseTaskState(TaskStatus? status) => status switch
+    {
+        TaskStatus.Created or TaskStatus.WaitingForActivation or TaskStatus.WaitingToRun
+            or TaskStatus.Running or TaskStatus.WaitingForChildrenToComplete => DashboardBrowserCloseTaskState.Pending,
+        TaskStatus.RanToCompletion => DashboardBrowserCloseTaskState.RanToCompletion,
+        TaskStatus.Canceled => DashboardBrowserCloseTaskState.Canceled,
+        TaskStatus.Faulted => DashboardBrowserCloseTaskState.Faulted,
+        _ => DashboardBrowserCloseTaskState.Unavailable
+    };
+
+    private bool? ReadBrowserConnection(Func<bool>? readIsConnected)
+    {
+        try
+        {
+            if (readIsConnected is not null) return readIsConnected();
+        }
+        catch { }
+        MarkIncomplete();
+        return null;
+    }
+
+    internal void RecordTeardownStep(
+        DashboardTeardownStep step,
+        DashboardTeardownOutcome outcome,
+        DashboardTeardownFailureKind failureKind = DashboardTeardownFailureKind.Unknown)
+    {
+        // Diagnostic failures must never replace an exception from the original teardown.
+        try
+        {
+            lock (_gate)
+            {
+                if ((uint)step >= (uint)_teardownSteps.Length
+                    || outcome is not (DashboardTeardownOutcome.Started or DashboardTeardownOutcome.Completed
+                        or DashboardTeardownOutcome.Failed or DashboardTeardownOutcome.Skipped)
+                    || (outcome != DashboardTeardownOutcome.Failed && failureKind != DashboardTeardownFailureKind.Unknown))
+                {
+                    _incomplete = true;
+                    return;
+                }
+
+                _teardownObserved = true;
+                var state = _teardownSteps[(int)step];
+                if (outcome is DashboardTeardownOutcome.Started or DashboardTeardownOutcome.Skipped)
+                {
+                    if (state.Outcome != DashboardTeardownOutcome.NotReached)
+                    {
+                        _incomplete = true;
+                        return;
+                    }
+                    state.Outcome = outcome;
+                    if (outcome == DashboardTeardownOutcome.Started) state.StartedTimestamp = Stopwatch.GetTimestamp();
+                    return;
+                }
+
+                if (state.Outcome != DashboardTeardownOutcome.Started)
+                {
+                    _incomplete = true;
+                    return;
+                }
+                state.Outcome = outcome;
+                if (state.StartedTimestamp is long started)
+                    state.ElapsedMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                if (outcome == DashboardTeardownOutcome.Failed)
+                {
+                    state.FailureKind = NormalizeTeardownFailureKind(failureKind);
+                    RecordFirstTeardownFailure(step, state.FailureKind.Value);
+                }
+            }
+        }
+        catch { _incomplete = true; }
+    }
+
+    internal void RecordTeardownOuterFailure(DashboardTeardownFailureKind failureKind)
+    {
+        try
+        {
+            lock (_gate)
+            {
+                _teardownObserved = true;
+                var normalized = NormalizeTeardownFailureKind(failureKind);
+                _outerTeardownFailureKind ??= normalized;
+                // An original resource predicate or Process.Dispose can fail outside the four observed operations.
+                RecordFirstTeardownFailure(null, normalized);
+            }
+        }
+        catch { _incomplete = true; }
+    }
+
+    private DashboardTeardownFailureKind NormalizeTeardownFailureKind(DashboardTeardownFailureKind failureKind)
+    {
+        if (failureKind is DashboardTeardownFailureKind.Unknown or DashboardTeardownFailureKind.Timeout
+            or DashboardTeardownFailureKind.Canceled or DashboardTeardownFailureKind.Other)
+            return failureKind;
+        _incomplete = true;
+        return DashboardTeardownFailureKind.Unknown;
+    }
+
+    private void RecordFirstTeardownFailure(DashboardTeardownStep? step, DashboardTeardownFailureKind failureKind)
+    {
+        if (_firstTeardownFailureObserved) return;
+        _firstTeardownFailureObserved = true;
+        _firstTeardownFailureStep = step;
+        _firstTeardownFailureKind = failureKind;
+    }
+
     internal byte[] SerializeSnapshot()
     {
         lock (_gate)
@@ -193,6 +532,8 @@ internal sealed class DashboardProcessStartupDiagnostics
                 processId = _processId,
                 processStartedAtUtc = _processStartedAtUtc,
                 resolvedHostPath = _resolvedHostPath,
+                hostObservationOutcome = _hostObservationOutcome.ToString(),
+                hostObservationFailedStage = _hostObservationFailedStage.ToString(),
                 observedExitCode = _exitCode,
                 expectedPort = _expectedPort,
                 observedListeningPort = _listeningPort,
@@ -202,7 +543,36 @@ internal sealed class DashboardProcessStartupDiagnostics
                 readinessElapsedMilliseconds = _readinessElapsedMilliseconds,
                 initialization = _initialization,
                 fixtureDisposal = _fixtureDisposal,
+                fixtureTestClass = _fixtureTestClass switch
+                {
+                    DashboardFixtureTestClass.DashboardBrowserUiTests => nameof(DashboardBrowserUiTests),
+                    DashboardFixtureTestClass.GraphViewportTests => nameof(GraphViewportTests),
+                    DashboardFixtureTestClass.GraphVisibleViewportTests => nameof(GraphVisibleViewportTests),
+                    DashboardFixtureTestClass.HeaderViewportTests => nameof(HeaderViewportTests),
+                    DashboardFixtureTestClass.DashboardAuthenticationBrowserTests => nameof(DashboardAuthenticationBrowserTests),
+                    _ => "Unknown"
+                },
                 processTreeCleanup = "Unverified",
+                teardownScope = "FixtureDisposeCurrentAttemptOnly",
+                teardownObserved = _teardownObserved,
+                browserConnectedBeforeClose = _browserConnectedBeforeClose,
+                browserConnectedAtTimeout = _browserConnectedAtTimeout,
+                browserCloseTaskStateAtTimeout = _browserCloseTaskStateAtTimeout?.ToString(),
+                browserCloseAfterCleanupObserved = _browserCloseAfterCleanupObserved,
+                browserCloseTaskStateAfterCleanup = _browserCloseTaskStateAfterCleanup?.ToString(),
+                teardownSteps = _teardownSteps.Select((step, index) => new
+                {
+                    step = ((DashboardTeardownStep)index).ToString(),
+                    outcome = step.Outcome.ToString(),
+                    elapsedMilliseconds = step.ElapsedMilliseconds,
+                    failureKind = step.FailureKind?.ToString()
+                }).ToArray(),
+                firstObservedTeardownFailure = _firstTeardownFailureObserved ? new
+                {
+                    step = _firstTeardownFailureStep?.ToString() ?? "Unknown",
+                    failureKind = _firstTeardownFailureKind?.ToString() ?? "Unknown"
+                } : null,
+                outerPropagatedTeardownFailureKind = _outerTeardownFailureKind?.ToString(),
                 httpAttempts = _httpAttempts,
                 lastHttpStatus = _lastHttpStatus,
                 lastHttpFailure = _lastHttpFailure,
@@ -256,5 +626,13 @@ internal sealed class DashboardProcessStartupDiagnostics
         _startupElapsedMillisecondsAtReadinessOutcome = Stopwatch.GetElapsedTime(_startupTimestamp, now).TotalMilliseconds;
         if (_readinessTimestamp is long started)
             _readinessElapsedMilliseconds = Stopwatch.GetElapsedTime(started, now).TotalMilliseconds;
+    }
+
+    private sealed class TeardownStepState
+    {
+        internal DashboardTeardownOutcome Outcome { get; set; } = DashboardTeardownOutcome.NotReached;
+        internal long? StartedTimestamp { get; set; }
+        internal double? ElapsedMilliseconds { get; set; }
+        internal DashboardTeardownFailureKind? FailureKind { get; set; }
     }
 }

@@ -5,8 +5,18 @@ using Xunit.Abstractions;
 namespace Memory.DashboardTests;
 
 // Real browser and shipped UI; the existing fixture supplies local API doubles, not backend acceptance.
-public sealed class HeaderViewportTests(DashboardBrowserFixture fixture, ITestOutputHelper output) : IClassFixture<DashboardBrowserFixture>
+public sealed class HeaderViewportTests : IClassFixture<DashboardBrowserFixture>
 {
+    private readonly DashboardBrowserFixture fixture;
+    private readonly ITestOutputHelper output;
+
+    public HeaderViewportTests(DashboardBrowserFixture fixture, ITestOutputHelper output)
+    {
+        this.fixture = fixture;
+        this.output = output;
+        fixture.BindTestClass(DashboardFixtureTestClass.HeaderViewportTests);
+    }
+
     [Theory]
     [InlineData(390, 844, 150)]
     [InlineData(1024, 600, 150)]
@@ -138,7 +148,30 @@ public sealed class HeaderViewportTests(DashboardBrowserFixture fixture, ITestOu
     private async Task<IPage> LoginGraphAsync(IBrowserContext context)
     {
         var page = await context.NewPageAsync();
-        await page.GotoAsync(new Uri(fixture.BaseUri, "/login?returnUrl=%2Fgraph%3FuiProfile%3Ddense").ToString());
+        DashboardNavigationDiagnostics? navigation = null;
+        try
+        {
+            var viewport = page.ViewportSize;
+            if (viewport is not null)
+                navigation = DashboardNavigationDiagnostics.TryAttach(page, fixture.BaseUri, "dark", viewport.Width < 768 ? "mobile" : "desktop", "/login");
+        }
+        catch { }
+        if (navigation is null)
+        {
+            try { output.WriteLine("Header navigation diagnostics: Unknown."); }
+            catch { }
+        }
+        var gotoSucceeded = false;
+        try
+        {
+            await page.GotoAsync(new Uri(fixture.BaseUri, "/login?returnUrl=%2Fgraph%3FuiProfile%3Ddense").ToString());
+            gotoSucceeded = true;
+        }
+        finally
+        {
+            navigation?.Detach(gotoSucceeded);
+            navigation?.TryPersist();
+        }
         // Authenticate through the real local endpoint and shared cookie jar; this test targets layout, not login hydration.
         var form = context.APIRequest.CreateFormData();
         form.Set("Username", "admin");

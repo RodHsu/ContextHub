@@ -1,11 +1,23 @@
+using System.Text;
 using System.Text.Json;
 using Microsoft.Playwright;
+using Xunit.Abstractions;
 
 namespace Memory.DashboardTests;
 
 // Real Chromium geometry and shipped JavaScript; data comes from local browser fixtures only.
-public sealed class GraphViewportTests(DashboardBrowserFixture fixture) : IClassFixture<DashboardBrowserFixture>
+public sealed class GraphViewportTests : IClassFixture<DashboardBrowserFixture>
 {
+    private readonly DashboardBrowserFixture fixture;
+    private readonly ITestOutputHelper output;
+
+    public GraphViewportTests(DashboardBrowserFixture fixture, ITestOutputHelper output)
+    {
+        this.fixture = fixture;
+        this.output = output;
+        fixture.BindTestClass(DashboardFixtureTestClass.GraphViewportTests);
+    }
+
     [Fact]
     public async Task Fit_should_contain_offset_node_label_and_stroke_without_fitting_blank_canvas()
     {
@@ -106,7 +118,15 @@ public sealed class GraphViewportTests(DashboardBrowserFixture fixture) : IClass
             """));
         Assert.Equal("translate(70 50)", await page.Locator(".graph-view-node").First.GetAttributeAsync("transform"));
         await page.EvaluateAsync("() => document.querySelectorAll('.graph-view-node')[1].setAttribute('transform','translate(90 160)')");
-        await page.WaitForFunctionAsync("() => document.querySelectorAll('.graph-label-leader').length===0");
+        try
+        {
+            await page.WaitForFunctionAsync("() => document.querySelectorAll('.graph-label-leader').length===0");
+        }
+        catch (System.TimeoutException)
+        {
+            await RecordWideCollisionFailureAsync(page);
+            throw;
+        }
         Assert.Null(await page.Locator(".graph-node-title").First.GetAttributeAsync("transform"));
         await AssertContainedAsync(page);
     }
@@ -233,6 +253,54 @@ public sealed class GraphViewportTests(DashboardBrowserFixture fixture) : IClass
         await page.WaitForTimeoutAsync(300);
         Assert.True(await ScaleAsync(page) > 0);
         await page.ScreenshotAsync(new() { Path = Path.Combine(fixture.ArtifactDirectory, "graph-toolbar-mobile-150.png"), FullPage = true });
+    }
+
+    private async Task RecordWideCollisionFailureAsync(IPage page)
+    {
+        const string unavailable = """{"schemaVersion":1,"kind":"WideInlineTitleCollisionFailure","outcome":"Unavailable"}""";
+        var diagnostic = unavailable;
+        try
+        {
+            var task = page.EvaluateAsync<string>("""
+                () => {
+                    const number = value => Number.isFinite(value) ? value : null;
+                    const matrix = value => value ? {
+                        a:number(value.a),b:number(value.b),c:number(value.c),
+                        d:number(value.d),e:number(value.e),f:number(value.f)
+                    } : null;
+                    const geometry = element => {
+                        if (!element) return null;
+                        const box=element.getBBox();
+                        return {box:{x:number(box.x),y:number(box.y),width:number(box.width),height:number(box.height)},
+                            ctm:matrix(element.getCTM()),screenCtm:matrix(element.getScreenCTM())};
+                    };
+                    const viewport=document.querySelector('.graph-scroll-shell');
+                    const nodes=document.querySelectorAll('.graph-view-node');
+                    const labels=document.querySelectorAll('.graph-node-title');
+                    const nodeGeometry=[],labelGeometry=[];
+                    for(let index=0;index<Math.min(nodes.length,2);index++) nodeGeometry.push(geometry(nodes[index]));
+                    for(let index=0;index<Math.min(labels.length,2);index++) labelGeometry.push(geometry(labels[index]));
+                    return JSON.stringify({schemaVersion:1,kind:'WideInlineTitleCollisionFailure',outcome:'Observed',
+                        viewportWidth:viewport ? number(viewport.clientWidth) : null,
+                        viewportHeight:viewport ? number(viewport.clientHeight) : null,
+                        visibility:document.visibilityState==='visible' ? 'visible' : document.visibilityState==='hidden' ? 'hidden' : 'Unknown',
+                        readyState:['loading','interactive','complete'].includes(document.readyState) ? document.readyState : 'Unknown',
+                        hasFocus:document.hasFocus(),leaderCount:document.querySelectorAll('.graph-label-leader').length,
+                        nodes:nodeGeometry,labels:labelGeometry});
+                }
+                """);
+            // WaitAsync does not cancel the browser RPC; observe any fault arriving after this diagnostic budget.
+            _ = task.ContinueWith(static completed => { _ = completed.Exception; }, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            var observed = await task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (Encoding.UTF8.GetByteCount(observed) <= 8 * 1024) diagnostic = observed;
+        }
+        catch
+        {
+            // Diagnostics cannot replace the original test failure or expose exception payloads.
+        }
+        try { output.WriteLine(diagnostic); }
+        catch { }
     }
 
     private async Task<IPage> GeometryPageAsync(IBrowserContext context, string shapes)

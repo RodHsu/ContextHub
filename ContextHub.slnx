@@ -17,6 +17,7 @@
     <Project Path="tests/Memory.ComposeSmokeTests/Memory.ComposeSmokeTests.csproj" />
     <Project Path="tests/Memory.DashboardTests/Memory.DashboardTests.csproj" />
     <Project Path="tests/Memory.IntegrationTests/Memory.IntegrationTests.csproj" />
+    <Project Path="tests/Memory.IntegrationTests/NativeClockProbe/Memory.ArrivalNativeClockProbe.csproj" />
     <Project Path="tests/Memory.McpProtocolTests/Memory.McpProtocolTests.csproj" />
     <Project Path="tests/Memory.UnitTests/Memory.UnitTests.csproj" />
   </Folder>
