@@ -15,11 +15,11 @@ public sealed class ChatGptProposalService(
     IProjectArtifactExchangeService artifactExchangeService,
     IManagedFileService managedFileService,
     IProjectDiscussionService projectDiscussionService,
-    IProjectWorkItemService projectWorkItemService,
     ISuggestedActionService suggestedActionService,
     IRequestActorAccessor actorAccessor,
     IClock clock,
-    ILogger<ChatGptProposalService> logger) : IChatGptProposalService
+    ILogger<ChatGptProposalService> logger,
+    Func<IWorkItemProposalWorkflow>? workItemWorkflow = null) : IChatGptProposalService
 {
     public const string SourceSystem = "chatgpt-mcp-gateway";
     private const string ProposalTag = "chatgpt-proposal";
@@ -59,6 +59,7 @@ public sealed class ChatGptProposalService(
         var projectId = ProjectContext.Normalize(request.ProjectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
 
+        request = NormalizeWorkItemCreate(request, actor, projectId);
         var now = clock.UtcNow;
         var conversationId = $"{SourceSystem}:{request.OAuthSubject.Trim()}:{projectId}";
         var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
@@ -210,6 +211,9 @@ public sealed class ChatGptProposalService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var proposal = await LoadProposalForWriteAsync(request.ProposalId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, proposal.ProjectId, write: true);
+        if (IsWorkItemProposal(proposal))
+            return await (workItemWorkflow?.Invoke() ?? throw new WorkItemProposalOutcomeUnknownException())
+                .ApproveAsync(request, cancellationToken);
         if (proposal.PromotionStatus == ConversationPromotionStatus.Promoted)
         {
             return ToResult(proposal);
@@ -267,6 +271,9 @@ public sealed class ChatGptProposalService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var proposal = await LoadProposalForWriteAsync(request.ProposalId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, proposal.ProjectId, write: true);
+        if (IsWorkItemProposal(proposal))
+            return await (workItemWorkflow?.Invoke() ?? throw new WorkItemProposalOutcomeUnknownException())
+                .RejectAsync(request, cancellationToken);
         if (proposal.PromotionStatus == ConversationPromotionStatus.Skipped)
         {
             return ToResult(proposal);
@@ -311,10 +318,7 @@ public sealed class ChatGptProposalService(
                 Deserialize<DiscussionThreadArchiveRequest>(payloadJson).ThreadId,
                 Deserialize<DiscussionThreadArchiveRequest>(payloadJson).Archived,
                 cancellationToken))?.Id,
-            "project_work_item_archive" => (await projectWorkItemService.SetArchivedAsync(
-                Deserialize<ProjectWorkItemArchiveRequest>(payloadJson).WorkItemId,
-                Deserialize<ProjectWorkItemArchiveRequest>(payloadJson).Archived,
-                cancellationToken)).Id,
+            "project_work_item_archive" => throw new InvalidOperationException("Work item proposals require their durable dispatch workflow."),
             "enqueue_reindex" => (await memoryService.EnqueueReindexAsync(Deserialize<EnqueueReindexRequest>(payloadJson), cancellationToken)).JobId,
             _ => throw new InvalidOperationException($"Tool '{toolName}' is not supported for proposal approval.")
         };
@@ -423,6 +427,25 @@ public sealed class ChatGptProposalService(
             }, JsonOptions),
             CreatedAt = now
         }, cancellationToken);
+    }
+
+    private static bool IsWorkItemProposal(ConversationInsight proposal)
+        => proposal.Tags.Contains("tool:" + WorkItemProposalContract.ToolName, StringComparer.Ordinal)
+            || ParseMetadata(proposal.MetadataJson).ToolName == WorkItemProposalContract.ToolName;
+
+    private static ChatGptProposalCreateRequest NormalizeWorkItemCreate(ChatGptProposalCreateRequest request, ContextHubRequestActor actor, string projectId)
+    {
+        if (request.ToolName.Trim() != WorkItemProposalContract.ToolName) return request;
+        var archive = DeserializeStrict<ProjectWorkItemArchiveRequest>(request.PayloadJson);
+        var run = NormalizeGovernanceRunId(request.GovernanceRunId);
+        var original = WorkItemProposalContract.Command(projectId, archive with { RequestId = string.IsNullOrWhiteSpace(archive.RequestId) ? "creation-only" : archive.RequestId });
+        var key = string.IsNullOrWhiteSpace(archive.RequestId)
+            ? run.Length == 0 ? $"proposal:{Guid.NewGuid():N}"
+                : "proposal:" + Hash(actor.TenantId?.ToString("D") ?? "", actor.UserId?.ToString("D") ?? "", run, WorkItemEditContract.Hash(original)).ToLowerInvariant()
+            : archive.RequestId;
+        var command = WorkItemProposalContract.Command(projectId, archive with { RequestId = key });
+        var payload = archive with { ExpectedRevision = command.ExpectedRevision, RequestId = command.RequestId };
+        return request with { PayloadJson = JsonSerializer.Serialize(payload, JsonOptions) };
     }
 
     private static void ValidateCreate(ChatGptProposalCreateRequest request)
@@ -557,41 +580,8 @@ public sealed class ChatGptProposalService(
         return document.RootElement.Clone();
     }
 
-    private static ChatGptProposalMetadata ParseMetadata(string metadataJson)
-    {
-        using var document = JsonDocument.Parse(metadataJson);
-        var root = document.RootElement;
-        var payload = root.GetProperty("payload").GetRawText();
-        return new ChatGptProposalMetadata(
-            root.GetProperty("toolName").GetString() ?? string.Empty,
-            payload,
-            root.TryGetProperty("oauthSubject", out var subject) ? subject.GetString() ?? string.Empty : string.Empty,
-            root.TryGetProperty("oauthEmail", out var email) ? email.GetString() ?? string.Empty : string.Empty,
-            root.TryGetProperty("oauthName", out var name) ? name.GetString() ?? string.Empty : string.Empty,
-            root.TryGetProperty("governanceRunId", out var governanceRunId) ? governanceRunId.GetString() ?? string.Empty : string.Empty);
-    }
-
-    private static ChatGptProposalResult ToResult(ConversationInsight item)
-    {
-        var metadata = ParseMetadata(item.MetadataJson);
-        return new ChatGptProposalResult(
-            item.Id,
-            metadata.ToolName,
-            ToProposalStatus(item.PromotionStatus),
-            item.ProjectId,
-            item.ProjectName,
-            item.Title,
-            item.Summary,
-            metadata.PayloadJson,
-            metadata.OAuthSubject,
-            metadata.OAuthEmail,
-            metadata.OAuthName,
-            item.PromotedMemoryId,
-            item.Error,
-            item.CreatedAt,
-            item.UpdatedAt,
-            metadata.GovernanceRunId);
-    }
+    private static ChatGptProposalMetadata ParseMetadata(string metadataJson) => ChatGptProposalProjection.ReadMetadata(metadataJson);
+    private static ChatGptProposalResult ToResult(ConversationInsight item) => ChatGptProposalProjection.ToResult(item);
 
     private static ConversationPromotionStatus ToPromotionStatus(ChatGptProposalStatus status)
         => status switch
@@ -635,11 +625,5 @@ public sealed class ChatGptProposalService(
         return normalized;
     }
 
-    private sealed record ChatGptProposalMetadata(
-        string ToolName,
-        string PayloadJson,
-        string OAuthSubject,
-        string OAuthEmail,
-        string OAuthName,
-        string GovernanceRunId);
+
 }
