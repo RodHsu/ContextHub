@@ -10,7 +10,7 @@
               Breadcrumb="ContextHub / Files & Knowledge / Managed Files"
               BodyClass="page-viewport-body domain-page-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" WarningText="_loadError" />
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" WarningText="@_loadError" />
         <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">刷新</button>
     </Actions>
     <ChildContent>
@@ -19,13 +19,13 @@
                           CurrentHref="/files"
                           Links="FileLinks" />
 
-        <DashboardScopeBar ProjectId="_projectId"
+        <DashboardScopeBar ProjectId="@_projectId"
                            ProjectIdChanged="ChangeProjectAsync"
                            ProjectIds="_projectIds"
                            AllowAllProjects="false"
-                           SearchText="_searchText"
+                           SearchText="@_searchText"
                            SearchTextChanged="ChangeSearch"
-                           SearchPlaceholder="搜尋 logical file name、classification 或 lifecycle"
+                           SearchPlaceholder="僅篩選本頁：檔名、classification 或 lifecycle"
                            Disabled="_loading" />
 
         @if (_loading && _files.Count == 0)
@@ -46,15 +46,24 @@
             }
 
             <section class="domain-summary-grid" aria-label="受管檔案摘要">
-                <article class="panel"><span>可見檔案</span><strong>@DashboardFormatting.Integer(FilteredFiles.Count)</strong><small>已先套用 project 與 metadata authorization hard filter</small></article>
+                <article class="panel"><span>本頁可見檔案</span><strong>@DashboardFormatting.Integer(FilteredFiles.Count)</strong><small>本頁已套用 project 與 metadata authorization；不是檔案總數</small></article>
                 <article class="panel"><span>Quarantine</span><strong>@DashboardFormatting.Integer(_files.Count(x => x.Classification == FileClassification.Quarantined))</strong><small>不進入 extract、embedding 或 transfer</small></article>
                 <article class="panel"><span>需要重掃</span><strong>@DashboardFormatting.Integer(_files.Count(x => x.NeedsRescan))</strong><small>classification revision 必須 read-back</small></article>
                 <article class="panel"><span>Open findings</span><strong>@DashboardFormatting.Integer(_files.Sum(x => x.OpenSecurityFindings))</strong><small>僅顯示正規化的安全分類</small></article>
             </section>
 
+            <nav class="file-pagination" aria-label="檔案清單分頁">
+                <button class="ghost-button" @onclick="PreviousPageAsync" disabled="@(_loading || _state.Legacy || _state.Offset == 0)">上一頁檔案</button>
+                <span>本頁起點 @_state.Offset；本頁搜尋符合 @FilteredFiles.Count 筆</span>
+                <button class="ghost-button" @onclick="NextPageAsync" disabled="@(_loading || !_state.HasMore)">下一頁檔案</button>
+            </nav>
+            @if (_state.Legacy)
+            {
+                <p class="file-read-note" role="status">目前服務只提供舊版清單：範圍可能不完整，分頁與總數未知。</p>
+            }
             @if (_files.Count == 0)
             {
-                <DashboardAsyncState State="empty" Title="目前範圍沒有可見檔案" Message="未授權資源不會出現在 inventory 或搜尋結果中。" />
+                <DashboardAsyncState State="empty" Title="本頁沒有可見檔案" Message="這只說明目前頁的可見資料，不代表整個專案或未授權檔案不存在。" />
             }
             else
             {
@@ -69,8 +78,8 @@
                                 <tbody>
                                     @foreach (var file in FilteredFiles)
                                     {
-                                        <tr class="@SelectedClass(file.FileId)" @onclick="@(() => SelectAsync(file))" tabindex="0">
-                                            <td><strong>@file.FileName</strong><small>@file.FileId</small></td>
+                                        <tr class="@SelectedClass(file.FileId)">
+                                            <td><button class="file-select-button" @onclick="@(() => SelectAsync(file))">@file.FileName</button><small>@file.FileId</small></td>
                                             <td>v@file.VersionNumber</td>
                                             <td><span class="status-badge @ClassificationClass(file.Classification)">@file.Classification</span></td>
                                             <td>@file.Lifecycle</td>
@@ -99,10 +108,62 @@
                                 <div><dt>Last scan</dt><dd>@if (_selected.LastScanAt.HasValue) { <ClientLocalTime Value="_selected.LastScanAt.Value" /> } else { <span>尚無 evidence</span> }</dd></div>
                                 <div><dt>Security</dt><dd>@(_selected.NeedsRescan ? "Fail closed / needs rescan" : "Current")</dd></div>
                             </dl>
+                            @if (_state.SelectionLoading)
+                            {
+                                <p role="status">正在讀取版本、歷史與權限…</p>
+                            }
+                            else if (_state.SelectionError is not null)
+                            {
+                                <p role="alert">@_state.SelectionError</p>
+                            }
+                            else if (_state.DetailUnavailable)
+                            {
+                                <p role="status">目前無法取得此檔案的最新 metadata；可能已變更或不可見。</p>
+                            }
+                            else
+                            {
+                                <section class="file-version-panel" aria-label="版本 metadata 與歷史">
+                                    <div class="subpanel-title">版本 metadata（唯讀）</div>
+                                    <p>最新版本：v@_selected.VersionNumber · @_selected.FileVersionId</p>
+                                    @if (_state.Version is { } shown)
+                                    {
+                                        <dl class="definition-grid">
+                                            <div><dt>檢視版本</dt><dd>v@shown.VersionNumber @(_state.PinnedVersion ? "（固定版本）" : "（最新）")</dd></div>
+                                            <div><dt>Version ID</dt><dd>@shown.FileVersionId</dd></div>
+                                            <div><dt>Lifecycle</dt><dd>@shown.Lifecycle</dd></div>
+                                            <div><dt>Classification</dt><dd>@shown.Classification · revision @shown.ClassificationRevision</dd></div>
+                                        </dl>
+                                    }
+                                    else
+                                    {
+                                        <p role="status">此固定版本目前不可讀或服務尚未提供；不以最新版本代替。</p>
+                                    }
+                                    <button class="ghost-button" @onclick="LatestVersionAsync" disabled="@(!_state.PinnedVersion)">檢視最新版本</button>
+                                    @if (_state.Versions is { } history)
+                                    {
+                                        <div class="file-history-list" aria-label="本頁可見版本">
+                                            @foreach (var version in history.Items)
+                                            {
+                                                <button class="ghost-button" @onclick="@(() => SelectVersionAsync(version.FileVersionId))" @key="version.FileVersionId">檢視 v@version.VersionNumber · @version.FileVersionId · @version.Lifecycle</button>
+                                            }
+                                            @if (history.Items.Count == 0) { <p>本頁沒有可見版本。</p> }
+                                        </div>
+                                        <nav class="file-pagination" aria-label="版本歷史分頁">
+                                            <button class="ghost-button" @onclick="PreviousVersionsAsync" disabled="@(_state.VersionsOffset == 0)">上一頁版本</button>
+                                            <span>本頁起點 @_state.VersionsOffset；本頁可見 @history.Items.Count 筆</span>
+                                            <button class="ghost-button" @onclick="NextVersionsAsync" disabled="@(!history.HasMore)">下一頁版本</button>
+                                        </nav>
+                                    }
+                                    else
+                                    {
+                                        <p role="status">版本歷史未知：目前服務未提供此讀取功能。</p>
+                                    }
+                                </section>
+                            }
                             <div class="subpanel-title">Effective rights</div>
                             @if (_rights is null)
                             {
-                                <DashboardAsyncState State="loading" Title="讀取有效權限" Message="正在取得逐 right authority evidence。" />
+                                <p role="status">@(_state.SelectionLoading ? "正在取得逐 right authority evidence。" : "有效權限資料未知。")</p>
                             }
                             else
                             {
@@ -146,16 +207,17 @@
     ];
 
     private readonly CancellationTokenSource _cts = new();
-    private IReadOnlyList<ManagedFileInventoryResult> _files = [];
+    private FileMetadataReadState _state = default!;
+    private IReadOnlyList<ManagedFileInventoryResult> _files => _state.Files;
     private IReadOnlyList<string> _projectIds = [];
-    private ManagedFileInventoryResult? _selected;
-    private EffectiveRightsResult? _rights;
-    private StepUpAuthorizationResult? _releaseRequirement;
+    private ManagedFileInventoryResult? _selected => _state.Selected;
+    private EffectiveRightsResult? _rights => _state.Rights;
+    private StepUpAuthorizationResult? _releaseRequirement => _state.ReleaseRequirement;
     private string _projectId = ProjectContext.DefaultProjectId;
     private string _searchText = string.Empty;
-    private bool _loading;
-    private string? _loadError;
-    private DateTimeOffset? _lastUpdatedAt;
+    private bool _loading => _state.Loading;
+    private string? _loadError => _state.Error;
+    private DateTimeOffset? _lastUpdatedAt => _state.LastUpdatedAt;
 
     private IReadOnlyList<ManagedFileInventoryResult> FilteredFiles => _files.Where(file =>
         string.IsNullOrWhiteSpace(_searchText) ||
@@ -165,6 +227,7 @@
 
     protected override async Task OnInitializedAsync()
     {
+        _state = new FileMetadataReadState(ApiClient);
         var settings = await RuntimeSettingsAccessor.GetCurrentAsync(_cts.Token);
         _projectId = settings.Behavior.DefaultProjectId;
         var projects = await ApiClient.GetProjectInformationProjectsAsync(false, _cts.Token);
@@ -175,7 +238,8 @@
     private async Task ChangeProjectAsync(string projectId)
     {
         _projectId = projectId;
-        await LoadAsync();
+        _searchText = string.Empty;
+        await _state.LoadAsync(_projectId);
     }
 
     private Task ChangeSearch(string value)
@@ -184,39 +248,14 @@
         return InvokeAsync(StateHasChanged);
     }
 
-    private async Task LoadAsync()
-    {
-        _loading = true;
-        try
-        {
-            _files = await ApiClient.GetManagedFilesAsync(_projectId, 100, _cts.Token);
-            _selected = _selected is null ? _files.FirstOrDefault() : _files.FirstOrDefault(x => x.FileId == _selected.FileId) ?? _files.FirstOrDefault();
-            await LoadSelectionAsync();
-            _lastUpdatedAt = DateTimeOffset.UtcNow;
-            _loadError = null;
-        }
-        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
-        catch (Exception ex) { _loadError = DashboardUiErrorFormatter.BuildLoadError("受管檔案", ex, _files.Count > 0); }
-        finally { _loading = false; }
-    }
-
-    private async Task SelectAsync(ManagedFileInventoryResult file)
-    {
-        _selected = file;
-        await LoadSelectionAsync();
-    }
-
-    private async Task LoadSelectionAsync()
-    {
-        if (_selected is null)
-        {
-            _rights = null;
-            _releaseRequirement = null;
-            return;
-        }
-        _rights = await ApiClient.GetEffectiveRightsAsync(_projectId, ["metadata", "read", "download", "searchindex", "securityrelease", "delete"], "File", _selected.FileId.ToString("D"), _cts.Token);
-        _releaseRequirement = await ApiClient.GetStepUpRequirementAsync(StepUpOperationClass.RestrictedRelease, "file:quarantine-release", "FileVersion", _selected.FileVersionId.ToString("D"), _cts.Token);
-    }
+    private Task LoadAsync() => _state.LoadAsync(_projectId, _state.Offset);
+    private Task PreviousPageAsync() => _state.LoadAsync(_projectId, Math.Max(0, _state.Offset - FileMetadataReadState.PageSize));
+    private Task NextPageAsync() => _state.LoadAsync(_projectId, _state.Offset + FileMetadataReadState.PageSize);
+    private Task SelectAsync(ManagedFileInventoryResult file) => _state.SelectAsync(file);
+    private Task SelectVersionAsync(Guid versionId) => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, versionId, _state.VersionsOffset);
+    private Task LatestVersionAsync() => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, null, _state.VersionsOffset);
+    private Task PreviousVersionsAsync() => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, _state.RequestedVersionId, Math.Max(0, _state.VersionsOffset - FileMetadataReadState.PageSize));
+    private Task NextVersionsAsync() => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, _state.RequestedVersionId, _state.VersionsOffset + FileMetadataReadState.PageSize);
 
     private string SelectedClass(Guid id) => _selected?.FileId == id ? "is-selected" : string.Empty;
     private static string ClassificationClass(FileClassification value) => value switch
@@ -229,6 +268,7 @@
 
     public ValueTask DisposeAsync()
     {
+        _state?.Dispose();
         _cts.Cancel();
         _cts.Dispose();
         return ValueTask.CompletedTask;

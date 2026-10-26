@@ -19,6 +19,14 @@ public interface IContextHubApiClient
         => Task.FromResult<DashboardGraphRefreshStatus?>(null);
     Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken);
+    Task<ManagedFileMetadataPage?> GetManagedFilePageAsync(string projectId, int limit, int offset, CancellationToken cancellationToken)
+        => Task.FromResult<ManagedFileMetadataPage?>(null);
+    Task<ManagedFileInventoryResult?> GetManagedFileMetadataAsync(string projectId, Guid fileId, CancellationToken cancellationToken)
+        => Task.FromResult<ManagedFileInventoryResult?>(null);
+    Task<ManagedFileMetadataPage?> GetManagedFileVersionsAsync(string projectId, Guid fileId, int limit, int offset, CancellationToken cancellationToken)
+        => Task.FromResult<ManagedFileMetadataPage?>(null);
+    Task<ManagedFileInventoryResult?> GetManagedFileVersionAsync(string projectId, Guid fileId, Guid versionId, CancellationToken cancellationToken)
+        => Task.FromResult<ManagedFileInventoryResult?>(null);
     Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<CanonicalTagQualityWindow>?>(null);
@@ -183,6 +191,31 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
             ["projectId"] = projectId,
             ["limit"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture)
         }), cancellationToken);
+
+    public Task<ManagedFileMetadataPage?> GetManagedFilePageAsync(string projectId, int limit, int offset, CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<ManagedFileMetadataPage>(FileMetadataUrl("/api/files/inventory", projectId, limit, offset), cancellationToken);
+
+    public Task<ManagedFileInventoryResult?> GetManagedFileMetadataAsync(string projectId, Guid fileId, CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<ManagedFileInventoryResult>(FileMetadataUrl($"/api/files/{fileId:D}", projectId), cancellationToken);
+
+    public Task<ManagedFileMetadataPage?> GetManagedFileVersionsAsync(string projectId, Guid fileId, int limit, int offset, CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<ManagedFileMetadataPage>(FileMetadataUrl($"/api/files/{fileId:D}/versions", projectId, limit, offset), cancellationToken);
+
+    public Task<ManagedFileInventoryResult?> GetManagedFileVersionAsync(string projectId, Guid fileId, Guid versionId, CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<ManagedFileInventoryResult>(FileMetadataUrl($"/api/files/{fileId:D}/versions/{versionId:D}", projectId), cancellationToken);
+
+    private static string FileMetadataUrl(string path, string projectId, int? limit = null, int? offset = null)
+    {
+        if (string.IsNullOrWhiteSpace(projectId)) throw new ArgumentException("A project is required.", nameof(projectId));
+        if (limit is <= 0 or > 100) throw new ArgumentOutOfRangeException(nameof(limit));
+        if (offset is < 0) throw new ArgumentOutOfRangeException(nameof(offset));
+        return QueryHelpers.AddQueryString(path, new Dictionary<string, string?>
+        {
+            ["projectId"] = projectId.Trim(),
+            ["limit"] = limit?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["offset"] = offset?.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        });
+    }
 
     public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
         => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken);
