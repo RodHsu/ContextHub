@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -143,7 +144,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
             HandleCookies = true
         });
         using var loginPage = await client.GetAsync("/login");
-        loginPage.StatusCode.Should().Be(HttpStatusCode.OK);
+        loginPage.StatusCode.Should().Be(HttpStatusCode.OK, "login redirect target was {0}", loginPage.Headers.Location);
         var values = new Dictionary<string, string>
         {
             ["Username"] = "admin",
@@ -974,6 +975,41 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         apiClient.LastMemoryGraphRequest.GraphMode.Should().Be(MemoryGraphMode.ProjectFull);
     }
 
+    [Theory]
+    [InlineData("dashboard-test")]
+    [InlineData("dashboard-test-secondary")]
+    public async Task Project_workspace_should_pass_selected_project_to_quality_panel(string projectId)
+    {
+        var errors = new PageRenderErrors();
+        // UseSetting is available during Program startup, before the later app-configuration callback.
+        // Keep this synthetic host's cookie keys inside its own test output, never the system default.
+        using var factory = new DashboardApplicationFactory().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("Dashboard:DataProtectionPath", Path.Combine(AppContext.BaseDirectory, "quality-page-keys", Guid.NewGuid().ToString("N")));
+            builder.ConfigureLogging(logging => logging.AddProvider(errors));
+        });
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+        var api = factory.Services.GetRequiredService<IContextHubApiClient>().Should().BeOfType<FakeContextHubApiClient>().Subject;
+        api.CanonicalTagQualityRows =
+        [
+            new(Guid.Parse("d7cd8d50-7083-442f-a345-18abf3af3d83"), 30, 20, 0, 10, 0, 0, .5m, 0, 0, .5m, [], true)
+        ];
+        try { await LoginAsync(client); }
+        catch when (errors.Error is not null) { throw new InvalidOperationException("Synthetic page host failed before quality rendering.", errors.Error); }
+
+        using var response = await client.GetAsync($"/project-information?projectId={Uri.EscapeDataString(projectId)}");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var html = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync());
+        api.LastCanonicalTagQualityProjectId.Should().Be(projectId);
+        api.LastCanonicalTagQualityDays.Should().Be(30);
+        html.Should().Contain("d7cd8d50-7083-442f-a345-18abf3af3d83");
+        html.Should().MatchRegex($@"<caption(?:\s[^>]*)?>{Regex.Escape(projectId)}\s*· 最近 30 天");
+    }
+
     [Fact]
     public void Current_Project_Resolver_Should_Fallback_To_ContextHub_When_Runtime_Default_Is_Default()
     {
@@ -1108,10 +1144,23 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         preview.Conflicts.Should().Contain(conflict => conflict.Section == InstanceTransferSection.UserPreferences);
     }
 
+    private sealed class PageRenderErrors : ILoggerProvider, ILogger
+    {
+        public Exception? Error { get; private set; }
+        public ILogger CreateLogger(string categoryName) => this;
+        public void Dispose() { }
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel level) => level >= LogLevel.Error;
+        public void Log<TState>(LogLevel level, EventId id, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (level >= LogLevel.Error && exception is not null) Error = exception;
+        }
+    }
+
     private static async Task LoginAsync(HttpClient client)
     {
         using var loginPage = await client.GetAsync("/login");
-        loginPage.StatusCode.Should().Be(HttpStatusCode.OK);
+        loginPage.StatusCode.Should().Be(HttpStatusCode.OK, "login redirect target was {0}", loginPage.Headers.Location);
         var html = await loginPage.Content.ReadAsStringAsync();
         var token = ExtractAntiforgeryToken(html);
 
@@ -1346,6 +1395,17 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public MemoryListRequest? LastMemoryListRequest { get; private set; }
     public MemoryGraphRequest? LastMemoryGraphRequest { get; private set; }
+    public string? LastCanonicalTagQualityProjectId { get; private set; }
+    public int LastCanonicalTagQualityDays { get; private set; }
+    public IReadOnlyList<CanonicalTagQualityWindow>? CanonicalTagQualityRows { get; set; }
+
+    public Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
+    {
+        LastCanonicalTagQualityProjectId = projectId;
+        LastCanonicalTagQualityDays = days;
+        return Task.FromResult(CanonicalTagQualityRows);
+    }
+
 
     public Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<ManagedFileInventoryResult>>
