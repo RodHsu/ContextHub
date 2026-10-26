@@ -31,6 +31,45 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
     }
 
     [DockerRequiredFact]
+    public async Task Persist_only_observation_should_survive_a_fresh_scope_and_remain_idempotent()
+    {
+        var factory = environment.GetFactory();
+        TenantUser actor;
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var seed = await setupDb.TenantUsers.AsNoTracking()
+                .SingleAsync(x => x.Username == "contract-test-admin");
+            actor = await CreateOwnerAsync(setupDb, seed.TenantId, "persist-only-owner");
+        }
+
+        var receipt = CreateReceipt($"persist-only-{Guid.NewGuid():N}", "Scheduled");
+        using (var writeScope = factory.Services.CreateScope())
+        {
+            SetActor(writeScope.ServiceProvider, actor);
+            var service = writeScope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityService>();
+            await service.PersistObservationAsync(receipt, CancellationToken.None);
+            await service.PersistObservationAsync(receipt, CancellationToken.None);
+        }
+
+        using var readScope = factory.Services.CreateScope();
+        SetActor(readScope.ServiceProvider, actor);
+        var db = readScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var rows = await db.ScheduledGovernanceReliabilityRuns.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.Id &&
+                        x.GovernanceRunId == receipt.GovernanceRunId)
+            .ToArrayAsync();
+        rows.Should().ContainSingle().Which.ReceiptId.Should().Be(receipt.ReceiptId);
+
+        var reliability = readScope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityService>();
+        var readBack = await reliability.GetAsync(CancellationToken.None);
+        var observed = await reliability.ObserveAsync(receipt, CancellationToken.None);
+        observed.Should().BeEquivalentTo(readBack);
+        observed.Runs.Should().ContainSingle().Which.GovernanceRunId.Should().Be(receipt.GovernanceRunId);
+        observed.GatePassed.Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
     public async Task Concurrent_observation_should_converge_to_one_row_and_survive_a_fresh_scope_read()
     {
         var factory = environment.GetFactory();
