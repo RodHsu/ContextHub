@@ -2381,6 +2381,7 @@ public sealed record ProjectWorkItemArchiveRequest(Guid WorkItemId, bool Archive
 public sealed record ProjectWorkItemChecklistItemResult(Guid Id, string Content, bool IsCompleted, int SortOrder);
 public sealed record ProjectWorkItemResult(Guid Id, string ProjectId, string Title, string Description, IReadOnlyList<string> Tags, IReadOnlyList<ProjectWorkItemChecklistItemResult> ChecklistItems, ProjectWorkItemStatus Status, int Priority, DateTimeOffset? DueAt, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? CompletedAt, DateTimeOffset? ArchivedAt = null)
 {
+    public long? Revision { get; init; }
     public bool IsArchived => ArchivedAt.HasValue;
     public ProjectWorkItemDefinitionState DefinitionState { get; init; } = ProjectWorkItemDefinitionState.Draft;
     public IReadOnlyList<ProjectWorkItemGovernanceExclusionResult> GovernanceExclusions { get; init; } = [];

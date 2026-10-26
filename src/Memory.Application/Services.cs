@@ -2652,6 +2652,7 @@ public static class DependencyInjection
         services.AddScoped<IProjectInformationService, ProjectInformationService>();
         services.AddScoped<IProjectDiscussionService, ProjectDiscussionService>();
         services.AddScoped<IProjectWorkItemService, ProjectWorkItemService>();
+        services.AddScoped<IWorkItemEditingService, WorkItemEditingService>();
         services.AddScoped<IAgentExecutionService, AgentExecutionService>();
         services.AddScoped<IAgentExecutionResourceResolver, AgentExecutionResourceResolver>();
         services.AddScoped<IPlatformProjectionService, PlatformProjectionService>();

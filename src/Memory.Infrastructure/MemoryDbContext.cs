@@ -111,6 +111,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<DiscussionParticipant> DiscussionParticipants => Set<DiscussionParticipant>();
     public DbSet<DiscussionMessage> DiscussionMessages => Set<DiscussionMessage>();
     public DbSet<ProjectWorkItem> ProjectWorkItems => Set<ProjectWorkItem>();
+    public DbSet<WorkItemEditHistory> WorkItemEditHistories => Set<WorkItemEditHistory>();
+    public DbSet<WorkItemEditReceiptRecord> WorkItemEditReceipts => Set<WorkItemEditReceiptRecord>();
     public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => Set<ProjectWorkItemChecklistItem>();
     public DbSet<AgentExecution> AgentExecutions => Set<AgentExecution>();
     public DbSet<AgentExecutionEvent> AgentExecutionEvents => Set<AgentExecutionEvent>();
@@ -1732,7 +1734,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
 
         modelBuilder.Entity<ProjectWorkItem>(entity =>
         {
-            entity.ToTable("project_work_items");
+            entity.ToTable("project_work_items", table => table.HasCheckConstraint("ck_work_item_revision_positive", "revision > 0"));
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
             entity.Property(x => x.TenantId).HasColumnName("tenant_id");
@@ -1750,7 +1752,55 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.Property(x => x.CompletedAt).HasColumnName("completed_at");
             entity.Property(x => x.ArchivedAt).HasColumnName("archived_at");
             entity.Property(x => x.GovernanceExclusionsJson).HasColumnName("governance_exclusions_json").HasColumnType("jsonb");
+            entity.Property(x => x.Revision).HasColumnName("revision").HasDefaultValue(1L).IsConcurrencyToken();
             entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.Status, x.DueAt });
+        });
+
+        modelBuilder.Entity<WorkItemEditHistory>(entity =>
+        {
+            entity.ToTable("work_item_edit_history", table =>
+            {
+                table.HasCheckConstraint("ck_work_item_edit_history_revision_step", "previous_revision > 0 AND revision = previous_revision + 1");
+                table.HasCheckConstraint("ck_work_item_edit_history_request", "length(request_id) BETWEEN 1 AND 200");
+            });
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.WorkItemId).HasColumnName("work_item_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.PreviousRevision).HasColumnName("previous_revision");
+            entity.Property(x => x.Revision).HasColumnName("revision");
+            entity.Property(x => x.Operation).HasColumnName("operation");
+            entity.Property(x => x.RequestId).HasColumnName("request_id");
+            entity.Property(x => x.BeforeJson).HasColumnName("before_json").HasColumnType("jsonb");
+            entity.Property(x => x.AfterJson).HasColumnName("after_json").HasColumnType("jsonb");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.WorkItemId, x.Revision }).IsUnique();
+            entity.HasOne<ProjectWorkItem>().WithMany().HasForeignKey(x => x.WorkItemId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<WorkItemEditReceiptRecord>(entity =>
+        {
+            entity.ToTable("work_item_edit_receipts", table =>
+            {
+                table.HasCheckConstraint("ck_work_item_edit_receipts_request", "length(request_id) BETWEEN 1 AND 200");
+                table.HasCheckConstraint("ck_work_item_edit_receipts_hash", "request_hash ~ '^[0-9a-f]{64}$'");
+            });
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.ActorUserId).HasColumnName("actor_user_id");
+            entity.Property(x => x.WorkItemId).HasColumnName("work_item_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ProjectKey).HasColumnName("project_key");
+            entity.Property(x => x.RequestId).HasColumnName("request_id");
+            entity.Property(x => x.RequestHash).HasColumnName("request_hash");
+            entity.Property(x => x.ResultJson).HasColumnName("result_json").HasColumnType("jsonb");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.ActorUserId, x.ProjectKey, x.WorkItemId, x.RequestId }).IsUnique();
+            entity.HasOne<ProjectWorkItem>().WithMany().HasForeignKey(x => x.WorkItemId).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<ProjectWorkItemChecklistItem>(entity =>

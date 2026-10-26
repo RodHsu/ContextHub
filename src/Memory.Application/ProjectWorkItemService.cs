@@ -252,6 +252,7 @@ public sealed class ProjectWorkItemService(
             : query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
     private static ProjectWorkItemResult Map(ProjectWorkItem x) => new(x.Id, x.ProjectId, x.Title, x.Description, x.Tags, x.ChecklistItems.OrderBy(item => item.SortOrder).Select(item => new ProjectWorkItemChecklistItemResult(item.Id, item.Content, item.IsCompleted, item.SortOrder)).ToArray(), x.Status, x.Priority, x.DueAt, x.CreatedAt, x.UpdatedAt, x.CompletedAt, x.ArchivedAt)
     {
+        Revision = x.Revision,
         DefinitionState = x.DefinitionState,
         GovernanceExclusions = ReadExclusions(x.GovernanceExclusionsJson)
     };
