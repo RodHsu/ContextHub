@@ -381,6 +381,7 @@ public sealed class ScheduledGovernanceServiceTests
 
         reliability.ObserveCount.Should().Be(0);
         reliability.GetCount.Should().Be(1);
+        reliability.PersistCount.Should().Be(0);
     }
 
     [Fact]
@@ -608,7 +609,98 @@ public sealed class ScheduledGovernanceServiceTests
         var action = () => service.ReviewAsync(new("run-failed-observed"), CancellationToken.None);
         await action.Should().ThrowAsync<InvalidOperationException>();
 
-        reliability.ObserveCount.Should().Be(1);
+        reliability.PersistCount.Should().Be(1);
+        reliability.ObserveCount.Should().Be(0);
+        reliability.GetCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Review_Should_Await_Observation_Persistence_Without_Requesting_A_Summary()
+    {
+        var receipt = CreateDecisionReceipt("run-persist", ScheduledGovernanceDecision.NoOpConverged);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reliability = new CountingReliability
+        {
+            PersistOverride = (observed, _) =>
+            {
+                observed.Should().BeSameAs(receipt);
+                entered.SetResult();
+                return release.Task;
+            },
+            RejectSummary = true
+        };
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(), new StubReceipts(receipt), reliability);
+
+        var operation = service.ReviewAsync(new("run-persist"), CancellationToken.None);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        operation.IsCompleted.Should().BeFalse("observation persistence is still mandatory");
+        release.SetResult();
+        await operation.WaitAsync(TimeSpan.FromSeconds(5));
+
+        reliability.PersistCount.Should().Be(1);
+        reliability.ObserveCount.Should().Be(0);
+        reliability.GetCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Cancelled_Review_Should_Record_Stopped_Then_Await_Uncancelled_Persistence_Only()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var receipt = CreateDecisionReceipt("run-cancelled", ScheduledGovernanceDecision.HumanDecisionOnly) with
+        {
+            Status = "Stopped",
+            StoppedReason = "OperationCanceled"
+        };
+        var receipts = new StubReceipts(receipt);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reliability = new CountingReliability
+        {
+            PersistOverride = (observed, token) =>
+            {
+                observed.Should().BeSameAs(receipt);
+                receipts.ReviewStoppedCount.Should().Be(1);
+                receipts.StoppedCancellationToken.CanBeCanceled.Should().BeFalse();
+                token.CanBeCanceled.Should().BeFalse();
+                entered.SetResult();
+                return release.Task;
+            },
+            RejectSummary = true
+        };
+        var service = CreateService(new CancelledKnowledgeReview(), new CapturingExecutor(), receipts, reliability);
+
+        var operation = service.ReviewAsync(new("run-cancelled"), cancellation.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        operation.IsCompleted.Should().BeFalse("cancellation must not skip observation persistence");
+        release.SetResult();
+        Func<Task> action = async () => await operation.WaitAsync(TimeSpan.FromSeconds(5));
+        await action.Should().ThrowAsync<OperationCanceledException>();
+
+        reliability.PersistCount.Should().Be(1);
+        reliability.ObserveCount.Should().Be(0);
+        reliability.GetCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Review_Should_Not_Hide_Observation_Persistence_Failures()
+    {
+        var receipt = CreateDecisionReceipt("run-persist-failed", ScheduledGovernanceDecision.NoOpConverged);
+        var reliability = new CountingReliability
+        {
+            PersistOverride = (_, _) => Task.FromException(new InvalidOperationException("persistence failed")),
+            RejectSummary = true
+        };
+        var service = CreateService(new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(), new StubReceipts(receipt), reliability);
+
+        var action = () => service.ReviewAsync(new("run-persist-failed"), CancellationToken.None);
+        await action.Should().ThrowAsync<InvalidOperationException>().WithMessage("persistence failed");
+        reliability.PersistCount.Should().Be(1);
+        reliability.ObserveCount.Should().Be(0);
         reliability.GetCount.Should().Be(0);
     }
 
@@ -835,6 +927,12 @@ public sealed class ScheduledGovernanceServiceTests
             => throw new InvalidOperationException("fixture failure");
     }
 
+    private sealed class CancelledKnowledgeReview : IKnowledgeReviewService
+    {
+        public Task<KnowledgeReviewResult> ReviewAsync(KnowledgeReviewRequest request, CancellationToken cancellationToken)
+            => Task.FromCanceled<KnowledgeReviewResult>(cancellationToken);
+    }
+
     private sealed class CapturingExecutor : IGovernanceBatchExecutor
     {
         public int CallCount { get; private set; }
@@ -855,6 +953,7 @@ public sealed class ScheduledGovernanceServiceTests
     {
         public int ReviewStartedCount { get; private set; }
         public int ReviewStoppedCount { get; private set; }
+        public CancellationToken StoppedCancellationToken { get; private set; }
         public string? LastReviewStartedRunId { get; private set; }
         public ScheduledGovernanceReviewResult? LastScheduledDecision { get; private set; }
 
@@ -904,6 +1003,7 @@ public sealed class ScheduledGovernanceServiceTests
         public Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken, bool isReReview = false)
         {
             ReviewStoppedCount++;
+            StoppedCancellationToken = cancellationToken;
             return Task.CompletedTask;
         }
         public Task RecordExecutionStartedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, CancellationToken cancellationToken) => Task.CompletedTask;
@@ -922,21 +1022,32 @@ public sealed class ScheduledGovernanceServiceTests
 
     private sealed class CountingReliability : IScheduledGovernanceReliabilityService
     {
+        public Func<GovernanceRunReceiptResult, CancellationToken, Task>? PersistOverride { get; init; }
+        public bool RejectSummary { get; init; }
         public ScheduledGovernanceReliabilitySummary? Summary { get; init; }
+        public int PersistCount { get; private set; }
         public int ObserveCount { get; private set; }
         public int GetCount { get; private set; }
+
+        public Task PersistObservationAsync(GovernanceRunReceiptResult receipt, CancellationToken cancellationToken)
+        {
+            PersistCount++;
+            return PersistOverride?.Invoke(receipt, cancellationToken) ?? Task.CompletedTask;
+        }
 
         public Task<ScheduledGovernanceReliabilitySummary> ObserveAsync(
             GovernanceRunReceiptResult receipt,
             CancellationToken cancellationToken)
         {
             ObserveCount++;
+            if (RejectSummary) throw new InvalidOperationException("summary must not be requested");
             return Task.FromResult(Summary!);
         }
 
         public Task<ScheduledGovernanceReliabilitySummary> GetAsync(CancellationToken cancellationToken)
         {
             GetCount++;
+            if (RejectSummary) throw new InvalidOperationException("summary must not be requested");
             return Task.FromResult(Summary!);
         }
     }

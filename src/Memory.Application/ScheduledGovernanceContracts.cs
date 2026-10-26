@@ -403,6 +403,11 @@ public interface IScheduledGovernanceService
 
 public interface IScheduledGovernanceReliabilityService
 {
+    /// <summary>Persist the receipt observation without rebuilding the reliability-window summary.</summary>
+    Task PersistObservationAsync(
+        GovernanceRunReceiptResult receipt,
+        CancellationToken cancellationToken);
+
     Task<ScheduledGovernanceReliabilitySummary> ObserveAsync(
         GovernanceRunReceiptResult receipt,
         CancellationToken cancellationToken);
