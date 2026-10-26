@@ -113,6 +113,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<ProjectWorkItem> ProjectWorkItems => Set<ProjectWorkItem>();
     public DbSet<WorkItemEditHistory> WorkItemEditHistories => Set<WorkItemEditHistory>();
     public DbSet<WorkItemEditReceiptRecord> WorkItemEditReceipts => Set<WorkItemEditReceiptRecord>();
+    public DbSet<WorkItemProposalOperation> WorkItemProposalOperations => Set<WorkItemProposalOperation>();
     public DbSet<ProjectWorkItemChecklistItem> ProjectWorkItemChecklistItems => Set<ProjectWorkItemChecklistItem>();
     public DbSet<AgentExecution> AgentExecutions => Set<AgentExecution>();
     public DbSet<AgentExecutionEvent> AgentExecutionEvents => Set<AgentExecutionEvent>();
@@ -1802,6 +1803,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             entity.HasIndex(x => new { x.TenantId, x.ActorUserId, x.ProjectKey, x.WorkItemId, x.RequestId }).IsUnique();
             entity.HasOne<ProjectWorkItem>().WithMany().HasForeignKey(x => x.WorkItemId).OnDelete(DeleteBehavior.Restrict);
         });
+
+        WorkItemProposalMapping.Configure(modelBuilder);
 
         modelBuilder.Entity<ProjectWorkItemChecklistItem>(entity =>
         {
