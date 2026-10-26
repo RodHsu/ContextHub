@@ -551,7 +551,7 @@ public sealed class ScheduledGovernanceService(
     {
         if (receipt is not null && reliability is not null)
         {
-            await reliability.ObserveAsync(receipt, cancellationToken);
+            await reliability.PersistObservationAsync(receipt, cancellationToken);
         }
     }
 
