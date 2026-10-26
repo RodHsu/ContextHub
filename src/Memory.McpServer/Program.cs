@@ -1500,18 +1500,7 @@ discussions.MapPost("/threads/{threadId:guid}/messages", async (Guid threadId, D
 
 var workItems = app.MapGroup("/api/work-items");
 workItems.RequireAuthIfEnabled(requireAuthentication);
-workItems.MapGet(string.Empty, async (string projectId, string? status, string? definitionState, int? limit, bool? includeArchived, IProjectWorkItemService service, CancellationToken cancellationToken) =>
-{
-    if (!EnumParser.TryParse(status, out ProjectWorkItemStatus? parsedStatus, out var error))
-    {
-        return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = [error ?? "Unsupported ProjectWorkItemStatus value."] });
-    }
-    if (!EnumParser.TryParse(definitionState, out ProjectWorkItemDefinitionState? parsedDefinitionState, out var definitionError))
-    {
-        return Results.ValidationProblem(new Dictionary<string, string[]> { ["definitionState"] = [definitionError ?? "Unsupported ProjectWorkItemDefinitionState value."] });
-    }
-    return Results.Ok(await service.ListAsync(new ProjectWorkItemListRequest(ProjectContext.Normalize(projectId), parsedStatus, limit ?? 100, includeArchived ?? false, DefinitionState: parsedDefinitionState), cancellationToken));
-}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+workItems.MapWorkItemReadEndpoints(requireAuthentication);
 workItems.MapPost(string.Empty, async (ProjectWorkItemCreateRequest request, IProjectWorkItemService service, CancellationToken cancellationToken) =>
 {
     try { return Results.Created("/api/work-items", await service.CreateAsync(request, cancellationToken)); }
