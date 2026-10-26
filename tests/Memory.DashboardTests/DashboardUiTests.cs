@@ -399,7 +399,11 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
     [Fact]
     public async Task Successful_Login_Should_Render_Dashboard_Pages_With_Internal_Scroll_Hosts()
     {
-        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        // Program consumes this before the factory's later configuration callback.
+        // Keep page-render cookies/antiforgery isolated in this test's writable output.
+        using var factory = new DashboardApplicationFactory().WithWebHostBuilder(builder =>
+            builder.UseSetting("Dashboard:DataProtectionPath", Path.Combine(AppContext.BaseDirectory, "work-item-page-keys", Guid.NewGuid().ToString("N"))));
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false,
             HandleCookies = true
@@ -630,9 +634,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("連線面總覽");
         mcpToolsHtml.Should().Contain("目前發布數量");
         mcpToolsHtml.Should().Contain("Direct MCP");
-        mcpToolsHtml.Should().Contain("84</strong> 支工具");
+        mcpToolsHtml.Should().Contain("85</strong> 支工具");
         mcpToolsHtml.Should().Contain("ChatGPT App-facing");
-        mcpToolsHtml.Should().Contain("84</strong> 支工具");
+        mcpToolsHtml.Should().Contain("85</strong> 支工具");
         mcpToolsHtml.Should().Contain("可能刪除");
         mcpToolsHtml.Should().Contain("3</strong> 支工具");
         mcpToolsHtml.Should().Contain("Direct MCP 工具");
@@ -1495,6 +1499,9 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid id, bool archived, CancellationToken cancellationToken)
         => throw new NotSupportedException();
+
+    public async Task<ProjectWorkItemResult?> GetWorkItemForEditAsync(string projectId, Guid workItemId, CancellationToken cancellationToken)
+        => (await GetProjectWorkItemsAsync(new(projectId, IncludeArchived: true), cancellationToken)).FirstOrDefault(item => item.Id == workItemId);
     public Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectWorkItemResult(Guid.NewGuid(), request.ProjectId, request.Title, request.Description ?? string.Empty, request.Tags ?? [], [], ProjectWorkItemStatus.Pending, request.Priority, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
     public Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
