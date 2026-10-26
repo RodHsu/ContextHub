@@ -889,7 +889,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         canonicalRoutes.Should().NotContain("/jobs");
 
         var nonAdminRoutes = DashboardNavigation.VisibleGroups(false).SelectMany(group => group.Items).Select(item => item.Href).ToArray();
-        nonAdminRoutes.Should().Contain("/project-information");
+        nonAdminRoutes.Should().NotContain("/project-information");
         nonAdminRoutes.Should().Contain("/memories");
         nonAdminRoutes.Should().NotContain("/");
         nonAdminRoutes.Should().NotContain("/operations");
