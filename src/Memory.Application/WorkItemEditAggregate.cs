@@ -1,4 +1,5 @@
 using Memory.Domain;
+using System.Text.Json;
 
 namespace Memory.Application;
 
@@ -10,7 +11,7 @@ namespace Memory.Application;
 /// </summary>
 public static class WorkItemEditAggregate
 {
-    public static bool Apply(ProjectWorkItem aggregate, WorkItemEditCommand command, DateTimeOffset now)
+    public static bool Apply(ProjectWorkItem aggregate, WorkItemEditCommand command, DateTimeOffset now, string actorName = "")
     {
         ArgumentNullException.ThrowIfNull(aggregate);
         var normalized = WorkItemEditContract.Normalize(command);
@@ -24,7 +25,7 @@ public static class WorkItemEditAggregate
         RequireExplicitReopen(aggregate, normalized);
         var candidate = Copy(aggregate);
         var timestamp = now.ToUniversalTime();
-        ApplyCandidate(candidate, normalized, timestamp);
+        ApplyCandidate(candidate, normalized, timestamp, actorName);
         // Lifecycle/checklist edits may not create or retain an invalid Completed
         // aggregate. Metadata-only and archive/restore edits retain historical business state.
         var validatesCompletion = normalized.Operation is WorkItemEditOperation.ChecklistComplete or WorkItemEditOperation.ChecklistAdd or
@@ -55,7 +56,7 @@ public static class WorkItemEditAggregate
             throw new SafeEditConflictException(SafeEditConflictCodes.RequiresReopen, aggregate.Revision);
     }
 
-    private static void ApplyCandidate(ProjectWorkItem item, WorkItemEditCommand command, DateTimeOffset now)
+    private static void ApplyCandidate(ProjectWorkItem item, WorkItemEditCommand command, DateTimeOffset now, string actorName)
     {
         var patch = command.Patch;
         switch (command.Operation)
@@ -128,6 +129,9 @@ public static class WorkItemEditAggregate
             case WorkItemEditOperation.Restore:
                 item.ArchivedAt = null;
                 break;
+            case WorkItemEditOperation.GovernanceExclusion:
+                ApplyGovernanceExclusion(item, patch.GovernanceExclusion!, now, actorName);
+                break;
             default:
                 throw new ArgumentException("Invalid work item operation.");
         }
@@ -177,6 +181,7 @@ public static class WorkItemEditAggregate
         DueAt = item.DueAt,
         CompletedAt = item.CompletedAt,
         ArchivedAt = item.ArchivedAt,
+        GovernanceExclusionsJson = item.GovernanceExclusionsJson,
         ChecklistItems = item.ChecklistItems.OrderBy(row => row.SortOrder).ThenBy(row => row.Id).Select(row => new ProjectWorkItemChecklistItem
         {
             Id = row.Id,
@@ -194,6 +199,7 @@ public static class WorkItemEditAggregate
         if (before.Title != after.Title || before.Description != after.Description || !before.Tags.SequenceEqual(after.Tags) ||
             before.Priority != after.Priority || before.Status != after.Status || before.DefinitionState != after.DefinitionState ||
             before.DueAt != after.DueAt || before.CompletedAt != after.CompletedAt || before.ArchivedAt != after.ArchivedAt ||
+            before.GovernanceExclusionsJson != after.GovernanceExclusionsJson ||
             before.ChecklistItems.Count != after.ChecklistItems.Count) return true;
         var rows = before.ChecklistItems.ToDictionary(row => row.Id);
         return after.ChecklistItems.Any(row => !rows.TryGetValue(row.Id, out var old) ||
@@ -215,6 +221,7 @@ public static class WorkItemEditAggregate
         target.DueAt = candidate.DueAt;
         target.CompletedAt = candidate.CompletedAt;
         target.ArchivedAt = candidate.ArchivedAt;
+        target.GovernanceExclusionsJson = candidate.GovernanceExclusionsJson;
         foreach (var old in target.ChecklistItems.Where(row => !next.ContainsKey(row.Id)).ToArray()) target.ChecklistItems.Remove(old);
         var existing = target.ChecklistItems.ToDictionary(row => row.Id);
         foreach (var row in candidate.ChecklistItems)
@@ -233,5 +240,26 @@ public static class WorkItemEditAggregate
                 current.UpdatedAt = now;
             }
         }
+    }
+
+    private static void ApplyGovernanceExclusion(ProjectWorkItem item, WorkItemGovernanceExclusionChange change, DateTimeOffset now, string actorName)
+    {
+        if (string.IsNullOrWhiteSpace(actorName)) throw new InvalidOperationException("A server-resolved actor is required.");
+        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var rows = (JsonSerializer.Deserialize<ProjectWorkItemGovernanceExclusionResult[]>(item.GovernanceExclusionsJson, json) ?? []).ToList();
+        var index = rows.FindIndex(row => string.Equals(row.GovernanceRunId, change.GovernanceRunId, StringComparison.Ordinal));
+        ProjectWorkItemGovernanceExclusionResult updated;
+        if (change.Excluded)
+        {
+            if (index >= 0 && rows[index].IsActive && string.Equals(rows[index].Reason, change.Reason, StringComparison.Ordinal)) return;
+            updated = new(change.GovernanceRunId, change.Reason, actorName, now);
+        }
+        else
+        {
+            if (index < 0 || !rows[index].IsActive) return;
+            updated = rows[index] with { Reason = change.Reason, Actor = actorName, UpdatedAt = now, RevokedAt = now };
+        }
+        if (index >= 0) rows[index] = updated; else rows.Add(updated);
+        item.GovernanceExclusionsJson = JsonSerializer.Serialize(rows, json);
     }
 }

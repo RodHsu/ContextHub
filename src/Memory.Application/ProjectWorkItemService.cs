@@ -7,7 +7,8 @@ namespace Memory.Application;
 public sealed class ProjectWorkItemService(
     IApplicationDbContext dbContext,
     IRequestActorAccessor actorAccessor,
-    IClock clock) : IProjectWorkItemService
+    IClock clock,
+    Func<IWorkItemEditingService>? editing = null) : IProjectWorkItemService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -54,44 +55,14 @@ public sealed class ProjectWorkItemService(
         return Map(entity);
     }
 
-    public async Task<ProjectWorkItemResult> UpdateAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
+    public Task<ProjectWorkItemResult> UpdateAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
     {
-        var actor = actorAccessor.Current;
-        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
-        var entity = await ApplyActorScope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor).SingleOrDefaultAsync(x => x.Id == request.Id, cancellationToken)
-            ?? throw new InvalidOperationException($"Project work item '{request.Id}' was not found.");
-        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
-        EnsureNotArchived(entity);
-        if (request.Title is not null)
-        {
-            ValidateText(request.Title, 200, "Work item title");
-            entity.Title = request.Title.Trim();
-        }
-        if (request.Description is not null)
-        {
-            ValidateOptionalText(request.Description, 12000, "Work item description");
-            entity.Description = request.Description.Trim();
-        }
-        if (request.Tags is not null) entity.Tags = NormalizeTags(request.Tags);
-        if (request.Priority.HasValue) entity.Priority = Math.Clamp(request.Priority.Value, 0, 100);
-        if (request.DueAt.HasValue) entity.DueAt = request.DueAt;
-        if (request.Status.HasValue)
-        {
-            if (request.Status == ProjectWorkItemStatus.Completed && entity.ChecklistItems.Any(x => !x.IsCompleted))
-            {
-                throw new InvalidOperationException("Complete every checklist item before completing this work item.");
-            }
-            entity.Status = request.Status.Value;
-            entity.CompletedAt = request.Status is ProjectWorkItemStatus.Completed or ProjectWorkItemStatus.Cancelled ? clock.UtcNow : null;
-        }
-        if (request.DefinitionState.HasValue && request.DefinitionState.Value != entity.DefinitionState)
-        {
-            EnsureDefinitionTransitionAllowed(entity.DefinitionState, request.DefinitionState.Value);
-            entity.DefinitionState = request.DefinitionState.Value;
-        }
-        entity.UpdatedAt = clock.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return Map(entity);
+        var hasFlat = request.Title is not null || request.Description is not null || request.Tags is not null ||
+            request.Status.HasValue || request.Priority.HasValue || request.DueAt.HasValue || request.DefinitionState.HasValue;
+        if (request.Edit is not null && hasFlat) throw new ArgumentException("Use either a typed edit patch or legacy update fields, not both.");
+        var patch = request.Edit ?? new WorkItemEditPatch(request.Title, request.Description, request.Tags, request.Priority,
+            request.Status, request.DefinitionState, request.DueAt.HasValue ? new(EditDueAtMode.Set, request.DueAt) : new());
+        return ApplyVersionedAsync(request.Id, request.ExpectedRevision, request.RequestId, request.Operation, patch, cancellationToken);
     }
 
     public async Task<ProjectWorkItemResult?> GetAsync(Guid workItemId, bool includeArchived, CancellationToken cancellationToken)
@@ -123,127 +94,47 @@ public sealed class ProjectWorkItemService(
         return items.Select(Map).ToArray();
     }
 
-    public async Task<ProjectWorkItemResult> SetArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken)
-    {
-        var actor = actorAccessor.Current;
-        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
-        var entity = await ApplyActorScope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor).SingleOrDefaultAsync(x => x.Id == workItemId, cancellationToken)
-            ?? throw new InvalidOperationException($"Project work item '{workItemId}' was not found.");
-        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
+    public Task<ProjectWorkItemResult> SetArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken)
+        => SetArchivedAsync(new ProjectWorkItemArchiveRequest(workItemId, archived), cancellationToken);
 
-        var shouldChange = archived ? entity.ArchivedAt is null : entity.ArchivedAt is not null;
-        if (shouldChange)
-        {
-            var now = clock.UtcNow;
-            entity.ArchivedAt = archived ? now : null;
-            entity.UpdatedAt = now;
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
+    public Task<ProjectWorkItemResult> SetArchivedAsync(ProjectWorkItemArchiveRequest request, CancellationToken cancellationToken)
+        => ApplyVersionedAsync(request.WorkItemId, request.ExpectedRevision, request.RequestId,
+            request.Archived ? WorkItemEditOperation.Archive : WorkItemEditOperation.Restore, new(), cancellationToken);
 
-        return Map(entity);
-    }
+    public Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
+        => SetChecklistItemCompletionAsync(new ProjectWorkItemChecklistUpdateRequest(workItemId, checklistItemId, isCompleted), cancellationToken);
 
-    public async Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
-    {
-        var actor = actorAccessor.Current;
-        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
-        var entity = await ApplyActorScope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor).SingleOrDefaultAsync(x => x.Id == workItemId, cancellationToken)
-            ?? throw new InvalidOperationException($"Project work item '{workItemId}' was not found.");
-        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: true);
-        EnsureNotArchived(entity);
-        var item = entity.ChecklistItems.SingleOrDefault(x => x.Id == checklistItemId)
-            ?? throw new InvalidOperationException($"Checklist item '{checklistItemId}' was not found.");
-        item.IsCompleted = isCompleted;
-        item.UpdatedAt = clock.UtcNow;
-        entity.UpdatedAt = clock.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return Map(entity);
-    }
+    public Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(ProjectWorkItemChecklistUpdateRequest request, CancellationToken cancellationToken)
+        => ApplyVersionedAsync(request.WorkItemId, request.ExpectedRevision, request.RequestId, WorkItemEditOperation.ChecklistComplete,
+            new(ChecklistItemId: request.ChecklistItemId, IsCompleted: request.IsCompleted), cancellationToken);
 
-    public async Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(
-        ProjectWorkItemGovernanceExclusionRequest request,
-        CancellationToken cancellationToken)
+    public Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.GovernanceTrackerManage);
-        if (!actor.IsAdmin)
-        {
-            throw new UnauthorizedAccessException("Only a tenant owner or administrator may change governance tracker exclusions.");
-        }
+        if (!actor.IsAdmin) throw new UnauthorizedAccessException("Governance tracker management is unavailable.");
+        if (string.IsNullOrWhiteSpace(request.ProjectId)) throw new ArgumentException("An explicit ProjectId is required.");
+        return ApplyVersionedAsync(request.WorkItemId, request.ExpectedRevision, request.RequestId,
+            WorkItemEditOperation.GovernanceExclusion, new(GovernanceExclusion: new(request.GovernanceRunId, request.Reason, request.Excluded)),
+            cancellationToken, request.ProjectId);
+    }
 
-        var projectId = ProjectContext.Normalize(request.ProjectId);
-        ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
-        var entity = await ApplyActorScope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor)
-            .SingleOrDefaultAsync(x => x.Id == request.WorkItemId, cancellationToken)
-            ?? throw new InvalidOperationException($"Project work item '{request.WorkItemId}' was not found.");
-        if (!Memory.Application.ProjectContext.Matches(entity.ProjectId, projectId))
-        {
-            throw new UnauthorizedAccessException("The work item does not belong to the requested ProjectId.");
-        }
-        EnsureNotArchived(entity);
-
-        var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
-        if (string.IsNullOrWhiteSpace(request.Reason))
-        {
-            throw new InvalidOperationException("A governance tracker exclusion reason is required.");
-        }
-
-        var relatedSnapshots = await dbContext.KnowledgeGovernanceSnapshots
-            .AsNoTracking()
-            .Where(x => x.TenantId == actor.TenantId &&
-                        x.OwnerUserId == actor.UserId &&
-                        x.GovernanceRunId == governanceRunId)
-            .Select(x => x.ProjectIdsJson)
-            .ToListAsync(cancellationToken);
-        if (!relatedSnapshots.Any(json => ReadProjectIds(json).Contains(projectId, Memory.Application.ProjectContext.IdentityComparer)))
-        {
-            throw new InvalidOperationException("GovernanceRunId does not identify an authorized review snapshot containing this ProjectId.");
-        }
-
-        var exclusions = ReadExclusions(entity.GovernanceExclusionsJson).ToList();
-        var index = exclusions.FindIndex(x => string.Equals(x.GovernanceRunId, governanceRunId, StringComparison.Ordinal));
-        var now = clock.UtcNow;
-        var reason = request.Reason.Trim();
-        ProjectWorkItemGovernanceExclusionResult updated;
-        if (request.Excluded)
-        {
-            if (index >= 0 && exclusions[index].IsActive && string.Equals(exclusions[index].Reason, reason, StringComparison.Ordinal))
-            {
-                return Map(entity);
-            }
-            updated = new ProjectWorkItemGovernanceExclusionResult(governanceRunId, reason, actor.Username, now);
-        }
-        else
-        {
-            if (index < 0 || !exclusions[index].IsActive)
-            {
-                return Map(entity);
-            }
-            updated = exclusions[index] with { Reason = reason, Actor = actor.Username, UpdatedAt = now, RevokedAt = now };
-        }
-
-        if (index >= 0) exclusions[index] = updated;
-        else exclusions.Add(updated);
-        entity.GovernanceExclusionsJson = JsonSerializer.Serialize(exclusions, JsonOptions);
-        entity.UpdatedAt = now;
-        await dbContext.SecurityAuditEvents.AddAsync(new SecurityAuditEvent
-        {
-            TenantId = actor.TenantId,
-            ActorUserId = actor.UserId,
-            EventType = SecurityAuditEventType.ProjectWorkItemGovernanceExclusionUpdated,
-            Outcome = request.Excluded ? "Excluded" : "Revoked",
-            DetailsJson = JsonSerializer.Serialize(new
-            {
-                workItemId = entity.Id,
-                projectId,
-                governanceRunId,
-                reason
-            }, JsonOptions),
-            CreatedAt = now
-        }, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return Map(entity);
+    private async Task<ProjectWorkItemResult> ApplyVersionedAsync(Guid workItemId, long? expectedRevision, string? requestId,
+        WorkItemEditOperation operation, WorkItemEditPatch patch, CancellationToken cancellationToken, string? expectedProject = null)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
+        // Resolve only authorized scope, never an original-version precondition on behalf of a caller.
+        var project = await ApplyActorScope(dbContext.ProjectWorkItems.AsNoTracking(), actor).Where(row => row.Id == workItemId)
+            .Select(row => row.ProjectId).SingleOrDefaultAsync(cancellationToken) ?? throw new KeyNotFoundException("Work item is unavailable.");
+        ActorAuthorization.EnsureProjectAllowed(actor, project, write: true);
+        if (expectedProject is not null && !ProjectContext.Matches(project, ProjectContext.Normalize(expectedProject)))
+            throw new UnauthorizedAccessException("Work item is unavailable.");
+        var command = WorkItemEditContract.Normalize(new(project, workItemId, expectedRevision, requestId ?? string.Empty, operation, patch));
+        var service = editing?.Invoke() ?? throw new NotSupportedException("Versioned work item editing is not configured.");
+        var receipt = await service.ApplyAsync(command, cancellationToken);
+        return receipt.Result with { EditReceipt = WorkItemEditReceiptMetadata.From(receipt) };
     }
 
     private static IQueryable<ProjectWorkItem> ApplyActorScope(IQueryable<ProjectWorkItem> query, ContextHubRequestActor actor)
@@ -257,28 +148,6 @@ public sealed class ProjectWorkItemService(
         GovernanceExclusions = ReadExclusions(x.GovernanceExclusionsJson)
     };
 
-    private static void EnsureDefinitionTransitionAllowed(
-        ProjectWorkItemDefinitionState current,
-        ProjectWorkItemDefinitionState requested)
-    {
-        var allowed = current switch
-        {
-            ProjectWorkItemDefinitionState.Discussing => requested is ProjectWorkItemDefinitionState.Draft or ProjectWorkItemDefinitionState.ReadyForDevelopment or ProjectWorkItemDefinitionState.Superseded,
-            ProjectWorkItemDefinitionState.Draft => requested is ProjectWorkItemDefinitionState.Discussing or ProjectWorkItemDefinitionState.ReadyForDevelopment or ProjectWorkItemDefinitionState.Superseded,
-            ProjectWorkItemDefinitionState.ReadyForDevelopment => requested is ProjectWorkItemDefinitionState.Draft or ProjectWorkItemDefinitionState.Frozen or ProjectWorkItemDefinitionState.Superseded,
-            ProjectWorkItemDefinitionState.Frozen => requested is ProjectWorkItemDefinitionState.ReadyForDevelopment or ProjectWorkItemDefinitionState.Superseded,
-            ProjectWorkItemDefinitionState.Superseded => false,
-            _ => false
-        };
-        if (!allowed)
-        {
-            throw new InvalidOperationException($"DefinitionState transition from '{current}' to '{requested}' is not allowed.");
-        }
-    }
-    private static void EnsureNotArchived(ProjectWorkItem entity)
-    {
-        if (entity.ArchivedAt.HasValue) throw new InvalidOperationException("Project work item is archived. Restore it before making changes.");
-    }
     private static string[] NormalizeTags(IReadOnlyList<string>? tags)
         => (tags ?? []).Select(tag => tag.Trim()).Where(tag => tag.Length is > 0 and <= 50).Distinct(StringComparer.OrdinalIgnoreCase).Take(12).ToArray();
     private static string[] NormalizeChecklist(IReadOnlyList<string>? items)
@@ -308,24 +177,4 @@ public sealed class ProjectWorkItemService(
         }
     }
 
-    private static IReadOnlyList<string> ReadProjectIds(string json)
-    {
-        try
-        {
-            return JsonSerializer.Deserialize<string[]>(json, JsonOptions) ?? [];
-        }
-        catch (JsonException)
-        {
-            return [];
-        }
-    }
-
-    private static string NormalizeGovernanceRunId(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value) || value.Trim().Length > 128)
-        {
-            throw new InvalidOperationException("GovernanceRunId is required and must not exceed 128 characters.");
-        }
-        return value.Trim();
-    }
 }

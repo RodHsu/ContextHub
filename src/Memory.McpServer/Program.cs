@@ -1506,31 +1506,7 @@ workItems.MapPost(string.Empty, async (ProjectWorkItemCreateRequest request, IPr
     try { return Results.Created("/api/work-items", await service.CreateAsync(request, cancellationToken)); }
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
-workItems.MapPut("/{id:guid}", async (Guid id, ProjectWorkItemUpdateBody body, IProjectWorkItemService service, CancellationToken cancellationToken) =>
-{
-    try { return Results.Ok(await service.UpdateAsync(new ProjectWorkItemUpdateRequest(id, body.Title, body.Description, body.Tags, body.Status, body.Priority, body.DueAt, body.DefinitionState), cancellationToken)); }
-    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
-}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
-workItems.MapPost("/{id:guid}/archive", async (Guid id, IProjectWorkItemService service, CancellationToken cancellationToken) =>
-{
-    try { return Results.Ok(await service.SetArchivedAsync(id, archived: true, cancellationToken)); }
-    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
-}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
-workItems.MapPost("/{id:guid}/restore", async (Guid id, IProjectWorkItemService service, CancellationToken cancellationToken) =>
-{
-    try { return Results.Ok(await service.SetArchivedAsync(id, archived: false, cancellationToken)); }
-    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["workItem"] = [ex.Message] }); }
-}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
-workItems.MapPut("/{workItemId:guid}/checklist/{checklistItemId:guid}", async (Guid workItemId, Guid checklistItemId, ProjectWorkItemChecklistCompletionBody body, IProjectWorkItemService service, CancellationToken cancellationToken) =>
-{
-    try { return Results.Ok(await service.SetChecklistItemCompletionAsync(workItemId, checklistItemId, body.IsCompleted, cancellationToken)); }
-    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["checklistItem"] = [ex.Message] }); }
-}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
-workItems.MapPut("/{workItemId:guid}/governance-exclusion", async (Guid workItemId, ProjectWorkItemGovernanceExclusionBody body, IProjectWorkItemService service, CancellationToken cancellationToken) =>
-{
-    try { return Results.Ok(await service.SetGovernanceExclusionAsync(new ProjectWorkItemGovernanceExclusionRequest(workItemId, body.ProjectId, body.GovernanceRunId, body.Reason, body.Excluded), cancellationToken)); }
-    catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["governanceExclusion"] = [ex.Message] }); }
-}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+workItems.MapWorkItemEditingEndpoints(requireAuthentication);
 
 var agentExecutions = app.MapGroup("/api/agent-executions");
 agentExecutions.RequireAuthIfEnabled(requireAuthentication);
@@ -2848,9 +2824,6 @@ internal sealed record TenantUserUpdateBody(
     string? Password = null);
 internal sealed record DiscussionMessageCreateBody(string SenderProjectId, string Content);
 internal sealed record DiscussionThreadReadBody(string ReaderProjectId, Guid LastReadMessageId);
-internal sealed record ProjectWorkItemUpdateBody(string? Title = null, string? Description = null, IReadOnlyList<string>? Tags = null, ProjectWorkItemStatus? Status = null, int? Priority = null, DateTimeOffset? DueAt = null, ProjectWorkItemDefinitionState? DefinitionState = null);
-internal sealed record ProjectWorkItemChecklistCompletionBody(bool IsCompleted);
-internal sealed record ProjectWorkItemGovernanceExclusionBody(string ProjectId, string GovernanceRunId, string Reason, bool Excluded = true);
 internal sealed record ConversationInsightGovernanceBody(string? GovernanceRunId = null, string? Reason = null);
 internal sealed record ConversationInsightDispositionBody(ConversationInsightDisposition Disposition, string Reason, string? GovernanceRunId = null);
 internal sealed record ProjectHierarchySetChildrenBody(IReadOnlyList<string>? ChildProjectIds);

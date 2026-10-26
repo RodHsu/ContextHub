@@ -2,6 +2,7 @@ using System.ComponentModel;
 using Memory.Application;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
+using System.Text.Json;
 
 namespace Memory.McpServer;
 
@@ -24,7 +25,9 @@ public sealed class MemoryMcpTools(
     IProjectArtifactExchangeService artifactExchangeService,
     IManagedFileService managedFileService,
     IChatGptProposalService chatGptProposalService,
-    IMaintenanceCoordinator maintenanceCoordinator)
+    IMaintenanceCoordinator maintenanceCoordinator,
+    IWorkItemEditingService? workItemEditing = null,
+    ILogger<MemoryMcpTools>? logger = null)
 {
     [McpServerTool(UseStructuredContent = true), Description("Describe ContextHub purpose, capabilities, startup flow, and projectId guidance for first-time agent onboarding.")]
     public ContextHubBootstrapResult describe_context_hub(string? projectId = null)
@@ -225,25 +228,35 @@ public sealed class MemoryMcpTools(
     public Task<ProjectWorkItemResult> project_work_item_create(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.CreateAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Update a project work item status, content, priority, or due date.")]
+    [McpServerTool(UseStructuredContent = true), Description("Edit one work item using its original read Revision and RequestId. For structural checklist edits or explicit Reopen, use Operation and Edit. Use Edit.DueAt Mode=Clear to clear a due date. If outcome is unknown, recover the exact request receipt/hash before retrying; never fill latest or invent another request identity.")]
     public Task<ProjectWorkItemResult> project_work_item_update(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken = default)
-        => projectWorkItemService.UpdateAsync(request, cancellationToken);
+        => WorkItemBoundaryAsync(() => projectWorkItemService.UpdateAsync(request, cancellationToken));
 
     [McpServerTool(UseStructuredContent = true), Description("Explicitly and auditably exclude or restore one governance acceptance tracker for one existing governanceRunId. Only tenant owners or administrators may change this project-scoped relationship; ordinary work items remain actionable.")]
     public Task<ProjectWorkItemResult> project_work_item_set_governance_exclusion(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken cancellationToken = default)
-        => projectWorkItemService.SetGovernanceExclusionAsync(request, cancellationToken);
+        => WorkItemBoundaryAsync(() => projectWorkItemService.SetGovernanceExclusionAsync(request, cancellationToken));
 
-    [McpServerTool(UseStructuredContent = true), Description("Complete or reopen one checklist item on a project work item. Archived work items reject checklist mutations.")]
-    public Task<ProjectWorkItemResult> project_work_item_checklist_update(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken = default)
-        => projectWorkItemService.SetChecklistItemCompletionAsync(workItemId, checklistItemId, isCompleted, cancellationToken);
+    [McpServerTool(UseStructuredContent = true), Description("Set one checklist completion using ExpectedRevision and RequestId. Explicitly Reopen a Completed work item through project_work_item_update before unchecking. Unknown outcome requires exact receipt recovery.")]
+    public Task<ProjectWorkItemResult> project_work_item_checklist_update(Guid workItemId, Guid checklistItemId, bool isCompleted,
+        CancellationToken cancellationToken = default, long? expectedRevision = null, string? requestId = null)
+        => WorkItemBoundaryAsync(() => projectWorkItemService.SetChecklistItemCompletionAsync(new ProjectWorkItemChecklistUpdateRequest(
+            workItemId, checklistItemId, isCompleted, expectedRevision, requestId), cancellationToken));
 
     [McpServerTool(UseStructuredContent = true), Description("Archive a project work item. Archived work items are hidden from default lists and reject mutations until restored.")]
-    public Task<ProjectWorkItemResult> project_work_item_archive(Guid workItemId, CancellationToken cancellationToken = default)
-        => projectWorkItemService.SetArchivedAsync(workItemId, archived: true, cancellationToken);
+    public Task<ProjectWorkItemResult> project_work_item_archive(Guid workItemId, CancellationToken cancellationToken = default,
+        long? expectedRevision = null, string? requestId = null)
+        => WorkItemBoundaryAsync(() => projectWorkItemService.SetArchivedAsync(new ProjectWorkItemArchiveRequest(workItemId, true, expectedRevision, requestId), cancellationToken));
 
     [McpServerTool(UseStructuredContent = true), Description("Restore an archived project work item without changing its business status.")]
-    public Task<ProjectWorkItemResult> project_work_item_restore(Guid workItemId, CancellationToken cancellationToken = default)
-        => projectWorkItemService.SetArchivedAsync(workItemId, archived: false, cancellationToken);
+    public Task<ProjectWorkItemResult> project_work_item_restore(Guid workItemId, CancellationToken cancellationToken = default,
+        long? expectedRevision = null, string? requestId = null)
+        => WorkItemBoundaryAsync(() => projectWorkItemService.SetArchivedAsync(new ProjectWorkItemArchiveRequest(workItemId, false, expectedRevision, requestId), cancellationToken));
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read one committed work-item edit receipt for the same actor/project/target/request and original intent hash/version. This is the original result, not current state. Null means no committed receipt was observed, not proof the edit never arrived. This read never replays a mutation.")]
+    public Task<WorkItemEditReceipt?> project_work_item_edit_receipt_get(WorkItemEditRecoveryRequest request, CancellationToken cancellationToken = default)
+        => WorkItemBoundaryAsync(() => (workItemEditing ?? throw new NotSupportedException("Work item receipt recovery is unavailable."))
+            .ReadReceiptAsync(request, cancellationToken));
 
     [McpServerTool(UseStructuredContent = true), Description("List project work items. Archived work items are excluded unless IncludeArchived is true. These are user-managed project tasks, not governance suggested actions.")]
     public Task<IReadOnlyList<ProjectWorkItemResult>> project_work_items_list(ProjectWorkItemListRequest request, CancellationToken cancellationToken = default)
@@ -416,6 +429,25 @@ public sealed class MemoryMcpTools(
         catch (MemoryScoreValidationException ex)
         {
             throw new McpException(ex.Message, ex);
+        }
+    }
+
+    private async Task<T> WorkItemBoundaryAsync<T>(Func<Task<T>> operation)
+    {
+        try { return await operation(); }
+        catch (SafeEditConflictException error)
+        {
+            throw new McpException(JsonSerializer.Serialize(new { code = error.Code, currentRevision = error.CurrentRevision, detail = error.Message }));
+        }
+        catch (UnauthorizedAccessException) { throw new McpException("Work item operation is unavailable."); }
+        catch (KeyNotFoundException) { throw new McpException("Work item operation is unavailable."); }
+        catch (ArgumentException) { throw new McpException("Invalid edit intent; verify the original read revision and explicit fields."); }
+        catch (InvalidOperationException) { throw new McpException("Invalid edit state; reload and compare while retaining the draft."); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error)
+        {
+            logger?.LogError(error, "Work item operation outcome could not be confirmed.");
+            throw new McpException("RequestOutcomeUnknown: recover the original request identity and intent hash; do not automatically replay or create a new request.");
         }
     }
 }

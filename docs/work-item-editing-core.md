@@ -1,12 +1,26 @@
 # Work item editing core — staged source
 
-This change adds the actual Application command/aggregate core and PostgreSQL store. It is a source foundation, not a completed public editor cutover. Existing REST/MCP/proposal/governance writers are not routed through it in this phase. Do not deploy this phase alone or infer end-to-end CAS from the additional read revision. All writer adapters, public contract/host acceptance and database acceptance are separate required gates before rollout.
+The source foundation adds the Application command/aggregate core and PostgreSQL store. The adapter stage routes ordinary existing REST/MCP WorkItem updates, archive/restore, checklist completion and governance-exclusion relationship edits through that core. It adds an HTTP edit/recovery protocol and a draft controller/client, but does not yet bind the actual editor page, proposal workflow or governance executor. Memory CAS remains a separate package. Do not deploy these stages alone or infer end-to-end CAS from the additional read revision. All writer adapters, public contract/host acceptance and database acceptance remain required gates before rollout.
 
 ## Intent and original version
 
 WorkItemEditCommand requires an explicit regular project, target, positive original-read revision, bounded request identity, operation and typed patch. Missing original revision rejects; the server does not fill it with a current version. The production read DTO preserves an omitted revision as unknown/null; only an actual mapped row supplies the database baseline. Migration baseline1 is not reconstructed history.
 
-The normalized WorkItemEditIntent/v1 fingerprint binds canonical project identity, work item, original revision, operation, field presence, leaf identities/order and effective values. RequestId is a separate scoped ledger key. DueAt has explicit Keep/Clear/Set intent. The same scoped key with a different fingerprint conflicts. Read-only receipt recovery requires the pending intent's original fingerprint/version; it cannot mistake an old result for a different reused-key intent.
+The normalized WorkItemEditIntent/v2 fingerprint binds canonical project identity, work item, original revision, operation, field presence, leaf identities/order and effective values, including the privileged governance-exclusion relationship change. It supersedes the unpublished foundation's v1 hash shape; no v1 receipt conversion or backward-compatible recovery is claimed. RequestId is a separate scoped ledger key. DueAt has explicit Keep/Clear/Set intent. The same scoped key with a different fingerprint conflicts. Read-only receipt recovery requires the pending intent's original fingerprint/version; it cannot mistake an old result for a different reused-key intent.
+
+## Adapter contract and recovery
+
+Ordinary legacy writers without a positive original revision reject with MissingReadVersion. Authorized project lookup does not supply a current revision on the client's behalf. Existing scalar MCP wrappers accept expectedRevision/requestId and dispatch typed Application requests. REST updates distinguish omitted dueAt (Keep), explicit null (Clear) and a date (Set); typed patches cannot be mixed with flat update fields. Completed uncheck still requires an explicit Reopen edit and its own committed history.
+
+POST `/api/work-items/{id}/edits` accepts the canonical command. GET `/api/work-items/{id}/edit-receipts` takes projectId, requestId, expectedRequestHash and hashVersion; a null/404 result is not proof the original edit never arrived. Current tenant/owner/service-actor/project authority and the original fingerprint are checked before returning the original result. Errors expose known safe conflict codes, opaque forbidden/not-found responses or a generic unknown-outcome response. A trace identifier in an error is not a replacement edit identity. The caller must retain its original key/hash/version before submission.
+
+The privileged exclusion operation retains existing MemoryWrite, admin and GovernanceTrackerManage checks, a same-actor/tenant review snapshot containing the project, and the original security audit. The store saves the relationship, history, audit, receipt and outbox in its one owned transaction. This does not change or complete the separate governance executor's immutable-snapshot integration.
+
+The draft controller binds identity+project+target, preserves drafts and original revision on 409, and requires explicit comparison acceptance before a new intent. Late read/write/recovery responses are ignored after scope changes or disposal. Cancellation, malformed success or uncertain transport leaves the exact request pending; no automatic replay/new key/latest-version fill occurs. Only non-secret recovery metadata can be captured. The current controller is in memory and has no browser storage or process-restart durability claim; actual editor binding and durable checkpoint custody are still unimplemented.
+
+### Tool-surface review
+
+`project_work_item_edit_receipt_get` is a distinct read-only recovery query on the general backend and restricted gateway. Current WorkItem detail/list cannot answer whether a particular request committed, and adding optional historical-ledger modes to those queries would conflate current state with original results. The tool uses existing MemoryRead plus current resource authority and the exact actor-scoped request fingerprint; it grants no new role, mutation, delete, replay or global ledger capability. Both surfaces share the same Application use case and SDK input schema. The general catalog advances to 2026-10-26-v11; the dedicated Scheduled Governance four-tool catalog/schema and acceptance gates are unchanged. Host publication/reconnect/schema acceptance remain unexecuted release gates.
 
 ## Aggregate and commit
 
@@ -26,6 +40,6 @@ Pure-helper, actor-dispatch, actual EF model/query translation and change-tracke
 
 ## Rollout and rollback
 
-First finish all writer adapters and legacy rejection/read-reload flow, then verify schemas/host publication, migration readiness and actual database invariants. Existing immutable governance snapshot/execute/Natural gates are not weakened; old snapshots without an original version cannot be upgraded by reading latest. No new surface is enabled by this source package.
+First finish all writer adapters and legacy rejection/read-reload flow, then verify schemas/host publication, migration readiness and actual database invariants. Existing immutable governance snapshot/execute/Natural gates are not weakened; old snapshots without an original version cannot be upgraded by reading latest. Source endpoint/tool registration does not establish deployment or host publication, and these incomplete stages are not ready for release.
 
 If rollout is incomplete, keep versioned edit entry points unavailable. Rollback preserves additive revision/history/receipt data and uses compatible writers or read-only editing; it must not drop evidence or return to blind overwrites after guarded edits have occurred. A destructive down migration is deliberately not supplied.

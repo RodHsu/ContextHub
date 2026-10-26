@@ -19,8 +19,23 @@ public static class ProjectWorkItemReadEndpoints
             }
             return Results.Ok(await service.ListAsync(new ProjectWorkItemListRequest(ProjectContext.Normalize(projectId), parsedStatus, limit ?? 100, includeArchived ?? false, Offset: offset ?? 0, DefinitionState: parsedDefinitionState), cancellationToken));
         }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
-        workItems.MapGet("/{id:guid}", async (Guid id, bool? includeArchived, IProjectWorkItemService service, CancellationToken cancellationToken)
-            => await service.GetAsync(id, includeArchived ?? false, cancellationToken) is { } item ? Results.Ok(item) : Results.NotFound())
+        workItems.MapGet("/{id:guid}", async (Guid id, bool? includeArchived, string? projectId, IProjectWorkItemService service,
+            HttpResponse response, CancellationToken cancellationToken) =>
+        {
+            response.Headers.CacheControl = "no-store";
+            try
+            {
+                var item = await service.GetAsync(id, includeArchived ?? false, cancellationToken);
+                return item is not null && (projectId is null || ProjectContext.Matches(item.ProjectId, projectId.Trim()))
+                    ? (IResult)Results.Ok(item) : Results.NotFound();
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Read-scope authentication is enforced by the endpoint filter first.
+                // Never expose a private resource's actual project through a service error.
+                return Results.NotFound();
+            }
+        })
             .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
         return workItems;
     }

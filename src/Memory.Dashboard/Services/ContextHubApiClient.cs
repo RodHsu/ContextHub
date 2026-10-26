@@ -7,7 +7,7 @@ using Microsoft.AspNetCore.WebUtilities;
 
 namespace Memory.Dashboard.Services;
 
-public interface IContextHubApiClient
+public interface IContextHubApiClient : IWorkItemEditingApi
 {
     Task<SystemStatusResult> GetStatusAsync(CancellationToken cancellationToken);
     Task<DashboardOverviewResult> GetOverviewAsync(CancellationToken cancellationToken);
@@ -575,8 +575,84 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public async Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
     {
-        using var response = await httpClient.PutAsJsonAsync($"/api/work-items/{request.Id:D}", request, cancellationToken);
-        return await ReadRequiredAsync<ProjectWorkItemResult>(response, cancellationToken);
+        // A nullable legacy DTO cannot carry property presence. Omit unspecified values;
+        // explicit clearing is represented by the typed Edit.DueAt change.
+        var body = new Dictionary<string, object?> { ["expectedRevision"] = request.ExpectedRevision, ["requestId"] = request.RequestId, ["operation"] = request.Operation };
+        if (request.Edit is not null) body["edit"] = request.Edit;
+        if (request.Title is not null) body["title"] = request.Title;
+        if (request.Description is not null) body["description"] = request.Description;
+        if (request.Tags is not null) body["tags"] = request.Tags;
+        if (request.Status.HasValue) body["status"] = request.Status.Value;
+        if (request.Priority.HasValue) body["priority"] = request.Priority.Value;
+        if (request.DueAt.HasValue) body["dueAt"] = request.DueAt.Value;
+        if (request.DefinitionState.HasValue) body["definitionState"] = request.DefinitionState.Value;
+        using var response = await httpClient.PutAsJsonAsync($"/api/work-items/{request.Id:D}", body, cancellationToken);
+        await EnsureWorkItemResponseAsync(response, cancellationToken);
+        return await response.Content.ReadFromJsonAsync<ProjectWorkItemResult>(cancellationToken: cancellationToken)
+            ?? throw new InvalidDataException("Work item response is unavailable.");
+    }
+
+    public async Task<ProjectWorkItemResult?> GetWorkItemForEditAsync(string projectId, Guid workItemId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(projectId) || workItemId == Guid.Empty) throw new ArgumentException("An explicit work item scope is required.");
+        var url = QueryHelpers.AddQueryString($"/api/work-items/{workItemId:D}", new Dictionary<string, string?> { ["projectId"] = projectId, ["includeArchived"] = "true" });
+        using var response = await httpClient.GetAsync(url, ct);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<ProjectWorkItemResult>(cancellationToken: ct);
+        if (result is not null && (result.Id != workItemId || !ProjectContext.Matches(result.ProjectId, projectId)))
+            throw new InvalidDataException("Work item response scope is inconsistent.");
+        return result;
+    }
+
+    public async Task<WorkItemEditReceipt> ApplyWorkItemEditAsync(WorkItemEditCommand command, CancellationToken ct)
+    {
+        var normalized = WorkItemEditContract.Normalize(command);
+        try
+        {
+            using var response = await httpClient.PostAsJsonAsync($"/api/work-items/{normalized.WorkItemId:D}/edits", normalized, ct);
+            await EnsureWorkItemResponseAsync(response, ct);
+            return await response.Content.ReadFromJsonAsync<WorkItemEditReceipt>(cancellationToken: ct)
+                ?? throw new InvalidDataException("Edit receipt response is unavailable.");
+        }
+        catch (NotSupportedException error)
+        {
+            // Once this adapter is entered, unsupported encoding/decoding must not be
+            // confused with the interface's explicitly pre-dispatch unsupported case.
+            throw new InvalidDataException("Edit submission outcome could not be decoded.", error);
+        }
+    }
+
+    public async Task<WorkItemEditReceipt?> RecoverWorkItemEditAsync(WorkItemEditRecoveryRequest request, CancellationToken ct)
+    {
+        var normalized = WorkItemEditRecovery.Normalize(request);
+        var url = QueryHelpers.AddQueryString($"/api/work-items/{normalized.WorkItemId:D}/edit-receipts", new Dictionary<string, string?>
+        {
+            ["projectId"] = normalized.ProjectId,
+            ["requestId"] = normalized.RequestId,
+            ["expectedRequestHash"] = normalized.ExpectedRequestHash,
+            ["hashVersion"] = normalized.HashVersion
+        });
+        using var response = await httpClient.GetAsync(url, ct);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null; // Not proof the original request never arrived.
+        await EnsureWorkItemResponseAsync(response, ct);
+        return await response.Content.ReadFromJsonAsync<WorkItemEditReceipt>(cancellationToken: ct);
+    }
+
+    private static async Task EnsureWorkItemResponseAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        if (response.StatusCode == HttpStatusCode.Conflict)
+        {
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            var root = document.RootElement;
+            var code = root.TryGetProperty("code", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+            if (code is not (SafeEditConflictCodes.MissingReadVersion or SafeEditConflictCodes.StaleReadVersion or
+                SafeEditConflictCodes.RequestIdentityMismatch or SafeEditConflictCodes.RequiresReopen))
+                throw new InvalidDataException("Edit conflict response is unsupported.");
+            long? revision = root.TryGetProperty("currentRevision", out var current) && current.ValueKind == JsonValueKind.Number && current.TryGetInt64(out var parsed) && parsed > 0 ? parsed : null;
+            throw new SafeEditConflictException(code, revision);
+        }
+        response.EnsureSuccessStatusCode();
     }
 
     public async Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken)

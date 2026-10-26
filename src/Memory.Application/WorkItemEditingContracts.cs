@@ -14,11 +14,13 @@ public enum WorkItemEditOperation
     ChecklistReorder,
     Reopen,
     Archive,
-    Restore
+    Restore,
+    GovernanceExclusion
 }
 
 public enum EditDueAtMode { Keep, Clear, Set }
 public sealed record EditDueAt(EditDueAtMode Mode = EditDueAtMode.Keep, DateTimeOffset? Value = null);
+public sealed record WorkItemGovernanceExclusionChange(string GovernanceRunId, string Reason, bool Excluded = true);
 
 public sealed record WorkItemEditPatch(
     string? Title = null,
@@ -31,7 +33,8 @@ public sealed record WorkItemEditPatch(
     Guid? ChecklistItemId = null,
     bool? IsCompleted = null,
     string? ChecklistContent = null,
-    IReadOnlyList<Guid>? ChecklistOrder = null);
+    IReadOnlyList<Guid>? ChecklistOrder = null,
+    WorkItemGovernanceExclusionChange? GovernanceExclusion = null);
 
 public sealed record WorkItemEditCommand(
     string ProjectId,
@@ -73,7 +76,7 @@ public sealed class SafeEditConflictException(string code, long? currentRevision
 /// </summary>
 public static class WorkItemEditContract
 {
-    public const string IntentHashVersion = "WorkItemEditIntent/v1";
+    public const string IntentHashVersion = "WorkItemEditIntent/v2";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     public static WorkItemEditCommand Normalize(WorkItemEditCommand command)
@@ -115,7 +118,10 @@ public static class WorkItemEditContract
             Priority = patch.Priority.HasValue ? Math.Clamp(patch.Priority.Value, 0, 100) : null,
             DueAt = dueAt,
             ChecklistContent = content,
-            ChecklistOrder = order is null ? null : Array.AsReadOnly(order)
+            ChecklistOrder = order is null ? null : Array.AsReadOnly(order),
+            GovernanceExclusion = patch.GovernanceExclusion is { } exclusion
+                ? exclusion with { GovernanceRunId = Text(exclusion.GovernanceRunId, 128, "GovernanceRunId", true)!, Reason = Text(exclusion.Reason, 12000, "Reason", true)! }
+                : null
         };
         return command with { ProjectId = project, RequestId = requestId, Patch = normalized };
     }
@@ -148,7 +154,8 @@ public static class WorkItemEditContract
                 patch.ChecklistItemId,
                 patch.IsCompleted,
                 patch.ChecklistContent,
-                patch.ChecklistOrder
+                patch.ChecklistOrder,
+                patch.GovernanceExclusion
             }
         }, Json);
         return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
@@ -178,6 +185,13 @@ public static class WorkItemEditContract
                      patch.Priority.HasValue || patch.Status.HasValue || patch.DefinitionState.HasValue || dueAt.Mode != EditDueAtMode.Keep;
         var checklist = patch.ChecklistItemId.HasValue || patch.IsCompleted.HasValue ||
                         patch.ChecklistContent is not null || patch.ChecklistOrder is not null;
+        if (operation == WorkItemEditOperation.GovernanceExclusion)
+        {
+            if (update || checklist || patch.GovernanceExclusion is null)
+                throw Invalid("Governance exclusion accepts only its explicit relationship change.");
+            return;
+        }
+        if (patch.GovernanceExclusion is not null) throw Invalid("Governance exclusion requires its privileged operation.");
         if (operation == WorkItemEditOperation.Update)
         {
             if (checklist) throw Invalid("Checklist edits require a specific checklist operation.");

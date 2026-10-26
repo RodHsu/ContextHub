@@ -2651,7 +2651,9 @@ public static class DependencyInjection
         services.AddScoped<IDurableMemoryGovernanceService, DurableMemoryGovernanceService>();
         services.AddScoped<IProjectInformationService, ProjectInformationService>();
         services.AddScoped<IProjectDiscussionService, ProjectDiscussionService>();
-        services.AddScoped<IProjectWorkItemService, ProjectWorkItemService>();
+        services.AddScoped<IProjectWorkItemService>(provider => new ProjectWorkItemService(
+            provider.GetRequiredService<IApplicationDbContext>(), provider.GetRequiredService<IRequestActorAccessor>(),
+            provider.GetRequiredService<IClock>(), () => provider.GetRequiredService<IWorkItemEditingService>()));
         services.AddScoped<IWorkItemEditingService, WorkItemEditingService>();
         services.AddScoped<IAgentExecutionService, AgentExecutionService>();
         services.AddScoped<IAgentExecutionResourceResolver, AgentExecutionResourceResolver>();
