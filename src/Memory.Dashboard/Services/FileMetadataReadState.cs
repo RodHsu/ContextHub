@@ -8,6 +8,8 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
     public const int PageSize = 25;
     private CancellationTokenSource? _pageRequest;
     private CancellationTokenSource? _selectionRequest;
+    private CancellationTokenSource? _contentRequest;
+    private CancellationTokenSource? _auditRequest;
     private bool _disposed;
     public string ProjectId { get; private set; } = string.Empty;
     public IReadOnlyList<ManagedFileInventoryResult> Files { get; private set; } = [];
@@ -28,6 +30,70 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
     public bool PinnedVersion { get; private set; }
     public Guid? RequestedVersionId { get; private set; }
     public DateTimeOffset? LastUpdatedAt { get; private set; }
+    public ManagedFileContentMetadata? ContentMetadata { get; private set; }
+    public ManagedFileAuditPage? Audit { get; private set; }
+    public bool ContentLoading { get; private set; }
+    public bool AuditLoading { get; private set; }
+    public string? ContentError { get; private set; }
+    public string? AuditError { get; private set; }
+
+    public async Task ReadContentMetadataAsync(string purpose)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        Cancel(ref _contentRequest);
+        ContentMetadata = null; ContentError = null; ContentLoading = false;
+        if (Version is not { } version) return;
+        if (string.IsNullOrWhiteSpace(purpose) || purpose.Trim().Length > 200)
+        { ContentError = "請輸入不含秘密的明確用途（最多 200 字）。"; return; }
+        var project = ProjectId;
+        var selection = _selectionRequest;
+        var request = _contentRequest = new();
+        var token = request.Token;
+        ContentLoading = true;
+        try
+        {
+            var result = await api.ReadFileContentMetadataAsync(project, version.FileId, version.FileVersionId, purpose, token);
+            if (!CurrentDisclosure(request, _contentRequest, selection, project, version)) return;
+            if (result is null || result.FileId != version.FileId || result.FileVersionId != version.FileVersionId)
+                ContentError = "大小與雜湊不可用：尚未通過目前版本的下載授權，或服務未提供此資料。";
+            else ContentMetadata = result;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception)
+        { if (CurrentDisclosure(request, _contentRequest, selection, project, version)) ContentError = "大小與雜湊讀取未完成，請確認用途與下載權限。"; }
+        finally { if (CurrentDisclosure(request, _contentRequest, selection, project, version)) ContentLoading = false; }
+    }
+
+    public async Task ReadAuditAsync(int offset = 0)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
+        Cancel(ref _auditRequest);
+        Audit = null; AuditError = null; AuditLoading = false;
+        if (Version is not { } version) return;
+        var project = ProjectId;
+        var selection = _selectionRequest;
+        var request = _auditRequest = new();
+        var token = request.Token;
+        AuditLoading = true;
+        try
+        {
+            var result = await api.ReadFileAuditAsync(project, version.FileId, version.FileVersionId, PageSize, offset, token);
+            if (!CurrentDisclosure(request, _auditRequest, selection, project, version)) return;
+            if (result is null || result.FileId != version.FileId || result.FileVersionId != version.FileVersionId)
+                AuditError = "稽核資料不可用；不代表沒有稽核紀錄。";
+            else Audit = result;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception)
+        { if (CurrentDisclosure(request, _auditRequest, selection, project, version)) AuditError = "稽核讀取未完成；需要既有稽核讀取資格。"; }
+        finally { if (CurrentDisclosure(request, _auditRequest, selection, project, version)) AuditLoading = false; }
+    }
+
+    private bool CurrentDisclosure(CancellationTokenSource request, CancellationTokenSource? active,
+        CancellationTokenSource? selection, string project, ManagedFileInventoryResult version)
+        => Current(request, active) && ReferenceEquals(selection, _selectionRequest) && ProjectContext.Matches(project, ProjectId)
+            && Version?.FileId == version.FileId && Version.FileVersionId == version.FileVersionId;
 
     public async Task LoadAsync(string projectId, int offset = 0)
     {
@@ -124,6 +190,11 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
 
     private void ClearSelection()
     {
+        Cancel(ref _contentRequest);
+        Cancel(ref _auditRequest);
+        ContentMetadata = null; Audit = null;
+        ContentError = AuditError = null;
+        ContentLoading = AuditLoading = false;
         Selected = Version = null;
         Versions = null;
         Rights = null;

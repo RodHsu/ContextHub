@@ -2188,6 +2188,7 @@ var files = app.MapGroup("/api/files");
 files.MapLogicalFileDownloadEndpoints(requireAuthentication);
 files.RequireAuthIfEnabled(requireAuthentication);
 files.MapFileMetadataReadEndpoints(requireAuthentication);
+files.MapFileDisclosureReadEndpoints(requireAuthentication);
 files.MapGet(string.Empty, async (string projectId, int? limit, IManagedFileService service, CancellationToken cancellationToken) =>
     Results.Ok(await service.ListAsync(projectId, limit ?? 50, cancellationToken)))
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);

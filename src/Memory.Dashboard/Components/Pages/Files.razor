@@ -159,6 +159,40 @@
                                         <p role="status">版本歷史未知：目前服務未提供此讀取功能。</p>
                                     }
                                 </section>
+                                <section class="file-version-panel" aria-label="受下載權限保護的大小與雜湊">
+                                    <div class="subpanel-title">大小與 SHA-256</div>
+                                    <p>僅在目前版本的下載權限、用途與 DLP 條件通過後顯示；基本資訊權限不會取得這些值。</p>
+                                    <label>查核用途（不要輸入秘密）<input maxlength="200" @bind="_contentPurpose" /></label>
+                                    <button class="ghost-button" @onclick="ReadContentMetadataAsync" disabled="@(_state.Version is null || _state.ContentLoading)">查核下載授權並讀取</button>
+                                    @if (_state.ContentLoading) { <p role="status">正在查核授權…</p> }
+                                    @if (_state.ContentError is { } contentError) { <p role="alert">@contentError</p> }
+                                    @if (_state.ContentMetadata is { } content)
+                                    {
+                                        <dl class="definition-grid">
+                                            <div><dt>大小（bytes）</dt><dd>@(content.SizeBytes?.ToString() ?? "未知")</dd></div>
+                                            <div><dt>SHA-256</dt><dd>@(content.ContentSha256 ?? "未知")</dd></div>
+                                        </dl>
+                                    }
+                                </section>
+                                <section class="file-version-panel" aria-label="已遮罩的版本稽核">
+                                    <div class="subpanel-title">版本稽核（唯讀）</div>
+                                    <p>限既有稽核讀取資格；操作者、用途與拒絕詳細資訊預設遮罩。</p>
+                                    <button class="ghost-button" @onclick="ReadAuditAsync" disabled="@(_state.Version is null || _state.AuditLoading)">讀取已遮罩稽核</button>
+                                    @if (_state.AuditLoading) { <p role="status">正在讀取稽核…</p> }
+                                    @if (_state.AuditError is { } auditError) { <p role="alert">@auditError</p> }
+                                    @if (_state.Audit is { } audit)
+                                    {
+                                        <p>本頁可顯示成功事件 @audit.Items.Count 筆；不包含被遮罩的拒絕詳細資訊，不代表完整稽核總數。</p>
+                                        @foreach (var entry in audit.Items)
+                                        {
+                                            <p @key="entry.AuditId"><ClientLocalTime Value="entry.CreatedAt" /> · @entry.Operation · 操作者：已遮罩 · 用途：已遮罩</p>
+                                        }
+                                        <nav class="file-pagination" aria-label="已遮罩稽核分頁">
+                                            <button class="ghost-button" @onclick="@(() => _state.ReadAuditAsync(Math.Max(0, audit.Offset - FileMetadataReadState.PageSize)))" disabled="@(audit.Offset == 0)">上一頁稽核</button>
+                                            <button class="ghost-button" @onclick="@(() => _state.ReadAuditAsync(audit.Offset + FileMetadataReadState.PageSize))" disabled="@(!audit.HasMore)">下一頁稽核</button>
+                                        </nav>
+                                    }
+                                </section>
                             }
                             <div class="subpanel-title">Effective rights</div>
                             @if (_rights is null)
@@ -207,6 +241,7 @@
     ];
 
     private readonly CancellationTokenSource _cts = new();
+    private string _contentPurpose = string.Empty;
     private FileMetadataReadState _state = default!;
     private IReadOnlyList<ManagedFileInventoryResult> _files => _state.Files;
     private IReadOnlyList<string> _projectIds = [];
@@ -237,6 +272,7 @@
 
     private async Task ChangeProjectAsync(string projectId)
     {
+        _contentPurpose = string.Empty;
         _projectId = projectId;
         _searchText = string.Empty;
         await _state.LoadAsync(_projectId);
@@ -248,14 +284,18 @@
         return InvokeAsync(StateHasChanged);
     }
 
-    private Task LoadAsync() => _state.LoadAsync(_projectId, _state.Offset);
-    private Task PreviousPageAsync() => _state.LoadAsync(_projectId, Math.Max(0, _state.Offset - FileMetadataReadState.PageSize));
-    private Task NextPageAsync() => _state.LoadAsync(_projectId, _state.Offset + FileMetadataReadState.PageSize);
-    private Task SelectAsync(ManagedFileInventoryResult file) => _state.SelectAsync(file);
-    private Task SelectVersionAsync(Guid versionId) => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, versionId, _state.VersionsOffset);
-    private Task LatestVersionAsync() => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, null, _state.VersionsOffset);
-    private Task PreviousVersionsAsync() => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, _state.RequestedVersionId, Math.Max(0, _state.VersionsOffset - FileMetadataReadState.PageSize));
-    private Task NextVersionsAsync() => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, _state.RequestedVersionId, _state.VersionsOffset + FileMetadataReadState.PageSize);
+    private Task LoadAsync() => WithFreshPurpose(() => _state.LoadAsync(_projectId, _state.Offset));
+    private Task PreviousPageAsync() => WithFreshPurpose(() => _state.LoadAsync(_projectId, Math.Max(0, _state.Offset - FileMetadataReadState.PageSize)));
+    private Task NextPageAsync() => WithFreshPurpose(() => _state.LoadAsync(_projectId, _state.Offset + FileMetadataReadState.PageSize));
+    private Task SelectAsync(ManagedFileInventoryResult file) { _contentPurpose = string.Empty; return _state.SelectAsync(file); }
+    private Task SelectVersionAsync(Guid versionId) { _contentPurpose = string.Empty; return _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, versionId, _state.VersionsOffset); }
+    private Task ReadContentMetadataAsync() => _state.ReadContentMetadataAsync(_contentPurpose);
+    private Task ReadAuditAsync() => _state.ReadAuditAsync();
+    private Task LatestVersionAsync() => WithFreshPurpose(() => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, null, _state.VersionsOffset));
+    private Task PreviousVersionsAsync() => WithFreshPurpose(() => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, _state.RequestedVersionId, Math.Max(0, _state.VersionsOffset - FileMetadataReadState.PageSize)));
+    private Task NextVersionsAsync() => WithFreshPurpose(() => _selected is null ? Task.CompletedTask : _state.SelectAsync(_selected, _state.RequestedVersionId, _state.VersionsOffset + FileMetadataReadState.PageSize));
+
+    private Task WithFreshPurpose(Func<Task> read) { _contentPurpose = string.Empty; return read(); }
 
     private string SelectedClass(Guid id) => _selected?.FileId == id ? "is-selected" : string.Empty;
     private static string ClassificationClass(FileClassification value) => value switch

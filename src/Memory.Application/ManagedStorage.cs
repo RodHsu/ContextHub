@@ -187,39 +187,8 @@ public sealed class ManagedTransferService(
         var projectId = ProjectContext.Normalize(request.ProjectId);
         var actor = RequireActor(projectId, write: false);
         ValidatePurposeAndIdempotency(request.Purpose, request.IdempotencyKey);
-        var managedObject = await Scope(dbContext.ManagedObjects, actor)
-            .SingleOrDefaultAsync(x => x.Id == request.ObjectId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId), cancellationToken)
-            ?? throw new KeyNotFoundException("Managed object was not found.");
-        if (managedObject.State != ManagedObjectState.Ready)
-        {
-            throw new InvalidOperationException("Managed object is not available for transfer.");
-        }
-
-        var linkedVersions = await dbContext.FileVersions.Include(x => x.FileAsset)
-            .Where(x => x.ManagedObjectId == managedObject.Id)
-            .ToArrayAsync(cancellationToken);
-        if (linkedVersions.Length > 0)
-        {
-            if (!request.FileVersionId.HasValue) throw new UnauthorizedAccessException("A logical FileVersion reference is required for managed file download.");
-            var linked = linkedVersions.SingleOrDefault(x => x.Id == request.FileVersionId.Value)
-                ?? throw new UnauthorizedAccessException("Managed file download reference is invalid.");
-            if (linked.Lifecycle != FileVersionLifecycle.Ready || linked.NeedsRescan)
-            {
-                throw new UnauthorizedAccessException("Managed file download requires a successfully scanned ready version.");
-            }
-            var classificationDecision = FileSecurityPolicy.Authorize(linked.Classification, FileOperation.Download, request.Purpose, actor.IsAdmin || actor.HasScope(SecurityScopes.SecurityManage));
-            if (!classificationDecision.Allowed) throw new UnauthorizedAccessException("Managed file classification denies download.");
-            if (linked.FileAsset?.ProjectId is string fileProjectId)
-            {
-                var principal = actor.UserId?.ToString("D") ?? actor.Username;
-                var rights = await foundation.EvaluateAsync(fileProjectId, principal, ["download"], "File", linked.FileAssetId.ToString("D"), cancellationToken);
-                if (!rights.Decisions.Single().Allowed) throw new UnauthorizedAccessException("Managed file effective rights deny download.");
-            }
-            else if (!actor.IsAdmin && linked.FileAsset?.OwnerUserId != actor.UserId)
-            {
-                throw new UnauthorizedAccessException("Unassigned files are uploader/admin only.");
-            }
-        }
+        var managedObject = await ManagedDownloadAuthorization.AuthorizeAsync(dbContext, foundation, actor, projectId,
+            request.ObjectId, request.FileVersionId, request.Purpose, cancellationToken);
 
         var now = clock.UtcNow;
         var (session, token) = CreateSession(managedObject, actor, request.Purpose, request.AgentId, request.ExecutionId, ManagedTransferOperation.Download, managedObject.PlaintextLength, now, settings);

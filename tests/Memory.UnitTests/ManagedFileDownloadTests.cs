@@ -192,6 +192,127 @@ public sealed class ManagedFileDownloadTests
         setup.Sessions.Should().BeEmpty(); setup.Proxy.Saves.Should().Be(0);
     }
 
+    [Fact]
+    public async Task Content_metadata_requires_download_authority_and_never_creates_a_session_or_audit_mutation()
+    {
+        var setup = new Fixture();
+        setup.Version.ContentSha256 = new string('C', 64);
+        var result = await setup.Disclosure.ReadContentMetadataAsync("ContextHub", setup.Asset.Id, setup.Version.Id, "synthetic-review", default);
+        result!.SizeBytes.Should().Be(100); result.ContentSha256.Should().Be(new string('c', 64));
+        result.FileVersionId.Should().Be(setup.Version.Id);
+        setup.Foundation.Requests.Should().ContainSingle().Which.Item2.Should().Be("download");
+        setup.Sessions.Should().BeEmpty(); setup.Proxy.Saves.Should().Be(0);
+        setup.Foundation.DeniedRights.Add("download");
+        (await setup.Disclosure.ReadContentMetadataAsync("ContextHub", setup.Asset.Id, setup.Version.Id, "synthetic", default)).Should().BeNull();
+        setup.Proxy.Saves.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData("tenant")]
+    [InlineData("owner")]
+    [InlineData("project")]
+    [InlineData("object-project")]
+    [InlineData("pin")]
+    [InlineData("deleted")]
+    [InlineData("rescan")]
+    [InlineData("object-state")]
+    [InlineData("quarantine")]
+    public async Task Hash_and_size_do_not_escape_existing_logical_download_boundaries(string denial)
+    {
+        var s = new Fixture();
+        switch (denial)
+        {
+            case "tenant": s.Asset.TenantId = Guid.NewGuid(); break;
+            case "owner": s.Asset.OwnerUserId = Guid.NewGuid(); break;
+            case "project": s.Asset.ProjectId = "Other"; break;
+            case "object-project": s.Object.ProjectId = "Other"; break;
+            case "pin": s.Version.FileAssetId = Guid.NewGuid(); break;
+            case "deleted": s.Asset.State = FileAssetState.LogicalDeleted; break;
+            case "rescan": s.Version.NeedsRescan = true; break;
+            case "object-state": s.Object.State = ManagedObjectState.Corrupt; break;
+            case "quarantine": s.Actor.Current = s.Actor.Current with { Role = TenantUserRole.Admin }; s.Version.Classification = FileClassification.Quarantined; break;
+        }
+        (await s.Disclosure.ReadContentMetadataAsync("ContextHub", s.Asset.Id, s.Version.Id, "synthetic", default)).Should().BeNull();
+        s.Proxy.Saves.Should().Be(0); s.Sessions.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(FileClassification.Normal)]
+    [InlineData(FileClassification.Sensitive)]
+    [InlineData(FileClassification.Restricted)]
+    public async Task Purpose_is_required_for_all_content_metadata_and_dlp_keeps_existing_download_behavior(FileClassification classification)
+    {
+        var s = new Fixture(); s.Version.Classification = classification;
+        await FluentActions.Awaiting(() => s.Disclosure.ReadContentMetadataAsync("ContextHub", s.Asset.Id, s.Version.Id, " ", default)).Should().ThrowAsync<ArgumentException>();
+        (await s.Disclosure.ReadContentMetadataAsync("ContextHub", s.Asset.Id, s.Version.Id, "synthetic", default)).Should().NotBeNull();
+        s.Version.ContentSha256 = "not-a-hash-sensitive-value";
+        (await s.Disclosure.ReadContentMetadataAsync("ContextHub", s.Asset.Id, s.Version.Id, "synthetic", default))!.ContentSha256.Should().BeNull();
+        s.Proxy.Saves.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    public async Task Audit_uses_exact_existing_admin_reader_predicate_and_masks_before_paging(bool admin, bool securityScope, bool service)
+    {
+        var s = new Fixture();
+        s.Actor.Current = s.Actor.Current with
+        {
+            Role = admin ? TenantUserRole.Admin : TenantUserRole.Member,
+            Scopes = securityScope ? [SecurityScopes.MemoryRead, SecurityScopes.SecurityManage] : [SecurityScopes.MemoryRead],
+            IsServiceActor = service
+        };
+        s.Events.Add(s.Event());
+        for (var i = 0; i < 105; i++) s.Events.Add(s.Event(allowed: false));
+        var hidden = s.Event(); hidden.TenantId = Guid.NewGuid(); s.Events.Add(hidden);
+        var otherVersion = s.Event(); otherVersion.FileVersionId = Guid.NewGuid(); s.Events.Add(otherVersion);
+        if (!admin && !securityScope)
+        {
+            await FluentActions.Awaiting(() => s.Disclosure.ReadAuditAsync("ContextHub", s.Asset.Id, s.Version.Id, 1, 0, default)).Should().ThrowAsync<UnauthorizedAccessException>();
+            s.Proxy.AuditReads.Should().Be(0); return;
+        }
+        var page = await s.Disclosure.ReadAuditAsync("ContextHub", s.Asset.Id, s.Version.Id, 1, 0, default);
+        page!.Items.Should().ContainSingle(); page.HasMore.Should().BeFalse();
+        page.ActorMasked.Should().BeTrue(); page.PurposeMasked.Should().BeTrue(); page.DeniedDetailsMasked.Should().BeTrue();
+        var json = JsonSerializer.Serialize(page);
+        json.Should().NotContain("raw-actor").And.NotContain("raw-purpose").And.NotContain("raw-reason");
+        typeof(ManagedFileAuditEntry).GetProperties().Select(p => p.Name).Should().Equal("AuditId", "Operation", "CreatedAt");
+        s.Proxy.Saves.Should().Be(0);
+        s.Foundation.DeniedRights.Add("metadata"); var before = s.Proxy.AuditReads;
+        (await s.Disclosure.ReadAuditAsync("ContextHub", s.Asset.Id, s.Version.Id, 1, 0, default)).Should().BeNull();
+        s.Proxy.AuditReads.Should().Be(before);
+    }
+
+    [Fact]
+    public async Task Audit_pages_all_visible_successes_with_stable_order_without_denied_lookahead_or_totals()
+    {
+        var s = new Fixture(); s.Actor.Current = s.Actor.Current with { Role = TenantUserRole.Admin };
+        for (var i = 0; i < 102; i++) { var e = s.Event(); e.CreatedAt = DateTimeOffset.UnixEpoch.AddSeconds(i); s.Events.Add(e); }
+        for (var i = 0; i < 250; i++) s.Events.Add(s.Event(false));
+        var first = await s.Disclosure.ReadAuditAsync("ContextHub", s.Asset.Id, s.Version.Id, 100, 0, default);
+        var last = await s.Disclosure.ReadAuditAsync("ContextHub", s.Asset.Id, s.Version.Id, 100, 100, default);
+        first!.Items.Should().HaveCount(100); first.HasMore.Should().BeTrue();
+        last!.Items.Should().HaveCount(2); last.HasMore.Should().BeFalse();
+        first.Items.Concat(last.Items).Select(e => e.AuditId).Should().OnlyHaveUniqueItems();
+        s.Proxy.Saves.Should().Be(0);
+    }
+
+    [Fact]
+    public void Audit_sql_projection_excludes_raw_actor_purpose_and_reason_without_opening_database()
+    {
+        var s = new Fixture();
+        using var db = new MemoryDbContext(new DbContextOptionsBuilder<MemoryDbContext>().UseNpgsql("Host=localhost;Database=unused;Username=unused;Password=unused").Options);
+        var service = new ManagedFileDisclosureService(db, s.Actor, s.Foundation, null!);
+        var query = (IQueryable<ManagedFileAuditEntry>)typeof(ManagedFileDisclosureService)
+            .GetMethod("VisibleAuditEntries", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(service, [s.Actor.Current, "ContextHub", s.Asset.Id, s.Version.Id])!;
+        var sql = query.ToQueryString();
+        sql.Should().Contain("tenant_id").And.Contain("file_version_id").And.Contain("allowed");
+        sql.Should().NotContain("actor_id").And.NotContain("purpose").And.NotContain("reason_code");
+        db.Database.GetDbConnection().State.Should().Be(System.Data.ConnectionState.Closed);
+    }
+
     private sealed class Fixture
     {
         public RequestActorAccessor Actor { get; } = new();
@@ -203,6 +324,22 @@ public sealed class ManagedFileDownloadTests
         public Foundation Foundation { get; } = new();
         public DbProxy Proxy { get; }
         public ManagedFileDownloadService Service { get; }
+        public ManagedFileDisclosureService Disclosure { get; }
+        public List<FileAccessEvent> Events { get; } = [];
+        public FileAccessEvent Event(bool allowed = true) => new()
+        {
+            FileAssetId = Asset.Id,
+            FileVersionId = Version.Id,
+            TenantId = Actor.Current.TenantId,
+            OwnerUserId = Actor.Current.UserId,
+            ProjectId = "ContextHub",
+            Operation = FileOperation.Download,
+            ActorId = "raw-actor",
+            Purpose = "raw-purpose",
+            ReasonCode = "raw-reason",
+            Allowed = allowed,
+            CreatedAt = DateTimeOffset.UnixEpoch
+        };
         public Guid ExecutionId { get; } = Guid.NewGuid();
         public CreateLogicalFileDownloadRequest Request => new("ContextHub", "synthetic-review", "synthetic-request", "synthetic-agent", ExecutionId);
         public Fixture()
@@ -230,14 +367,17 @@ public sealed class ManagedFileDownloadTests
                 Lifecycle = FileVersionLifecycle.Ready
             };
             Versions.Add(Version);
+            Asset.Versions.Add(Version);
             var db = DispatchProxy.Create<IApplicationDbContext, DbProxy>();
             Proxy = (DbProxy)(object)db;
             Proxy.Sets["get_FileAssets"] = new TestSet<FileAsset>([Asset]);
             Proxy.Sets["get_FileVersions"] = new TestSet<FileVersion>(Versions);
             Proxy.Sets["get_ManagedObjects"] = new TestSet<ManagedObject>([Object]);
             Proxy.Sets["get_ManagedTransferSessions"] = new TestSet<ManagedTransferSession>(Sessions);
+            Proxy.Sets["get_FileAccessEvents"] = new TestSet<FileAccessEvent>(Events);
             var transfers = new ManagedTransferService(db, Actor, new Clock(), new NoContentStore(), new NoKeys(), Foundation, Options.Create(new ManagedTransferOptions()));
             Service = new(db, Actor, transfers);
+            Disclosure = new(db, Actor, Foundation, new ManagedFileReadService(db, Actor, Foundation));
         }
         public Task<LogicalFileDownloadSessionResult?> Create() => Service.CreateAsync(Asset.Id, Version.Id, Request, default);
     }
@@ -246,9 +386,10 @@ public sealed class ManagedFileDownloadTests
     {
         public Dictionary<string, object> Sets { get; } = [];
         public int Saves { get; private set; }
+        public int AuditReads { get; private set; }
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
-            if (Sets.TryGetValue(targetMethod!.Name, out var set)) return set;
+            if (Sets.TryGetValue(targetMethod!.Name, out var set)) { if (targetMethod.Name == "get_FileAccessEvents") AuditReads++; return set; }
             if (targetMethod.Name == "SaveChangesAsync") { ((CancellationToken)args![0]!).ThrowIfCancellationRequested(); Saves++; return Task.FromResult(1); }
             throw new NotSupportedException(targetMethod.Name);
         }
@@ -270,6 +411,7 @@ public sealed class ManagedFileDownloadTests
     private sealed class Foundation : IPlatformFoundationStore
     {
         public bool Allowed { get; set; } = true;
+        public HashSet<string> DeniedRights { get; } = [];
         public Action? BeforeEvaluate { get; set; }
         public List<(string, string, string)> Requests { get; } = [];
         public Task<EffectiveRightsResult> EvaluateAsync(string projectId, string principalId, IReadOnlyList<string> rights, string? resourceType, string? resourceId, CancellationToken ct)
@@ -277,7 +419,7 @@ public sealed class ManagedFileDownloadTests
             BeforeEvaluate?.Invoke();
             ct.ThrowIfCancellationRequested();
             Requests.Add((projectId, rights.Single(), resourceId!));
-            return Task.FromResult(new EffectiveRightsResult(projectId, principalId, new(1, 1, 1, 1), [new("download", Allowed, "Resource", [], "synthetic")]));
+            return Task.FromResult(new EffectiveRightsResult(projectId, principalId, new(1, 1, 1, 1), [new(rights.Single(), Allowed && !DeniedRights.Contains(rights.Single()), "Resource", [], "synthetic")]));
         }
         public Task<AuthorizationTopologyEdge> UpsertTopologyEdgeAsync(TopologyEdgeUpsertRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<AuthorizationRule> UpsertPolicyAsync(AuthorizationRuleUpsertRequest request, CancellationToken ct) => throw new NotSupportedException();

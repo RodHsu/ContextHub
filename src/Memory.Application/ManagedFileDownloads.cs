@@ -73,6 +73,10 @@ public sealed class ManagedFileDownloadService(
     }
 
     private IQueryable<Guid?> ResolveObject(ContextHubRequestActor actor, string projectId, Guid fileId, Guid fileVersionId)
+        => ResolveLogicalObject(dbContext, actor, projectId, fileId, fileVersionId);
+
+    internal static IQueryable<Guid?> ResolveLogicalObject(IApplicationDbContext dbContext, ContextHubRequestActor actor,
+        string projectId, Guid fileId, Guid fileVersionId)
     {
         var assets = dbContext.FileAssets.AsNoTracking().Where(asset => asset.TenantId == actor.TenantId
             && (actor.IsAdmin || actor.IsServiceActor || asset.OwnerUserId == actor.UserId)
