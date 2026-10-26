@@ -860,7 +860,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
     [Fact]
     public async Task Main_Navigation_Should_Use_Canonical_Information_Architecture()
     {
-        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        // Program reads this setting before the factory's later configuration callback.
+        using var factory = new DashboardApplicationFactory().WithWebHostBuilder(builder =>
+            builder.UseSetting("Dashboard:DataProtectionPath", Path.Combine(AppContext.BaseDirectory, "navigation-page-keys", Guid.NewGuid().ToString("N"))));
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false,
             HandleCookies = true
