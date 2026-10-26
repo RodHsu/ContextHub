@@ -60,6 +60,18 @@ public sealed class ProjectWorkItemReadEndpointTests
         service.GetRequest.Should().Be(default((Guid, bool)));
     }
 
+    [Fact]
+    public async Task Scoped_read_masks_foreign_project_errors_and_returns_no_private_resource_detail()
+    {
+        var service = new Reads { Failure = new UnauthorizedAccessException("Project 'private-project' is not readable.") };
+        await using var app = await Host(service);
+        using var client = app.GetTestClient();
+        var response = await client.GetAsync($"/api/work-items/{Guid.NewGuid()}?projectId=ContextHub");
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await response.Content.ReadAsStringAsync()).Should().NotContain("private-project");
+        response.Headers.CacheControl!.NoStore.Should().BeTrue();
+    }
+
     private static async Task<WebApplication> Host(Reads service, bool readScope = true)
     {
         var builder = WebApplication.CreateBuilder();
@@ -87,7 +99,8 @@ public sealed class ProjectWorkItemReadEndpointTests
         public ProjectWorkItemListRequest? ListRequest { get; private set; }
         public (Guid, bool) GetRequest { get; private set; }
         public ProjectWorkItemResult? Result { get; set; }
-        public Task<ProjectWorkItemResult?> GetAsync(Guid id, bool includeArchived, CancellationToken cancellationToken) { GetRequest = (id, includeArchived); return Task.FromResult(Result); }
+        public Exception? Failure { get; init; }
+        public Task<ProjectWorkItemResult?> GetAsync(Guid id, bool includeArchived, CancellationToken cancellationToken) { GetRequest = (id, includeArchived); return Failure is null ? Task.FromResult(Result) : Task.FromException<ProjectWorkItemResult?>(Failure); }
         public Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken) { ListRequest = request; return Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>([]); }
         public Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<ProjectWorkItemResult> UpdateAsync(ProjectWorkItemUpdateRequest request, CancellationToken ct) => throw new NotSupportedException();

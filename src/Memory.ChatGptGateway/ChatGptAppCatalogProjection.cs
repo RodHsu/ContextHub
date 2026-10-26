@@ -8,7 +8,8 @@ public static class ChatGptAppCatalogProjection
     {
         "governance_contract_get",
         "governance_run_get",
-        "governance_runs_list"
+        "governance_runs_list",
+        "project_work_item_edit_receipt_get"
     };
 
     public static ChatGptAppCatalogProjectionResult Project(JsonElement tools)
