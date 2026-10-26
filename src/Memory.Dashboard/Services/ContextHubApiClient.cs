@@ -28,6 +28,12 @@ public interface IContextHubApiClient
     Task<ManagedFileInventoryResult?> GetManagedFileVersionAsync(string projectId, Guid fileId, Guid versionId, CancellationToken cancellationToken)
         => Task.FromResult<ManagedFileInventoryResult?>(null);
     Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken);
+    Task<SecretManagementExpiry?> GetSecretManagementExpiryAsync(string projectId, Guid secretId, CancellationToken ct)
+        => Task.FromResult<SecretManagementExpiry?>(null);
+    Task<SecretManagementLeasePage?> GetSecretManagementLeasesAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken ct)
+        => Task.FromResult<SecretManagementLeasePage?>(null);
+    Task<SecretManagementHistoryPage?> GetSecretManagementHistoryAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken ct)
+        => Task.FromResult<SecretManagementHistoryPage?>(null);
     Task<ManagedFileContentMetadata?> ReadFileContentMetadataAsync(string projectId, Guid fileId, Guid versionId, string purpose, CancellationToken ct)
         => Task.FromResult<ManagedFileContentMetadata?>(null);
     Task<ManagedFileAuditPage?> ReadFileAuditAsync(string projectId, Guid fileId, Guid versionId, int limit, int offset, CancellationToken ct)
@@ -223,6 +229,15 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
         => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken);
+
+    public Task<SecretManagementExpiry?> GetSecretManagementExpiryAsync(string projectId, Guid secretId, CancellationToken ct)
+        => GetOptionalTelemetryAsync<SecretManagementExpiry>(FileMetadataUrl($"/api/secrets/{secretId:D}/management/expiry", projectId), ct);
+
+    public Task<SecretManagementLeasePage?> GetSecretManagementLeasesAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken ct)
+        => GetOptionalTelemetryAsync<SecretManagementLeasePage>(FileMetadataUrl($"/api/secrets/{secretId:D}/management/leases", projectId, limit, offset), ct);
+
+    public Task<SecretManagementHistoryPage?> GetSecretManagementHistoryAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken ct)
+        => GetOptionalTelemetryAsync<SecretManagementHistoryPage>(FileMetadataUrl($"/api/secrets/{secretId:D}/management/history", projectId, limit, offset), ct);
 
     public async Task<ManagedFileContentMetadata?> ReadFileContentMetadataAsync(string projectId, Guid fileId, Guid versionId, string purpose, CancellationToken ct)
     {
