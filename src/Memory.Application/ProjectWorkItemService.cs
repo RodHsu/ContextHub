@@ -94,6 +94,18 @@ public sealed class ProjectWorkItemService(
         return Map(entity);
     }
 
+    public async Task<ProjectWorkItemResult?> GetAsync(Guid workItemId, bool includeArchived, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        var query = ApplyActorScope(dbContext.ProjectWorkItems.AsNoTracking().Include(x => x.ChecklistItems), actor);
+        if (!includeArchived) query = query.Where(x => x.ArchivedAt == null);
+        var entity = await query.SingleOrDefaultAsync(x => x.Id == workItemId, cancellationToken);
+        if (entity is null) return null;
+        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: false);
+        return Map(entity);
+    }
+
     public async Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
@@ -105,7 +117,7 @@ public sealed class ProjectWorkItemService(
         if (request.Status.HasValue) query = query.Where(x => x.Status == request.Status.Value);
         if (request.DefinitionState.HasValue) query = query.Where(x => x.DefinitionState == request.DefinitionState.Value);
         var items = await query.OrderBy(x => x.Status == ProjectWorkItemStatus.Completed || x.Status == ProjectWorkItemStatus.Cancelled)
-            .ThenByDescending(x => x.Priority).ThenBy(x => x.DueAt).ThenByDescending(x => x.UpdatedAt)
+            .ThenByDescending(x => x.Priority).ThenBy(x => x.DueAt).ThenByDescending(x => x.UpdatedAt).ThenBy(x => x.Id)
             .Skip(Math.Max(0, request.Offset))
             .Take(Math.Clamp(request.Limit, 1, 200)).ToListAsync(cancellationToken);
         return items.Select(Map).ToArray();
