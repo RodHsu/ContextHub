@@ -40,6 +40,22 @@ public sealed class ScheduledGovernanceReliabilityService(
         GovernanceRunReceiptResult receipt,
         CancellationToken cancellationToken)
     {
+        var (actor, current) = await PersistObservationCoreAsync(receipt, cancellationToken);
+        var rows = await ReadRowsAsync(actor, cancellationToken);
+        return await BuildSummaryAsync(actor, rows, current.Calculator, cancellationToken);
+    }
+
+    public async Task PersistObservationAsync(
+        GovernanceRunReceiptResult receipt,
+        CancellationToken cancellationToken)
+    {
+        _ = await PersistObservationCoreAsync(receipt, cancellationToken);
+    }
+
+    private async Task<(ContextHubRequestActor Actor, CurrentAuthorityContext Current)> PersistObservationCoreAsync(
+        GovernanceRunReceiptResult receipt,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(receipt);
         var actor = RequireReadActor();
         var current = CreateCurrentAuthorityContext();
@@ -85,8 +101,7 @@ public sealed class ScheduledGovernanceReliabilityService(
             isNewEntity,
             current.Calculator,
             cancellationToken);
-        var rows = await ReadRowsAsync(actor, cancellationToken);
-        return await BuildSummaryAsync(actor, rows, current.Calculator, cancellationToken);
+        return (actor, current);
     }
 
     public async Task<ScheduledGovernanceReliabilitySummary> GetAsync(
