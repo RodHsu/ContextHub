@@ -2619,6 +2619,7 @@ public static class DependencyInjection
         services.AddScoped<IManagedTransferService, ManagedTransferService>();
         services.AddScoped<IManagedObjectReconciliationService, ManagedObjectReconciliationService>();
         services.AddScoped<IManagedFileService, ManagedFileService>();
+        services.AddScoped<IManagedFileReadService, ManagedFileReadService>();
         services.AddScoped<IManagedFileDeletionReconciler, ManagedFileDeletionReconciler>();
         services.AddScoped<IManagedFileProjectionReconciler, ManagedFileProjectionReconciler>();
         services.AddScoped<ICanonicalTagGovernanceService, CanonicalTagGovernanceService>();
