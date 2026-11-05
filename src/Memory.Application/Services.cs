@@ -2617,6 +2617,7 @@ public static class DependencyInjection
         services.AddSingleton<ICanonicalTagResolver, CanonicalTagResolver>();
         services.AddScoped<IPlatformFoundationStore, PlatformFoundationStore>();
         services.AddScoped<IManagedTransferService, ManagedTransferService>();
+        services.AddScoped<IManagedFileDownloadService, ManagedFileDownloadService>();
         services.AddScoped<IManagedObjectReconciliationService, ManagedObjectReconciliationService>();
         services.AddScoped<IManagedFileService, ManagedFileService>();
         services.AddScoped<IManagedFileDeletionReconciler, ManagedFileDeletionReconciler>();
