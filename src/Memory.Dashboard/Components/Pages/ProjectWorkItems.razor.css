@@ -1,0 +1,171 @@
+.project-work-items-workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+    min-height: 0;
+    overflow: visible;
+}
+
+.project-work-items-list-panel,
+.project-work-item-detail-panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+
+.project-work-items-list-panel .panel-heading-row {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 0;
+}
+
+.project-work-items-list-panel .panel-heading-row > div {
+    flex: 1 1 12rem;
+    min-width: 0;
+}
+
+.project-work-items-list-panel .panel-heading-meta {
+    text-align: left;
+}
+
+.project-work-items-filter-toolbar {
+    flex: none;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    min-width: 0;
+}
+
+.project-work-items-filter-toolbar > input,
+.project-work-items-filter-toolbar > select {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.project-work-items-filter-toolbar > label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    grid-column: 1 / -1;
+}
+
+.project-work-items-filter-toolbar input[type="checkbox"] {
+    flex: 0 0 auto;
+    width: 1rem;
+    min-width: 1rem;
+    height: 1rem;
+}
+
+.project-work-items-list-column-labels,
+.project-work-item-list-item {
+    grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr) minmax(0, 0.8fr);
+}
+
+.project-work-items-list-scroll {
+    flex: none;
+    max-height: max(20rem, calc(100dvh - 24rem));
+    overflow: auto;
+}
+
+.project-work-item-list-item {
+    min-width: 0;
+}
+
+.project-work-item-list-project code,
+.project-work-item-list-tags,
+.project-work-item-list-summary strong {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+.project-work-item-list-progress {
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+.project-work-item-detail-heading,
+.project-work-item-execution-heading {
+    flex-wrap: wrap;
+}
+
+.project-work-item-detail-heading > div {
+    min-width: 0;
+}
+
+.project-work-item-detail-heading h2,
+.project-work-item-description,
+.project-work-item-checklist-copy {
+    overflow-wrap: anywhere;
+}
+
+.project-work-item-heading-side {
+    max-width: 100%;
+    white-space: normal;
+}
+
+.project-work-item-heading-side select {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.project-work-item-detail-scroll {
+    flex: none;
+    max-height: none;
+    overflow: visible;
+}
+
+.project-work-item-execution-panel {
+    overflow: visible;
+}
+
+@media (max-width: 960px) {
+    .project-work-items-workspace {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .project-work-items-list-panel,
+    .project-work-item-detail-panel {
+        min-height: 0;
+    }
+
+    .project-work-items-list-scroll {
+        max-height: none;
+        overflow: visible;
+    }
+}
+
+@media (max-width: 720px) {
+    .project-work-items-filter-toolbar,
+    .project-work-item-list-item,
+    .project-work-item-form {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .project-work-item-list-project,
+    .project-work-item-list-summary,
+    .project-work-item-list-progress {
+        grid-column: auto;
+        grid-row: auto;
+    }
+
+    .project-work-item-list-progress {
+        justify-items: start;
+        text-align: left;
+    }
+
+    .project-work-item-detail-heading,
+    .project-work-item-execution-heading {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .project-work-item-heading-side {
+        justify-items: start;
+        text-align: left;
+    }
+
+    .project-work-item-heading-side > label,
+    .project-work-item-heading-side select {
+        width: 100%;
+    }
+}
