@@ -36,26 +36,28 @@ public sealed class DashboardContextSavingsAggregatorTests
         twentyFourHours.ActualToolCallCount.Should().Be(12);
         twentyFourHours.BaselineTokenEstimate.Should().Be(200);
         twentyFourHours.ReturnedTokenEstimate.Should().Be(200);
-        twentyFourHours.EstimatedSavedTokens.Should().Be(100);
-        twentyFourHours.SavingPercent.Should().Be(50d);
+        twentyFourHours.EstimatedSavedTokens.Should().Be(0);
+        twentyFourHours.PositiveSavedTokens.Should().Be(100);
+        twentyFourHours.IncreasedTokens.Should().Be(100);
+        twentyFourHours.SavingPercent.Should().Be(0d);
         twentyFourHours.CacheHitPercent.Should().Be(50d);
 
         var threeDays = result.Windows.Single(x => x.Key == "3d");
         threeDays.SampleCount.Should().Be(3);
         threeDays.ActualToolCallCount.Should().Be(34);
-        threeDays.EstimatedSavedTokens.Should().Be(250);
+        threeDays.EstimatedSavedTokens.Should().Be(150);
 
         var sevenDays = result.Windows.Single(x => x.Key == "7d");
         sevenDays.SampleCount.Should().Be(4);
         sevenDays.ActualToolCallCount.Should().Be(56);
-        sevenDays.EstimatedSavedTokens.Should().Be(600);
-        sevenDays.SavingPercent.Should().Be(50d);
+        sevenDays.EstimatedSavedTokens.Should().Be(500);
+        sevenDays.SavingPercent.Should().Be(41.67d);
 
         var thirtyDays = result.Windows.Single(x => x.Key == "30d");
         thirtyDays.SampleCount.Should().Be(5);
         thirtyDays.ActualToolCallCount.Should().Be(78);
-        thirtyDays.EstimatedSavedTokens.Should().Be(1_100);
-        thirtyDays.SavingPercent.Should().Be(61.11d);
+        thirtyDays.EstimatedSavedTokens.Should().Be(1_000);
+        thirtyDays.SavingPercent.Should().Be(55.56d);
         thirtyDays.ExactCoveragePercent.Should().Be(0d);
         thirtyDays.TokenCountingMode.Should().Be(TokenCountingModes.Approximate);
     }

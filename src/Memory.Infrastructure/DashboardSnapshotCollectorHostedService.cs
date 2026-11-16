@@ -815,7 +815,6 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 x.CreatedAt,
                 x.CacheHit,
                 TryReadSavingsEstimate(x.MetadataJson)))
-            .Where(x => x.Savings is not null)
             .OrderBy(x => x.CreatedAt)
             .ToArray();
 
@@ -871,9 +870,11 @@ public sealed class DashboardSnapshotCollectorHostedService(
         IReadOnlyList<ContextSavingsTelemetrySample> samples,
         long actualToolCallCount)
     {
-        var windowSamples = samples
+        var candidates = samples
             .Where(x => x.CreatedAt >= startedAt && x.CreatedAt <= endedAt)
             .ToArray();
+        var windowSamples = candidates.Where(x => x.Savings is not null).ToArray();
+        var unusable = candidates.Length - windowSamples.Length;
         if (windowSamples.Length == 0)
         {
             return new DashboardContextSavingsWindowResult(
@@ -891,12 +892,20 @@ public sealed class DashboardSnapshotCollectorHostedService(
                 startedAt,
                 endedAt,
                 null,
-                ActualToolCallCount: actualToolCallCount);
+                ActualToolCallCount: actualToolCallCount,
+                PositiveSavedTokens: 0,
+                IncreasedTokens: 0,
+                UnusableSampleCount: unusable,
+                SavingsCalculationVersion: "net-br-v1");
         }
 
-        var baseline = windowSamples.Sum(x => Math.Max(0, x.Savings!.BaselineTokenEstimate));
-        var returned = windowSamples.Sum(x => Math.Max(0, x.Savings!.ReturnedTokenEstimate));
-        var saved = windowSamples.Sum(x => Math.Max(0, x.Savings!.EstimatedSavedTokens));
+        // Recompute from the same valid B/R pairs, including old clamped events.
+        // Never rewrite telemetry or trust its historical saved field.
+        var baseline = windowSamples.Sum(x => x.Savings!.BaselineTokenEstimate);
+        var returned = windowSamples.Sum(x => x.Savings!.ReturnedTokenEstimate);
+        var saved = baseline - returned;
+        var positive = windowSamples.Sum(x => Math.Max(0L, (long)x.Savings!.BaselineTokenEstimate - x.Savings.ReturnedTokenEstimate));
+        var increased = windowSamples.Sum(x => Math.Max(0L, (long)x.Savings!.ReturnedTokenEstimate - x.Savings.BaselineTokenEstimate));
         var savingPercent = baseline > 0
             ? saved / (double)baseline * 100d
             : 0d;
@@ -922,7 +931,11 @@ public sealed class DashboardSnapshotCollectorHostedService(
             windowSamples[^1].CreatedAt,
             Math.Round(exactCoveragePercent, 2),
             tokenCountingMode,
-            actualToolCallCount);
+            actualToolCallCount,
+            positive,
+            increased,
+            unusable,
+            "net-br-v1");
     }
 
     private static IReadOnlyList<DashboardContextSavingsTrendPointResult> BuildContextSavingsTrend(
@@ -931,7 +944,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
         DateTimeOffset endedAt)
     {
         var windowSamples = samples
-            .Where(x => x.CreatedAt >= startedAt && x.CreatedAt <= endedAt)
+            .Where(x => x.Savings is not null && x.CreatedAt >= startedAt && x.CreatedAt <= endedAt)
             .ToArray();
         if (windowSamples.Length == 0)
         {
@@ -946,9 +959,9 @@ public sealed class DashboardSnapshotCollectorHostedService(
             .Select(group =>
             {
                 var bucketSamples = group.ToArray();
-                var baseline = bucketSamples.Sum(x => Math.Max(0, x.Savings!.BaselineTokenEstimate));
-                var returned = bucketSamples.Sum(x => Math.Max(0, x.Savings!.ReturnedTokenEstimate));
-                var saved = bucketSamples.Sum(x => Math.Max(0, x.Savings!.EstimatedSavedTokens));
+                var baseline = bucketSamples.Sum(x => x.Savings!.BaselineTokenEstimate);
+                var returned = bucketSamples.Sum(x => x.Savings!.ReturnedTokenEstimate);
+                var saved = baseline - returned;
                 var savingPercent = baseline > 0
                     ? saved / (double)baseline * 100d
                     : 0d;
@@ -1042,6 +1055,19 @@ public sealed class DashboardSnapshotCollectorHostedService(
 
         try
         {
+            using var document = JsonDocument.Parse(metadataJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
+            var savingsRows = document.RootElement.EnumerateObject()
+                .Where(x => string.Equals(x.Name, "savings", StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (savingsRows.Length != 1 || savingsRows[0].Value.ValueKind != JsonValueKind.Object) return null;
+            var value = savingsRows[0].Value;
+            // Missing B/R must not deserialize into a fabricated zero sample.
+            foreach (var name in new[] { "baselineTokenEstimate", "returnedTokenEstimate" })
+            {
+                var fields = value.EnumerateObject().Where(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (fields.Length != 1 || fields[0].Value.ValueKind != JsonValueKind.Number ||
+                    !fields[0].Value.TryGetInt32(out var count) || count < 0) return null;
+            }
             return JsonSerializer.Deserialize<ContextSavingsTelemetryMetadata>(metadataJson, JsonOptions)?.Savings;
         }
         catch (JsonException)
