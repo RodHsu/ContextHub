@@ -119,22 +119,30 @@ public sealed record ScheduledGovernanceExecutionResult(
     ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null);
 
 public sealed record ScheduledGovernanceRunResult(
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-100)]
     Guid ReceiptId,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-99)]
     string GovernanceRunId,
     DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-89)]
     string ToolContractVersion,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-88)]
     string SchemaHash,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-87)]
     string PublishedCatalogVersion,
     string InitialSnapshotToken,
     string FinalSnapshotToken,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-95)]
     bool CoverageComplete,
     int InitialGovernanceActionable,
     int FinalGovernanceActionable,
     int CandidateCount,
     int ReversibleExecutionActionableCount,
     int GovernedExceptionCount,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-94)]
     int Applied,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-93)]
     int Failed,
     int Deferred,
     int RequiresUserDecision,
@@ -143,18 +151,24 @@ public sealed record ScheduledGovernanceRunResult(
     int BusinessWorkItemActionable,
     string FinalConvergenceStatus,
     string StoppedReason,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-92)]
     IReadOnlyList<Guid> AuditIds,
     IReadOnlyList<string> ProjectIds,
     bool IsReplay,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-98)]
     bool RunExists,
     string Status,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-91)]
     bool LatestBatchReceived,
+    [property: System.Text.Json.Serialization.JsonPropertyOrder(-90)]
     string RequestIdentityHash,
     GovernanceExceptionDeltaResult? ExceptionDelta = null,
     ScheduledGovernanceRuntimeIdentity? RuntimeIdentity = null)
 {
+    [System.Text.Json.Serialization.JsonPropertyOrder(-97)]
     public bool Received { get; init; } = true;
     public bool Terminal { get; init; } = true;
+    [System.Text.Json.Serialization.JsonPropertyOrder(-96)]
     public ScheduledGovernanceDecision? Decision { get; init; }
     public string Outcome { get; init; } = string.Empty;
     public ScheduledGovernanceReliabilitySummary? Reliability { get; init; }
@@ -166,58 +180,70 @@ public sealed record ScheduledGovernanceRunResult(
     public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> ServerInvariantProofs =>
         CurrentRunEvidence?.ServerInvariantProofs ?? new Dictionary<string, ScheduledGovernanceInvariantProof>();
 
-    // Explicit primitive properties survive hosts that collapse complex output schemas.
+    // A1 requires these eleven Status enums first, then core receipt identity.
+    // Runtime bool/reason/scope and compatibility maps remain available for Phase B.
     public bool? InitialReviewReceived => ScalarValue("initialReviewReceived");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-200)]
     public ScheduledGovernanceInvariantProofStatus InitialReviewReceivedStatus => ScalarProof("initialReviewReceived").Status;
     public string InitialReviewReceivedReason => ScalarProof("initialReviewReceived").Reason;
     public string InitialReviewReceivedScope => ScalarProof("initialReviewReceived").Scope;
 
     public bool? CountInvariantSatisfied => ScalarValue("countInvariantSatisfied");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-199)]
     public ScheduledGovernanceInvariantProofStatus CountInvariantSatisfiedStatus => ScalarProof("countInvariantSatisfied").Status;
     public string CountInvariantSatisfiedReason => ScalarProof("countInvariantSatisfied").Reason;
     public string CountInvariantSatisfiedScope => ScalarProof("countInvariantSatisfied").Scope;
 
     public bool? DecisionObeyed => ScalarValue("decisionObeyed");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-198)]
     public ScheduledGovernanceInvariantProofStatus DecisionObeyedStatus => ScalarProof("decisionObeyed").Status;
     public string DecisionObeyedReason => ScalarProof("decisionObeyed").Reason;
     public string DecisionObeyedScope => ScalarProof("decisionObeyed").Scope;
 
     public bool? NoGeneralConnectorFallback => ScalarValue("noGeneralConnectorFallback");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-197)]
     public ScheduledGovernanceInvariantProofStatus NoGeneralConnectorFallbackStatus => ScalarProof("noGeneralConnectorFallback").Status;
     public string NoGeneralConnectorFallbackReason => ScalarProof("noGeneralConnectorFallback").Reason;
     public string NoGeneralConnectorFallbackScope => ScalarProof("noGeneralConnectorFallback").Scope;
 
     public bool? NoUnauthorizedMutation => ScalarValue("noUnauthorizedMutation");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-196)]
     public ScheduledGovernanceInvariantProofStatus NoUnauthorizedMutationStatus => ScalarProof("noUnauthorizedMutation").Status;
     public string NoUnauthorizedMutationReason => ScalarProof("noUnauthorizedMutation").Reason;
     public string NoUnauthorizedMutationScope => ScalarProof("noUnauthorizedMutation").Scope;
 
     public bool? NoDuplicateMutation => ScalarValue("noDuplicateMutation");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-195)]
     public ScheduledGovernanceInvariantProofStatus NoDuplicateMutationStatus => ScalarProof("noDuplicateMutation").Status;
     public string NoDuplicateMutationReason => ScalarProof("noDuplicateMutation").Reason;
     public string NoDuplicateMutationScope => ScalarProof("noDuplicateMutation").Scope;
 
     public bool? DisplayNameUnchanged => ScalarValue("displayNameUnchangedByRun");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-194)]
     public ScheduledGovernanceInvariantProofStatus DisplayNameUnchangedStatus => ScalarProof("displayNameUnchangedByRun").Status;
     public string DisplayNameUnchangedReason => ScalarProof("displayNameUnchangedByRun").Reason;
     public string DisplayNameUnchangedScope => ScalarProof("displayNameUnchangedByRun").Scope;
 
     public bool? BusinessWorkItemsUntouched => ScalarValue("businessWorkItemsUntouchedByRun");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-193)]
     public ScheduledGovernanceInvariantProofStatus BusinessWorkItemsUntouchedStatus => ScalarProof("businessWorkItemsUntouchedByRun").Status;
     public string BusinessWorkItemsUntouchedReason => ScalarProof("businessWorkItemsUntouchedByRun").Reason;
     public string BusinessWorkItemsUntouchedScope => ScalarProof("businessWorkItemsUntouchedByRun").Scope;
 
     public bool? HostDispatchCompleted => ScalarValue("hostDispatchCompleted");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-192)]
     public ScheduledGovernanceInvariantProofStatus HostDispatchCompletedStatus => ScalarProof("hostDispatchCompleted").Status;
     public string HostDispatchCompletedReason => ScalarProof("hostDispatchCompleted").Reason;
     public string HostDispatchCompletedScope => ScalarProof("hostDispatchCompleted").Scope;
 
     public bool? ImmutableSnapshotBound => ScalarValue("immutableSnapshotBound");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-191)]
     public ScheduledGovernanceInvariantProofStatus ImmutableSnapshotBoundStatus => ScalarProof("immutableSnapshotBound").Status;
     public string ImmutableSnapshotBoundReason => ScalarProof("immutableSnapshotBound").Reason;
     public string ImmutableSnapshotBoundScope => ScalarProof("immutableSnapshotBound").Scope;
 
     public bool? FixedReversibleExecutorUsed => ScalarValue("fixedReversibleExecutorUsed");
+    [System.Text.Json.Serialization.JsonPropertyOrder(-190)]
     public ScheduledGovernanceInvariantProofStatus FixedReversibleExecutorUsedStatus => ScalarProof("fixedReversibleExecutorUsed").Status;
     public string FixedReversibleExecutorUsedReason => ScalarProof("fixedReversibleExecutorUsed").Reason;
     public string FixedReversibleExecutorUsedScope => ScalarProof("fixedReversibleExecutorUsed").Scope;

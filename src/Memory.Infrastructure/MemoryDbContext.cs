@@ -11,6 +11,8 @@ namespace Memory.Infrastructure;
 
 public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) : DbContext(options), IApplicationDbContext
 {
+    private readonly HashSet<Guid> automaticallyCapturedOutboxIds = [];
+
     private static readonly ValueConverter<string, JsonDocument> JsonDocumentConverter = new(
         value => JsonDocument.Parse(string.IsNullOrWhiteSpace(value) ? "{}" : value),
         document => document.RootElement.GetRawText());
@@ -155,18 +157,30 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
-        CaptureAuthorityOutboxEvents();
+        var scopes = PendingProjectSkillBindings();
+        var roots = TrackedSkillTenants(scopes);
+        var missing = scopes.Select(x => x.SkillId).Distinct().Where(id => !roots.ContainsKey(id)).ToArray();
+        if (missing.Length > 0)
+            foreach (var root in Skills.AsNoTracking().Where(x => missing.Contains(x.Id)).Select(x => new { x.Id, x.TenantId }).ToArray())
+                roots.Add(root.Id, new(root.TenantId, root.TenantId));
+        CaptureAuthorityOutboxEvents(scopes, roots);
         ValidateTrackedMemoryScores();
         return base.SaveChanges(acceptAllChangesOnSuccess);
     }
 
-    public override Task<int> SaveChangesAsync(
+    public override async Task<int> SaveChangesAsync(
         bool acceptAllChangesOnSuccess,
         CancellationToken cancellationToken = default)
     {
-        CaptureAuthorityOutboxEvents();
+        var scopes = PendingProjectSkillBindings();
+        var roots = TrackedSkillTenants(scopes);
+        var missing = scopes.Select(x => x.SkillId).Distinct().Where(id => !roots.ContainsKey(id)).ToArray();
+        if (missing.Length > 0)
+            foreach (var root in await Skills.AsNoTracking().Where(x => missing.Contains(x.Id)).Select(x => new { x.Id, x.TenantId }).ToArrayAsync(cancellationToken))
+                roots.Add(root.Id, new(root.TenantId, root.TenantId));
+        CaptureAuthorityOutboxEvents(scopes, roots);
         ValidateTrackedMemoryScores();
-        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
     }
 
     private void ValidateTrackedMemoryScores()
@@ -184,8 +198,31 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
         }
     }
 
-    private void CaptureAuthorityOutboxEvents()
+    private sealed record SkillTenantSnapshot(Guid? Current, Guid? Original);
+
+    private AuthorityOutboxCapture.ProjectBindingScope[] PendingProjectSkillBindings()
+        => ChangeTracker.Entries<SkillBinding>().SelectMany(AuthorityOutboxCapture.ProjectBindingScopes).ToArray();
+
+    private Dictionary<Guid, SkillTenantSnapshot> TrackedSkillTenants(AuthorityOutboxCapture.ProjectBindingScope[] scopes)
     {
+        if (scopes.Length == 0) return [];
+        var ids = scopes.Select(x => x.SkillId).ToHashSet();
+        return ChangeTracker.Entries<Skill>().Where(x => ids.Contains(x.Entity.Id))
+            .ToDictionary(x => x.Entity.Id, x => new SkillTenantSnapshot(x.Entity.TenantId, x.Property(s => s.TenantId).OriginalValue));
+    }
+
+    private void CaptureAuthorityOutboxEvents(AuthorityOutboxCapture.ProjectBindingScope[] scopes, Dictionary<Guid, SkillTenantSnapshot> roots)
+    {
+        // A failed SaveChanges leaves generated audit rows Added. Rebuild only our own
+        // uncommitted rows so a retry reflects the current mutation, not an aborted one.
+        // Successfully saved rows and caller-authored authority events remain untouched.
+        if (automaticallyCapturedOutboxIds.Count > 0)
+        {
+            foreach (var entry in ChangeTracker.Entries<AuthorityOutboxEvent>()
+                         .Where(x => x.State == EntityState.Added && automaticallyCapturedOutboxIds.Contains(x.Entity.Id)).ToArray())
+                entry.State = EntityState.Detached;
+            automaticallyCapturedOutboxIds.Clear();
+        }
         var now = DateTimeOffset.UtcNow;
         var pending = ChangeTracker.Entries()
             .Where(entry => entry.State is EntityState.Added or EntityState.Modified or EntityState.Deleted)
@@ -193,17 +230,27 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             .Select(entry => AuthorityOutboxCapture.TryCreate(entry, now))
             .Where(value => value is not null)
             .Cast<AuthorityOutboxEvent>()
-            .ToArray();
-        if (pending.Length == 0) return;
+            .ToList();
+        foreach (var scope in scopes)
+        {
+            if (!roots.TryGetValue(scope.SkillId, out var tenant))
+                throw new InvalidOperationException("Project Skill binding owning root could not be resolved.");
+            pending.Add(AuthorityOutboxCapture.CreateProjectBinding(scope, scope.Original ? tenant.Original : tenant.Current, now));
+        }
+        if (pending.Count == 0) return;
 
         var tracked = ChangeTracker.Entries<AuthorityOutboxEvent>()
             .Where(entry => entry.State == EntityState.Added)
-            .Select(entry => $"{entry.Entity.AggregateType}|{entry.Entity.AggregateId}|{entry.Entity.EventType}")
-            .ToHashSet(StringComparer.Ordinal);
+            .Select(entry => (entry.Entity.TenantId, entry.Entity.ProjectId, entry.Entity.AggregateType, entry.Entity.AggregateId, entry.Entity.EventType))
+            .ToHashSet();
         foreach (var item in pending)
         {
-            var key = $"{item.AggregateType}|{item.AggregateId}|{item.EventType}";
-            if (tracked.Add(key)) AuthorityOutboxEvents.Add(item);
+            var key = (item.TenantId, item.ProjectId, item.AggregateType, item.AggregateId, item.EventType);
+            if (tracked.Add(key))
+            {
+                AuthorityOutboxEvents.Add(item);
+                automaticallyCapturedOutboxIds.Add(item.Id);
+            }
         }
     }
 
@@ -274,6 +321,11 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.HasDbFunction(typeof(ProjectContext).GetMethod(nameof(ProjectContext.IdentityKey), [typeof(string)])!)
+            .HasName("project_identity_key").HasSchema("public");
+        modelBuilder.HasDbFunction(typeof(ProjectContext).GetMethod(nameof(ProjectContext.Matches), [typeof(string), typeof(string)])!)
+            .HasName("project_identity_equals").HasSchema("public");
+
         modelBuilder.Entity<InstanceSetting>(entity =>
         {
             entity.ToTable("instance_settings");

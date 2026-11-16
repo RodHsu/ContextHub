@@ -2972,7 +2972,7 @@ public sealed class MemoryDataRetentionService(
             LEFT JOIN recent_hits rh ON rh.memory_id = mi.id
             LEFT JOIN link_degrees ld ON ld.memory_id = mi.id
             WHERE
-                (cardinality(@project_ids) = 0 OR mi.project_id = ANY(@project_ids))
+                (cardinality(@project_ids) = 0 OR public.project_identity_key(mi.project_id) = ANY(@project_ids))
                 AND (@tenant_id IS NULL OR mi.tenant_id = @tenant_id)
                 AND
                 (
@@ -3616,7 +3616,7 @@ public sealed class MemoryDataRetentionService(
             LEFT JOIN recent_hits rh ON rh.memory_id = mi.id
             LEFT JOIN link_degrees ld ON ld.memory_id = mi.id
             WHERE mi.status = @status
-              AND (cardinality(@project_ids) = 0 OR mi.project_id = ANY(@project_ids))
+              AND (cardinality(@project_ids) = 0 OR public.project_identity_key(mi.project_id) = ANY(@project_ids))
               AND (@tenant_id IS NULL OR mi.tenant_id = @tenant_id)
               AND mi.updated_at < @cutoff
               AND mi.importance <= @max_importance
@@ -3635,7 +3635,7 @@ public sealed class MemoryDataRetentionService(
         command.Parameters.Add(new NpgsqlParameter<string>("status", MemoryStatusArchived));
         command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("cutoff", cutoffUtc));
         AddPolicyParameters(command, policy, hitWindowStart);
-        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", projectIds.ToArray()));
+        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", ProjectContext.IdentityKeys(projectIds)));
         command.Parameters.Add(new NpgsqlParameter("tenant_id", NpgsqlDbType.Uuid) { Value = tenantId ?? (object)DBNull.Value });
 
         var affectedProjectIds = new List<string>();
@@ -3909,7 +3909,7 @@ public sealed class MemoryDataRetentionService(
         command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("stale_cutoff", cutoffUtc.AddDays(policy.ArchivedItemsRetentionDays - 60)));
         command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("episode_cutoff", cutoffUtc.AddDays(policy.ArchivedItemsRetentionDays - 30)));
         AddPolicyParameters(command, policy, hitWindowStart);
-        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", projectIds.ToArray()));
+        command.Parameters.Add(new NpgsqlParameter<string[]>("project_ids", ProjectContext.IdentityKeys(projectIds)));
         command.Parameters.Add(new NpgsqlParameter("tenant_id", NpgsqlDbType.Uuid) { Value = tenantId ?? (object)DBNull.Value });
     }
 

@@ -15,6 +15,35 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     private DashboardBrowserTestProfile Profile => _profileAccessor.Current;
 
+    public Task<CacheMetricsWindowResult?> GetCacheMetricsAsync(string period, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var days = period switch { "3D" => 3, "7D" => 7, "14D" => 14, "30D" => 30, _ => 1 };
+        IReadOnlyList<CacheMetricsSeriesResult> series = Profile == DashboardBrowserTestProfile.Empty ? [] :
+        [
+            new("final-result", "interactive", 3, 197, 0, 0, 0, 0, 4000),
+            new("final-result", "graph-background", 9900, 100, 0, 0, 0, 0, 11000),
+            new("search-final", "application", 15, 185, 185, 0, 1, 0, 0),
+            new("working-context-final", "application", 3, 197, 197, 0, 0, 1, 0),
+            new("semantic-hits", "application", 180, 20, 20, 0, 0, 0, 0),
+            new("embedding-query", "application", 198, 2, 2, 0, 0, 0, 0),
+            new(CacheMetricKinds.OriginSearch, "interactive", 0, 0, 0, 0, 0, 0, 0, 42),
+            new("query-compute", "interactive", 0, 0, 0, 0, 0, 0, 4000, 200),
+            new("telemetry-write", "interactive", 0, 0, 0, 0, 0, 0, 1600, 200),
+            new("server-request", "application", 0, 0, 0, 0, 0, 0, 12000, 300)
+        ];
+        return Task.FromResult<CacheMetricsWindowResult?>(new(true, period, now.AddDays(-days), now,
+            now, days > 1 ? "Partial" : "Observed", 0, series,
+            [new("mcp-a", Guid.Parse("fe1124d0-c26b-49f0-a705-2e8611f751c7"), now.AddDays(-1), now.AddSeconds(-4), 2, 0, false),
+             new("mcp-b", Guid.Parse("dd9e2aae-16de-4e1c-8aef-065ed8242366"), now.AddHours(-6), now.AddSeconds(-12), 1, 0, false)],
+            now.AddDays(-1)));
+    }
+
+    public Task<DashboardGraphRefreshStatus?> GetGraphRefreshStatusAsync(CancellationToken cancellationToken)
+        => Task.FromResult<DashboardGraphRefreshStatus?>(new("global", 42, "incremental",
+            DateTimeOffset.UtcNow.AddSeconds(-20), DateTimeOffset.UtcNow.AddHours(-2), DateTimeOffset.UtcNow,
+            2, 8, true, false, 3, 39, 120, 20, 0, string.Empty));
+
     private static DateTimeOffset BuildTimestampUtc => DateTimeOffset.Parse("2026-04-12T00:30:00+00:00");
 
     private static IReadOnlyList<MemoryGraphEdgeResult> GraphDemoPrecomputedEdges { get; } = BuildGraphDemoPrecomputedEdges();

@@ -35,6 +35,8 @@ public sealed class EmbeddingOptions
     public string Profile { get; set; } = "compact";
     public string ModelId { get; set; } = string.Empty;
     public string ModelKey { get; set; } = string.Empty;
+    public string TokenizerContract { get; set; } = E5TokenizerContract.Legacy;
+    public string AssetBundleSha256 { get; set; } = string.Empty;
     public int Dimensions { get; set; }
     public string BaseUrl { get; set; } = string.Empty;
     public int TimeoutSeconds { get; set; } = 30;

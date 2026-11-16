@@ -115,7 +115,7 @@ public sealed class PlatformWave5WorkflowTests(ContainerTestEnvironment environm
                 UpdatedAt = DateTimeOffset.UtcNow
             });
             await db.SaveChangesAsync();
-            var authorityEvent = await db.AuthorityOutboxEvents.SingleAsync(x => x.ProjectId == projectId);
+            var authorityEvent = await db.AuthorityOutboxEvents.SingleAsync(x => x.ProjectId == projectId && x.Category == "Connections");
             authorityEvent.PayloadJson.Should().NotContain("never-in-outbox");
             authorityEventId = authorityEvent.Id;
             (await db.MonitoringActivityProjections.CountAsync(x => x.ProjectId == projectId)).Should().Be(0,

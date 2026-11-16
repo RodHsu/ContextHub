@@ -22,7 +22,7 @@ public sealed class SuggestedActionReconciliationService(
             .Select(projectId => ProjectContext.Normalize(projectId))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var actions = await dbContext.SuggestedActions
-            .Where(x => affectedProjectIds.Contains(x.ProjectId) &&
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(affectedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) &&
                         (x.Status == SuggestedActionStatus.Pending || x.Status == SuggestedActionStatus.Accepted))
             .ToListAsync(cancellationToken);
         var candidates = actions
@@ -97,7 +97,7 @@ public sealed class SuggestedActionReconciliationService(
     {
         if (candidate.MemoryIds.Any(id => !memories.TryGetValue(id, out var memory) ||
                                           memory.Status == MemoryStatus.Archived ||
-                                          !string.Equals(memory.ProjectId, candidate.Action.ProjectId, StringComparison.OrdinalIgnoreCase)))
+                                          !Memory.Application.ProjectContext.Matches(memory.ProjectId, candidate.Action.ProjectId)))
         {
             return true;
         }

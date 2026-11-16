@@ -106,8 +106,10 @@
 .workspace-shell .sidebar-build { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.35rem 0.5rem; padding: 0; border: 0; text-align: start; text-transform: none; }
 .workspace-shell .sidebar-build-value { background: transparent; padding: 0; overflow-wrap: anywhere; text-align: end; }
 .workspace-shell .sidebar-build-time { grid-column: 1 / -1; font-size: 0.7rem; }
-.workspace-shell .main-shell { grid-template-rows: 72px minmax(0, 1fr); height: 100dvh; }
-.workspace-shell .topbar { height: 72px; min-height: 72px; padding-inline: 1.6rem; background: var(--bg-elevated); backdrop-filter: none; gap: 1rem; }
+.workspace-shell .main-shell { grid-template-rows: auto minmax(0, 1fr); height: 100dvh; }
+.workspace-shell .topbar { height: auto; min-height: 72px; padding: 0.6rem 1.6rem; background: var(--bg-elevated); backdrop-filter: none; gap: 1rem; flex-wrap: wrap; }
+.workspace-shell .topbar-actions { flex-wrap: wrap; }
+.workspace-shell .topbar :is(.command-button, .theme-switcher-toggle, .ghost-button) { min-height: 44px; }
 .workspace-shell .topbar-title { font-size: 0.9rem; font-weight: 600; }
 .workspace-shell .topbar-subtitle { font-size: 0.72rem; margin-top: 0.2rem; }
 .workspace-shell .topbar-user { max-width: 8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -140,6 +142,8 @@
 .workspace-shell .data-table tbody tr:hover { background: var(--accent-soft); }
 .workspace-shell .runtime-parameters-panel tbody td:last-child { user-select: text; }
 .workspace-shell .preferences-list-panel { grid-template-rows: auto auto auto minmax(0, 1fr); }
+.workspace-shell .project-information-page-body { flex: none; grid-auto-rows: max-content; }
+.workspace-shell .project-studio { min-height: max-content; }
 .preferences-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; }
 .preferences-pagination > span { color: var(--text-muted); font-size: 0.75rem; }
 .preferences-pagination > div { display: flex; gap: 0.4rem; }
@@ -206,18 +210,18 @@
 @media (max-width: 1024px) {
     .workspace-shell { display: block; }
     .workspace-shell > .sidebar { display: none; }
-    .workspace-shell .topbar { padding-inline: 0.85rem; }
+    .workspace-shell .topbar { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; padding-inline: 0.85rem; }
     .workspace-shell .topbar-subtitle,
     .workspace-shell .topbar-user { display: none; }
-    .workspace-shell .mobile-nav-button { position: static; display: grid; place-items: center; flex: 0 0 40px; padding: 0; height: 40px; width: 40px; color: var(--text); border: 1px solid var(--border); background: var(--surface); }
+    .workspace-shell .mobile-nav-button { position: static; display: grid; place-items: center; flex: 0 0 44px; padding: 0; height: 44px; width: 44px; color: var(--text); border: 1px solid var(--border); background: var(--surface); }
     .workspace-shell .topbar-context { flex: 1; }
-    .workspace-shell .command-button { min-width: 40px; width: 40px; justify-content: center; padding: 0; }
+    .workspace-shell .command-button { min-width: 44px; width: 44px; justify-content: center; padding: 0; }
     .workspace-shell .command-button-label,
     .workspace-shell .command-button-kbd { display: none; }
     .workspace-shell .page-actions { width: 100%; justify-content: flex-start; }
 }
 @media (max-width: 600px) {
-    .workspace-shell .topbar { gap: 0.5rem; }
+    .workspace-shell .topbar { grid-template-columns: 44px minmax(0, 1fr); gap: 0.5rem; }
     .workspace-shell .topbar-context { display: none; }
     .workspace-shell .topbar-actions { margin-inline-start: auto; gap: 0.4rem; }
     .workspace-shell .content { padding: 1rem 0.75rem; }

@@ -34,7 +34,8 @@ public sealed class AgentExecutionContractTests
             "agent_execution_block",
             "agent_execution_complete",
             "agent_execution_fail",
-            "agent_execution_abandon"
+            "agent_execution_abandon",
+            "agent_execution_cancel"
         };
 
         McpPublishedToolCatalog.BackendToolNames.Should().Contain(names);
@@ -42,7 +43,7 @@ public sealed class AgentExecutionContractTests
         McpPublishedToolCatalog.BackendOnlyToolNames.Should().NotContain(names);
         McpPublishedToolCatalog.QueryToolNames.Should().ContainSingle(name => name == "agent_execution_get");
         McpPublishedToolCatalog.DirectMutationToolNames.Should().Contain(names.Except(["agent_execution_get"]));
-        McpPublishedToolCatalog.AppFacingCatalogVersion.Should().Be("2026-09-27-v8");
+        McpPublishedToolCatalog.AppFacingCatalogVersion.Should().Be("2026-10-10-v10");
     }
 
     [Fact]

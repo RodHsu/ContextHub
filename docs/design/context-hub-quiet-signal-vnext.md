@@ -126,7 +126,7 @@ Implementation guidance: [Modern Web Guidance](https://github.com/GoogleChrome/m
 
 ## Published Blazor assets
 
-The Dashboard explicitly sets `RequiresAspNetWebAssets=true` because the Docker restore layer copies project files before Razor components. This ensures .NET 10 includes its Blazor framework script during restore. The Docker publish step rejects an image without `wwwroot/_framework/blazor.web.js`. Container validation must verify script delivery and an active Blazor circuit, in addition to an HTTP 200 page. See [Microsoft Blazor project structure](https://learn.microsoft.com/en-us/aspnet/core/blazor/project-structure?view=aspnetcore-10.0) and [the upstream Docker restore issue](https://github.com/dotnet/aspnetcore/issues/69341).
+The Dashboard explicitly sets `RequiresAspNetWebAssets=true` so framework asset inclusion does not depend on Razor discovery during project-only restore. The Docker restore layer also preserves the existing `App.razor` copy. The publish step rejects an image without `wwwroot/_framework/blazor.web.js`. Container validation must verify script delivery and an active Blazor circuit, in addition to an HTTP 200 page. See [Microsoft Blazor project structure](https://learn.microsoft.com/en-us/aspnet/core/blazor/project-structure?view=aspnetcore-10.0) and [the upstream Docker restore issue](https://github.com/dotnet/aspnetcore/issues/69341).
 
 ## Preference workspace
 

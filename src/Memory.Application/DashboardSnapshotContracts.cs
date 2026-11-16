@@ -88,7 +88,8 @@ public sealed record DashboardMonitoringSnapshotPayload(
     IReadOnlyList<EmbeddingUsageWindowResult>? EmbeddingUsage = null);
 
 public sealed record DashboardMemoryGraphIndexSnapshotPayload(
-    MemoryGraphResult Graph);
+    MemoryGraphResult Graph,
+    IReadOnlyList<Guid>? SimilaritySourceIds = null);
 
 public sealed record DashboardStorageTableStatsSnapshotPayload(
     IReadOnlyList<StorageTableSummaryResult> Tables);

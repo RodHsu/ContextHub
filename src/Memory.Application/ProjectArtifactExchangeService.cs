@@ -67,8 +67,8 @@ public sealed class ProjectArtifactExchangeService(
         var projectId = ProjectContext.Normalize(request.ProjectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
 
-        var query = dbContext.MemoryItems.AsNoTracking()
-            .Where(x => x.ProjectId == projectId && x.MemoryType == MemoryType.Artifact &&
+        var query = ReadableMemories(actor)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.MemoryType == MemoryType.Artifact &&
                         x.SourceType == SourceType && x.Status == MemoryStatus.Active);
         if (!string.IsNullOrWhiteSpace(request.Query))
         {
@@ -103,7 +103,7 @@ public sealed class ProjectArtifactExchangeService(
             .Select(x => x.MemoryId).Distinct().ToArray();
         if (ids.Length == 0) return [];
 
-        var rows = await dbContext.MemoryItems.AsNoTracking().Where(x => ids.Contains(x.Id)).ToListAsync(cancellationToken);
+        var rows = await ReadableMemories(actor).Where(x => ids.Contains(x.Id)).ToListAsync(cancellationToken);
         var byRank = ids.Select((id, index) => new { id, index }).ToDictionary(x => x.id, x => x.index);
         var visible = await FilterAuthorizedAsync(rows, cancellationToken);
         return visible
@@ -116,12 +116,22 @@ public sealed class ProjectArtifactExchangeService(
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
-        var entity = await dbContext.MemoryItems.AsNoTracking().FirstOrDefaultAsync(
+        var entity = await ReadableMemories(actor).FirstOrDefaultAsync(
             x => x.Id == memoryId && x.MemoryType == MemoryType.Artifact && x.SourceType == SourceType && x.Status == MemoryStatus.Active,
             cancellationToken);
         if (entity is null) return null;
         ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: false);
         return await ToAuthorizedResultAsync(entity, cancellationToken);
+    }
+
+    private IQueryable<MemoryItem> ReadableMemories(ContextHubRequestActor actor)
+    {
+        if (actor.IsAuthenticated && !actor.HasUser && !actor.IsServiceActor)
+            throw new UnauthorizedAccessException("Authenticated requests must resolve to a tenant user.");
+
+        return dbContext.MemoryItems.AsNoTracking()
+            .Where(item => !actor.HasUser || (item.TenantId == actor.TenantId &&
+                (actor.IsServiceActor || item.OwnerUserId == actor.UserId)));
     }
 
     private async Task<LogicalFileReference?> ValidateLogicalReferenceAsync(
@@ -140,7 +150,7 @@ public sealed class ProjectArtifactExchangeService(
             throw new InvalidOperationException("FileReference requires non-empty FileId and FileVersionId values.");
 
         var version = await dbContext.FileVersions.AsNoTracking().Include(x => x.FileAsset).SingleOrDefaultAsync(
-            x => x.Id == request.FileVersionId.Value && x.FileAssetId == request.FileId.Value && x.FileAsset!.ProjectId == projectId &&
+            x => x.Id == request.FileVersionId.Value && x.FileAssetId == request.FileId.Value && Memory.Application.ProjectContext.Matches(x.FileAsset!.ProjectId, projectId) &&
                  x.FileAsset.State == FileAssetState.Active && x.Lifecycle != FileVersionLifecycle.LogicalDeleted,
             cancellationToken) ?? throw new InvalidOperationException("The logical managed file reference is unavailable or does not belong to the requested project.");
         var decision = await managedFileService.AuthorizeOperationAsync(version.Id, FileOperation.Metadata, "artifact-file-reference", cancellationToken);
@@ -234,7 +244,7 @@ public sealed class ProjectArtifactExchangeService(
         if (result is null || result.Kind != ProjectArtifactKind.FileReference) return result;
 
         var exists = await dbContext.FileVersions.AsNoTracking().AnyAsync(
-            x => x.Id == result.FileVersionId && x.FileAssetId == result.FileId && x.FileAsset!.ProjectId == item.ProjectId &&
+            x => x.Id == result.FileVersionId && x.FileAssetId == result.FileId && Memory.Application.ProjectContext.Matches(x.FileAsset!.ProjectId, item.ProjectId) &&
                  x.FileAsset.State == FileAssetState.Active && x.Lifecycle != FileVersionLifecycle.LogicalDeleted,
             cancellationToken);
         if (!exists) return null;

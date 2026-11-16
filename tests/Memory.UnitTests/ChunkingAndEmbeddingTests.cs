@@ -159,6 +159,9 @@ public sealed class ChunkingAndEmbeddingTests
     [Fact]
     public async Task Http_Embedding_Provider_Should_Map_Batch_Response_In_Order()
     {
+        var firstVector = new float[384];
+        var secondVector = new float[384];
+        firstVector[0] = secondVector[1] = 1f;
         var handler = new StubHttpMessageHandler(request =>
         {
             Assert.Equal(HttpMethod.Post, request.Method);
@@ -171,8 +174,8 @@ public sealed class ChunkingAndEmbeddingTests
                 384,
                 512,
                 [
-                    new BatchEmbeddingResult(5, false, [1f, 0f]),
-                    new BatchEmbeddingResult(7, false, [0f, 1f])
+                    new BatchEmbeddingResult(5, false, firstVector),
+                    new BatchEmbeddingResult(7, false, secondVector)
                 ]));
 
             return new HttpResponseMessage(HttpStatusCode.OK)
@@ -205,8 +208,8 @@ public sealed class ChunkingAndEmbeddingTests
         ], CancellationToken.None);
 
         Assert.Equal(2, results.Count);
-        Assert.Equal([1f, 0f], results[0].Values);
-        Assert.Equal([0f, 1f], results[1].Values);
+        Assert.Equal(firstVector, results[0].Values);
+        Assert.Equal(secondVector, results[1].Values);
         Assert.Equal(2, telemetry.Items.Count);
         Assert.All(telemetry.Items, item =>
         {
@@ -217,6 +220,43 @@ public sealed class ChunkingAndEmbeddingTests
             Assert.Equal(512, item.MaxTokens);
             Assert.False(item.Truncated);
         });
+    }
+
+    [Theory]
+    [InlineData("model", false)]
+    [InlineData("dimensions", false)]
+    [InlineData("tokens", false)]
+    [InlineData("shape", false)]
+    [InlineData("null", false)]
+    [InlineData("model", true)]
+    [InlineData("dimensions", true)]
+    [InlineData("tokens", true)]
+    [InlineData("shape", true)]
+    [InlineData("null", true)]
+    public async Task Http_embedding_rejects_mismatched_contract_before_usage_or_vectors_escape(string mismatch, bool batch)
+    {
+        var key = mismatch == "model" ? "model-v2" : "model-v1";
+        var dimensions = mismatch == "dimensions" ? 383 : 384;
+        var tokens = mismatch == "tokens" ? 256 : 512;
+        var values = mismatch == "null" ? null : new float[mismatch == "shape" ? 383 : dimensions];
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(batch
+                ? JsonSerializer.Serialize(new BatchEmbeddingServiceEmbedResponse(key, dimensions, tokens,
+                    [new(4, false, new float[dimensions]), new(4, false, values!)]))
+                : JsonSerializer.Serialize(new EmbeddingServiceEmbedResponse(key, dimensions, tokens, 4, false, values!)),
+                System.Text.Encoding.UTF8, "application/json")
+        });
+        var telemetry = new RecordingEmbeddingUsageTelemetry();
+        var provider = new HttpEmbeddingProvider(new StubHttpClientFactory(new HttpClient(handler)
+        {
+            BaseAddress = new Uri("http://embedding-service")
+        }), Options.Create(new EmbeddingOptions { BaseUrl = "http://embedding-service", ModelKey = "model-v1", Dimensions = 384, MaxTokens = 512 }),
+            telemetry, NullLogger<HttpEmbeddingProvider>.Instance);
+        var embed = () => provider.EmbedBatchAsync(batch ? [new("first", EmbeddingPurpose.Query), new("second", EmbeddingPurpose.Query)]
+            : [new("first", EmbeddingPurpose.Query)], default);
+        await Assert.ThrowsAsync<InvalidOperationException>(embed);
+        Assert.Empty(telemetry.Items);
     }
 
     [Fact]

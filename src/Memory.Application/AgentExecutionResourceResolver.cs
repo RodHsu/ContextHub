@@ -141,7 +141,7 @@ public sealed class AgentExecutionResourceResolver(
         var requirement = (package.ResourceRequirements ?? []).SingleOrDefault(x => x.RequirementId == request.RequirementId && x.Kind == AgentExecutionResourceKind.Credential)
             ?? throw new InvalidOperationException("Credential resource requirement is unavailable.");
         var secret = await VisibleSecrets(actor).AsNoTracking().SingleOrDefaultAsync(
-            x => x.Id == requirement.LogicalResourceId && x.ProjectId == execution.ProjectId && x.State == SecretState.Active, cancellationToken)
+            x => x.Id == requirement.LogicalResourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, execution.ProjectId) && x.State == SecretState.Active, cancellationToken)
             ?? throw new UnauthorizedAccessException("Resource is unavailable.");
         var decision = await stepUp.AuthorizeAsync(StepUpOperationClass.SecretUseLeaseCreate, "secret:lease:create", "Secret", secret.Id.ToString("D"), request.StepUp, cancellationToken);
         if (decision.Outcome != StepUpRequirementOutcome.Allowed) throw new StepUpRequiredException(decision);
@@ -195,7 +195,7 @@ public sealed class AgentExecutionResourceResolver(
     {
         var actor = actorAccessor.Current;
         var query = dbContext.FileVersions.AsNoTracking().Include(x => x.FileAsset)
-            .Where(x => x.FileAssetId == requirement.LogicalResourceId && x.FileAsset!.ProjectId == execution.ProjectId &&
+            .Where(x => x.FileAssetId == requirement.LogicalResourceId && Memory.Application.ProjectContext.Matches(x.FileAsset!.ProjectId, execution.ProjectId) &&
                         x.FileAsset.State == FileAssetState.Active && x.Lifecycle == FileVersionLifecycle.Ready);
         if (actor.HasUser)
             query = actor.IsServiceActor ? query.Where(x => x.FileAsset!.TenantId == actor.TenantId) : query.Where(x => x.FileAsset!.TenantId == actor.TenantId && x.FileAsset.OwnerUserId == actor.UserId);
@@ -221,7 +221,7 @@ public sealed class AgentExecutionResourceResolver(
     {
         var actor = actorAccessor.Current;
         var secret = await VisibleSecrets(actor).Include(x => x.Versions).SingleOrDefaultAsync(
-            x => x.Id == requirement.LogicalResourceId && x.ProjectId == execution.ProjectId && x.State == SecretState.Active, cancellationToken);
+            x => x.Id == requirement.LogicalResourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, execution.ProjectId) && x.State == SecretState.Active, cancellationToken);
         if (secret?.CurrentVersionId is null) return Denied(requirement, "ResourceUnavailable");
         var version = secret.Versions.SingleOrDefault(x => x.Id == (prior?.ResolvedVersionId ?? secret.CurrentVersionId.Value));
         if (version is null || version.State != SecretVersionState.Active || version.ExpiresAt <= clock.UtcNow ||
@@ -282,7 +282,7 @@ public sealed class AgentExecutionResourceResolver(
     private async Task<AgentExecutionResolutionItem> ResolveConnectionAsync(AgentExecution execution, AgentExecutionResourceRequirement requirement, AgentExecutionResolutionItem? prior, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
-        var query = dbContext.SourceConnections.AsNoTracking().Where(x => x.Id == requirement.LogicalResourceId && x.ProjectId == execution.ProjectId && x.Enabled);
+        var query = dbContext.SourceConnections.AsNoTracking().Where(x => x.Id == requirement.LogicalResourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, execution.ProjectId) && x.Enabled);
         if (actor.HasUser) query = actor.IsServiceActor ? query.Where(x => x.TenantId == actor.TenantId) : query.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
         var profile = await query.SingleOrDefaultAsync(cancellationToken);
         if (profile is null) return Denied(requirement, "ResourceUnavailable");
@@ -306,11 +306,11 @@ public sealed class AgentExecutionResourceResolver(
         return item.Kind switch
         {
             AgentExecutionResourceKind.File => await dbContext.FileVersions.AsNoTracking().Include(x => x.FileAsset).AnyAsync(x =>
-                x.Id == item.ResolvedVersionId && x.FileAssetId == item.LogicalResourceId && x.FileAsset!.ProjectId == execution.ProjectId &&
+                x.Id == item.ResolvedVersionId && x.FileAssetId == item.LogicalResourceId && Memory.Application.ProjectContext.Matches(x.FileAsset!.ProjectId, execution.ProjectId) &&
                 x.FileAsset.State == FileAssetState.Active && x.Lifecycle == FileVersionLifecycle.Ready && x.Classification != FileClassification.Quarantined &&
                 x.ContentSha256 == item.IntegrityIdentity && Math.Max(x.FileAsset.Revision, x.ClassificationRevision) == item.AuthorityRevision, cancellationToken),
             AgentExecutionResourceKind.Credential => await dbContext.Secrets.AsNoTracking().AnyAsync(x =>
-                x.Id == item.LogicalResourceId && x.ProjectId == execution.ProjectId && x.State == SecretState.Active &&
+                x.Id == item.LogicalResourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, execution.ProjectId) && x.State == SecretState.Active &&
                 x.CurrentVersionId == item.ResolvedVersionId && x.Revision == item.AuthorityRevision, cancellationToken) &&
                 await dbContext.SecretLeases.AsNoTracking().AnyAsync(x => x.Id == item.CapabilityLeaseId && x.ExecutionId == execution.Id &&
                     x.SecretVersionId == item.ResolvedVersionId && x.State == SecretLeaseState.Active && x.ExpiresAt > clock.UtcNow && x.AuthorityRevision == item.AuthorityRevision, cancellationToken),
@@ -324,7 +324,7 @@ public sealed class AgentExecutionResourceResolver(
     private async Task<bool> IsConnectionCurrentAsync(AgentExecution execution, AgentExecutionResolutionItem item, CancellationToken cancellationToken)
     {
         var profile = await dbContext.SourceConnections.AsNoTracking().SingleOrDefaultAsync(x =>
-            x.Id == item.LogicalResourceId && x.ProjectId == execution.ProjectId && x.Enabled && x.Revision == item.AuthorityRevision,
+            x.Id == item.LogicalResourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, execution.ProjectId) && x.Enabled && x.Revision == item.AuthorityRevision,
             cancellationToken);
         return profile is not null && FixedEquals(Hash($"{profile.SourceKind}|{profile.Revision}|{profile.ConfigJson}"), item.IntegrityIdentity);
     }
@@ -336,8 +336,8 @@ public sealed class AgentExecutionResourceResolver(
         if (!effective.Decisions.Single().Allowed) return false;
         var now = clock.UtcNow;
         var grants = await dbContext.SecretGrants.AsNoTracking().Where(x => x.SecretId == secret.Id && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == SecretRight.Use && (x.ExpiresAt == null || x.ExpiresAt > now)).Select(x => x.Effect).ToArrayAsync(cancellationToken);
-        var secretPolicies = await dbContext.SecretPolicies.AsNoTracking().Where(x => x.ProjectId == secret.ProjectId && x.SecretId == secret.Id && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == SecretRight.Use).Select(x => x.Effect).ToArrayAsync(cancellationToken);
-        var projectPolicies = await dbContext.SecretPolicies.AsNoTracking().Where(x => x.ProjectId == secret.ProjectId && x.SecretId == null && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == SecretRight.Use).Select(x => x.Effect).ToArrayAsync(cancellationToken);
+        var secretPolicies = await dbContext.SecretPolicies.AsNoTracking().Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, secret.ProjectId) && x.SecretId == secret.Id && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == SecretRight.Use).Select(x => x.Effect).ToArrayAsync(cancellationToken);
+        var projectPolicies = await dbContext.SecretPolicies.AsNoTracking().Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, secret.ProjectId) && x.SecretId == null && (x.PrincipalId == principal || x.PrincipalId == "*") && x.Right == SecretRight.Use).Select(x => x.Effect).ToArrayAsync(cancellationToken);
         var tier = grants.Length > 0 ? grants : secretPolicies.Length > 0 ? secretPolicies : projectPolicies;
         return tier.Length > 0 && !tier.Contains(AuthorizationEffect.Deny) && tier.Contains(AuthorizationEffect.Allow);
     }

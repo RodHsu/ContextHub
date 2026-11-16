@@ -54,7 +54,7 @@ Memory.McpServer
     |      - runtime logs
     |
     +--> Redis
-    |      - cache version
+    |      - reconstructible cache and signals
     |      - search/context cache
     |      - job signal
     |
@@ -162,7 +162,7 @@ Memory.Dashboard
 - 提供內網 `/embed` API
 - 提供 `/info` 給部署驗證
 
-這個 service 是正式部署的 embedding 主路徑。
+這個 service 是正式部署的 embedding 主路徑。模型、tokenizer 與向量世代的切換契約見 [Embedding tokenizer contract](embedding-tokenizer-contract.md)。
 
 ### 3.6 `Memory.Worker`
 
@@ -179,6 +179,8 @@ Memory.Dashboard
 
 - 提供高資訊密度的 operations dashboard
 - 以 cookie auth 提供單一 admin 登入
+- `/login` 採 static SSR，保留一般 HTTP POST 與 antiforgery 驗證；不在登入頁建立會被提交導頁中止的 Blazor circuit。
+- 登入頁以 `ExcludeFromInteractiveRouting` 切換呈現方式；登入後的 Dashboard 頁面維持 `InteractiveServer`，包含 Graph 更新與鍵盤互動。
 - 顯示 runtime 參數、Docker / Compose 資源、memory/log/job/storage explorer
 - 透過 `mcp-server` 的 REST API 讀取業務資料
 - 透過唯讀 Docker socket 顯示容器即時狀態
@@ -266,7 +268,7 @@ Memory.Dashboard
 
 用途：
 
-- cache version
+- search/context validity 依 PostgreSQL transactional scope revision；Redis 不作版本權威
 - search/context cache
 - job signal
 
@@ -484,6 +486,10 @@ source document / code / logs
 ```
 
 ## 8. Hybrid Search 流程
+
+Keyword 與 vector SQL 在排序及候選 `LIMIT` 前套用 project、tenant 與 owner 範圍，避免其他使用者的高分 chunks 耗盡可見候選。一般 Member／Admin 僅取自己的資料；具 tenant/user 的 service actor 保留同 tenant 範圍，背景 global service 保留全域範圍。Application 層仍複核授權及資料可見性，store 每次讀取呼叫當下的 actor，不能在建構時固定。已登入但缺少 tenant/user 的非 service actor 直接讀取 store 時也會被拒絕。
+
+Search、WorkingContext 與 SemanticHits 結果鍵使用 `cache:v4`，隔離舊版候選篩選與 ProjectId identity 契約；Dashboard memory 與 log 結果鍵使用 `cache:v3`，embedding 快取仍依各自 model key 區隔。ProjectId 保留原始拼寫，大小寫等價與 revision 別名彙總見 [Project identity](project-identity-contract.md)。升級初期結果需重新暖機，舊鍵由原 TTL 到期回收。此篩選保證候選符合既有 actor 範圍，不保證每次搜尋都能回傳完整文件數；chunk 重複、狀態篩選與模型品質仍會影響召回。
 
 ```text
 query

@@ -162,7 +162,7 @@ public sealed class ManagedFileService(
 
             var visibleAssets = await Scope(dbContext.FileAssets, actor)
                 .Include(x => x.Versions)
-                .Where(x => x.State != FileAssetState.LogicalDeleted && x.ProjectId == projectId)
+                .Where(x => x.State != FileAssetState.LogicalDeleted && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
                 .ToArrayAsync(ct);
             var sameName = visibleAssets.Where(x => x.NormalizedFileName == normalizedFileName).ToArray();
             var exact = sameName.SelectMany(x => x.Versions.Select(v => (Asset: x, Version: v)))
@@ -466,7 +466,7 @@ public sealed class ManagedFileService(
         var boundedLimit = Math.Clamp(limit, 1, 100);
         var candidates = await ScopeByAsset(dbContext.FileVersions.Include(x => x.FileAsset), actor)
             .Join(dbContext.FileSearchProjections, version => version.Id, projection => projection.FileVersionId, (version, projection) => new { version, projection })
-            .Where(x => x.version.FileAsset!.ProjectId == normalizedProject && x.version.Lifecycle == FileVersionLifecycle.Ready &&
+            .Where(x => Memory.Application.ProjectContext.Matches(x.version.FileAsset!.ProjectId, normalizedProject) && x.version.Lifecycle == FileVersionLifecycle.Ready &&
                         x.projection.ContentSearchEnabled && x.projection.InvalidatedAt == null &&
                         x.projection.ClassificationRevision == x.version.ClassificationRevision &&
                         x.version.Classification <= FileClassification.Sensitive &&
@@ -497,7 +497,7 @@ public sealed class ManagedFileService(
             .Include(x => x.Relations)
             .Include(x => x.Versions)
                 .ThenInclude(x => x.Findings)
-            .Where(x => x.ProjectId == normalizedProject && x.State != FileAssetState.LogicalDeleted)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProject) && x.State != FileAssetState.LogicalDeleted)
             .OrderByDescending(x => x.UpdatedAt)
             .Take(boundedLimit * 3)
             .ToArrayAsync(cancellationToken);

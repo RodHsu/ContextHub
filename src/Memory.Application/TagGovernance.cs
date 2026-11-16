@@ -75,7 +75,7 @@ public sealed class CanonicalTagGovernanceService(
         var projectId = ProjectContext.Normalize(request.ProjectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
         if (!CanonicalTagReasonCodes.IsValid(request.ReasonCode)) throw new InvalidOperationException("Tag telemetry reason code is not supported.");
-        var definition = await Scope(dbContext.CanonicalTagDefinitions, actor).SingleOrDefaultAsync(x => x.Id == request.DefinitionId && x.ProjectId == projectId, cancellationToken)
+        var definition = await Scope(dbContext.CanonicalTagDefinitions, actor).SingleOrDefaultAsync(x => x.Id == request.DefinitionId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId), cancellationToken)
             ?? throw new UnauthorizedAccessException("Canonical tag is not available.");
         var now = clock.UtcNow;
         await dbContext.CanonicalTagTelemetryEvents.AddAsync(new CanonicalTagTelemetryEvent
@@ -105,7 +105,7 @@ public sealed class CanonicalTagGovernanceService(
         var start = new DateTimeOffset(targetDay.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
         var end = start.AddDays(1);
         var groups = await Scope(dbContext.CanonicalTagTelemetryEvents, actor)
-            .Where(x => x.ProjectId == normalized && x.CreatedAt >= start && x.CreatedAt < end)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.CreatedAt >= start && x.CreatedAt < end)
             .GroupBy(x => x.DefinitionId)
             .Select(x => new
             {
@@ -119,7 +119,7 @@ public sealed class CanonicalTagGovernanceService(
             .ToArrayAsync(cancellationToken);
         foreach (var group in groups)
         {
-            var aggregate = await Scope(dbContext.CanonicalTagDailyAggregates, actor).SingleOrDefaultAsync(x => x.ProjectId == normalized && x.DefinitionId == group.DefinitionId && x.Day == targetDay, cancellationToken);
+            var aggregate = await Scope(dbContext.CanonicalTagDailyAggregates, actor).SingleOrDefaultAsync(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == group.DefinitionId && x.Day == targetDay, cancellationToken);
             var isNew = aggregate is null;
             aggregate ??= new CanonicalTagDailyAggregate { TenantId = actor.TenantId, OwnerUserId = actor.UserId, DefinitionId = group.DefinitionId, ProjectId = normalized, Day = targetDay };
             aggregate.SearchImpressions = group.SearchImpressions;
@@ -130,7 +130,7 @@ public sealed class CanonicalTagGovernanceService(
             aggregate.UpdatedAt = clock.UtcNow;
             if (isNew) await dbContext.CanonicalTagDailyAggregates.AddAsync(aggregate, cancellationToken);
         }
-        var definitions = await Scope(dbContext.CanonicalTagDefinitions, actor).Where(x => x.ProjectId == normalized).ToArrayAsync(cancellationToken);
+        var definitions = await Scope(dbContext.CanonicalTagDefinitions, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized)).ToArrayAsync(cancellationToken);
         foreach (var definition in definitions) definition.LastValidatedAt = clock.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
         return groups.Length;
@@ -143,7 +143,7 @@ public sealed class CanonicalTagGovernanceService(
         ActorAuthorization.EnsureProjectAllowed(actor, normalized, write: false);
         if (days is not 7 and not 30 and not 90) throw new InvalidOperationException("Tag quality window must be 7, 30, or 90 days.");
         var since = DateOnly.FromDateTime(clock.UtcNow.UtcDateTime.AddDays(-(days - 1)));
-        var aggregates = await Scope(dbContext.CanonicalTagDailyAggregates, actor).Where(x => x.ProjectId == normalized && x.Day >= since).ToArrayAsync(cancellationToken);
+        var aggregates = await Scope(dbContext.CanonicalTagDailyAggregates, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.Day >= since).ToArrayAsync(cancellationToken);
         return aggregates.GroupBy(x => x.DefinitionId).Select(group =>
         {
             var impressions = group.Sum(x => x.SearchImpressions);
@@ -170,8 +170,8 @@ public sealed class CanonicalTagGovernanceService(
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var normalized = ProjectContext.Normalize(projectId);
         await LoadDefinitionsAsync(normalized, sourceId, targetId, actor, cancellationToken);
-        var sourceBindings = await Scope(dbContext.CanonicalTagBindings, actor).Where(x => x.ProjectId == normalized && x.DefinitionId == sourceId && x.Status == "Active").ToArrayAsync(cancellationToken);
-        var targetKeys = await Scope(dbContext.CanonicalTagBindings, actor).Where(x => x.ProjectId == normalized && x.DefinitionId == targetId && x.Status == "Active")
+        var sourceBindings = await Scope(dbContext.CanonicalTagBindings, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == sourceId && x.Status == "Active").ToArrayAsync(cancellationToken);
+        var targetKeys = await Scope(dbContext.CanonicalTagBindings, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == targetId && x.Status == "Active")
             .Select(x => x.ResourceType + "\u001f" + x.ResourceId).ToArrayAsync(cancellationToken);
         var set = targetKeys.ToHashSet(StringComparer.Ordinal);
         var conflicts = sourceBindings.Count(x => set.Contains(x.ResourceType + "\u001f" + x.ResourceId));
@@ -187,8 +187,8 @@ public sealed class CanonicalTagGovernanceService(
             var (source, target) = await LoadDefinitionsAsync(normalized, sourceId, targetId, actor, ct);
             if (source.Revision != expectedSourceRevision) throw new DbUpdateConcurrencyException("Canonical tag revision conflict; reload before retrying.");
             if (source.Status != CanonicalTagStatus.Active || target.Status != CanonicalTagStatus.Active) throw new InvalidOperationException("Only active canonical tags can be merged.");
-            var sourceBindings = await Scope(dbContext.CanonicalTagBindings, actor).Where(x => x.ProjectId == normalized && x.DefinitionId == sourceId && x.Status == "Active").ToArrayAsync(ct);
-            var targetKeys = (await Scope(dbContext.CanonicalTagBindings, actor).Where(x => x.ProjectId == normalized && x.DefinitionId == targetId && x.Status == "Active").ToArrayAsync(ct))
+            var sourceBindings = await Scope(dbContext.CanonicalTagBindings, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == sourceId && x.Status == "Active").ToArrayAsync(ct);
+            var targetKeys = (await Scope(dbContext.CanonicalTagBindings, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == targetId && x.Status == "Active").ToArrayAsync(ct))
                 .ToDictionary(x => x.ResourceType + "\u001f" + x.ResourceId, StringComparer.Ordinal);
             foreach (var binding in sourceBindings)
             {
@@ -255,11 +255,11 @@ public sealed class CanonicalTagGovernanceService(
     {
         var actor = RequireActor(SecurityScopes.SecurityManage);
         var normalized = ProjectContext.Normalize(projectId);
-        _ = await Scope(dbContext.CanonicalTagDefinitions, actor).SingleOrDefaultAsync(x => x.ProjectId == normalized && x.Id == sourceId, cancellationToken)
+        _ = await Scope(dbContext.CanonicalTagDefinitions, actor).SingleOrDefaultAsync(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.Id == sourceId, cancellationToken)
             ?? throw new UnauthorizedAccessException("Canonical tag is not available.");
         var candidates = candidateResourceIds.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.Ordinal).Take(5000).ToArray();
         if (candidates.Length == 0) throw new InvalidOperationException("Tag split requires an explicit affected-resource candidate set.");
-        var total = await Scope(dbContext.CanonicalTagBindings, actor).CountAsync(x => x.ProjectId == normalized && x.DefinitionId == sourceId && x.Status == "Active", cancellationToken);
+        var total = await Scope(dbContext.CanonicalTagBindings, actor).CountAsync(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == sourceId && x.Status == "Active", cancellationToken);
         await dbContext.CanonicalTagGovernanceProposals.AddAsync(new CanonicalTagGovernanceProposal
         {
             TenantId = actor.TenantId,
@@ -286,7 +286,7 @@ public sealed class CanonicalTagGovernanceService(
         var normalized = ProjectContext.Normalize(projectId);
         ActorAuthorization.EnsureProjectAllowed(actor, normalized, write: true);
         if (request.Kind is not CanonicalTagGovernanceProposalKind.Rename and not CanonicalTagGovernanceProposalKind.Deprecate) throw new InvalidOperationException("Only rename and deprecate lifecycle changes are supported here.");
-        var definition = await Scope(dbContext.CanonicalTagDefinitions, actor).SingleOrDefaultAsync(x => x.ProjectId == normalized && x.Id == request.DefinitionId, cancellationToken)
+        var definition = await Scope(dbContext.CanonicalTagDefinitions, actor).SingleOrDefaultAsync(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.Id == request.DefinitionId, cancellationToken)
             ?? throw new UnauthorizedAccessException("Canonical tag is not available.");
         if (definition.Revision != request.ExpectedRevision) throw new DbUpdateConcurrencyException("Canonical tag revision conflict; reload before retrying.");
         var previousName = definition.CanonicalName;
@@ -294,7 +294,7 @@ public sealed class CanonicalTagGovernanceService(
         {
             var value = RequireText(request.Value, nameof(request.Value), 200);
             var normalizedValue = CanonicalTagResolver.NormalizeTag(value);
-            var collision = await Scope(dbContext.CanonicalTagDefinitions, actor).AnyAsync(x => x.ProjectId == normalized && x.Id != definition.Id && x.NormalizedName == normalizedValue && x.Status == CanonicalTagStatus.Active, cancellationToken);
+            var collision = await Scope(dbContext.CanonicalTagDefinitions, actor).AnyAsync(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.Id != definition.Id && x.NormalizedName == normalizedValue && x.Status == CanonicalTagStatus.Active, cancellationToken);
             if (collision) throw new InvalidOperationException("Canonical tag rename collides with an active definition.");
             await dbContext.CanonicalTagAliases.AddAsync(new CanonicalTagAlias { TenantId = actor.TenantId, OwnerUserId = actor.UserId, DefinitionId = definition.Id, ProjectId = normalized, Alias = previousName, NormalizedAlias = definition.NormalizedName }, cancellationToken);
             definition.CanonicalName = value;
@@ -317,7 +317,7 @@ public sealed class CanonicalTagGovernanceService(
             SourceDefinitionId = definition.Id,
             ProposedValue = request.Kind == CanonicalTagGovernanceProposalKind.Rename ? definition.CanonicalName : "Deprecated",
             ReasonCode = request.Kind == CanonicalTagGovernanceProposalKind.Rename ? CanonicalTagReasonCodes.DuplicateAlias : CanonicalTagReasonCodes.StaleUnused,
-            AffectedBindingCount = await Scope(dbContext.CanonicalTagBindings, actor).CountAsync(x => x.ProjectId == normalized && x.DefinitionId == definition.Id && x.Status == "Active", cancellationToken),
+            AffectedBindingCount = await Scope(dbContext.CanonicalTagBindings, actor).CountAsync(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == definition.Id && x.Status == "Active", cancellationToken),
             Confidence = 1m,
             CandidateResourceIdsJson = "[]",
             CreatedAt = clock.UtcNow,
@@ -330,7 +330,7 @@ public sealed class CanonicalTagGovernanceService(
     private async Task<(CanonicalTagDefinition Source, CanonicalTagDefinition Target)> LoadDefinitionsAsync(string projectId, Guid sourceId, Guid targetId, ContextHubRequestActor actor, CancellationToken cancellationToken)
     {
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: actor.HasScope(SecurityScopes.MemoryWrite));
-        var definitions = await Scope(dbContext.CanonicalTagDefinitions, actor).Where(x => x.ProjectId == projectId && (x.Id == sourceId || x.Id == targetId)).ToArrayAsync(cancellationToken);
+        var definitions = await Scope(dbContext.CanonicalTagDefinitions, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && (x.Id == sourceId || x.Id == targetId)).ToArrayAsync(cancellationToken);
         return (definitions.SingleOrDefault(x => x.Id == sourceId) ?? throw new UnauthorizedAccessException("Source tag is not available."), definitions.SingleOrDefault(x => x.Id == targetId) ?? throw new UnauthorizedAccessException("Target tag is not available."));
     }
 
@@ -370,7 +370,7 @@ public sealed class CanonicalTagBackgroundReconciler(IApplicationDbContext dbCon
         var groups = events.GroupBy(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.DefinitionId, Day = DateOnly.FromDateTime(x.CreatedAt.UtcDateTime) }).ToArray();
         foreach (var group in groups)
         {
-            var aggregate = await dbContext.CanonicalTagDailyAggregates.SingleOrDefaultAsync(x => x.TenantId == group.Key.TenantId && x.OwnerUserId == group.Key.OwnerUserId && x.ProjectId == group.Key.ProjectId && x.DefinitionId == group.Key.DefinitionId && x.Day == group.Key.Day, cancellationToken);
+            var aggregate = await dbContext.CanonicalTagDailyAggregates.SingleOrDefaultAsync(x => x.TenantId == group.Key.TenantId && x.OwnerUserId == group.Key.OwnerUserId && Memory.Application.ProjectContext.Matches(x.ProjectId, group.Key.ProjectId) && x.DefinitionId == group.Key.DefinitionId && x.Day == group.Key.Day, cancellationToken);
             var isNew = aggregate is null;
             aggregate ??= new CanonicalTagDailyAggregate { TenantId = group.Key.TenantId, OwnerUserId = group.Key.OwnerUserId, ProjectId = group.Key.ProjectId, DefinitionId = group.Key.DefinitionId, Day = group.Key.Day };
             aggregate.SearchImpressions = group.LongCount(x => x.Kind == CanonicalTagTelemetryKind.SearchImpression);

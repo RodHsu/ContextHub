@@ -39,7 +39,7 @@ internal static class GovernanceEvidenceFingerprint
             : await dbContext.MemoryItems.AsNoTracking().Where(x =>
                     x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
                     (memoryIds.Contains(x.Id) ||
-                     (hasExactMemoryIdentity && x.ProjectId == projectId &&
+                     (hasExactMemoryIdentity && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
                       x.Title.Trim().ToLower() == normalizedExactTitle &&
                       x.Summary.Trim().ToLower() == normalizedExactSummary)))
                 .OrderBy(x => x.Id)
@@ -115,40 +115,40 @@ internal static class GovernanceEvidenceFingerprint
             $"{x.ResourceId:N}:{x.LifecycleStatus}:{x.PolicyVersion}:{x.EvidenceFingerprint}:{x.UpdatedAt.UtcTicks}").ToArray();
         var projectInformationUpdated = await dbContext.MemoryItems.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
-                        x.ProjectId == projectId && x.ExternalKey == "system:project-information")
+                        Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.ExternalKey == "system:project-information")
             .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
         var workItemUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.ProjectWorkItems.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && x.ProjectId == projectId &&
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
                         (x.Title.Contains(referenceNeedle) || x.Description.Contains(referenceNeedle) ||
                          x.ChecklistItems.Any(item => item.Content.Contains(referenceNeedle))))
             .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
         var workItemChecklistUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.ProjectWorkItemChecklistItems.AsNoTracking()
             .Where(x => x.WorkItem != null && x.WorkItem.TenantId == tenantId &&
-                        x.WorkItem.OwnerUserId == ownerUserId && x.WorkItem.ProjectId == projectId &&
+                        x.WorkItem.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.WorkItem.ProjectId, projectId) &&
                         x.Content.Contains(referenceNeedle))
             .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
         var discussionUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.DiscussionThreads.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && x.HostProjectId == projectId &&
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.HostProjectId, projectId) &&
                         (x.Title.Contains(referenceNeedle) || x.Messages.Any(m => m.Content.Contains(referenceNeedle))))
             .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
         var discussionMessageUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.DiscussionMessages.AsNoTracking()
             .Where(x => x.Thread != null && x.Thread.TenantId == tenantId &&
-                        x.Thread.OwnerUserId == ownerUserId && x.Thread.HostProjectId == projectId &&
+                        x.Thread.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.Thread.HostProjectId, projectId) &&
                         x.Content.Contains(referenceNeedle))
             .Select(x => (DateTimeOffset?)x.CreatedAt).MaxAsync(cancellationToken);
         var actionUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.SuggestedActions.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
-                        x.ProjectId == projectId && x.DedupKey.Contains(referenceNeedle))
+                        Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.DedupKey.Contains(referenceNeedle))
             .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
         var insightUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.ConversationInsights.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && x.ProjectId == projectId &&
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
                         (!excludedInsightId.HasValue || x.Id != excludedInsightId.Value) &&
                         (x.Title.Contains(referenceNeedle) || x.Content.Contains(referenceNeedle) ||
                          x.Summary.Contains(referenceNeedle) || x.DedupKey.Contains(referenceNeedle)))
             .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
         var hierarchyUpdated = await dbContext.ProjectHierarchies.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
-                        (x.ParentProjectId == projectId || x.ChildProjectId == projectId))
+                        (Memory.Application.ProjectContext.Matches(x.ParentProjectId, projectId) || Memory.Application.ProjectContext.Matches(x.ChildProjectId, projectId)))
             .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
 
         var canonical = string.Join('\n', new[]

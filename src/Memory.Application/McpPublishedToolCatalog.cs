@@ -2,7 +2,7 @@ namespace Memory.Application;
 
 public static class McpPublishedToolCatalog
 {
-    public const string AppFacingCatalogVersion = "2026-09-27-v8";
+    public const string AppFacingCatalogVersion = "2026-10-10-v10";
 
     public static IReadOnlySet<string> RestrictedToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -55,6 +55,7 @@ public static class McpPublishedToolCatalog
         "agent_execution_complete",
         "agent_execution_fail",
         "agent_execution_abandon",
+        "agent_execution_cancel",
         "project_information_upsert",
         "project_information_update_lifecycle",
         "project_artifacts_list",

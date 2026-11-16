@@ -3,14 +3,16 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.Playwright;
+using Xunit.Abstractions;
 
 namespace Memory.DashboardTests;
 
-public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixture>
+public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixture>
 {
     private static readonly DashboardTheme[] Themes =
     [
@@ -120,10 +122,15 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     ];
 
     private readonly DashboardBrowserFixture _fixture;
+    private readonly ITestOutputHelper _output;
+    private long _generalLoginDiagnosticSequence;
+    private int _generalLoginDropReported;
 
-    public DashboardBrowserUiTests(DashboardBrowserFixture fixture)
+    public DashboardBrowserUiTests(DashboardBrowserFixture fixture, ITestOutputHelper output)
     {
         _fixture = fixture;
+        _output = output;
+        fixture.BindTestClass(DashboardFixtureTestClass.DashboardBrowserUiTests);
     }
 
     [Fact]
@@ -150,6 +157,51 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }
 
         failures.Should().BeEmpty(string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task Cache_Telemetry_Should_Keep_Periods_Populations_And_Keyboard_Usable_In_Compact_Layouts()
+    {
+        DashboardViewport[] viewports = [new("cache-desktop", 1366, 768), new("cache-short", 1024, 600), new("cache-mobile", 390, 844)];
+        await _fixture.EnsureDashboardRunningAsync();
+        foreach (var viewport in viewports)
+        {
+            await using var context = await _fixture.CreateContextAsync(viewport);
+            var page = await context.NewPageAsync();
+            await LoginAndOpenAsync(page, "/monitoring?uiProfile=normal");
+            await page.EvaluateAsync("document.documentElement.style.fontSize = '150%'");
+            var panel = page.Locator(".cache-telemetry-panel");
+            await panel.WaitForAsync();
+            await panel.Locator("[data-testid='interactive-cache-rate']").WaitForAsync();
+            (await panel.Locator("[data-testid='interactive-cache-rate']").InnerTextAsync()).Should().Contain("1.5%");
+            (await panel.InnerTextAsync()).Should().Contain("圖譜");
+            var originLoad = panel.Locator("[data-testid='cache-origin-load']");
+            (await originLoad.InnerTextAsync()).Should().Contain("搜尋回源").And.Contain("42");
+            await page.ScreenshotAsync(new() { Path = Path.Combine(_fixture.ArtifactDirectory, $"{viewport.Name}-summary-150percent.png"), FullPage = true });
+            foreach (var period in new[] { "24H", "3D", "7D", "14D", "30D" })
+            {
+                var button = panel.GetByRole(AriaRole.Button, new() { Name = period, Exact = true });
+                await button.FocusAsync();
+                await page.Keyboard.PressAsync("Enter");
+                await page.WaitForFunctionAsync("period => document.querySelector('.cache-periods button[aria-pressed=true]')?.textContent === period", period);
+                var bounds = await button.BoundingBoxAsync();
+                bounds!.Width.Should().BeGreaterThanOrEqualTo(44);
+                bounds.Height.Should().BeGreaterThanOrEqualTo(44);
+            }
+            (await panel.InnerTextAsync()).Should().Contain("部分資料");
+            await panel.Locator("summary").FocusAsync();
+            await page.Keyboard.PressAsync("Enter");
+            (await panel.Locator("details").GetAttributeAsync("open")).Should().NotBeNull();
+            await panel.Locator(".cache-instance-scroll").FocusAsync();
+            (await page.EvaluateAsync<bool>("document.activeElement.classList.contains('cache-instance-scroll')")).Should().BeTrue();
+            var overflow = await page.EvaluateAsync<bool>("document.documentElement.scrollWidth > innerWidth + 1");
+            overflow.Should().BeFalse($"{viewport.Name} at 150% font should keep horizontal scrolling inside the instance table");
+            await page.ScreenshotAsync(new() { Path = Path.Combine(_fixture.ArtifactDirectory, $"{viewport.Name}-150percent.png"), FullPage = true });
+            await panel.Locator(".cache-graph-section").ScrollIntoViewIfNeededAsync();
+            await page.ScreenshotAsync(new() { Path = Path.Combine(_fixture.ArtifactDirectory, $"{viewport.Name}-graph-150percent.png"), FullPage = true });
+            await originLoad.ScrollIntoViewIfNeededAsync();
+            await page.ScreenshotAsync(new() { Path = Path.Combine(_fixture.ArtifactDirectory, $"{viewport.Name}-origin-150percent.png"), FullPage = true });
+        }
     }
 
     [Fact]
@@ -347,7 +399,9 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             ".project-editor",
             ".lifecycle-inspector",
             ".child-projects-picker-options",
-            ".description-field textarea"
+            ".description-field textarea",
+            ".tag-quality-panel",
+            ".tag-quality-controls"
         ];
 
         foreach (var viewport in viewports)
@@ -358,6 +412,18 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
             await LoginAndOpenAsync(page, "/project-information");
             await page.GetByRole(AriaRole.Heading, new() { Name = "專案工作區" }).WaitForAsync();
+
+            var contained = await page.EvaluateAsync<bool>(@"() => {
+                const studio = document.querySelector('.project-studio').getBoundingClientRect();
+                const tag = document.querySelector('.tag-quality-panel').getBoundingClientRect();
+                return tag.top >= studio.bottom - 1 &&
+                    [...document.querySelector('.project-studio').children].every(element => {
+                        const rect = element.getBoundingClientRect();
+                        return rect.top >= studio.top - 1 && rect.bottom <= studio.bottom + 1;
+                    });
+            }");
+            if (!contained)
+                failures.Add($"{viewport.Name}: project studio must contain its panels before the tag quality panel starts");
 
             foreach (var selector in selectors)
             {
@@ -1834,22 +1900,34 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     {
         await _fixture.EnsureDashboardRunningAsync();
         await using var context = await _fixture.CreateContextAsync(Viewports[0]);
+        await context.GrantPermissionsAsync(new[] { "clipboard-write" }, new BrowserContextGrantPermissionsOptions
+        {
+            Origin = _fixture.BaseUri.GetLeftPart(UriPartial.Authority)
+        });
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/logs?uiProfile=normal");
         await page.Locator(".data-table-clickable tbody tr").First.ClickAsync();
         await page.GetByRole(AriaRole.Button, new() { Name = "複製 JSON" }).ClickAsync();
 
-        var toast = page.Locator(".toast").First;
-        await toast.WaitForAsync(new LocatorWaitForOptions
+        try
         {
-            State = WaitForSelectorState.Visible,
-            Timeout = 15000
-        });
+            var toast = page.Locator(".toast").First;
+            await toast.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 15000
+            });
 
-        var text = await toast.InnerTextAsync();
-        text.Should().Contain("已複製日誌 #");
-        text.Should().NotContain("_message");
+            var text = await toast.InnerTextAsync();
+            text.Should().Contain("已複製日誌 #");
+            text.Should().NotContain("_message");
+        }
+        catch
+        {
+            await RecordClipboardFailureCapabilityAsync(page);
+            throw;
+        }
     }
 
     [Fact]
@@ -2223,6 +2301,10 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         };
 
         await using var context = await _fixture.CreateContextAsync(viewports[0]);
+        await context.GrantPermissionsAsync(new[] { "clipboard-write" }, new BrowserContextGrantPermissionsOptions
+        {
+            Origin = _fixture.BaseUri.GetLeftPart(UriPartial.Authority)
+        });
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
@@ -2333,13 +2415,21 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         }
 
         await page.GetByRole(AriaRole.Button, new() { Name = "複製內容" }).ClickAsync();
-        var toast = page.Locator(".toast").First;
-        await toast.WaitForAsync(new LocatorWaitForOptions
+        try
         {
-            State = WaitForSelectorState.Visible,
-            Timeout = 15000
-        });
-        (await toast.InnerTextAsync()).Should().Contain("已複製 memory 內容");
+            var toast = page.Locator(".toast").First;
+            await toast.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 15000
+            });
+            (await toast.InnerTextAsync()).Should().Contain("已複製 memory 內容");
+        }
+        catch
+        {
+            await RecordClipboardFailureCapabilityAsync(page);
+            throw;
+        }
     }
 
     [Fact]
@@ -2819,6 +2909,10 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         });
         await page.WaitForFunctionAsync("() => Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0) > 0");
 
+        // The published target scale precedes the 220ms CSS paint transition.
+        await page.EvaluateAsync("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+        await page.WaitForFunctionAsync("() => { const content = document.querySelector('.graph-pan-content'); return content && content.getAnimations().every(animation => animation.playState !== 'running' && !animation.pending); }");
+
         var layoutJson = await page.EvaluateAsync<string>(
             @"() => JSON.stringify({
                 scale: Number(document.querySelector('.graph-scroll-shell')?.dataset.scale ?? 0),
@@ -2831,14 +2925,32 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
                 shellWidth: Math.round(document.querySelector('.graph-scroll-shell')?.getBoundingClientRect().width ?? 0),
                 shellHeight: Math.round(document.querySelector('.graph-scroll-shell')?.getBoundingClientRect().height ?? 0),
                 contentWidth: Math.round(document.querySelector('.graph-pan-content')?.offsetWidth ?? 0),
-                contentHeight: Math.round(document.querySelector('.graph-pan-content')?.offsetHeight ?? 0)
+                contentHeight: Math.round(document.querySelector('.graph-pan-content')?.offsetHeight ?? 0),
+                paintedNodes: [...document.querySelectorAll('.graph-view-node')].map(node => {
+                    const circle=node.querySelector('circle'), label=node.querySelector('.graph-node-title'), hit=node.querySelector('.graph-view-node-hit');
+                    const c=circle.getBoundingClientRect(), t=label.getBoundingClientRect(), h=hit.getBoundingClientRect();
+                    const matrix=circle.getScreenCTM(), scale=Math.hypot(matrix.a,matrix.b);
+                    const stroke=parseFloat(getComputedStyle(circle).strokeWidth)*scale;
+                    const shell=document.querySelector('.graph-scroll-shell').getBoundingClientRect();
+                    const contained=[c,t].every(r=>r.left-stroke/2>=shell.left-1 && r.top-stroke/2>=shell.top-1 && r.right+stroke/2<=shell.right+1 && r.bottom+stroke/2<=shell.bottom+1);
+                    return {circleWidth:c.width+stroke,circleHeight:c.height+stroke,labelWidth:t.width,labelHeight:t.height,effectiveFont:parseFloat(getComputedStyle(label).fontSize)*scale,hitWidth:h.width,hitHeight:h.height,contained};
+                })
             })");
 
+        await File.WriteAllTextAsync(Path.Combine(_fixture.ArtifactDirectory, "graph-normal-painted-measurements.json"), layoutJson);
         using var document = JsonDocument.Parse(layoutJson);
         document.RootElement.GetProperty("scale").GetDouble().Should().BeGreaterThan(0.58d, $"layout was {layoutJson}");
         document.RootElement.GetProperty("nodeWidth").GetInt32().Should().BeGreaterThanOrEqualTo(28);
         document.RootElement.GetProperty("nodeHeight").GetInt32().Should().BeGreaterThanOrEqualTo(18);
-        document.RootElement.GetProperty("nodeHeight").GetInt32().Should().BeLessThan(46);
+        // The anchor also contains the invisible hit target; measure painted content separately.
+        foreach (var node in document.RootElement.GetProperty("paintedNodes").EnumerateArray())
+        {
+            node.GetProperty("circleHeight").GetDouble().Should().BeInRange(18, 64);
+            node.GetProperty("effectiveFont").GetDouble().Should().BeGreaterThanOrEqualTo(14);
+            node.GetProperty("hitWidth").GetDouble().Should().BeGreaterThanOrEqualTo(24);
+            node.GetProperty("hitHeight").GetDouble().Should().BeGreaterThanOrEqualTo(24);
+            node.GetProperty("contained").GetBoolean().Should().BeTrue($"painted content was {layoutJson}");
+        }
         document.RootElement.GetProperty("circleRadius").GetDouble().Should().BeGreaterThanOrEqualTo(9d);
         document.RootElement.GetProperty("titleWidth").GetInt32().Should().BeGreaterThanOrEqualTo(40);
         document.RootElement.GetProperty("legacyLabelCount").GetInt32().Should().Be(0);
@@ -3765,70 +3877,77 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         bool enableRwdUsabilityChecks = false)
     {
         await _fixture.EnsureDashboardRunningAsync();
-        await using var context = await _fixture.CreateContextAsync(viewport);
-        await context.AddInitScriptAsync(
-            $@"(() => {{
+        var context = await _fixture.CreateContextAsync(viewport);
+        try
+        {
+            await context.AddInitScriptAsync(
+                $@"(() => {{
                 localStorage.setItem('contextHub.dashboard.theme', '{theme.PreferenceValue}');
                 document.documentElement.dataset.themePreference = '{theme.PreferenceValue}';
                 document.documentElement.dataset.theme = '{theme.PreferenceValue}';
                 document.documentElement.style.colorScheme = '{theme.PreferenceValue}';
             }})();");
-        var page = await context.NewPageAsync();
+            var page = await context.NewPageAsync();
 
-        var targetUrl = BuildRouteUrl(route.Route, profile);
-        await LoginAndOpenAsync(page, targetUrl);
+            var targetUrl = BuildRouteUrl(route.Route, profile);
+            await LoginAndOpenAsync(page, targetUrl);
 
-        var heading = page.GetByRole(AriaRole.Heading, new() { Name = route.Title });
-        await heading.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+            var heading = page.GetByRole(AriaRole.Heading, new() { Name = route.Title });
+            await heading.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
 
-        foreach (var selector in route.RequiredSelectors)
-        {
-            await page.Locator(selector).First.WaitForAsync(new LocatorWaitForOptions
+            foreach (var selector in route.RequiredSelectors)
             {
-                State = WaitForSelectorState.Visible,
-                Timeout = 15000
-            });
+                await page.Locator(selector).First.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 15000
+                });
+            }
+
+            if (enableInteractions)
+            {
+                await PerformInteractiveChecksAsync(page, route.Name);
+            }
+
+            var screenshotPath = await CaptureScreenshotAsync(page, route.Name, profile, viewport, theme);
+            var snapshot = await AnalyzeLayoutAsync(page, route.OverlapSelectors, route.ScrollSelectors);
+
+            snapshot.ResolvedTheme.Should().Be(theme.PreferenceValue,
+                $"theme mismatch on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+
+            snapshot.DocumentScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+                $"unexpected horizontal overflow on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.BodyScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+                $"body width overflow on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+
+            snapshot.MissingSelectors.Should().BeEmpty($"missing expected selectors on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.OverlapWarnings.Should().BeEmpty($"detected overlapping panels on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.VisibleRectCount.Should().BeGreaterThan(0, $"no visible key panels detected on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+
+            if (expectScrollableOverflow)
+            {
+                snapshot.ScrollTargets.Any(target => target.CanScrollY).Should().BeTrue(
+                    $"expected at least one scrollable container with vertical overflow on {route.Name}; screenshot: {screenshotPath}");
+            }
+            else
+            {
+                snapshot.ScrollTargets.Should().NotBeEmpty($"missing scroll targets on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            }
+
+            if (enableRwdUsabilityChecks)
+            {
+                var usability = await AnalyzeRwdUsabilityAsync(page, route.ScrollSelectors);
+                usability.ScrollTrapWarnings.Should().BeEmpty(
+                    $"scroll traps on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+                usability.BadScrollbarWarnings.Should().BeEmpty(
+                    $"expected visible or usable scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+                usability.DoubleScrollbarWarnings.Should().BeEmpty(
+                    $"unexpected double vertical scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+            }
         }
-
-        if (enableInteractions)
+        finally
         {
-            await PerformInteractiveChecksAsync(page, route.Name);
-        }
-
-        var screenshotPath = await CaptureScreenshotAsync(page, route.Name, profile, viewport, theme);
-        var snapshot = await AnalyzeLayoutAsync(page, route.OverlapSelectors, route.ScrollSelectors);
-
-        snapshot.ResolvedTheme.Should().Be(theme.PreferenceValue,
-            $"theme mismatch on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-
-        snapshot.DocumentScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
-            $"unexpected horizontal overflow on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.BodyScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
-            $"body width overflow on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-
-        snapshot.MissingSelectors.Should().BeEmpty($"missing expected selectors on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.OverlapWarnings.Should().BeEmpty($"detected overlapping panels on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.VisibleRectCount.Should().BeGreaterThan(0, $"no visible key panels detected on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-
-        if (expectScrollableOverflow)
-        {
-            snapshot.ScrollTargets.Any(target => target.CanScrollY).Should().BeTrue(
-                $"expected at least one scrollable container with vertical overflow on {route.Name}; screenshot: {screenshotPath}");
-        }
-        else
-        {
-            snapshot.ScrollTargets.Should().NotBeEmpty($"missing scroll targets on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        }
-
-        if (enableRwdUsabilityChecks)
-        {
-            var usability = await AnalyzeRwdUsabilityAsync(page, route.ScrollSelectors);
-            usability.ScrollTrapWarnings.Should().BeEmpty(
-                $"scroll traps on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
-            usability.BadScrollbarWarnings.Should().BeEmpty(
-                $"expected visible or usable scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
-            usability.DoubleScrollbarWarnings.Should().BeEmpty(
-                $"unexpected double vertical scrollbars on {route.Name} / {viewport.Name}; screenshot: {screenshotPath}; snapshot: {usability.RawJson}");
+            await context.CloseAsync().WaitAsync(TimeSpan.FromSeconds(30));
         }
     }
 
@@ -3886,33 +4005,205 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             }})();");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync(new Uri(_fixture.BaseUri, route.Route).ToString(), new PageGotoOptions
+        var navigation = DashboardNavigationDiagnostics.TryAttach(page, _fixture.BaseUri, theme.Name, viewport.Name, route.Route);
+        try
         {
-            WaitUntil = WaitUntilState.NetworkIdle,
-            Timeout = 15000
-        });
-
-        await page.GetByRole(AriaRole.Heading, new() { Name = route.Title })
-            .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
-
-        foreach (var selector in route.RequiredSelectors)
-        {
-            await page.Locator(selector).First.WaitForAsync(new LocatorWaitForOptions
+            const float readinessBudgetMilliseconds = 15000;
+            var readinessStarted = Stopwatch.GetTimestamp();
+            var gotoSucceeded = false;
+            try
             {
-                State = WaitForSelectorState.Visible,
-                Timeout = 15000
+                await page.GotoAsync(new Uri(_fixture.BaseUri, route.Route).ToString(), new PageGotoOptions
+                {
+                    WaitUntil = WaitUntilState.Load,
+                    Timeout = readinessBudgetMilliseconds
+                });
+                gotoSucceeded = true;
+            }
+            finally
+            {
+                navigation?.Detach(gotoSucceeded);
+            }
+            var remainingReadinessMilliseconds = readinessBudgetMilliseconds
+                - Stopwatch.GetElapsedTime(readinessStarted).TotalMilliseconds;
+            if (remainingReadinessMilliseconds <= 0)
+                throw new TimeoutException("PUBLIC_ROUTE_VISUAL_READINESS_BUDGET_EXHAUSTED");
+            await page.WaitForFunctionAsync("""
+                async () => {
+                    if (document.readyState !== 'complete' || !document.fonts)
+                        return false;
+                    const stylesheets = Array.from(document.querySelectorAll('head link[rel="stylesheet"]'));
+                    if (stylesheets.length === 0 || stylesheets.some(link => link.sheet === null))
+                        return false;
+                    await document.fonts.ready;
+                    return document.fonts.status === 'loaded'
+                        && Array.from(document.fonts).every(face => face.status !== 'error');
+                }
+                """, null, new PageWaitForFunctionOptions
+            {
+                Timeout = (float)remainingReadinessMilliseconds
             });
+
+            await page.GetByRole(AriaRole.Heading, new() { Name = route.Title })
+                .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+
+            foreach (var selector in route.RequiredSelectors)
+            {
+                await page.Locator(selector).First.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 15000
+                });
+            }
+
+            var screenshotPath = await CaptureScreenshotAsync(page, route.Name, DashboardUiProfile.Normal, viewport, theme);
+            var snapshot = await AnalyzePublicLayoutAsync(page, route.OverlapSelectors);
+
+            snapshot.DocumentScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+                $"unexpected horizontal overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.BodyScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
+                $"body width overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.MissingSelectors.Should().BeEmpty($"missing expected selectors on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+            snapshot.OverlapWarnings.Should().BeEmpty($"detected overlapping panels on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
         }
+        finally
+        {
+            navigation?.Detach();
+            navigation?.TryPersist();
+        }
+    }
 
-        var screenshotPath = await CaptureScreenshotAsync(page, route.Name, DashboardUiProfile.Normal, viewport, theme);
-        var snapshot = await AnalyzePublicLayoutAsync(page, route.OverlapSelectors);
+    private async Task RecordClipboardFailureCapabilityAsync(IPage page)
+    {
+        const string unavailable = """{"schemaVersion":1,"kind":"ClipboardWriteFailureCapability","outcome":"Unavailable"}""";
+        var diagnostic = unavailable;
+        try
+        {
+            var task = page.EvaluateAsync<JsonElement>("""
+                async () => {
+                    let permission='Unavailable',queryError='None';
+                    try {
+                        if (navigator.permissions && typeof navigator.permissions.query==='function') {
+                            const result=await navigator.permissions.query({name:'clipboard-write'});
+                            permission=['granted','denied','prompt'].includes(result.state) ? result.state : 'Unavailable';
+                        } else queryError='Unsupported';
+                    } catch (error) {
+                        queryError=['NotAllowedError','SecurityError','TypeError','NotSupportedError','InvalidStateError'].includes(error?.name) ? error.name : 'Other';
+                    }
+                    return {secureContext:window.isSecureContext,
+                        writeTextAvailable:typeof navigator.clipboard?.writeText==='function',
+                        visibility:['visible','hidden'].includes(document.visibilityState) ? document.visibilityState : 'Unavailable',
+                        hasFocus:document.hasFocus(),activationActive:navigator.userActivation?.isActive ?? null,
+                        activationEver:navigator.userActivation?.hasBeenActive ?? null,
+                        permission:permission,queryError:queryError};
+                }
+                """);
+            // A timed-out diagnostic RPC can finish later; observe faults without writing late output.
+            _ = task.ContinueWith(static completed => { _ = completed.Exception; }, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            var observed = await task.WaitAsync(TimeSpan.FromSeconds(2));
+            var projected = JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                kind = "ClipboardWriteFailureCapability",
+                outcome = "Observed",
+                secureContext = ClipboardProbeBoolean(observed, "secureContext"),
+                writeTextAvailable = ClipboardProbeBoolean(observed, "writeTextAvailable"),
+                visibility = ClipboardProbeEnum(observed, "visibility", "visible", "hidden"),
+                hasFocus = ClipboardProbeBoolean(observed, "hasFocus"),
+                activationActive = ClipboardProbeBoolean(observed, "activationActive"),
+                activationEver = ClipboardProbeBoolean(observed, "activationEver"),
+                permission = ClipboardProbeEnum(observed, "permission", "granted", "denied", "prompt"),
+                queryError = ClipboardProbeEnum(observed, "queryError", "None", "Unsupported", "NotAllowedError", "SecurityError", "TypeError", "NotSupportedError", "InvalidStateError", "Other")
+            });
+            if (Encoding.UTF8.GetByteCount(projected) <= 4 * 1024) diagnostic = projected;
+        }
+        catch
+        {
+            // Diagnostic failures never replace the original test failure or publish exception payloads.
+        }
+        WriteBoundedDiagnostic(diagnostic, 4 * 1024);
+    }
 
-        snapshot.DocumentScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
-            $"unexpected horizontal overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.BodyScrollWidth.Should().BeLessThanOrEqualTo(snapshot.ViewportWidth + 1,
-            $"body width overflow on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.MissingSelectors.Should().BeEmpty($"missing expected selectors on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
-        snapshot.OverlapWarnings.Should().BeEmpty($"detected overlapping panels on public route {route.Name} / {viewport.Name}; screenshot: {screenshotPath}");
+    private static bool? ClipboardProbeBoolean(JsonElement snapshot, string property)
+        => snapshot.TryGetProperty(property, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean() : null;
+
+    private static string ClipboardProbeEnum(JsonElement snapshot, string property, params string[] allowed)
+    {
+        if (!snapshot.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.String) return "Unavailable";
+        var candidate = value.GetString();
+        foreach (var item in allowed)
+            if (string.Equals(candidate, item, StringComparison.Ordinal)) return item;
+        return "Unavailable";
+    }
+
+    private (long Sequence, DateTimeOffset? StartedAtUtc, long? StartedTimestamp) BeginGeneralLoginDiagnostic()
+    {
+        var sequence = Interlocked.Increment(ref _generalLoginDiagnosticSequence);
+        try { return (sequence, DateTimeOffset.UtcNow, Stopwatch.GetTimestamp()); }
+        catch { return (sequence, null, null); }
+    }
+
+    private static string ClassifyGeneralLoginFailure(Exception exception)
+    {
+        if (exception is TimeoutException) return "Timeout";
+        try
+        {
+            if (exception is PlaywrightException && exception.Message.Contains("net::ERR_NETWORK_CHANGED", StringComparison.Ordinal))
+                return "NetworkChanged";
+        }
+        catch { }
+        return "Other";
+    }
+
+    private void RecordGeneralLoginDiagnostic(
+        (long Sequence, DateTimeOffset? StartedAtUtc, long? StartedTimestamp) started, string outcome)
+    {
+        try
+        {
+            if (started.Sequence > 2047)
+            {
+                // Reserve the final output slot for the first drop; later totals remain explicitly unknown.
+                if (Interlocked.CompareExchange(ref _generalLoginDropReported, 1, 0) == 0)
+                    WriteBoundedDiagnostic(JsonSerializer.Serialize(new
+                    {
+                        schemaVersion = 1,
+                        kind = "GeneralLoginNavigation",
+                        sequence = started.Sequence,
+                        diagnosticStatus = "Dropped",
+                        outcome = "Other",
+                        droppedAtLeast = 1,
+                        additionalDroppedCount = "Unknown"
+                    }), 1024);
+                return;
+            }
+            var endedAtUtc = DateTimeOffset.UtcNow;
+            var elapsed = started.StartedTimestamp.HasValue
+                ? (double?)Stopwatch.GetElapsedTime(started.StartedTimestamp.Value).TotalMilliseconds : null;
+            WriteBoundedDiagnostic(JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                kind = "GeneralLoginNavigation",
+                sequence = started.Sequence,
+                diagnosticStatus = started.StartedAtUtc.HasValue && elapsed.HasValue ? "Observed" : "Unavailable",
+                startedAtUtc = started.StartedAtUtc,
+                endedAtUtc,
+                elapsedMilliseconds = elapsed.HasValue && double.IsFinite(elapsed.Value) ? elapsed : null,
+                outcome = outcome is "Completed" or "NetworkChanged" or "Timeout" ? outcome : "Other",
+                clockQualification = "Unverified"
+            }), 1024);
+        }
+        catch { }
+    }
+
+    private void WriteBoundedDiagnostic(string diagnostic, int maximumBytes)
+    {
+        try
+        {
+            if (Encoding.UTF8.GetByteCount(diagnostic) <= maximumBytes) _output.WriteLine(diagnostic);
+        }
+        catch { }
     }
 
     private async Task LoginAndOpenAsync(IPage page, string relativeUrlWithProfile)
@@ -3921,7 +4212,22 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         for (var loginAttempt = 0; loginAttempt < 2; loginAttempt++)
         {
             var loginUrl = new Uri(_fixture.BaseUri, $"/login?returnUrl={Uri.EscapeDataString(relativeUrlWithProfile)}");
-            await page.GotoAsync(loginUrl.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            var navigationDiagnostic = BeginGeneralLoginDiagnostic();
+            var navigationOutcome = "Other";
+            try
+            {
+                await page.GotoAsync(loginUrl.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                navigationOutcome = "Completed";
+            }
+            catch (Exception exception)
+            {
+                navigationOutcome = ClassifyGeneralLoginFailure(exception);
+                throw;
+            }
+            finally
+            {
+                RecordGeneralLoginDiagnostic(navigationDiagnostic, navigationOutcome);
+            }
             await page.WaitForTimeoutAsync(350);
             await page.Locator("input[name='Username']").FillAsync("admin");
             await page.Locator("input[name='Password']").FillAsync("ContextHub!123");
@@ -4433,7 +4739,46 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
     private IPlaywright? _playwright;
     private IBrowser? _browser;
     private Process? _process;
+    private int _listeningPort;
     private readonly int _port = GetFreeTcpPort();
+    private readonly List<DashboardProcessStartupDiagnostics> _startupDiagnostics = [];
+    private DashboardProcessStartupDiagnostics? _currentStartupDiagnostics;
+    private DashboardFixtureTestClass? _fixtureTestClass;
+
+    public DashboardBrowserFixture()
+    {
+    }
+
+    internal DashboardBrowserFixture(Process ownedProcess)
+    {
+        ArgumentNullException.ThrowIfNull(ownedProcess);
+        _process = ownedProcess;
+    }
+
+    internal void BindTestClass(DashboardFixtureTestClass testClass)
+    {
+        lock (_startupDiagnostics)
+        {
+            _fixtureTestClass = _fixtureTestClass is null || _fixtureTestClass == testClass
+                ? testClass : DashboardFixtureTestClass.Unknown;
+            foreach (var diagnostics in _startupDiagnostics)
+                diagnostics.RecordFixtureTestClass(_fixtureTestClass.Value);
+        }
+    }
+
+    internal void RegisterStartupDiagnostics(DashboardProcessStartupDiagnostics diagnostics)
+    {
+        lock (_startupDiagnostics)
+        {
+            if (_startupDiagnostics.Count >= DashboardProcessStartupDiagnostics.MaximumAttempts)
+            {
+                _startupDiagnostics[^1].RecordOmittedAttempt();
+                return;
+            }
+            if (_fixtureTestClass is { } testClass) diagnostics.RecordFixtureTestClass(testClass);
+            _startupDiagnostics.Add(diagnostics);
+        }
+    }
 
     public Uri BaseUri => new($"http://127.0.0.1:{_port}/");
 
@@ -4441,19 +4786,30 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        Directory.CreateDirectory(ArtifactDirectory);
-        StartDashboardProcess();
-        await WaitForDashboardAsync();
-
-        var executablePath = FindBrowserExecutable()
-            ?? throw new InvalidOperationException("No Chromium-based browser executable was found for dashboard browser tests.");
-
-        _playwright = await Playwright.CreateAsync();
-        _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        try
         {
-            Headless = true,
-            ExecutablePath = executablePath
-        });
+            Directory.CreateDirectory(ArtifactDirectory);
+            StartDashboardProcess();
+            await WaitForDashboardAsync();
+
+            var executablePath = FindBrowserExecutable()
+                ?? throw new InvalidOperationException("No Chromium-based browser executable was found for dashboard browser tests.");
+
+            _playwright = await Playwright.CreateAsync();
+            _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+            {
+                Headless = true,
+                ExecutablePath = executablePath
+            });
+            _currentStartupDiagnostics?.RecordInitializationCompleted();
+        }
+        catch
+        {
+            _currentStartupDiagnostics?.RecordInitializationFailed();
+            _currentStartupDiagnostics?.ObserveProcessExit(_process);
+            _currentStartupDiagnostics?.TryPersist(ArtifactDirectory);
+            throw;
+        }
     }
 
     internal async Task EnsureDashboardRunningAsync()
@@ -4465,31 +4821,136 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
         if (_process is not null)
         {
+            _currentStartupDiagnostics?.ObserveProcessExit(_process);
             _process.Dispose();
             _process = null;
         }
 
-        StartDashboardProcess();
-        await WaitForDashboardAsync();
+        try
+        {
+            StartDashboardProcess();
+            await WaitForDashboardAsync();
+        }
+        catch
+        {
+            _currentStartupDiagnostics?.RecordInitializationFailed();
+            _currentStartupDiagnostics?.ObserveProcessExit(_process);
+            _currentStartupDiagnostics?.TryPersist(ArtifactDirectory);
+            throw;
+        }
     }
 
     public async Task DisposeAsync()
     {
-        if (_browser is not null)
+        var disposalCompleted = false;
+        Task? closeTask = null;
+        try
         {
-            await _browser.CloseAsync();
-            _browser = null;
+            try
+            {
+                if (_browser is { } browser)
+                {
+                    _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.BrowserClose, DashboardTeardownOutcome.Started);
+                    _currentStartupDiagnostics?.ObserveBrowserCloseStart(() => browser.IsConnected);
+                    try
+                    {
+                        closeTask = browser.CloseAsync();
+                        await closeTask.WaitAsync(TimeSpan.FromSeconds(30));
+                        _browser = null;
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.BrowserClose, DashboardTeardownOutcome.Completed);
+                    }
+                    catch (Exception exception)
+                    {
+                        if (exception is TimeoutException)
+                            _currentStartupDiagnostics?.ObserveBrowserCloseTimeout(() => browser.IsConnected, closeTask);
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.BrowserClose,
+                            DashboardTeardownOutcome.Failed, DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+                        throw;
+                    }
+                }
+                else
+                {
+                    _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.BrowserClose, DashboardTeardownOutcome.Skipped);
+                }
+            }
+            finally
+            {
+                try
+                {
+                    if (_process is not null && !_process.HasExited)
+                    {
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostKill, DashboardTeardownOutcome.Started);
+                        try
+                        {
+                            _process.Kill(entireProcessTree: true);
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostKill, DashboardTeardownOutcome.Completed);
+                        }
+                        catch (Exception exception)
+                        {
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostKill,
+                                DashboardTeardownOutcome.Failed, DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+                            throw;
+                        }
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostWait, DashboardTeardownOutcome.Started);
+                        try
+                        {
+                            await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostWait, DashboardTeardownOutcome.Completed);
+                        }
+                        catch (Exception exception)
+                        {
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostWait,
+                                DashboardTeardownOutcome.Failed, DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+                            throw;
+                        }
+                        _currentStartupDiagnostics?.ObserveProcessExit(_process);
+                        _process.Dispose();
+                        _process = null;
+                    }
+                    else
+                    {
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostKill, DashboardTeardownOutcome.Skipped);
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.HostWait, DashboardTeardownOutcome.Skipped);
+                        if (_process is { } process)
+                        {
+                            _currentStartupDiagnostics?.ObserveProcessExit(process);
+                            process.Dispose();
+                            _process = null;
+                        }
+                    }
+                }
+                finally
+                {
+                    _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.PlaywrightDispose,
+                        _playwright is null ? DashboardTeardownOutcome.Skipped : DashboardTeardownOutcome.Started);
+                    try
+                    {
+                        _playwright?.Dispose();
+                        if (_playwright is not null)
+                            _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.PlaywrightDispose, DashboardTeardownOutcome.Completed);
+                    }
+                    catch (Exception exception)
+                    {
+                        _currentStartupDiagnostics?.RecordTeardownStep(DashboardTeardownStep.PlaywrightDispose,
+                            DashboardTeardownOutcome.Failed, DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+                        throw;
+                    }
+                }
+            }
+            disposalCompleted = true;
         }
-
-        if (_process is not null && !_process.HasExited)
+        catch (Exception exception)
         {
-            _process.Kill(entireProcessTree: true);
-            await _process.WaitForExitAsync();
-            _process.Dispose();
-            _process = null;
+            _currentStartupDiagnostics?.RecordTeardownOuterFailure(DashboardProcessStartupDiagnostics.ClassifyTeardownFailure(exception));
+            throw;
         }
-
-        _playwright?.Dispose();
+        finally
+        {
+            if (closeTask is not null) _currentStartupDiagnostics?.ObserveBrowserCloseAfterCleanup(closeTask);
+            _currentStartupDiagnostics?.ObserveProcessExit(_process);
+            foreach (var diagnostics in _startupDiagnostics) diagnostics.RecordDisposal(disposalCompleted);
+            PersistStartupDiagnostics();
+        }
     }
 
     internal async Task<IBrowserContext> CreateContextAsync(DashboardViewport viewport)
@@ -4512,6 +4973,14 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
     private static string? FindBrowserExecutable()
     {
+        var configuredPath = Environment.GetEnvironmentVariable("CONTEXTHUB_TEST_BROWSER_EXECUTABLE");
+        if (!string.IsNullOrWhiteSpace(configuredPath))
+        {
+            if (!Path.IsPathFullyQualified(configuredPath) || !File.Exists(configuredPath))
+                throw new InvalidOperationException("The explicitly selected test browser must be an existing absolute executable path.");
+            return configuredPath;
+        }
+
         var candidates = new[]
         {
             @"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -4546,13 +5015,46 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
             StringComparison.OrdinalIgnoreCase)
             ? "Release"
             : "Debug";
-        var startInfo = new ProcessStartInfo("dotnet", $"run --no-build --configuration {configuration} --project \"{dashboardProject}\" -- --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
+        var dashboardDirectory = Path.GetDirectoryName(dashboardProject)!;
+        var targetFramework = Path.GetFileName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
+        if (targetFramework != "net10.0")
+            throw new NotSupportedException("DASHBOARD_BUILT_LAUNCH_TARGET_FRAMEWORK_UNSUPPORTED");
+        var outputDirectory = Path.Combine(dashboardDirectory, "bin", configuration, targetFramework);
+        var dashboardAssembly = Path.Combine(outputDirectory, "Memory.Dashboard.dll");
+        foreach (var fileName in new[]
         {
-            WorkingDirectory = repoRoot,
+            "Memory.Dashboard.dll", "Memory.Dashboard.deps.json", "Memory.Dashboard.runtimeconfig.json",
+            "Memory.Dashboard.staticwebassets.runtime.json", "Memory.Dashboard.staticwebassets.endpoints.json",
+            "appsettings.json"
+        })
+        {
+            var artifactPath = Path.Combine(outputDirectory, fileName);
+            if (!File.Exists(artifactPath))
+                throw new FileNotFoundException("DASHBOARD_BUILT_LAUNCH_ARTIFACT_MISSING", artifactPath);
+        }
+        if (!Directory.Exists(Path.Combine(dashboardDirectory, "wwwroot")))
+            throw new DirectoryNotFoundException("DASHBOARD_BUILT_LAUNCH_WEB_ROOT_MISSING");
+        var startInfo = new ProcessStartInfo("dotnet", $"\"{dashboardAssembly}\" --urls {BaseUri.AbsoluteUri.TrimEnd('/')}")
+        {
+            WorkingDirectory = dashboardDirectory,
             UseShellExecute = false,
+            CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
+
+        _currentStartupDiagnostics = null;
+        if (_startupDiagnostics.Count < DashboardProcessStartupDiagnostics.MaximumAttempts)
+        {
+            _currentStartupDiagnostics = DashboardProcessStartupDiagnostics.TryCreate(dashboardAssembly, configuration, BaseUri, _port);
+            if (_currentStartupDiagnostics is not null)
+                RegisterStartupDiagnostics(_currentStartupDiagnostics);
+        }
+        else
+        {
+            _startupDiagnostics[^1].RecordOmittedAttempt();
+        }
+        var diagnostics = _currentStartupDiagnostics;
 
         startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Testing";
         startInfo.Environment["Dashboard__UseBrowserTestDoubles"] = "true";
@@ -4568,8 +5070,24 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         startInfo.Environment["Memory__Namespace"] = "context-hub-browser";
 
         _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start dashboard process for browser tests.");
-        _ = _process.StandardOutput.ReadToEndAsync();
-        _ = _process.StandardError.ReadToEndAsync();
+        diagnostics?.ObserveStartedProcess(_process);
+        _process.OutputDataReceived += (_, entry) =>
+        {
+            const string marker = "Now listening on: ";
+            var line = entry.Data;
+            var offset = line?.IndexOf(marker, StringComparison.Ordinal) ?? -1;
+            if (offset >= 0 && Uri.TryCreate(line![(offset + marker.Length)..].Trim(), UriKind.Absolute, out var address) && address.IsLoopback)
+                Interlocked.Exchange(ref _listeningPort, address.Port);
+        };
+        _process.OutputDataReceived += (_, entry) => diagnostics?.ObserveOutput(entry.Data, standardError: false);
+        _process.ErrorDataReceived += (_, entry) => diagnostics?.ObserveOutput(entry.Data, standardError: true);
+        _process.BeginOutputReadLine();
+        _process.BeginErrorReadLine();
+    }
+
+    private void PersistStartupDiagnostics()
+    {
+        foreach (var diagnostics in _startupDiagnostics) diagnostics.TryPersist(ArtifactDirectory);
     }
 
     private static string CreateRepoTestDataPath(params string[] segments)
@@ -4585,6 +5103,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
 
     private async Task WaitForDashboardAsync()
     {
+        _currentStartupDiagnostics?.RecordReadinessStarted();
         using var client = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(3)
@@ -4592,29 +5111,40 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "browser-test-dashboard-token");
 
         var deadline = DateTime.UtcNow.AddSeconds(30);
+        int? lastStatus = null;
+        string? lastFailure = null;
         while (DateTime.UtcNow < deadline)
         {
             if (_process is not null && _process.HasExited)
             {
+                _currentStartupDiagnostics?.ObserveProcessExit(_process);
                 throw new InvalidOperationException($"Dashboard process exited early with code {_process.ExitCode}.");
             }
 
             try
             {
+                _currentStartupDiagnostics?.RecordHttpAttempt();
                 using var response = await client.GetAsync(new Uri(BaseUri, "/health/live"));
+                lastStatus = (int)response.StatusCode;
+                _currentStartupDiagnostics?.RecordHttpStatus((int)response.StatusCode);
                 if (response.StatusCode == HttpStatusCode.OK)
                 {
+                    _currentStartupDiagnostics?.RecordListeningPort(_listeningPort);
+                    _currentStartupDiagnostics?.RecordReady();
                     return;
                 }
             }
-            catch
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
             {
+                lastFailure = exception.GetType().Name;
+                _currentStartupDiagnostics?.RecordHttpFailure(exception is TaskCanceledException);
             }
 
             await Task.Delay(500);
         }
 
-        throw new TimeoutException("Timed out waiting for dashboard browser test host to become ready.");
+        _currentStartupDiagnostics?.RecordListeningPort(_listeningPort);
+        throw new TimeoutException($"Dashboard browser test host readiness failed: listeningPort={_listeningPort}, expectedPort={_port}, lastStatus={lastStatus}, lastFailure={lastFailure}.");
     }
 
     private static int GetFreeTcpPort()

@@ -368,15 +368,35 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             CancellationToken.None);
         actorAccessor.Current = ContextHubRequestActor.Unrestricted;
 
-        var processed = await processor.ProcessNextAsync(CancellationToken.None);
+        // This fixture shares a queue with the other workflow tests. Processing one
+        // arbitrary pending job does not prove that this owner's reindex ran.
+        var targetJob = await dbContext.MemoryJobs.AsNoTracking()
+            .SingleAsync(job => job.ProjectId == projectId && job.JobType == MemoryJobType.Reindex);
+        var pendingCount = await dbContext.MemoryJobs.CountAsync(job => job.Status == MemoryJobStatus.Pending);
+        JobResult? processed = null;
+        for (var attempt = 0; attempt <= pendingCount; attempt++)
+        {
+            processed = await processor.ProcessNextAsync(CancellationToken.None);
+            if (processed?.Id == targetJob.Id) break;
+        }
 
         processed.Should().NotBeNull();
+        processed!.Id.Should().Be(targetJob.Id);
         processed!.Status.Should().Be(MemoryJobStatus.Completed);
         processed.Error.Should().BeEmpty();
 
-        var snapshot = await snapshotStore.GetAsync<DashboardMemoryGraphIndexSnapshotPayload>(
-            DashboardSnapshotKeys.MemoryGraphIndex,
-            CancellationToken.None);
+        // Event refresh may be coalesced with an in-flight collector, whose old
+        // generation must then be fenced out. Wait for the existing scheduled retry;
+        // do not force a manual rebuild that could hide a broken event/actor path.
+        DashboardSnapshotEnvelope<DashboardMemoryGraphIndexSnapshotPayload>? snapshot = null;
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(60);
+        do
+        {
+            snapshot = await snapshotStore.GetAsync<DashboardMemoryGraphIndexSnapshotPayload>(
+                DashboardSnapshotKeys.MemoryGraphIndex, CancellationToken.None);
+            if (snapshot?.Payload.Graph.Nodes.Any(node => node.Id == created.Id) == true) break;
+            await Task.Delay(100);
+        } while (DateTimeOffset.UtcNow < deadline);
         snapshot.Should().NotBeNull();
         snapshot!.Payload.Graph.Nodes.Should().Contain(node => node.Id == created.Id);
 
@@ -831,7 +851,7 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     }
 
     [DockerRequiredFact]
-    public async Task Enqueue_Reindex_Should_Write_New_Model_Key_Vectors()
+    public async Task Enqueue_Reindex_Should_Assert_Provider_Identity_And_Preserve_Vector_Provenance()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         UseBootstrapActor(scope.ServiceProvider);
@@ -859,12 +879,24 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
 
         await processor.ProcessNextAsync(CancellationToken.None);
 
+        var jobsBefore = await dbContext.MemoryJobs.CountAsync();
+        var mismatched = () => memoryService.EnqueueReindexAsync(
+            new EnqueueReindexRequest("intfloat/multilingual-e5-base", created.Id), CancellationToken.None);
+        await mismatched.Should().ThrowAsync<InvalidOperationException>().WithMessage("*configured embedding provider*");
+        (await dbContext.MemoryJobs.CountAsync()).Should().Be(jobsBefore);
+
+        var modelKey = scope.ServiceProvider.GetRequiredService<IEmbeddingProvider>().ModelKey;
         var reindex = await memoryService.EnqueueReindexAsync(
-            new EnqueueReindexRequest("intfloat/multilingual-e5-base", created.Id),
+            new EnqueueReindexRequest(modelKey, created.Id),
             CancellationToken.None);
 
         reindex.Status.Should().Be(MemoryJobStatus.Pending);
-        await DrainConversationAutomationAsync(processor, dbContext, "conversation-1", CancellationToken.None);
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            await processor.ProcessNextAsync(CancellationToken.None);
+            if (await dbContext.MemoryJobs.AnyAsync(job => job.Id == reindex.JobId && job.Status == MemoryJobStatus.Completed)) break;
+        }
+        (await dbContext.MemoryJobs.SingleAsync(job => job.Id == reindex.JobId)).Status.Should().Be(MemoryJobStatus.Completed);
 
         var chunkIds = await dbContext.MemoryItemChunks
             .Where(x => x.MemoryItemId == created.Id)
@@ -876,8 +908,8 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
             .Where(x => chunkIds.Contains(x.ChunkId))
             .ToListAsync(CancellationToken.None);
 
-        vectors.Should().Contain(x => x.ModelKey == "deterministic-384" && x.Status == VectorStatus.Active.ToString());
-        vectors.Count(x => x.ModelKey == "intfloat/multilingual-e5-base" && x.Status == VectorStatus.Active.ToString())
+        vectors.Should().OnlyContain(x => x.ModelKey == modelKey);
+        vectors.Count(x => x.ModelKey == modelKey && x.Status == VectorStatus.Active.ToString())
             .Should().Be(chunkIds.Count);
     }
 

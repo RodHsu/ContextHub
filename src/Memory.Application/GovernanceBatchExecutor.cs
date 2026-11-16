@@ -799,13 +799,13 @@ public sealed class GovernanceBatchExecutor(
         if (item.Kind == nameof(GovernanceItemKind.ProjectHierarchy) && item.RequiresExplicitApproval)
         {
             var rows = await dbContext.ProjectHierarchies.AsNoTracking()
-                .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && x.ParentProjectId == item.ProjectId)
+                .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && Memory.Application.ProjectContext.Matches(x.ParentProjectId, item.ProjectId))
                 .OrderBy(x => x.ChildProjectId)
                 .ThenBy(x => x.Id)
                 .ToListAsync(cancellationToken);
             var proposedChildren = rows.Where(x => x.Id != item.Id)
                 .Select(x => x.ChildProjectId)
-                .Where(x => !string.Equals(x, item.ProjectId, StringComparison.OrdinalIgnoreCase))
+                .Where(x => !Memory.Application.ProjectContext.Matches(x, item.ProjectId))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
@@ -850,7 +850,7 @@ public sealed class GovernanceBatchExecutor(
                     GovernanceBatchItemDisposition.NoOp, "Artifact duplicate is already reconciled or no longer exists.", [],
                     authority is null ? [] : [authority.Id], actor, cancellationToken);
             }
-            if (!string.Equals(duplicate.ProjectId, authority.ProjectId, StringComparison.OrdinalIgnoreCase) ||
+            if (!Memory.Application.ProjectContext.Matches(duplicate.ProjectId, authority.ProjectId) ||
                 duplicate.MemoryType != MemoryType.Artifact || authority.MemoryType != MemoryType.Artifact ||
                 !string.Equals(Normalize(duplicate.Title), Normalize(authority.Title), StringComparison.Ordinal) ||
                 !string.Equals(Normalize(duplicate.Summary), Normalize(authority.Summary), StringComparison.Ordinal) ||
@@ -960,7 +960,7 @@ public sealed class GovernanceBatchExecutor(
                 throw new InvalidOperationException("Reindex proposal applied without a job read-back reference.");
             }
             var jobReadBack = await dbContext.MemoryJobs.AsNoTracking().AnyAsync(x =>
-                x.Id == proposal.AppliedResourceId.Value && x.ProjectId == finding.ProjectId, cancellationToken);
+                x.Id == proposal.AppliedResourceId.Value && Memory.Application.ProjectContext.Matches(x.ProjectId, finding.ProjectId), cancellationToken);
             if (!jobReadBack)
             {
                 throw new InvalidOperationException("Reindex job reference failed server-side read-back.");
@@ -1086,7 +1086,7 @@ public sealed class GovernanceBatchExecutor(
         }
         var left = await memoryService.GetAsync(finding.PrimaryMemoryId.Value, cancellationToken);
         var right = await memoryService.GetAsync(finding.SecondaryMemoryId.Value, cancellationToken);
-        if (left is null || right is null || !string.Equals(left.ProjectId, right.ProjectId, StringComparison.OrdinalIgnoreCase))
+        if (left is null || right is null || !Memory.Application.ProjectContext.Matches(left.ProjectId, right.ProjectId))
         {
             return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.RequiresUserDecision, "Merge candidates are missing or cross ProjectId.", actor, cancellationToken);
         }
@@ -1207,7 +1207,7 @@ public sealed class GovernanceBatchExecutor(
         var pair = await dbContext.MemoryItems.AsNoTracking()
             .Where(x => (x.Id == primaryId || x.Id == secondaryId) &&
                         x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
-                        x.ProjectId == projectId)
+                        Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
             .ToArrayAsync(cancellationToken);
         if (pair.Length != 2)
         {
@@ -1258,7 +1258,7 @@ public sealed class GovernanceBatchExecutor(
         var pair = await dbContext.MemoryItems
             .Where(x => (x.Id == primaryId || x.Id == secondaryId) &&
                         x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
-                        x.ProjectId == projectId)
+                        Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
             .ToArrayAsync(cancellationToken);
         var primary = pair.Single(x => x.Id == primaryId);
         var secondary = pair.Single(x => x.Id == secondaryId);
@@ -1298,7 +1298,7 @@ public sealed class GovernanceBatchExecutor(
         var pair = await dbContext.MemoryItems.AsNoTracking()
             .Where(x => (x.Id == primaryId || x.Id == secondaryId) &&
                         x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
-                        x.ProjectId == projectId)
+                        Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
             .ToArrayAsync(cancellationToken);
         return pair.Length == 2 && IsExactTypedReplacement(
             pair.Single(x => x.Id == primaryId),
@@ -1580,7 +1580,7 @@ public sealed class GovernanceBatchExecutor(
             var summary = GovernanceEvidenceFingerprint.NormalizeExactText(insight.Summary);
             var now = clock.UtcNow;
             var durableEquivalents = await dbContext.MemoryItems.AsNoTracking().Where(x =>
-                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && x.ProjectId == insight.ProjectId &&
+                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && Memory.Application.ProjectContext.Matches(x.ProjectId, insight.ProjectId) &&
                 x.Status == MemoryStatus.Active &&
                 x.AuthorityState == MemoryAuthorityState.Current &&
                 x.ValidFrom <= now &&
@@ -1842,7 +1842,7 @@ public sealed class GovernanceBatchExecutor(
         => string.Equals(persisted.Key, rebuilt.Key, StringComparison.Ordinal) &&
            string.Equals(persisted.Kind, rebuilt.Kind, StringComparison.Ordinal) &&
            persisted.Id == rebuilt.Id &&
-           string.Equals(persisted.ProjectId, rebuilt.ProjectId, StringComparison.OrdinalIgnoreCase) &&
+           Memory.Application.ProjectContext.Matches(persisted.ProjectId, rebuilt.ProjectId) &&
            string.Equals(persisted.SnapshotToken, rebuilt.SnapshotToken, StringComparison.Ordinal) &&
            string.Equals(persisted.GovernanceRunId, rebuilt.GovernanceRunId, StringComparison.Ordinal) &&
            string.Equals(persisted.Classification, rebuilt.Classification, StringComparison.Ordinal) &&

@@ -185,7 +185,7 @@ public sealed class DashboardQueryService(
         var now = timeProvider.GetUtcNow();
         var actor = actorAccessor.Current;
         var normalizedProjectId = string.IsNullOrWhiteSpace(projectId) ||
-            string.Equals(projectId, ProjectContext.AllProjectIdsSentinel, StringComparison.OrdinalIgnoreCase)
+            Memory.Application.ProjectContext.Matches(projectId, ProjectContext.AllProjectIdsSentinel)
                 ? null
                 : ProjectContext.Normalize(projectId);
 
@@ -219,12 +219,12 @@ public sealed class DashboardQueryService(
 
         if (normalizedProjectId is not null)
         {
-            authorityQuery = authorityQuery.Where(item => item.ProjectId == normalizedProjectId);
-            projectionQuery = projectionQuery.Where(item => item.ProjectId == normalizedProjectId);
-            runQuery = runQuery.Where(item => item.ProjectId == normalizedProjectId);
-            executionQuery = executionQuery.Where(item => item.ProjectId == normalizedProjectId);
-            objectQuery = objectQuery.Where(item => item.ProjectId == normalizedProjectId);
-            transferQuery = transferQuery.Where(item => item.ProjectId == normalizedProjectId);
+            authorityQuery = authorityQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, normalizedProjectId));
+            projectionQuery = projectionQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, normalizedProjectId));
+            runQuery = runQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, normalizedProjectId));
+            executionQuery = executionQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, normalizedProjectId));
+            objectQuery = objectQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, normalizedProjectId));
+            transferQuery = transferQuery.Where(item => Memory.Application.ProjectContext.Matches(item.ProjectId, normalizedProjectId));
         }
 
         var authorityEventCount = await authorityQuery.LongCountAsync(cancellationToken);
@@ -234,20 +234,34 @@ public sealed class DashboardQueryService(
             await authorityQuery.LongCountAsync(item => item.SecurityCritical, cancellationToken),
             await authorityQuery.Select(item => (DateTimeOffset?)item.OccurredAt).MaxAsync(cancellationToken));
 
-        var projectionStates = await projectionQuery
+        var storedProjectionStates = await projectionQuery
             .OrderByDescending(item => item.UpdatedAt)
             .Take(100)
-            .Select(item => new DashboardProjectionStateResult(
+            .ToArrayAsync(cancellationToken);
+        var projectionProjects = storedProjectionStates.Select(item => item.ProjectId).Distinct(ProjectContext.IdentityComparer).ToArray();
+        var authorityBoundaries = await authorityQuery
+            .Where(item => Memory.Application.ProjectContext.IdentityKeys(projectionProjects).Contains(Memory.Application.ProjectContext.IdentityKey(item.ProjectId)))
+            .GroupBy(item => new { item.TenantId, ProjectId = ProjectContext.IdentityKey(item.ProjectId) })
+            .Select(group => new { group.Key.TenantId, group.Key.ProjectId, Sequence = group.Max(item => item.Sequence) })
+            .ToArrayAsync(cancellationToken);
+        var observedBoundaries = authorityBoundaries.ToDictionary(item => (item.TenantId, item.ProjectId), item => item.Sequence);
+        var projectionStates = storedProjectionStates.Select(item =>
+        {
+            // The projector's saved boundary does not include commits made since its last run.
+            // Keep that boundary for compatibility, but compare freshness with live scoped authority.
+            var observed = Math.Max(item.AuthoritySequence, observedBoundaries.GetValueOrDefault((item.TenantId, ProjectContext.IdentityKey(item.ProjectId))));
+            return new DashboardProjectionStateResult(
                 item.ProjectId,
                 item.Generation,
                 item.AuthoritySequence,
                 item.Cursor,
-                item.AuthoritySequence > item.Cursor ? item.AuthoritySequence - item.Cursor : 0,
+                observed > item.Cursor ? observed - item.Cursor : 0,
                 item.LastSuccessAt,
                 item.NextRunAt,
-                item.Cursor < item.AuthoritySequence || item.LastSuccessAt == null,
-                false))
-            .ToArrayAsync(cancellationToken);
+                item.Cursor < observed || item.LastSuccessAt == null,
+                false,
+                observed);
+        }).ToArray();
 
         var recentRuns = await runQuery
             .OrderByDescending(item => item.UpdatedAt)
@@ -540,8 +554,13 @@ public sealed class DashboardQueryService(
         var normalized = Normalize(request.Page, request.PageSize, 100);
         var normalizedRequest = request with { Page = normalized.Page, PageSize = normalized.PageSize };
         var actor = actorAccessor.Current;
+        var requestedProjects = ResolveDashboardSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
+        if (requestedProjects is not null)
+        {
+            ActorAuthorization.EnsureProjectsAllowed(actor, requestedProjects, write: false);
+        }
         var version = await cacheStore.GetVersionStampAsync(
-            ResolveDashboardSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer) ?? [],
+            requestedProjects ?? [],
             actor,
             request.UseSummaryLayer,
             cancellationToken);
@@ -555,7 +574,7 @@ public sealed class DashboardQueryService(
             return cached.Value;
         }
 
-        var query = BuildMemoryScopeQuery(
+        var query = await BuildMemoryScopeQueryAsync(
             request.ProjectId,
             request.IncludedProjectIds,
             request.QueryMode,
@@ -566,7 +585,8 @@ public sealed class DashboardQueryService(
             request.MemoryType,
             request.Status,
             request.SourceType,
-            request.Tag);
+            request.Tag,
+            cancellationToken);
 
         var totalCount = await query.CountAsync(cancellationToken);
         var items = await query
@@ -599,6 +619,12 @@ public sealed class DashboardQueryService(
 
     public async Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)
     {
+        var actor = actorAccessor.Current;
+        if (!string.IsNullOrWhiteSpace(request.ProjectId))
+            ActorAuthorization.EnsureProjectAllowed(actor, ProjectContext.Normalize(request.ProjectId), write: false);
+        var requestedProjects = ResolveDashboardSearchProjects(request.ProjectId, request.IncludedProjectIds, request.QueryMode, request.UseSummaryLayer);
+        if (requestedProjects is not null)
+            ActorAuthorization.EnsureProjectsAllowed(actor, requestedProjects, write: false);
         var normalizedMaxNodes = NormalizeGraphMaxNodes(request.MaxNodes);
         var snapshot = await snapshotStore.GetAsync<DashboardMemoryGraphIndexSnapshotPayload>(
             DashboardSnapshotKeys.MemoryGraphIndex,
@@ -617,8 +643,10 @@ public sealed class DashboardQueryService(
                     "Graph index snapshot unavailable. Wait for the background collector to finish the first refresh."));
         }
 
-        var graph = BuildGraphFromSnapshot(request, normalizedMaxNodes, snapshot.Payload.Graph);
-        return await ApplyActorGraphFilterAsync(graph, cancellationToken);
+        // Filter before ranking, traversal and truncation so inaccessible nodes cannot crowd
+        // out permitted nodes or influence the returned graph's counts and truncation state.
+        var visibleGraph = await ApplyActorGraphFilterAsync(snapshot.Payload.Graph, cancellationToken);
+        return BuildGraphFromSnapshot(request, normalizedMaxNodes, visibleGraph);
     }
 
     public async Task<IReadOnlyList<ProjectSuggestionResult>> GetProjectSuggestionsAsync(string? query, int limit, CancellationToken cancellationToken)
@@ -629,7 +657,8 @@ public sealed class DashboardQueryService(
             cancellationToken);
         if (snapshot is not null)
         {
-            var snapshotProjects = await FilterActiveProjectSuggestionsAsync(FilterProjectSuggestions(snapshot.Payload.Projects, query, normalizedLimit), cancellationToken);
+            var visibleProjects = await FilterActiveProjectSuggestionsAsync(snapshot.Payload.Projects, cancellationToken);
+            var snapshotProjects = FilterProjectSuggestions(visibleProjects, query, normalizedLimit);
             if (snapshotProjects.Count >= normalizedLimit || string.IsNullOrWhiteSpace(query))
             {
                 return snapshotProjects;
@@ -639,24 +668,31 @@ public sealed class DashboardQueryService(
         var projects = await dbContext.MemoryItems
             .AsNoTracking()
             .Where(x => !actorAccessor.Current.HasUser || (x.TenantId == actorAccessor.Current.TenantId && x.OwnerUserId == actorAccessor.Current.UserId))
-            .Where(x => x.ProjectId != ProjectContext.SharedProjectId && x.ProjectId != ProjectContext.UserProjectId)
-            .GroupBy(x => x.ProjectId)
-            .Select(group => new ProjectSuggestionResult(group.Key, group.Count()))
+            .Where(x => !ProjectContext.Matches(x.ProjectId, ProjectContext.SharedProjectId) && !ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId))
+            .GroupBy(x => ProjectContext.IdentityKey(x.ProjectId))
+            .Select(group => new ProjectSuggestionResult(group.Min(x => x.ProjectId)!, group.Count()))
             .ToListAsync(cancellationToken);
 
-        return await FilterActiveProjectSuggestionsAsync(FilterProjectSuggestions(projects, query, normalizedLimit), cancellationToken);
+        var visibleFallbackProjects = await FilterActiveProjectSuggestionsAsync(projects, cancellationToken);
+        return FilterProjectSuggestions(visibleFallbackProjects, query, normalizedLimit);
     }
 
     public async Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
-        var version = await cacheStore.GetVersionStampAsync([], actor, includeShared: false, cancellationToken);
+        var projectId = await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => x.Id == id && (!actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)))
+            .Select(x => x.ProjectId).FirstOrDefaultAsync(cancellationToken);
+        if (projectId is null) return null;
+        ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
+        var version = await cacheStore.GetVersionStampAsync([projectId], actor, includeShared: false, cancellationToken);
         var cacheKey = RedisCacheKeyBuilder.DashboardMemoryDetails(version, id, actor);
         var cached = await objectCache.GetAsync<MemoryDetailsResult>(
             cacheKey,
             "dashboard-memory-details",
             cancellationToken);
-        if (cached.Hit)
+        if (cached.Hit && cached.Value is not null &&
+            ProjectContext.Matches(cached.Value.Document.ProjectId, projectId))
         {
             return cached.Value;
         }
@@ -667,7 +703,7 @@ public sealed class DashboardQueryService(
             .Include(x => x.Chunks)
                 .ThenInclude(x => x.Vectors)
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
-            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            .FirstOrDefaultAsync(x => x.Id == id && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId), cancellationToken);
 
         if (entity is null)
         {
@@ -912,15 +948,28 @@ public sealed class DashboardQueryService(
             return projects;
         }
 
-        var projectIds = projects.Select(project => project.ProjectId).ToArray();
         var actor = actorAccessor.Current;
+        if (actor.HasUser)
+        {
+            var grantedProjects = actor.AllowedProjectIds.ToHashSet(ProjectContext.IdentityComparer);
+            var visibleProjectIds = projects.Where(project => grantedProjects.Count == 0 || Memory.Application.ProjectContext.IdentityKeys(grantedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(project.ProjectId))
+                || ProjectContext.IsShared(project.ProjectId) || ProjectContext.IsUser(project.ProjectId)).Select(project => project.ProjectId).ToArray();
+            // Snapshot counts belong to the whole instance. Recompute counts within the
+            // caller's ownership boundary before returning even a project name or count.
+            projects = await dbContext.MemoryItems.AsNoTracking()
+                .Where(item => Memory.Application.ProjectContext.IdentityKeys(visibleProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(item.ProjectId)) && item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId)
+                .GroupBy(item => ProjectContext.IdentityKey(item.ProjectId))
+                .Select(group => new ProjectSuggestionResult(group.Min(item => item.ProjectId)!, group.Count()))
+                .ToListAsync(cancellationToken);
+        }
+        var projectIds = projects.Select(project => project.ProjectId).ToArray();
         var inactiveProjectIds = await dbContext.MemoryItems.AsNoTracking()
-            .Where(item => projectIds.Contains(item.ProjectId) && item.ExternalKey == "system:project-information")
+            .Where(item => Memory.Application.ProjectContext.IdentityKeys(projectIds).Contains(Memory.Application.ProjectContext.IdentityKey(item.ProjectId)) && item.ExternalKey == "system:project-information")
             .Where(item => item.Status == MemoryStatus.Archived || item.Tags.Contains("project-hidden"))
             .Where(item => !actor.HasUser || (item.TenantId == actor.TenantId && (actor.IsServiceActor || item.OwnerUserId == actor.UserId)))
             .Select(item => item.ProjectId)
             .ToListAsync(cancellationToken);
-        return projects.Where(project => !inactiveProjectIds.Contains(project.ProjectId, StringComparer.OrdinalIgnoreCase)).ToArray();
+        return projects.Where(project => !inactiveProjectIds.Contains(project.ProjectId, Memory.Application.ProjectContext.IdentityComparer)).ToArray();
     }
 
     private static (int Page, int PageSize) Normalize(int page, int pageSize, int maxPageSize)
@@ -930,7 +979,7 @@ public sealed class DashboardQueryService(
         return (normalizedPage, normalizedPageSize);
     }
 
-    private IQueryable<MemoryItem> BuildMemoryScopeQuery(
+    private async Task<IQueryable<MemoryItem>> BuildMemoryScopeQueryAsync(
         string? currentProjectId,
         IReadOnlyList<string>? includedProjectIds,
         MemoryQueryMode queryMode,
@@ -941,19 +990,29 @@ public sealed class DashboardQueryService(
         MemoryType? memoryType,
         MemoryStatus? status,
         string? sourceType,
-        string? tag)
+        string? tag,
+        CancellationToken cancellationToken)
     {
         var items = dbContext.MemoryItems.AsNoTracking().AsQueryable();
         var actor = actorAccessor.Current;
         if (actor.HasUser)
         {
             items = items.Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+            if (actor.AllowedProjectIds.Count > 0)
+            {
+                var candidateProjects = await items.Select(x => x.ProjectId).Distinct().ToListAsync(cancellationToken);
+                var grantedProjects = candidateProjects.Where(projectId =>
+                    ProjectContext.IsShared(projectId) || ProjectContext.IsUser(projectId) ||
+                    actor.AllowedProjectIds.Contains(projectId, Memory.Application.ProjectContext.IdentityComparer)).ToArray();
+                items = items.Where(x => Memory.Application.ProjectContext.IdentityKeys(grantedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
+            }
         }
         var allowedProjects = ResolveDashboardSearchProjects(currentProjectId, includedProjectIds, queryMode, useSummaryLayer);
 
         if (allowedProjects is not null)
         {
-            items = items.Where(x => allowedProjects.Contains(x.ProjectId));
+            ActorAuthorization.EnsureProjectsAllowed(actor, allowedProjects, write: false);
+            items = items.Where(x => Memory.Application.ProjectContext.IdentityKeys(allowedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
         if (!string.IsNullOrWhiteSpace(projectQuery))
@@ -1010,14 +1069,19 @@ public sealed class DashboardQueryService(
             return graph;
         }
 
-        var nodeIds = graph.Nodes.Select(x => x.Id).ToArray();
-        var allowedIds = await dbContext.MemoryItems
+        bool ProjectAllowed(string projectId) => actor.AllowedProjectIds.Count == 0
+            || actor.AllowedProjectIds.Contains(projectId, Memory.Application.ProjectContext.IdentityComparer)
+            || ProjectContext.IsShared(projectId) || ProjectContext.IsUser(projectId);
+        var nodeIds = graph.Nodes.Where(node => ProjectAllowed(node.ProjectId)).Select(x => x.Id).ToArray();
+        var currentItems = await dbContext.MemoryItems
             .AsNoTracking()
             .Where(x => nodeIds.Contains(x.Id))
             .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
-            .Select(x => x.Id)
+            .Select(x => new { x.Id, x.ProjectId })
             .ToListAsync(cancellationToken);
-        var allowed = allowedIds.ToHashSet();
+        // Use the authorization comparer, not database lower(), whose Unicode mappings
+        // differ from .NET. Check current ownership/project as well as the snapshot metadata.
+        var allowed = currentItems.Where(item => ProjectAllowed(item.ProjectId)).Select(item => item.Id).ToHashSet();
         var nodes = graph.Nodes.Where(x => allowed.Contains(x.Id)).ToArray();
         var edges = graph.Edges.Where(x => allowed.Contains(x.FromId) && allowed.Contains(x.ToId)).ToArray();
 
@@ -1253,7 +1317,7 @@ public sealed class DashboardQueryService(
 
         if (allowedProjects is not null)
         {
-            filtered = filtered.Where(node => allowedProjects.Contains(node.ProjectId, StringComparer.OrdinalIgnoreCase));
+            filtered = filtered.Where(node => allowedProjects.Contains(node.ProjectId, Memory.Application.ProjectContext.IdentityComparer));
         }
 
         if (IsIntegratedAllProjectsGraphRequest(request))
@@ -1917,7 +1981,7 @@ public sealed class DashboardQueryService(
 
     private static bool IsEligibleIntegratedSimilarityNeighbor(MemoryItem source, ScoredGraphNode candidate)
     {
-        if (string.Equals(source.ProjectId, candidate.Item.ProjectId, StringComparison.OrdinalIgnoreCase))
+        if (Memory.Application.ProjectContext.Matches(source.ProjectId, candidate.Item.ProjectId))
         {
             return true;
         }

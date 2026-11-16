@@ -26,9 +26,9 @@ public sealed class FullGovernancePlanService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var tenantId = actor.TenantId ?? throw new InvalidOperationException("Full governance review requires a tenant actor.");
         var ownerUserId = actor.UserId ?? throw new InvalidOperationException("Full governance review requires a tenant user.");
-        var projects = projectIds.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var projects = projectIds.Distinct(ProjectContext.IdentityComparer).ToArray();
         ActorAuthorization.EnsureProjectsAllowed(actor, projects, write: false);
-        var projectSet = projects.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var projectSet = projects.ToHashSet(ProjectContext.IdentityComparer);
         var items = new List<GovernanceReviewItem>();
         var retention = await autonomousRetention.ReviewAsync(projects, governanceRunId, cancellationToken);
         foreach (var candidate in retention.Candidates)
@@ -68,9 +68,9 @@ public sealed class FullGovernancePlanService(
         var scopedMemories = await dbContext.MemoryItems.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId)
             .Where(x =>
-                (projects.Contains(x.ProjectId) &&
+                (Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) &&
                  (x.MemoryType == MemoryType.Artifact || x.ExternalKey == ProjectInformationExternalKey)) ||
-                (x.ProjectId == ProjectContext.UserProjectId && x.MemoryType == MemoryType.Preference))
+                (Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId) && x.MemoryType == MemoryType.Preference))
             .Select(x => new
             {
                 x.Id,
@@ -92,12 +92,12 @@ public sealed class FullGovernancePlanService(
             .ToListAsync(cancellationToken);
 
         var projectInformation = scopedMemories
-            .Where(x => projectSet.Contains(x.ProjectId) && x.ExternalKey == ProjectInformationExternalKey)
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(projectSet).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && x.ExternalKey == ProjectInformationExternalKey)
             .ToArray();
         foreach (var projectId in projects)
         {
             var information = projectInformation.OrderByDescending(x => x.UpdatedAt)
-                .FirstOrDefault(x => string.Equals(x.ProjectId, projectId, StringComparison.OrdinalIgnoreCase));
+                .FirstOrDefault(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
             if (information is null || !IsValidJson(information.MetadataJson))
             {
                 items.Add(Item($"project:{projectId.ToLowerInvariant()}", GovernanceItemKind.Project, projectId,
@@ -109,7 +109,7 @@ public sealed class FullGovernancePlanService(
 
         var hierarchyRows = await dbContext.ProjectHierarchies.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId)
-            .Where(x => projects.Contains(x.ParentProjectId) || projects.Contains(x.ChildProjectId))
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ParentProjectId)) || Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ChildProjectId)))
             .ToListAsync(cancellationToken);
         var hierarchyReasons = FindHierarchyProblems(hierarchyRows, projectSet);
         foreach (var problem in hierarchyReasons)
@@ -119,7 +119,7 @@ public sealed class FullGovernancePlanService(
                 GovernanceBatchRiskLevel.High, true, problem.Row.Id, problem.Reasons, governanceRunId));
         }
 
-        var preferences = scopedMemories.Where(x => x.ProjectId == ProjectContext.UserProjectId && x.MemoryType == MemoryType.Preference).ToArray();
+        var preferences = scopedMemories.Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId) && x.MemoryType == MemoryType.Preference).ToArray();
         foreach (var preference in preferences.Where(x => string.IsNullOrWhiteSpace(x.Content) || !IsValidJson(x.MetadataJson)))
         {
             items.Add(Item($"preference:{preference.Id:N}", GovernanceItemKind.UserPreference, ProjectContext.UserProjectId,
@@ -139,7 +139,7 @@ public sealed class FullGovernancePlanService(
             }
         }
 
-        var artifacts = scopedMemories.Where(x => projectSet.Contains(x.ProjectId) && x.MemoryType == MemoryType.Artifact &&
+        var artifacts = scopedMemories.Where(x => Memory.Application.ProjectContext.IdentityKeys(projectSet).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && x.MemoryType == MemoryType.Artifact &&
                                                    x.ExternalKey != ProjectInformationExternalKey).ToArray();
         foreach (var group in artifacts.Where(x => x.Status == MemoryStatus.Active)
                      .GroupBy(x => $"{x.ProjectId}\nvalue:{NormalizeText(x.Title)}\n{NormalizeText(x.Summary)}\n{NormalizeText(x.SourceType)}", StringComparer.OrdinalIgnoreCase)
@@ -158,11 +158,11 @@ public sealed class FullGovernancePlanService(
             }
         }
         var discussions = await dbContext.DiscussionThreads.AsNoTracking().Include(x => x.Participants).Include(x => x.Messages)
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.HostProjectId))
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.HostProjectId)))
             .ToListAsync(cancellationToken);
         foreach (var discussion in discussions)
         {
-            var invalidParticipant = discussion.Participants.Any(x => !projectSet.Contains(x.ProjectId));
+            var invalidParticipant = discussion.Participants.Any(x => !Memory.Application.ProjectContext.IdentityKeys(projectSet).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
             var closedForRetention = discussion.Status.Equals("Closed", StringComparison.OrdinalIgnoreCase) &&
                                      discussion.ArchivedAt is null && discussion.UpdatedAt < clock.UtcNow.AddDays(-30);
             var staleOpen = discussion.Status.Equals("Open", StringComparison.OrdinalIgnoreCase) &&
@@ -179,7 +179,7 @@ public sealed class FullGovernancePlanService(
         }
 
         var workItems = await dbContext.ProjectWorkItems.AsNoTracking().Include(x => x.ChecklistItems)
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId))
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .ToListAsync(cancellationToken);
         foreach (var workItem in workItems)
         {
@@ -194,12 +194,12 @@ public sealed class FullGovernancePlanService(
 
         await ReopenChangedInsightsAsync(projects, tenantId, ownerUserId, governanceRunId, cancellationToken);
         var insights = await dbContext.ConversationInsights.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId))
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending || x.PromotionStatus == ConversationPromotionStatus.Failed)
             .ToListAsync(cancellationToken);
         var now = clock.UtcNow;
         var currentInsightEvidence = await dbContext.MemoryItems.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId))
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .Where(x => x.Status == MemoryStatus.Active &&
                         x.AuthorityState == MemoryAuthorityState.Current &&
                         x.ValidFrom <= now &&
@@ -213,7 +213,7 @@ public sealed class FullGovernancePlanService(
             .Where(group => group.Count() == 1)
             .ToDictionary(group => group.Key, group => group.Single(), StringComparer.OrdinalIgnoreCase);
         var proposalProjects = projects.Append(ProjectContext.SharedProjectId)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(ProjectContext.IdentityComparer)
             .ToArray();
         var proposalInsights = await ChatGptProposalService.ApplyActorScope(
                 dbContext.ConversationInsights.AsNoTracking(), actor, proposalProjects, ChatGptProposalStatus.Pending)
@@ -254,7 +254,7 @@ public sealed class FullGovernancePlanService(
 
         var actions = await dbContext.SuggestedActions.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
-                        (projects.Contains(x.ProjectId) || x.ProjectId == ProjectContext.SharedProjectId) &&
+                        (Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) || Memory.Application.ProjectContext.Matches(x.ProjectId, ProjectContext.SharedProjectId)) &&
                         x.Status == SuggestedActionStatus.Pending)
             .ToListAsync(cancellationToken);
         foreach (var action in actions)
@@ -266,9 +266,9 @@ public sealed class FullGovernancePlanService(
                 ["SUGGESTED_ACTION_RESOURCE_READBACK_REQUIRED"], governanceRunId));
         }
 
-        var logTotal = await dbContext.RuntimeLogEntries.AsNoTracking().LongCountAsync(x => projects.Contains(x.ProjectId), cancellationToken);
+        var logTotal = await dbContext.RuntimeLogEntries.AsNoTracking().LongCountAsync(x => Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)), cancellationToken);
         var logPartitions = await dbContext.RuntimeLogEntries.AsNoTracking()
-            .Where(x => projects.Contains(x.ProjectId))
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .GroupBy(x => new { x.ProjectId, x.ServiceName, Day = x.CreatedAt.Date })
             .Select(x => new
             {
@@ -391,7 +391,7 @@ public sealed class FullGovernancePlanService(
             IsolationLevel.Serializable,
             cancellationToken);
         var exceptions = await dbContext.ConversationInsights
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId) &&
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) &&
                         (x.PromotionStatus == ConversationPromotionStatus.Deferred ||
                          x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision ||
                          x.PromotionStatus == ConversationPromotionStatus.HostBlocked))
@@ -506,17 +506,17 @@ public sealed class FullGovernancePlanService(
     private static IReadOnlyList<HierarchyProblem> FindHierarchyProblems(IReadOnlyList<ProjectHierarchy> rows, IReadOnlySet<string> projects)
     {
         var result = new List<HierarchyProblem>();
-        var duplicates = rows.GroupBy(x => $"{x.ParentProjectId}\n{x.ChildProjectId}", StringComparer.OrdinalIgnoreCase)
+        var duplicates = rows.GroupBy(x => (ProjectContext.IdentityKey(x.ParentProjectId), ProjectContext.IdentityKey(x.ChildProjectId)))
             .Where(x => x.Count() > 1).SelectMany(x => x.Skip(1)).Select(x => x.Id).ToHashSet();
-        var adjacency = rows.GroupBy(x => x.ParentProjectId, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(x => x.Key, x => x.Select(row => row.ChildProjectId).ToArray(), StringComparer.OrdinalIgnoreCase);
+        var adjacency = rows.GroupBy(x => x.ParentProjectId, ProjectContext.IdentityComparer)
+            .ToDictionary(x => x.Key, x => x.Select(row => row.ChildProjectId).ToArray(), ProjectContext.IdentityComparer);
         foreach (var row in rows)
         {
             var reasons = new List<string>();
-            if (string.Equals(row.ParentProjectId, row.ChildProjectId, StringComparison.OrdinalIgnoreCase)) reasons.Add("HIERARCHY_SELF_PARENT");
-            if (!projects.Contains(row.ParentProjectId) || !projects.Contains(row.ChildProjectId)) reasons.Add("HIERARCHY_DANGLING_PROJECT");
+            if (Memory.Application.ProjectContext.Matches(row.ParentProjectId, row.ChildProjectId)) reasons.Add("HIERARCHY_SELF_PARENT");
+            if (!Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(row.ParentProjectId)) || !Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(row.ChildProjectId))) reasons.Add("HIERARCHY_DANGLING_PROJECT");
             if (duplicates.Contains(row.Id)) reasons.Add("HIERARCHY_DUPLICATE_CHILD");
-            if (HasPath(adjacency, row.ChildProjectId, row.ParentProjectId, new HashSet<string>(StringComparer.OrdinalIgnoreCase))) reasons.Add("HIERARCHY_CYCLE");
+            if (HasPath(adjacency, row.ChildProjectId, row.ParentProjectId, new HashSet<string>(ProjectContext.IdentityComparer))) reasons.Add("HIERARCHY_CYCLE");
             if (reasons.Count > 0) result.Add(new HierarchyProblem(row, reasons[0], reasons));
         }
         return result;
@@ -532,7 +532,7 @@ public sealed class FullGovernancePlanService(
         }
         foreach (var child in children)
         {
-            if (string.Equals(child, target, StringComparison.OrdinalIgnoreCase) || HasPath(graph, child, target, visited)) return true;
+            if (ProjectContext.Matches(child, target) || HasPath(graph, child, target, visited)) return true;
         }
         visited.Remove(current);
         return false;

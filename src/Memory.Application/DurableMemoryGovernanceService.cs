@@ -64,7 +64,7 @@ public sealed class DurableMemoryGovernanceService(
         var memories = await dbContext.MemoryItems
             .AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId)
-            .Where(x => normalizedProjects.Contains(x.ProjectId))
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(normalizedProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .OrderBy(x => x.ProjectId)
             .ThenBy(x => x.CreatedAt)
             .ThenBy(x => x.Id)

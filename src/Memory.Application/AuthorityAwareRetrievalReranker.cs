@@ -12,7 +12,7 @@ namespace Memory.Application;
 /// </summary>
 internal static class AuthorityAwareRetrievalReranker
 {
-    internal const string RankingVersion = "authority-v1";
+    internal const string RankingVersion = "authority-v2-project-identity-v1";
     internal const string ConflictMarker = "[Authority conflict: competing claims; no winner selected.]";
 
     private static readonly string[] SupersedesPropertyNames =
@@ -744,21 +744,22 @@ internal static class AuthorityAwareRetrievalReranker
             identity = item.Id.ToString("D");
         }
 
-        return string.Join(
-            '|',
-            NormalizeGuid(item.TenantId),
-            NormalizeGuid(item.OwnerUserId),
-            NormalizeText(item.ProjectId),
+        return JsonSerializer.Serialize(new
+        {
+            Tenant = NormalizeGuid(item.TenantId),
+            Owner = NormalizeGuid(item.OwnerUserId),
+            Project = ProjectContext.IdentityKey(item.ProjectId),
             item.Scope,
             item.MemoryType,
-            identity);
+            Identity = identity
+        });
     }
 
     private static bool IsSameAuthorityScope(MemoryItem left, MemoryItem right)
         => left.TenantId == right.TenantId &&
            left.OwnerUserId == right.OwnerUserId &&
            left.Scope == right.Scope &&
-           string.Equals(NormalizeText(left.ProjectId), NormalizeText(right.ProjectId), StringComparison.Ordinal);
+           ProjectContext.Matches(left.ProjectId, right.ProjectId);
 
     private static string NormalizeGuid(Guid? value)
         => value?.ToString("D") ?? string.Empty;

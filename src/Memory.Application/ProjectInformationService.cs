@@ -23,7 +23,7 @@ public sealed class ProjectInformationService(
         ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: false);
 
         var item = await dbContext.MemoryItems.AsNoTracking()
-            .Where(x => x.ProjectId == normalizedProjectId && x.ExternalKey == ExternalKey)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId) && x.ExternalKey == ExternalKey)
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
             .FirstOrDefaultAsync(cancellationToken);
 
@@ -72,9 +72,9 @@ public sealed class ProjectInformationService(
         ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: true);
 
         var item = await dbContext.MemoryItems
-            .Where(x => x.ProjectId == normalizedProjectId && x.ExternalKey == ExternalKey)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId) && x.ExternalKey == ExternalKey)
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
-            .FirstOrDefaultAsync(cancellationToken);
+            .SingleOrDefaultAsync(cancellationToken);
         var now = clock.UtcNow;
         var previousDisplayName = item?.Title;
         var displayName = allowInteractiveDisplayNameUpdate && actor.IsInteractiveUser
@@ -152,9 +152,9 @@ public sealed class ProjectInformationService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         ActorAuthorization.EnsureProjectAllowed(actor, normalizedProjectId, write: true);
         var item = await dbContext.MemoryItems
-            .Where(x => x.ProjectId == normalizedProjectId && x.ExternalKey == ExternalKey)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId) && x.ExternalKey == ExternalKey)
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
-            .FirstOrDefaultAsync(cancellationToken);
+            .SingleOrDefaultAsync(cancellationToken);
         var now = clock.UtcNow;
 
         if (item is null)
@@ -209,15 +209,15 @@ public sealed class ProjectInformationService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var items = await dbContext.MemoryItems.AsNoTracking()
-            .Where(x => x.ProjectId != ProjectContext.SharedProjectId && x.ProjectId != ProjectContext.UserProjectId)
+            .Where(x => !ProjectContext.Matches(x.ProjectId, ProjectContext.SharedProjectId) && !ProjectContext.Matches(x.ProjectId, ProjectContext.UserProjectId))
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
             .ToListAsync(cancellationToken);
         var informationByProject = items
             .Where(x => x.ExternalKey == ExternalKey)
-            .GroupBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(x => x.Key, x => x.OrderByDescending(item => item.UpdatedAt).First(), StringComparer.OrdinalIgnoreCase);
+            .GroupBy(x => x.ProjectId, ProjectContext.IdentityComparer)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(item => item.UpdatedAt).First(), ProjectContext.IdentityComparer);
 
-        return items.GroupBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase)
+        return items.GroupBy(x => x.ProjectId, ProjectContext.IdentityComparer)
             .Select(group =>
             {
                 informationByProject.TryGetValue(group.Key, out var information);
@@ -240,7 +240,7 @@ public sealed class ProjectInformationService(
 
         var actor = actorAccessor.Current;
         return await dbContext.MemoryItems.AsNoTracking()
-            .Where(x => projectIds.Contains(x.ProjectId) && x.ExternalKey == ExternalKey && x.Status == MemoryStatus.Archived)
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(projectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && x.ExternalKey == ExternalKey && x.Status == MemoryStatus.Archived)
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && (actor.IsServiceActor || x.OwnerUserId == actor.UserId)))
             .Select(x => x.ProjectId)
             .ToArrayAsync(cancellationToken);

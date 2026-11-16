@@ -63,6 +63,20 @@ builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
     {
         var startedAt = Stopwatch.GetTimestamp();
         var success = false;
+        RequestArrivalLease? observation = null;
+        try
+        {
+            var httpContext = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
+            var parentSequence = httpContext?.Items[typeof(RequestArrivalLease)] is long sequence ? sequence : 0;
+            var buffer = context.Services?.GetService<RequestArrivalObservations>();
+            if (buffer?.Enabled is true)
+                observation = RequestArrivalCapture.TryBegin(buffer, "mcp-tool", context.Params?.Name ?? string.Empty,
+                    parentSequence, ArrivalRequestClassification.ForTool(context.Params?.Name));
+        }
+        catch (Exception)
+        {
+            // Capture is best-effort and must not change MCP dispatch behavior.
+        }
         try
         {
             var result = await next(context, cancellationToken);
@@ -71,6 +85,7 @@ builder.Services.AddMcpServer(options => options.ServerInfo = new Implementation
         }
         finally
         {
+            RequestArrivalCapture.TryComplete(observation, success ? "success" : cancellationToken.IsCancellationRequested ? "cancelled" : "error");
             await McpToolCallTelemetry.TryRecordAsync(
                 context.Services,
                 "mcp-server",
@@ -93,6 +108,23 @@ var allowedMcpOrigins = ResolveAllowedOrigins(
     builder.Configuration.GetSection("ContextHub:Security:AllowedMcpOrigins").Get<string[]>());
 
 app.UseForwardedHeaders();
+app.UseRequestArrivalObservations();
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/mcp"))
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        var metrics = context.RequestServices.GetRequiredService<ICacheMetricsRecorder>();
+        // OnCompleted includes telemetry waits and response serialization. This is server HTTP time,
+        // not a retrieval-only latency or the client's network round trip (MCP includes non-tool requests).
+        context.Response.OnCompleted(() =>
+        {
+            metrics.Record("server-request", CacheMetricOutcome.Observation, "application", Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+            return Task.CompletedTask;
+        });
+    }
+    await next();
+});
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) &&
@@ -233,6 +265,7 @@ app.MapGet("/api/status", async (
 var dashboard = app.MapGroup("/api/dashboard");
 dashboard.RequireAuthIfEnabled(requireAuthentication);
 dashboard.RequireAdminIfEnabled(requireAuthentication);
+dashboard.MapCacheTelemetryEndpoints();
 dashboard.MapGet("/overview", async (IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
 {
     var result = await service.GetOverviewAsync(cancellationToken);
@@ -390,7 +423,7 @@ memories.MapGet("/graph", async (
             parsedStatus,
             sourceType),
         cancellationToken);
-    SetDataSource(httpContext, "redis");
+    SetDataSource(httpContext, "database-projection");
     return Results.Ok(result);
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
@@ -460,7 +493,7 @@ projectInformation.MapGet("/{projectId}", async (string projectId, IProjectInfor
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 projectInformation.MapPut("/{projectId}", async (string projectId, ProjectInformationUpdateRequest request, IProjectInformationService service, CancellationToken cancellationToken) =>
 {
-    if (!string.Equals(ProjectContext.Normalize(projectId), ProjectContext.Normalize(request.ProjectId), StringComparison.OrdinalIgnoreCase))
+    if (!ProjectContext.Matches(ProjectContext.Normalize(projectId), ProjectContext.Normalize(request.ProjectId)))
     {
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["projectId"] = ["Route and request ProjectId must match."] });
     }
@@ -469,7 +502,7 @@ projectInformation.MapPut("/{projectId}", async (string projectId, ProjectInform
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 projectInformation.MapPost("/{projectId}/lifecycle", async (string projectId, ProjectLifecycleUpdateRequest request, IProjectInformationService service, CancellationToken cancellationToken) =>
 {
-    if (!string.Equals(ProjectContext.Normalize(projectId), ProjectContext.Normalize(request.ProjectId), StringComparison.OrdinalIgnoreCase))
+    if (!ProjectContext.Matches(ProjectContext.Normalize(projectId), ProjectContext.Normalize(request.ProjectId)))
     {
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["projectId"] = ["Route and request ProjectId must match."] });
     }
@@ -1467,18 +1500,7 @@ discussions.MapPost("/threads/{threadId:guid}/messages", async (Guid threadId, D
 
 var workItems = app.MapGroup("/api/work-items");
 workItems.RequireAuthIfEnabled(requireAuthentication);
-workItems.MapGet(string.Empty, async (string projectId, string? status, string? definitionState, int? limit, bool? includeArchived, IProjectWorkItemService service, CancellationToken cancellationToken) =>
-{
-    if (!EnumParser.TryParse(status, out ProjectWorkItemStatus? parsedStatus, out var error))
-    {
-        return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = [error ?? "Unsupported ProjectWorkItemStatus value."] });
-    }
-    if (!EnumParser.TryParse(definitionState, out ProjectWorkItemDefinitionState? parsedDefinitionState, out var definitionError))
-    {
-        return Results.ValidationProblem(new Dictionary<string, string[]> { ["definitionState"] = [definitionError ?? "Unsupported ProjectWorkItemDefinitionState value."] });
-    }
-    return Results.Ok(await service.ListAsync(new ProjectWorkItemListRequest(ProjectContext.Normalize(projectId), parsedStatus, limit ?? 100, includeArchived ?? false, DefinitionState: parsedDefinitionState), cancellationToken));
-}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+workItems.MapWorkItemReadEndpoints(requireAuthentication);
 workItems.MapPost(string.Empty, async (ProjectWorkItemCreateRequest request, IProjectWorkItemService service, CancellationToken cancellationToken) =>
 {
     try { return Results.Created("/api/work-items", await service.CreateAsync(request, cancellationToken)); }

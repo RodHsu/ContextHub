@@ -36,7 +36,7 @@ public sealed class AutonomousRetentionService(
         ActorAuthorization.EnsureProjectsAllowed(actor, projects, write: false);
 
         var memories = await dbContext.MemoryItems.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projects.Contains(x.ProjectId))
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
             .OrderBy(x => x.ProjectId).ThenBy(x => x.Id)
             .ToListAsync(cancellationToken);
         var ids = memories.Select(x => x.Id).ToArray();
@@ -118,7 +118,7 @@ public sealed class AutonomousRetentionService(
         projectId = ProjectContext.Normalize(projectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
         var memory = await dbContext.MemoryItems.SingleOrDefaultAsync(x =>
-            x.Id == resourceId && x.ProjectId == projectId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
+            x.Id == resourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
             cancellationToken) ?? throw new KeyNotFoundException($"Memory '{resourceId}' was not found.");
         var policy = ResolvePolicy(memory);
         var evidence = await LoadEvidenceAsync([resourceId], actor.TenantId!.Value, actor.UserId!.Value, [projectId], cancellationToken);
@@ -268,7 +268,7 @@ public sealed class AutonomousRetentionService(
         }
 
         var originalStillExists = await dbContext.MemoryItems.AsNoTracking().AnyAsync(x =>
-            x.Id == resourceId && x.ProjectId == projectId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
+            x.Id == resourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
             cancellationToken);
         var tombstoneReadBack = await FindTombstoneAsync(resourceId, projectId, actor, cancellationToken);
         if (originalStillExists || tombstoneReadBack is null || tombstoneReadBack.Id != tombstone.Id || tombstoneReadBack.AuditId != auditId)
@@ -294,7 +294,7 @@ public sealed class AutonomousRetentionService(
             x.ResourceId == resourceId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
         if (normalizedProjectId is not null)
         {
-            query = query.Where(x => x.ProjectId == normalizedProjectId);
+            query = query.Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId));
         }
         var tombstone = await query.SingleOrDefaultAsync(cancellationToken);
         if (tombstone is null)
@@ -347,13 +347,13 @@ public sealed class AutonomousRetentionService(
                 .ToDictionaryAsync(x => x.Id, cancellationToken);
         var hierarchy = await dbContext.ProjectHierarchies.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
-                        (projectIds.Contains(x.ParentProjectId) || projectIds.Contains(x.ChildProjectId)))
+                        (Memory.Application.ProjectContext.IdentityKeys(projectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ParentProjectId)) || Memory.Application.ProjectContext.IdentityKeys(projectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ChildProjectId))))
             .Select(x => new { x.ParentProjectId, x.ChildProjectId, x.UpdatedAt })
             .ToListAsync(cancellationToken);
         var evidenceProjectIds = projectIds.Concat(hierarchy.SelectMany(x => new[] { x.ParentProjectId, x.ChildProjectId }))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var activeWorkItems = await dbContext.ProjectWorkItems.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && evidenceProjectIds.Contains(x.ProjectId) &&
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(evidenceProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) &&
                         x.ArchivedAt == null &&
                         (x.Status == ProjectWorkItemStatus.Pending || x.Status == ProjectWorkItemStatus.InProgress || x.Status == ProjectWorkItemStatus.Blocked))
             .Select(x => new { x.Id, x.Title, x.Description }).ToListAsync(cancellationToken);
@@ -367,7 +367,7 @@ public sealed class AutonomousRetentionService(
             .Concat(activeChecklistTexts).ToArray();
         var openThreads = await dbContext.DiscussionThreads.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && x.ArchivedAt == null && x.Status == "Open" &&
-                        (evidenceProjectIds.Contains(x.HostProjectId) || x.Participants.Any(p => evidenceProjectIds.Contains(p.ProjectId))))
+                        (Memory.Application.ProjectContext.IdentityKeys(evidenceProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.HostProjectId)) || x.Participants.Any(p => Memory.Application.ProjectContext.IdentityKeys(evidenceProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(p.ProjectId)))))
             .Select(x => new { x.Id, x.Title }).ToListAsync(cancellationToken);
         var openThreadIds = openThreads.Select(x => x.Id).ToArray();
         var openDiscussionTexts = openThreadIds.Length == 0
@@ -377,7 +377,7 @@ public sealed class AutonomousRetentionService(
                 .Select(x => x.Content).ToListAsync(cancellationToken);
         openDiscussionTexts = openDiscussionTexts.Concat(openThreads.Select(x => x.Title)).ToList();
         var activeJobPayloads = await dbContext.MemoryJobs.AsNoTracking()
-            .Where(x => evidenceProjectIds.Contains(x.ProjectId) &&
+            .Where(x => Memory.Application.ProjectContext.IdentityKeys(evidenceProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) &&
                         ((!x.TenantId.HasValue || !x.OwnerUserId.HasValue) ||
                          (x.TenantId == tenantId && x.OwnerUserId == ownerUserId)) &&
                         (x.Status == MemoryJobStatus.Pending || x.Status == MemoryJobStatus.Running))
@@ -447,7 +447,7 @@ public sealed class AutonomousRetentionService(
             else if (!replacementId.HasValue || !evidence.ReplacementTargets.TryGetValue(replacementId.Value, out var target) ||
                 target.Status != MemoryStatus.Active ||
                 target.Scope != memory.Scope ||
-                !string.Equals(target.ProjectId, memory.ProjectId, StringComparison.OrdinalIgnoreCase))
+                !Memory.Application.ProjectContext.Matches(target.ProjectId, memory.ProjectId))
                 blocked.Add("replacementChainIncomplete");
             else reasons.Add("replacementChainComplete");
         }
@@ -582,7 +582,7 @@ public sealed class AutonomousRetentionService(
 
     private Task<ResourceTombstone?> FindTombstoneAsync(Guid resourceId, string projectId, ContextHubRequestActor actor, CancellationToken cancellationToken)
         => dbContext.ResourceTombstones.AsNoTracking().SingleOrDefaultAsync(x =>
-            x.ResourceId == resourceId && x.ProjectId == projectId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
+            x.ResourceId == resourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
             cancellationToken);
 
     private Task LockTextEvidenceWritersAsync(CancellationToken cancellationToken)
@@ -624,7 +624,7 @@ public sealed class AutonomousRetentionService(
                 StringComparison.Ordinal))
         {
             return dbContext.MemoryItems.SingleOrDefaultAsync(x =>
-                x.Id == resourceId && x.ProjectId == projectId &&
+                x.Id == resourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
                 x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
                 cancellationToken);
         }
@@ -633,7 +633,7 @@ public sealed class AutonomousRetentionService(
                 SELECT *
                 FROM memory_items
                 WHERE id = {resourceId}
-                  AND project_id = {projectId}
+                  AND public.project_identity_equals(project_id, {projectId})
                   AND tenant_id = {actor.TenantId}
                   AND owner_user_id = {actor.UserId}
                 FOR UPDATE

@@ -24,7 +24,7 @@ public sealed class SourceConnectionService(
         var query = dbContext.SourceConnections
             .AsNoTracking()
             .ForActor(actor)
-            .Where(x => x.ProjectId == projectId);
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
 
         if (request.Enabled.HasValue)
         {
@@ -154,7 +154,7 @@ public sealed class SourceConnectionService(
 
         if (normalizedProjectId is not null)
         {
-            query = query.Where(x => x.ProjectId == normalizedProjectId);
+            query = query.Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalizedProjectId));
         }
 
         var entities = await query
@@ -417,7 +417,7 @@ public sealed class SourceSyncService(
         var now = clock.UtcNow;
         var from = now.AddMinutes(-config.TimeWindowMinutes);
         var query = dbContext.RuntimeLogEntries
-            .Where(x => x.ProjectId == projectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId))
             .Where(x => x.CreatedAt >= from && x.CreatedAt <= now);
 
         if (!string.IsNullOrWhiteSpace(config.ServiceName))
@@ -595,7 +595,7 @@ public sealed class SourceSyncService(
         var now = clock.UtcNow;
         var entity = await dbContext.MemoryItems
             .ForActor(actorAccessor.Current)
-            .FirstOrDefaultAsync(x => x.ProjectId == source.ProjectId && x.ExternalKey == externalKey, cancellationToken);
+            .FirstOrDefaultAsync(x => Memory.Application.ProjectContext.Matches(x.ProjectId, source.ProjectId) && x.ExternalKey == externalKey, cancellationToken);
         var created = entity is null;
         var changed = created;
 
@@ -699,7 +699,7 @@ public sealed class SourceSyncService(
         var marker = $"\"connectorId\":\"{source.Id}\"";
         var existing = await dbContext.MemoryItems
             .ForActor(actorAccessor.Current)
-            .Where(x => x.ProjectId == source.ProjectId)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, source.ProjectId))
             .Where(x => x.SourceType == source.SourceKind.ToString())
             .Where(x => x.MetadataJson.Contains(marker))
             .Where(x => x.Status != MemoryStatus.Archived)

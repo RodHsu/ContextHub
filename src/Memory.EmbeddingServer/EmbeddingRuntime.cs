@@ -24,6 +24,7 @@ internal sealed class OnnxEmbeddingRuntime(
     private readonly SemaphoreSlim _inferenceGate = new(1, 1);
     private InferenceSession? _session;
     private SentencePieceTokenizer? _tokenizer;
+    private E5TokenizerVocabulary? _vocabulary;
     private string? _modelDirectory;
 
     public bool IsReady { get; private set; }
@@ -47,6 +48,9 @@ internal sealed class OnnxEmbeddingRuntime(
             Directory.CreateDirectory(_modelDirectory);
 
             await EnsureModelAssetsAsync(_modelDirectory, cancellationToken);
+            if (_profile.TokenizerContract == E5TokenizerContract.Mapped &&
+                await E5AssetBundle.ComputeAsync(_modelDirectory, _profile.AssetFiles, cancellationToken) != _profile.AssetBundleSha256)
+                throw new InvalidOperationException("Embedding asset bundle does not match its pinned model contract.");
             _tokenizer = await LoadTokenizerAsync(_modelDirectory, cancellationToken);
             _session = CreateSession(Path.Combine(_modelDirectory, _profile.ModelFile));
 
@@ -199,7 +203,18 @@ internal sealed class OnnxEmbeddingRuntime(
 
         await using var stream = File.OpenRead(tokenizerPath);
         cancellationToken.ThrowIfCancellationRequested();
-        return SentencePieceTokenizer.Create(stream, addBeginningOfSentence: true, addEndOfSentence: true, specialTokens: new Dictionary<string, int>());
+        if (_profile.TokenizerContract == E5TokenizerContract.Mapped)
+        {
+            await using var vocabularyStream = File.OpenRead(Path.Combine(modelDirectory, "tokenizer.json"));
+            using var document = await System.Text.Json.JsonDocument.ParseAsync(vocabularyStream, cancellationToken: cancellationToken);
+            _vocabulary = E5TokenizerVocabulary.Read(document.RootElement);
+            var model = await File.ReadAllBytesAsync(tokenizerPath, cancellationToken);
+            using var declaredModel = new MemoryStream(E5SentencePieceModel.ForDeclaredNormalizer(model, _vocabulary.CharacterMap));
+            return SentencePieceTokenizer.Create(declaredModel, addBeginningOfSentence: true, addEndOfSentence: true,
+                specialTokens: new Dictionary<string, int>());
+        }
+        return SentencePieceTokenizer.Create(stream, addBeginningOfSentence: true, addEndOfSentence: true,
+            specialTokens: _vocabulary?.SpecialTokens ?? new Dictionary<string, int>());
     }
 
     private InferenceSession CreateSession(string modelPath)
@@ -264,14 +279,22 @@ internal sealed class OnnxEmbeddingRuntime(
 
     private PreparedEmbeddingInput PrepareInput(SentencePieceTokenizer tokenizer, string text, EmbeddingPurpose purpose)
     {
+        if (string.IsNullOrWhiteSpace(text)) throw new InvalidOperationException("Embedding text must not be blank.");
         var normalizedText = text.Trim();
         var preparedText = purpose == EmbeddingPurpose.Query ? $"query: {normalizedText}" : $"passage: {normalizedText}";
-        var tokenIds = tokenizer.EncodeToIds(preparedText, true, true, true, true).ToArray();
-        var tokenCount = tokenIds.Length;
-        var truncated = tokenCount > _profile.MaxTokens;
-        if (truncated)
+        long[] tokenIds;
+        int tokenCount;
+        if (_vocabulary is not null)
         {
-            tokenIds = tokenIds.Take(_profile.MaxTokens).ToArray();
+            var pieces = EncodeDeclaredPieces(tokenizer, preparedText);
+            tokenCount = pieces.Count;
+            tokenIds = _vocabulary.PrepareIds(pieces, _profile.MaxTokens);
+        }
+        else
+        {
+            var raw = tokenizer.EncodeToIds(preparedText, true, true, true, true).ToArray();
+            tokenCount = raw.Length;
+            tokenIds = raw.Take(_profile.MaxTokens).Select(id => (long)id).ToArray();
         }
 
         if (tokenIds.Length == 0)
@@ -280,21 +303,41 @@ internal sealed class OnnxEmbeddingRuntime(
         }
 
         return new PreparedEmbeddingInput(
-            tokenIds.Select(x => (long)x).ToArray(),
+            tokenIds,
             Enumerable.Repeat(1L, tokenIds.Length).ToArray(),
             tokenCount,
-            truncated);
+            tokenCount > _profile.MaxTokens);
     }
 
     private BatchTokenCountResult CountTokensCore(string text)
     {
         var tokenizer = _tokenizer ?? throw new InvalidOperationException("Tokenizer is not initialized.");
+        if (_vocabulary is not null)
+        {
+            var count = EncodeDeclaredPieces(tokenizer, (text ?? string.Empty).Trim()).Count;
+            return new(count, count > _profile.MaxTokens);
+        }
         var tokenIds = tokenizer.EncodeToIds((text ?? string.Empty).Trim(), true, true, true, true).ToArray();
         var tokenCount = tokenIds.Length;
         return new BatchTokenCountResult(tokenCount, tokenCount > _profile.MaxTokens);
     }
 
-    private static List<NamedOnnxValue> BuildInputs(InferenceSession session, IReadOnlyList<PreparedEmbeddingInput> inputsBatch)
+    private IReadOnlyList<E5EncodedToken> EncodeDeclaredPieces(SentencePieceTokenizer tokenizer, string text)
+        => _vocabulary!.EncodePieces(text,
+            fragment => NormalizeDeclaredText(tokenizer, fragment),
+            fragment => tokenizer.EncodeToTokens(fragment, out _, false, false, false, false)
+                .Select(token => new E5EncodedToken(token.Value, token.Id)));
+
+    private static string NormalizeDeclaredText(SentencePieceTokenizer tokenizer, string fragment)
+    {
+        // The public Normalizer string overload only applies whitespace policy in
+        // Microsoft.ML.Tokenizers 2.0.0. Encoding uses the pinned UTF-8 character map.
+        // Its normalizedText covers the entire fragment even when the ID limit is one.
+        _ = tokenizer.EncodeToIds(fragment, false, false, 1, out var normalized, out _, false, true);
+        return normalized ?? throw new InvalidOperationException("Tokenizer did not return its declared normalized text.");
+    }
+
+    private List<NamedOnnxValue> BuildInputs(InferenceSession session, IReadOnlyList<PreparedEmbeddingInput> inputsBatch)
     {
         var inputs = new List<NamedOnnxValue>(capacity: 3);
         var batchSize = inputsBatch.Count;
@@ -303,7 +346,7 @@ internal sealed class OnnxEmbeddingRuntime(
 
         if (session.InputMetadata.ContainsKey("input_ids"))
         {
-            inputs.Add(NamedOnnxValue.CreateFromTensor("input_ids", CreateTensor(inputsBatch.Select(x => x.InputIds).ToArray(), shape)));
+            inputs.Add(NamedOnnxValue.CreateFromTensor("input_ids", CreateTensor(inputsBatch.Select(x => x.InputIds).ToArray(), shape, _vocabulary?.PaddingId ?? 0)));
         }
 
         if (session.InputMetadata.ContainsKey("attention_mask"))
@@ -319,12 +362,15 @@ internal sealed class OnnxEmbeddingRuntime(
         return inputs;
     }
 
-    private static DenseTensor<long> CreateTensor(IReadOnlyList<long>[] values, int[] shape)
+    private static DenseTensor<long> CreateTensor(IReadOnlyList<long>[] values, int[] shape, long paddingId = 0)
     {
         var tensor = new DenseTensor<long>(shape);
         for (var batchIndex = 0; batchIndex < values.Length; batchIndex++)
         {
             var row = values[batchIndex] ?? [];
+            if (paddingId != 0)
+                for (var tokenIndex = row.Count; tokenIndex < shape[1]; tokenIndex++)
+                    tensor[batchIndex, tokenIndex] = paddingId;
             for (var tokenIndex = 0; tokenIndex < row.Count; tokenIndex++)
             {
                 tensor[batchIndex, tokenIndex] = row[tokenIndex];

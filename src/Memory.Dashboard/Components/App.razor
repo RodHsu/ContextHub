@@ -31,11 +31,11 @@
     <link rel="stylesheet" href="@Assets["workspace.css"]" />
     <link rel="stylesheet" href="@Assets["Memory.Dashboard.styles.css"]" />
     <ImportMap />
-    <HeadOutlet @rendermode="InteractiveServer" />
+    <HeadOutlet @rendermode="PageRenderMode" />
 </head>
 
 <body>
-    <Routes @rendermode="InteractiveServer" />
+    <Routes @rendermode="PageRenderMode" />
     <ReconnectModal />
     <script src="@Assets["dashboard-theme.js"]"></script>
     <script src="@Assets["dashboard-shell.js"]"></script>
@@ -50,3 +50,11 @@
 </body>
 
 </html>
+
+@code {
+    [CascadingParameter]
+    private HttpContext HttpContext { get; set; } = default!;
+
+    private IComponentRenderMode? PageRenderMode
+        => HttpContext.AcceptsInteractiveRouting() ? InteractiveServer : null;
+}

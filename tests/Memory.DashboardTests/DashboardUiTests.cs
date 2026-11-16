@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -93,6 +94,81 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         AssertStaticAssetCacheHeaders(sessionScriptResponse);
         var sessionScript = await sessionScriptResponse.Content.ReadAsStringAsync();
         sessionScript.Should().Contain("/account/session/refresh");
+    }
+
+    [Theory]
+    [InlineData("/login")]
+    [InlineData("/login?error=invalid&returnUrl=%2Fgraph")]
+    public async Task Login_Page_Should_Use_Static_Rendering_And_Preserve_Post_Form(string path)
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        using var response = await client.GetAsync(path);
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertNoStoreHeaders(response);
+        var html = await response.Content.ReadAsStringAsync();
+
+        html.Should().Contain("action=\"/account/login\"");
+        html.Should().Contain("name=\"__RequestVerificationToken\"");
+        html.Should().NotMatchRegex("<!--Blazor:\\{[^>]*\\\"type\\\":\\\"server\\\"");
+    }
+
+    [Fact]
+    public async Task Login_Should_Still_Issue_Cookie_And_Enter_Interactive_Graph()
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+
+        await LoginAsync(client);
+        using var response = await client.GetAsync("/graph");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        AssertNoStoreHeaders(response);
+        var html = await response.Content.ReadAsStringAsync();
+        html.Should().Contain("graph-workspace");
+        html.Should().MatchRegex("<!--Blazor:\\{[^>]*\\\"type\\\":\\\"server\\\"");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("invalid-antiforgery-token")]
+    public async Task Static_Login_Post_Should_Reject_Missing_Or_Invalid_Antiforgery(string? verificationToken)
+    {
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+        using var loginPage = await client.GetAsync("/login");
+        loginPage.StatusCode.Should().Be(HttpStatusCode.OK, "login redirect target was {0}", loginPage.Headers.Location);
+        var values = new Dictionary<string, string>
+        {
+            ["Username"] = "admin",
+            ["Password"] = "ContextHub!123",
+            ["ReturnUrl"] = "/graph"
+        };
+        if (verificationToken is not null) values["__RequestVerificationToken"] = verificationToken;
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/account/login")
+        {
+            Content = new FormUrlEncodedContent(values)
+        };
+        request.Headers.Add("Cookie", BuildAntiforgeryCookie(loginPage.Headers));
+        using var response = await client.SendAsync(request);
+        var sessionIssued = response.Headers.TryGetValues("Set-Cookie", out var cookies) &&
+                            cookies.Any(value => value.StartsWith("contexthub.dashboard=", StringComparison.Ordinal));
+        sessionIssued.Should().BeFalse("an invalid antiforgery request must never establish a dashboard session");
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        response.Headers.Location!.ToString().Should().StartWith("/login?returnUrl=");
+        using var graphResponse = await client.GetAsync("/graph");
+        graphResponse.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        graphResponse.Headers.Location!.ToString().Should().StartWith("/login?returnUrl=");
     }
 
     [Fact]
@@ -405,6 +481,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var monitoringHtml = WebUtility.HtmlDecode(await monitoringResponse.Content.ReadAsStringAsync());
         monitoringHtml.Should().Contain("狀態監控");
+        monitoringHtml.Should().Contain("分層快取觀測");
+        monitoringHtml.Should().Contain("期間快取統計未知");
+        monitoringHtml.Should().Contain("刷新狀態未知");
         monitoringHtml.Should().Contain("refresh-status-group");
         monitoringHtml.Should().Contain("資料快照");
         monitoringHtml.Should().Contain("Redis");
@@ -431,7 +510,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         monitoringHtml.Should().Contain("Redis 命中 / 未命中");
         monitoringHtml.Should().Contain("快取略過 / 錯誤");
         monitoringHtml.Should().Contain("緩衝命中率");
-        monitoringHtml.Should().Contain("次資料區塊存取");
+        monitoringHtml.Should().Contain("次區塊存取");
         monitoringHtml.Should().Contain("資源趨勢");
         monitoringHtml.Should().NotContain("Agent MCP 延遲");
         monitoringHtml.Should().NotContain("Agent 最近");
@@ -553,9 +632,9 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("連線面總覽");
         mcpToolsHtml.Should().Contain("目前發布數量");
         mcpToolsHtml.Should().Contain("Direct MCP");
-        mcpToolsHtml.Should().Contain("83</strong> 支工具");
+        mcpToolsHtml.Should().Contain("84</strong> 支工具");
         mcpToolsHtml.Should().Contain("ChatGPT App-facing");
-        mcpToolsHtml.Should().Contain("83</strong> 支工具");
+        mcpToolsHtml.Should().Contain("84</strong> 支工具");
         mcpToolsHtml.Should().Contain("可能刪除");
         mcpToolsHtml.Should().Contain("3</strong> 支工具");
         mcpToolsHtml.Should().Contain("Direct MCP 工具");
@@ -900,6 +979,41 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         apiClient.LastMemoryGraphRequest.GraphMode.Should().Be(MemoryGraphMode.ProjectFull);
     }
 
+    [Theory]
+    [InlineData("dashboard-test")]
+    [InlineData("dashboard-test-secondary")]
+    public async Task Project_workspace_should_pass_selected_project_to_quality_panel(string projectId)
+    {
+        var errors = new PageRenderErrors();
+        // UseSetting is available during Program startup, before the later app-configuration callback.
+        // Keep this synthetic host's cookie keys inside its own test output, never the system default.
+        using var factory = new DashboardApplicationFactory().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("Dashboard:DataProtectionPath", Path.Combine(AppContext.BaseDirectory, "quality-page-keys", Guid.NewGuid().ToString("N")));
+            builder.ConfigureLogging(logging => logging.AddProvider(errors));
+        });
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true
+        });
+        var api = factory.Services.GetRequiredService<IContextHubApiClient>().Should().BeOfType<FakeContextHubApiClient>().Subject;
+        api.CanonicalTagQualityRows =
+        [
+            new(Guid.Parse("d7cd8d50-7083-442f-a345-18abf3af3d83"), 30, 20, 0, 10, 0, 0, .5m, 0, 0, .5m, [], true)
+        ];
+        try { await LoginAsync(client); }
+        catch when (errors.Error is not null) { throw new InvalidOperationException("Synthetic page host failed before quality rendering.", errors.Error); }
+
+        using var response = await client.GetAsync($"/project-information?projectId={Uri.EscapeDataString(projectId)}");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var html = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync());
+        api.LastCanonicalTagQualityProjectId.Should().Be(projectId);
+        api.LastCanonicalTagQualityDays.Should().Be(30);
+        html.Should().Contain("d7cd8d50-7083-442f-a345-18abf3af3d83");
+        html.Should().MatchRegex($@"<caption(?:\s[^>]*)?>{Regex.Escape(projectId)}\s*· 最近 30 天");
+    }
+
     [Fact]
     public void Current_Project_Resolver_Should_Fallback_To_ContextHub_When_Runtime_Default_Is_Default()
     {
@@ -1034,10 +1148,23 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         preview.Conflicts.Should().Contain(conflict => conflict.Section == InstanceTransferSection.UserPreferences);
     }
 
+    private sealed class PageRenderErrors : ILoggerProvider, ILogger
+    {
+        public Exception? Error { get; private set; }
+        public ILogger CreateLogger(string categoryName) => this;
+        public void Dispose() { }
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel level) => level >= LogLevel.Error;
+        public void Log<TState>(LogLevel level, EventId id, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (level >= LogLevel.Error && exception is not null) Error = exception;
+        }
+    }
+
     private static async Task LoginAsync(HttpClient client)
     {
         using var loginPage = await client.GetAsync("/login");
-        loginPage.StatusCode.Should().Be(HttpStatusCode.OK);
+        loginPage.StatusCode.Should().Be(HttpStatusCode.OK, "login redirect target was {0}", loginPage.Headers.Location);
         var html = await loginPage.Content.ReadAsStringAsync();
         var token = ExtractAntiforgeryToken(html);
 
@@ -1206,7 +1333,7 @@ public sealed class DashboardApplicationFactory : WebApplicationFactory<Program>
                 ["Dashboard:ComposeProject"] = "contexthub",
                 ["Dashboard:DataProtectionPath"] = CreateRepoTestDataPath("dataprotection", Guid.NewGuid().ToString("N")),
                 ["Memory:Namespace"] = "context-hub-test",
-                ["ConnectionStrings:Postgres"] = "Host=127.0.0.1;Port=5432;Database=contexthub;Username=contexthub;Password=contexthub"
+                ["ConnectionStrings:Postgres"] = "Host=127.0.0.1;Port=5432;Database=contexthub;Username=contexthub;Password=ContextHub_TestFixture_Only"
             });
         });
         builder.ConfigureServices(services =>
@@ -1272,6 +1399,17 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
     public MemoryListRequest? LastMemoryListRequest { get; private set; }
     public MemoryGraphRequest? LastMemoryGraphRequest { get; private set; }
+    public string? LastCanonicalTagQualityProjectId { get; private set; }
+    public int LastCanonicalTagQualityDays { get; private set; }
+    public IReadOnlyList<CanonicalTagQualityWindow>? CanonicalTagQualityRows { get; set; }
+
+    public Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
+    {
+        LastCanonicalTagQualityProjectId = projectId;
+        LastCanonicalTagQualityDays = days;
+        return Task.FromResult(CanonicalTagQualityRows);
+    }
+
 
     public Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<ManagedFileInventoryResult>>

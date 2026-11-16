@@ -62,13 +62,24 @@ public sealed class PlatformProjectionHostedService(
             {
                 var tenantScopeKey = project.TenantId?.ToString("D") ?? "system";
                 var state = await dbContext.MonitoringProjectionStates.AsNoTracking().SingleOrDefaultAsync(
-                    x => x.ProjectionName == PlatformProjectionContract.ProjectionName && x.TenantScopeKey == tenantScopeKey && x.ProjectId == project.ProjectId,
+                    x => x.ProjectionName == PlatformProjectionContract.ProjectionName && x.TenantScopeKey == tenantScopeKey && Memory.Application.ProjectContext.Matches(x.ProjectId, project.ProjectId),
                     cancellationToken);
-                var mode = state?.LastSuccessAt is null
-                    ? PlatformBackgroundMode.Incremental
-                    : state!.LastSuccessAt <= now - FullRebuildInterval
-                        ? PlatformBackgroundMode.Full
-                        : PlatformBackgroundMode.Incremental;
+                var mode = PlatformBackgroundMode.Incremental;
+                if (state?.LastSuccessAt is not null)
+                {
+                    // Incremental success advances LastSuccessAt on every poll. Anchor full
+                    // reconciliation to completed run history so steady traffic cannot defer it.
+                    var completedRuns = dbContext.PlatformBackgroundRuns.AsNoTracking()
+                        .Where(run => run.TenantId == project.TenantId && Memory.Application.ProjectContext.Matches(run.ProjectId, project.ProjectId) &&
+                                      run.JobType == PlatformProjectionContract.ProjectionName &&
+                                      run.Status == PlatformBackgroundRunStatus.Completed && run.CompletedAt != null);
+                    var reconciliationAnchor = await completedRuns
+                        .Where(run => run.Mode == PlatformBackgroundMode.Full)
+                        .MaxAsync(run => run.CompletedAt, cancellationToken);
+                    reconciliationAnchor ??= await completedRuns.MinAsync(run => run.CompletedAt, cancellationToken);
+                    if (reconciliationAnchor is null || reconciliationAnchor <= now - FullRebuildInterval)
+                        mode = PlatformBackgroundMode.Full;
+                }
                 var result = await service.RunAsync(new PlatformProjectionRunRequest(project.TenantId, project.ProjectId, mode, ownerId), cancellationToken);
                 if (result.Status == PlatformBackgroundRunStatus.Running)
                 {

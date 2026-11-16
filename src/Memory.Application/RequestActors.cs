@@ -109,7 +109,7 @@ public static class ActorAuthorization
         }
 
         if (actor.AllowedProjectIds.Count == 0 ||
-            actor.AllowedProjectIds.Any(x => string.Equals(x, projectId, StringComparison.OrdinalIgnoreCase)))
+            actor.AllowedProjectIds.Any(x => ProjectContext.Matches(x, projectId)))
         {
             return;
         }

@@ -23,7 +23,7 @@ public sealed class SuggestedActionService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var projectId = ProjectContext.Normalize(request.ProjectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-        var query = dbContext.SuggestedActions.AsNoTracking().ForActor(actor).Where(x => x.ProjectId == projectId);
+        var query = dbContext.SuggestedActions.AsNoTracking().ForActor(actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
 
         if (request.Status.HasValue)
         {
@@ -262,7 +262,7 @@ public sealed class SuggestedActionService(
 
         var candidates = await dbContext.SuggestedActions
             .Where(x => x.Id != terminal.Id &&
-                        x.ProjectId == terminal.ProjectId &&
+                        Memory.Application.ProjectContext.Matches(x.ProjectId, terminal.ProjectId) &&
                         x.Type == terminal.Type &&
                         (x.Status == SuggestedActionStatus.Pending || x.Status == SuggestedActionStatus.Accepted))
             .ToListAsync(cancellationToken);

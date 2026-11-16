@@ -271,9 +271,19 @@
             return;
         }
 
-        await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", _createdPlainToken);
-        _message = "已複製完整 Token。";
-        _messageSequence++;
+        _message = null;
+        _error = null;
+        try
+        {
+            await JsRuntime.InvokeVoidAsync("contextHubDashboard.copyText", _createdPlainToken);
+            _message = "已複製完整 Token。";
+            _messageSequence++;
+        }
+        catch (JSException)
+        {
+            _error = "複製失敗，請改用手動複製 Token。";
+            _errorSequence++;
+        }
     }
 
     private void EditToken(ApiTokenResult token)

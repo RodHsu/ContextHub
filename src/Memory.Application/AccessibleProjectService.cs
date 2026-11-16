@@ -16,8 +16,8 @@ public sealed class AccessibleProjectService(
         {
             return actor.AllowedProjectIds
                 .Select(projectId => ProjectContext.Normalize(projectId))
-                .Where(id => !string.Equals(id, ProjectContext.DefaultProjectId, StringComparison.OrdinalIgnoreCase))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(id => !Memory.Application.ProjectContext.Matches(id, ProjectContext.DefaultProjectId))
+                .Distinct(ProjectContext.IdentityComparer)
                 .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
                 .Take(take)
                 .Select(id => new AccessibleProjectResult(id, true, actor.HasScope(SecurityScopes.MemoryWrite)))
@@ -43,8 +43,8 @@ public sealed class AccessibleProjectService(
 
         return knownProjectIds
             .Select(projectId => ProjectContext.Normalize(projectId))
-            .Where(id => !string.Equals(id, ProjectContext.DefaultProjectId, StringComparison.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(id => !Memory.Application.ProjectContext.Matches(id, ProjectContext.DefaultProjectId))
+            .Distinct(ProjectContext.IdentityComparer)
             .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
             .Take(take)
             .Select(id => new AccessibleProjectResult(id, true, actor.HasScope(SecurityScopes.MemoryWrite)))

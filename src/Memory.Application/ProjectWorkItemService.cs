@@ -94,18 +94,30 @@ public sealed class ProjectWorkItemService(
         return Map(entity);
     }
 
+    public async Task<ProjectWorkItemResult?> GetAsync(Guid workItemId, bool includeArchived, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        var query = ApplyActorScope(dbContext.ProjectWorkItems.AsNoTracking().Include(x => x.ChecklistItems), actor);
+        if (!includeArchived) query = query.Where(x => x.ArchivedAt == null);
+        var entity = await query.SingleOrDefaultAsync(x => x.Id == workItemId, cancellationToken);
+        if (entity is null) return null;
+        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: false);
+        return Map(entity);
+    }
+
     public async Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var projectId = ProjectContext.Normalize(request.ProjectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
-        var query = ApplyActorScope(dbContext.ProjectWorkItems.AsNoTracking().Include(x => x.ChecklistItems), actor).Where(x => x.ProjectId == projectId);
+        var query = ApplyActorScope(dbContext.ProjectWorkItems.AsNoTracking().Include(x => x.ChecklistItems), actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
         if (!request.IncludeArchived) query = query.Where(x => x.ArchivedAt == null);
         if (request.Status.HasValue) query = query.Where(x => x.Status == request.Status.Value);
         if (request.DefinitionState.HasValue) query = query.Where(x => x.DefinitionState == request.DefinitionState.Value);
         var items = await query.OrderBy(x => x.Status == ProjectWorkItemStatus.Completed || x.Status == ProjectWorkItemStatus.Cancelled)
-            .ThenByDescending(x => x.Priority).ThenBy(x => x.DueAt).ThenByDescending(x => x.UpdatedAt)
+            .ThenByDescending(x => x.Priority).ThenBy(x => x.DueAt).ThenByDescending(x => x.UpdatedAt).ThenBy(x => x.Id)
             .Skip(Math.Max(0, request.Offset))
             .Take(Math.Clamp(request.Limit, 1, 200)).ToListAsync(cancellationToken);
         return items.Select(Map).ToArray();
@@ -165,7 +177,7 @@ public sealed class ProjectWorkItemService(
         var entity = await ApplyActorScope(dbContext.ProjectWorkItems.Include(x => x.ChecklistItems), actor)
             .SingleOrDefaultAsync(x => x.Id == request.WorkItemId, cancellationToken)
             ?? throw new InvalidOperationException($"Project work item '{request.WorkItemId}' was not found.");
-        if (!string.Equals(entity.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
+        if (!Memory.Application.ProjectContext.Matches(entity.ProjectId, projectId))
         {
             throw new UnauthorizedAccessException("The work item does not belong to the requested ProjectId.");
         }
@@ -184,7 +196,7 @@ public sealed class ProjectWorkItemService(
                         x.GovernanceRunId == governanceRunId)
             .Select(x => x.ProjectIdsJson)
             .ToListAsync(cancellationToken);
-        if (!relatedSnapshots.Any(json => ReadProjectIds(json).Contains(projectId, StringComparer.OrdinalIgnoreCase)))
+        if (!relatedSnapshots.Any(json => ReadProjectIds(json).Contains(projectId, Memory.Application.ProjectContext.IdentityComparer)))
         {
             throw new InvalidOperationException("GovernanceRunId does not identify an authorized review snapshot containing this ProjectId.");
         }

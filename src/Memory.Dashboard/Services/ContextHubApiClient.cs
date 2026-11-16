@@ -13,9 +13,15 @@ public interface IContextHubApiClient
     Task<DashboardOverviewResult> GetOverviewAsync(CancellationToken cancellationToken);
     Task<DashboardRuntimeResult> GetRuntimeAsync(CancellationToken cancellationToken);
     Task<DashboardMonitoringResult> GetMonitoringAsync(CancellationToken cancellationToken);
+    Task<CacheMetricsWindowResult?> GetCacheMetricsAsync(string period, CancellationToken cancellationToken)
+        => Task.FromResult<CacheMetricsWindowResult?>(null);
+    Task<DashboardGraphRefreshStatus?> GetGraphRefreshStatusAsync(CancellationToken cancellationToken)
+        => Task.FromResult<DashboardGraphRefreshStatus?>(null);
     Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken);
     Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<CanonicalTagQualityWindow>?>(null);
     Task<EffectiveRightsResult> GetEffectiveRightsAsync(string projectId, IReadOnlyList<string> rights, string? resourceType, string? resourceId, CancellationToken cancellationToken);
     Task<StepUpAuthorizationResult> GetStepUpRequirementAsync(StepUpOperationClass operation, string purpose, string? resourceType, string? resourceId, CancellationToken cancellationToken);
     Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken);
@@ -144,6 +150,24 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     public Task<DashboardMonitoringResult> GetMonitoringAsync(CancellationToken cancellationToken)
         => GetRequiredAsync<DashboardMonitoringResult>("/api/dashboard/monitoring", cancellationToken);
 
+    public Task<CacheMetricsWindowResult?> GetCacheMetricsAsync(string period, CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<CacheMetricsWindowResult>(
+            QueryHelpers.AddQueryString("/api/dashboard/cache-metrics", "period", period), cancellationToken);
+
+    public Task<DashboardGraphRefreshStatus?> GetGraphRefreshStatusAsync(CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<DashboardGraphRefreshStatus>("/api/dashboard/graph-refresh", cancellationToken);
+
+    private async Task<T?> GetOptionalTelemetryAsync<T>(string url, CancellationToken cancellationToken) where T : class
+    {
+        using var response = await httpClient.GetAsync(url, cancellationToken);
+        if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.NotImplemented)
+        {
+            return null;
+        }
+
+        return await ReadRequiredAsync<T>(response, cancellationToken);
+    }
+
     public Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken)
     {
         var query = string.IsNullOrWhiteSpace(projectId) ||
@@ -162,6 +186,19 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
         => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken);
+
+    public Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(projectId)) throw new ArgumentException("A project is required.", nameof(projectId));
+        if (days is not 7 and not 30 and not 90) throw new ArgumentOutOfRangeException(nameof(days));
+        return GetOptionalTelemetryAsync<IReadOnlyList<CanonicalTagQualityWindow>>(QueryHelpers.AddQueryString(
+            $"/api/canonical-tags/{Uri.EscapeDataString(projectId.Trim())}/quality",
+            new Dictionary<string, string?>
+            {
+                ["days"] = days.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["minimumSamples"] = "20"
+            }), cancellationToken);
+    }
 
     public Task<EffectiveRightsResult> GetEffectiveRightsAsync(
         string projectId,

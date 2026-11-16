@@ -80,7 +80,7 @@ public sealed class AgentConnectivityService(
         var recentSince = now.AddMinutes(-10);
         var recent = await dbContext.AgentConnectivityObservations
             .AsNoTracking()
-            .Where(x => x.ProjectId == effectiveProjectId && x.ObservedAtUtc >= recentSince)
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, effectiveProjectId) && x.ObservedAtUtc >= recentSince)
             .OrderByDescending(x => x.ObservedAtUtc)
             .Take(500)
             .ToListAsync(cancellationToken);
@@ -89,7 +89,7 @@ public sealed class AgentConnectivityService(
         {
             var lastSeen = await dbContext.AgentConnectivityObservations
                 .AsNoTracking()
-                .Where(x => x.ProjectId == effectiveProjectId)
+                .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, effectiveProjectId))
                 .OrderByDescending(x => x.ObservedAtUtc)
                 .Select(x => (DateTimeOffset?)x.ObservedAtUtc)
                 .FirstOrDefaultAsync(cancellationToken);
@@ -143,7 +143,7 @@ public sealed class AgentConnectivityService(
 
         var rows = dbContext.AgentConnectivitySummaries
             .AsNoTracking()
-            .Where(x => x.ProjectId == projectId && x.BucketStartUtc >= from && x.BucketStartUtc <= to);
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.BucketStartUtc >= from && x.BucketStartUtc <= to);
 
         if (!string.IsNullOrWhiteSpace(query.AgentId))
         {
@@ -195,7 +195,7 @@ public sealed class AgentConnectivityService(
         ActorAuthorization.EnsureProjectAllowed(actor, effectiveProjectId, write: false);
         var rows = dbContext.AgentConnectivityObservations
             .AsNoTracking()
-            .Where(x => x.ProjectId == effectiveProjectId);
+            .Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, effectiveProjectId));
 
         if (!string.IsNullOrWhiteSpace(agentId))
         {
@@ -243,7 +243,7 @@ public sealed class AgentConnectivityService(
             var summary = await dbContext.AgentConnectivitySummaries.FirstOrDefaultAsync(
                 x => x.BucketStartUtc == group.Key.BucketStartUtc &&
                      x.BucketMinutes == BucketMinutes &&
-                     x.ProjectId == group.Key.ProjectId &&
+                     Memory.Application.ProjectContext.Matches(x.ProjectId, group.Key.ProjectId) &&
                      x.AgentId == group.Key.AgentId &&
                      x.EndpointHost == group.Key.EndpointHost &&
                      x.Transport == group.Key.Transport &&

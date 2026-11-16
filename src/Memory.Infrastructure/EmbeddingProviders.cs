@@ -159,10 +159,7 @@ public sealed class HttpEmbeddingProvider(
             var singlePayload = await singleResponse.Content.ReadFromJsonAsync<EmbeddingServiceEmbedResponse>(cancellationToken: cancellationToken)
                 ?? throw new InvalidOperationException("Embedding service returned an empty payload.");
 
-            if (singlePayload.Values.Length == 0)
-            {
-                throw new InvalidOperationException("Embedding service returned an empty vector.");
-            }
+            ValidateResponse(singlePayload.ModelKey, singlePayload.Dimensions, singlePayload.MaxTokens, singlePayload.Values);
 
             if (singlePayload.Truncated)
             {
@@ -200,10 +197,12 @@ public sealed class HttpEmbeddingProvider(
         var batchPayload = await batchResponse.Content.ReadFromJsonAsync<BatchEmbeddingServiceEmbedResponse>(cancellationToken: cancellationToken)
             ?? throw new InvalidOperationException("Embedding service returned an empty batch payload.");
 
-        if (batchPayload.Results.Count != normalizedItems.Length)
+        if (batchPayload.Results is null || batchPayload.Results.Count != normalizedItems.Length || batchPayload.Results.Any(result => result is null))
         {
             throw new InvalidOperationException("Embedding service batch result count does not match request count.");
         }
+        foreach (var result in batchPayload.Results)
+            ValidateResponse(batchPayload.ModelKey, batchPayload.Dimensions, batchPayload.MaxTokens, result.Values);
 
         var truncatedCount = batchPayload.Results.Count(result => result.Truncated);
         if (truncatedCount > 0)
@@ -258,6 +257,16 @@ public sealed class HttpEmbeddingProvider(
         {
             logger.LogDebug(ex, "Embedding usage telemetry failed after embedding response.");
         }
+    }
+
+    private void ValidateResponse(string modelKey, int dimensions, int maxTokens, float[]? values)
+    {
+        _ = E5TokenizerContract.ResolveModelKey(_options.ModelKey, _options.ModelKey, _options.TokenizerContract,
+            _options.AssetBundleSha256, _options.Dimensions, _options.MaxTokens);
+        if (string.IsNullOrWhiteSpace(_options.ModelKey) || !string.Equals(modelKey, _options.ModelKey, StringComparison.Ordinal) ||
+            dimensions <= 0 || dimensions != _options.Dimensions || maxTokens != _options.MaxTokens ||
+            values is null || values.Length != dimensions || values.Any(value => !float.IsFinite(value)))
+            throw new InvalidOperationException("Embedding service response does not match the configured model contract.");
     }
 
     private static string ResolveDefaultSourceKind(EmbeddingPurpose purpose)

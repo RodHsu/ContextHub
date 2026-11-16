@@ -6,6 +6,22 @@ namespace Memory.UnitTests;
 
 public sealed class AuthorityAwareRetrievalRerankerTests
 {
+    [Theory]
+    [InlineData("TT-1", "TT_1")]
+    [InlineData("TT/1", "TT-1")]
+    [InlineData("Å", "A\u030a")]
+    public void Authority_grouping_preserves_noncase_project_boundaries(string left, string right)
+    {
+        var first = CreateMemory("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Same authority title");
+        var second = CreateMemory("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Same authority title");
+        first.ProjectId = left;
+        second.ProjectId = right;
+        first.MetadataJson = second.MetadataJson = "{\"authorityState\":\"Current\"}";
+        var ranked = AuthorityAwareRetrievalReranker.Rerank([new(first, 0.9m, "first"), new(second, 0.8m, "second")],
+            2, DateTimeOffset.Parse("2026-09-01T00:00:00Z"));
+        ranked.Should().HaveCount(2).And.OnlyContain(x => !x.IsAuthorityConflict);
+    }
+
     [Fact]
     public void Current_authority_outranks_a_high_score_superseded_blocker()
     {
@@ -13,6 +29,7 @@ public sealed class AuthorityAwareRetrievalRerankerTests
         current.MetadataJson = "{\"authorityState\":\"Current\"}";
 
         var superseded = CreateMemory("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Scheduler state");
+        superseded.ProjectId = current.ProjectId.ToLowerInvariant();
         superseded.MetadataJson = $$"""{"authorityState":"Superseded","supersededByMemoryId":"{{current.Id:D}}"}""";
 
         var ranked = AuthorityAwareRetrievalReranker.Rerank(

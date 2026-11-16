@@ -101,7 +101,7 @@ public sealed class SecurityBootstrapHostedService(
         foreach (var projectId in projectIds)
         {
             var grant = await dbContext.TenantProjectGrants.FirstOrDefaultAsync(
-                x => x.TenantId == tenant.Id && x.ProjectId == projectId,
+                x => x.TenantId == tenant.Id && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId),
                 cancellationToken);
             if (grant is null)
             {

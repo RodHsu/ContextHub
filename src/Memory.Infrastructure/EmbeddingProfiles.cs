@@ -13,7 +13,9 @@ public sealed record ResolvedEmbeddingProfile(
     string AssetRepository,
     string ModelFile,
     string TokenizerFile,
-    IReadOnlyList<EmbeddingAssetFile> AssetFiles);
+    IReadOnlyList<EmbeddingAssetFile> AssetFiles,
+    string TokenizerContract = E5TokenizerContract.Legacy,
+    string AssetBundleSha256 = "");
 
 public interface IResolvedEmbeddingProfileAccessor
 {
@@ -84,9 +86,15 @@ public static class EmbeddingProfileResolver
                 ?? throw new InvalidOperationException($"Unsupported EMBEDDING_MODEL_ID '{options.ModelId}'. Only the built-in E5 profiles are supported.");
         }
 
-        var modelKey = string.IsNullOrWhiteSpace(options.ModelKey) ? selected.ModelKey : options.ModelKey.Trim();
+        var tokenizerContract = E5TokenizerContract.Normalize(options.TokenizerContract);
         var dimensions = options.Dimensions > 0 ? options.Dimensions : selected.Dimensions;
         var maxTokens = options.MaxTokens > 0 ? options.MaxTokens : selected.MaxTokens;
+        if (tokenizerContract == E5TokenizerContract.Mapped && maxTokens < 2)
+            throw new InvalidOperationException("Corrected E5 tokenizer requires at least two boundary tokens.");
+        var assetBundleSha256 = tokenizerContract == E5TokenizerContract.Mapped
+            ? E5AssetBundle.NormalizeSha256(options.AssetBundleSha256) : string.Empty;
+        var modelKey = E5TokenizerContract.ResolveModelKey(selected.ModelKey, options.ModelKey, tokenizerContract,
+            assetBundleSha256, dimensions, maxTokens);
         var inferenceThreads = options.InferenceThreads > 0
             ? options.InferenceThreads
             : Math.Min(Environment.ProcessorCount, 6);
@@ -96,6 +104,8 @@ public static class EmbeddingProfileResolver
         return selected with
         {
             ModelKey = modelKey,
+            TokenizerContract = tokenizerContract,
+            AssetBundleSha256 = assetBundleSha256,
             Dimensions = dimensions,
             MaxTokens = maxTokens,
             InferenceThreads = inferenceThreads,
@@ -109,6 +119,8 @@ public static class EmbeddingProfileResolver
         options.Profile = resolved.Profile;
         options.ModelId = resolved.ModelId;
         options.ModelKey = resolved.ModelKey;
+        options.TokenizerContract = resolved.TokenizerContract;
+        options.AssetBundleSha256 = resolved.AssetBundleSha256;
         options.Dimensions = resolved.Dimensions;
         options.MaxTokens = resolved.MaxTokens;
         options.InferenceThreads = resolved.InferenceThreads;
@@ -170,4 +182,5 @@ public sealed record EmbeddingServiceInfoResult(
     int InferenceThreads,
     int BatchSize,
     bool BatchingEnabled,
-    bool Ready);
+    bool Ready,
+    string TokenizerContract = E5TokenizerContract.Legacy);
