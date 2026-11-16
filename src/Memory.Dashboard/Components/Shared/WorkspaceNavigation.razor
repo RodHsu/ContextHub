@@ -1,0 +1,54 @@
+@inject NavigationManager Navigation
+
+@foreach (var group in Groups)
+{
+    var expanded = !_collapsed.Contains(group.Label);
+    var groupId = $"{IdPrefix}-{Groups.ToList().IndexOf(group)}";
+    <section class="workspace-nav-group">
+        <button class="workspace-nav-heading" type="button" aria-expanded="@expanded" aria-controls="@groupId" @onclick="() => Toggle(group.Label)">
+            <span>@group.Label</span><span class="workspace-nav-chevron" aria-hidden="true">@(expanded ? "⌄" : "›")</span>
+        </button>
+        <nav id="@groupId" class="sidebar-nav" aria-label="@group.Label" hidden="@(!expanded)">
+            @foreach (var route in group.Items)
+            {
+                <NavLink class="nav-item" href="@route.Href" Match="@route.Match" title="@route.Description">
+                    <NavigationIcon Mark="@route.Mark" />
+                    <span class="nav-label">@route.Label</span>
+                </NavLink>
+            }
+        </nav>
+    </section>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<DashboardNavigationGroup> Groups { get; set; } = [];
+    [Parameter] public string IdPrefix { get; set; } = "workspace-nav";
+    private readonly HashSet<string> _collapsed = [];
+    private string? _lastPath;
+
+    protected override void OnParametersSet()
+    {
+        var path = "/" + Navigation.ToBaseRelativePath(Navigation.Uri);
+        if (_lastPath is null)
+        {
+            _collapsed.UnionWith(Groups.Where(group => group.Label != "總覽" && !group.Items.Any(item => DashboardNavigation.IsCurrent(item, path))).Select(group => group.Label));
+        }
+        if (_lastPath != path)
+        {
+            var active = Groups.FirstOrDefault(group => group.Items.Any(item => DashboardNavigation.IsCurrent(item, path)));
+            if (active is not null)
+            {
+                _collapsed.Remove(active.Label);
+            }
+            _lastPath = path;
+        }
+    }
+
+    private void Toggle(string label)
+    {
+        if (!_collapsed.Add(label))
+        {
+            _collapsed.Remove(label);
+        }
+    }
+}

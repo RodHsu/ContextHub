@@ -1,0 +1,30 @@
+<svg class="navigation-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="@IconPath" />
+</svg>
+
+@code {
+    [Parameter] public string Mark { get; set; } = "O";
+
+    private string IconPath => Mark switch
+    {
+        "menu" => "M4 6h16 M4 12h16 M4 18h16",
+        "P" => "M3 7h7l2-3h9v16H3Z M3 9h18",
+        "H" or "G" => "M10 3h4v4h-4Z M3 17h4v4H3Z M17 17h4v4h-4Z M12 7v5 M5 17v-5h14v5",
+        "W" => "M8 5h12v16H4V5h4 M8 3h8v4H8Z M8 12l2 2 5-4 M8 18h8",
+        "D" => "M4 4h16v12H9l-5 4Z M8 8h8 M8 12h5",
+        "F" or "M" => "M5 3h9l5 5v13H5Z M14 3v5h5 M9 13h6 M9 17h6",
+        "S" or "B" => "M20 6c0 2-4 3-8 3S4 8 4 6s4-3 8-3 8 1 8 3Z M4 6v12c0 2 4 3 8 3s8-1 8-3V6 M4 12c0 2 4 3 8 3s8-1 8-3",
+        "A" => "M4 7h16v13H4Z M9 11v2 M15 11v2 M9 17h6 M12 3v4 M2 11v5 M22 11v5",
+        "K" => "M13 2 4 14h7l-1 8 10-13h-7Z",
+        "C" => "M8 8 4 12l4 4 M16 8l4 4-4 4 M13 5l-2 14",
+        "Z" or "X" => "M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7Z M8 12l3 3 5-6",
+        "I" or "Q" => "M4 4h16v16H4Z M4 14h5l2 3h2l2-3h5 M8 8h8",
+        "V" or "E" => "M9 4h11v16H4V9 M4 4l2 2 4-4 M8 12h8 M8 16h6",
+        "L" => "M5 3h14v18H5Z M9 7h6 M9 11h6 M9 15h4",
+        "Y" => "M4 7h16 M4 17h16 M8 4v6 M16 14v6",
+        "U" => "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0 M4 21v-3c0-3 4-5 8-5s8 2 8 5v3",
+        "R" => "M4 8a8 8 0 1 1 0 8 M4 3v5h5 M12 8v5l3 2",
+        "T" => "m8 5-6 7 6 7 M16 5l6 7-6 7 M14 3l-4 18",
+        _ => "M3 3h7v7H3Z M14 3h7v7h-7Z M3 14h7v7H3Z M14 14h7v7h-7Z"
+    };
+}

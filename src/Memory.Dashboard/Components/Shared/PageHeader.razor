@@ -1,8 +1,16 @@
+@inject NavigationManager Navigation
+
 <div class="page-header">
     <div class="page-header-copy">
         @if (!string.IsNullOrWhiteSpace(Breadcrumb))
         {
             <div class="page-breadcrumb">@Breadcrumb</div>
+        }
+        else
+        {
+            <nav class="page-breadcrumb" aria-label="所在位置">
+                <span>ContextHub</span><span aria-hidden="true"> / </span><span>@CurrentGroup</span>
+            </nav>
         }
         <h1>@Title</h1>
         @if (!string.IsNullOrWhiteSpace(Subtitle))
@@ -21,7 +29,9 @@
 
 @code {
     [Parameter]
-    public string Breadcrumb { get; set; } = "ContextHub / 主控台";
+    public string Breadcrumb { get; set; } = string.Empty;
+
+    private string CurrentGroup => DashboardNavigation.FindGroup("/" + Navigation.ToBaseRelativePath(Navigation.Uri))?.Label ?? "主控台";
 
     [Parameter]
     public string Title { get; set; } = string.Empty;

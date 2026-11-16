@@ -1,5 +1,9 @@
 .project-work-items-workspace {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-auto-rows: max-content;
+    height: max-content;
+    align-self: start;
     align-items: start;
     min-height: 0;
     overflow: visible;

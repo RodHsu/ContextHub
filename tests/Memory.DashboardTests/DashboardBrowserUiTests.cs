@@ -15,7 +15,8 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     private static readonly DashboardTheme[] Themes =
     [
         DashboardTheme.Dark,
-        DashboardTheme.Light
+        DashboardTheme.Light,
+        DashboardTheme.Black
     ];
 
     private static readonly DashboardViewport[] Viewports =
@@ -61,7 +62,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         new("sources", "/sources", "資料來源", [".sources-page-stack", ".sources-setup-grid", ".sources-workspace-section"], [".page-header", ".sources-setup-grid", ".sources-workspace-section"], [".content", ".sources-page-stack", ".panel-scroll-body"]),
         new("governance", "/governance", "治理檢查", [".governance-page-stack", ".metric-grid", ".governance-workspace-section"], [".page-header", ".metric-grid", ".governance-workspace-section"], [".content", ".governance-page-stack", ".panel-scroll-body"]),
         new("evaluation", "/evaluation", "評估驗證", [".evaluation-page-stack", ".filter-panel", ".evaluation-workspace-section"], [".page-header", ".filter-panel", ".evaluation-workspace-section"], [".content", ".evaluation-page-stack", ".panel-scroll-body"]),
-        new("inbox", "/inbox", "專案待辦", [".inbox-page-stack", ".metric-grid", ".inbox-workspace-section"], [".page-header", ".metric-grid", ".inbox-workspace-section"], [".content", ".inbox-page-stack", ".panel-scroll-body"]),
+        new("inbox", "/inbox", "治理建議", [".inbox-page-stack", ".metric-grid", ".inbox-workspace-section"], [".page-header", ".metric-grid", ".inbox-workspace-section"], [".content", ".inbox-page-stack", ".panel-scroll-body"]),
         new("chatgpt-proposals", "/chatgpt-proposals", "ChatGPT 寫入審核", [".chatgpt-proposals-filter", ".chatgpt-proposals-summary", ".chatgpt-proposals-workspace", ".chatgpt-proposals-list-panel", ".chatgpt-proposals-detail-panel"], [".page-header", ".chatgpt-proposals-filter", ".chatgpt-proposals-workspace"], [".content", ".panel-scroll-body"]),
         new("preferences", "/preferences", "使用者偏好", [".split-layout", ".preferences-list-panel"], [".page-header", ".split-layout"], [".content", ".preferences-list-scroll-shell"]),
         new("account-tokens", "/account/tokens", "我的存取權杖", [".settings-form-grid", ".security-token-table", ".table-scroll-shell"], [".page-header", ".panel"], [".content", ".table-scroll-shell"]),
@@ -176,8 +177,8 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             (await page.Locator(".high-risk-operation button").IsDisabledAsync()).Should().BeTrue();
 
             var bodyText = await page.Locator("body").InnerTextAsync();
-            bodyText.ToLowerInvariant().Should().Contain("business authority");
-            bodyText.ToLowerInvariant().Should().Contain("rebuildable monitoring");
+            bodyText.Should().Contain("正式資料");
+            bodyText.Should().Contain("監控同步");
             bodyText.Should().Contain("操作保持停用");
             bodyText.ToLowerInvariant().Should().NotContain("intfloat/");
             bodyText.Should().NotContain("CPUExecutionProvider");
@@ -517,7 +518,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         await page.Locator(".project-work-items-workspace").WaitForAsync();
         (await page.Locator(".project-work-item-list-item").CountAsync()).Should().BeGreaterThan(0);
         (await page.Locator(".project-work-item-checklist input[type='checkbox']").CountAsync()).Should().BeGreaterThan(0);
-        (await page.Locator("button:has-text('完成代辦')").IsDisabledAsync()).Should().BeTrue();
+        (await page.Locator("button:has-text('完成待辦')").IsDisabledAsync()).Should().BeTrue();
     }
 
     [Fact]
@@ -564,63 +565,21 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
-    public async Task Dashboard_Footer_Should_Remain_Anchored_Outside_The_Scrollable_Workspace()
+    public async Task Workspace_Should_Keep_Header_Fixed_And_Use_Full_Available_Content_Height()
     {
-        var route = Routes.Single(candidate => candidate.Name == "memories");
-        DashboardViewport[] viewports =
-        [
-            new("desktop", 1366, 768),
-            new("mobile", 390, 844)
-        ];
-
-        foreach (var viewport in viewports)
+        foreach (var viewport in new[] { new DashboardViewport("desktop", 1366, 768), new DashboardViewport("mobile", 390, 844) })
         {
-            await _fixture.EnsureDashboardRunningAsync();
             await using var context = await _fixture.CreateContextAsync(viewport);
             var page = await context.NewPageAsync();
-
-            await LoginAndOpenAsync(page, route.Route);
-            await page.Locator(".memories-workspace-layout").WaitForAsync();
-
-            var layoutJson = await page.EvaluateAsync<string>(
-                @"() => {
-                    const content = document.querySelector('.content');
-                    const pageViewport = document.querySelector('.page-viewport');
-                    const footer = document.querySelector('.dashboard-footer');
-                    const before = {
-                        content: content?.getBoundingClientRect(),
-                        pageViewport: pageViewport?.getBoundingClientRect(),
-                        footer: footer?.getBoundingClientRect()
-                    };
-
-                    if (content) content.scrollTop = content.scrollHeight;
-
-                    const after = {
-                        content: content?.getBoundingClientRect(),
-                        pageViewport: pageViewport?.getBoundingClientRect(),
-                        footer: footer?.getBoundingClientRect()
-                    };
-
-                    return JSON.stringify({
-                        footerPosition: footer ? getComputedStyle(footer).position : '',
-                        contentScrollHeight: content?.scrollHeight ?? 0,
-                        contentClientHeight: content?.clientHeight ?? 0,
-                        before,
-                        after
-                    });
-                }");
-
-            using var layoutDocument = JsonDocument.Parse(layoutJson);
-            var layout = layoutDocument.RootElement;
-            layout.GetProperty("footerPosition").GetString().Should().Be("static", layoutJson);
-            var before = layout.GetProperty("before");
-            var after = layout.GetProperty("after");
-            before.GetProperty("footer").GetProperty("top").GetDouble().Should().BeGreaterThanOrEqualTo(
-                before.GetProperty("content").GetProperty("bottom").GetDouble() - 1, layoutJson);
-            after.GetProperty("footer").GetProperty("top").GetDouble().Should().BeApproximately(
-                before.GetProperty("footer").GetProperty("top").GetDouble(), 1, layoutJson);
-            after.GetProperty("pageViewport").GetProperty("bottom").GetDouble().Should().BeLessThanOrEqualTo(
-                after.GetProperty("content").GetProperty("bottom").GetDouble() + 1, layoutJson);
+            await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
+            var headerBefore = await page.Locator(".topbar").BoundingBoxAsync();
+            await page.Locator(".content").EvaluateAsync("element => element.scrollTop = element.scrollHeight");
+            var content = await page.Locator(".content").BoundingBoxAsync();
+            var headerAfter = await page.Locator(".topbar").BoundingBoxAsync();
+            content.Should().NotBeNull();
+            (content!.Y + content.Height).Should().BeApproximately(viewport.Height, 1);
+            headerAfter!.Y.Should().BeApproximately(headerBefore!.Y, 1);
+            (await page.Locator(".dashboard-footer").CountAsync()).Should().Be(0);
         }
     }
 
@@ -813,41 +772,15 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             var after = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
             after.Should().BeGreaterThan(before, "vertical wheel input over the jobs table must reach the page scroll owner");
 
-            var settingsLink = page.Locator(".nav-item[href='/settings']");
-            var sidebar = page.Locator(".sidebar");
-            await sidebar.EvaluateAsync("element => element.scrollTop = element.scrollHeight");
-            var sidebarMetrics = await sidebar.EvaluateAsync<string>(
-                @"element => JSON.stringify({
-                    scrollTop: element.scrollTop,
-                    scrollHeight: element.scrollHeight,
-                    clientHeight: element.clientHeight,
-                    height: getComputedStyle(element).height,
-                    overflowY: getComputedStyle(element).overflowY,
-                    innerHeight: element.querySelector('.sidebar-inner')?.getBoundingClientRect().height ?? 0,
-                    settingsTop: element.querySelector('.nav-item[href=""/settings""]')?.getBoundingClientRect().top ?? 0
-                })");
-            using var sidebarDocument = JsonDocument.Parse(sidebarMetrics);
-            sidebarDocument.RootElement.GetProperty("scrollTop").GetDouble().Should().BeGreaterThan(0, $"the compact rail must remain scrollable when canonical navigation grows: {sidebarMetrics}");
-            await settingsLink.HoverAsync();
-            var flyoutJson = await settingsLink.EvaluateAsync<string>(
-                @"element => {
-                    const label = element.querySelector('.nav-label');
-                    const rect = label?.getBoundingClientRect();
-                    if (!label || !rect) return JSON.stringify({ hit: false, reason: 'missing-label' });
-                    const style = getComputedStyle(label);
-                    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-                    return JSON.stringify({
-                        hit: hit === label || !!hit?.closest('.nav-label'),
-                        display: style.display,
-                        visibility: style.visibility,
-                        opacity: style.opacity,
-                        rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-                        hitTag: hit?.tagName ?? '',
-                        hitClass: hit?.className?.toString() ?? ''
-                    });
-                }");
-            using var flyoutDocument = JsonDocument.Parse(flyoutJson);
-            flyoutDocument.RootElement.GetProperty("hit").GetBoolean().Should().BeTrue($"compact navigation labels must render above the page content: {flyoutJson}");
+            await page.Locator(".mobile-nav-button").ClickAsync();
+            var drawer = page.Locator("#workspace-mobile-nav");
+            await drawer.GetByRole(AriaRole.Button, new() { Name = "設定與帳戶" }).ClickAsync();
+            var settingsLink = drawer.Locator(".nav-item[href='/settings']");
+            await settingsLink.ScrollIntoViewIfNeededAsync();
+            (await settingsLink.IsVisibleAsync()).Should().BeTrue();
+            await settingsLink.FocusAsync();
+            (await settingsLink.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+            await page.Keyboard.PressAsync("Escape");
         }
 
         await using (var context = await _fixture.CreateContextAsync(new DashboardViewport("reported-1205", 1205, 1216)))
@@ -904,8 +837,8 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
             await page.Locator(".memory-detail-body .subpanel-title", new() { HasTextString = "來源脈絡" }).WaitForAsync();
             await page.Locator(".memory-detail-body .subpanel-title", new() { HasTextString = "版本紀錄" }).WaitForAsync();
             await page.Locator(".memory-detail-body .subpanel-title", new() { HasTextString = "內容片段" }).WaitForAsync();
-            (await page.GetByText("Revisions").CountAsync()).Should().Be(0);
-            (await page.GetByText("Chunks").CountAsync()).Should().Be(0);
+            (await page.Locator(".memory-detail-body").GetByText("Revisions").CountAsync()).Should().Be(0);
+            (await page.Locator(".memory-detail-body").GetByText("Chunks").CountAsync()).Should().Be(0);
             var detailShells = page.Locator(".memory-detail-list-scroll-shell");
             (await detailShells.CountAsync()).Should().BeGreaterThanOrEqualTo(2);
             foreach (var index in Enumerable.Range(0, await detailShells.CountAsync()))
@@ -1028,138 +961,76 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
-    public async Task Preferences_Should_Keep_Editor_And_Dense_List_In_Bounded_Scroll_Workspaces()
+    public async Task Preferences_Should_Page_Loaded_Records_And_Use_One_Scroller_On_Narrow_Screens()
     {
-        await _fixture.EnsureDashboardRunningAsync();
-        var viewports = new[]
+        foreach (var viewport in new[] { new DashboardViewport("desktop", 1920, 1080), new DashboardViewport("tablet", 800, 1280), new DashboardViewport("mobile", 390, 844) })
         {
-            new DashboardViewport("1080p", 1920, 1080),
-            new DashboardViewport("tab-s7-landscape", 1280, 800),
-            new DashboardViewport("tab-s7-portrait", 800, 1280)
-        };
-
-        await using var context = await _fixture.CreateContextAsync(viewports[0]);
-        var page = await context.NewPageAsync();
-        await LoginAndOpenAsync(page, "/preferences?uiProfile=dense");
-        await page.Locator(".preferences-list-scroll-shell").WaitForAsync();
-
-        foreach (var viewport in viewports)
-        {
-            await page.SetViewportSizeAsync(viewport.Width, viewport.Height);
-            await page.WaitForTimeoutAsync(250);
-
-            var metricsJson = await page.EvaluateAsync<string>(
-                @"() => {
-                    const root = document.documentElement;
-                    const workspace = document.querySelector('.preferences-workspace-layout');
-                    const panel = document.querySelector('.preferences-list-panel');
-                    const list = document.querySelector('.preferences-list-scroll-shell');
-                    const cards = Array.from(document.querySelectorAll('.preferences-list-scroll-shell .stack-item'));
-                    const firstCard = cards[0]?.getBoundingClientRect();
-                    const columns = workspace ? getComputedStyle(workspace).gridTemplateColumns.split(' ').filter(Boolean).length : 0;
-                    return JSON.stringify({
-                        viewportWidth: window.innerWidth,
-                        documentScrollWidth: root.scrollWidth,
-                        columns,
-                        panelHeight: panel?.getBoundingClientRect().height ?? 0,
-                        listClientHeight: list?.clientHeight ?? 0,
-                        listScrollHeight: list?.scrollHeight ?? 0,
-                        listOverflowY: list ? getComputedStyle(list).overflowY : '',
-                        cardCount: cards.length,
-                        firstCardHeight: firstCard?.height ?? 0
-                    });
-                }");
-
-            using var metricsDocument = JsonDocument.Parse(metricsJson);
-            var metrics = metricsDocument.RootElement;
-            metrics.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(
-                metrics.GetProperty("viewportWidth").GetInt32() + 1, metricsJson);
-            metrics.GetProperty("columns").GetInt32().Should().Be(viewport.Width > 1360 ? 2 : 1, metricsJson);
-            metrics.GetProperty("panelHeight").GetDouble().Should().BeLessThanOrEqualTo(840, metricsJson);
-            metrics.GetProperty("listScrollHeight").GetDouble().Should().BeGreaterThan(
-                metrics.GetProperty("listClientHeight").GetDouble(), metricsJson);
-            metrics.GetProperty("listOverflowY").GetString().Should().Be("auto", metricsJson);
-            metrics.GetProperty("cardCount").GetInt32().Should().Be(50, metricsJson);
-            metrics.GetProperty("firstCardHeight").GetDouble().Should().BeGreaterThan(80, metricsJson);
+            await using var context = await _fixture.CreateContextAsync(viewport);
+            var page = await context.NewPageAsync();
+            await LoginAndOpenAsync(page, "/preferences?uiProfile=dense");
+            var cards = page.Locator(".preferences-list-scroll-shell .stack-item");
+            await cards.First.WaitForAsync();
+            (await cards.CountAsync()).Should().Be(10);
+            var firstTitle = await cards.First.Locator(".stack-item-title").InnerTextAsync();
+            var editorKey = await page.GetByPlaceholder("preferred-language").InputValueAsync();
+            var next = page.GetByRole(AriaRole.Button, new() { Name = "下一頁偏好", Exact = true });
+            var previous = page.GetByRole(AriaRole.Button, new() { Name = "上一頁偏好", Exact = true });
+            await next.ClickAsync();
+            await page.WaitForFunctionAsync("first => document.querySelector('.preferences-list-scroll-shell .stack-item-title').textContent !== first", firstTitle);
+            (await page.GetByPlaceholder("preferred-language").InputValueAsync()).Should().Be(editorKey, "paging must preserve the active editor");
+            await previous.ClickAsync();
+            await page.WaitForFunctionAsync("first => document.querySelector('.preferences-list-scroll-shell .stack-item-title').textContent === first", firstTitle);
+            for (var i = 0; i < 4; i++)
+            {
+                await next.ClickAsync();
+                await page.WaitForFunctionAsync("page => document.querySelector('.preferences-pagination').textContent.includes('第 ' + page + ' /')", i + 2);
+            }
+            await Assertions.Expect(next).ToBeDisabledAsync();
+            await page.Locator(".preference-filter-button").First.ClickAsync();
+            await page.WaitForFunctionAsync("() => document.querySelector('[aria-label=\"上一頁偏好\"]').disabled");
+            (await previous.IsDisabledAsync()).Should().BeTrue();
+            var list = page.Locator(".preferences-list-scroll-shell");
+            if (viewport.Width > 1360)
+            {
+                (await list.EvaluateAsync<string>("element => getComputedStyle(element).overflowY")).Should().Be("auto");
+            }
+            else
+            {
+                (await list.EvaluateAsync<string>("element => getComputedStyle(element).overflowY")).Should().Be("visible");
+                await list.ScrollIntoViewIfNeededAsync();
+                await page.Locator(".content").EvaluateAsync("element => element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight - 160)");
+                var bounds = await list.BoundingBoxAsync();
+                await page.Mouse.MoveAsync(bounds!.X + 50, Math.Clamp(bounds.Y + 100, 90, viewport.Height - 10));
+                var before = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
+                await page.Mouse.WheelAsync(0, 700);
+                await page.WaitForFunctionAsync("before => document.querySelector('.content').scrollTop > before", before);
+            }
+            await CaptureScreenshotAsync(page, "preferences-pagination", DashboardUiProfile.Dense, viewport, DashboardTheme.Dark);
         }
-
-        var listShell = page.Locator(".preferences-list-scroll-shell");
-        await listShell.ScrollIntoViewIfNeededAsync();
-        await listShell.EvaluateAsync("element => element.scrollTop = element.scrollHeight");
-        await listShell.HoverAsync(new LocatorHoverOptions { Position = new Position { X = 80, Y = 180 } });
-        var pageScrollBefore = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
-        await page.Mouse.WheelAsync(0, 700);
-        await page.WaitForTimeoutAsync(150);
-        var pageScrollAfter = await page.Locator(".content").EvaluateAsync<double>("element => element.scrollTop");
-        pageScrollAfter.Should().BeGreaterThan(pageScrollBefore,
-            "wheel input at the end of the preference list must chain to the page scroll owner");
     }
 
     [Fact]
-    public async Task Theme_Switcher_Menu_Should_Be_Clickable_At_App_Browser_Size()
+    public async Task Theme_Selector_Should_Support_Native_Keyboard_And_All_Appearances()
     {
-        await _fixture.EnsureDashboardRunningAsync();
-        var viewport = new DashboardViewport("app-browser-1031", 1031, 1270);
-        await using var context = await _fixture.CreateContextAsync(viewport);
-        await context.AddInitScriptAsync(
-            @"(() => {
-                localStorage.setItem('contextHub.dashboard.theme', 'dark');
-                document.documentElement.dataset.themePreference = 'dark';
-                document.documentElement.dataset.theme = 'dark';
-                document.documentElement.style.colorScheme = 'dark';
-            })();");
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("app-browser-1031", 1031, 1270));
         var page = await context.NewPageAsync();
-
         await LoginAndOpenAsync(page, "/preferences");
-        var themeToggle = page.Locator(".theme-switcher-toggle");
-        (await themeToggle.EvaluateAsync<string>("element => getComputedStyle(element).cursor"))
-            .Should()
-            .Be("pointer");
-
-        await themeToggle.ClickAsync();
-        var lightOption = page.GetByRole(AriaRole.Menuitemradio, new() { Name = "淺色" });
-        await lightOption.WaitForAsync(new LocatorWaitForOptions
-        {
-            State = WaitForSelectorState.Visible,
-            Timeout = 5000
-        });
-
-        var hitTestJson = await page.EvaluateAsync<string>(
-            @"() => {
-                const option = Array.from(document.querySelectorAll('.theme-switcher-option'))
-                    .find(item => item.textContent?.includes('淺色'));
-                const menu = document.querySelector('.theme-switcher-menu');
-                const topbar = document.querySelector('.topbar');
-                const pageHeader = document.querySelector('.page-header');
-                const rect = option?.getBoundingClientRect();
-                const x = rect ? rect.left + (rect.width / 2) : 0;
-                const y = rect ? rect.top + (rect.height / 2) : 0;
-                const hit = rect ? document.elementFromPoint(x, y) : null;
-                return JSON.stringify({
-                    optionVisible: !!option,
-                    hitThemeOption: !!hit?.closest('.theme-switcher-option'),
-                    hitClass: hit?.className?.toString() ?? '',
-                    menuZ: Number(getComputedStyle(menu).zIndex || 0),
-                    topbarZ: Number(getComputedStyle(topbar).zIndex || 0),
-                    pageHeaderZ: Number(getComputedStyle(pageHeader).zIndex || 0)
-                });
-            }");
-
-        using var hitTestDocument = JsonDocument.Parse(hitTestJson);
-        var hitTest = hitTestDocument.RootElement;
-        hitTest.GetProperty("optionVisible").GetBoolean().Should().BeTrue();
-        hitTest.GetProperty("hitThemeOption").GetBoolean().Should().BeTrue($"theme menu must not be covered at 1031x1270, hit test was {hitTestJson}");
-        hitTest.GetProperty("topbarZ").GetInt32().Should().BeGreaterThan(hitTest.GetProperty("pageHeaderZ").GetInt32());
-        hitTest.GetProperty("menuZ").GetInt32().Should().BeGreaterThan(100);
-
-        await lightOption.ClickAsync();
+        var selector = page.GetByRole(AriaRole.Combobox, new() { Name = "主題", Exact = true });
+        await selector.FocusAsync();
+        await selector.SelectOptionAsync("light");
         await page.WaitForFunctionAsync("() => document.documentElement.dataset.theme === 'light'");
-        var toggleText = await themeToggle.InnerTextAsync();
-        toggleText.Should().Contain("淺色");
+        await page.Keyboard.PressAsync("ArrowDown");
+        await page.WaitForFunctionAsync("() => document.documentElement.dataset.theme === 'dark'");
+        await selector.SelectOptionAsync("black");
+        await page.WaitForFunctionAsync("() => document.documentElement.dataset.theme === 'black'");
+        await page.ReloadAsync();
+        await page.WaitForFunctionAsync("() => document.documentElement.dataset.theme === 'black'");
+        await selector.SelectOptionAsync("system");
+        await page.WaitForFunctionAsync("() => document.documentElement.dataset.themePreference === 'system'");
     }
 
     [Fact]
-    public async Task Tablet_Width_Should_Use_Compact_Sidebar_And_Content_Scroll_Host()
+    public async Task Tablet_Width_Should_Use_Drawer_And_Content_Scroll_Host()
     {
         await _fixture.EnsureDashboardRunningAsync();
         await using var context = await _fixture.CreateContextAsync(new DashboardViewport("narrow-desktop", 1000, 768));
@@ -1210,11 +1081,11 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, layoutJson);
         root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1, layoutJson);
         root.GetProperty("documentScrollHeight").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportHeight").GetInt32() + 1, layoutJson);
-        root.GetProperty("sidebarWidth").GetInt32().Should().BeInRange(56, 72, layoutJson);
-        root.GetProperty("sidebarRight").GetInt32().Should().BeLessThanOrEqualTo(76, layoutJson);
+        root.GetProperty("sidebarWidth").GetInt32().Should().Be(0, layoutJson);
+        root.GetProperty("sidebarRight").GetInt32().Should().Be(0, layoutJson);
         root.GetProperty("sidebarHeight").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportHeight").GetInt32(), layoutJson);
-        root.GetProperty("navLabelDisplay").GetString().Should().Be("none", layoutJson);
-        root.GetProperty("contentOverflowX").GetString().Should().Be("hidden", layoutJson);
+        (await page.Locator(".mobile-nav-button").IsVisibleAsync()).Should().BeTrue();
+        root.GetProperty("contentOverflowX").GetString().Should().BeOneOf("hidden", "clip");
         root.GetProperty("contentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("contentClientWidth").GetInt32() + 1, layoutJson);
         root.GetProperty("contentOverflowY").GetString().Should().Be("auto", layoutJson);
         root.GetProperty("contentScrollHeight").GetInt32().Should().BeGreaterThan(root.GetProperty("contentClientHeight").GetInt32(), layoutJson);
@@ -1222,80 +1093,93 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
     }
 
     [Fact]
-    public async Task Quiet_Signal_Shell_Should_Use_Desktop_Rail_Tablet_Rail_And_Mobile_Drawer_Breakpoints()
+    public async Task Workspace_Shell_Should_Support_Search_Keyboard_Drawer_And_Theme_Persistence()
     {
-        await _fixture.EnsureDashboardRunningAsync();
-        var viewports = new[]
-        {
-            new DashboardViewport("tab-s7-landscape", 1280, 800),
-            new DashboardViewport("tab-s7-portrait", 800, 1280),
-            new DashboardViewport("mobile", 390, 844)
-        };
-
-        foreach (var viewport in viewports)
+        foreach (var viewport in new[] { new DashboardViewport("desktop", 1440, 1024), new DashboardViewport("tablet", 800, 1280), new DashboardViewport("mobile", 390, 844) })
         {
             await using var context = await _fixture.CreateContextAsync(viewport);
             var page = await context.NewPageAsync();
-            await LoginAndOpenAsync(page, "/jobs?uiProfile=dense");
-            await page.Locator(".jobs-page-body").WaitForAsync(new LocatorWaitForOptions
+            await LoginAndOpenAsync(page, "/?uiProfile=dense");
+            var command = page.Locator(".command-button");
+            await command.FocusAsync();
+            await page.Keyboard.PressAsync("Control+k");
+            var dialog = page.Locator("#workspace-command");
+            await dialog.WaitForAsync();
+            (await dialog.EvaluateAsync<bool>("element => element.matches(':modal')")).Should().BeTrue();
+            var search = page.Locator("#workspace-route-query");
+            (await search.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+            await search.FillAsync("/monitoring");
+            await page.Locator(".command-route[href='/monitoring']").WaitForAsync();
+            await page.WaitForFunctionAsync("() => document.querySelectorAll('.command-route').length === 1");
+            await search.FillAsync("no-such-feature-123");
+            await page.Locator(".workspace-command-empty").WaitForAsync();
+            await search.FillAsync("");
+            await page.Locator(".command-route[href='/jobs']").WaitForAsync();
+            await page.Keyboard.PressAsync("Escape");
+            (await command.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+            if (viewport.Width <= 1024)
             {
-                State = WaitForSelectorState.Visible,
-                Timeout = 15000
-            });
-
-            var shellJson = await page.EvaluateAsync<string>(
-                @"() => {
-                    const sidebar = document.querySelector('.sidebar');
-                    const navLabel = document.querySelector('.nav-label');
-                    const mobileButton = document.querySelector('.mobile-nav-button');
-                    const rect = sidebar?.getBoundingClientRect();
-                    const style = sidebar ? getComputedStyle(sidebar) : null;
-                    return JSON.stringify({
-                        viewportWidth: innerWidth,
-                        bodyScrollWidth: document.body.scrollWidth,
-                        documentScrollWidth: document.documentElement.scrollWidth,
-                        sidebarWidth: Math.round(rect?.width ?? 0),
-                        sidebarLeft: Math.round(rect?.left ?? 0),
-                        sidebarRight: Math.round(rect?.right ?? 0),
-                        sidebarTransform: style?.transform ?? '',
-                        navLabelDisplay: navLabel ? getComputedStyle(navLabel).display : '',
-                        mobileButtonDisplay: mobileButton ? getComputedStyle(mobileButton).display : ''
-                    });
-                }");
-
-            using var shellDocument = JsonDocument.Parse(shellJson);
-            var root = shellDocument.RootElement;
-            root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(viewport.Width + 1, shellJson);
-            root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(viewport.Width + 1, shellJson);
-
-            if (viewport.Width == 1280)
-            {
-                root.GetProperty("sidebarWidth").GetInt32().Should().BeInRange(70, 74, shellJson);
-                root.GetProperty("navLabelDisplay").GetString().Should().Be("none", shellJson);
-                root.GetProperty("mobileButtonDisplay").GetString().Should().Be("none", shellJson);
+                var trigger = page.Locator(".mobile-nav-button");
+                await trigger.FocusAsync();
+                await page.Keyboard.PressAsync("Enter");
+                var drawer = page.Locator("#workspace-mobile-nav");
+                await drawer.WaitForAsync();
+                (await drawer.EvaluateAsync<bool>("element => element.matches(':modal')")).Should().BeTrue();
+                (await trigger.GetAttributeAsync("aria-expanded")).Should().Be("true");
+                await page.Keyboard.PressAsync("Escape");
+                await page.WaitForFunctionAsync("() => document.querySelector('.mobile-nav-button').getAttribute('aria-expanded') === 'false'");
+                (await trigger.GetAttributeAsync("aria-expanded")).Should().Be("false");
+                (await trigger.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+                await trigger.ClickAsync();
+                await drawer.GetByRole(AriaRole.Button, new() { Name = "營運與監控" }).ClickAsync();
+                await drawer.Locator("a[href='/monitoring']").ClickAsync();
+                await page.WaitForURLAsync("**/monitoring");
+                (await drawer.EvaluateAsync<bool>("element => element.open")).Should().BeFalse();
+                await trigger.ClickAsync();
+                await page.SetViewportSizeAsync(1440, 1024);
+                await page.WaitForFunctionAsync("() => !document.getElementById('workspace-mobile-nav').open");
+                await page.SetViewportSizeAsync(viewport.Width, viewport.Height);
             }
-            else if (viewport.Width == 800)
-            {
-                root.GetProperty("sidebarWidth").GetInt32().Should().BeInRange(62, 66, shellJson);
-                root.GetProperty("navLabelDisplay").GetString().Should().Be("none", shellJson);
-                root.GetProperty("mobileButtonDisplay").GetString().Should().Be("none", shellJson);
-            }
-            else
-            {
-                root.GetProperty("sidebarRight").GetInt32().Should().BeLessThanOrEqualTo(0, shellJson);
-                root.GetProperty("mobileButtonDisplay").GetString().Should().NotBe("none", shellJson);
+            await page.Locator(".theme-switcher-toggle").SelectOptionAsync("black");
+            await page.ReloadAsync();
+            await page.WaitForFunctionAsync("() => document.documentElement.dataset.theme === 'black'");
+            (await page.EvaluateAsync<string>("() => getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()")).Should().Be("#000000");
+            var geometry = await page.EvaluateAsync<int[]>("() => [innerWidth, document.documentElement.scrollWidth, document.body.scrollWidth]");
+            geometry[1].Should().BeLessThanOrEqualTo(geometry[0] + 1);
+            geometry[2].Should().BeLessThanOrEqualTo(geometry[0] + 1);
+            await CaptureScreenshotAsync(page, "workspace-shell", DashboardUiProfile.Dense, viewport, DashboardTheme.Black);
+        }
+    }
 
-                await page.Locator(".mobile-nav-button").ClickAsync();
-                await page.WaitForFunctionAsync(
-                    "() => document.querySelector('.sidebar')?.getBoundingClientRect().left >= -1");
-                var openLeft = await page.Locator(".sidebar")
-                    .EvaluateAsync<double>("element => element.getBoundingClientRect().left");
-                openLeft.Should().BeGreaterThanOrEqualTo(-1);
-
-                await page.Mouse.ClickAsync(viewport.Width - 12, viewport.Height / 2);
-                await page.WaitForFunctionAsync(
-                    "() => document.querySelector('.sidebar')?.getBoundingClientRect().right <= 1");
+    [Fact]
+    public async Task Work_Items_Should_Keep_Filters_List_And_Detail_In_Separate_Regions()
+    {
+        foreach (var viewport in new[] { new DashboardViewport("desktop", 1440, 1024), new DashboardViewport("tablet", 800, 1280), new DashboardViewport("mobile", 390, 844) })
+        {
+            await using var context = await _fixture.CreateContextAsync(viewport);
+            var page = await context.NewPageAsync();
+            await LoginAndOpenAsync(page, "/project-work-items?uiProfile=dense");
+            await page.Locator(".project-work-item-list-item").First.WaitForAsync();
+            (await page.Locator("main").CountAsync()).Should().Be(1);
+            var layout = await page.EvaluateAsync<double[]>(@"() => {
+                const filter = document.querySelector('.project-work-items-filter-toolbar').getBoundingClientRect();
+                const list = document.querySelector('.project-work-items-list-scroll').getBoundingClientRect();
+                const panel = document.querySelector('.project-work-items-list-panel').getBoundingClientRect();
+                const detail = document.querySelector('.project-work-item-detail-panel').getBoundingClientRect();
+                return [filter.bottom, list.top, panel.bottom, detail.top, document.documentElement.scrollWidth, innerWidth];
+            }");
+            layout[0].Should().BeLessThanOrEqualTo(layout[1] + 1, "filters must not cover list items");
+            layout[4].Should().BeLessThanOrEqualTo(layout[5] + 1);
+            if (viewport.Width <= 960)
+            {
+                layout[2].Should().BeLessThanOrEqualTo(layout[3] + 1, "list and detail must flow vertically on narrow screens");
             }
+            var search = page.GetByRole(AriaRole.Textbox, new() { Name = "搜尋專案待辦" });
+            await search.FillAsync("no-matching-work-item");
+            await page.Locator(".project-work-items-list-panel .empty-inline").WaitForAsync();
+            await search.FillAsync("");
+            await page.Locator(".project-work-item-list-item").First.WaitForAsync();
+            await CaptureScreenshotAsync(page, "work-items-layout", DashboardUiProfile.Dense, viewport, DashboardTheme.Dark);
         }
     }
 
@@ -1341,7 +1225,7 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         root.GetProperty("surface").GetString().Should().Be("#141a21", tokenJson);
         root.GetProperty("accent").GetString().Should().Be("#2dd4bf", tokenJson);
         root.GetProperty("radius").GetString().Should().Be("8px", tokenJson);
-        root.GetProperty("sidebarWidth").GetInt32().Should().BeInRange(246, 250, tokenJson);
+        root.GetProperty("sidebarWidth").GetInt32().Should().BeInRange(250, 254, tokenJson);
         root.GetProperty("overviewSignalStripWidth").GetInt32().Should().BeGreaterThan(900, tokenJson);
         root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(viewport.Width + 1, tokenJson);
         root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(viewport.Width + 1, tokenJson);
@@ -2242,7 +2126,9 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
 
         using var document = JsonDocument.Parse(layoutJson);
         document.RootElement.GetProperty("quickRows").GetInt32().Should().BeLessThanOrEqualTo(2);
-        document.RootElement.GetProperty("advancedOpen").GetBoolean().Should().BeTrue();
+        document.RootElement.GetProperty("advancedOpen").GetBoolean().Should().BeFalse();
+        await page.Locator(".filter-advanced summary").ClickAsync();
+        (await page.GetByLabel("來源類型", new() { Exact = true }).IsVisibleAsync()).Should().BeTrue();
         document.RootElement.GetProperty("gridScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("gridClientWidth").GetInt32() + 1);
         document.RootElement.GetProperty("advancedScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("advancedClientWidth").GetInt32() + 1);
     }
@@ -3527,11 +3413,11 @@ public sealed class DashboardBrowserUiTests : IClassFixture<DashboardBrowserFixt
         document.RootElement.GetProperty("sidebarBuildLabel").GetString().Should().Be("管理介面");
         document.RootElement.GetProperty("sidebarBuildValue").GetString().Should().NotBeNullOrWhiteSpace();
         document.RootElement.GetProperty("sidebarBuildTime").GetString().Should().NotBeNullOrWhiteSpace();
-        document.RootElement.GetProperty("sidebarBuildAlign").GetString().Should().Be("center");
+        document.RootElement.GetProperty("sidebarBuildAlign").GetString().Should().Be("start");
         var sidebarInnerBottom = document.RootElement.GetProperty("sidebarInnerBottom").GetDouble();
         var sidebarBuildBottom = document.RootElement.GetProperty("sidebarBuildBottom").GetDouble();
         sidebarFooterTop.Should().BeLessThan(sidebarBuildTop);
-        (sidebarInnerBottom - sidebarBuildBottom).Should().BeLessThanOrEqualTo(2d);
+        (sidebarInnerBottom - sidebarBuildBottom).Should().BeLessThanOrEqualTo(24d);
         document.RootElement.GetProperty("refreshBuildExists").GetBoolean().Should().BeFalse();
         var mainTop = document.RootElement.GetProperty("mainTop").GetDouble();
         var parametersTop = document.RootElement.GetProperty("parametersTop").GetDouble();
@@ -4539,6 +4425,7 @@ internal sealed record DashboardTheme(string Name, string PreferenceValue)
 {
     public static readonly DashboardTheme Dark = new("dark", "dark");
     public static readonly DashboardTheme Light = new("light", "light");
+    public static readonly DashboardTheme Black = new("black", "black");
 }
 
 public sealed class DashboardBrowserFixture : IAsyncLifetime

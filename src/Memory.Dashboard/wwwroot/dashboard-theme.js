@@ -4,7 +4,7 @@
     let initialized = false;
 
     function normalizePreference(value) {
-        return value === "light" || value === "dark" || value === "system"
+        return value === "light" || value === "dark" || value === "black" || value === "system"
             ? value
             : "dark";
     }
@@ -22,7 +22,7 @@
         const resolved = resolveTheme(normalized);
         document.documentElement.dataset.themePreference = normalized;
         document.documentElement.dataset.theme = resolved;
-        document.documentElement.style.colorScheme = resolved;
+        document.documentElement.style.colorScheme = resolved === "black" ? "dark" : resolved;
         return normalized;
     }
 

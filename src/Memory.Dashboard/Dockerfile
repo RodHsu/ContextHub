@@ -16,6 +16,7 @@ RUN --mount=type=cache,id=contexthub-nuget-dotnet10-v1,target=/root/.nuget/packa
 COPY . .
 RUN --mount=type=cache,id=contexthub-nuget-dotnet10-v1,target=/root/.nuget/packages,sharing=locked \
     dotnet publish src/Memory.Dashboard/Memory.Dashboard.csproj -c Release -o /app/publish --no-restore /p:UseAppHost=false /p:Version=$APP_VERSION /p:InformationalVersion=$APP_VERSION /p:BuildTimestampUtc=$BUILD_TIMESTAMP_UTC
+RUN test -s /app/publish/wwwroot/_framework/blazor.web.js
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 RUN apt-get update \

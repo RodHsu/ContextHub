@@ -15,7 +15,7 @@
                     : preference;
                 document.documentElement.dataset.themePreference = preference;
                 document.documentElement.dataset.theme = resolved;
-                document.documentElement.style.colorScheme = resolved;
+                document.documentElement.style.colorScheme = resolved === "black" ? "dark" : resolved;
             }
             catch {
                 document.documentElement.dataset.themePreference = "dark";
@@ -28,6 +28,7 @@
     <link rel="icon" type="image/svg+xml" href="@Assets["favicon.svg"]" />
     <link rel="stylesheet" href="@Assets["app.css"]" />
     <link rel="stylesheet" href="@Assets["quiet-signal.css"]" />
+    <link rel="stylesheet" href="@Assets["workspace.css"]" />
     <link rel="stylesheet" href="@Assets["Memory.Dashboard.styles.css"]" />
     <ImportMap />
     <HeadOutlet @rendermode="InteractiveServer" />
@@ -37,6 +38,7 @@
     <Routes @rendermode="InteractiveServer" />
     <ReconnectModal />
     <script src="@Assets["dashboard-theme.js"]"></script>
+    <script src="@Assets["dashboard-shell.js"]"></script>
     <script type="module" src="@Assets["dashboard-viewport.js"]"></script>
     <script src="@Assets["dashboard-time.js"]"></script>
     <script src="@Assets["dashboard-clipboard.js"]"></script>

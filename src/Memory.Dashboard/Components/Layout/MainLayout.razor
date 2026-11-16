@@ -1,50 +1,32 @@
 @inherits LayoutComponentBase
-@using Memory.Application
+@implements IDisposable
+@inject IJSRuntime JsRuntime
+@inject NavigationManager Navigation
 
 <AuthorizeView>
     <Authorized Context="auth">
         @{
-            var isAdmin = IsDashboardAdmin(auth.User);
+            var isAdmin = DashboardRouteAuthorization.IsAdmin(auth.User);
             var groups = DashboardNavigation.VisibleGroups(isAdmin).ToArray();
+            var currentGroup = groups.FirstOrDefault(group => group.Items.Any(item => DashboardNavigation.IsCurrent(item, CurrentPath)));
+            var currentRoute = currentGroup?.Items.FirstOrDefault(item => DashboardNavigation.IsCurrent(item, CurrentPath));
+            var searchGroups = FilterGroups(groups).ToArray();
         }
-        <div class="dashboard-shell" data-dashboard-interactive="@(_interactiveReady ? "true" : "false")">
-            <div class="shell-progress-strip" aria-hidden="true"></div>
-            <input id="dashboard-mobile-nav-toggle" class="mobile-nav-toggle" type="checkbox" aria-hidden="true" tabindex="-1" />
-            <label class="mobile-nav-button" for="dashboard-mobile-nav-toggle" aria-label="切換主選單">
-                <span class="mobile-nav-button-line"></span>
-                <span class="mobile-nav-button-line"></span>
-                <span class="mobile-nav-button-line"></span>
-            </label>
-            <label class="mobile-nav-backdrop" for="dashboard-mobile-nav-toggle" aria-hidden="true"></label>
-
+        <div class="dashboard-shell workspace-shell" data-dashboard-interactive="@(_interactiveReady ? "true" : "false")">
+            <a class="skip-link" href="#dashboard-main-content">跳到主要內容</a>
             <aside class="sidebar" aria-label="主要導覽">
                 <div class="sidebar-inner">
-                    <div class="brand">
-                        <div class="brand-mark">C</div>
-                        <div>
-                            <div class="brand-title">ContextHub</div>
-                            <div class="brand-subtitle">靜默訊號</div>
-                        </div>
+                    <a class="brand" href="@(isAdmin ? "/" : "/memories")" aria-label="ContextHub 首頁">
+                        <img class="brand-mark" src="/favicon.svg" alt="" />
+                        <div><div class="brand-title">ContextHub</div><div class="brand-subtitle">工作與知識主控台</div></div>
+                    </a>
+                    <div class="workspace-nav-scroll">
+                        <WorkspaceNavigation Groups="groups" IdPrefix="desktop-nav" />
                     </div>
-
-                    @foreach (var group in groups)
-                    {
-                        <div class="sidebar-section-label">@group.Label</div>
-                        <nav class="sidebar-nav" aria-label="@group.Label">
-                            @foreach (var route in group.Items)
-                            {
-                                <NavLink class="nav-item" href="@route.Href" Match="@route.Match" title="@route.Description">
-                                    <span class="nav-icon nav-icon-mark" aria-hidden="true">@route.Mark</span>
-                                    <span class="nav-label">@route.Label</span>
-                                </NavLink>
-                            }
-                        </nav>
-                    }
-
                     <div class="sidebar-bottom">
                         <div class="sidebar-build">
                             <span class="sidebar-build-label">管理介面</span>
-                            <span class="sidebar-build-value">@BuildMetadata.Current.Version</span>
+                            <span class="sidebar-build-value" title="@BuildMetadata.Current.Version">@BuildMetadata.Current.Version</span>
                             <span class="sidebar-build-time"><ClientLocalTime Value="BuildMetadata.Current.TimestampUtc" /></span>
                         </div>
                     </div>
@@ -53,101 +35,99 @@
 
             <div class="main-shell">
                 <header class="topbar">
+                    <button type="button" class="mobile-nav-button" data-mobile-nav-open aria-label="開啟主選單" aria-controls="workspace-mobile-nav" aria-expanded="false">
+                        <NavigationIcon Mark="menu" />
+                    </button>
                     <div class="topbar-context">
-                        <div class="topbar-title">
-                            <span class="status-dot"></span>
-                            <span>ContextHub</span>
-                        </div>
-                        <div class="topbar-subtitle">平台營運與知識治理</div>
+                        <div class="topbar-title">@(currentGroup?.Label ?? "ContextHub")</div>
+                        <div class="topbar-subtitle">@(currentRoute?.Description ?? "平台營運與知識治理")</div>
                     </div>
-
                     <div class="topbar-actions">
-                        <button type="button"
-                                class="command-button"
-                                aria-haspopup="dialog"
-                                aria-expanded="@_commandPaletteOpen"
-                                @onclick="OpenCommandPalette">
+                        <button type="button" class="command-button" data-command-open aria-haspopup="dialog" aria-controls="workspace-command" aria-label="搜尋功能">
                             <span class="command-button-icon" aria-hidden="true">⌕</span>
-                            <span class="command-button-label">搜尋功能</span>
-                            <span class="command-button-kbd">⌘K</span>
+                            <span class="command-button-label">搜尋功能或頁面</span><kbd class="command-button-kbd">Ctrl K</kbd>
                         </button>
                         <ThemeSwitcher />
-                        <span class="topbar-user">@auth.User.Identity?.Name</span>
-                        <form method="post" action="/account/logout">
-                            <AntiforgeryToken />
-                            <button type="submit" class="ghost-button">登出</button>
-                        </form>
+                        <span class="topbar-user" title="@auth.User.Identity?.Name">@auth.User.Identity?.Name</span>
+                        <form method="post" action="/account/logout"><AntiforgeryToken /><button type="submit" class="ghost-button">登出</button></form>
                     </div>
                 </header>
-
-                <main class="content" id="dashboard-main-content">
+                <main class="content" id="dashboard-main-content" tabindex="-1">
                     @Body
                 </main>
-                <footer class="dashboard-footer">
-                    <span>ContextHub</span>
-                    <span>平台營運與知識治理主控台</span>
-                </footer>
             </div>
 
-            @if (_commandPaletteOpen)
-            {
-                <div class="command-overlay" role="presentation" @onclick="CloseCommandPalette">
-                    <section class="command-palette" role="dialog" aria-modal="true" aria-label="快速切換功能" @onclick:stopPropagation="true">
-                        <div class="command-palette-header">
-                            <div>
-                                <div class="command-palette-eyebrow">Canonical navigation</div>
-                                <h2>快速切換功能</h2>
-                            </div>
-                            <button type="button" class="icon-button" aria-label="關閉快速切換功能" @onclick="CloseCommandPalette">×</button>
-                        </div>
-
-                        <div class="command-palette-body">
-                            @foreach (var group in groups)
-                            {
-                                <div class="command-group">
-                                    <div class="command-group-title">@group.Label</div>
-                                    <div class="command-route-grid">
-                                        @foreach (var route in group.Items)
-                                        {
-                                            <NavLink class="command-route" href="@route.Href" Match="@route.Match" @onclick="CloseCommandPalette">
-                                                <span class="command-route-mark" aria-hidden="true">@route.Mark</span>
-                                                <span class="command-route-copy">
-                                                    <span class="command-route-title">@route.Label</span>
-                                                    <span class="command-route-path">@route.Description</span>
-                                                </span>
-                                            </NavLink>
-                                        }
-                                    </div>
-                                </div>
-                            }
-                        </div>
-                    </section>
+            <dialog id="workspace-mobile-nav" class="workspace-mobile-dialog" aria-labelledby="mobile-nav-title">
+                <div class="workspace-drawer-heading"><strong id="mobile-nav-title">ContextHub</strong><button type="button" class="icon-button" data-dialog-close aria-label="關閉主選單" autofocus>×</button></div>
+                <WorkspaceNavigation Groups="groups" IdPrefix="mobile-nav" />
+            </dialog>
+            <dialog id="workspace-command" class="command-palette workspace-command-dialog" aria-labelledby="command-title">
+                <div class="command-palette-header">
+                    <h2 id="command-title">搜尋功能</h2>
+                    <button type="button" class="icon-button" data-dialog-close aria-label="關閉搜尋">×</button>
                 </div>
-            }
+                <div class="workspace-command-search">
+                    <label for="workspace-route-query">輸入功能名稱、用途或路徑</label>
+                    <input id="workspace-route-query" type="search" placeholder="例如：監控、待辦、/memories" autocomplete="off" autofocus @bind="_query" @bind:event="oninput" />
+                </div>
+                <div class="command-palette-body">
+                    @if (searchGroups.Length == 0)
+                    {
+                        <div class="workspace-command-empty">找不到相符功能。請換個關鍵字，或清除搜尋條件。</div>
+                    }
+                    @foreach (var group in searchGroups)
+                    {
+                        <section class="command-group" aria-label="@group.Label">
+                            <div class="command-group-title">@group.Label</div>
+                            <div class="command-route-grid">
+                                @foreach (var route in group.Items)
+                                {
+                                    <NavLink class="command-route" href="@route.Href" Match="@route.Match">
+                                        <NavigationIcon Mark="@route.Mark" />
+                                        <span class="command-route-copy"><span class="command-route-title">@route.Label</span><span class="command-route-path">@route.Description</span></span>
+                                        <span class="command-route-arrow" aria-hidden="true">↗</span>
+                                    </NavLink>
+                                }
+                            </div>
+                        </section>
+                    }
+                </div>
+                <div class="workspace-command-footer"><span>Tab 選擇功能 · Enter 開啟</span><span>Esc 關閉</span></div>
+            </dialog>
         </div>
     </Authorized>
 </AuthorizeView>
 
 @code {
-    private bool _commandPaletteOpen;
     private bool _interactiveReady;
+    private string _query = string.Empty;
+    private string CurrentPath => "/" + Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0];
 
-    private static bool IsDashboardAdmin(System.Security.Claims.ClaimsPrincipal user)
-        => user.IsInRole(TenantUserRole.Owner.ToString()) ||
-           user.IsInRole(TenantUserRole.Admin.ToString()) ||
-           user.IsInRole("DashboardAdmin");
+    protected override void OnInitialized() => Navigation.LocationChanged += HandleLocationChanged;
 
-    protected override void OnAfterRender(bool firstRender)
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (!firstRender)
+        if (firstRender)
         {
-            return;
+            await JsRuntime.InvokeVoidAsync("contextHubShell.initialize");
+            _interactiveReady = true;
+            await InvokeAsync(StateHasChanged);
         }
-
-        _interactiveReady = true;
-        StateHasChanged();
     }
 
-    private void OpenCommandPalette() => _commandPaletteOpen = true;
-    private void CloseCommandPalette() => _commandPaletteOpen = false;
+    private IEnumerable<DashboardNavigationGroup> FilterGroups(IEnumerable<DashboardNavigationGroup> groups)
+    {
+        var query = _query.Trim();
+        return groups.Select(group => new DashboardNavigationGroup(group.Label, group.Items.Where(item =>
+            query.Length == 0 || $"{group.Label} {item.Label} {item.Description} {item.Href}".Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray()))
+            .Where(group => group.Items.Count > 0);
+    }
+
+    private void HandleLocationChanged(object? sender, LocationChangedEventArgs args)
+    {
+        _query = string.Empty;
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose() => Navigation.LocationChanged -= HandleLocationChanged;
 }
