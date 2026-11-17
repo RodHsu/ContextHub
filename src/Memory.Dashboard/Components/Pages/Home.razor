@@ -50,7 +50,7 @@
                     @foreach (var metric in _overview.Metrics.Take(3))
                     {
                         <div class="operations-desk-metric" title="@metric.Definition">
-                            <span>@metric.Label</span>
+                            <span title="@metric.Label">@MetricLabel(metric.Label)</span>
                             <strong>@DashboardFormatting.Integer(metric.Value)</strong>
                             <small>@MetricUnitText(metric.Unit)</small>
                         </div>
@@ -66,8 +66,8 @@
                                    IsRefreshing="_loading"
                                    PollingIntervalSeconds="@PollingIntervalSeconds"
                                    WarningText="@_overview.SnapshotStatus?.Warning" />
-                    <button type="button" class="ghost-button operations-desk-refresh" @onclick="LoadAsync" disabled="@_loading">
-                        <NavigationIcon Mark="R" /><span>刷新</span>
+                    <button type="button" class="ghost-button operations-desk-refresh" aria-label="刷新" title="刷新" @onclick="LoadAsync" disabled="@_loading">
+                        <NavigationIcon Mark="R" />
                     </button>
                 </div>
             </section>
@@ -125,7 +125,7 @@
                     }
 
                     <footer class="operations-desk-related-links" aria-label="相關診斷工具">
-                        <span>相關工具</span><a href="/operations">營運中心 <span class="desk-icon desk-icon-external" aria-hidden="true"></span></a><a href="/logs">日誌與診斷 <span class="desk-icon desk-icon-external" aria-hidden="true"></span></a>
+                        <span>相關工具</span><a href="/operations">營運中心 <span class="desk-icon desk-icon-external" aria-hidden="true"></span></a><a href="/monitoring">狀態監控 <span class="desk-icon desk-icon-activity" aria-hidden="true"></span></a><a href="/logs">日誌與診斷 <span class="desk-icon desk-icon-external" aria-hidden="true"></span></a>
                     </footer>
                 </article>
 
@@ -135,15 +135,14 @@
                         <nav class="operations-desk-entry-list" aria-label="常用工作入口">
                             <a class="operations-desk-entry" href="/project-information"><span class="desk-icon desk-icon-folder" aria-hidden="true"></span><span class="operations-desk-entry-copy"><strong>專案工作區</strong><small>查看專案背景、結構與協作範圍</small></span><span class="desk-icon desk-icon-chevron operations-desk-entry-arrow" aria-hidden="true"></span></a>
                             <a class="operations-desk-entry" href="/memories"><span class="desk-icon desk-icon-search" aria-hidden="true"></span><span class="operations-desk-entry-copy"><strong>搜尋知識</strong><small>搜尋專案記憶、內容與版本紀錄</small></span><span class="desk-icon desk-icon-chevron operations-desk-entry-arrow" aria-hidden="true"></span></a>
-                            <a class="operations-desk-entry" href="/monitoring"><span class="desk-icon desk-icon-activity" aria-hidden="true"></span><span class="operations-desk-entry-copy"><strong>持續觀察平台</strong><small>檢視服務健康與資源變化</small></span><span class="desk-icon desk-icon-chevron operations-desk-entry-arrow" aria-hidden="true"></span></a>
-                        </nav>
-                    </section>
-                    <section class="overview-decision-panel operations-desk-review-section">
-                        <h3>檢查與審核</h3>
-                        <nav class="operations-desk-review-links" aria-label="檢查與審核入口">
-                            <a href="/inbox">治理建議<span class="desk-icon desk-icon-chevron" aria-hidden="true"></span></a>
-                            <a href="/chatgpt-proposals">ChatGPT 寫入審核<span class="desk-icon desk-icon-chevron" aria-hidden="true"></span></a>
-                            <a href="/governance">治理檢查<span class="desk-icon desk-icon-chevron" aria-hidden="true"></span></a>
+                            <details class="overview-decision-panel operations-desk-review-section">
+                                <summary class="operations-desk-entry"><NavigationIcon Mark="Z" /><span class="operations-desk-entry-copy"><strong>檢查與審核</strong><small>依事項類型開啟建議、寫入審核與治理結果</small></span><span class="desk-icon desk-icon-chevron operations-desk-entry-arrow" aria-hidden="true"></span></summary>
+                                <div class="operations-desk-review-links">
+                                    <a href="/inbox">治理建議<span class="desk-icon desk-icon-chevron" aria-hidden="true"></span></a>
+                                    <a href="/chatgpt-proposals">ChatGPT 寫入審核<span class="desk-icon desk-icon-chevron" aria-hidden="true"></span></a>
+                                    <a href="/governance">治理檢查<span class="desk-icon desk-icon-chevron" aria-hidden="true"></span></a>
+                                </div>
+                            </details>
                         </nav>
                     </section>
                     <section class="overview-work-panel operations-desk-jobs-section">
@@ -255,6 +254,14 @@
         "jobs" => "項",
         "logs" => "筆",
         _ => unit
+    };
+
+    private static string MetricLabel(string label) => label switch
+    {
+        "全 Instance 記憶資料列" => "記憶",
+        "預設專案記憶" => "專案記憶",
+        "使用者偏好" => "偏好",
+        _ => label
     };
 
     private static string StatusClass(string status) => status.ToLowerInvariant() switch

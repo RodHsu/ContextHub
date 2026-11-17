@@ -45,6 +45,13 @@ public sealed partial class DashboardBrowserUiTests
         string[] destinations = ["/project-information", "/project-work-items", "/memories", "/monitoring", "/operations", "/logs", "/inbox", "/chatgpt-proposals", "/governance", "/jobs"];
         foreach (var destination in destinations)
         {
+            if (destination is "/inbox" or "/chatgpt-proposals" or "/governance")
+            {
+                var reviewSummary = page.Locator(".operations-desk-review-section > summary");
+                await reviewSummary.FocusAsync();
+                await page.Keyboard.PressAsync("Enter");
+                await Assertions.Expect(page.Locator(".operations-desk-review-section")).ToHaveAttributeAsync("open", "");
+            }
             var link = page.Locator($"main a[href='{destination}']").First;
             await link.ScrollIntoViewIfNeededAsync();
             await link.FocusAsync();
@@ -137,10 +144,33 @@ public sealed partial class DashboardBrowserUiTests
         layout.GetProperty("documentWidth").GetDouble().Should().BeLessThanOrEqualTo(width + 1, layout.ToString());
         layout.GetProperty("bodyWidth").GetDouble().Should().BeLessThanOrEqualTo(width + 1, layout.ToString());
         layout.GetProperty("contentScrollWidth").GetDouble().Should().BeLessThanOrEqualTo(layout.GetProperty("contentWidth").GetDouble() + 1, layout.ToString());
+        var summaryBounds = await page.EvaluateAsync<JsonElement>("""
+            () => {
+                const summary=document.querySelector('.operations-desk-summary'), outer=summary.getBoundingClientRect();
+                const issues=[];
+                for(const element of summary.querySelectorAll('.operations-desk-health, .operations-desk-metrics, .operations-desk-freshness, .operations-desk-metric > span, .operations-desk-metric > strong, .operations-desk-refresh, .refresh-status-primary-copy')) {
+                    const rect=element.getBoundingClientRect();
+                    if(rect.left < outer.left-1 || rect.right > outer.right+1 || rect.top < outer.top-1 || rect.bottom > outer.bottom+1 || element.scrollWidth > element.clientWidth+1)
+                        issues.push({element:element.className,text:element.textContent.trim(),left:rect.left,right:rect.right,scroll:element.scrollWidth,client:element.clientWidth});
+                }
+                return {height:outer.height,issues};
+            }
+            """);
+        summaryBounds.GetProperty("issues").EnumerateArray().Should().BeEmpty("summary contents must remain readable inside their container: {0}", summaryBounds);
+        if (width >= 1487 && !allowReflow)
+            summaryBounds.GetProperty("height").GetDouble().Should().BeLessThan(100, "desktop summary should fit one compact band");
     }
 
     private static async Task AssertOperationsDeskTypographyAndContrastAsync(IPage page)
     {
+        await page.EvaluateAsync("""
+            async () => {
+                getComputedStyle(document.body).color;
+                await Promise.all(document.getAnimations().filter(animation =>
+                    animation.effect?.getComputedTiming().iterations !== Infinity)
+                    .map(animation => animation.finished.catch(() => {})));
+            }
+            """);
         var typography = await page.EvaluateAsync<JsonElement>("""
             () => {
                 const canvas=document.createElement('canvas'); canvas.width=canvas.height=1;

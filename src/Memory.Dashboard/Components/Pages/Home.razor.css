@@ -1,6 +1,6 @@
 .operations-desk-summary {
-    display: grid;
-    grid-template-columns: minmax(12rem, 1fr) minmax(0, 1.8fr) auto;
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 1rem;
     min-width: 0;
@@ -12,9 +12,11 @@
 }
 
 .operations-desk-health {
-    display: grid;
-    align-content: center;
-    gap: 0.35rem;
+    display: flex;
+    flex: 1 1 19rem;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
     min-width: 0;
 }
 
@@ -43,19 +45,20 @@
 .operations-desk-health-description,
 .operations-desk-muted {
     color: var(--text-muted);
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     line-height: 1.5;
 }
 
 .operations-desk-metrics {
+    flex: 2 1 27rem;
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     min-width: 0;
 }
 
 .operations-desk-metric {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
     gap: 0.15rem 0.65rem;
     min-width: 0;
@@ -64,13 +67,17 @@
 }
 
 .operations-desk-metric > span {
+    flex: 1 1 3rem;
+    min-width: 0;
     color: var(--text-muted);
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     line-height: 1.45;
     overflow-wrap: anywhere;
 }
 
 .operations-desk-metric > strong {
+    max-width: 100%;
+    color: var(--text-strong);
     font-size: 1.5rem;
     font-weight: 650;
     font-variant-numeric: tabular-nums;
@@ -79,16 +86,20 @@
 }
 
 .operations-desk-metric > small {
-    grid-column: 1 / -1;
-    color: var(--text-subtle);
-    font-size: 0.75rem;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
 }
 
 .operations-desk-freshness {
+    flex: 0 1 18rem;
+    max-width: 100%;
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 0.75rem;
+    flex-wrap: nowrap;
+    gap: 0.5rem;
     min-width: 0;
     padding-inline-start: 1rem;
     border-inline-start: 1px solid var(--border);
@@ -102,14 +113,19 @@
     box-shadow: none;
 }
 
+.operations-desk-freshness ::deep .refresh-status-group { flex: 1 1 auto; min-width: 0; }
+.operations-desk-freshness ::deep .refresh-status-primary-copy { min-width: 0; overflow-wrap: anywhere; }
+
 .operations-desk-freshness ::deep .refresh-status-primary { gap: 0.5rem; }
+.operations-desk-freshness ::deep .refresh-status-primary-copy { display: grid; grid-template-columns: auto auto; align-items: baseline; gap: 0.2rem 0.5rem; }
 .operations-desk-freshness ::deep .refresh-status-caption { font-size: 0.75rem; }
 .operations-desk-freshness ::deep .refresh-status-time { font-size: 0.8125rem; }
-.operations-desk-freshness ::deep .refresh-status-subline { font-size: 0.75rem; }
+.operations-desk-freshness ::deep .refresh-status-subline { grid-column: 1 / -1; font-size: 0.75rem; }
 .operations-desk-freshness ::deep .refresh-status-live[aria-hidden="true"] { display: none; }
 
 .operations-desk-refresh {
     display: inline-flex;
+    flex: 0 0 auto;
     align-items: center;
     gap: 0.4rem;
     padding-inline: 0.65rem;
@@ -154,7 +170,7 @@
 .operations-desk-section-heading h2 {
     margin: 0;
     color: var(--text-strong);
-    font-size: clamp(1.25rem, 1.05rem + 0.3vw, 1.5rem);
+    font-size: 1.75rem;
     font-weight: 650;
     line-height: 1.3;
 }
@@ -163,7 +179,7 @@
     max-width: 65ch;
     margin: 0.5rem 0 0;
     color: var(--text-muted);
-    font-size: 0.875rem;
+    font-size: 1rem;
     line-height: 1.6;
 }
 
@@ -228,7 +244,7 @@
 
 .operations-desk-risk-table td:first-child { padding-inline-start: 0; }
 .operations-desk-risk-table td:last-child { padding-inline-end: 0; }
-.operations-desk-risk-service { font-size: 1rem; font-weight: 600; user-select: text; }
+.operations-desk-risk-service { color: var(--text-strong); font-size: 1.125rem; font-weight: 600; user-select: text; }
 
 .operations-desk-risk-details { margin-block-start: 0.5rem; }
 
@@ -241,14 +257,14 @@
     cursor: pointer;
     list-style: none;
     color: var(--text-muted);
-    font-size: 0.875rem;
+    font-size: 1rem;
     line-height: 1.6;
 }
 
 .operations-desk-risk-details > summary::-webkit-details-marker { display: none; }
 .operations-desk-risk-details > summary::marker { content: ""; }
 .operations-desk-risk-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
-.operations-desk-risk-excerpt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.operations-desk-risk-excerpt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: clip; }
 .operations-desk-message-toggle { width: fit-content; color: var(--info); font-size: 0.8125rem; }
 .operations-desk-risk-details[open] .operations-desk-message-toggle { text-decoration: underline; }
 
@@ -296,13 +312,12 @@
 
 .operations-desk-entry > .desk-icon { width: 1.5rem; height: 1.5rem; }
 .operations-desk-entry-copy { display: grid; gap: 0.3rem; min-width: 0; }
-.operations-desk-entry strong { font-size: 1rem; font-weight: 600; }
-.operations-desk-entry small { color: var(--text-muted); font-size: 0.875rem; line-height: 1.5; }
+.operations-desk-entry strong { font-size: 1.125rem; font-weight: 600; }
+.operations-desk-entry small { color: var(--text-muted); font-size: 0.9375rem; line-height: 1.5; }
 .operations-desk-entry-arrow { color: var(--text-muted); }
 .operations-desk-entry:hover strong,
 .operations-desk-health-link:hover strong { color: var(--accent); }
 
-.operations-desk-review-section,
 .operations-desk-jobs-section {
     margin-block-start: 1.25rem;
     padding-block-start: 1.25rem;
@@ -311,7 +326,12 @@
 
 .operations-desk-review-section h3,
 .operations-desk-jobs-section h3 { margin: 0; font-size: 1.0625rem; font-weight: 600; }
-.operations-desk-review-links { display: grid; margin-block-start: 0.5rem; }
+.operations-desk-review-section { margin: 0; padding: 0; border: 0; }
+.operations-desk-review-section > summary { cursor: pointer; list-style: none; }
+.operations-desk-review-section > summary::-webkit-details-marker { display: none; }
+.operations-desk-review-section[open] > summary .desk-icon-chevron { transform: rotate(90deg); }
+.operations-desk-review-links { display: grid; margin-block: 0.25rem 0.75rem; padding-inline-start: 2.125rem; }
+.operations-desk-home-actions .primary-button { min-height: 3rem; padding-inline: 1.25rem; font-size: 1rem; }
 
 .operations-desk-review-links a {
     display: flex;
@@ -339,15 +359,14 @@
     font-size: 0.875rem;
 }
 
-.operations-desk-job > strong { min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+.operations-desk-job > strong { min-width: 0; color: var(--text-strong); overflow-wrap: anywhere; font-weight: 500; }
 .operations-desk-job ::deep .client-relative-time { grid-column: 2; color: var(--text-muted); font-size: 0.8125rem; }
 .operations-desk-all-jobs { display: inline-flex; align-items: center; gap: 0.5rem; min-height: 2.75rem; font-size: 0.875rem; }
 .operations-desk-empty { margin: 0.75rem 0; color: var(--text-muted); font-size: 0.875rem; line-height: 1.7; }
 .operations-desk-release { margin: 0; padding: 0; border: 0; font-size: 0.75rem; }
 
 @media (max-width: 1280px) {
-    .operations-desk-summary { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
-    .operations-desk-freshness { grid-column: 1 / -1; justify-content: space-between; padding-block-start: 0.75rem; padding-inline-start: 0; border-inline-start: 0; border-block-start: 1px solid var(--border); }
+    .operations-desk-freshness { flex-basis: 100%; justify-content: space-between; padding-block-start: 0.75rem; padding-inline-start: 0; border-inline-start: 0; border-block-start: 1px solid var(--border); }
 }
 
 @media (max-width: 1024px) {
@@ -357,7 +376,10 @@
 }
 
 @media (max-width: 600px) {
-    .operations-desk-summary { grid-template-columns: minmax(0, 1fr); gap: 0.875rem; padding: 1rem; }
+    .operations-desk-summary { flex-direction: column; align-items: stretch; gap: 0.875rem; padding: 1rem; }
+    .operations-desk-health,
+    .operations-desk-metrics,
+    .operations-desk-freshness { flex: 0 1 auto; }
     .operations-desk-metrics { grid-template-columns: repeat(auto-fit, minmax(min(100%, 6rem), 1fr)); gap: 0.5rem; padding-block-start: 0.875rem; border-block-start: 1px solid var(--border); }
     .operations-desk-metric { grid-template-columns: minmax(0, 1fr); padding-inline: 0.625rem; }
     .operations-desk-metric:first-child { padding-inline-start: 0; border-inline-start: 0; }

@@ -39,6 +39,7 @@ Internal design-tool sessions, private project IDs, and one-off implementation Q
 - Primary accent: teal, reserved for primary actions, selected state, and focus
 - Status colors: success, warning, danger, and info must be paired with text or icons
 - Typography: sans-serif UI font for product text; monospace only for IDs, JSON, logs, timestamps, code, and tokens
+- Scale: 1rem body baseline with distinct page and section headings; use relative units and natural control heights
 - Radius: keep containers at 8px or less unless a component requires otherwise
 - Shadows: use only for overlays such as menus, drawers, and dialogs
 

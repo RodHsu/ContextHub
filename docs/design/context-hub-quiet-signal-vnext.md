@@ -16,8 +16,8 @@
 - Text: high-contrast neutral foreground
 - Status: success, warning, danger, and info colors paired with icon or text
 - Typography: UI text in a readable sans-serif; IDs, JSON, logs, timestamps, code, and tokens in monospace
-- Body text: generally 14-16px
-- Page title: generally 24px
+- Body text: a 1rem system-font baseline; secondary and table text generally 0.875rem
+- Page title: 1.5-2.25rem, with a clear hierarchy over section headings
 - Letter spacing: `0`
 - Radius: 8px or less for containers
 - Shadows: menus, drawers, and dialogs only
@@ -26,7 +26,7 @@
 
 | Viewport | Navigation | Content composition |
 | --- | --- | --- |
-| `>= 1200` | 252px labeled sidebar, collapsible task groups | Bounded content; wide master-detail layouts |
+| `>= 1200` | 15.5rem labeled sidebar, collapsible task groups | Left-aligned content; wide master-detail layouts |
 | `1025-1199` | 224px labeled sidebar | Wrapped tools and single-column overview |
 | `<= 1024` | App bar button and native modal navigation drawer | Full-width workspace; local data overflow |
 
@@ -50,6 +50,18 @@ Hard rules:
 - `ContentReader`: selectable, copyable, wrappable, bounded, and scrollable within its frame.
 - `FormSection`: label above control, inline validation, dirty state, save guard, disabled explanation.
 - `RefreshState`: keep old data visible while refresh runs; update client-local timestamp on success.
+
+## Operations desk composition
+
+The overview uses the Structured Operations Desk composition within Quiet Signal. The shared app bar provides location and global controls; the content has one main page title. PageViewport headers omit the repeated breadcrumb, while standalone PageHeader consumers may retain it for contextual flows.
+
+A compact summary combines service attention, the available snapshot metrics and freshness. The main workspace gives recent errors the larger column; a narrower surface groups work entries, review links and background jobs. Actual log levels and timestamps remain the source of truth. The interface must not infer an unresolved workflow state or a new severity taxonomy from presentation alone.
+
+Healthy and empty states use short text rather than nested framed cards. Workspaces share an alignment edge with the app bar and use available width; prose and technical readers keep their own readable line lengths and overflow frames. At narrow widths the overview stacks in DOM order, and controls grow naturally with text size.
+
+All existing navigation, service warnings, review destinations, refresh warnings, loading/error states and background-work links remain available. Light, dark and pure-black appearances use the same type scale and composition. Visual acceptance compares rendered desktop and mobile views against the approved composition in addition to functional and geometry tests.
+
+Small action and work-entry icons use the supplied [Feather 4.29.2](https://github.com/feathericons/feather/tree/v4.29.2) SVG assets. They are served locally with their [MIT license](../../src/Memory.Dashboard/wwwroot/icons/feather/LICENSE); no runtime icon CDN or font download is required. The existing product logo and navigation icon system remain in use.
 - `DestructiveDialog`: object name, impact preview, consequence, and typed confirmation for high-risk actions.
 - `AsyncState`: default, loading, stale, empty, error, retry, success, focus, and disabled states preserve layout.
 

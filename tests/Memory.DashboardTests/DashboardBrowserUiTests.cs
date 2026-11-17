@@ -1253,7 +1253,7 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
     public async Task Operations_Desk_Overview_Should_Keep_Readable_Hierarchy_At_Design_Viewport()
     {
         await _fixture.EnsureDashboardRunningAsync();
-        var viewport = new DashboardViewport("operations-desk-design", 1440, 1024);
+        var viewport = new DashboardViewport("operations-desk-design", 1487, 1058);
         await using var context = await _fixture.CreateContextAsync(viewport);
         var page = await context.NewPageAsync();
         await LoginAndOpenAsync(page, "/?uiProfile=dense");
@@ -3756,16 +3756,23 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
         Math.Abs(reloadButton.GetProperty("top").GetInt32() - refreshStatus.GetProperty("top").GetInt32()).Should().BeLessThanOrEqualTo(2, $"reload button should align with refresh status: {layoutJson}");
     }
 
-    [Fact]
-    public async Task Settings_Transfer_Scope_Chips_Should_Stay_Three_Columns_And_Not_Collapse_At_1080_Width()
+    [Theory]
+    [InlineData(1024)]
+    [InlineData(1025)]
+    [InlineData(1080)]
+    [InlineData(1360)]
+    [InlineData(1361)]
+    [InlineData(1366)]
+    public async Task Settings_Transfer_Scope_Chips_Should_Stay_Three_Columns_And_Not_Collapse_At_1080_Width(int width)
     {
         await _fixture.EnsureDashboardRunningAsync();
-        var viewport = new DashboardViewport("notebook-1080", 1080, 1080);
+        var viewport = new DashboardViewport($"notebook-{width}", width, 1080);
         await using var context = await _fixture.CreateContextAsync(viewport);
         var page = await context.NewPageAsync();
 
         await LoginAndOpenAsync(page, "/settings?uiProfile=dense");
 
+        await CaptureScreenshotAsync(page, "settings-transfer-scope", DashboardUiProfile.Dense, viewport, DashboardTheme.Dark);
         var layoutJson = await page.EvaluateAsync<string>(
             @"() => JSON.stringify({
                 chipTops: Array.from(document.querySelectorAll('.transfer-scope-chip')).map(item => Math.round(item.getBoundingClientRect().top)),
@@ -3778,7 +3785,7 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
         using var document = JsonDocument.Parse(layoutJson);
         document.RootElement.GetProperty("chipTops").EnumerateArray().Select(item => item.GetInt32()).Distinct().Should().HaveCount(1);
         document.RootElement.GetProperty("chipWidths").EnumerateArray().Should().HaveCount(3);
-        document.RootElement.GetProperty("titleHeights").EnumerateArray().Select(item => item.GetInt32()).All(height => height < 56).Should().BeTrue();
+        document.RootElement.GetProperty("titleHeights").EnumerateArray().Select(item => item.GetInt32()).All(height => height < 56).Should().BeTrue(layoutJson);
         document.RootElement.GetProperty("gridScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(document.RootElement.GetProperty("gridClientWidth").GetInt32() + 1);
     }
 
