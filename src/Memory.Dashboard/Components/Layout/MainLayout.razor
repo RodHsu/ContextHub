@@ -69,7 +69,7 @@
                 </div>
                 <div class="workspace-command-search">
                     <label for="workspace-route-query">輸入功能名稱、用途或路徑</label>
-                    <input id="workspace-route-query" type="search" placeholder="例如：監控、待辦、/memories" autocomplete="off" autofocus @bind="_query" @bind:event="oninput" />
+                    <input id="workspace-route-query" type="text" role="searchbox" enterkeyhint="search" placeholder="例如：監控、待辦、/memories" autocomplete="off" autofocus @bind="_query" @bind:event="oninput" />
                 </div>
                 <div class="command-palette-body">
                     @if (searchGroups.Length == 0)
