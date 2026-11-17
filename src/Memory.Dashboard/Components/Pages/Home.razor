@@ -3,42 +3,25 @@
 @inject IContextHubApiClient ApiClient
 @inject IDashboardRuntimeSettingsAccessor RuntimeSettingsAccessor
 
-<PageTitle>Context Hub | 總覽</PageTitle>
+<PageTitle>ContextHub | 工作總覽</PageTitle>
 
-<PageViewport Title="總覽"
-              Subtitle="掌握平台狀態，繼續專案工作，處理需要注意的事項。"
+<PageViewport Title="工作總覽"
+              Subtitle="掌握平台狀態、營運風險與待處理事項，快速進入工作流程。"
               Breadcrumb="ContextHub / 總覽"
               BodyClass="page-viewport-body overview-page-body">
     <Actions>
-        <div class="page-actions-status">
-            <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
-                           SnapshotAtUtc="_overview?.SnapshotAtUtc"
-                           IsRefreshing="_loading"
-                           PollingIntervalSeconds="@PollingIntervalSeconds"
-                           WarningText="@_overview?.SnapshotStatus?.Warning" />
-        </div>
-        <div class="page-actions-primary">
-            <a class="ghost-button button-link" href="/operations">開啟營運中心</a>
-            <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">刷新</button>
+        <div class="page-actions-primary operations-desk-home-actions">
+            @if (_overview is null)
+            {
+                <button class="ghost-button" @onclick="LoadAsync" disabled="@_loading">刷新</button>
+            }
+            <a class="primary-button button-link" href="/project-work-items">檢視待辦 <span class="desk-icon desk-icon-arrow" aria-hidden="true"></span></a>
         </div>
     </Actions>
     <ChildContent>
-        <section class="panel overview-shortcuts" aria-label="常用工作">
-            <div class="panel-heading-row">
-                <div>
-                    <div class="panel-title">常用工作</div>
-                    <div class="panel-heading-meta">從專案、知識或營運開始。</div>
-                </div>
-            </div>
-            <nav class="overview-decision-links" aria-label="常用工作入口">
-                <a href="/project-work-items"><strong>追蹤專案工作</strong><span>查看待辦、成熟度與檢核清單</span></a>
-                <a href="/memories"><strong>尋找專案知識</strong><span>搜尋內容、來源與版本紀錄</span></a>
-                <a href="/monitoring"><strong>持續觀察平台</strong><span>追蹤服務健康與資源變化</span></a>
-            </nav>
-        </section>
         @if (_overview is null && _loading)
         {
-            <DashboardAsyncState State="loading" Title="載入總覽" Message="正在整理最新健康、風險與行動訊號。" />
+            <DashboardAsyncState State="loading" Title="載入總覽" Message="正在整理最新健康、風險與背景工作。" />
         }
         else if (_overview is null)
         {
@@ -48,137 +31,148 @@
         }
         else
         {
+            var attentionServices = AttentionServices();
+            var healthKnown = _overview.Services.Count > 0;
             @if (!string.IsNullOrWhiteSpace(_loadError))
             {
                 <DashboardAsyncState State="degraded" Title="顯示上次成功資料" Message="@_loadError" />
             }
 
-            <section class="overview-signal-strip" aria-label="高行動價值摘要">
-                @foreach (var metric in _overview.Metrics.Take(3))
-                {
-                    <article class="overview-signal" title="@metric.Definition">
-                        <span>@metric.Label</span>
-                        <strong>@DashboardFormatting.Integer(metric.Value)</strong>
-                        <small>@MetricUnitText(metric.Unit)</small>
-                    </article>
-                }
-                @if (_overview.Metrics.Count == 0)
-                {
-                    <article class="overview-signal overview-signal-empty">
-                        <span>摘要訊號</span>
-                        <strong>0</strong>
-                        <small>等待資料</small>
-                    </article>
-                }
+            <section class="operations-desk-summary overview-signal-strip" aria-label="平台健康與摘要">
+                <div class="operations-desk-health overview-health-panel">
+                    <a href="/operations" class="operations-desk-health-link">
+                        <span class="operations-desk-health-dot @(!healthKnown ? "unknown" : attentionServices.Count == 0 ? "healthy" : "attention")" aria-hidden="true"></span>
+                        <strong>@(!healthKnown ? "健康狀態未知" : attentionServices.Count == 0 ? "平台正常" : "平台需注意")</strong>
+                    </a>
+                    <span class="operations-desk-health-description">@(!healthKnown ? "尚無服務健康資料" : attentionServices.Count == 0 ? $"{_overview.Services.Count} 項服務運作正常" : $"優先檢視 {attentionServices.Count} 項異常服務")</span>
+                </div>
+                <div class="operations-desk-metrics" aria-label="摘要指標">
+                    @foreach (var metric in _overview.Metrics.Take(3))
+                    {
+                        <div class="operations-desk-metric" title="@metric.Definition">
+                            <span>@metric.Label</span>
+                            <strong>@DashboardFormatting.Integer(metric.Value)</strong>
+                            <small>@MetricUnitText(metric.Unit)</small>
+                        </div>
+                    }
+                    @if (_overview.Metrics.Count == 0)
+                    {
+                        <span class="operations-desk-muted">目前沒有摘要指標。</span>
+                    }
+                </div>
+                <div class="operations-desk-freshness">
+                    <RefreshStatus LastUpdatedAt="_lastUpdatedAt"
+                                   SnapshotAtUtc="_overview.SnapshotAtUtc"
+                                   IsRefreshing="_loading"
+                                   PollingIntervalSeconds="@PollingIntervalSeconds"
+                                   WarningText="@_overview.SnapshotStatus?.Warning" />
+                    <button type="button" class="ghost-button operations-desk-refresh" @onclick="LoadAsync" disabled="@_loading">
+                        <NavigationIcon Mark="R" /><span>刷新</span>
+                    </button>
+                </div>
             </section>
 
-            <section class="overview-action-grid">
-                <article class="panel overview-health-panel">
-                    <div class="panel-heading-row">
+            <section class="operations-desk-workspace" aria-label="營運風險與工作入口">
+                <article class="panel overview-risk-panel operations-desk-risk-panel">
+                    <header class="operations-desk-section-heading">
                         <div>
-                            <div class="panel-title">平台健康</div>
-                            <div class="panel-heading-meta">優先列出需要注意的服務，完整狀態請至營運中心。</div>
+                            <h2>風險與異常</h2>
+                            <p>優先顯示最近三筆錯誤與異常，展開訊息追查原因。</p>
                         </div>
-                        <span class="status-badge @(AttentionServices().Count == 0 ? "ok" : "warn")">
-                            @(AttentionServices().Count == 0 ? "正常" : $"{AttentionServices().Count} 項需注意")
-                        </span>
-                    </div>
+                        <span class="operations-desk-count" aria-label="最近異常數量">@DashboardFormatting.Integer(_overview.RecentErrors.Count)</span>
+                    </header>
 
-                    <div class="overview-queue">
-                        @if (AttentionServices().Count == 0)
-                        {
-                            <div class="empty-inline">目前沒有服務健康警示。</div>
-                        }
-                        else
-                        {
-                            @foreach (var service in AttentionServices())
+                    @if (attentionServices.Count > 0)
+                    {
+                        <div class="operations-desk-service-alerts" aria-label="需要注意的服務">
+                            @foreach (var service in attentionServices)
                             {
-                                <article class="overview-queue-item">
+                                <div class="operations-desk-service-alert">
                                     <span class="status-badge @StatusClass(service.Status)">@DashboardText.Status(service.Status)</span>
                                     <div><strong>@DashboardText.Service(service.Name)</strong><span>@service.Description</span></div>
-                                </article>
+                                </div>
                             }
-                        }
-                    </div>
-                    <a class="ghost-button button-link" href="/operations">檢視營運中心</a>
-                </article>
-
-                <article class="panel overview-risk-panel">
-                    <div class="panel-heading-row">
-                        <div>
-                            <div class="panel-title">風險與異常</div>
-                            <div class="panel-heading-meta">最近的錯誤與嚴重異常，可開啟日誌追查。</div>
                         </div>
-                        <span class="status-badge @(_overview.RecentErrors.Count == 0 ? "ok" : "bad")">@DashboardFormatting.Integer(_overview.RecentErrors.Count)</span>
-                    </div>
-                    <div class="overview-queue">
-                        @if (_overview.RecentErrors.Count == 0)
-                        {
-                            <div class="empty-inline">目前沒有待檢視異常。</div>
-                        }
-                        else
-                        {
-                            @foreach (var error in _overview.RecentErrors.Take(3))
-                            {
-                                <article class="overview-queue-item">
-                                    <span class="status-badge bad">@error.Level</span>
-                                    <div><strong>@error.ServiceName</strong><span>@error.Message</span></div>
-                                    <ClientRelativeTime Value="error.CreatedAt" />
-                                </article>
-                            }
-                        }
-                    </div>
-                    <a class="ghost-button button-link" href="/logs">檢視日誌與診斷</a>
-                </article>
+                    }
 
-                <article class="panel overview-decision-panel">
-                    <div class="panel-heading-row">
-                        <div>
-                            <div class="panel-title">檢查與審核</div>
-                            <div class="panel-heading-meta">依事項類型開啟建議、寫入審核或治理結果。</div>
-                        </div>
-                    </div>
-                    <div class="overview-decision-links">
-                        <a href="/inbox"><strong>治理建議</strong><span>檢視系統提出的同步與索引建議</span></a>
-                        <a href="/chatgpt-proposals"><strong>ChatGPT 寫入審核</strong><span>比較提案內容並確認套用結果</span></a>
-                        <a href="/governance"><strong>治理檢查</strong><span>追查檢查結果、例外與執行收據</span></a>
-                    </div>
-                </article>
-            </section>
-
-            <section class="panel overview-work-panel">
-                <div class="panel-heading-row">
-                    <div>
-                        <div class="panel-title">進行中的背景工作</div>
-                        <div class="panel-heading-meta">顯示最近三筆等待或執行中的工作，開啟背景工作可查看詳情。</div>
-                    </div>
-                    <span class="status-badge neutral">@DashboardFormatting.Integer(_overview.ActiveJobs.Count)</span>
-                </div>
-                <div class="overview-work-list">
-                    @if (_overview.ActiveJobs.Count == 0)
+                    @if (_overview.RecentErrors.Count == 0)
                     {
-                        <div class="empty-inline">目前沒有等待中或執行中的背景工作。</div>
+                        <p class="operations-desk-empty">目前沒有待檢視異常。</p>
                     }
                     else
                     {
-                        @foreach (var job in _overview.ActiveJobs.Take(3))
-                        {
-                            <article>
-                                <span class="status-badge @StatusClass(job.Status.ToString())">@DashboardText.Label(job.Status)</span>
-                                <div><strong>@DashboardText.Label(job.JobType)</strong><span>受控背景工作；詳細參數僅在授權後顯示。</span></div>
-                                <ClientRelativeTime Value="job.CreatedAt" />
-                            </article>
-                        }
+                        <div class="operations-desk-risk-table-frame">
+                            <table class="operations-desk-risk-table">
+                                <thead><tr><th scope="col">項目</th><th scope="col">等級</th><th scope="col">發生時間</th></tr></thead>
+                                <tbody>
+                                    @foreach (var error in _overview.RecentErrors.Take(3))
+                                    {
+                                        <tr class="operations-desk-risk-item" @key="error.Id">
+                                            <td>
+                                                <strong class="operations-desk-risk-service">@error.ServiceName</strong>
+                                                <details class="operations-desk-risk-details">
+                                                    <summary><span class="operations-desk-risk-excerpt">@error.Message</span><span class="operations-desk-message-toggle">完整訊息</span></summary>
+                                                    <p class="operations-desk-risk-message selectable-text">@error.Message</p>
+                                                </details>
+                                            </td>
+                                            <td><span class="operations-desk-mobile-label" aria-hidden="true">等級</span><span class="status-badge @StatusClass(error.Level)">@error.Level</span></td>
+                                            <td class="operations-desk-risk-time"><span class="operations-desk-mobile-label" aria-hidden="true">發生時間</span><ClientLocalTime Value="error.CreatedAt" /></td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
                     }
-                </div>
-                <a class="ghost-button button-link" href="/jobs">檢視背景工作</a>
+
+                    <footer class="operations-desk-related-links" aria-label="相關診斷工具">
+                        <span>相關工具</span><a href="/operations">營運中心 <span class="desk-icon desk-icon-external" aria-hidden="true"></span></a><a href="/logs">日誌與診斷 <span class="desk-icon desk-icon-external" aria-hidden="true"></span></a>
+                    </footer>
+                </article>
+
+                <aside class="panel operations-desk-secondary" aria-label="工作入口、審核與背景工作">
+                    <section class="operations-desk-entry-section">
+                        <header class="operations-desk-section-heading"><div><h2>工作入口</h2><p>依常見任務快速進入工作流程。</p></div></header>
+                        <nav class="operations-desk-entry-list" aria-label="常用工作入口">
+                            <a class="operations-desk-entry" href="/project-information"><span class="desk-icon desk-icon-folder" aria-hidden="true"></span><span class="operations-desk-entry-copy"><strong>專案工作區</strong><small>查看專案背景、結構與協作範圍</small></span><span class="desk-icon desk-icon-chevron operations-desk-entry-arrow" aria-hidden="true"></span></a>
+                            <a class="operations-desk-entry" href="/memories"><span class="desk-icon desk-icon-search" aria-hidden="true"></span><span class="operations-desk-entry-copy"><strong>搜尋知識</strong><small>搜尋專案記憶、內容與版本紀錄</small></span><span class="desk-icon desk-icon-chevron operations-desk-entry-arrow" aria-hidden="true"></span></a>
+                            <a class="operations-desk-entry" href="/monitoring"><span class="desk-icon desk-icon-activity" aria-hidden="true"></span><span class="operations-desk-entry-copy"><strong>持續觀察平台</strong><small>檢視服務健康與資源變化</small></span><span class="desk-icon desk-icon-chevron operations-desk-entry-arrow" aria-hidden="true"></span></a>
+                        </nav>
+                    </section>
+                    <section class="overview-decision-panel operations-desk-review-section">
+                        <h3>檢查與審核</h3>
+                        <nav class="operations-desk-review-links" aria-label="檢查與審核入口">
+                            <a href="/inbox">治理建議<span class="desk-icon desk-icon-chevron" aria-hidden="true"></span></a>
+                            <a href="/chatgpt-proposals">ChatGPT 寫入審核<span class="desk-icon desk-icon-chevron" aria-hidden="true"></span></a>
+                            <a href="/governance">治理檢查<span class="desk-icon desk-icon-chevron" aria-hidden="true"></span></a>
+                        </nav>
+                    </section>
+                    <section class="overview-work-panel operations-desk-jobs-section">
+                        <div class="operations-desk-jobs-heading"><h3>背景工作</h3><span class="operations-desk-count">@DashboardFormatting.Integer(_overview.ActiveJobs.Count)</span></div>
+                        <div class="overview-work-list operations-desk-job-list">
+                            @if (_overview.ActiveJobs.Count == 0)
+                            {
+                                <p class="operations-desk-empty">目前沒有等待中或執行中的背景工作。</p>
+                            }
+                            else
+                            {
+                                @foreach (var job in _overview.ActiveJobs.Take(3))
+                                {
+                                    <article class="operations-desk-job" @key="job.Id">
+                                        <span class="status-badge @StatusClass(job.Status.ToString())">@DashboardText.Label(job.Status)</span>
+                                        <strong>@DashboardText.Label(job.JobType)</strong>
+                                        <ClientRelativeTime Value="job.CreatedAt" />
+                                    </article>
+                                }
+                            }
+                        </div>
+                        <a class="operations-desk-all-jobs" href="/jobs">檢視背景工作 <span class="desk-icon desk-icon-arrow" aria-hidden="true"></span></a>
+                    </section>
+                </aside>
             </section>
 
-            <footer class="overview-release-strip">
-                <span>發布版本</span>
-                <strong>@_overview.BuildVersion</strong>
-                <ClientLocalTime Value="_overview.BuildTimestampUtc" />
-                <span>資料快照 <ClientLocalTime Value="_overview.SnapshotAtUtc" /></span>
+            <footer class="overview-release-strip operations-desk-release">
+                <span>資料服務版本 <strong>@_overview.BuildVersion</strong></span>
+                <span>建置時間 <ClientLocalTime Value="_overview.BuildTimestampUtc" /></span>
             </footer>
         }
     </ChildContent>
