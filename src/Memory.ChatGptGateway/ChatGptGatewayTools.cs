@@ -407,43 +407,17 @@ public sealed class ChatGptGatewayTools(
     public async Task<ChatGptProposalResult> chatgpt_governance_proposal_create(ChatGptGovernanceProposalRequest request, CancellationToken cancellationToken = default)
     {
         var user = ResolveOAuthUser();
-        try
-        {
-            return await proposalService.CreateAsync(
-                new ChatGptProposalCreateRequest(
-                    request.ToolName,
-                    request.ProjectId,
-                    request.PayloadJson,
-                    request.Title,
-                    request.Summary,
-                    user.Subject,
-                    user.Email,
-                    user.Name,
-                    request.GovernanceRunId),
-                cancellationToken);
-        }
-        catch (MemoryScoreValidationException ex)
-        {
-            throw new McpException(ex.Message, ex);
-        }
+        return await ProposalBoundaryAsync(() => proposalService.CreateAsync(new(request.ToolName, request.ProjectId,
+            request.PayloadJson, request.Title, request.Summary, user.Subject, user.Email, user.Name, request.GovernanceRunId), cancellationToken), cancellationToken);
     }
 
     [McpServerTool(UseStructuredContent = true), Description("Approve a ChatGPT write proposal and apply it through ContextHub write use cases.")]
-    public async Task<ChatGptProposalResult> chatgpt_proposal_approve(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            return await proposalService.ApproveAsync(request, cancellationToken);
-        }
-        catch (MemoryScoreValidationException ex)
-        {
-            throw new McpException(ex.Message, ex);
-        }
-    }
+    public Task<ChatGptProposalResult> chatgpt_proposal_approve(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
+        => ProposalBoundaryAsync(() => proposalService.ApproveAsync(request, cancellationToken), cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Reject a pending ChatGPT write proposal without changing durable ContextHub memory.")]
     public Task<ChatGptProposalResult> chatgpt_proposal_reject(ChatGptProposalDecisionRequest request, CancellationToken cancellationToken = default)
-        => proposalService.RejectAsync(request, cancellationToken);
+        => ProposalBoundaryAsync(() => proposalService.RejectAsync(request, cancellationToken), cancellationToken);
 
     [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Search legal, relevant Skill candidates for execution startup or a bounded evidence-driven re-search. The agent may select zero, one, or multiple results.")]
     public Task<SkillSearchForExecutionResult> skills_search_for_execution(SkillSearchForExecutionRequest request, CancellationToken cancellationToken = default)
@@ -542,6 +516,24 @@ public sealed class ChatGptGatewayTools(
     }
 
     private sealed record OAuthUser(string Subject, string Email, string Name);
+
+    private async Task<ChatGptProposalResult> ProposalBoundaryAsync(Func<Task<ChatGptProposalResult>> action, CancellationToken cancellationToken)
+    {
+        try { return await action(); }
+        catch (MemoryScoreValidationException error) { throw new McpException(error.Message, error); }
+        catch (SafeEditConflictException error)
+        { throw new McpException(JsonSerializer.Serialize(new { code = error.Code, currentRevision = error.CurrentRevision, detail = error.Message })); }
+        catch (UnauthorizedAccessException) { throw new McpException("Proposal operation is unavailable."); }
+        catch (KeyNotFoundException) { throw new McpException("Proposal operation is unavailable."); }
+        catch (ArgumentException) { throw new McpException("Invalid proposal intent. Retain the original proposal and read version."); }
+        catch (InvalidOperationException) { throw new McpException("Invalid proposal state. Reload without replacing its original intent."); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error)
+        {
+            logger?.LogWarning(error, "Proposal outcome requires original receipt recovery.");
+            throw new McpException("{\"code\":\"ProposalOutcomeUnknown\",\"detail\":\"Recover the original proposal receipt; do not create another request.\"}");
+        }
+    }
 
     private async Task<T> WorkItemBoundaryAsync<T>(Func<Task<T>> operation)
     {

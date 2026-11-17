@@ -1777,25 +1777,7 @@ chatGpt.MapGet("/proposals", async (
     return Results.Ok(result);
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
-chatGpt.MapPost("/proposals/{proposalId:guid}/approve", async (
-    Guid proposalId,
-    ChatGptProposalDecisionBody body,
-    IChatGptProposalService service,
-    CancellationToken cancellationToken) =>
-{
-    var result = await service.ApproveAsync(new ChatGptProposalDecisionRequest(proposalId, body.Note ?? string.Empty), cancellationToken);
-    return Results.Ok(result);
-}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
-
-chatGpt.MapPost("/proposals/{proposalId:guid}/reject", async (
-    Guid proposalId,
-    ChatGptProposalDecisionBody body,
-    IChatGptProposalService service,
-    CancellationToken cancellationToken) =>
-{
-    var result = await service.RejectAsync(new ChatGptProposalDecisionRequest(proposalId, body.Note ?? string.Empty), cancellationToken);
-    return Results.Ok(result);
-}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+chatGpt.MapProposalDecisionEndpoints(requireAuthentication);
 
 var jobs = app.MapGroup("/api/jobs");
 jobs.RequireAuthIfEnabled(requireAuthentication);
@@ -2809,7 +2791,6 @@ internal sealed record UserPreferenceArchiveBody(bool Archived = true);
 internal sealed record MemoryArchiveBody(bool Archived = true, string? ProjectId = null, string? Reason = null);
 internal sealed record MemoryMoveBody(string TargetProjectId, string? SourceProjectId = null, string? Reason = null);
 internal sealed record MemoryDeleteBody(string? ProjectId = null, string? Reason = null);
-internal sealed record ChatGptProposalDecisionBody(string? Note = null);
 internal sealed record TenantUserCreateBody(
     string Username,
     string DisplayName,

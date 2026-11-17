@@ -1,6 +1,6 @@
 # Work item editing core — staged source
 
-The source foundation adds the Application command/aggregate core and PostgreSQL store. The adapter stage routes ordinary existing REST/MCP WorkItem updates, archive/restore, checklist completion and governance-exclusion relationship edits through that core. The actual WorkItem page now uses the HTTP edit/recovery protocol and draft controller for metadata, lifecycle and checklist completion edits. Proposal/governance composition and Memory CAS remain separate packages. Do not deploy these stages alone or infer end-to-end CAS from the additional read revision. All writer adapters, public contract/host acceptance and database acceptance remain required gates before rollout.
+The source foundation adds the Application command/aggregate core and PostgreSQL store. The adapter stage routes ordinary existing REST/MCP WorkItem updates, archive/restore, checklist completion and governance-exclusion relationship edits through that core. The actual WorkItem page now uses the HTTP edit/recovery protocol and draft controller for metadata, lifecycle and checklist completion edits. WorkItem proposal archive/restore now uses the separate committed-dispatch and exact-receipt recovery protocol described in [proposal recovery](work-item-proposal-recovery.md). Governance immutable preconditions, Memory CAS and structural checklist editing remain separate dependencies. Do not deploy these stages alone or infer end-to-end CAS from the additional read revision. All writer adapters, public contract/host acceptance and database acceptance remain required gates before rollout.
 
 ## Intent and original version
 
@@ -36,7 +36,7 @@ The PostgreSQL store uses a fresh context and one ReadCommitted transaction, wit
 
 A changed aggregate, immutable before/after history, immutable scoped receipt and transactional outbox event are saved/committed together. A no-op persists only its receipt. An apply result is returned after this store's commit completes. Cancellation/transport failure at commit is unknown until exact same-request recovery; it does not cause automatic replay. Receipt result is the original committed result, not current-state or signed-proof evidence.
 
-Current ambient transactions are explicitly rejected by this foundation. Proposal/governance composition must establish one commit owner or an explicit staged-result protocol in the adapter phase; nesting this store and calling a staged receipt committed would be incorrect. This dependency is not bypassed by using a second independent commit for a proposal.
+Current ambient transactions are explicitly rejected by this foundation. The WorkItem proposal adapter now uses explicit separate commit owners: a durable one-shot dispatch marker, the core edit transaction, then receipt-bound proposal finalization. This is a recoverable workflow with a documented pre-dispatch failure window, not an atomic proposal-and-edit transaction. Governance composition still requires immutable original versions and an explicit commit/result protocol; nesting this store and calling a staged receipt committed remains incorrect.
 
 ## Migration and validation boundaries
 

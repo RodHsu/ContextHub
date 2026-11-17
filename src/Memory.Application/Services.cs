@@ -2671,7 +2671,14 @@ public static class DependencyInjection
         services.AddScoped<IPerformanceProbeService, PerformanceProbeService>();
         services.AddScoped<IInstanceBehaviorSettingsAccessor, InstanceBehaviorSettingsAccessor>();
         services.AddScoped<IConversationAutomationService, ConversationAutomationService>();
-        services.AddScoped<IChatGptProposalService, ChatGptProposalService>();
+        services.AddScoped<IWorkItemProposalWorkflow, WorkItemProposalWorkflow>();
+        services.AddScoped<IChatGptProposalService>(provider => new ChatGptProposalService(
+            provider.GetRequiredService<IApplicationDbContext>(), provider.GetRequiredService<IMemoryService>(),
+            provider.GetRequiredService<IProjectInformationService>(), provider.GetRequiredService<IProjectArtifactExchangeService>(),
+            provider.GetRequiredService<IManagedFileService>(), provider.GetRequiredService<IProjectDiscussionService>(),
+            provider.GetRequiredService<ISuggestedActionService>(), provider.GetRequiredService<IRequestActorAccessor>(),
+            provider.GetRequiredService<IClock>(), provider.GetRequiredService<ILogger<ChatGptProposalService>>(),
+            () => provider.GetRequiredService<IWorkItemProposalWorkflow>()));
         services.AddScoped<ITenantSecurityService, TenantSecurityService>();
         services.AddScoped<ISourceConnectionService, SourceConnectionService>();
         services.AddScoped<ISourceSyncService, SourceSyncService>();
