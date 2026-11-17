@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Claims;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using FluentAssertions;
@@ -9,6 +10,7 @@ using Memory.Application;
 using Memory.Dashboard.Services;
 using Memory.Domain;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -247,8 +249,8 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         var overviewHtml = WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync());
         overviewHtml.Should().Contain("平台健康");
         overviewHtml.Should().Contain("風險與異常");
-        overviewHtml.Should().Contain("需要人員決策");
-        overviewHtml.Should().Contain("進行中工作");
+        overviewHtml.Should().Contain("檢查與審核");
+        overviewHtml.Should().Contain("進行中的背景工作");
         overviewHtml.Should().Contain("href=\"/operations\"");
         overviewHtml.Should().NotContain("context-savings-strip");
         overviewHtml.Should().NotContain("資源狀態圖表");
@@ -292,7 +294,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         canonicalRoutes.Should().ContainSingle(route => route == "/files");
         canonicalRoutes.Should().ContainSingle(route => route == "/secrets");
         canonicalRoutes.Should().ContainSingle(route => route == "/operations");
-        canonicalRoutes.Should().NotContain(["/monitoring", "/runtime", "/jobs"]);
+        canonicalRoutes.Should().Contain(["/monitoring", "/runtime", "/jobs"]);
     }
 
     [Fact]
@@ -410,15 +412,15 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         using var overviewResponse = await client.GetAsync("/");
         overviewResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var overviewHtml = WebUtility.HtmlDecode(await overviewResponse.Content.ReadAsStringAsync());
-        overviewHtml.Should().Contain("只顯示需要注意、需要決策或最值得立即行動的訊號");
+        overviewHtml.Should().Contain("掌握平台狀態，繼續專案工作，處理需要注意的事項。");
         overviewHtml.Should().Contain("全 Instance 記憶資料列");
         overviewHtml.Should().Contain("預設專案記憶");
         overviewHtml.Should().Contain("平台健康");
         overviewHtml.Should().Contain("風險與異常");
-        overviewHtml.Should().Contain("需要人員決策");
-        overviewHtml.Should().Contain("進行中工作");
+        overviewHtml.Should().Contain("檢查與審核");
+        overviewHtml.Should().Contain("進行中的背景工作");
         overviewHtml.Should().Contain("開啟營運中心");
-        overviewHtml.Should().Contain("Release identity");
+        overviewHtml.Should().Contain("發布版本");
         overviewHtml.Should().Contain("2026.04.12-test");
         overviewHtml.Should().Contain("Overview page sample error 1");
         overviewHtml.Should().Contain("Overview page sample error 2");
@@ -438,20 +440,20 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         overviewHtml.Should().NotContain("資源狀態圖表");
         overviewHtml.IndexOf("sidebar-build", StringComparison.Ordinal).Should().BeGreaterThan(0);
         overviewHtml.Should().NotContain("sidebar-footer");
-        overviewHtml.IndexOf("專案與工作", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("檔案與知識", StringComparison.Ordinal));
-        overviewHtml.IndexOf("檔案與知識", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("Agents", StringComparison.Ordinal));
-        overviewHtml.IndexOf("Agents", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("治理與安全", StringComparison.Ordinal));
-        overviewHtml.IndexOf("治理與安全", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("Operations", StringComparison.Ordinal));
-        overviewHtml.IndexOf("Operations", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("個人", StringComparison.Ordinal));
+        overviewHtml.IndexOf("專案與協作", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("知識與檔案", StringComparison.Ordinal));
+        overviewHtml.IndexOf("知識與檔案", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("Agent 自動化", StringComparison.Ordinal));
+        overviewHtml.IndexOf("Agent 自動化", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("治理與安全", StringComparison.Ordinal));
+        overviewHtml.IndexOf("治理與安全", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("營運與監控", StringComparison.Ordinal));
+        overviewHtml.IndexOf("營運與監控", StringComparison.Ordinal).Should().BeLessThan(overviewHtml.IndexOf("設定與帳戶", StringComparison.Ordinal));
 
         using var operationsResponse = await client.GetAsync("/operations");
         operationsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var operationsHtml = WebUtility.HtmlDecode(await operationsResponse.Content.ReadAsStringAsync());
-        operationsHtml.Should().Contain("Business authority");
-        operationsHtml.Should().Contain("Rebuildable monitoring");
-        operationsHtml.Should().Contain("Monitoring 不得覆寫此狀態");
-        operationsHtml.Should().Contain("不暴露 provider、endpoint、bucket、object locator 或 direct URL");
-        operationsHtml.Should().Contain("操作維持 fail-closed");
+        operationsHtml.Should().Contain("正式資料");
+        operationsHtml.Should().Contain("監控同步");
+        operationsHtml.Should().Contain("監控資料不會覆寫此狀態");
+        operationsHtml.Should().Contain("個別資源的權限與安全資訊請開啟詳情");
+        operationsHtml.Should().Contain("操作保持停用");
         operationsHtml.Should().Contain("disabled");
 
         using var runtimeResponse = await client.GetAsync("/runtime");
@@ -688,11 +690,11 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         projectInformationHtml.Should().Contain("專案工作區");
         projectInformationHtml.Should().Contain("project-workspace-links");
         projectInformationHtml.Should().Contain("跨專案討論");
-        projectInformationHtml.Should().Contain("專案與工作");
-        projectInformationHtml.Should().Contain("檔案與知識");
+        projectInformationHtml.Should().Contain("專案與協作");
+        projectInformationHtml.Should().Contain("知識與檔案");
         projectInformationHtml.Should().Contain("治理與安全");
-        projectInformationHtml.Should().Contain("Operations");
-        projectInformationHtml.Should().Contain("個人");
+        projectInformationHtml.Should().Contain("營運與監控");
+        projectInformationHtml.Should().Contain("設定與帳戶");
         projectInformationHtml.Should().Contain("背景注入");
         projectInformationHtml.Should().Contain("顯示範圍");
 
@@ -713,7 +715,7 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         using var projectWorkItemsResponse = await client.GetAsync("/project-work-items");
         projectWorkItemsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var projectWorkItemsHtml = WebUtility.HtmlDecode(await projectWorkItemsResponse.Content.ReadAsStringAsync());
-        projectWorkItemsHtml.Should().Contain("相關代辦");
+        projectWorkItemsHtml.Should().Contain("相關待辦");
         projectWorkItemsHtml.Should().Contain("所有專案");
         projectWorkItemsHtml.Should().Contain("project-work-items-workspace");
         projectWorkItemsHtml.Should().Contain("project-work-items-list-column-labels");
@@ -783,10 +785,10 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         inboxResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var inboxHtml = WebUtility.HtmlDecode(await inboxResponse.Content.ReadAsStringAsync());
         inboxHtml.Should().Contain("專案待辦");
-        inboxHtml.Should().Contain("待辦清單");
-        inboxHtml.Should().Contain("待辦細節");
-        inboxHtml.Should().Contain("治理分析與評測回歸");
-        inboxHtml.Should().Contain("suggested actions");
+        inboxHtml.Should().Contain("建議清單");
+        inboxHtml.Should().Contain("建議細節");
+        inboxHtml.Should().Contain("治理分析與評測結果");
+        inboxHtml.Should().Contain("不會取代專案工作的進度與驗收");
 
         using var storageResponse = await client.GetAsync("/storage");
         storageResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -872,27 +874,29 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         response.StatusCode.Should().Be(HttpStatusCode.OK);
 
         var html = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync());
-        html.Should().Contain("專案與工作");
-        html.Should().Contain("檔案與知識");
-        html.Should().Contain("Agents");
+        html.Should().Contain("專案與協作");
+        html.Should().Contain("知識與檔案");
+        html.Should().Contain("Agent 自動化");
         html.Should().Contain("治理與安全");
-        html.Should().Contain("Operations");
-        html.Should().Contain("個人");
+        html.Should().Contain("營運與監控");
+        html.Should().Contain("設定與帳戶");
         html.Should().Contain("href=\"/operations\"");
         html.Should().Contain("href=\"/connectivity\"");
         html.Should().NotContain("Agent 延遲");
 
         var canonicalRoutes = DashboardNavigation.Groups.SelectMany(group => group.Items).Select(item => item.Href).ToArray();
         canonicalRoutes.Should().Contain("/operations");
-        canonicalRoutes.Should().NotContain("/monitoring");
-        canonicalRoutes.Should().NotContain("/runtime");
-        canonicalRoutes.Should().NotContain("/jobs");
+        canonicalRoutes.Should().Contain("/monitoring");
+        canonicalRoutes.Should().Contain("/runtime");
+        canonicalRoutes.Should().Contain("/jobs");
 
         var nonAdminRoutes = DashboardNavigation.VisibleGroups(false).SelectMany(group => group.Items).Select(item => item.Href).ToArray();
-        nonAdminRoutes.Should().Contain("/project-information");
+        nonAdminRoutes.Should().NotContain(["/project-information", "/project-tree", "/files", "/discussions"]);
         nonAdminRoutes.Should().Contain("/memories");
         nonAdminRoutes.Should().NotContain("/");
         nonAdminRoutes.Should().NotContain("/operations");
+        var member = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.Role, TenantUserRole.Member.ToString())], "test"));
+        nonAdminRoutes.Should().OnlyContain(route => DashboardRouteAuthorization.CanAccess(member, new PathString(route)));
     }
 
     [Fact]
@@ -1476,7 +1480,7 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
                 Guid.Parse("e367c784-a8f8-4a17-a94b-8f6f09e2653a"),
                 request.ProjectId,
                 "驗證專案工作區",
-                "確認專案代辦清單與檢核面板皆可使用。",
+                "確認專案待辦清單與檢核面板皆可使用。",
                 ["Dashboard", "QA"],
                 [
                     new ProjectWorkItemChecklistItemResult(Guid.Parse("6f593ffd-d345-48d2-b8b1-f7dddff8687b"), "完成清單樣式檢視", true, 0),

@@ -25,6 +25,7 @@ ContextHub Dashboard
 │   ├── Project Work Items /project-work-items
 │   └── Discussions /discussions
 ├── Files & Knowledge
+│   ├── Managed Files /files
 │   ├── Memories /memories
 │   ├── Graph /graph
 │   ├── Sources /sources
@@ -34,25 +35,25 @@ ContextHub Dashboard
 │   ├── Agent Skills /skills
 │   └── Connectivity /connectivity
 ├── Governance & Security
-│   ├── Inbox /inbox
+│   ├── Secrets and MFA /secrets
+│   ├── Governance Suggestions /inbox
 │   ├── Governance /governance
 │   ├── ChatGPT Proposals /chatgpt-proposals
 │   ├── Evaluation /evaluation
 │   └── Security /security
 ├── Operations
 │   ├── Operations Center /operations
+│   ├── Monitoring /monitoring
+│   ├── Runtime /runtime
+│   ├── Jobs /jobs
 │   ├── Logs /logs
 │   ├── Performance /performance
 │   ├── Storage /storage
-│   ├── MCP Tools /mcp-tools
-│   └── Settings /settings
-├── Personal
+│   └── MCP Tools /mcp-tools
+├── Settings and Account
+│   ├── Settings /settings
 │   ├── Preferences /preferences
 │   └── Tokens /account/tokens
-├── Operations drill-down routes
-│   ├── Monitoring /monitoring
-│   ├── Runtime /runtime
-│   └── Jobs /jobs
 └── Boundary Pages
     ├── /login
     ├── /forbidden
@@ -66,9 +67,9 @@ ContextHub Dashboard
 | --- | --- | --- | --- |
 | Function | App shell | All routes | Sidebar, topbar, content scroll host, layout contract |
 | Function | Navigation groups | All routes | Overview, Projects & Work, Files & Knowledge, Agents, Governance & Security, Operations, Personal |
-| Function | Responsive navigation | All routes | Expanded sidebar, icon rail, overlay drawer |
+| Function | Responsive navigation | All routes | Labeled sidebar, collapsible task groups, native modal drawer |
 | Function | Account chrome | All routes | User identity, theme switcher, logout |
-| Function | Theme switching | All routes | Dark/light mode and persistence |
+| Function | Theme switching | All routes | Dark/light/pure black/system and persistence |
 | Function | Refresh status | Most dashboard pages | Last updated, refresh state, polling interval |
 | Function | Client-local time | All routes | User-facing timestamps default to local time |
 | Function | Toast | All routes | Success, error, undo where safe |

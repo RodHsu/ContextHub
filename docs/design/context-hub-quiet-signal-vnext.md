@@ -26,10 +26,10 @@
 
 | Viewport | Navigation | Content composition |
 | --- | --- | --- |
-| `>= 1440` | Expanded sidebar | 12-column grid; master-detail can use 7/5 split |
-| `1025-1365` | Icon rail or compact sidebar | Secondary columns collapse into bounded drawers |
-| `768-1024` | Rail or overlay drawer | Charts, queues, lists, and details become single-column or route transitions |
-| `< 768` | Top app bar and overlay navigation | List-to-detail workflows; no compressed desktop tables |
+| `>= 1200` | 252px labeled sidebar, collapsible task groups | Bounded content; wide master-detail layouts |
+| `1025-1199` | 224px labeled sidebar | Wrapped tools and single-column overview |
+| `<= 1024` | App bar button and native modal navigation drawer | Full-width workspace; local data overflow |
+
 
 Hard rules:
 
@@ -107,3 +107,27 @@ Each production route should pass:
 4. Tables, readers, drawers, and sticky actions do not overlap or escape their frames.
 5. Light/dark, loading, empty, error, stale, disabled, focus, and destructive confirmation states remain usable.
 6. Local time, selectable technical values, copy feedback, keyboard focus, and reduced-motion behavior are covered.
+
+## Workspace navigation and interaction
+
+The shared shell uses one role-filtered navigation model for the desktop sidebar, mobile drawer and function search. Existing routes remain stable. Monitoring, runtime and background jobs are first-class entries under Operations; instance settings live with account utilities. Governance suggestions at /inbox are distinct from business work items at /project-work-items.
+
+- Sidebar groups are collapsible buttons with expanded state. The current group opens after navigation. Every route uses a recognizable SVG icon and a text label; compact widths use a drawer rather than an alphabet-only rail.
+- Function search is a native modal dialog, opened by the search button or Ctrl/Cmd+K. Search matches group, label, purpose and route; empty results provide recovery text. Tab/Enter follow normal link semantics. Escape and close buttons use the native dialog focus lifecycle.
+- The mobile navigation renders the same component and role-filtered model in its own native dialog. Choosing a route closes it; resizing to desktop also closes it. Closed mobile navigation is outside the tab order.
+- Dark, light, pure black and system preferences persist across pages and reloads. Pure black uses a black canvas with separate neutral surfaces; system resolves to light/dark.
+- A visible-on-focus skip link targets the main content. Reduced motion and forced colors retain usable navigation.
+- The overview uses natural document flow inside the main scroll region: shortcuts, a metric strip, health/risk/review, background work and release identity. Panels must not overlap or compress their contents to fit a viewport.
+- Memory search has visible labels. Advanced conditions start collapsed without changing their query values.
+
+Member navigation reflects the current server route policy: memories, graph, preferences and personal tokens. Hiding a link never substitutes for server authorization. Other domain surfaces retain their existing access requirements.
+
+Implementation guidance: [Modern Web Guidance](https://github.com/GoogleChrome/modern-web-guidance-src), navigation drawer, navbar, dialog, CSS layout, responsive table and accessibility guides. Native showModal/close avoids command-invoker, popover and anchor-positioning compatibility dependencies.
+
+## Published Blazor assets
+
+The Dashboard explicitly sets `RequiresAspNetWebAssets=true` so framework asset inclusion does not depend on Razor discovery during project-only restore. The Docker restore layer also preserves the existing `App.razor` copy. The publish step rejects an image without `wwwroot/_framework/blazor.web.js`. Container validation must verify script delivery and an active Blazor circuit, in addition to an HTTP 200 page. See [Microsoft Blazor project structure](https://learn.microsoft.com/en-us/aspnet/core/blazor/project-structure?view=aspnetcore-10.0) and [the upstream Docker restore issue](https://github.com/dotnet/aspnetcore/issues/69341).
+
+## Preference workspace
+
+Preferences paginate the already loaded records in groups of ten. Counts and page totals describe that loaded, category-filtered set; the interface identifies the current 50-record load limit. Paging preserves the active editor. Category changes return to page one, while refresh and save locate the selected record in a valid page. Desktop retains the bounded list and editor columns; at 1360px and below the panels flow naturally and the main content owns vertical scrolling. This avoids trapping the pointer between a bounded list and its page.
