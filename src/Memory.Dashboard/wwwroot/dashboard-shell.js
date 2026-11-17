@@ -20,6 +20,15 @@
             initialized = true;
             document.addEventListener("click", event => {
                 if (!(event.target instanceof Element)) return;
+                const skipLink = event.target.closest("a[data-skip-to-content]");
+                const main = document.getElementById("dashboard-main-content");
+                if (skipLink && main instanceof HTMLElement && event.button === 0 &&
+                    !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+                    event.preventDefault();
+                    main.focus({ preventScroll: true });
+                    main.scrollTop = 0;
+                    return;
+                }
                 if (event.target.closest("[data-command-open]")) openDialog("workspace-command");
                 if (event.target.closest("[data-mobile-nav-open]")) openDialog("workspace-mobile-nav");
                 const dialog = event.target.closest("dialog");

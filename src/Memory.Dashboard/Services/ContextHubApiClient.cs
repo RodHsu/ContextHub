@@ -182,10 +182,10 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         {
             ["projectId"] = projectId,
             ["limit"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture)
-        }), cancellationToken);
+        }), cancellationToken, preserveForbiddenStatusCode: true);
 
     public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
-        => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken);
+        => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken, preserveForbiddenStatusCode: true);
 
     public Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
     {
@@ -945,10 +945,10 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
             }),
             cancellationToken);
 
-    private Task<T> GetRequiredAsync<T>(string url, CancellationToken cancellationToken)
-        => GetAndReadAsync<T>(url, cancellationToken);
+    private Task<T> GetRequiredAsync<T>(string url, CancellationToken cancellationToken, bool preserveForbiddenStatusCode = false)
+        => GetAndReadAsync<T>(url, cancellationToken, preserveForbiddenStatusCode);
 
-    private async Task<T> GetAndReadAsync<T>(string url, CancellationToken cancellationToken)
+    private async Task<T> GetAndReadAsync<T>(string url, CancellationToken cancellationToken, bool preserveForbiddenStatusCode)
     {
         for (var attempt = 1; ; attempt++)
         {
@@ -961,9 +961,9 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
                     continue;
                 }
 
-                return await ReadRequiredAsync<T>(response, cancellationToken);
+                return await ReadRequiredAsync<T>(response, cancellationToken, preserveForbiddenStatusCode);
             }
-            catch (Exception ex) when (ShouldRetryGet(ex, cancellationToken, attempt))
+            catch (Exception ex) when (!(preserveForbiddenStatusCode && ex is HttpRequestException { StatusCode: HttpStatusCode.Forbidden }) && ShouldRetryGet(ex, cancellationToken, attempt))
             {
                 await DelayBeforeRetryAsync(attempt, cancellationToken);
             }
@@ -988,11 +988,16 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         return Task.Delay(delay, cancellationToken);
     }
 
-    private static async Task<T> ReadRequiredAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken)
+    private static async Task<T> ReadRequiredAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken, bool preserveForbiddenStatusCode = false)
     {
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException(await BuildApiErrorMessageAsync(response, cancellationToken));
+            var message = await BuildApiErrorMessageAsync(response, cancellationToken);
+            if (preserveForbiddenStatusCode && response.StatusCode == HttpStatusCode.Forbidden)
+            {
+                throw new HttpRequestException(message, null, HttpStatusCode.Forbidden);
+            }
+            throw new InvalidOperationException(message);
         }
 
         return await response.Content.ReadFromJsonAsync<T>(cancellationToken: cancellationToken)

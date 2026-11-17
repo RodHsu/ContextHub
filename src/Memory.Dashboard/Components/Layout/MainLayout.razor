@@ -13,7 +13,7 @@
             var searchGroups = FilterGroups(groups).ToArray();
         }
         <div class="dashboard-shell workspace-shell" data-dashboard-interactive="@(_interactiveReady ? "true" : "false")">
-            <a class="skip-link" href="#dashboard-main-content">跳到主要內容</a>
+            <a class="skip-link" href="#dashboard-main-content" data-skip-to-content data-enhance-nav="false">跳到主要內容</a>
             <aside class="sidebar" aria-label="主要導覽">
                 <div class="sidebar-inner">
                     <a class="brand" href="@(isAdmin ? "/" : "/memories")" aria-label="ContextHub 首頁">
