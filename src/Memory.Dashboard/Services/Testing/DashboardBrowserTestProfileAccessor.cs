@@ -10,7 +10,8 @@ internal enum DashboardBrowserTestProfile
     Normal,
     Empty,
     Dense,
-    GraphDemo
+    GraphDemo,
+    PreferenceMetadata
 }
 
 internal sealed class DashboardBrowserTestProfileAccessor
@@ -35,6 +36,11 @@ internal sealed class DashboardBrowserTestProfileAccessor
     public DashboardBrowserTestProfile Current => ResolveProfile();
 
     public DashboardBrowserTestProfile GetProfile() => Current;
+
+    public Guid PreferenceMetadataSessionId
+        => Guid.TryParse(_httpContextAccessor.HttpContext?.Request.Cookies["dashboard-preference-test-session"], out var sessionId)
+            ? sessionId
+            : Guid.Empty;
 
     private DashboardBrowserTestProfile ResolveProfile()
     {

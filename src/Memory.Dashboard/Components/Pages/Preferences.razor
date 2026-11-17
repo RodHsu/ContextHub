@@ -82,9 +82,16 @@
                     @onclick="@(() => FilterAsync(null))">全部 (@DashboardFormatting.Integer(_allPreferences.Count))</button>
         </div>
 
+        <nav class="preferences-pagination" aria-label="偏好分頁">
+            <span title="本次查詢最多載入 50 筆；分頁僅涵蓋已載入資料">符合 @_preferences.Count 筆 · 第 @(_pageIndex + 1) / @PageCount 頁（載入上限 50 筆）</span>
+            <div>
+                <button type="button" class="ghost-button" aria-label="上一頁偏好" disabled="@(_pageIndex == 0)" @onclick="() => ChangePage(-1)">上一頁</button>
+                <button type="button" class="ghost-button" aria-label="下一頁偏好" disabled="@(_pageIndex + 1 >= PageCount)" @onclick="() => ChangePage(1)">下一頁</button>
+            </div>
+        </nav>
         <div class="stack-scroll-shell preferences-list-scroll-shell" data-scroll-viewport="true">
             <div class="stack-list">
-                @foreach (var item in _preferences)
+                @foreach (var item in PagedPreferences)
                 {
                     var selected = item.Id == _selectedPreferenceId;
                     <article class="stack-item stack-item-selectable @(selected ? "stack-item-selected" : string.Empty)"
@@ -123,12 +130,18 @@
     private string _content = string.Empty;
     private string _rationale = string.Empty;
     private string _tags = string.Empty;
+    private decimal _importance = 0.95m;
+    private decimal _confidence = 0.95m;
     private string? _message;
     private long _messageSequence;
     private UserPreferenceKind? _filterKind;
     private Guid? _selectedPreferenceId;
     private IReadOnlyList<UserPreferenceResult> _allPreferences = [];
     private IReadOnlyList<UserPreferenceResult> _preferences = [];
+    private const int PageSize = 10;
+    private int _pageIndex;
+    private int PageCount => Math.Max(1, (_preferences.Count + PageSize - 1) / PageSize);
+    private IEnumerable<UserPreferenceResult> PagedPreferences => _preferences.Skip(_pageIndex * PageSize).Take(PageSize);
     private bool _loading;
     private DateTimeOffset? _lastUpdatedAt;
 
@@ -146,6 +159,8 @@
                 ? _allPreferences.Where(x => x.Kind == _filterKind.Value).ToArray()
                 : _allPreferences;
             SyncEditorFromStoredPreferences();
+            var selectedIndex = _preferences.ToList().FindIndex(item => item.Id == _selectedPreferenceId);
+            _pageIndex = Math.Max(0, selectedIndex / PageSize);
             _lastUpdatedAt = DateTimeOffset.UtcNow;
         }
         finally
@@ -163,7 +178,9 @@
                 _title,
                 _content,
                 _rationale,
-                ParseTags(_tags)),
+                ParseTags(_tags),
+                Importance: _importance,
+                Confidence: _confidence),
             CancellationToken.None);
 
         _selectedPreferenceId = saved.Id;
@@ -182,7 +199,11 @@
     {
         _filterKind = kind;
         await LoadAsync();
+        _pageIndex = 0;
     }
+
+    private void ChangePage(int delta)
+        => _pageIndex = Math.Clamp(_pageIndex + delta, 0, PageCount - 1);
 
     private void SelectPreference(UserPreferenceResult item)
     {
@@ -202,6 +223,8 @@
         _content = string.Empty;
         _rationale = string.Empty;
         _tags = string.Empty;
+        _importance = 0.95m;
+        _confidence = 0.95m;
         if (setMessage)
         {
             ShowMessage("已切換為建立新偏好。");
@@ -248,6 +271,8 @@
         _title = item.Title;
         _content = item.Content;
         _rationale = item.Rationale;
+        _importance = item.Importance;
+        _confidence = item.Confidence;
         _tags = string.Join(", ", item.Tags.Where(x => !string.Equals(x, "user-preference", StringComparison.OrdinalIgnoreCase)));
     }
 

@@ -13,8 +13,10 @@ internal sealed class DashboardNavigationDiagnostics
     [
         ("/login", "document"), ("/favicon.svg", "image"),
         ("/app.css", "stylesheet"), ("/quiet-signal.css", "stylesheet"),
+        ("/workspace.css", "stylesheet"),
         ("/Memory.Dashboard.styles.css", "stylesheet"),
         ("/dashboard-theme.js", "script"), ("/dashboard-viewport.js", "script"),
+        ("/dashboard-shell.js", "script"),
         ("/dashboard-time.js", "script"), ("/dashboard-clipboard.js", "script"),
         ("/dashboard-session.js", "script"), ("/dashboard-graph.js", "script"),
         ("/dashboard-transfer.js", "script"), ("/dashboard-discussions.js", "script"),
@@ -48,11 +50,11 @@ internal sealed class DashboardNavigationDiagnostics
             || origin.AbsolutePath != "/" || origin.UserInfo.Length != 0
             || origin.Query.Length != 0 || origin.Fragment.Length != 0)
             throw new ArgumentException("NAVIGATION_DIAGNOSTIC_ORIGIN_REJECTED");
-        if (theme is not ("dark" or "light") || viewport is not ("desktop" or "tab-s7-portrait" or "mobile")
+        if (theme is not ("dark" or "light" or "black") || viewport is not ("desktop" or "tab-s7-portrait" or "mobile")
             || route != "/login")
             throw new ArgumentException("NAVIGATION_DIAGNOSTIC_CASE_REJECTED");
         _origin = origin;
-        _theme = theme == "dark" ? "dark" : "light";
+        _theme = theme;
         _viewport = viewport switch { "desktop" => "desktop", "tab-s7-portrait" => "tab-s7-portrait", _ => "mobile" };
         var repo = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
         _repoRoot = repo;
