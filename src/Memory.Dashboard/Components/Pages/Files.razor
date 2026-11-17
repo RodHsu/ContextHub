@@ -11,7 +11,7 @@
               BodyClass="page-viewport-body domain-page-body">
     <Actions>
         <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" WarningText="@_loadError" />
-        <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">刷新</button>
+        <button class="primary-button" @onclick="LoadAsync" disabled="@(_loading || _permissionDenied)">刷新</button>
     </Actions>
     <ChildContent>
         <DomainSurfaceNav Title="檔案與知識"
@@ -31,6 +31,10 @@
         @if (_loading && _files.Count == 0)
         {
             <DashboardAsyncState State="loading" Title="載入受管檔案" Message="正在讀取檔案 authority 與安全狀態。" />
+        }
+        else if (_permissionDenied)
+        {
+            <DashboardAsyncState State="permission" Title="沒有受管檔案存取權限" Message="目前帳號無權讀取此專案的受管檔案。請選擇已授權的專案，或聯絡管理者確認存取權限。" />
         }
         else if (!string.IsNullOrWhiteSpace(_loadError) && _files.Count == 0)
         {
@@ -154,6 +158,7 @@
     private string _projectId = ProjectContext.DefaultProjectId;
     private string _searchText = string.Empty;
     private bool _loading;
+    private bool _permissionDenied;
     private string? _loadError;
     private DateTimeOffset? _lastUpdatedAt;
 
@@ -174,6 +179,11 @@
 
     private async Task ChangeProjectAsync(string projectId)
     {
+        if (!string.Equals(_projectId, projectId, StringComparison.Ordinal))
+        {
+            ClearInventory();
+            _loadError = null;
+        }
         _projectId = projectId;
         await LoadAsync();
     }
@@ -187,6 +197,9 @@
     private async Task LoadAsync()
     {
         _loading = true;
+        _permissionDenied = false;
+        _rights = null;
+        _releaseRequirement = null;
         try
         {
             _files = await ApiClient.GetManagedFilesAsync(_projectId, 100, _cts.Token);
@@ -196,6 +209,12 @@
             _loadError = null;
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            ClearInventory();
+            _permissionDenied = true;
+            _loadError = null;
+        }
         catch (Exception ex) { _loadError = DashboardUiErrorFormatter.BuildLoadError("受管檔案", ex, _files.Count > 0); }
         finally { _loading = false; }
     }
@@ -206,12 +225,21 @@
         await LoadSelectionAsync();
     }
 
+    private void ClearInventory()
+    {
+        _files = [];
+        _selected = null;
+        _rights = null;
+        _releaseRequirement = null;
+        _lastUpdatedAt = null;
+    }
+
     private async Task LoadSelectionAsync()
     {
+        _rights = null;
+        _releaseRequirement = null;
         if (_selected is null)
         {
-            _rights = null;
-            _releaseRequirement = null;
             return;
         }
         _rights = await ApiClient.GetEffectiveRightsAsync(_projectId, ["metadata", "read", "download", "searchindex", "securityrelease", "delete"], "File", _selected.FileId.ToString("D"), _cts.Token);
