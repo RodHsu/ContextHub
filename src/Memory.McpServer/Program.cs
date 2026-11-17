@@ -2322,6 +2322,7 @@ stepUpAuthentication.MapPost("/webauthn/{credentialId:guid}/remove", async (Guid
     Results.Ok(await service.RemoveWebAuthnCredentialAsync(new FactorRemovalRequest(credentialId, request.StepUp, request.ExternalApprovalReference, request.Reason), cancellationToken)));
 
 var secrets = app.MapGroup("/api/secrets");
+secrets.MapSecretManagementReadEndpoints(requireAuthentication);
 secrets.RequireAuthIfEnabled(requireAuthentication);
 secrets.MapGet(string.Empty, async (string projectId, ISecretManagementService service, CancellationToken cancellationToken) =>
     Results.Ok(await service.ListAsync(projectId, cancellationToken)))

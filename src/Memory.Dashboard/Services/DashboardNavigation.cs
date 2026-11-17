@@ -12,13 +12,13 @@ public static class DashboardNavigation
     [
         new("總覽", [new("O", "總覽", "/", "健康、風險與待決事項", NavLinkMatch.All)]),
         new("專案與工作", [
-            new("P", "專案工作區", "/project-information", "專案背景與 lifecycle", RequiresAdmin: false),
-            new("H", "專案拓撲", "/project-tree", "階層、關係與權限影響", RequiresAdmin: false),
+            new("P", "專案工作區", "/project-information", "專案背景與 lifecycle"),
+            new("H", "專案拓撲", "/project-tree", "階層、關係與權限影響"),
             new("W", "專案待辦", "/project-work-items", "可執行工作與 checklist"),
-            new("D", "跨專案討論", "/discussions", "參與者範圍內的協作", RequiresAdmin: false)
+            new("D", "跨專案討論", "/discussions", "參與者範圍內的協作")
         ]),
         new("檔案與知識", [
-            new("F", "受管檔案", "/files", "DLP、quarantine、權限與 lifecycle", RequiresAdmin: false),
+            new("F", "受管檔案", "/files", "DLP、quarantine、權限與 lifecycle"),
             new("M", "記憶資料", "/memories", "搜尋、內容與 revisions", RequiresAdmin: false),
             new("G", "記憶圖譜", "/graph", "關係與整合視圖", RequiresAdmin: false),
             new("S", "資料來源", "/sources", "來源與同步狀態"),

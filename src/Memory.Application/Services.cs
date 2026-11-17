@@ -2633,6 +2633,7 @@ public static class DependencyInjection
         services.AddScoped<IWebAuthnCeremonyVerifier, Fido2WebAuthnCeremonyVerifier>();
         services.AddScoped<IMultiFactorAuthenticationService, MultiFactorAuthenticationService>();
         services.AddScoped<ISecretManagementService, SecretManagementService>();
+        services.AddScoped<ISecretManagementReadService, SecretManagementReadService>();
         services.AddScoped<ISshCertificateService, SshCertificateService>();
         services.AddScoped<ISecretReconciliationService, SecretReconciliationService>();
         services.AddSingleton<ISshCertificateIssuer, DisabledSshCertificateIssuer>();
