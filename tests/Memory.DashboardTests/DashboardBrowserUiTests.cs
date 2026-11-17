@@ -51,7 +51,7 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
 
     private static readonly DashboardRouteSpec[] Routes =
     [
-        new("overview", "/", "總覽", [".overview-signal-strip", ".overview-action-grid", ".overview-work-panel", ".overview-release-strip"], [".page-header", ".overview-signal-strip", ".overview-action-grid", ".overview-work-panel"], [".content"]),
+        new("overview", "/", "工作總覽", [".operations-desk-summary", ".operations-desk-workspace", ".overview-work-panel", ".overview-release-strip"], [".page-header", ".operations-desk-summary", ".operations-desk-workspace", ".overview-release-strip"], [".content"]),
         new("operations", "/operations", "營運中心", [".dashboard-scope-bar", ".operations-authority-grid", ".operations-path-grid", ".operations-projection-table", ".high-risk-operation"], [".page-header", ".dashboard-scope-bar", ".operations-authority-grid", ".operations-path-grid"], [".content", ".table-scroll-shell"]),
         new("runtime", "/runtime", "執行參數", [".runtime-page-stack", ".runtime-main-panel", ".runtime-parameters-panel"], [".page-header", ".runtime-main-panel", ".runtime-parameters-panel"], [".content", ".runtime-page-stack"]),
         new("monitoring", "/monitoring", "狀態監控", [".monitoring-page-stack", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".page-header", ".monitoring-top-grid", ".monitoring-context-savings-panel", ".monitoring-telemetry-grid"], [".content", ".monitoring-page-stack"]),
@@ -1250,53 +1250,16 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
     }
 
     [Fact]
-    public async Task Quiet_Signal_Overview_Should_Render_With_VNext_Tokens_At_Design_Viewport()
+    public async Task Operations_Desk_Overview_Should_Keep_Readable_Hierarchy_At_Design_Viewport()
     {
         await _fixture.EnsureDashboardRunningAsync();
-        var viewport = new DashboardViewport("quiet-signal-design", 1440, 1024);
+        var viewport = new DashboardViewport("operations-desk-design", 1440, 1024);
         await using var context = await _fixture.CreateContextAsync(viewport);
-        await context.AddInitScriptAsync(
-            @"(() => {
-                localStorage.setItem('contextHub.dashboard.theme', 'dark');
-                document.documentElement.dataset.themePreference = 'dark';
-                document.documentElement.dataset.theme = 'dark';
-                document.documentElement.style.colorScheme = 'dark';
-            })();");
         var page = await context.NewPageAsync();
-
-        await LoginAndOpenAsync(page, BuildRouteUrl("/", DashboardUiProfile.Dense));
-        await page.GetByRole(AriaRole.Heading, new() { Name = "總覽" })
-            .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
-
-        var tokenJson = await page.EvaluateAsync<string>(
-            @"() => {
-                const root = getComputedStyle(document.documentElement);
-                const sidebar = document.querySelector('.sidebar')?.getBoundingClientRect();
-                const overviewSignalStrip = document.querySelector('.overview-signal-strip')?.getBoundingClientRect();
-                return JSON.stringify({
-                    background: root.getPropertyValue('--bg').trim(),
-                    surface: root.getPropertyValue('--surface').trim(),
-                    accent: root.getPropertyValue('--accent').trim(),
-                    radius: root.getPropertyValue('--radius').trim(),
-                    bodyScrollWidth: document.body.scrollWidth,
-                    documentScrollWidth: document.documentElement.scrollWidth,
-                    sidebarWidth: Math.round(sidebar?.width ?? 0),
-                    overviewSignalStripWidth: Math.round(overviewSignalStrip?.width ?? 0)
-                });
-            }");
-
-        using var tokenDocument = JsonDocument.Parse(tokenJson);
-        var root = tokenDocument.RootElement;
-        root.GetProperty("background").GetString().Should().Be("#0b0f14", tokenJson);
-        root.GetProperty("surface").GetString().Should().Be("#141a21", tokenJson);
-        root.GetProperty("accent").GetString().Should().Be("#2dd4bf", tokenJson);
-        root.GetProperty("radius").GetString().Should().Be("8px", tokenJson);
-        root.GetProperty("sidebarWidth").GetInt32().Should().BeInRange(250, 254, tokenJson);
-        root.GetProperty("overviewSignalStripWidth").GetInt32().Should().BeGreaterThan(900, tokenJson);
-        root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(viewport.Width + 1, tokenJson);
-        root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(viewport.Width + 1, tokenJson);
-
-        await CaptureScreenshotAsync(page, "quiet-signal-overview-design", DashboardUiProfile.Dense, viewport, DashboardTheme.Dark);
+        await LoginAndOpenAsync(page, "/?uiProfile=dense");
+        await AssertOperationsDeskLayoutAsync(page, viewport.Width);
+        await AssertOperationsDeskTypographyAndContrastAsync(page);
+        await CaptureScreenshotAsync(page, "operations-desk-design", DashboardUiProfile.Dense, viewport, DashboardTheme.Dark);
     }
 
     [Fact]
@@ -1633,56 +1596,8 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
         var viewport = new DashboardViewport("app-browser-999", 999, 1270);
         await using var context = await _fixture.CreateContextAsync(viewport);
         var page = await context.NewPageAsync();
-
         await LoginAndOpenAsync(page, "/?uiProfile=dense");
-        await page.Locator(".overview-signal-strip").WaitForAsync(new LocatorWaitForOptions
-        {
-            State = WaitForSelectorState.Visible,
-            Timeout = 15000
-        });
-
-        var layoutJson = await page.EvaluateAsync<string>(
-            @"() => {
-                const rectOf = selector => {
-                    const element = document.querySelector(selector);
-                    const rect = element?.getBoundingClientRect();
-                    return {
-                        top: Math.round(rect?.top ?? 0),
-                        bottom: Math.round(rect?.bottom ?? 0),
-                        height: Math.round(rect?.height ?? 0)
-                    };
-                };
-
-                return JSON.stringify({
-                    viewportWidth: window.innerWidth,
-                    documentScrollWidth: document.documentElement.scrollWidth,
-                    bodyScrollWidth: document.body.scrollWidth,
-                    contentScrollWidth: document.querySelector('.content')?.scrollWidth ?? 0,
-                    contentClientWidth: document.querySelector('.content')?.clientWidth ?? 0,
-                    signalScrollWidth: document.querySelector('.overview-signal-strip')?.scrollWidth ?? 0,
-                    signalClientWidth: document.querySelector('.overview-signal-strip')?.clientWidth ?? 0,
-                    actionScrollWidth: document.querySelector('.overview-action-grid')?.scrollWidth ?? 0,
-                    actionClientWidth: document.querySelector('.overview-action-grid')?.clientWidth ?? 0,
-                    signals: rectOf('.overview-signal-strip'),
-                    actions: rectOf('.overview-action-grid'),
-                    work: rectOf('.overview-work-panel')
-                });
-            }");
-
-        using var document = JsonDocument.Parse(layoutJson);
-        var root = document.RootElement;
-        var signals = root.GetProperty("signals");
-        var actions = root.GetProperty("actions");
-        var work = root.GetProperty("work");
-
-        signals.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(actions.GetProperty("top").GetInt32(), $"signals must finish before action surfaces start: {layoutJson}");
-        actions.GetProperty("bottom").GetInt32().Should().BeLessThanOrEqualTo(work.GetProperty("top").GetInt32(), $"action surfaces must finish before active work starts: {layoutJson}");
-        signals.GetProperty("height").GetInt32().Should().BeGreaterThan(60, $"signal strip should remain readable: {layoutJson}");
-        root.GetProperty("documentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
-        root.GetProperty("bodyScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("viewportWidth").GetInt32() + 1);
-        root.GetProperty("contentScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("contentClientWidth").GetInt32() + 1);
-        root.GetProperty("signalScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("signalClientWidth").GetInt32() + 1);
-        root.GetProperty("actionScrollWidth").GetInt32().Should().BeLessThanOrEqualTo(root.GetProperty("actionClientWidth").GetInt32() + 1);
+        await AssertOperationsDeskLayoutAsync(page, viewport.Width);
     }
 
     [Fact]
@@ -3457,9 +3372,9 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
 
         var selectionJson = await page.EvaluateAsync<string>(
             @"() => JSON.stringify({
-                panelTitle: getComputedStyle(document.querySelector('.panel-title')).userSelect,
-                signalLabel: getComputedStyle(document.querySelector('.overview-signal span')).userSelect,
-                errorCopy: getComputedStyle(document.querySelector('.overview-queue-item div span')).userSelect
+                panelTitle: getComputedStyle(document.querySelector('main h1')).userSelect,
+                signalLabel: getComputedStyle(document.querySelector('.operations-desk-metric span')).userSelect,
+                errorCopy: getComputedStyle(document.querySelector('.operations-desk-risk-item details p')).userSelect
             })");
 
         using var document = JsonDocument.Parse(selectionJson);
