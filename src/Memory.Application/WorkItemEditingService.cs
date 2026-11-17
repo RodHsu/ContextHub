@@ -4,13 +4,21 @@ using Memory.Domain;
 namespace Memory.Application;
 
 /// <summary>Server-derived scope only. Clients do not supply actor or tenant identity.</summary>
-public sealed record WorkItemEditScope(Guid TenantId, Guid ActorUserId, bool IsServiceActor, string ProjectId);
+public sealed record WorkItemEditScope(Guid TenantId, Guid ActorUserId, bool IsServiceActor, string ProjectId,
+    bool CanManageGovernanceTrackers = false, string ActorName = "");
 
 /// <summary>A committed edit result, not a signed proof or a current-state snapshot.</summary>
 public sealed record WorkItemEditReceipt(Guid ReceiptId, Guid? HistoryId, string ProjectId, Guid WorkItemId,
     string RequestId, string RequestHash, string HashVersion, WorkItemEditOperation Operation,
     long PreviousRevision, long Revision, bool Changed, DateTimeOffset AppliedAt,
     ProjectWorkItemResult Result, bool Replayed = false);
+
+public sealed record WorkItemEditReceiptMetadata(Guid ReceiptId, Guid? HistoryId, string RequestId, string RequestHash,
+    string HashVersion, WorkItemEditOperation Operation, long PreviousRevision, long Revision, bool Changed, DateTimeOffset AppliedAt, bool Replayed)
+{
+    public static WorkItemEditReceiptMetadata From(WorkItemEditReceipt value) => new(value.ReceiptId, value.HistoryId,
+        value.RequestId, value.RequestHash, value.HashVersion, value.Operation, value.PreviousRevision, value.Revision, value.Changed, value.AppliedAt, value.Replayed);
+}
 
 public sealed record WorkItemEditRecoveryRequest(string ProjectId, Guid WorkItemId, string RequestId,
     string ExpectedRequestHash, string HashVersion = WorkItemEditContract.IntentHashVersion);
@@ -47,6 +55,8 @@ public sealed class WorkItemEditingService(IWorkItemEditStore store, IRequestAct
         ArgumentNullException.ThrowIfNull(command);
         var project = RequireProject(command.ProjectId);
         var scope = Scope(project, SecurityScopes.MemoryWrite, write: true);
+        if (command.Operation == WorkItemEditOperation.GovernanceExclusion && !scope.CanManageGovernanceTrackers)
+            throw new UnauthorizedAccessException("Governance tracker management is unavailable.");
         var normalized = WorkItemEditContract.Normalize(command);
         return store.ApplyAsync(scope, normalized, ct);
     }
@@ -64,7 +74,8 @@ public sealed class WorkItemEditingService(IWorkItemEditStore store, IRequestAct
         var actor = actors.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, requiredScope);
         ActorAuthorization.EnsureProjectAllowed(actor, project, write);
-        return new(actor.TenantId!.Value, actor.UserId!.Value, actor.IsServiceActor, project);
+        return new(actor.TenantId!.Value, actor.UserId!.Value, actor.IsServiceActor, project,
+            actor.IsAdmin && actor.HasScope(SecurityScopes.GovernanceTrackerManage), actor.Username);
     }
 
     private static string RequireProject(string project)

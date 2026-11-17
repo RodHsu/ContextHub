@@ -21,6 +21,8 @@ public sealed class WorkItemEditStore(IDbContextFactory<MemoryDbContext> factory
             throw new InvalidOperationException("Work item edits require an explicit commit owner; ambient transaction composition is not enabled.");
         var normalized = WorkItemEditContract.Normalize(command);
         if (!ProjectContext.Matches(scope.ProjectId, normalized.ProjectId)) throw Unavailable();
+        if (normalized.Operation == WorkItemEditOperation.GovernanceExclusion && !scope.CanManageGovernanceTrackers)
+            throw new UnauthorizedAccessException("Governance tracker management is unavailable.");
         var hash = WorkItemEditContract.Hash(normalized);
         await using var db = await factory.CreateDbContextAsync(ct);
         if (db.Database.ProviderName != "Npgsql.EntityFrameworkCore.PostgreSQL")
@@ -46,11 +48,20 @@ public sealed class WorkItemEditStore(IDbContextFactory<MemoryDbContext> factory
         }
 
         WorkItemEditContract.RequireRevision(normalized.ExpectedRevision, entity.Revision);
+        if (normalized.Operation == WorkItemEditOperation.GovernanceExclusion)
+        {
+            var reference = normalized.Patch.GovernanceExclusion!;
+            var snapshots = await db.KnowledgeGovernanceSnapshots.AsNoTracking()
+                .Where(row => row.TenantId == scope.TenantId && row.OwnerUserId == scope.ActorUserId && row.GovernanceRunId == reference.GovernanceRunId)
+                .Select(row => row.ProjectIdsJson).ToArrayAsync(ct);
+            if (!snapshots.Any(json => SnapshotContainsProject(json, entity.ProjectId))) throw Unavailable();
+        }
         var now = clock.UtcNow;
         var beforeRevision = entity.Revision;
         var before = WorkItemEditProjection.ToResult(entity);
         var originalChildren = entity.ChecklistItems.ToDictionary(x => x.Id);
-        var changed = WorkItemEditAggregate.Apply(entity, normalized, now);
+        var changed = WorkItemEditAggregate.Apply(entity, normalized, now,
+            string.IsNullOrWhiteSpace(scope.ActorName) ? scope.ActorUserId.ToString("D") : scope.ActorName);
         var after = WorkItemEditProjection.ToResult(entity);
         Guid? historyId = null;
         if (changed)
@@ -73,6 +84,25 @@ public sealed class WorkItemEditStore(IDbContextFactory<MemoryDbContext> factory
             };
             historyId = history.Id;
             db.WorkItemEditHistories.Add(history);
+            if (normalized.Operation == WorkItemEditOperation.GovernanceExclusion)
+            {
+                var reference = normalized.Patch.GovernanceExclusion!;
+                db.SecurityAuditEvents.Add(new SecurityAuditEvent
+                {
+                    TenantId = scope.TenantId,
+                    ActorUserId = scope.ActorUserId,
+                    EventType = SecurityAuditEventType.ProjectWorkItemGovernanceExclusionUpdated,
+                    Outcome = reference.Excluded ? "Excluded" : "Revoked",
+                    DetailsJson = JsonSerializer.Serialize(new
+                    {
+                        workItemId = entity.Id,
+                        projectId = entity.ProjectId,
+                        governanceRunId = reference.GovernanceRunId,
+                        reason = reference.Reason
+                    }, Json),
+                    CreatedAt = now
+                });
+            }
             db.AuthorityOutboxEvents.Add(new AuthorityOutboxEvent
             {
                 TenantId = scope.TenantId,
@@ -167,4 +197,10 @@ public sealed class WorkItemEditStore(IDbContextFactory<MemoryDbContext> factory
         db.ProjectWorkItemChecklistItems.AddRange(entity.ChecklistItems.Where(x => !originalChildren.ContainsKey(x.Id)));
     }
     private static KeyNotFoundException Unavailable() => new("Work item is unavailable.");
+
+    private static bool SnapshotContainsProject(string json, string project)
+    {
+        try { return (JsonSerializer.Deserialize<string[]>(json, Json) ?? []).Contains(project, ProjectContext.IdentityComparer); }
+        catch (JsonException) { return false; }
+    }
 }

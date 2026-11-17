@@ -31,7 +31,9 @@ public sealed class ChatGptGatewayTools(
     IAgentExecutionService agentExecutionService,
     ISkillService skillService,
     IRequestActorAccessor actorAccessor,
-    IHttpContextAccessor httpContextAccessor)
+    IHttpContextAccessor httpContextAccessor,
+    IWorkItemEditingService? workItemEditing = null,
+    ILogger<ChatGptGatewayTools>? logger = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -268,25 +270,35 @@ public sealed class ChatGptGatewayTools(
     public Task<ProjectWorkItemResult> project_work_item_create(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.CreateAsync(request, cancellationToken);
 
-    [McpServerTool(UseStructuredContent = true), Description("Update project work item content, priority, due date, or lifecycle status.")]
+    [McpServerTool(UseStructuredContent = true), Description("Edit one work item using its original read Revision and RequestId. Use Operation/Edit for stable checklist edits or explicit Reopen; Edit.DueAt Mode=Clear clears a due date. Unknown outcome requires exact receipt/hash recovery before retry, never latest-fill or a new request identity.")]
     public Task<ProjectWorkItemResult> project_work_item_update(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken = default)
-        => projectWorkItemService.UpdateAsync(request, cancellationToken);
+        => WorkItemBoundaryAsync(() => projectWorkItemService.UpdateAsync(request, cancellationToken));
 
     [McpServerTool(UseStructuredContent = true), Description("Explicitly and auditably exclude or restore one governance acceptance tracker for one existing governanceRunId. Only tenant owners or administrators may change this project-scoped relationship; ordinary work items remain actionable.")]
     public Task<ProjectWorkItemResult> project_work_item_set_governance_exclusion(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken cancellationToken = default)
-        => projectWorkItemService.SetGovernanceExclusionAsync(request, cancellationToken);
+        => WorkItemBoundaryAsync(() => projectWorkItemService.SetGovernanceExclusionAsync(request, cancellationToken));
 
-    [McpServerTool(UseStructuredContent = true), Description("Complete or reopen one project work item checklist entry.")]
-    public Task<ProjectWorkItemResult> project_work_item_checklist_update(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken = default)
-        => projectWorkItemService.SetChecklistItemCompletionAsync(workItemId, checklistItemId, isCompleted, cancellationToken);
+    [McpServerTool(UseStructuredContent = true), Description("Set one checklist completion using ExpectedRevision and RequestId. Explicitly Reopen a Completed work item through project_work_item_update before unchecking. Unknown outcome requires exact receipt recovery.")]
+    public Task<ProjectWorkItemResult> project_work_item_checklist_update(Guid workItemId, Guid checklistItemId, bool isCompleted,
+        CancellationToken cancellationToken = default, long? expectedRevision = null, string? requestId = null)
+        => WorkItemBoundaryAsync(() => projectWorkItemService.SetChecklistItemCompletionAsync(new ProjectWorkItemChecklistUpdateRequest(
+            workItemId, checklistItemId, isCompleted, expectedRevision, requestId), cancellationToken));
 
     [McpServerTool(UseStructuredContent = true), Description("Archive a project work item. Archived work items are hidden from default lists and reject mutations until restored.")]
-    public Task<ProjectWorkItemResult> project_work_item_archive(Guid workItemId, CancellationToken cancellationToken = default)
-        => projectWorkItemService.SetArchivedAsync(workItemId, archived: true, cancellationToken);
+    public Task<ProjectWorkItemResult> project_work_item_archive(Guid workItemId, CancellationToken cancellationToken = default,
+        long? expectedRevision = null, string? requestId = null)
+        => WorkItemBoundaryAsync(() => projectWorkItemService.SetArchivedAsync(new ProjectWorkItemArchiveRequest(workItemId, true, expectedRevision, requestId), cancellationToken));
 
     [McpServerTool(UseStructuredContent = true), Description("Restore an archived project work item without changing its business status.")]
-    public Task<ProjectWorkItemResult> project_work_item_restore(Guid workItemId, CancellationToken cancellationToken = default)
-        => projectWorkItemService.SetArchivedAsync(workItemId, archived: false, cancellationToken);
+    public Task<ProjectWorkItemResult> project_work_item_restore(Guid workItemId, CancellationToken cancellationToken = default,
+        long? expectedRevision = null, string? requestId = null)
+        => WorkItemBoundaryAsync(() => projectWorkItemService.SetArchivedAsync(new ProjectWorkItemArchiveRequest(workItemId, false, expectedRevision, requestId), cancellationToken));
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read one committed work-item edit receipt for the same actor/project/target/request and original intent hash/version. This is the original result, not current state. Null means no committed receipt was observed, not proof the edit never arrived. This read never replays a mutation.")]
+    public Task<WorkItemEditReceipt?> project_work_item_edit_receipt_get(WorkItemEditRecoveryRequest request, CancellationToken cancellationToken = default)
+        => WorkItemBoundaryAsync(() => (workItemEditing ?? throw new NotSupportedException("Work item receipt recovery is unavailable."))
+            .ReadReceiptAsync(request, cancellationToken));
 
     [McpServerTool(UseStructuredContent = true), Description("Propose an update to the durable project description. DisplayName is UI-managed and cannot be changed by ChatGPT or MCP agents.")]
     public Task<ChatGptProposalResult> project_information_upsert(ProjectInformationAgentUpdateRequest request, string? governanceRunId = null, CancellationToken cancellationToken = default)
@@ -530,4 +542,23 @@ public sealed class ChatGptGatewayTools(
     }
 
     private sealed record OAuthUser(string Subject, string Email, string Name);
+
+    private async Task<T> WorkItemBoundaryAsync<T>(Func<Task<T>> operation)
+    {
+        try { return await operation(); }
+        catch (SafeEditConflictException error)
+        {
+            throw new McpException(JsonSerializer.Serialize(new { code = error.Code, currentRevision = error.CurrentRevision, detail = error.Message }));
+        }
+        catch (UnauthorizedAccessException) { throw new McpException("Work item operation is unavailable."); }
+        catch (KeyNotFoundException) { throw new McpException("Work item operation is unavailable."); }
+        catch (ArgumentException) { throw new McpException("Invalid edit intent; verify the original read revision and explicit fields."); }
+        catch (InvalidOperationException) { throw new McpException("Invalid edit state; reload and compare while retaining the draft."); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error)
+        {
+            logger?.LogError(error, "Work item operation outcome could not be confirmed.");
+            throw new McpException("RequestOutcomeUnknown: recover the original request identity and intent hash; do not automatically replay or create a new request.");
+        }
+    }
 }
