@@ -4734,7 +4734,7 @@ internal sealed record DashboardTheme(string Name, string PreferenceValue)
     public static readonly DashboardTheme Black = new("black", "black");
 }
 
-public sealed class DashboardBrowserFixture : IAsyncLifetime
+public sealed partial class DashboardBrowserFixture : IAsyncLifetime
 {
     private IPlaywright? _playwright;
     private IBrowser? _browser;
@@ -5080,6 +5080,7 @@ public sealed class DashboardBrowserFixture : IAsyncLifetime
                 Interlocked.Exchange(ref _listeningPort, address.Port);
         };
         _process.OutputDataReceived += (_, entry) => diagnostics?.ObserveOutput(entry.Data, standardError: false);
+        _process.OutputDataReceived += (_, entry) => ObservePreferenceMetadataRequest(entry.Data);
         _process.ErrorDataReceived += (_, entry) => diagnostics?.ObserveOutput(entry.Data, standardError: true);
         _process.BeginOutputReadLine();
         _process.BeginErrorReadLine();

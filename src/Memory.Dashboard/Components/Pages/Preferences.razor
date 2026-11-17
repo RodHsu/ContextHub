@@ -130,6 +130,8 @@
     private string _content = string.Empty;
     private string _rationale = string.Empty;
     private string _tags = string.Empty;
+    private decimal _importance = 0.95m;
+    private decimal _confidence = 0.95m;
     private string? _message;
     private long _messageSequence;
     private UserPreferenceKind? _filterKind;
@@ -176,7 +178,9 @@
                 _title,
                 _content,
                 _rationale,
-                ParseTags(_tags)),
+                ParseTags(_tags),
+                Importance: _importance,
+                Confidence: _confidence),
             CancellationToken.None);
 
         _selectedPreferenceId = saved.Id;
@@ -219,6 +223,8 @@
         _content = string.Empty;
         _rationale = string.Empty;
         _tags = string.Empty;
+        _importance = 0.95m;
+        _confidence = 0.95m;
         if (setMessage)
         {
             ShowMessage("已切換為建立新偏好。");
@@ -265,6 +271,8 @@
         _title = item.Title;
         _content = item.Content;
         _rationale = item.Rationale;
+        _importance = item.Importance;
+        _confidence = item.Confidence;
         _tags = string.Join(", ", item.Tags.Where(x => !string.Equals(x, "user-preference", StringComparison.OrdinalIgnoreCase)));
     }
 

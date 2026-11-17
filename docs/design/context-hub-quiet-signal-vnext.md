@@ -131,3 +131,9 @@ The Dashboard explicitly sets `RequiresAspNetWebAssets=true` so framework asset 
 ## Preference workspace
 
 Preferences paginate the already loaded records in groups of ten. Counts and page totals describe that loaded, category-filtered set; the interface identifies the current 50-record load limit. Paging preserves the active editor. Category changes return to page one, while refresh and save locate the selected record in a valid page. Desktop retains the bounded list and editor columns; at 1360px and below the panels flow naturally and the main content owns vertical scrolling. This avoids trapping the pointer between a bounded list and its page.
+
+Editing a preference preserves its loaded importance and confidence scores. New preferences use the existing 0.95 defaults for both scores.
+
+## Inventory filters
+
+Files and Secrets bind their project, search and refresh warning text to the current page state. Selecting a project and refreshing preserves the selection; searching and refreshing preserves the filter. A successful refresh must not display a literal field name as a warning.
