@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
 using Memory.Application;
 using Memory.Domain;
 
@@ -7,6 +9,14 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 {
     private readonly DashboardBrowserTestProfileAccessor _profileAccessor;
     private ProjectInformationResult? _projectInformation;
+    private static readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, UserPreferenceResult>> MetadataPreferenceSessions = new();
+    private ConcurrentDictionary<string, UserPreferenceResult> MetadataPreferences
+        => MetadataPreferenceSessions.GetOrAdd(_profileAccessor.PreferenceMetadataSessionId, _ => new(
+        new[] { new KeyValuePair<string, UserPreferenceResult>("preference-metadata-existing", new UserPreferenceResult(
+            Guid.Parse("d85d314c-a29b-4c17-9bd6-530c7d2764f9"), "preference-metadata-existing",
+            UserPreferenceKind.ToolingPreference, "Metadata preservation fixture", "Original metadata fixture content",
+            "Synthetic browser regression", ["user-preference", "ToolingPreference", "custom-alpha", "custom-beta"],
+            0.41m, 0.73m, MemoryStatus.Active, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch)) }));
 
     public BrowserTestContextHubApiClient(DashboardBrowserTestProfileAccessor profileAccessor)
     {
@@ -629,7 +639,22 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     }
 
     public Task<UserPreferenceResult> UpsertPreferenceAsync(UserPreferenceUpsertRequest request, CancellationToken cancellationToken)
-        => Task.FromResult(new UserPreferenceResult(
+    {
+        if (Profile == DashboardBrowserTestProfile.PreferenceMetadata)
+        {
+            var existing = MetadataPreferences.GetValueOrDefault(request.Key);
+            var saved = new UserPreferenceResult(existing?.Id ?? Guid.NewGuid(), request.Key, request.Kind,
+                request.Title, request.Content, request.Rationale,
+                (request.Tags ?? []).Append("user-preference").Append(request.Kind.ToString())
+                    .Where(tag => !string.IsNullOrWhiteSpace(tag)).Select(tag => tag.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                request.Importance, request.Confidence, existing?.Status ?? MemoryStatus.Active,
+                existing?.CreatedAt ?? DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+            MetadataPreferences[request.Key] = saved;
+            // This synthetic profile reports only numeric request fields to its owning browser-test fixture.
+            Console.WriteLine("PREFERENCE_METADATA_TEST_REQUEST " + JsonSerializer.Serialize(new { request.Importance, request.Confidence }));
+            return Task.FromResult(saved);
+        }
+        return Task.FromResult(new UserPreferenceResult(
             Guid.NewGuid(),
             request.Key,
             request.Kind,
@@ -642,6 +667,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             MemoryStatus.Active,
             DateTimeOffset.UtcNow.AddDays(-1),
             DateTimeOffset.UtcNow));
+    }
 
     public Task<UserPreferenceResult> ArchivePreferenceAsync(Guid id, bool archived, CancellationToken cancellationToken)
         => Task.FromResult(new UserPreferenceResult(
@@ -1990,6 +2016,10 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     private IReadOnlyList<UserPreferenceResult> BuildPreferences()
     {
+        if (Profile == DashboardBrowserTestProfile.PreferenceMetadata)
+        {
+            return MetadataPreferences.Values.OrderBy(item => item.Key, StringComparer.Ordinal).ToArray();
+        }
         if (Profile == DashboardBrowserTestProfile.Empty)
         {
             return [];
