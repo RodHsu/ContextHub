@@ -1,0 +1,83 @@
+@implements IDisposable
+@inject IContextHubApiClient ApiClient
+
+<section class="panel tag-quality-panel" aria-label="標籤品質" aria-busy="@_state.Loading">
+    <div class="tag-quality-heading">
+        <div><h2>標籤品質</h2><p>目前專案的已觀測統計；品質指標不代表授權或全量標籤清冊。</p></div>
+        <div class="tag-quality-controls">
+            <label for="@_windowId">觀測期間</label>
+            <select id="@_windowId" value="@_days" @onchange="ChangeWindowAsync">
+                <option value="7">7 天</option><option value="30">30 天</option><option value="90">90 天</option>
+            </select>
+            <button class="ghost-button" @onclick="LoadAsync" disabled="@(_state.Loading || string.IsNullOrWhiteSpace(ProjectId))">重新載入品質</button>
+        </div>
+    </div>
+    @if (string.IsNullOrWhiteSpace(ProjectId))
+    {
+        <p role="status">請先選擇專案。</p>
+    }
+    else if (_state.Loading)
+    {
+        <p role="status" aria-live="polite">正在載入 @ProjectId 的標籤品質…</p>
+    }
+    else if (_state.Error is not null)
+    {
+        <p role="alert">@_state.Error</p>
+    }
+    else if (_state.Unsupported)
+    {
+        <p role="status">品質資料未知：目前服務未提供此讀取功能。</p>
+    }
+    else if (_state.Rows.Count == 0)
+    {
+        <p role="status">此期間沒有可見的品質統計；不表示沒有標籤或品質良好。</p>
+    }
+    else
+    {
+        <div class="tag-quality-table" tabindex="0" role="region" aria-label="標籤品質統計，可橫向捲動">
+            <table>
+                <caption>@ProjectId · 最近 @_days 天 · 最少 20 次曝光才符合治理樣本門檻</caption>
+                <thead><tr><th scope="col">標籤 ID</th><th scope="col">曝光／選取</th><th scope="col">選取率</th><th scope="col">品質代理值</th><th scope="col">樣本與訊號</th></tr></thead>
+                <tbody>
+                    @foreach (var row in _state.Rows)
+                    {
+                        <tr @key="row.DefinitionId">
+                            <th scope="row"><code>@row.DefinitionId</code></th>
+                            <td>@DashboardFormatting.Integer(row.Impressions) / @DashboardFormatting.Integer(row.Selections)</td>
+                            <td>@CanonicalTagQualityState.Rate(row.SelectionRate, row.Impressions)</td>
+                            <td>@CanonicalTagQualityState.Rate(row.PrecisionProxy, row.Impressions)</td>
+                            <td><strong>@(row.MeetsGovernanceThreshold ? "已達樣本門檻" : "樣本不足，僅供觀察")</strong><span>@(row.Signals.Count == 0 ? "未提供品質訊號" : string.Join("、", row.Signals))</span></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <p class="tag-quality-note">數值由服務計算；僅供觀察，不會自動合併、改名或重標。未提供名稱時保留標籤 ID，避免推測清冊內容。</p>
+    }
+</section>
+
+@code {
+    [Parameter] public string ProjectId { get; set; } = string.Empty;
+    private readonly CanonicalTagQualityState _state = new();
+    private readonly string _windowId = $"tag-quality-window-{Guid.NewGuid():N}";
+    private string? _loadedProject;
+    private int _days = 30;
+
+    protected override Task OnParametersSetAsync()
+    {
+        if (string.Equals(_loadedProject, ProjectId, StringComparison.Ordinal)) return Task.CompletedTask;
+        _loadedProject = ProjectId;
+        return LoadAsync();
+    }
+
+    private Task LoadAsync() => _state.LoadAsync(ProjectId, _days, ApiClient.GetCanonicalTagQualityAsync);
+
+    private Task ChangeWindowAsync(ChangeEventArgs args)
+    {
+        if (!int.TryParse(args.Value?.ToString(), out var days) || days is not 7 and not 30 and not 90) return Task.CompletedTask;
+        _days = days;
+        return LoadAsync();
+    }
+
+    public void Dispose() => _state.Dispose();
+}

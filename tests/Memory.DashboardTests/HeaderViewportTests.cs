@@ -74,29 +74,19 @@ public sealed class HeaderViewportTests : IClassFixture<DashboardBrowserFixture>
         var command = page.GetByRole(AriaRole.Button, new() { Name = "搜尋功能", Exact = true });
         await command.FocusAsync();
         await page.Keyboard.PressAsync("Enter");
-        await page.GetByRole(AriaRole.Dialog, new() { Name = "快速切換功能" }).WaitForAsync();
-        var close = page.GetByRole(AriaRole.Button, new() { Name = "關閉快速切換功能" });
+        await page.GetByRole(AriaRole.Dialog, new() { Name = "搜尋功能" }).WaitForAsync();
+        var close = page.GetByRole(AriaRole.Button, new() { Name = "關閉搜尋" });
         await close.FocusAsync();
         await page.Keyboard.PressAsync("Enter");
-        await page.GetByRole(AriaRole.Dialog, new() { Name = "快速切換功能" }).WaitForAsync(new() { State = WaitForSelectorState.Hidden });
+        await page.GetByRole(AriaRole.Dialog, new() { Name = "搜尋功能" }).WaitForAsync(new() { State = WaitForSelectorState.Hidden });
 
         var theme = page.Locator(".theme-switcher-toggle");
         await command.FocusAsync();
         await page.Keyboard.PressAsync("Tab");
         Assert.True(await theme.EvaluateAsync<bool>("element => element===document.activeElement"));
-        await page.Keyboard.PressAsync("Enter");
-        var menu = page.GetByRole(AriaRole.Menu, new() { Name = "主題選單" });
-        await menu.WaitForAsync();
-        await AssertVisibleBoundsAsync(menu, "theme-menu", requireTarget: false);
-        var options = menu.GetByRole(AriaRole.Menuitemradio);
-        Assert.Equal(3, await options.CountAsync());
-        for (var index = 0; index < 3; index++)
-        {
-            await page.Keyboard.PressAsync("Tab");
-            Assert.True(await options.Nth(index).EvaluateAsync<bool>("element => element===document.activeElement"));
-            await AssertVisibleBoundsAsync(options.Nth(index), $"theme-option-{index}");
-        }
-        await page.Keyboard.PressAsync("Enter");
+        Assert.Equal("SELECT", await theme.EvaluateAsync<string>("element => element.tagName"));
+        await theme.SelectOptionAsync("dark");
+        await page.Keyboard.PressAsync("ArrowUp");
         await page.WaitForFunctionAsync("() => document.documentElement.dataset.theme==='light'");
         await theme.FocusAsync();
         await page.Keyboard.PressAsync("Tab");
@@ -112,7 +102,10 @@ public sealed class HeaderViewportTests : IClassFixture<DashboardBrowserFixture>
         await page.Mouse.WheelAsync(0, 500);
         await page.WaitForFunctionAsync("() => document.querySelector('.content').scrollTop>0");
         await AssertHeaderAsync(page, "after-content-wheel");
-        await AssertVisibleBoundsAsync(page.Locator(".dashboard-footer"), "footer", requireTarget: false);
+        Assert.Equal(0, await page.Locator(".dashboard-footer").CountAsync());
+        var finalContentBounds = await content.BoundingBoxAsync();
+        Assert.NotNull(finalContentBounds);
+        Assert.InRange(finalContentBounds.Y + finalContentBounds.Height, height - 1, height + 1);
         await page.ScreenshotAsync(new() { Path = Path.Combine(fixture.ArtifactDirectory, $"header-{width}-{height}-{fontPercent}.png") });
     }
 

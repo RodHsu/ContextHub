@@ -10,7 +10,7 @@
               Breadcrumb="ContextHub / Files & Knowledge / Managed Files"
               BodyClass="page-viewport-body domain-page-body">
     <Actions>
-        <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" WarningText="_loadError" />
+        <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" WarningText="@_loadError" />
         <button class="primary-button" @onclick="LoadAsync" disabled="@_loading">刷新</button>
     </Actions>
     <ChildContent>
@@ -19,11 +19,11 @@
                           CurrentHref="/files"
                           Links="FileLinks" />
 
-        <DashboardScopeBar ProjectId="_projectId"
+        <DashboardScopeBar ProjectId="@_projectId"
                            ProjectIdChanged="ChangeProjectAsync"
                            ProjectIds="_projectIds"
                            AllowAllProjects="false"
-                           SearchText="_searchText"
+                           SearchText="@_searchText"
                            SearchTextChanged="ChangeSearch"
                            SearchPlaceholder="搜尋 logical file name、classification 或 lifecycle"
                            Disabled="_loading" />

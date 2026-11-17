@@ -6,8 +6,8 @@
 <PageTitle>Context Hub | 總覽</PageTitle>
 
 <PageViewport Title="總覽"
-              Subtitle="只顯示需要注意、需要決策或最值得立即行動的訊號。"
-              Breadcrumb="ContextHub / Overview"
+              Subtitle="掌握平台狀態，繼續專案工作，處理需要注意的事項。"
+              Breadcrumb="ContextHub / 總覽"
               BodyClass="page-viewport-body overview-page-body">
     <Actions>
         <div class="page-actions-status">
@@ -23,13 +23,26 @@
         </div>
     </Actions>
     <ChildContent>
+        <section class="panel overview-shortcuts" aria-label="常用工作">
+            <div class="panel-heading-row">
+                <div>
+                    <div class="panel-title">常用工作</div>
+                    <div class="panel-heading-meta">從專案、知識或營運開始。</div>
+                </div>
+            </div>
+            <nav class="overview-decision-links" aria-label="常用工作入口">
+                <a href="/project-work-items"><strong>追蹤專案工作</strong><span>查看待辦、成熟度與檢核清單</span></a>
+                <a href="/memories"><strong>尋找專案知識</strong><span>搜尋內容、來源與版本紀錄</span></a>
+                <a href="/monitoring"><strong>持續觀察平台</strong><span>追蹤服務健康與資源變化</span></a>
+            </nav>
+        </section>
         @if (_overview is null && _loading)
         {
             <DashboardAsyncState State="loading" Title="載入總覽" Message="正在整理最新健康、風險與行動訊號。" />
         }
         else if (_overview is null)
         {
-            <DashboardAsyncState State="error" Title="總覽目前不可用" Message="@(_loadError ?? "Overview data unavailable.")">
+            <DashboardAsyncState State="error" Title="總覽目前不可用" Message="@(_loadError ?? "目前無法取得總覽資料。")">
                 <Action><button class="ghost-button" @onclick="LoadAsync">重試</button></Action>
             </DashboardAsyncState>
         }
@@ -64,10 +77,10 @@
                     <div class="panel-heading-row">
                         <div>
                             <div class="panel-title">平台健康</div>
-                            <div class="panel-heading-meta">只列出最多三個需要注意的服務；完整 telemetry 位於 Operations。</div>
+                            <div class="panel-heading-meta">優先列出需要注意的服務，完整狀態請至營運中心。</div>
                         </div>
                         <span class="status-badge @(AttentionServices().Count == 0 ? "ok" : "warn")">
-                            @(AttentionServices().Count == 0 ? "Healthy" : $"{AttentionServices().Count} attention")
+                            @(AttentionServices().Count == 0 ? "正常" : $"{AttentionServices().Count} 項需注意")
                         </span>
                     </div>
 
@@ -87,14 +100,14 @@
                             }
                         }
                     </div>
-                    <a class="ghost-button button-link" href="/operations">檢視 Operations</a>
+                    <a class="ghost-button button-link" href="/operations">檢視營運中心</a>
                 </article>
 
                 <article class="panel overview-risk-panel">
                     <div class="panel-heading-row">
                         <div>
                             <div class="panel-title">風險與異常</div>
-                            <div class="panel-heading-meta">最新三筆 Error / Critical；不在總覽重複完整 log reader。</div>
+                            <div class="panel-heading-meta">最近的錯誤與嚴重異常，可開啟日誌追查。</div>
                         </div>
                         <span class="status-badge @(_overview.RecentErrors.Count == 0 ? "ok" : "bad")">@DashboardFormatting.Integer(_overview.RecentErrors.Count)</span>
                     </div>
@@ -115,20 +128,20 @@
                             }
                         }
                     </div>
-                    <a class="ghost-button button-link" href="/logs">檢視日誌與 diagnostics</a>
+                    <a class="ghost-button button-link" href="/logs">檢視日誌與診斷</a>
                 </article>
 
                 <article class="panel overview-decision-panel">
                     <div class="panel-heading-row">
                         <div>
-                            <div class="panel-title">需要人員決策</div>
-                            <div class="panel-heading-meta">將 governance、proposal 與 blocked workflow 導向唯一 canonical surface。</div>
+                            <div class="panel-title">檢查與審核</div>
+                            <div class="panel-heading-meta">依事項類型開啟建議、寫入審核或治理結果。</div>
                         </div>
                     </div>
                     <div class="overview-decision-links">
-                        <a href="/inbox"><strong>待決事項</strong><span>處理需要人員裁決的 queue</span></a>
-                        <a href="/chatgpt-proposals"><strong>ChatGPT 寫入審核</strong><span>檢視提案、authority 與 read-back</span></a>
-                        <a href="/governance"><strong>治理檢查</strong><span>檢視 coverage、exceptions 與 receipts</span></a>
+                        <a href="/inbox"><strong>治理建議</strong><span>檢視系統提出的同步與索引建議</span></a>
+                        <a href="/chatgpt-proposals"><strong>ChatGPT 寫入審核</strong><span>比較提案內容並確認套用結果</span></a>
+                        <a href="/governance"><strong>治理檢查</strong><span>追查檢查結果、例外與執行收據</span></a>
                     </div>
                 </article>
             </section>
@@ -136,8 +149,8 @@
             <section class="panel overview-work-panel">
                 <div class="panel-heading-row">
                     <div>
-                        <div class="panel-title">進行中工作</div>
-                        <div class="panel-heading-meta">最多三筆；完整 queue、payload 與維護操作留在專屬頁面。</div>
+                        <div class="panel-title">進行中的背景工作</div>
+                        <div class="panel-heading-meta">顯示最近三筆等待或執行中的工作，開啟背景工作可查看詳情。</div>
                     </div>
                     <span class="status-badge neutral">@DashboardFormatting.Integer(_overview.ActiveJobs.Count)</span>
                 </div>
@@ -162,10 +175,10 @@
             </section>
 
             <footer class="overview-release-strip">
-                <span>Release identity</span>
+                <span>發布版本</span>
                 <strong>@_overview.BuildVersion</strong>
                 <ClientLocalTime Value="_overview.BuildTimestampUtc" />
-                <span>Snapshot <ClientLocalTime Value="_overview.SnapshotAtUtc" /></span>
+                <span>資料快照 <ClientLocalTime Value="_overview.SnapshotAtUtc" /></span>
             </footer>
         }
     </ChildContent>

@@ -87,6 +87,8 @@ public sealed class DashboardNavigationDiagnosticsTests
     [InlineData("app.0123456789.css", "stylesheet", "/app.css")]
     [InlineData("Memory.Dashboard.a1b2c3d4e5.styles.css", "stylesheet", "/Memory.Dashboard.styles.css")]
     [InlineData("_framework/blazor.web.abcdefghij.js", "script", "/_framework/blazor.web.js")]
+    [InlineData("workspace.abcdefghij.css", "stylesheet", "/workspace.css")]
+    [InlineData("dashboard-shell.abcdefghij.js", "script", "/dashboard-shell.js")]
     public void Only_fixed_asset_names_accept_a_fixed_fingerprint_shape(string path, string type, string expected)
     {
         var diagnostics = Create();
@@ -323,7 +325,10 @@ public sealed class DashboardNavigationDiagnosticsTests
     [InlineData("light", "desktop")]
     [InlineData("light", "tab-s7-portrait")]
     [InlineData("light", "mobile")]
-    public void Six_existing_public_boundary_cases_have_exact_closed_labels(string theme, string viewport)
+    [InlineData("black", "desktop")]
+    [InlineData("black", "tab-s7-portrait")]
+    [InlineData("black", "mobile")]
+    public void Public_boundary_cases_have_exact_closed_labels(string theme, string viewport)
     {
         var diagnostics = new DashboardNavigationDiagnostics(new Uri("http://127.0.0.1:58123/"), theme, viewport, "/login");
         using var json = Snapshot(diagnostics);
