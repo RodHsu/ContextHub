@@ -1,0 +1,9 @@
+.file-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .6rem; margin: .75rem 0; }
+.file-pagination span, .file-read-note { color: var(--text-muted); font-size: .8rem; }
+.file-version-panel { min-width: 0; padding: .8rem 0; }
+.file-version-panel p, .file-version-panel dd { overflow-wrap: anywhere; }
+.file-history-list { display: grid; gap: .4rem; margin-top: .75rem; }
+.file-history-list button { white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.file-select-button { background: transparent; border: 0; color: var(--text); padding: 0; text-align: left; cursor: pointer; font: inherit; font-weight: 600; }
+.file-select-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 720px) { .file-pagination { justify-content: start; } .file-pagination span { width: 100%; } }
