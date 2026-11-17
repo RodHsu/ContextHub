@@ -130,7 +130,7 @@ The shared shell uses one role-filtered navigation model for the desktop sidebar
 - Dark, light, pure black and system preferences persist across pages and reloads. Pure black uses a black canvas with separate neutral surfaces; system resolves to light/dark.
 - A visible-on-focus skip link targets the main content. Reduced motion and forced colors retain usable navigation.
 - The overview uses natural document flow inside the main scroll region: shortcuts, a metric strip, health/risk/review, background work and release identity. Panels must not overlap or compress their contents to fit a viewport.
-- Memory search has visible labels. Advanced conditions start collapsed without changing their query values.
+- Memory search has visible labels. Each result title is a native button so Tab, Enter and Space can select and read an item without a pointer. Advanced conditions start collapsed without changing their query values.
 
 Member navigation reflects the current server route policy: memories, graph, preferences and personal tokens. Hiding a link never substitutes for server authorization. Other domain surfaces retain their existing access requirements.
 
@@ -149,3 +149,5 @@ Editing a preference preserves its loaded importance and confidence scores. New 
 ## Inventory filters
 
 Files and Secrets bind their project, search and refresh warning text to the current page state. Selecting a project and refreshing preserves the selection; searching and refreshing preserves the filter. A successful refresh must not display a literal field name as a warning.
+
+The scope selector includes the actual queried project even when it is absent from the project catalog, preserving its exact value while deduplicating other options without regard to case. This keeps a configured default visible without silently switching the query or its authorization scope.

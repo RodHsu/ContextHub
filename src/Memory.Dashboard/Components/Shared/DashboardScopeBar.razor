@@ -8,7 +8,7 @@
             {
                 <option value="@ProjectContext.AllProjectIdsSentinel">全部專案</option>
             }
-            @foreach (var option in ProjectIds.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+            @foreach (var option in ScopedProjectIds)
             {
                 <option value="@option">@option</option>
             }
@@ -43,6 +43,11 @@
     [Parameter] public string SearchPlaceholder { get; set; } = "依名稱或狀態篩選";
     [Parameter] public RenderFragment? Filters { get; set; }
     [Parameter] public RenderFragment? Actions { get; set; }
+
+    private IEnumerable<string> ScopedProjectIds => ProjectIds.Prepend(ProjectId)
+        .Where(value => !string.IsNullOrWhiteSpace(value) && value != ProjectContext.AllProjectIdsSentinel)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(value => value, StringComparer.OrdinalIgnoreCase);
     [Parameter] public bool Disabled { get; set; }
 
     private Task HandleProjectChanged(ChangeEventArgs args)
