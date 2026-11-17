@@ -5,8 +5,8 @@
 <PageTitle>Context Hub | 營運中心</PageTitle>
 
 <PageViewport Title="營運中心"
-              Subtitle="集中檢視 authority、rebuildable projection、背景工作、Agent queue 與邏輯儲存健康。"
-              Breadcrumb="ContextHub / Operations"
+              Subtitle="檢查資料同步、背景工作、Agent 執行與檔案儲存健康，追查異常原因。"
+              Breadcrumb="ContextHub / 營運"
               BodyClass="page-viewport-body operations-page-body">
     <Actions>
         <div class="page-actions-status">
@@ -29,11 +29,11 @@
 
         @if (_operations is null && _loading)
         {
-            <DashboardAsyncState State="loading" Title="載入營運狀態" Message="正在讀取 authority 與 monitoring projection。" />
+            <DashboardAsyncState State="loading" Title="載入營運狀態" Message="正在讀取正式資料狀態與監控快照。" />
         }
         else if (_operations is null)
         {
-            <DashboardAsyncState State="error" Title="無法載入營運狀態" Message="@(_loadError ?? "Operations data unavailable.")">
+            <DashboardAsyncState State="error" Title="無法載入營運狀態" Message="@(_loadError ?? "目前無法取得營運資料。")">
                 <Action><button class="ghost-button" @onclick="LoadAsync">重試</button></Action>
             </DashboardAsyncState>
         }
@@ -46,29 +46,29 @@
 
             <section class="operations-authority-grid">
                 <article class="panel operations-authority-card">
-                    <div class="operations-card-kicker">Business authority</div>
-                    <div class="panel-title">Authority commit boundary</div>
+                    <div class="operations-card-kicker">正式資料</div>
+                    <div class="panel-title">資料提交狀態</div>
                     <strong>@DashboardFormatting.Integer(_operations.Authority.LatestSequence)</strong>
-                    <span>latest sequence</span>
+                    <span>最新事件序號</span>
                     <dl class="definition-grid">
                         <div><dt>事件</dt><dd>@DashboardFormatting.Integer(_operations.Authority.EventCount)</dd></div>
-                        <div><dt>Security critical</dt><dd>@DashboardFormatting.Integer(_operations.Authority.SecurityCriticalEventCount)</dd></div>
-                        <div><dt>最後 commit</dt><dd>@if (_operations.Authority.LastCommittedAtUtc.HasValue) { <ClientLocalTime Value="_operations.Authority.LastCommittedAtUtc.Value" /> } else { <span>-</span> }</dd></div>
+                        <div><dt>安全相關事件</dt><dd>@DashboardFormatting.Integer(_operations.Authority.SecurityCriticalEventCount)</dd></div>
+                        <div><dt>最後提交</dt><dd>@if (_operations.Authority.LastCommittedAtUtc.HasValue) { <ClientLocalTime Value="_operations.Authority.LastCommittedAtUtc.Value" /> } else { <span>-</span> }</dd></div>
                     </dl>
-                    <div class="authority-callout authority-callout-primary">此區為 authority evidence；Monitoring 不得覆寫此狀態。</div>
+                    <div class="authority-callout authority-callout-primary">這是正式資料的提交紀錄（authority）；監控資料不會覆寫此狀態。</div>
                 </article>
 
                 <article class="panel operations-authority-card operations-projection-card">
-                    <div class="operations-card-kicker">Rebuildable monitoring</div>
-                    <div class="panel-title">Projection coverage</div>
+                    <div class="operations-card-kicker">監控同步</div>
+                    <div class="panel-title">監控資料落後量</div>
                     <strong>@DashboardFormatting.Integer(ProjectionLag())</strong>
-                    <span>event lag</span>
+                    <span>尚未同步的事件</span>
                     <dl class="definition-grid">
-                        <div><dt>Scopes</dt><dd>@DashboardFormatting.Integer(_operations.Projections.Count)</dd></div>
-                        <div><dt>Stale</dt><dd>@DashboardFormatting.Integer(_operations.Projections.Count(item => item.IsStale))</dd></div>
-                        <div><dt>最高 generation</dt><dd>@DashboardFormatting.Integer(_operations.Projections.Count == 0 ? 0 : _operations.Projections.Max(item => item.Generation))</dd></div>
+                        <div><dt>專案範圍</dt><dd>@DashboardFormatting.Integer(_operations.Projections.Count)</dd></div>
+                        <div><dt>過期範圍</dt><dd>@DashboardFormatting.Integer(_operations.Projections.Count(item => item.IsStale))</dd></div>
+                        <div><dt>最新重建版本</dt><dd>@DashboardFormatting.Integer(_operations.Projections.Count == 0 ? 0 : _operations.Projections.Max(item => item.Generation))</dd></div>
                     </dl>
-                    <div class="authority-callout">Projection 可重建，僅供觀測；lag 或 stale 不等於 business state 失效。</div>
+                    <div class="authority-callout">監控投影（projection）可重建；資料落後或過期，不代表正式資料失效。</div>
                 </article>
             </section>
 
@@ -76,8 +76,8 @@
                 <article class="panel operations-path-card">
                     <div class="panel-heading-row">
                         <div>
-                            <div class="panel-title">Precise / Incremental</div>
-                            <div class="panel-heading-meta">Mutation/outbox 觸發的精準投影與失效更新。</div>
+                            <div class="panel-title">增量更新</div>
+                            <div class="panel-heading-meta">資料異動後，更新受影響的監控資料與快取。</div>
                         </div>
                         <span class="status-badge @RunHealthClass(FilteredRuns(_operations.IncrementalRuns))">@RunHealthText(FilteredRuns(_operations.IncrementalRuns))</span>
                     </div>
@@ -87,8 +87,8 @@
                 <article class="panel operations-path-card">
                     <div class="panel-heading-row">
                         <div>
-                            <div class="panel-title">Scheduled full reconciliation</div>
-                            <div class="panel-heading-meta">全量 coverage、drift detection 與 repair，不是 authority。</div>
+                            <div class="panel-title">定時完整核對</div>
+                            <div class="panel-heading-meta">定期核對完整範圍、找出差異並修復監控資料，不變更正式資料。</div>
                         </div>
                         <span class="status-badge @RunHealthClass(FilteredRuns(_operations.FullReconciliationRuns))">@RunHealthText(FilteredRuns(_operations.FullReconciliationRuns))</span>
                     </div>
@@ -99,13 +99,13 @@
             <section class="panel operations-projection-table">
                 <div class="panel-heading-row">
                     <div>
-                        <div class="panel-title">Authority / projection revision</div>
-                        <div class="panel-heading-meta">逐 scope 顯示 authority sequence、projection cursor、generation 與 stale/fail-closed 狀態。</div>
+                        <div class="panel-title">正式資料與監控同步進度</div>
+                        <div class="panel-heading-meta">依專案比較正式事件與監控處理進度，追查落後或過期的範圍。</div>
                     </div>
                 </div>
                 <div class="table-scroll-shell">
                     <table class="data-table">
-                        <thead><tr><th>Project</th><th>Authority</th><th>Projection</th><th>Lag</th><th>Generation</th><th>狀態</th><th>Last success</th><th>Next run</th><th>Authority drill-down</th></tr></thead>
+                        <thead><tr><th>專案</th><th>正式事件序號</th><th>監控游標</th><th>落後事件</th><th>重建版本</th><th>狀態</th><th>最後成功</th><th>下次執行</th><th>詳細資訊</th></tr></thead>
                         <tbody>
                             @foreach (var state in FilteredProjections())
                             {
@@ -128,7 +128,7 @@
 
             <section class="operations-summary-grid">
                 <article class="panel" id="agent-executions">
-                    <div class="panel-title">AgentExecution queue / workers</div>
+                    <div class="panel-title">Agent 執行狀態</div>
                     <div class="metric-strip operations-metric-strip">
                         <div><span>Ready</span><strong>@DashboardFormatting.Integer(_operations.AgentExecutions.Ready)</strong></div>
                         <div><span>Running</span><strong>@DashboardFormatting.Integer(_operations.AgentExecutions.Running)</strong></div>
@@ -144,7 +144,7 @@
                 </article>
 
                 <article class="panel" id="logical-storage">
-                    <div class="panel-title">Logical storage / transfer health</div>
+                    <div class="panel-title">檔案儲存與傳輸</div>
                     <div class="metric-strip operations-metric-strip">
                         <div><span>Objects</span><strong>@DashboardFormatting.Integer(_operations.LogicalStorage.ObjectCount)</strong></div>
                         <div><span>Logical bytes</span><strong>@DashboardFormatting.Bytes(_operations.LogicalStorage.LogicalBytes)</strong></div>
@@ -156,7 +156,7 @@
                         <div><dt>Orphaned / missing / corrupt</dt><dd>@DashboardFormatting.Integer(_operations.LogicalStorage.Orphaned) / @DashboardFormatting.Integer(_operations.LogicalStorage.Missing) / @DashboardFormatting.Integer(_operations.LogicalStorage.Corrupt)</dd></div>
                         <div><dt>Expired / revoked transfers</dt><dd>@DashboardFormatting.Integer(_operations.LogicalStorage.FailedOrExpiredTransfers)</dd></div>
                     </dl>
-                    <div class="authority-callout">僅顯示 ContextHub logical metrics；不暴露 provider、endpoint、bucket、object locator 或 direct URL。</div>
+                    <div class="authority-callout">顯示 ContextHub 管理的檔案與傳輸狀態；個別資源的權限與安全資訊請開啟詳情。</div>
                     <div class="detail-actions">
                         <a class="ghost-button button-link" href="/files">受管檔案與 DLP</a>
                         <a class="ghost-button button-link" href="/secrets">Secrets、leases 與 MFA</a>
@@ -165,7 +165,7 @@
             </section>
 
             <section class="panel operations-services-panel">
-                <div class="panel-title">Services / runtime / dependencies</div>
+                <div class="panel-title">服務與執行環境</div>
                 <div class="operations-service-list">
                     @foreach (var service in FilteredServices())
                     {
@@ -177,20 +177,20 @@
                     }
                 </div>
                 <div class="detail-actions">
-                    <a class="ghost-button button-link" href="/monitoring">進階 telemetry</a>
+                    <a class="ghost-button button-link" href="/monitoring">服務與資源監控</a>
                     <a class="ghost-button button-link" href="/runtime">執行參數</a>
                     <a class="ghost-button button-link" href="/jobs">背景工作控制</a>
-                    <a class="ghost-button button-link" href="/logs">日誌與 diagnostics</a>
+                    <a class="ghost-button button-link" href="/logs">日誌與診斷</a>
                     <a class="ghost-button button-link" href="/mcp-tools">MCP / API</a>
                 </div>
             </section>
 
-            <HighRiskOperationGuard OperationName="受控 full reconciliation"
-                                    Summary="只允許 bounded scope、impact preview、audit 與 server-side assurance 決策。"
-                                    Reason="修復已證明的 projection drift"
-                                    ImpactPreview="只重建目前 Project scope 的 monitoring projection；不變更 business authority。"
-                                    OutcomeReadBack="此 Wave 未發布 mutation endpoint，操作維持 fail-closed。"
-                                    ActionLabel="啟動 bounded reconciliation"
+            <HighRiskOperationGuard OperationName="受控完整核對"
+                                    Summary="操作前必須確認影響範圍、取得必要授權，並保留稽核紀錄。"
+                                    Reason="修復已確認的監控資料差異"
+                                    ImpactPreview="只重建目前專案範圍的監控投影，不變更正式資料。"
+                                    OutcomeReadBack="目前尚未提供可執行的管理介面，此操作保持停用。"
+                                    ActionLabel="啟動受控核對"
                                     Decision="@null" />
         }
     </ChildContent>

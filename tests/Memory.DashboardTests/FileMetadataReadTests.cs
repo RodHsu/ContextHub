@@ -279,6 +279,7 @@ public sealed class FileMetadataReadTests
         var snapshot = await fakeSettings.GetSnapshotAsync(CancellationToken.None);
         snapshot = snapshot with { Behavior = snapshot.Behavior with { DefaultProjectId = "p" } };
         using var services = new ServiceCollection().AddLogging().AddSingleton(api)
+            .AddSingleton<NavigationManager>(new TestNavigationManager())
             .AddSingleton<IDashboardRuntimeSettingsAccessor>(new TestRuntimeSettings(snapshot)).BuildServiceProvider();
         await using var renderer = new HtmlRenderer(services, services.GetRequiredService<ILoggerFactory>());
         return await renderer.Dispatcher.InvokeAsync(async () =>
@@ -286,6 +287,14 @@ public sealed class FileMetadataReadTests
             var rendered = await renderer.RenderComponentAsync<Files>(ParameterView.Empty);
             return rendered.ToHtmlString();
         });
+    }
+
+    private sealed class TestNavigationManager : NavigationManager
+    {
+        public TestNavigationManager() => Initialize("https://context-hub.example.test/", "https://context-hub.example.test/files");
+
+        protected override void NavigateToCore(string uri, bool forceLoad)
+            => throw new InvalidOperationException("Navigation is not supported by this rendering fixture.");
     }
 
     private sealed class TestRuntimeSettings(InstanceSettingsSnapshot snapshot) : IDashboardRuntimeSettingsAccessor
