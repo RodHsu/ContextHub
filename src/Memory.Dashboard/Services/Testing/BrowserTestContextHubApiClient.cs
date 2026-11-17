@@ -9,6 +9,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 {
     private readonly DashboardBrowserTestProfileAccessor _profileAccessor;
     private ProjectInformationResult? _projectInformation;
+    private readonly Dictionary<string, int> _inventoryPermissionReads = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, UserPreferenceResult>> MetadataPreferenceSessions = new();
     private ConcurrentDictionary<string, UserPreferenceResult> MetadataPreferences
         => MetadataPreferenceSessions.GetOrAdd(_profileAccessor.PreferenceMetadataSessionId, _ => new(
@@ -299,6 +300,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     public Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken)
     {
+        CheckInventoryPermission(projectId);
         if (Profile == DashboardBrowserTestProfile.Empty)
         {
             return Task.FromResult<IReadOnlyList<ManagedFileInventoryResult>>([]);
@@ -315,12 +317,26 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     }
 
     public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
-        => Task.FromResult<IReadOnlyList<SecretSummary>>(Profile == DashboardBrowserTestProfile.Empty
+    {
+        CheckInventoryPermission(projectId);
+        return Task.FromResult<IReadOnlyList<SecretSummary>>(Profile == DashboardBrowserTestProfile.Empty
             ? []
             : [
                 new SecretSummary(Guid.Parse("bbbbbbbb-1000-0000-0000-000000000001"), projectId, "deployment-credential", SecretKind.ApiToken, SecretState.Active, 4, 12, DateTimeOffset.UtcNow.AddMinutes(-30)),
                 new SecretSummary(Guid.Parse("bbbbbbbb-1000-0000-0000-000000000002"), projectId, "ssh-signing-authority", SecretKind.SshCertificateAuthorityReference, SecretState.Compromised, 2, 9, DateTimeOffset.UtcNow.AddHours(-3))
             ]);
+    }
+
+    private void CheckInventoryPermission(string projectId)
+    {
+        if (Profile != DashboardBrowserTestProfile.InventoryPermissions) return;
+        var reads = _inventoryPermissionReads.GetValueOrDefault(projectId) + 1;
+        _inventoryPermissionReads[projectId] = reads;
+        if (projectId == "dashboard-test-restricted" || (projectId == "dashboard-test-revoked" && reads > 1))
+            throw new HttpRequestException("Synthetic inventory permission denied.", null, System.Net.HttpStatusCode.Forbidden);
+        if (projectId == "dashboard-test-unavailable" || (projectId == "dashboard-test-transient" && reads > 1))
+            throw new InvalidOperationException("API 回應 500 InternalServerError。");
+    }
 
     public Task<EffectiveRightsResult> GetEffectiveRightsAsync(
         string projectId,
@@ -759,6 +775,11 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000004"), "Vital_AirMeet_BackEnd", "AirMeet BackEnd", "BackEnd service contracts and persistence.", DateTimeOffset.UtcNow), 5),
             new(new ProjectInformationResult(Guid.Parse("cccccccc-0000-0000-0000-000000000005"), "Vital_AirMeet_Document", "AirMeet Document", "Authoritative product and contract documents.", DateTimeOffset.UtcNow), 4)
         ];
+        if (Profile == DashboardBrowserTestProfile.InventoryPermissions)
+        {
+            projects = projects.Concat(new[] { "dashboard-test-restricted", "dashboard-test-revoked", "dashboard-test-unavailable", "dashboard-test-transient" }
+                .Select(projectId => new ProjectInformationListItem(new ProjectInformationResult(Guid.NewGuid(), projectId, projectId, "Synthetic inventory permission regression.", DateTimeOffset.UnixEpoch), 0))).ToArray();
+        }
         return Task.FromResult(projects);
     }
 
