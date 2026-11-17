@@ -23,10 +23,14 @@ public sealed partial class DashboardBrowserUiTests
         containment[0].Should().BeGreaterThanOrEqualTo(containment[1] - 1, "the page must grow with all overview content instead of leaving it outside a shrunken flex item");
 
         var content = page.Locator("main.content");
-        await content.FocusAsync();
+        await page.GetByRole(AriaRole.Link, new() { Name = "跳到主要內容", Exact = true }).FocusAsync();
+        await page.Keyboard.PressAsync("Enter");
+        await Assertions.Expect(content).ToBeFocusedAsync();
+        await content.EvaluateAsync("element => { element.dataset.qaScrollFinished = 'false'; element.addEventListener('scrollend', () => element.dataset.qaScrollFinished = 'true', { once: true }); }");
         await page.Keyboard.PressAsync("PageDown");
-        await page.WaitForFunctionAsync("() => document.querySelector('main.content').scrollTop > 0");
-        await content.EvaluateAsync("element => element.scrollTop = 0");
+        await page.WaitForFunctionAsync("() => document.querySelector('main.content').dataset.qaScrollFinished === 'true' && document.querySelector('main.content').scrollTop > 0");
+        await content.EvaluateAsync("element => { element.dataset.qaScrollFinished = 'false'; element.addEventListener('scrollend', () => element.dataset.qaScrollFinished = 'true', { once: true }); element.scrollTop = 0; }");
+        await page.WaitForFunctionAsync("() => document.querySelector('main.content').dataset.qaScrollFinished === 'true' && document.querySelector('main.content').scrollTop === 0");
         var bounds = (await content.BoundingBoxAsync())!;
         await page.Mouse.MoveAsync(bounds.X + bounds.Width - 12, bounds.Y + bounds.Height / 2);
         await page.Mouse.WheelAsync(0, 4000);
