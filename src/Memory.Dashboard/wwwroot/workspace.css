@@ -149,6 +149,7 @@
 .workspace-shell .theme-switcher-toggle { width: auto; min-width: 5rem; cursor: pointer; }
 .workspace-shell .content { padding: 1.5rem; }
 .workspace-shell .page-viewport { width: 100%; margin-inline: 0; height: auto; min-height: 100%; display: flex; flex-direction: column; gap: 1.5rem; }
+.workspace-shell .page-viewport:has(> .overview-page-body) { flex: 1 0 auto; }
 .workspace-shell .page-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem; }
 .workspace-shell .page-header-copy { min-width: min(100%, 16rem); flex: 1; }
 .workspace-shell .page-header h1 { font-size: 2.25rem; font-weight: 650; letter-spacing: -0.025em; }
