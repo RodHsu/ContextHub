@@ -16,8 +16,8 @@
 - Text: high-contrast neutral foreground
 - Status: success, warning, danger, and info colors paired with icon or text
 - Typography: UI text in a readable sans-serif; IDs, JSON, logs, timestamps, code, and tokens in monospace
-- Body text: generally 14-16px
-- Page title: generally 24px
+- Body text: a 1rem system-font baseline; secondary and table text generally 0.875rem
+- Page title: 1.5-2.25rem, with a clear hierarchy over section headings
 - Letter spacing: `0`
 - Radius: 8px or less for containers
 - Shadows: menus, drawers, and dialogs only
@@ -26,7 +26,7 @@
 
 | Viewport | Navigation | Content composition |
 | --- | --- | --- |
-| `>= 1200` | 252px labeled sidebar, collapsible task groups | Bounded content; wide master-detail layouts |
+| `>= 1200` | 15.5rem labeled sidebar, collapsible task groups | Left-aligned content; wide master-detail layouts |
 | `1025-1199` | 224px labeled sidebar | Wrapped tools and single-column overview |
 | `<= 1024` | App bar button and native modal navigation drawer | Full-width workspace; local data overflow |
 
@@ -50,6 +50,18 @@ Hard rules:
 - `ContentReader`: selectable, copyable, wrappable, bounded, and scrollable within its frame.
 - `FormSection`: label above control, inline validation, dirty state, save guard, disabled explanation.
 - `RefreshState`: keep old data visible while refresh runs; update client-local timestamp on success.
+
+## Operations desk composition
+
+The overview uses the Structured Operations Desk composition within Quiet Signal. The shared app bar provides location and global controls; the content has one main page title. PageViewport headers omit the repeated breadcrumb, while standalone PageHeader consumers may retain it for contextual flows.
+
+A compact summary combines service attention, the available snapshot metrics and freshness. The main workspace gives recent errors the larger column; a narrower surface groups work entries, review links and background jobs. Actual log levels and timestamps remain the source of truth. The interface must not infer an unresolved workflow state or a new severity taxonomy from presentation alone.
+
+Healthy and empty states use short text rather than nested framed cards. Workspaces share an alignment edge with the app bar and use available width; prose and technical readers keep their own readable line lengths and overflow frames. At narrow widths the overview stacks in DOM order, and controls grow naturally with text size.
+
+All existing navigation, service warnings, review destinations, refresh warnings, loading/error states and background-work links remain available. Light, dark and pure-black appearances use the same type scale and composition. Visual acceptance compares rendered desktop and mobile views against the approved composition in addition to functional and geometry tests.
+
+Small action and work-entry icons use the supplied [Feather 4.29.2](https://github.com/feathericons/feather/tree/v4.29.2) SVG assets. They are served locally with their [MIT license](../../src/Memory.Dashboard/wwwroot/icons/feather/LICENSE); no runtime icon CDN or font download is required. The existing product logo and navigation icon system remain in use.
 - `DestructiveDialog`: object name, impact preview, consequence, and typed confirmation for high-risk actions.
 - `AsyncState`: default, loading, stale, empty, error, retry, success, focus, and disabled states preserve layout.
 
@@ -118,7 +130,8 @@ The shared shell uses one role-filtered navigation model for the desktop sidebar
 - Dark, light, pure black and system preferences persist across pages and reloads. Pure black uses a black canvas with separate neutral surfaces; system resolves to light/dark.
 - A visible-on-focus skip link targets the main content. Reduced motion and forced colors retain usable navigation.
 - The overview uses natural document flow inside the main scroll region: shortcuts, a metric strip, health/risk/review, background work and release identity. Panels must not overlap or compress their contents to fit a viewport.
-- Memory search has visible labels. Advanced conditions start collapsed without changing their query values.
+- The overview's outer page must grow with its contents. It must not shrink while children overflow its box; the main content owns scrolling, with keyboard and wheel access through the release footer.
+- Memory search has visible labels. Each result title is a native button so Tab, Enter and Space can select and read an item without a pointer. Advanced conditions start collapsed without changing their query values.
 
 Member navigation reflects the current server route policy: memories, graph, preferences and personal tokens. Hiding a link never substitutes for server authorization. Other domain surfaces retain their existing access requirements.
 
@@ -137,3 +150,5 @@ Editing a preference preserves its loaded importance and confidence scores. New 
 ## Inventory filters
 
 Files and Secrets bind their project, search and refresh warning text to the current page state. Selecting a project and refreshing preserves the selection; searching and refreshing preserves the filter. A successful refresh must not display a literal field name as a warning.
+
+The scope selector includes the actual queried project even when it is absent from the project catalog, preserving its exact value while deduplicating other options without regard to case. This keeps a configured default visible without silently switching the query or its authorization scope.

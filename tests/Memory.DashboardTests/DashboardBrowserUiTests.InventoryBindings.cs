@@ -10,6 +10,29 @@ public sealed partial class DashboardBrowserUiTests
     [InlineData("/files", 390, 844)]
     [InlineData("/secrets", 1366, 768)]
     [InlineData("/secrets", 390, 844)]
+    public async Task Inventory_Initial_Scope_Should_Show_Loaded_Default_Project_Missing_From_Catalog(string route, int width, int height)
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("inventory-default-scope", width, height));
+        var page = await context.NewPageAsync();
+        await LoginAndOpenAsync(page, route + "?uiProfile=normal");
+
+        const string configuredProject = "default";
+        var scope = page.Locator(".dashboard-scope-bar select");
+        var project = page.Locator(".domain-detail-panel .definition-grid dd").First;
+        await Expect(project).ToHaveTextAsync(configuredProject);
+        await Expect(scope).ToHaveValueAsync(configuredProject);
+
+        await page.GetByRole(AriaRole.Button, new() { Name = "刷新", Exact = true }).ClickAsync();
+        await Expect(scope).ToHaveValueAsync(configuredProject);
+        await Expect(project).ToHaveTextAsync(configuredProject);
+    }
+
+    [Theory]
+    [InlineData("/files", 1366, 768)]
+    [InlineData("/files", 390, 844)]
+    [InlineData("/secrets", 1366, 768)]
+    [InlineData("/secrets", 390, 844)]
     public async Task Inventory_Scope_Should_Match_Loaded_Project_After_Selection_And_Refresh(string route, int width, int height)
     {
         await _fixture.EnsureDashboardRunningAsync();

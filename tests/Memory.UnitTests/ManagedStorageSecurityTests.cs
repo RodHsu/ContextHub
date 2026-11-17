@@ -404,6 +404,176 @@ public sealed class ManagedStorageSecurityTests
         fixture.Object.State.Should().Be(ManagedObjectState.Ready);
     }
 
+
+    [Theory]
+    [InlineData(" export ", " export ")]
+    [InlineData("export", "\texport\r\n")]
+    [InlineData("\texport\r\n", "export")]
+    public async Task Upload_initialization_rejects_consumed_key_with_the_stored_trimmed_purpose(string firstPurpose, string repeatedPurpose)
+    {
+        var fixture = new UploadInitFixture();
+        var first = await fixture.CreateAsync(firstPurpose, " init-id ");
+
+        await FluentActions.Awaiting(() => fixture.CreateAsync(repeatedPurpose, " init-id "))
+            .Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("The upload idempotency identity has already been consumed.");
+
+        fixture.Proxy.Sessions.Should().ContainSingle().Which.Id.Should().Be(first.SessionId);
+        fixture.Proxy.Objects.Should().ContainSingle().Which.Id.Should().Be(first.Object.ObjectId);
+        fixture.Proxy.Sessions.Single().Purpose.Should().Be("export");
+        fixture.Proxy.Records.Should().ContainSingle().Which.RequestId.Should().Be(" init-id ");
+        fixture.Proxy.Records.Single().RequestHash.Should().Be(Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes(string.Join('|', "create-upload", "ContextHub", "100", firstPurpose)))).ToLowerInvariant());
+        fixture.Keys.Wraps.Should().Be(1);
+        fixture.Proxy.Saves.Should().Be(1);
+    }
+
+    [Theory]
+    [InlineData("export", "different-key")]
+    [InlineData("export", "INIT-ID")]
+    [InlineData("export", " init-id ")]
+    [InlineData("Export", "init-id")]
+    [InlineData("review", "init-id")]
+    public async Task Upload_initialization_preserves_distinct_keys_and_case_sensitive_purposes(string nextPurpose, string nextKey)
+    {
+        var fixture = new UploadInitFixture();
+        var first = await fixture.CreateAsync(" export ", "init-id");
+        var next = await fixture.CreateAsync(nextPurpose, nextKey);
+
+        next.SessionId.Should().NotBe(first.SessionId);
+        next.Object.ObjectId.Should().NotBe(first.Object.ObjectId);
+        fixture.Proxy.Sessions.Should().HaveCount(2);
+        fixture.Proxy.Objects.Should().HaveCount(2);
+        fixture.Proxy.Records.Should().HaveCount(2);
+        fixture.Proxy.Sessions.Last().Purpose.Should().Be(nextPurpose.Trim());
+        fixture.Keys.Wraps.Should().Be(2);
+        fixture.Proxy.Saves.Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData("tenant")]
+    [InlineData("owner")]
+    [InlineData("project")]
+    public async Task Upload_initialization_keeps_consumed_identity_scoped_to_actor_and_project(string changedScope)
+    {
+        var fixture = new UploadInitFixture();
+        var first = await fixture.CreateAsync(" export ", "init-id");
+        if (changedScope == "tenant") fixture.Actor.Current = fixture.Actor.Current with { TenantId = Guid.NewGuid() };
+        if (changedScope == "owner") fixture.Actor.Current = fixture.Actor.Current with { UserId = Guid.NewGuid() };
+        var next = await fixture.CreateAsync(" export ", "init-id", changedScope == "project" ? "Other" : "ContextHub");
+
+        next.SessionId.Should().NotBe(first.SessionId);
+        fixture.Proxy.Sessions.Should().HaveCount(2);
+        fixture.Proxy.Objects.Should().HaveCount(2);
+        fixture.Proxy.Records.Should().HaveCount(2);
+        fixture.Keys.Wraps.Should().Be(2);
+        fixture.Proxy.Saves.Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData("missing-scope")]
+    [InlineData("denied-project")]
+    [InlineData("whitespace-purpose")]
+    [InlineData("long-purpose")]
+    [InlineData("whitespace-key")]
+    [InlineData("invalid-length")]
+    public async Task Upload_initialization_keeps_authorization_and_validation_before_lookup(string invalid)
+    {
+        var fixture = new UploadInitFixture();
+        if (invalid == "missing-scope") fixture.Actor.Current = fixture.Actor.Current with { Scopes = [SecurityScopes.MemoryRead] };
+        var purpose = invalid switch { "whitespace-purpose" => " \t ", "long-purpose" => new string('x', 201), _ => " export " };
+        var key = invalid == "whitespace-key" ? " \t " : "init-id";
+        var project = invalid == "denied-project" ? "Outside" : "ContextHub";
+        Func<Task> operation = () => fixture.CreateAsync(purpose, key, project, invalid == "invalid-length" ? 0 : 100);
+
+        if (invalid is "missing-scope" or "denied-project")
+            await operation.Should().ThrowAsync<UnauthorizedAccessException>();
+        else
+            await operation.Should().ThrowAsync<InvalidOperationException>();
+
+        fixture.Proxy.SessionReads.Should().Be(0);
+        fixture.Proxy.Sessions.Should().BeEmpty();
+        fixture.Proxy.Objects.Should().BeEmpty();
+        fixture.Proxy.Records.Should().BeEmpty();
+        fixture.Keys.Wraps.Should().Be(0);
+        fixture.Proxy.Saves.Should().Be(0);
+    }
+
+    // Calls the real upload initializer and key authority. Persistence only links the
+    // service-produced navigation records; it does not implement purpose/key matching.
+    // These sources do not establish SQL translation, unique constraints or concurrency.
+    private sealed class UploadInitFixture
+    {
+        public RequestActorAccessor Actor { get; } = new()
+        {
+            Current = new(Guid.NewGuid(), Guid.NewGuid(), "synthetic-upload-owner", TenantUserRole.Member,
+                [SecurityScopes.MemoryWrite], ["ContextHub", "Other"], true)
+        };
+        public UploadInitDbProxy Proxy { get; }
+        public UploadInitKeys Keys { get; }
+        private readonly ManagedTransferService service;
+
+        public UploadInitFixture()
+        {
+            var db = DispatchProxy.Create<IApplicationDbContext, UploadInitDbProxy>();
+            Proxy = (UploadInitDbProxy)(object)db;
+            Keys = new UploadInitKeys(new AesGcmManagedFileKeyAuthority(Options.Create(new ManagedFileKeyAuthorityOptions
+            {
+                CurrentKeyId = "synthetic-upload-key",
+                Keys = { ["synthetic-upload-key"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) }
+            })));
+            service = new ManagedTransferService(db, Actor, new RangeClock(), new RangeStore([]), Keys, null!,
+                Options.Create(new ManagedTransferOptions()));
+        }
+
+        public Task<ManagedTransferSessionResult> CreateAsync(string purpose, string key, string project = "ContextHub", long length = 100)
+            => service.CreateUploadAsync(new(project, length, purpose, key), CancellationToken.None);
+    }
+
+    public class UploadInitDbProxy : DispatchProxy
+    {
+        public List<ManagedObject> Objects { get; } = [];
+        public List<ManagedTransferSession> Sessions { get; } = [];
+        public List<ManagedTransferOperationRecord> Records { get; } = [];
+        public int SessionReads { get; private set; }
+        public int Saves { get; private set; }
+
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            switch (method!.Name)
+            {
+                case "get_ManagedObjects": return new RangeSet<ManagedObject>(Objects);
+                case "get_ManagedTransferSessions": SessionReads++; return new RangeSet<ManagedTransferSession>(Sessions);
+                case "get_ManagedTransferOperationRecords": return new RangeSet<ManagedTransferOperationRecord>(Records);
+                case "SaveChangesAsync":
+                    ((CancellationToken)args![0]!).ThrowIfCancellationRequested();
+                    foreach (var session in Sessions)
+                    {
+                        foreach (var operation in session.Operations)
+                        {
+                            operation.SessionId = session.Id;
+                            if (!Records.Contains(operation)) Records.Add(operation);
+                        }
+                    }
+                    Saves++;
+                    return Task.FromResult(1);
+                default: throw new NotSupportedException(method.Name);
+            }
+        }
+    }
+
+    private sealed class UploadInitKeys(IManagedFileKeyAuthority inner) : IManagedFileKeyAuthority
+    {
+        public int Wraps { get; private set; }
+        public WrappedManagedKey Wrap(Guid id, int generation, ReadOnlySpan<byte> key)
+        {
+            Wraps++;
+            return inner.Wrap(id, generation, key);
+        }
+        public byte[] Unwrap(Guid id, int generation, WrappedManagedKey key) => throw new NotSupportedException();
+        public WrappedManagedKey Rewrap(Guid id, int generation, WrappedManagedKey key) => throw new NotSupportedException();
+    }
+
     // Exercises the production service with a valid capability and actual AES-GCM content.
     // Only persistence/transaction boundaries are in memory; no database or host service is used.
     private sealed class RangeFixture

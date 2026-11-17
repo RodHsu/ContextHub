@@ -130,8 +130,9 @@ public sealed class ManagedTransferService(
             throw new InvalidOperationException("Managed object length is outside the configured transfer limit.");
         }
 
+        var normalizedPurpose = request.Purpose.Trim();
         var existing = await Scope(dbContext.ManagedTransferSessions.AsNoTracking(), actor)
-            .Where(x => x.Operation == ManagedTransferOperation.Upload && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Purpose == request.Purpose)
+            .Where(x => x.Operation == ManagedTransferOperation.Upload && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Purpose == normalizedPurpose)
             .Join(dbContext.ManagedTransferOperationRecords, session => session.Id, operation => operation.SessionId, (session, operation) => new { session, operation })
             .SingleOrDefaultAsync(x => x.operation.RequestId == request.IdempotencyKey, cancellationToken);
         if (existing is not null)

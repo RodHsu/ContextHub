@@ -38,13 +38,14 @@
                     <button type="button" class="mobile-nav-button" data-mobile-nav-open aria-label="開啟主選單" aria-controls="workspace-mobile-nav" aria-expanded="false">
                         <NavigationIcon Mark="menu" />
                     </button>
-                    <div class="topbar-context">
-                        <div class="topbar-title">@(currentGroup?.Label ?? "ContextHub")</div>
-                        <div class="topbar-subtitle">@(currentRoute?.Description ?? "平台營運與知識治理")</div>
-                    </div>
+                    <nav class="topbar-context workspace-location" aria-label="所在位置">
+                        <span class="workspace-location-product">ContextHub</span>
+                        <span class="workspace-location-divider" aria-hidden="true">/</span>
+                        <span class="topbar-title" aria-current="page">@(currentRoute?.Label ?? currentGroup?.Label ?? "工作區")</span>
+                    </nav>
                     <div class="topbar-actions">
                         <button type="button" class="command-button" data-command-open aria-haspopup="dialog" aria-controls="workspace-command" aria-label="搜尋功能">
-                            <span class="command-button-icon" aria-hidden="true">⌕</span>
+                            <span class="command-button-icon desk-icon desk-icon-search" aria-hidden="true"></span>
                             <span class="command-button-label">搜尋功能或頁面</span><kbd class="command-button-kbd">Ctrl K</kbd>
                         </button>
                         <ThemeSwitcher />
