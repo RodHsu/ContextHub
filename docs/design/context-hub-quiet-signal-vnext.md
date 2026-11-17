@@ -130,6 +130,7 @@ The shared shell uses one role-filtered navigation model for the desktop sidebar
 - Dark, light, pure black and system preferences persist across pages and reloads. Pure black uses a black canvas with separate neutral surfaces; system resolves to light/dark.
 - A visible-on-focus skip link targets the main content. Reduced motion and forced colors retain usable navigation.
 - The overview uses natural document flow inside the main scroll region: shortcuts, a metric strip, health/risk/review, background work and release identity. Panels must not overlap or compress their contents to fit a viewport.
+- The overview's outer page must grow with its contents. It must not shrink while children overflow its box; the main content owns scrolling, with keyboard and wheel access through the release footer.
 - Memory search has visible labels. Each result title is a native button so Tab, Enter and Space can select and read an item without a pointer. Advanced conditions start collapsed without changing their query values.
 
 Member navigation reflects the current server route policy: memories, graph, preferences and personal tokens. Hiding a link never substitutes for server authorization. Other domain surfaces retain their existing access requirements.

@@ -9,6 +9,40 @@ public sealed partial class DashboardBrowserUiTests
     [Theory]
     [InlineData(1366, 768)]
     [InlineData(390, 844)]
+    [InlineData(999, 700)]
+    public async Task Operations_Desk_Should_Keep_Full_Content_In_Scroll_Flow_And_Reach_Footer_With_Wheel(int width, int height)
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new("operations-desk-scroll", width, height));
+        var page = await context.NewPageAsync();
+        await LoginAndOpenAsync(page, "/?uiProfile=dense");
+        var containment = await page.EvaluateAsync<double[]>("""
+            () => [document.querySelector('.page-viewport').getBoundingClientRect().bottom,
+                   document.querySelector('.overview-page-body').getBoundingClientRect().bottom]
+            """);
+        containment[0].Should().BeGreaterThanOrEqualTo(containment[1] - 1, "the page must grow with all overview content instead of leaving it outside a shrunken flex item");
+
+        var content = page.Locator("main.content");
+        await content.FocusAsync();
+        await page.Keyboard.PressAsync("PageDown");
+        await page.WaitForFunctionAsync("() => document.querySelector('main.content').scrollTop > 0");
+        await content.EvaluateAsync("element => element.scrollTop = 0");
+        var bounds = (await content.BoundingBoxAsync())!;
+        await page.Mouse.MoveAsync(bounds.X + bounds.Width - 12, bounds.Y + bounds.Height / 2);
+        await page.Mouse.WheelAsync(0, 4000);
+        await page.WaitForFunctionAsync("""
+            () => {
+                const content=document.querySelector('main.content'), footer=document.querySelector('.operations-desk-release');
+                return content.scrollTop > 0 && footer.getBoundingClientRect().bottom <= content.getBoundingClientRect().bottom + 1;
+            }
+            """);
+        await Assertions.Expect(page.Locator(".operations-desk-release")).ToBeInViewportAsync();
+        await CaptureScreenshotAsync(page, "operations-desk-scroll-footer", DashboardUiProfile.Dense, new("operations-desk-scroll", width, height), DashboardTheme.Dark);
+    }
+
+    [Theory]
+    [InlineData(1366, 768)]
+    [InlineData(390, 844)]
     public async Task Operations_Desk_Should_Keep_Original_Entrances_And_Real_Risk_Messages_Keyboard_Reachable(int width, int height)
     {
         await _fixture.EnsureDashboardRunningAsync();
