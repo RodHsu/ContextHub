@@ -1181,7 +1181,10 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
             await page.Locator(".workspace-command-empty").WaitForAsync();
             await search.FillAsync("");
             await page.Locator(".command-route[href='/jobs']").WaitForAsync();
+            await search.FillAsync("監控");
+            await page.Locator(".command-route[href='/monitoring']").WaitForAsync();
             await page.Keyboard.PressAsync("Escape");
+            await Assertions.Expect(dialog).Not.ToBeVisibleAsync();
             (await command.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
             if (viewport.Width <= 1024)
             {
