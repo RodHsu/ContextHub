@@ -954,7 +954,10 @@ public sealed class DashboardSnapshotCollectorHostedService(
         var windowSeconds = Math.Max(1d, (endedAt - startedAt).TotalSeconds);
         var bucketSeconds = Math.Max(1d, Math.Ceiling(windowSeconds / MaxContextSavingsTrendPoints));
         return windowSamples
-            .GroupBy(x => (int)Math.Floor(Math.Max(0d, (x.CreatedAt - startedAt).TotalSeconds) / bucketSeconds))
+            // Keep the inclusive window endpoint in the final bucket.
+            .GroupBy(x => Math.Min(
+                MaxContextSavingsTrendPoints - 1,
+                (int)Math.Floor(Math.Max(0d, (x.CreatedAt - startedAt).TotalSeconds) / bucketSeconds)))
             .OrderBy(group => group.Key)
             .Select(group =>
             {

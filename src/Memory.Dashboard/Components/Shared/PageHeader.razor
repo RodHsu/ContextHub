@@ -2,11 +2,11 @@
 
 <div class="page-header">
     <div class="page-header-copy">
-        @if (!string.IsNullOrWhiteSpace(Breadcrumb))
+        @if (ShowBreadcrumb && !string.IsNullOrWhiteSpace(Breadcrumb))
         {
             <div class="page-breadcrumb">@Breadcrumb</div>
         }
-        else
+        else if (ShowBreadcrumb)
         {
             <nav class="page-breadcrumb" aria-label="所在位置">
                 <span>ContextHub</span><span aria-hidden="true"> / </span><span>@CurrentGroup</span>
@@ -28,6 +28,9 @@
 </div>
 
 @code {
+    [Parameter]
+    public bool ShowBreadcrumb { get; set; } = true;
+
     [Parameter]
     public string Breadcrumb { get; set; } = string.Empty;
 

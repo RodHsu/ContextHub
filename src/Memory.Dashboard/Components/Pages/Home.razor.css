@@ -1,0 +1,398 @@
+.operations-desk-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1rem;
+    min-width: 0;
+    padding: 1rem 1.25rem;
+    overflow: visible;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+}
+
+.operations-desk-health {
+    display: flex;
+    flex: 1 1 19rem;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    min-width: 0;
+}
+
+.operations-desk-health-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    width: fit-content;
+    max-width: 100%;
+    min-height: 2.75rem;
+    color: var(--text);
+    text-decoration: none;
+}
+
+.operations-desk-health-dot {
+    flex: 0 0 0.6rem;
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+.operations-desk-health-dot.healthy { background: var(--ok); }
+.operations-desk-health-dot.attention { background: var(--warn); }
+
+.operations-desk-health-description,
+.operations-desk-muted {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    line-height: 1.5;
+}
+
+.operations-desk-metrics {
+    flex: 2 1 27rem;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    min-width: 0;
+}
+
+.operations-desk-metric {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.15rem 0.65rem;
+    min-width: 0;
+    padding-inline: 1rem;
+    border-inline-start: 1px solid var(--border);
+}
+
+.operations-desk-metric > span {
+    flex: 1 1 3rem;
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.operations-desk-metric > strong {
+    max-width: 100%;
+    color: var(--text-strong);
+    font-size: 1.5rem;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+
+.operations-desk-metric > small {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+}
+
+.operations-desk-freshness {
+    flex: 0 1 18rem;
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 0.5rem;
+    min-width: 0;
+    padding-inline-start: 1rem;
+    border-inline-start: 1px solid var(--border);
+}
+
+.operations-desk-freshness ::deep .refresh-status-shell {
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+.operations-desk-freshness ::deep .refresh-status-group { flex: 1 1 auto; min-width: 0; }
+.operations-desk-freshness ::deep .refresh-status-primary-copy { min-width: 0; overflow-wrap: anywhere; }
+
+.operations-desk-freshness ::deep .refresh-status-primary { gap: 0.5rem; }
+.operations-desk-freshness ::deep .refresh-status-primary-copy { display: grid; grid-template-columns: auto auto; align-items: baseline; gap: 0.2rem 0.5rem; }
+.operations-desk-freshness ::deep .refresh-status-caption { font-size: 0.75rem; }
+.operations-desk-freshness ::deep .refresh-status-time { font-size: 0.8125rem; }
+.operations-desk-freshness ::deep .refresh-status-subline { grid-column: 1 / -1; font-size: 0.75rem; }
+.operations-desk-freshness ::deep .refresh-status-live[aria-hidden="true"] { display: none; }
+
+.operations-desk-refresh {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 0.4rem;
+    padding-inline: 0.65rem;
+    font-size: 0.8125rem;
+}
+
+.operations-desk-workspace {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.875rem;
+    min-width: 0;
+}
+
+.operations-desk-risk-panel,
+.operations-desk-secondary {
+    min-width: 0;
+    padding: 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: none;
+}
+
+.operations-desk-risk-panel {
+    flex: 1.7 1 34rem;
+    display: flex;
+    flex-direction: column;
+    min-height: clamp(28rem, calc(100dvh - 20rem), 48rem);
+}
+
+.operations-desk-secondary { flex: 1 1 20rem; }
+
+.operations-desk-section-heading {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-block-end: 1.25rem;
+}
+
+.operations-desk-section-heading h2 {
+    margin: 0;
+    color: var(--text-strong);
+    font-size: 1.75rem;
+    font-weight: 650;
+    line-height: 1.3;
+}
+
+.operations-desk-section-heading p {
+    max-width: 65ch;
+    margin: 0.5rem 0 0;
+    color: var(--text-muted);
+    font-size: 1rem;
+    line-height: 1.6;
+}
+
+.operations-desk-count {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.operations-desk-service-alerts {
+    display: grid;
+    gap: 0.75rem;
+    margin-block-end: 1.25rem;
+    padding-inline-start: 0.875rem;
+    border-inline-start: 2px solid var(--warn);
+}
+
+.operations-desk-service-alert {
+    display: flex;
+    align-items: start;
+    gap: 0.75rem;
+    min-width: 0;
+}
+
+.operations-desk-service-alert > div {
+    display: grid;
+    gap: 0.25rem;
+    min-width: 0;
+    font-size: 0.875rem;
+    overflow-wrap: anywhere;
+}
+
+.operations-desk-service-alert > div > span { color: var(--text-muted); }
+
+.operations-desk-risk-table-frame { min-width: 0; }
+
+.operations-desk-risk-table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+}
+
+.operations-desk-risk-table th {
+    padding: 0.75rem 0.5rem;
+    border-block-end: 1px solid var(--border-strong);
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    text-align: start;
+}
+
+.operations-desk-risk-table th:first-child { width: 57%; padding-inline-start: 0; }
+.operations-desk-risk-table th:nth-child(2) { width: 17%; }
+.operations-desk-risk-table th:last-child { width: 26%; padding-inline-end: 0; }
+
+.operations-desk-risk-table td {
+    padding: 1.25rem 0.5rem;
+    border-block-end: 1px solid var(--border);
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+
+.operations-desk-risk-table td:first-child { padding-inline-start: 0; }
+.operations-desk-risk-table td:last-child { padding-inline-end: 0; }
+.operations-desk-risk-service { color: var(--text-strong); font-size: 1.125rem; font-weight: 600; user-select: text; }
+
+.operations-desk-risk-details { margin-block-start: 0.5rem; }
+
+.operations-desk-risk-details > summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.3rem;
+    min-width: 0;
+    min-height: 2.75rem;
+    cursor: pointer;
+    list-style: none;
+    color: var(--text-muted);
+    font-size: 1rem;
+    line-height: 1.6;
+}
+
+.operations-desk-risk-details > summary::-webkit-details-marker { display: none; }
+.operations-desk-risk-details > summary::marker { content: ""; }
+.operations-desk-risk-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.operations-desk-risk-excerpt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: clip; }
+.operations-desk-message-toggle { width: fit-content; color: var(--info); font-size: 0.8125rem; }
+.operations-desk-risk-details[open] .operations-desk-message-toggle { text-decoration: underline; }
+
+.operations-desk-risk-message {
+    margin: 0.75rem 0 0;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+.operations-desk-risk-time { color: var(--text-muted); font-size: 0.8125rem; line-height: 1.65; }
+.operations-desk-mobile-label { display: none; }
+
+.operations-desk-related-links {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    margin-block-start: auto;
+    padding-block-start: 1.5rem;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+.operations-desk-related-links a,
+.operations-desk-all-jobs { color: var(--info); text-decoration: none; }
+.operations-desk-related-links a { display: inline-flex; align-items: center; gap: 0.5rem; min-height: 2.75rem; }
+
+.operations-desk-entry-list { display: grid; }
+
+.operations-desk-entry {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.875rem;
+    min-height: 4.75rem;
+    padding-block: 1rem;
+    border-block-start: 1px solid var(--border);
+    color: var(--text);
+    text-decoration: none;
+}
+
+.operations-desk-entry > .desk-icon { width: 1.5rem; height: 1.5rem; }
+.operations-desk-entry-copy { display: grid; gap: 0.3rem; min-width: 0; }
+.operations-desk-entry strong { font-size: 1.125rem; font-weight: 600; }
+.operations-desk-entry small { color: var(--text-muted); font-size: 0.9375rem; line-height: 1.5; }
+.operations-desk-entry-arrow { color: var(--text-muted); }
+.operations-desk-entry:hover strong,
+.operations-desk-health-link:hover strong { color: var(--accent); }
+
+.operations-desk-jobs-section {
+    margin-block-start: 1.25rem;
+    padding-block-start: 1.25rem;
+    border-block-start: 1px solid var(--border);
+}
+
+.operations-desk-review-section h3,
+.operations-desk-jobs-section h3 { margin: 0; font-size: 1.0625rem; font-weight: 600; }
+.operations-desk-review-section { margin: 0; padding: 0; border: 0; }
+.operations-desk-review-section > summary { cursor: pointer; list-style: none; }
+.operations-desk-review-section > summary::-webkit-details-marker { display: none; }
+.operations-desk-review-section[open] > summary .desk-icon-chevron { transform: rotate(90deg); }
+.operations-desk-review-links { display: grid; margin-block: 0.25rem 0.75rem; padding-inline-start: 2.125rem; }
+.operations-desk-home-actions .primary-button { min-height: 3rem; padding-inline: 1.25rem; font-size: 1rem; }
+
+.operations-desk-review-links a {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 2.75rem;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    text-decoration: none;
+}
+
+.operations-desk-review-links a:hover { color: var(--accent); }
+.operations-desk-jobs-section { display: block; }
+.operations-desk-jobs-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+.operations-desk-job-list { display: grid; gap: 0; margin-block: 0.5rem 0.75rem; }
+
+.operations-desk-job {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: 0.35rem 0.75rem;
+    padding-block: 0.75rem;
+    border-block-end: 1px solid var(--border);
+    font-size: 0.875rem;
+}
+
+.operations-desk-job > strong { min-width: 0; color: var(--text-strong); overflow-wrap: anywhere; font-weight: 500; }
+.operations-desk-job ::deep .client-relative-time { grid-column: 2; color: var(--text-muted); font-size: 0.8125rem; }
+.operations-desk-all-jobs { display: inline-flex; align-items: center; gap: 0.5rem; min-height: 2.75rem; font-size: 0.875rem; }
+.operations-desk-empty { margin: 0.75rem 0; color: var(--text-muted); font-size: 0.875rem; line-height: 1.7; }
+.operations-desk-release { margin: 0; padding: 0; border: 0; font-size: 0.75rem; }
+
+@media (max-width: 1280px) {
+    .operations-desk-freshness { flex-basis: 100%; justify-content: space-between; padding-block-start: 0.75rem; padding-inline-start: 0; border-inline-start: 0; border-block-start: 1px solid var(--border); }
+}
+
+@media (max-width: 1024px) {
+    .operations-desk-risk-panel,
+    .operations-desk-secondary { flex-basis: 100%; }
+    .operations-desk-risk-panel { min-height: 0; }
+}
+
+@media (max-width: 600px) {
+    .operations-desk-summary { flex-direction: column; align-items: stretch; gap: 0.875rem; padding: 1rem; }
+    .operations-desk-health,
+    .operations-desk-metrics,
+    .operations-desk-freshness { flex: 0 1 auto; }
+    .operations-desk-metrics { grid-template-columns: repeat(auto-fit, minmax(min(100%, 6rem), 1fr)); gap: 0.5rem; padding-block-start: 0.875rem; border-block-start: 1px solid var(--border); }
+    .operations-desk-metric { grid-template-columns: minmax(0, 1fr); padding-inline: 0.625rem; }
+    .operations-desk-metric:first-child { padding-inline-start: 0; border-inline-start: 0; }
+    .operations-desk-metric > span { font-size: 0.75rem; }
+    .operations-desk-metric > strong { font-size: 1.25rem; }
+    .operations-desk-metric > small { grid-column: auto; }
+    .operations-desk-risk-panel,
+    .operations-desk-secondary { padding: 1.125rem; }
+    .operations-desk-risk-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .operations-desk-risk-table tbody,
+    .operations-desk-risk-item { display: block; width: 100%; }
+    .operations-desk-risk-item { padding-block: 1rem; border-block-end: 1px solid var(--border); }
+    .operations-desk-risk-table td { display: block; padding: 0; border: 0; }
+    .operations-desk-risk-table td:not(:first-child) { display: flex; align-items: baseline; gap: 0.75rem; margin-block-start: 0.75rem; }
+    .operations-desk-mobile-label { display: inline; color: var(--text-subtle); font-size: 0.75rem; }
+}

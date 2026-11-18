@@ -110,6 +110,56 @@ public sealed class DashboardContextSavingsAggregatorTests
         twentyFourHours.TokenCountingMode.Should().Be(TokenCountingModes.Mixed);
     }
 
+    [Fact]
+    public void BuildContextSavings_Should_Keep_Inclusive_End_In_The_Last_Of_24_Trend_Buckets()
+    {
+        var now = new DateTimeOffset(2026, 6, 20, 8, 0, 0, TimeSpan.Zero);
+        var events = Enumerable.Range(0, 25)
+            .Select(hour => CreateEvent(now.AddHours(hour - 24), baseline: 100, returned: 200,
+                coveragePercent: 100d, cacheHit: false))
+            .Reverse()
+            .ToArray();
+
+        var result = DashboardSnapshotCollectorHostedService.BuildContextSavings(now, now.AddDays(-30), events);
+
+        result.SampleCount.Should().Be(25);
+        result.BaselineTokenEstimate.Should().Be(2_500);
+        result.ReturnedTokenEstimate.Should().Be(5_000);
+        result.EstimatedSavedTokens.Should().Be(-2_500);
+        result.AverageSavingPercent.Should().Be(-100d);
+        var window = result.Windows!.Single(x => x.Key == "24h");
+        window.PositiveSavedTokens.Should().Be(0L);
+        window.IncreasedTokens.Should().Be(2_500L);
+        result.Trend.Should().HaveCount(24);
+        result.Trend.Sum(x => x.BaselineTokenEstimate).Should().Be(result.BaselineTokenEstimate);
+        result.Trend.Sum(x => x.ReturnedTokenEstimate).Should().Be(result.ReturnedTokenEstimate);
+        result.Trend.Sum(x => x.EstimatedSavedTokens).Should().Be(result.EstimatedSavedTokens);
+        result.Trend.Select(x => x.TimestampUtc).Should().BeInAscendingOrder();
+        var last = result.Trend[^1];
+        last.TimestampUtc.Should().Be(now);
+        last.BaselineTokenEstimate.Should().Be(200);
+        last.ReturnedTokenEstimate.Should().Be(400);
+        last.EstimatedSavedTokens.Should().Be(-200);
+        last.SavingPercent.Should().Be(-100d);
+    }
+
+    [Fact]
+    public void BuildContextSavings_Should_Keep_A_Sole_End_Sample_Without_Padding_Empty_Trend_Buckets()
+    {
+        var now = new DateTimeOffset(2026, 6, 20, 8, 0, 0, TimeSpan.Zero);
+
+        var result = DashboardSnapshotCollectorHostedService.BuildContextSavings(
+            now, now.AddDays(-30), [CreateEvent(now, baseline: 100, returned: 200, coveragePercent: 100d, cacheHit: false)]);
+
+        result.SampleCount.Should().Be(1);
+        var point = result.Trend.Should().ContainSingle().Which;
+        point.TimestampUtc.Should().Be(now);
+        point.BaselineTokenEstimate.Should().Be(100);
+        point.ReturnedTokenEstimate.Should().Be(200);
+        point.EstimatedSavedTokens.Should().Be(-100);
+        point.SavingPercent.Should().Be(-100d);
+    }
+
     private static DashboardSnapshotCollectorHostedService.ContextSavingsTelemetryEvent CreateEvent(
         DateTimeOffset createdAt,
         int baseline,

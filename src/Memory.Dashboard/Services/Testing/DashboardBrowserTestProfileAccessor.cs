@@ -11,7 +11,8 @@ internal enum DashboardBrowserTestProfile
     Empty,
     Dense,
     GraphDemo,
-    PreferenceMetadata
+    PreferenceMetadata,
+    InventoryPermissions
 }
 
 internal sealed class DashboardBrowserTestProfileAccessor

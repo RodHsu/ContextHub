@@ -216,7 +216,11 @@
                         {
                             <tr class="@SelectedClass(item.Id)" @onclick="@(() => SelectAsync(item.Id))">
                                 <td>
-                                    <div class="table-title memories-cell-title" title="@item.Title">@item.Title</div>
+                                    <button type="button"
+                                            class="table-title memories-cell-title memories-select-button"
+                                            title="@item.Title"
+                                            @onclick="@(() => SelectAsync(item.Id))"
+                                            @onclick:stopPropagation="true">@item.Title</button>
                                     <div class="table-subtitle memories-cell-summary" title="@item.Summary">@item.Summary</div>
                                 </td>
                                 <td>
