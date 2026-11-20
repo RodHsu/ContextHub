@@ -13,7 +13,7 @@
             var searchGroups = FilterGroups(groups).ToArray();
         }
         <div class="dashboard-shell workspace-shell" data-dashboard-interactive="@(_interactiveReady ? "true" : "false")">
-            <a class="skip-link" href="#dashboard-main-content">跳到主要內容</a>
+            <a class="skip-link" href="#dashboard-main-content" data-skip-to-content data-enhance-nav="false">跳到主要內容</a>
             <aside class="sidebar" aria-label="主要導覽">
                 <div class="sidebar-inner">
                     <a class="brand" href="@(isAdmin ? "/" : "/memories")" aria-label="ContextHub 首頁">
@@ -38,13 +38,14 @@
                     <button type="button" class="mobile-nav-button" data-mobile-nav-open aria-label="開啟主選單" aria-controls="workspace-mobile-nav" aria-expanded="false">
                         <NavigationIcon Mark="menu" />
                     </button>
-                    <div class="topbar-context">
-                        <div class="topbar-title">@(currentGroup?.Label ?? "ContextHub")</div>
-                        <div class="topbar-subtitle">@(currentRoute?.Description ?? "平台營運與知識治理")</div>
-                    </div>
+                    <nav class="topbar-context workspace-location" aria-label="所在位置">
+                        <span class="workspace-location-product">ContextHub</span>
+                        <span class="workspace-location-divider" aria-hidden="true">/</span>
+                        <span class="topbar-title" aria-current="page">@(currentRoute?.Label ?? currentGroup?.Label ?? "工作區")</span>
+                    </nav>
                     <div class="topbar-actions">
                         <button type="button" class="command-button" data-command-open aria-haspopup="dialog" aria-controls="workspace-command" aria-label="搜尋功能">
-                            <span class="command-button-icon" aria-hidden="true">⌕</span>
+                            <span class="command-button-icon desk-icon desk-icon-search" aria-hidden="true"></span>
                             <span class="command-button-label">搜尋功能或頁面</span><kbd class="command-button-kbd">Ctrl K</kbd>
                         </button>
                         <ThemeSwitcher />
@@ -68,7 +69,7 @@
                 </div>
                 <div class="workspace-command-search">
                     <label for="workspace-route-query">輸入功能名稱、用途或路徑</label>
-                    <input id="workspace-route-query" type="search" placeholder="例如：監控、待辦、/memories" autocomplete="off" autofocus @bind="_query" @bind:event="oninput" />
+                    <input id="workspace-route-query" type="text" role="searchbox" enterkeyhint="search" placeholder="例如：監控、待辦、/memories" autocomplete="off" autofocus @bind="_query" @bind:event="oninput" />
                 </div>
                 <div class="command-palette-body">
                     @if (searchGroups.Length == 0)

@@ -5,8 +5,8 @@
     var expanded = !_collapsed.Contains(group.Label);
     var groupId = $"{IdPrefix}-{Groups.ToList().IndexOf(group)}";
     <section class="workspace-nav-group">
-        <button class="workspace-nav-heading" type="button" aria-expanded="@expanded" aria-controls="@groupId" @onclick="() => Toggle(group.Label)">
-            <span>@group.Label</span><span class="workspace-nav-chevron" aria-hidden="true">@(expanded ? "⌄" : "›")</span>
+        <button class="workspace-nav-heading" type="button" aria-expanded="@(expanded ? "true" : "false")" aria-controls="@groupId" @onclick="() => Toggle(group.Label)">
+            <span>@group.Label</span><span class="workspace-nav-chevron desk-icon desk-icon-chevron" aria-hidden="true"></span>
         </button>
         <nav id="@groupId" class="sidebar-nav" aria-label="@group.Label" hidden="@(!expanded)">
             @foreach (var route in group.Items)
@@ -31,7 +31,7 @@
         var path = "/" + Navigation.ToBaseRelativePath(Navigation.Uri);
         if (_lastPath is null)
         {
-            _collapsed.UnionWith(Groups.Where(group => group.Label != "總覽" && !group.Items.Any(item => DashboardNavigation.IsCurrent(item, path))).Select(group => group.Label));
+            _collapsed.UnionWith(Groups.Where(group => group.Label is not ("總覽" or "專案與協作" or "知識與檔案") && !group.Items.Any(item => DashboardNavigation.IsCurrent(item, path))).Select(group => group.Label));
         }
         if (_lastPath != path)
         {
