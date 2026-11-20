@@ -157,7 +157,7 @@ public sealed class FullGovernancePlanService(
                 });
             }
         }
-        var discussions = await dbContext.DiscussionThreads.AsNoTracking().Include(x => x.Participants).Include(x => x.Messages)
+        var discussions = await dbContext.DiscussionThreads.AsNoTracking().Include(x => x.Participants)
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.HostProjectId)))
             .ToListAsync(cancellationToken);
         foreach (var discussion in discussions)

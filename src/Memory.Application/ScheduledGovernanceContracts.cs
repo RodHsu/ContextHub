@@ -398,7 +398,8 @@ public interface IScheduledGovernanceService
 
     Task<ScheduledGovernanceRunResult> GetReceiptAsync(
         string governanceRunId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool includeReliabilityHistory = true);
 }
 
 public interface IScheduledGovernanceReliabilityService
