@@ -305,19 +305,27 @@
                         <div class="panel-title">Token 節省量</div>
                         <div class="settings-section-meta">@ContextSavingsStateText(contextSavings) / @ContextSavingsWindowText(contextSavings)</div>
                     </div>
-                    <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">可信度 @ContextSavingsConfidenceText(contextSavings.Confidence)</span>
+                    <span class="status-badge @ContextSavingsConfidenceClass(contextSavings.Confidence)">@(contextSavings.HasData ? "可信度 " + ContextSavingsConfidenceText(contextSavings.Confidence) : "可信度未知")</span>
                 </div>
                 <div class="monitoring-context-savings-grid">
                     @foreach (var window in ContextSavingsWindows(contextSavings))
                     {
                         <article class="monitoring-context-savings-window" title="@ContextSavingsTokenModeTooltip(window)">
                             <span>@window.Label 節省量 / 快取命中率</span>
-                            <strong>@DashboardFormatting.Percent(window.SavingPercent)</strong>
+                            <strong>@NetSavingsText(window)</strong>
                             <small>
-                                <span>@FormatTokenCount(window.EstimatedSavedTokens)</span>
-                                <span>快取 @DashboardFormatting.Percent(window.CacheHitPercent)</span>
-                                <span class="context-savings-call-count">有效樣本：@DashboardFormatting.Integer(window.SampleCount) 次</span>
-                                <span class="context-savings-call-count">實際呼叫次數：@DashboardFormatting.Integer(window.ActualToolCallCount) 次</span>
+                                <span>淨額比例：@NetSavingsPercentText(window)</span>
+                                <span>正向節省：@SavingsPartText(window, true)</span>
+                                <span>增加量：@SavingsPartText(window, false)</span>
+                                <span>資料：@SavingsDataText(window)</span>
+                                @if (HasUsableSavings(window))
+                                {
+                                    <span>同批 baseline @DashboardFormatting.Integer(window.BaselineTokenEstimate) / returned @DashboardFormatting.Integer(window.ReturnedTokenEstimate)</span>
+                                    <span>快取 @DashboardFormatting.Percent(window.CacheHitPercent)</span>
+                                }
+                                <span class="context-savings-call-count">有效樣本：@(HasUsableSavings(window) || window.UnusableSampleCount.HasValue ? DashboardFormatting.Integer(window.SampleCount) + " 次" : "未知（無可用樣本）")</span>
+                                <span class="context-savings-call-count">實際呼叫次數：@(ContextSavingsSnapshotSection() is not null || window.SavingsCalculationVersion == "net-br-v1" ? DashboardFormatting.Integer(window.ActualToolCallCount) + " 次" : "未知（沒有可核快照）")</span>
+                                <span>滾動窗口：<ClientLocalTime Value="window.WindowStartedAtUtc" /> — <ClientLocalTime Value="window.WindowEndedAtUtc" /></span>
                             </small>
                         </article>
                     }
@@ -337,16 +345,47 @@
                     </article>
                     <article>
                         <span>來源覆蓋率</span>
-                        <strong>@DashboardFormatting.Percent(contextSavings.SourceCoveragePercent)</strong>
-                        <small>@DashboardFormatting.Integer(contextSavings.ReturnedTokenEstimate) returned tokens</small>
+                        @if (contextSavings.HasData && ContextSavingsWindows(contextSavings).FirstOrDefault() is { } primary && HasUsableSavings(primary))
+                        {
+                            <strong>@DashboardFormatting.Percent(contextSavings.SourceCoveragePercent)</strong>
+                            <small>@DashboardFormatting.Integer(contextSavings.ReturnedTokenEstimate) returned tokens</small>
+                        }
+                        else
+                        {
+                            <strong>未知（沒有可用的主窗口樣本）</strong>
+                            <small>returned tokens 未知；不以零代替。</small>
+                        }
                     </article>
+                    <article>
+                        <span>Context 節省快照</span>
+                        @if (ContextSavingsSnapshotSection() is { } snapshot)
+                        {
+                            <strong><ClientLocalTime Value="snapshot.CapturedAtUtc" /></strong>
+                            <small>@(snapshot.IsStale ? "已過期" : "未達過期門檻") / 更新間隔 @snapshot.RefreshIntervalSeconds 秒 / @(string.IsNullOrWhiteSpace(snapshot.LastError) ? "未記錄刷新錯誤" : "刷新錯誤，保留既有快照")</small>
+                        }
+                        else
+                        {
+                            <strong>未知（沒有可用的分區快照時間）</strong>
+                        }
+                        <small>頁首時間是 UI 載入時間，不等於快照或最後樣本時間。</small>
+                    </article>
+                    <div class="settings-section-meta">主值為同批有效樣本的 baseline − returned；正向節省減增加量等於淨額。比例以同批 baseline 為分母。只計選定回傳文字，embedding tokenizer／估算值均不是完整 JSON、目標 LLM token 或帳單。樣本與 MCP／Gateway invocation 的分母不同。樣本來源有界：最近 30 天最多 50,000 筆成功 working-context 事件，各窗口只計其中可用資料。</div>
                     <div class="monitoring-context-savings-trend">
-                        <svg class="resource-line-chart context-savings-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Monitoring context saving percent trend">
+                        <div class="settings-section-meta">淨額比例趨勢：依正負值自動縮放；無基準分母的區段不連線。</div>
+                        <svg class="resource-line-chart context-savings-line-chart" viewBox="0 0 240 96" preserveAspectRatio="none" role="img" aria-label="Monitoring net context saving percent trend">
                             @foreach (var guide in new[] { 14, 28, 42 })
                             {
                                 <line class="resource-line-guide" x1="0" y1="@guide" x2="240" y2="@guide"></line>
                             }
-                            <polyline class="resource-line savings" points="@BuildLinePoints(contextSavings.Trend.Select(x => x.SavingPercent), 100d)"></polyline>
+                            @foreach (var segment in BuildSavingsLineSegments(contextSavings.Trend))
+                            {
+                                <polyline class="resource-line savings" points="@segment"></polyline>
+                                @foreach (var point in segment.Split(' '))
+                                {
+                                    var coordinate = point.Split(',');
+                                    <circle class="context-savings-point" cx="@coordinate[0]" cy="@coordinate[1]" r="2" fill="currentColor"></circle>
+                                }
+                            }
                         </svg>
                     </div>
                 </div>
@@ -623,6 +662,65 @@
             _ => "neutral"
         };
 
+    // Old snapshots can yield net from B/R, but cannot invent P/I or parser status.
+    private static bool HasUsableSavings(DashboardContextSavingsWindowResult window)
+        => window.HasData && window.SampleCount > 0 && window.BaselineTokenEstimate >= 0 && window.ReturnedTokenEstimate >= 0;
+
+    private static string NetSavingsText(DashboardContextSavingsWindowResult window)
+    {
+        if (!HasUsableSavings(window)) return window.UnusableSampleCount > 0 ? "未知（樣本缺值或無效）" : "無可用樣本";
+        var net = (long)window.BaselineTokenEstimate - window.ReturnedTokenEstimate;
+        return $"{(net < 0 ? "淨增加" : "淨節省")} {DashboardFormatting.Integer(Math.Abs(net))} tokens";
+    }
+
+    private static string NetSavingsPercentText(DashboardContextSavingsWindowResult window)
+        => !HasUsableSavings(window) ? "未知" : window.BaselineTokenEstimate == 0 ? "不適用（baseline 為零）"
+            : DashboardFormatting.Percent(((long)window.BaselineTokenEstimate - window.ReturnedTokenEstimate) / (double)window.BaselineTokenEstimate * 100d);
+
+    private static string SavingsPartText(DashboardContextSavingsWindowResult window, bool positive)
+    {
+        if (!HasUsableSavings(window) || window.SavingsCalculationVersion != "net-br-v1" ||
+            window.PositiveSavedTokens is not { } p || p < 0 || window.IncreasedTokens is not { } i || i < 0 ||
+            p - i != (long)window.BaselineTokenEstimate - window.ReturnedTokenEstimate)
+            return "未知（沒有可核分項）";
+        return $"{DashboardFormatting.Integer(positive ? p : i)} tokens";
+    }
+
+    private static string SavingsDataText(DashboardContextSavingsWindowResult window)
+        => window.UnusableSampleCount is not { } rejected ? "舊快照：缺樣本完整性資訊"
+            : rejected > 0 ? $"排除 {rejected} 筆缺值／無效樣本；其餘樣本可計算"
+            : HasUsableSavings(window) ? "有效樣本可計算" : "無樣本";
+
+    private DashboardSnapshotSectionStatusResult? ContextSavingsSnapshotSection()
+        => _monitoring?.SnapshotStatus?.Sections.FirstOrDefault(x => x.Key == DashboardSnapshotKeys.ContextSavings && x.RefreshIntervalSeconds > 0);
+
+    private static IReadOnlyList<string> BuildSavingsLineSegments(IReadOnlyList<DashboardContextSavingsTrendPointResult> points)
+    {
+        var percentages = points.Select(x => x.BaselineTokenEstimate > 0 && x.ReturnedTokenEstimate >= 0
+            ? ((long)x.BaselineTokenEstimate - x.ReturnedTokenEstimate) / (double)x.BaselineTokenEstimate * 100d : (double?)null).ToArray();
+        var known = percentages.Where(x => x.HasValue).Select(x => x!.Value).ToArray();
+        if (known.Length == 0) return [];
+        var min = Math.Min(0d, known.Min());
+        var max = Math.Max(0d, known.Max());
+        var span = Math.Max(1d, max - min);
+        var segments = new List<string>();
+        var current = new List<string>();
+        for (var index = 0; index < percentages.Length; index++)
+        {
+            if (percentages[index] is not { } value)
+            {
+                if (current.Count > 0) segments.Add(string.Join(" ", current));
+                current.Clear();
+                continue;
+            }
+            var x = 6d + index * 228d / Math.Max(1, percentages.Length - 1);
+            var y = 88d - (value - min) / span * 80d;
+            current.Add(FormattableString.Invariant($"{x:0.##},{y:0.##}"));
+        }
+        if (current.Count > 0) segments.Add(string.Join(" ", current));
+        return segments;
+    }
+
     private static string FormatTokenCount(int value)
         => $"{DashboardFormatting.Integer(value)} tokens";
 
@@ -728,9 +826,14 @@
     }
 
     private static string ContextSavingsStateText(DashboardContextSavingsResult savings)
-        => savings.HasRecentData
-            ? "成功的 working-context telemetry"
-            : "等待 working-context telemetry";
+    {
+        var window = ContextSavingsWindows(savings).FirstOrDefault();
+        if (window?.UnusableSampleCount > 0)
+            return savings.HasData ? "有可用樣本；部分事件缺值／無效" : "未知：已收到事件，但沒有可計算樣本";
+        return savings.HasRecentData ? "成功的 working-context telemetry"
+            : window?.UnusableSampleCount == 0 ? "主窗口無樣本"
+            : "未知：等待可核 working-context telemetry";
+    }
 
     private static string ContextSavingsWindowText(DashboardContextSavingsResult savings)
         => savings.WindowLabel.Replace("最近", "主視窗：最近", StringComparison.Ordinal);

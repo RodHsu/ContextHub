@@ -1038,7 +1038,7 @@ public sealed class MemoryService(
             ? returnedCounts.Sum(count => count.ExactTokens ?? 0)
             : (int?)null;
         var exactSaved = exactBaseline.HasValue && exactReturned.HasValue
-            ? Math.Max(0, exactBaseline.Value - exactReturned.Value)
+            ? exactBaseline.Value - exactReturned.Value
             : (int?)null;
         var useExactAsPrimary = exactBaseline.HasValue &&
                                 exactReturned.HasValue &&
