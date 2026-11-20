@@ -280,6 +280,22 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         receipt.GetProperty("runExists").GetBoolean().Should().BeTrue();
         receipt.GetProperty("received").GetBoolean().Should().BeTrue();
         receipt.GetProperty("governanceRunId").GetString().Should().Be(governanceRunId);
+        receipt.GetProperty("reliability").ValueKind.Should().Be(JsonValueKind.Object);
+
+        var compactPayload = await SendMcpAsync(client, null, 23, "tools/call", new
+        {
+            name = ScheduledGovernanceContract.ReceiptToolName,
+            arguments = new { governanceRunId, includeReliabilityHistory = false }
+        });
+        var compactResult = ExtractSseJson(compactPayload).GetProperty("result");
+        compactResult.TryGetProperty("isError", out _).Should().BeFalse();
+        var compactReceipt = compactResult.GetProperty("structuredContent");
+        compactReceipt.GetProperty("receiptId").GetGuid().Should().Be(receipt.GetProperty("receiptId").GetGuid());
+        compactReceipt.GetProperty("received").GetBoolean().Should().BeTrue();
+        if (compactReceipt.TryGetProperty("reliability", out var compactReliability))
+        {
+            compactReliability.ValueKind.Should().Be(JsonValueKind.Null);
+        }
 
         var missingRunId = $"not-received-{Guid.NewGuid():N}";
         var missingPayload = await SendMcpAsync(client, null, 22, "tools/call", new

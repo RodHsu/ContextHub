@@ -121,6 +121,11 @@ public sealed class ScheduledGovernanceSchemaTests
 
         var runGet = JsonSerializer.SerializeToElement(McpServerTool.Create(
             methods[ScheduledGovernanceContract.ReceiptToolName], target, new McpServerToolCreateOptions()).ProtocolTool);
+        var runGetInput = runGet.GetProperty("inputSchema");
+        runGetInput.GetProperty("required").EnumerateArray().Select(x => x.GetString())
+            .Should().Equal("governanceRunId");
+        runGetInput.GetProperty("properties").GetProperty("includeReliabilityHistory")
+            .GetProperty("default").GetBoolean().Should().BeTrue();
         var outputProperties = runGet.GetProperty("outputSchema").GetProperty("properties");
         outputProperties.GetProperty("serverInvariants").GetProperty("additionalProperties")
             .GetProperty("type").EnumerateArray().Select(x => x.GetString()).Should().Contain("null");
@@ -321,6 +326,7 @@ public sealed class ScheduledGovernanceSchemaTests
 
         public Task<ScheduledGovernanceRunResult> GetReceiptAsync(
             string governanceRunId,
-            CancellationToken cancellationToken) => throw new NotSupportedException();
+            CancellationToken cancellationToken,
+            bool includeReliabilityHistory = true) => throw new NotSupportedException();
     }
 }

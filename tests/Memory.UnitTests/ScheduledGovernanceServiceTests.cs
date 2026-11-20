@@ -384,6 +384,34 @@ public sealed class ScheduledGovernanceServiceTests
         reliability.PersistCount.Should().Be(0);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Run_Get_Can_Read_Receipt_Without_Rebuilding_Reliability_History(bool runExists)
+    {
+        const string runId = "run-compact";
+        var reliability = new CountingReliability();
+        var receipt = runExists ? CreateReceipt(runId, "scheduled-1.3", "sha256:current", "catalog-current") : null;
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(),
+            new StubReceipts(receipt),
+            reliability);
+
+        var result = await service.GetReceiptAsync(runId, CancellationToken.None, includeReliabilityHistory: false);
+
+        result.RunExists.Should().Be(runExists);
+        result.Received.Should().Be(runExists);
+        result.Reliability.Should().BeNull();
+        if (receipt is not null)
+        {
+            result.ReceiptId.Should().Be(receipt.ReceiptId);
+        }
+        reliability.GetCount.Should().Be(0);
+        reliability.PersistCount.Should().Be(0);
+        reliability.ObserveCount.Should().Be(0);
+    }
+
     [Fact]
     public async Task GetReceipt_Should_Return_Persisted_Contract_Identity_Not_Current_Constants()
     {
