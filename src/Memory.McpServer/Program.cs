@@ -1411,6 +1411,19 @@ conversations.MapGet("/insights/{insightId:guid}", async (Guid insightId, IConve
     return result is null ? Results.NotFound() : Results.Ok(result);
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
+conversations.MapGet("/adjudication-preview", async (string projectId, int? offset, int? limit, string? governanceRunId,
+    IConversationAdjudicationService service, CancellationToken cancellationToken) =>
+    Results.Ok(await service.PreviewAsync(new ConversationAdjudicationPreviewRequest(projectId, offset ?? 0, limit ?? 100, governanceRunId), cancellationToken)))
+    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+
+conversations.MapPost("/adjudications", async (ConversationAdjudicationRequest request,
+    IConversationAdjudicationService service, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await service.AdjudicateAsync(request, cancellationToken)); }
+    catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+    catch (KeyNotFoundException) { return Results.NotFound(); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
+
 conversations.MapPost("/insights/{insightId:guid}/retry", async (Guid insightId, ConversationInsightGovernanceBody body, IConversationAutomationService service, CancellationToken cancellationToken) =>
 {
     try { return Results.Ok(await service.RetryInsightAsync(new ConversationInsightGovernanceRequest(insightId, body.GovernanceRunId, body.Reason), cancellationToken)); }

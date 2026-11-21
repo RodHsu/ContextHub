@@ -231,7 +231,7 @@ Do not write:
 
 The Dashboard also exposes this catalog in Traditional Chinese at `/mcp-tools`.
 
-The catalog summary is generated from the same canonical policy used by `/mcp-chat`, rather than a second configuration allowlist. Catalog `2026-09-27-v8` reports 83 backend `/mcp` tools and 83 ChatGPT App-facing tools, together with query/read, mutation, delete-capable, and proposal-gated counts. The general catalog includes all nine `agent_execution_*` worker tools and all seven Skills execution tools; `/mcp-automation` remains a separate exactly-four-tool surface. Release validation checks the host-compatible projection, including complete non-destructive annotations and structured schemas for AgentExecution plus the required read-only annotations for `governance_contract_get`, `governance_run_get`, and `governance_runs_list`. App-facing validation accepts JSON Schema outputs rooted at either `object` or `array`, while rejecting scalar roots that the connector cannot project as structured tool results.
+The catalog summary is generated from the same canonical policy used by `/mcp-chat`, rather than a second configuration allowlist. Catalog `2026-11-21-v11` reports 86 backend `/mcp` tools and 86 ChatGPT App-facing tools, together with query/read, mutation, delete-capable, and proposal-gated counts. The general catalog includes all nine `agent_execution_*` worker tools and all seven Skills execution tools; `/mcp-automation` remains a separate exactly-four-tool surface. Release validation checks the host-compatible projection, including complete non-destructive annotations and structured schemas for AgentExecution plus the required read-only annotations for `governance_contract_get`, `governance_run_get`, and `governance_runs_list`. App-facing validation accepts JSON Schema outputs rooted at either `object` or `array`, while rejecting scalar roots that the connector cannot project as structured tool results.
 
 ## Cross-Project Discussions
 
@@ -438,3 +438,5 @@ ContextHub is useful only when these remain true:
 - Forgetting to reindex after embedding changes
 - Treating health checks as a substitute for search quality and job status
 - Exposing `/mcp` to untrusted chat agents instead of using `/mcp-chat`
+
+See [Conversation exception adjudication](conversation-adjudication.md) for Owner/Admin preview, terminal decisions, historical reconciliation and append-only receipts.

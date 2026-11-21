@@ -4390,11 +4390,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
-        listedToolNames.Should().HaveCount(84);
+        listedToolNames.Should().HaveCount(86);
         var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
         appFacingProjection.IsValid.Should().BeTrue();
-        appFacingProjection.PublishedToolCount.Should().Be(84);
-        appFacingProjection.AppCallableToolCount.Should().Be(84);
+        appFacingProjection.PublishedToolCount.Should().Be(86);
+        appFacingProjection.AppCallableToolCount.Should().Be(86);
         appFacingProjection.MissingPublishedTools.Should().BeEmpty();
         appFacingProjection.UnexpectedPublishedTools.Should().BeEmpty();
         appFacingProjection.MissingAppCallableTools.Should().BeEmpty();
@@ -4404,7 +4404,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_run_get",
             "governance_runs_list"
         };
-        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(81);
+        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(86 - receiptAndContractTools.Length);
         foreach (var toolName in receiptAndContractTools)
         {
             var projectedTool = appFacingProjection.Tools.Single(tool => tool.Name == toolName);
@@ -4455,6 +4455,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "agent_execution_abandon",
             "agent_execution_cancel",
             "conversation_insight_status",
+            "conversation_adjudication_preview",
+            "conversation_insight_adjudicate",
             "conversation_insight_retry",
             "conversation_insight_skip",
             "conversation_insight_set_disposition",
@@ -4504,7 +4506,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governancePlan", "governanceCoverage", "convergence", "quarantinedCount", "deleteEligibleCount",
             "deleteMaturedCount", "autoDeletedCount", "deleteCancelledCount", "tombstonedCount",
             "semanticAutoResolvedCount", "remainingHumanDecisionCount", "protectedRetentionCount",
-            "candidateCount", "executionActionableCount", "governedExceptionCount"
+            "candidateCount", "executionActionableCount", "governedExceptionCount",
+            "unresolvedHumanDecisionCount", "resolvedHumanDecisionCount", "newlyResolvedHumanDecisionCount", "reopenedHumanDecisionCount"
         ]);
         var batchRequestSchema = batchTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request");
         batchRequestSchema.GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([

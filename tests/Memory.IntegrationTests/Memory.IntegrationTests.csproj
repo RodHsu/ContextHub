@@ -41,7 +41,6 @@
 
   <ItemGroup>
     <Compile Include="..\Shared\ContainerTestEnvironment.cs" Link="Shared\ContainerTestEnvironment.cs" />
-    <EmbeddedResource Include="Fixtures\052_conversation_adjudication.sql" />
     <EmbeddedResource Include="..\..\tools\performance\cache-capacity.sql" LogicalName="cache-capacity.sql" />
   </ItemGroup>
 
