@@ -40,6 +40,7 @@ internal sealed class MemoryManifestTestDb : DbContext, IApplicationDbContext
     DbSet<ConversationSession> IApplicationDbContext.ConversationSessions => throw new NotSupportedException();
     DbSet<ConversationCheckpoint> IApplicationDbContext.ConversationCheckpoints => throw new NotSupportedException();
     DbSet<ConversationInsight> IApplicationDbContext.ConversationInsights => throw new NotSupportedException();
+    DbSet<ConversationAdjudication> IApplicationDbContext.ConversationAdjudications => throw new NotSupportedException();
     public DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots => Set<KnowledgeGovernanceSnapshot>();
     DbSet<GovernanceBatchRun> IApplicationDbContext.GovernanceBatchRuns => throw new NotSupportedException();
     DbSet<GovernanceBatchExecution> IApplicationDbContext.GovernanceBatchExecutions => throw new NotSupportedException();
