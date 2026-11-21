@@ -102,7 +102,15 @@ public sealed class ProjectWorkItemService(
         if (!includeArchived) query = query.Where(x => x.ArchivedAt == null);
         var entity = await query.SingleOrDefaultAsync(x => x.Id == workItemId, cancellationToken);
         if (entity is null) return null;
-        ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: false);
+        try
+        {
+            ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: false);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // An ID-based read must not disclose an inaccessible item's existence or project.
+            return null;
+        }
         return Map(entity);
     }
 
