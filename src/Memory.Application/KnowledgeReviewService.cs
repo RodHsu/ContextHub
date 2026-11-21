@@ -166,14 +166,24 @@ public sealed class KnowledgeReviewService(
                         ConversationPromotionStatus.HostBlocked => 3,
                         ConversationPromotionStatus.RequiresUserDecision => 2,
                         _ => 1
-                    })))
+                    })
+                {
+                    EvidenceFingerprint = GovernanceExceptionIdentity.Hash(new
+                    {
+                        x.ProjectId,
+                        x.Title,
+                        x.Content,
+                        x.Summary,
+                        x.SourceRef,
+                        tags = x.Tags.Order().ToArray(),
+                        x.Importance,
+                        x.Confidence,
+                        x.PromotedMemoryId
+                    })
+                }))
             .Concat(fullGovernancePlan.Items
-                .Where(x => x.RequiresExplicitApproval)
-                .Select(x => new GovernanceExceptionStateResult(
-                    $"candidate:{x.ItemKey}",
-                    x.ItemKind.ToString(),
-                    "RequiresUserDecision",
-                    2)))
+                .Where(GovernanceExceptionIdentity.RequiresHumanDecision)
+                .Select(GovernanceExceptionIdentity.FromCandidate))
             .GroupBy(x => x.Key, StringComparer.Ordinal)
             .Select(group => group.OrderByDescending(x => x.Severity).First())
             .OrderBy(x => x.Key, StringComparer.Ordinal)
@@ -207,6 +217,10 @@ public sealed class KnowledgeReviewService(
             TombstonedCount = 0,
             SemanticAutoResolvedCount = 0,
             RemainingHumanDecisionCount = fullGovernancePlan.RemainingHumanDecisionCount,
+            UnresolvedHumanDecisionCount = userDecisionCount,
+            ResolvedHumanDecisionCount = fullGovernancePlan.ResolvedHumanDecisionCount,
+            NewlyResolvedHumanDecisionCount = fullGovernancePlan.NewlyResolvedHumanDecisionCount,
+            ReopenedHumanDecisionCount = fullGovernancePlan.ReopenedHumanDecisionCount,
             ProtectedRetentionCount = fullGovernancePlan.Retention.ProtectedRetentionCount,
             CandidateCount = candidateCount,
             ExecutionActionableCount = fullGovernancePlan.GovernanceActionableCount,

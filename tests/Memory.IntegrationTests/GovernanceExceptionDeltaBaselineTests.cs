@@ -12,6 +12,25 @@ public sealed class GovernanceExceptionDeltaBaselineTests(ContainerTestEnvironme
     : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Timestamp_refresh_should_be_unchanged_but_semantic_evidence_change_should_escalate()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var project = $"stable-key-{Guid.NewGuid():N}";
+        var run = Guid.NewGuid().ToString();
+        var id = Guid.NewGuid();
+        var old = new GovernanceExceptionStateResult($"candidate:finding:{id:N}:100", "Memory", "RequiresUserDecision", 2)
+        { EvidenceFingerprint = "original" };
+        await receipts.RecordReviewAsync(CreateReview(run, project, [old]), DateTimeOffset.UtcNow, default);
+        var refreshed = old with { Key = $"candidate:finding:{id:N}:200" };
+        await receipts.RecordReviewAsync(CreateReview(run, project, [refreshed]), DateTimeOffset.UtcNow, default);
+        (await receipts.GetAsync(run, default))!.ExceptionDelta.Should().Be(new GovernanceExceptionDeltaResult(0, 0, 1, 0));
+        await receipts.RecordReviewAsync(CreateReview(run, project, [refreshed with { EvidenceFingerprint = "changed" }]), DateTimeOffset.UtcNow, default);
+        (await receipts.GetAsync(run, default))!.ExceptionDelta.Should().Be(new GovernanceExceptionDeltaResult(0, 0, 0, 1));
+    }
+
+    [DockerRequiredFact]
     public async Task Fresh_run_should_compare_exceptions_with_latest_completed_review_for_same_scope()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

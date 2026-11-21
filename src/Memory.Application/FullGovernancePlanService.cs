@@ -48,7 +48,16 @@ public sealed class FullGovernancePlanService(
             });
         }
 
-        foreach (var candidate in memorySnapshot.ProjectCandidates.Concat(memorySnapshot.SharedCandidates))
+        var memoryCandidates = memorySnapshot.ProjectCandidates.Concat(memorySnapshot.SharedCandidates).ToArray();
+        var evidenceIds = memoryCandidates.SelectMany(x => new Guid?[] { x.MemoryId, x.RelatedMemoryId })
+            .Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
+        var evidenceMemories = await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
+                        (projects.Contains(x.ProjectId) || x.ProjectId == ProjectContext.SharedProjectId) && evidenceIds.Contains(x.Id))
+            .ToArrayAsync(cancellationToken);
+        var evidenceHashes = evidenceMemories.ToDictionary(x => x.Id, GovernanceExceptionIdentity.MemoryEvidence);
+
+        foreach (var candidate in memoryCandidates)
         {
             var successorArchive = candidate.Classification == GovernanceFindingType.SupersededMemoryCandidate &&
                                    string.Equals(candidate.RecommendedAction, GovernanceBatchActionType.Archive.ToString(), StringComparison.Ordinal);
@@ -61,7 +70,12 @@ public sealed class FullGovernancePlanService(
                 candidate.ReasonCodes, governanceRunId)
             {
                 IsReversible = successorArchive,
-                SemanticConfidence = successorArchive ? 0.99m : 0m
+                SemanticConfidence = successorArchive ? 0.99m : 0m,
+                SemanticEvidenceHash = GovernanceExceptionIdentity.Hash(new
+                {
+                    primary = evidenceHashes.GetValueOrDefault(candidate.MemoryId),
+                    secondary = candidate.RelatedMemoryId.HasValue ? evidenceHashes.GetValueOrDefault(candidate.RelatedMemoryId.Value) : null
+                })
             });
         }
 
@@ -324,7 +338,7 @@ public sealed class FullGovernancePlanService(
             x.ArchivedAt is null &&
             x.Status is ProjectWorkItemStatus.Pending or ProjectWorkItemStatus.InProgress or ProjectWorkItemStatus.Blocked &&
             !HasActiveGovernanceExclusion(x.GovernanceExclusionsJson, governanceRunId));
-        var governedExceptions = ordered.Count(x => x.RequiresExplicitApproval) + skillGovernance.ExceptionCount;
+        var governedExceptions = ordered.Count(GovernanceExceptionIdentity.RequiresHumanDecision) + skillGovernance.ExceptionCount;
         var coverage = new FullGovernanceCoverageResult(
             Surface(projects.Length, projects.Length, ordered, GovernanceItemKind.Project),
             Surface(hierarchyRows.Count, hierarchyRows.Count, ordered, GovernanceItemKind.ProjectHierarchy),
@@ -352,11 +366,23 @@ public sealed class FullGovernancePlanService(
                 skillGovernance.CoverageComplete)
         };
         var semanticAutoResolvable = ordered.Count(x => x.IsReversible && x.SemanticConfidence > 0m && !x.RequiresExplicitApproval);
-        return new FullGovernancePlanResult(ordered, coverage, ordered.Count(x => !x.RequiresExplicitApproval), businessWorkItems, governedExceptions)
+        var projectIdentityKeys = ProjectContext.IdentityKeys(projects);
+        var adjudications = dbContext.ConversationAdjudications.AsNoTracking().Where(x =>
+            x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projectIdentityKeys.Contains(ProjectContext.IdentityKey(x.ProjectId)));
+        var resolvedHumanDecisions = await dbContext.ConversationInsights.AsNoTracking().CountAsync(x =>
+            x.TenantId == tenantId && x.OwnerUserId == ownerUserId && projectIdentityKeys.Contains(ProjectContext.IdentityKey(x.ProjectId)) &&
+            (x.PromotionStatus == ConversationPromotionStatus.Skipped || x.PromotionStatus == ConversationPromotionStatus.Promoted) &&
+            adjudications.Any(r => r.InsightId == x.Id), cancellationToken);
+        var transitions = await adjudications.Where(x => x.GovernanceRunId == governanceRunId)
+            .GroupBy(x => x.Action).Select(x => new { Action = x.Key, Count = x.Count() }).ToArrayAsync(cancellationToken);
+        return new FullGovernancePlanResult(ordered, coverage, ordered.Count(x => !GovernanceExceptionIdentity.RequiresHumanDecision(x)), businessWorkItems, governedExceptions)
         {
             Retention = retention,
             SemanticAutoResolvableCount = semanticAutoResolvable,
             RemainingHumanDecisionCount = governedExceptions,
+            ResolvedHumanDecisionCount = resolvedHumanDecisions,
+            NewlyResolvedHumanDecisionCount = transitions.Where(x => x.Action != nameof(ConversationAdjudicationAction.Reopen)).Sum(x => x.Count),
+            ReopenedHumanDecisionCount = transitions.Where(x => x.Action == nameof(ConversationAdjudicationAction.Reopen)).Sum(x => x.Count),
             SkillGovernance = skillGovernance
         };
     }
@@ -369,7 +395,8 @@ public sealed class FullGovernancePlanService(
         GovernanceItemKind kind, bool hasMore = false, bool complete = true)
     {
         var candidates = items.Where(x => x.ItemKind == kind).ToArray();
-        return new(total, scanned, candidates.Length, candidates.Length, 0, candidates.Count(x => x.RequiresExplicitApproval), 0, hasMore, complete);
+        return new(total, scanned, candidates.Length, candidates.Count(x => !GovernanceExceptionIdentity.RequiresHumanDecision(x)), 0,
+            candidates.Count(GovernanceExceptionIdentity.RequiresHumanDecision), 0, hasMore, complete);
     }
 
     private static bool IsProtectedInsight(ConversationInsight insight)
@@ -391,6 +418,7 @@ public sealed class FullGovernancePlanService(
             IsolationLevel.Serializable,
             cancellationToken);
         var exceptions = await dbContext.ConversationInsights
+            .Where(x => !dbContext.ConversationAdjudications.Any(r => r.InsightId == x.Id))
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) &&
                         (x.PromotionStatus == ConversationPromotionStatus.Deferred ||
                          x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision ||

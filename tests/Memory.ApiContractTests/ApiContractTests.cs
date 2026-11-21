@@ -18,6 +18,21 @@ namespace Memory.ApiContractTests;
 public sealed class ApiContractTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Conversation_adjudication_should_expose_scoped_preview_and_reject_invalid_write()
+    {
+        using var client = environment.GetFactory().CreateClient();
+        var project = $"adjudication-api-{Guid.NewGuid():N}";
+        var preview = await client.GetFromJsonAsync<ConversationAdjudicationPreviewResult>(
+            $"/api/conversations/adjudication-preview?projectId={project}&offset=0&limit=200");
+        preview.Should().NotBeNull();
+        preview!.ProjectId.Should().Be(project);
+        preview.TotalCount.Should().Be(0);
+        var response = await client.PostAsJsonAsync("/api/conversations/adjudications", new ConversationAdjudicationRequest(
+            project, Guid.NewGuid(), Guid.NewGuid(), ConversationAdjudicationAction.ResolveSkipped, "", "", ""));
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
+    }
+
+    [DockerRequiredFact]
     public async Task Managed_file_security_contract_is_provider_neutral_and_does_not_expose_internal_object_identity()
     {
         Guid versionId;
@@ -394,8 +409,8 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         bootstrap.Should().NotBeNull();
         bootstrap!.Service.Name.Should().Be("ContextHub");
-        bootstrap.ToolCatalog.BackendToolCount.Should().Be(86);
-        bootstrap.ToolCatalog.AppFacingToolCount.Should().Be(86);
+        bootstrap.ToolCatalog.BackendToolCount.Should().Be(88);
+        bootstrap.ToolCatalog.AppFacingToolCount.Should().Be(88);
         bootstrap.ToolCatalog.DeleteCapableToolCount.Should().Be(3);
         bootstrap.Project.ProjectIdProvided.Should().BeFalse();
         bootstrap.Project.ProjectId.Should().BeNull();

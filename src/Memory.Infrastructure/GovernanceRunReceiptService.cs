@@ -1513,16 +1513,22 @@ public sealed class GovernanceRunReceiptService(
         IReadOnlyList<GovernanceExceptionStateResult> previous,
         IReadOnlyList<GovernanceExceptionStateResult> current)
     {
-        var previousByKey = previous.ToDictionary(x => x.Key, StringComparer.Ordinal);
-        var currentByKey = current.ToDictionary(x => x.Key, StringComparer.Ordinal);
+        var previousByKey = previous.GroupBy(x => GovernanceExceptionIdentity.NormalizeKey(x.Key), StringComparer.Ordinal)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(v => v.Severity).First(), StringComparer.Ordinal);
+        var currentByKey = current.GroupBy(x => GovernanceExceptionIdentity.NormalizeKey(x.Key), StringComparer.Ordinal)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(v => v.Severity).First(), StringComparer.Ordinal);
         var added = currentByKey.Keys.Count(key => !previousByKey.ContainsKey(key));
         var resolved = previousByKey.Keys.Count(key => !currentByKey.ContainsKey(key));
         var escalated = currentByKey.Count(pair =>
-            previousByKey.TryGetValue(pair.Key, out var old) && pair.Value.Severity > old.Severity);
+            previousByKey.TryGetValue(pair.Key, out var old) && (pair.Value.Severity > old.Severity || EvidenceChanged(old, pair.Value)));
         var unchanged = currentByKey.Count(pair =>
-            previousByKey.TryGetValue(pair.Key, out var old) && pair.Value.Severity == old.Severity);
+            previousByKey.TryGetValue(pair.Key, out var old) && pair.Value.Severity == old.Severity && !EvidenceChanged(old, pair.Value));
         return new GovernanceExceptionDeltaResult(added, resolved, unchanged, escalated);
     }
+
+    private static bool EvidenceChanged(GovernanceExceptionStateResult previous, GovernanceExceptionStateResult current)
+        => !string.IsNullOrEmpty(previous.EvidenceFingerprint) && !string.IsNullOrEmpty(current.EvidenceFingerprint) &&
+           !string.Equals(previous.EvidenceFingerprint, current.EvidenceFingerprint, StringComparison.Ordinal);
 
     private static IReadOnlyList<GovernanceExceptionStateResult> DeserializeExceptionStates(string? json)
     {

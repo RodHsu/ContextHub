@@ -1266,6 +1266,7 @@ public sealed record GovernanceReviewItem(
     public bool IsReversible { get; init; }
     public string RetentionPolicyVersion { get; init; } = string.Empty;
     public DateTimeOffset? DeleteEligibleAt { get; init; }
+    public string SemanticEvidenceHash { get; init; } = string.Empty;
 }
 
 public sealed record GovernanceSurfaceCoverageResult(
@@ -1314,6 +1315,9 @@ public sealed record FullGovernancePlanResult(
     public AutonomousRetentionReviewResult Retention { get; init; } = AutonomousRetentionReviewResult.Empty;
     public int SemanticAutoResolvableCount { get; init; }
     public int RemainingHumanDecisionCount { get; init; }
+    public int ResolvedHumanDecisionCount { get; init; }
+    public int NewlyResolvedHumanDecisionCount { get; init; }
+    public int ReopenedHumanDecisionCount { get; init; }
     public SkillMetadataGovernanceReviewResult? SkillGovernance { get; init; }
 }
 
@@ -1387,6 +1391,10 @@ public sealed record KnowledgeReviewResult(
     public int TombstonedCount { get; init; }
     public int SemanticAutoResolvedCount { get; init; }
     public int RemainingHumanDecisionCount { get; init; }
+    public int UnresolvedHumanDecisionCount { get; init; }
+    public int ResolvedHumanDecisionCount { get; init; }
+    public int NewlyResolvedHumanDecisionCount { get; init; }
+    public int ReopenedHumanDecisionCount { get; init; }
     public int ProtectedRetentionCount { get; init; }
     public int CandidateCount { get; init; }
     public int ExecutionActionableCount { get; init; }
@@ -1400,7 +1408,10 @@ public sealed record GovernanceExceptionStateResult(
     string Key,
     string Kind,
     string Disposition,
-    int Severity);
+    int Severity)
+{
+    public string EvidenceFingerprint { get; init; } = string.Empty;
+}
 
 public sealed record GovernanceExceptionDeltaResult(
     int New,
@@ -2071,6 +2082,7 @@ public interface IApplicationDbContext
     DbSet<ConversationSession> ConversationSessions { get; }
     DbSet<ConversationCheckpoint> ConversationCheckpoints { get; }
     DbSet<ConversationInsight> ConversationInsights { get; }
+    DbSet<ConversationAdjudication> ConversationAdjudications { get; }
     DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots { get; }
     DbSet<GovernanceBatchRun> GovernanceBatchRuns { get; }
     DbSet<GovernanceBatchExecution> GovernanceBatchExecutions { get; }

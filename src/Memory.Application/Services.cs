@@ -2666,6 +2666,7 @@ public static class DependencyInjection
         services.AddScoped<IPerformanceProbeService, PerformanceProbeService>();
         services.AddScoped<IInstanceBehaviorSettingsAccessor, InstanceBehaviorSettingsAccessor>();
         services.AddScoped<IConversationAutomationService, ConversationAutomationService>();
+        services.AddScoped<IConversationAdjudicationService, ConversationAdjudicationService>();
         services.AddScoped<IChatGptProposalService, ChatGptProposalService>();
         services.AddScoped<ITenantSecurityService, TenantSecurityService>();
         services.AddScoped<ISourceConnectionService, SourceConnectionService>();

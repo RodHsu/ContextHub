@@ -56,6 +56,7 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public DbSet<ConversationSession> ConversationSessions => Set<ConversationSession>();
     public DbSet<ConversationCheckpoint> ConversationCheckpoints => Set<ConversationCheckpoint>();
     public DbSet<ConversationInsight> ConversationInsights => Set<ConversationInsight>();
+    public DbSet<ConversationAdjudication> ConversationAdjudications => Set<ConversationAdjudication>();
     public DbSet<KnowledgeGovernanceSnapshot> KnowledgeGovernanceSnapshots => Set<KnowledgeGovernanceSnapshot>();
     public DbSet<GovernanceBatchRun> GovernanceBatchRuns => Set<GovernanceBatchRun>();
     public DbSet<GovernanceBatchExecution> GovernanceBatchExecutions => Set<GovernanceBatchExecution>();
@@ -1146,6 +1147,29 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
                 .IsUnique()
                 .HasFilter("tenant_id IS NOT NULL AND owner_user_id IS NOT NULL")
                 .HasDatabaseName("ix_conversation_insights_dedup_key");
+        });
+
+        modelBuilder.Entity<ConversationAdjudication>(entity =>
+        {
+            entity.ToTable("conversation_adjudications");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.InsightId).HasColumnName("insight_id");
+            entity.Property(x => x.RequestHash).HasColumnName("request_hash");
+            entity.Property(x => x.EvidenceFingerprint).HasColumnName("evidence_fingerprint");
+            entity.Property(x => x.Action).HasColumnName("action");
+            entity.Property(x => x.Outcome).HasColumnName("outcome");
+            entity.Property(x => x.PreviousStatus).HasColumnName("previous_status");
+            entity.Property(x => x.ResultStatus).HasColumnName("result_status");
+            entity.Property(x => x.Reason).HasColumnName("reason");
+            entity.Property(x => x.GovernanceRunId).HasColumnName("governance_run_id");
+            entity.Property(x => x.Actor).HasColumnName("actor");
+            entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectId, x.InsightId, x.CreatedAt })
+                .HasDatabaseName("ix_conversation_adjudications_owner_insight");
         });
 
         modelBuilder.Entity<KnowledgeGovernanceSnapshot>(entity =>

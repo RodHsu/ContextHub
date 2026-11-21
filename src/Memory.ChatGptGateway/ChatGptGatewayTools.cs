@@ -13,6 +13,7 @@ public sealed class ChatGptGatewayTools(
     IMemoryService memoryService,
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
+    IConversationAdjudicationService conversationAdjudicationService,
     IProjectInformationService projectInformationService,
     IProjectDiscussionService projectDiscussionService,
     IAccessibleProjectService accessibleProjectService,
@@ -49,6 +50,14 @@ public sealed class ChatGptGatewayTools(
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true), Description("Preview evidence-bound conversation exception adjudication for one explicit ProjectId. Owner/Admin only; read-only, paginated, no proposal execution.")]
+    public Task<ConversationAdjudicationPreviewResult> conversation_adjudication_preview(ConversationAdjudicationPreviewRequest request, CancellationToken cancellationToken = default)
+        => conversationAdjudicationService.PreviewAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true), Description("Manually adjudicate one conversation exception with its exact preview token and idempotent OperationId. Owner/Admin only; never approves proposals, mutates target resources, or overrides HostBlocked. Returns an append-only receipt.")]
+    public Task<ConversationAdjudicationReceipt> conversation_insight_adjudicate(ConversationAdjudicationRequest request, CancellationToken cancellationToken = default)
+        => conversationAdjudicationService.AdjudicateAsync(request, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Describe ContextHub purpose, capabilities, startup flow, and projectId guidance.")]
     public ContextHubBootstrapResult describe_context_hub(string? projectId = null)
