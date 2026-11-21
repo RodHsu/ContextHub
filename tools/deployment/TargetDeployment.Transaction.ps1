@@ -1,18 +1,25 @@
 #Requires -Version 7.4
 
 function Get-TargetDeploymentResult {
-    param([string]$Status, [AllowNull()][object]$TargetRevision, [string]$Stage)
+    param([string]$Status, [AllowNull()][object]$TargetRevision, [string]$Stage, [AllowNull()][object]$FailureKind)
 
-    [pscustomobject]@{ Status = $Status; TargetRevision = $TargetRevision; Stage = $Stage }
+    [pscustomobject]@{ Status = $Status; TargetRevision = $TargetRevision; Stage = $Stage; FailureKind = $FailureKind }
 }
 
 function Get-TargetDeploymentStateTemplate {
-    param([AllowNull()][object]$TargetRevision, [AllowNull()][object]$Outcome)
+    param(
+        [AllowNull()][object]$TargetRevision,
+        [AllowNull()][object]$Outcome,
+        [AllowNull()][Collections.IDictionary]$LastGood,
+        [AllowNull()][Collections.IDictionary]$PreviousGood
+    )
 
     [ordered]@{
         schemaVersion = 1
         lastProcessedTargetRevision = $TargetRevision
         lastOutcome = $Outcome
+        lastGood = $LastGood
+        previousGood = $PreviousGood
         pending = $null
     }
 }
@@ -30,12 +37,21 @@ function Get-TargetDeploymentState {
         throw 'TARGET_DEPLOYMENT_STATE_INVALID'
     }
 
+    foreach ($name in @('lastGood', 'previousGood')) {
+        $release = $state[$name]
+        if ($null -ne $release -and ($release -isnot [Collections.IDictionary] -or $release.Count -eq 0)) {
+            throw 'TARGET_DEPLOYMENT_SETTLED_RELEASE_INVALID'
+        }
+        if (-not $state.Contains($name)) { $state[$name] = $null }
+    }
+
     $pending = $state.pending
     if ($null -ne $pending -and (
         $pending -isnot [Collections.IDictionary] -or $pending.phase -cnotin @('Applying', 'RollbackFailed') -or
         $pending.targetRevision -isnot [string] -or [string]::IsNullOrWhiteSpace($pending.targetRevision) -or
         $pending.previous -isnot [Collections.IDictionary] -or $pending.previous.Count -eq 0 -or
-        $pending.candidate -isnot [Collections.IDictionary] -or $pending.candidate.Count -eq 0)) {
+        $pending.candidate -isnot [Collections.IDictionary] -or $pending.candidate.Count -eq 0 -or
+        ($null -ne $pending['failureKind'] -and $pending['failureKind'] -cnotin @('Timeout', 'Error')))) {
         throw 'TARGET_DEPLOYMENT_PENDING_INVALID'
     }
     return $state
@@ -81,6 +97,16 @@ function Invoke-TargetDeploymentRecordCallback {
     return $record
 }
 
+function Get-TargetDeploymentFailureKind {
+    param([Exception]$Exception)
+
+    while ($null -ne $Exception) {
+        if ($Exception -is [TimeoutException]) { return 'Timeout' }
+        $Exception = $Exception.InnerException
+    }
+    return 'Error'
+}
+
 function Restore-TargetDeploymentRelease {
     param(
         [string]$StatePath,
@@ -88,6 +114,7 @@ function Restore-TargetDeploymentRelease {
         [scriptblock]$Apply,
         [scriptblock]$Verify,
         [string]$Stage,
+        [AllowNull()][object]$FailureKind,
         [switch]$Recovering
     )
 
@@ -102,8 +129,10 @@ function Restore-TargetDeploymentRelease {
     if ($null -eq $rollbackStage) {
         $status = if ($Recovering) { 'Recovered' } else { 'RolledBack' }
         try {
-            Write-TargetDeploymentState $StatePath (Get-TargetDeploymentStateTemplate $pending.targetRevision $status)
-            return Get-TargetDeploymentResult -Status $status -TargetRevision $pending.targetRevision -Stage $Stage
+            $settled = Get-TargetDeploymentStateTemplate -TargetRevision $pending.targetRevision -Outcome $status `
+                -LastGood $pending.previous -PreviousGood $State.previousGood
+            Write-TargetDeploymentState $StatePath $settled
+            return Get-TargetDeploymentResult -Status $status -TargetRevision $pending.targetRevision -Stage $Stage -FailureKind $FailureKind
         } catch {
             $rollbackStage = 'RollbackFinalize'
         }
@@ -111,14 +140,15 @@ function Restore-TargetDeploymentRelease {
 
     $pending.phase = 'RollbackFailed'
     $pending.failureStage = $Stage
+    $pending.failureKind = $FailureKind
     $pending.rollbackStage = $rollbackStage
     try { Write-TargetDeploymentState $StatePath $State }
     catch {
         # The prior pending journal was committed before apply. If storage no longer accepts a write,
         # the durable pending entry still gates the next run on recovery.
-        return Get-TargetDeploymentResult -Status 'RollbackFailed' -TargetRevision $pending.targetRevision -Stage 'RollbackJournalWrite'
+        return Get-TargetDeploymentResult -Status 'RollbackFailed' -TargetRevision $pending.targetRevision -Stage 'RollbackJournalWrite' -FailureKind $FailureKind
     }
-    return Get-TargetDeploymentResult -Status 'RollbackFailed' -TargetRevision $pending.targetRevision -Stage $rollbackStage
+    return Get-TargetDeploymentResult -Status 'RollbackFailed' -TargetRevision $pending.targetRevision -Stage $rollbackStage -FailureKind $FailureKind
 }
 
 function Invoke-TargetDeploymentTransaction {
@@ -153,7 +183,8 @@ function Invoke-TargetDeploymentTransaction {
 
         if ($null -ne $state.pending) {
             if ($state.pending.phase -ceq 'RollbackFailed') {
-                return Get-TargetDeploymentResult -Status 'RollbackFailed' -TargetRevision $state.pending.targetRevision -Stage 'RollbackLatched'
+                return Get-TargetDeploymentResult -Status 'RollbackFailed' -TargetRevision $state.pending.targetRevision `
+                    -Stage 'RollbackLatched' -FailureKind $state.pending['failureKind']
             }
             return Restore-TargetDeploymentRelease -StatePath $path -State $state -Apply $Apply -Verify $Verify -Stage 'Recovery' -Recovering
         }
@@ -163,7 +194,7 @@ function Invoke-TargetDeploymentTransaction {
         if ($null -eq $candidate) {
             return Get-TargetDeploymentResult -Status 'NoChange' -TargetRevision $state.lastProcessedTargetRevision -Stage 'CandidateRead'
         }
-        $revision = $candidate.targetRevision
+        $revision = $candidate['targetRevision']
         if ($revision -isnot [string] -or [string]::IsNullOrWhiteSpace($revision)) {
             return Get-TargetDeploymentResult -Status 'Rejected' -TargetRevision $null -Stage 'CandidateValidation'
         }
@@ -185,7 +216,9 @@ function Invoke-TargetDeploymentTransaction {
             $stage = 'BaselineVerify'
             & $Verify $previousRelease *> $null
         } catch {
-            Write-TargetDeploymentState $path (Get-TargetDeploymentStateTemplate $revision 'Rejected')
+            $settled = Get-TargetDeploymentStateTemplate -TargetRevision $revision -Outcome 'Rejected' `
+                -LastGood $state.lastGood -PreviousGood $state.previousGood
+            Write-TargetDeploymentState $path $settled
             return Get-TargetDeploymentResult -Status 'Rejected' -TargetRevision $revision -Stage $stage
         }
 
@@ -203,10 +236,14 @@ function Invoke-TargetDeploymentTransaction {
             $stage = 'Verify'
             & $Verify $candidateRelease *> $null
             $stage = 'Finalize'
-            Write-TargetDeploymentState $path (Get-TargetDeploymentStateTemplate $revision 'Applied')
+            $settled = Get-TargetDeploymentStateTemplate -TargetRevision $revision -Outcome 'Applied' `
+                -LastGood $candidateRelease -PreviousGood $previousRelease
+            Write-TargetDeploymentState $path $settled
             return Get-TargetDeploymentResult -Status 'Applied' -TargetRevision $revision -Stage $stage
         } catch {
-            return Restore-TargetDeploymentRelease -StatePath $path -State $state -Apply $Apply -Verify $Verify -Stage $stage
+            $failureKind = if ($stage -cin @('Apply', 'Verify')) { Get-TargetDeploymentFailureKind -Exception $_.Exception }
+            return Restore-TargetDeploymentRelease -StatePath $path -State $state -Apply $Apply -Verify $Verify `
+                -Stage $stage -FailureKind $failureKind
         }
     } finally {
         $lock.Dispose()
