@@ -18,7 +18,7 @@ namespace Memory.IntegrationTests;
 
 public sealed class MultiFactorWave4BWorkflowTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
-    [Theory]
+    [DockerRequiredTheory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task Completing_one_factor_must_stale_the_opposite_pending_enrollment_without_mutation(bool webAuthnFirst)

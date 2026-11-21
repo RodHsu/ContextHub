@@ -304,6 +304,8 @@ public sealed class KnowledgeReviewService(
         }
 
         var normalized = value.Trim();
+        if (normalized.StartsWith(MemoryManifestService.StoragePrefix, StringComparison.Ordinal))
+            throw new InvalidOperationException("Metadata manifests are not governance runs.");
         if (normalized.Length > 128)
         {
             throw new InvalidOperationException("GovernanceRunId must not exceed 128 characters.");

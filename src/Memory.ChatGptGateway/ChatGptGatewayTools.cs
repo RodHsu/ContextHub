@@ -31,8 +31,23 @@ public sealed class ChatGptGatewayTools(
     IAgentExecutionService agentExecutionService,
     ISkillService skillService,
     IRequestActorAccessor actorAccessor,
-    IHttpContextAccessor httpContextAccessor)
+    IHttpContextAccessor httpContextAccessor,
+    IMemoryManifestService manifestService)
 {
+    [McpServerTool(UseStructuredContent = true), Description("Freeze or resume a bounded metadata-only immutable memory ID/version manifest. Reuse requestId after timeout; no content read or governance execution. Historical snapshots without a manifest cannot be reconstructed.")]
+    public async Task<MemoryManifestPage> memory_manifest_read(MemoryManifestReadRequest request, CancellationToken cancellationToken = default)
+    {
+        try { return await manifestService.ReadAsync(request, cancellationToken); }
+        catch (MemoryManifestException ex) { throw new McpException(ex.Code, ex); }
+    }
+
+    [McpServerTool(UseStructuredContent = true), Description("Compare up to 100 frozen manifest members with current metadata. Returns Unchanged, Changed, or RemovedOrMoved; never fetches memory content. Body readers must independently compare the returned body version.")]
+    public async Task<IReadOnlyList<MemoryManifestVerification>> memory_manifest_verify(MemoryManifestVerifyRequest request, CancellationToken cancellationToken = default)
+    {
+        try { return await manifestService.VerifyAsync(request, cancellationToken); }
+        catch (MemoryManifestException ex) { throw new McpException(ex.Code, ex); }
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     [McpServerTool(UseStructuredContent = true), Description("Describe ContextHub purpose, capabilities, startup flow, and projectId guidance.")]

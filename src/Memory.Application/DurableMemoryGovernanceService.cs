@@ -22,6 +22,8 @@ public sealed class DurableMemoryGovernanceService(
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        if (governanceRunId.StartsWith(MemoryManifestService.StoragePrefix, StringComparison.Ordinal))
+            throw new InvalidOperationException("Metadata manifests are not governance execution authority.");
         var tenantId = actor.TenantId ?? throw new UnauthorizedAccessException("Knowledge governance requires a tenant actor.");
         var ownerUserId = actor.UserId ?? throw new UnauthorizedAccessException("Knowledge governance requires a tenant user.");
         var normalizedProjects = DurableMemoryGovernancePolicy.NormalizeGovernanceProjectIds(projectIds);
@@ -202,6 +204,9 @@ public sealed class DurableMemoryGovernanceService(
         }
 
         var projectIds = DeserializeProjects(match.ProjectIdsJson);
+        if (Deserialize(match.ResultJson).ReadManifest is not null)
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorSnapshotMismatch,
+                "Metadata manifests are not governance execution authority.");
         try
         {
             ActorAuthorization.EnsureProjectsAllowed(actor, projectIds, write: requireWriteAuthorization);

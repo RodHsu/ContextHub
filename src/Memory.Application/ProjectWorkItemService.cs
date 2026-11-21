@@ -193,7 +193,8 @@ public sealed class ProjectWorkItemService(
             .AsNoTracking()
             .Where(x => x.TenantId == actor.TenantId &&
                         x.OwnerUserId == actor.UserId &&
-                        x.GovernanceRunId == governanceRunId)
+                        x.GovernanceRunId == governanceRunId &&
+                        !x.GovernanceRunId.StartsWith(MemoryManifestService.StoragePrefix))
             .Select(x => x.ProjectIdsJson)
             .ToListAsync(cancellationToken);
         if (!relatedSnapshots.Any(json => ReadProjectIds(json).Contains(projectId, Memory.Application.ProjectContext.IdentityComparer)))
