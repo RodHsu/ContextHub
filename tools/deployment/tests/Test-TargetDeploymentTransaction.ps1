@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param([string]$CrashStatePath)
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../TargetDeployment.Transaction.ps1')
 
@@ -58,6 +59,9 @@ function Get-TestTarget {
             if ($fixture.Failure -ceq 'Rollback' -and $release.Version -ceq 'old') { throw 'rollback failed' }
             $fixture.Live = $release.Version
             if ($fixture.Failure -cin @('Apply', 'Rollback') -and $release.Version -ceq 'new') { throw 'partial apply failed' }
+            if ($fixture.Failure -ceq 'ApplyTimeout' -and $release.Version -ceq 'new') {
+                throw [InvalidOperationException]::new('wrapped failure', [TimeoutException]::new('apply timed out'))
+            }
         }.GetNewClosure()
         Verify = {
             param($release)
@@ -87,18 +91,31 @@ try {
     Assert-Equal -Actual $result.Count -Expected 1 -Case 'one sanitized result'
     Assert-Equal -Actual $result[0].Status -Expected 'Applied' -Case 'successful apply'
     Assert-Equal -Actual $result[0].TargetRevision -Expected 'target-one' -Case 'consumed revision'
+    Assert-Equal -Actual $result[0].FailureKind -Expected $null -Case 'success does not report a failure kind'
     Assert-TestCallbackOrder $success.Fixture 'Get:,Build:target-one,Capture:new,Verify:old,Apply:new,Verify:new'
     $state = Get-TargetDeploymentState $callbacks.StatePath
     Assert-Equal -Actual $state.lastOutcome -Expected 'Applied' -Case 'persisted success'
     Assert-Equal -Actual $state.pending -Expected $null -Case 'success clears pending'
+    Assert-Equal -Actual $state.lastGood.Images.aux -Expected 'new-aux-id' -Case 'successful candidate retained as last good'
+    Assert-Equal -Actual $state.previousGood.Images.aux -Expected 'old-aux-id' -Case 'baseline retained as previous good'
 
     $success.Fixture.Events.Clear()
     Assert-Equal -Actual (Invoke-TargetDeploymentTransaction @callbacks).Status -Expected 'NoChange' -Case 'duplicate target no-op'
     Assert-TestCallbackOrder $success.Fixture 'Get:target-one'
+
+    $success.Fixture.Events.Clear()
+    $success.Fixture.Revision = 'target-two'
+    $success.Fixture.Failure = 'Build'
+    $result = Invoke-TargetDeploymentTransaction @callbacks
+    Assert-Equal -Actual $result.Status -Expected 'Rejected' -Case 'later pre-apply rejection'
+    Assert-Equal -Actual $result.FailureKind -Expected $null -Case 'build does not report an apply failure kind'
+    $state = Get-TargetDeploymentState $callbacks.StatePath
+    Assert-Equal -Actual $state.lastGood.Images.aux -Expected 'new-aux-id' -Case 'pre-apply rejection keeps last good'
+    Assert-Equal -Actual $state.previousGood.Images.aux -Expected 'old-aux-id' -Case 'pre-apply rejection keeps previous good'
     $success.Fixture.Events.Clear()
     $success.Fixture.Revision = $null
     Assert-Equal -Actual (Invoke-TargetDeploymentTransaction @callbacks).Status -Expected 'NoChange' -Case 'empty candidate no-op'
-    Assert-TestCallbackOrder $success.Fixture 'Get:target-one'
+    Assert-TestCallbackOrder $success.Fixture 'Get:target-two'
 
     foreach ($example in @(
         @{ Failure = 'Build'; Stage = 'Build'; Events = 'Get:,Build:target-one' },
@@ -116,15 +133,23 @@ try {
     }
 
     foreach ($example in @(
-        @{ Failure = 'Apply'; Stage = 'Apply'; Events = 'Get:,Build:target-one,Capture:new,Verify:old,Apply:new,Apply:old,Verify:old' },
-        @{ Failure = 'Timeout'; Stage = 'Verify'; Events = 'Get:,Build:target-one,Capture:new,Verify:old,Apply:new,Verify:new,Apply:old,Verify:old' }
+        @{ Failure = 'Apply'; Kind = 'Error'; Stage = 'Apply'; Events = 'Get:prior-target,Build:target-one,Capture:new,Verify:old,Apply:new,Apply:old,Verify:old' },
+        @{ Failure = 'ApplyTimeout'; Kind = 'Timeout'; Stage = 'Apply'; Events = 'Get:prior-target,Build:target-one,Capture:new,Verify:old,Apply:new,Apply:old,Verify:old' },
+        @{ Failure = 'Timeout'; Kind = 'Timeout'; Stage = 'Verify'; Events = 'Get:prior-target,Build:target-one,Capture:new,Verify:old,Apply:new,Verify:new,Apply:old,Verify:old' }
     )) {
         $test = Get-TestTarget (Join-Path $fixtureRoot "$($example.Failure).json") $example.Failure
         $callbacks = $test.Callbacks
+        $prior = Get-TargetDeploymentStateTemplate -TargetRevision 'prior-target' -Outcome 'Applied' `
+            -LastGood @{ Version = 'old' } -PreviousGood @{ Version = 'older'; Images = @{ main = 'older-id' } }
+        Write-TargetDeploymentState $callbacks.StatePath $prior
         $result = Invoke-TargetDeploymentTransaction @callbacks
         Assert-Equal -Actual $result.Status -Expected 'RolledBack' -Case 'automatic rollback'
         Assert-Equal -Actual $result.Stage -Expected $example.Stage -Case 'initial failure stage'
+        Assert-Equal -Actual $result.FailureKind -Expected $example.Kind -Case 'sanitized apply or verify failure kind'
         Assert-Equal -Actual $test.Fixture.Live -Expected 'old' -Case 'previous live version restored'
+        $state = Get-TargetDeploymentState $callbacks.StatePath
+        Assert-Equal -Actual $state.lastGood.Images.main -Expected 'old-id' -Case 'verified rollback descriptor is retained'
+        Assert-Equal -Actual $state.previousGood.Images.main -Expected 'older-id' -Case 'rollback keeps former previous good'
         Assert-TestCallbackOrder $test.Fixture $example.Events
         $test.Fixture.Events.Clear()
         Assert-Equal -Actual (Invoke-TargetDeploymentTransaction @callbacks).Status -Expected 'NoChange' -Case 'rollback consumes target'
@@ -136,9 +161,11 @@ try {
     $result = Invoke-TargetDeploymentTransaction @callbacks
     Assert-Equal -Actual $result.Status -Expected 'RollbackFailed' -Case 'rollback failure reported'
     Assert-Equal -Actual $result.Stage -Expected 'RollbackApply' -Case 'rollback failure stage recorded'
+    Assert-Equal -Actual $result.FailureKind -Expected 'Error' -Case 'rollback failure keeps original apply classification'
     Assert-TestCallbackOrder $latched.Fixture 'Get:,Build:target-one,Capture:new,Verify:old,Apply:new,Apply:old,Verify:old'
     $state = Get-TargetDeploymentState $callbacks.StatePath
     Assert-Equal -Actual $state.pending.phase -Expected 'RollbackFailed' -Case 'durable failure latch'
+    Assert-Equal -Actual $state.pending.failureKind -Expected 'Error' -Case 'latch retains sanitized classification'
     Assert-Equal -Actual $state.pending.previous.Images.aux -Expected 'old-aux-id' -Case 'retained rollback descriptor'
     Assert-Equal -Actual $state.pending.candidate.Images.aux -Expected 'new-aux-id' -Case 'retained candidate descriptor'
     $latched.Fixture.Events.Clear()
@@ -147,6 +174,9 @@ try {
     Assert-TestCallbackOrder $latched.Fixture ''
 
     $crashPath = Join-Path $fixtureRoot 'crash.json'
+    $prior = Get-TargetDeploymentStateTemplate -TargetRevision 'prior-target' -Outcome 'Applied' `
+        -LastGood @{ Version = 'old' } -PreviousGood @{ Version = 'older'; Images = @{ main = 'older-id' } }
+    Write-TargetDeploymentState $crashPath $prior
     $pwsh = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
     $nativePreference = $PSNativeCommandUseErrorActionPreference
     try {
@@ -170,6 +200,16 @@ try {
     Assert-TestCallbackOrder $restarted.Fixture 'Apply:old,Verify:old'
     $state = Get-TargetDeploymentState $crashPath
     Assert-Equal -Actual $state.lastProcessedTargetRevision -Expected 'crash-target' -Case 'restart recorded on disk'
+    Assert-Equal -Actual ($state.lastGood.Values -join ',') -Expected 'three,four' -Case 'verified restart rollback descriptor is retained'
+    Assert-Equal -Actual $state.previousGood.Images.main -Expected 'older-id' -Case 'restart keeps former previous good'
+
+    $legacy = Get-TestTarget (Join-Path $fixtureRoot 'legacy.json')
+    $callbacks = $legacy.Callbacks
+    [IO.File]::WriteAllText($callbacks.StatePath, '{"schemaVersion":1,"lastProcessedTargetRevision":"target-one","lastOutcome":"Applied","pending":null}')
+    Assert-Equal -Actual (Invoke-TargetDeploymentTransaction @callbacks).Status -Expected 'NoChange' -Case 'legacy settled journal can be read'
+    $state = Get-TargetDeploymentState $callbacks.StatePath
+    Assert-Equal -Actual $state.lastGood -Expected $null -Case 'legacy settled journal has optional last good'
+    Assert-Equal -Actual $state.previousGood -Expected $null -Case 'legacy settled journal has optional previous good'
 
     $busy = Get-TestTarget (Join-Path $fixtureRoot 'busy.json')
     $callbacks = $busy.Callbacks
