@@ -2,7 +2,9 @@
 
 A protected branch under targets/ identifies an environment. The deployment controller
 polls that branch and reads promotion.json from each new commit on its first-parent
-history. The first run uses the head of the target branch. Keep one complete promotion
+history. Only the target branch is fetched on unchanged polls. A new promotion
+requires a fresh fetch of main for source authorization. The first run uses the head
+of the target branch. Keep one complete promotion
 record per commit and protect the branch from force-pushes and deletion.
 
 The record contains target, sourceSha, version, and rollbackContract. Use a 40-character
@@ -42,7 +44,9 @@ image identities and health. It saves a recovery journal before applying changes
 starts only the listed Compose services. If apply fails, health is missing, or the
 deadline expires, the controller stops the previous Compose client and reapplies
 the retained images using a separate deadline. It verifies the restored image IDs
-and container health. An interrupted transaction is recovered before the next
+and container health. After a settled run it keeps the retained rollback image tags
+and generated overrides still referenced by containers or configured Compose inputs.
+An interrupted transaction is recovered before the next
 promotion is considered. A rollback failure preserves the journal and latches the
 controller. Inspect the live images and the journal before operator recovery.
 

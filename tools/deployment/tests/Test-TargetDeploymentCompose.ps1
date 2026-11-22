@@ -121,8 +121,17 @@ services:
     Assert-FixtureEqual $timeout.TargetRevision $timeoutRevision 'Timed-out target revision'
     Assert-FixtureEqual (Get-FixtureLiveImage) $goodImage 'Timeout recovery image'
 
+    $overlays = @(Get-ChildItem -LiteralPath $state -Filter 'images-*.json' -File)
+    Assert-FixtureEqual $overlays.Count 1 'Only the active generated overlay is retained'
+    $container = Invoke-FixtureNative docker @('compose', '-p', $project, '-f', $compose, 'ps', '--quiet', 'canary')
+    $liveFiles = Invoke-FixtureNative docker @('inspect', '--format', '{{index .Config.Labels "com.docker.compose.project.config_files"}}', $container)
+    if (!$liveFiles.Contains($overlays[0].Name, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The retained overlay is not the one used by the running container.'
+    }
+
+    [void](Invoke-FixtureGit $remote @('update-ref', '-d', 'refs/heads/main', $timeoutSource))
     $same = & $runner -ConfigPath $config
-    Assert-FixtureEqual $same.Status 'NoChange' 'Processed revision replay'
+    Assert-FixtureEqual $same.Status 'NoChange' 'Processed revision replay without authority lookup'
     $evidence = [ordered]@{
         branch = $Branch; isolatedCompose = $project;
         applied = $good; failedAndRolledBack = $failure; timedOutAndRolledBack = $timeout;

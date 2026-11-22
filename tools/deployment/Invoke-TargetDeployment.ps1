@@ -158,8 +158,7 @@ $getCandidate = {
         [void](Invoke-Tool $git @('init', '--bare', $bare) 30)
     }
     $ref = "+refs/heads/$($config.targetBranch):refs/heads/target"
-    [void](Invoke-Git @('fetch', '--no-tags', '--no-recurse-submodules', [string]$config.repository,
-        '+refs/heads/main:refs/heads/authority', $ref))
+    [void](Invoke-Git @('fetch', '--no-tags', '--no-recurse-submodules', [string]$config.repository, $ref))
     $head = Invoke-Git @('rev-parse', 'refs/heads/target')
     if ($head -ceq $LastProcessed) { return $null }
     if ($LastProcessed) {
@@ -180,6 +179,11 @@ $getCandidate = {
         # Keep the immutable target revision so the transaction records the rejection.
         $candidate.sourceSha = $null
         $candidate.version = $null
+    }
+    if ($candidate.sourceSha -and $candidate.version) {
+        # A failed authority fetch is a read failure. Leave this promotion pending for the next poll.
+        [void](Invoke-Git @('fetch', '--no-tags', '--no-recurse-submodules', [string]$config.repository,
+            '+refs/heads/main:refs/heads/authority'))
     }
     return $candidate
 }
@@ -295,6 +299,29 @@ $apply = {
 }
 
 
+function Invoke-OverlayRetention {
+    # Compose stores the applied overlay path in the container label. Include stopped
+    # containers and explicit file mounts, and leave all files in place if Docker lookup fails.
+    $references = [Collections.Generic.List[string]]::new()
+    foreach ($group in $config.groups) {
+        foreach ($file in $group.files) { $references.Add([string]$file) }
+        if ($group.Contains('envFile')) { $references.Add([string]$group.envFile) }
+    }
+    $ids = Invoke-Tool $docker @('ps', '--all', '--no-trunc', '--quiet') 30
+    $template = '{{index .Config.Labels "com.docker.compose.project.config_files"}}{{range .Mounts}}{{println .Source}}{{end}}'
+    foreach ($id in ($ids -split '\r?\n')) {
+        if (!$id) { continue }
+        $references.Add((Invoke-Tool $docker @('inspect', '--type', 'container', '--format', $template, $id) 30))
+    }
+    foreach ($file in (Get-ChildItem -LiteralPath $root -Filter 'images-*.json' -File)) {
+        if ($file.Name -cnotmatch '^images-[0-9a-f]{32}\.json$' -or
+            $file.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { continue }
+        if ($references.Where({ $_.Contains($file.Name, [StringComparison]::OrdinalIgnoreCase) }, 'First').Count -eq 0) {
+            [IO.File]::Delete($file.FullName)
+        }
+    }
+}
+
 function Invoke-ReleaseRetention {
     try {
         $lock = [IO.File]::Open("$statePath.lock", 'OpenOrCreate', 'ReadWrite', 'None')
@@ -303,6 +330,7 @@ function Invoke-ReleaseRetention {
     try {
         $saved = Get-TargetDeploymentState -Path $statePath
         if ($null -ne $saved.pending -or $null -eq $saved.lastGood) { return }
+        Invoke-OverlayRetention
         $retained = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($release in @($saved.lastGood, $saved.previousGood)) {
             if (!$release) { continue }
@@ -328,6 +356,6 @@ function Invoke-ReleaseRetention {
 $result = Invoke-TargetDeploymentTransaction -StatePath $statePath -GetCandidate $getCandidate -Build $build -Capture $capture -Apply $apply -Verify $verify
 if ($result.Status -cin @('Applied', 'Recovered', 'RolledBack', 'Rejected')) {
     try { Invoke-ReleaseRetention }
-    catch { Write-Verbose 'Deployment is settled, but retired tags could not be enumerated.' }
+    catch { Write-Verbose 'Deployment is settled, but some generated files or tags were retained.' }
 }
 $result
