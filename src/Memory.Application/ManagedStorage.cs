@@ -130,8 +130,9 @@ public sealed class ManagedTransferService(
             throw new InvalidOperationException("Managed object length is outside the configured transfer limit.");
         }
 
+        var normalizedPurpose = request.Purpose.Trim();
         var existing = await Scope(dbContext.ManagedTransferSessions.AsNoTracking(), actor)
-            .Where(x => x.Operation == ManagedTransferOperation.Upload && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Purpose == request.Purpose)
+            .Where(x => x.Operation == ManagedTransferOperation.Upload && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.Purpose == normalizedPurpose)
             .Join(dbContext.ManagedTransferOperationRecords, session => session.Id, operation => operation.SessionId, (session, operation) => new { session, operation })
             .SingleOrDefaultAsync(x => x.operation.RequestId == request.IdempotencyKey, cancellationToken);
         if (existing is not null)
@@ -353,14 +354,16 @@ public sealed class ManagedTransferService(
             await dbContext.AcquireTransactionLockAsync($"managed-transfer:{request.SessionId:D}", transactionToken);
             var session = await LoadSessionAsync(request.SessionId, request.Capability, ManagedTransferOperation.Download, request.ExpectedRevision, transactionToken);
             var managedObject = session.ManagedObject!;
-            if (request.Offset < 0 || request.Length <= 0 || request.Length > options.Value.NormalizedMaxRangeBytes || request.Offset + request.Length > managedObject.PlaintextLength)
+            if (request.Offset < 0 || request.Length <= 0 || request.Length > options.Value.NormalizedMaxRangeBytes || request.Offset > managedObject.PlaintextLength || request.Length > managedObject.PlaintextLength - request.Offset)
             {
                 throw new InvalidOperationException("Requested range is outside the authorized managed object boundary.");
             }
+            ValidateRequestId(request.RequestId);
+            var requestId = request.RequestId.Trim();
             if (session.UsedBytes + request.Length > session.MaxBytes) throw new InvalidOperationException("Transfer capability byte limit exceeded.");
             EnsureRateLimit(session, request.Length, Math.Max(managedObject.ChunkSize, options.Value.NormalizedMaxRangeBytes));
             var requestHash = HashRequest("download", session.Id.ToString("D"), session.Revision.ToString(), request.Offset.ToString(), request.Length.ToString());
-            if (await dbContext.ManagedTransferOperationRecords.AnyAsync(x => x.SessionId == session.Id && x.RequestId == request.RequestId, transactionToken))
+            if (await dbContext.ManagedTransferOperationRecords.AnyAsync(x => x.SessionId == session.Id && x.RequestId == requestId, transactionToken))
             {
                 throw new InvalidOperationException("Download request identity has already been consumed.");
             }
@@ -518,7 +521,8 @@ public sealed class ManagedTransferService(
     private async Task<ManagedTransferMutationResult?> CheckReplayAsync(ManagedTransferSession session, string requestId, string requestHash, CancellationToken cancellationToken)
     {
         ValidateRequestId(requestId);
-        var existing = await dbContext.ManagedTransferOperationRecords.AsNoTracking().SingleOrDefaultAsync(x => x.SessionId == session.Id && x.RequestId == requestId, cancellationToken);
+        var normalizedRequestId = requestId.Trim();
+        var existing = await dbContext.ManagedTransferOperationRecords.AsNoTracking().SingleOrDefaultAsync(x => x.SessionId == session.Id && x.RequestId == normalizedRequestId, cancellationToken);
         if (existing is null) return null;
         if (!FixedEquals(existing.RequestHash, requestHash)) throw new UnauthorizedAccessException("Transfer request identity replay does not match the original operation.");
         return new ManagedTransferMutationResult(session.Id, session.Revision, existing.BytesTransferred, true);
