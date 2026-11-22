@@ -57,14 +57,48 @@ public sealed class ProjectWorkItemReadTests
     }
 
     [Fact]
-    public async Task Get_requires_read_scope_and_allowed_project()
+    public async Task Get_requires_read_scope_before_resolving_item_visibility()
     {
         var item = Item();
         Func<Task> missingScope = () => Service(Actor() with { Scopes = [] }, item).GetAsync(item.Id, false, default);
         await missingScope.Should().ThrowAsync<UnauthorizedAccessException>();
         item.ProjectId = "Other";
-        Func<Task> forbiddenProject = () => Service(Actor(), item).GetAsync(item.Id, false, default);
-        await forbiddenProject.Should().ThrowAsync<UnauthorizedAccessException>();
+        Func<Task> hiddenMissingScope = () => Service(Actor() with { Scopes = [] }, item).GetAsync(item.Id, true, default);
+        await hiddenMissingScope.Should().ThrowAsync<UnauthorizedAccessException>();
+        Func<Task> unknownMissingScope = () => Service(Actor() with { Scopes = [] }).GetAsync(Guid.NewGuid(), false, default);
+        await unknownMissingScope.Should().ThrowAsync<UnauthorizedAccessException>();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Get_hides_disallowed_project_like_missing_item(bool serviceActor, bool archived)
+    {
+        var hidden = Item(serviceActor ? Guid.NewGuid() : Owner);
+        hidden.ProjectId = "PrivateProject";
+        hidden.Title = "Private title";
+        if (archived) hidden.ArchivedAt = DateTimeOffset.UnixEpoch;
+        var service = Service(Actor(serviceActor), hidden);
+
+        (await service.GetAsync(hidden.Id, false, default)).Should().BeNull();
+        (await service.GetAsync(hidden.Id, true, default)).Should().BeNull();
+        (await service.GetAsync(Guid.NewGuid(), true, default)).Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData("contexthub", false)]
+    [InlineData("SHARED", false)]
+    [InlineData("user", false)]
+    [InlineData("Other", true)]
+    public async Task Get_preserves_existing_project_identity_and_unrestricted_grants(string projectId, bool unrestricted)
+    {
+        var item = Item();
+        item.ProjectId = projectId;
+        var actor = unrestricted ? Actor() with { AllowedProjectIds = [] } : Actor();
+
+        (await Service(actor, item).GetAsync(item.Id, false, default))!.Id.Should().Be(item.Id);
     }
 
     [Fact]
