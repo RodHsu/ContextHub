@@ -1160,13 +1160,18 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         var service = scope.ServiceProvider.GetRequiredService<IInstanceTransferService>();
         var bundle = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            version = 1, @namespace = "legacy", exportedAtUtc = DateTimeOffset.UnixEpoch,
+            version = 1,
+            @namespace = "legacy",
+            exportedAtUtc = DateTimeOffset.UnixEpoch,
             sections = new[] { InstanceTransferSection.SystemSettings },
             systemSettings = new { behavior = new { }, dashboardAuth = new { adminUsername = "legacy", sessionTimeoutMinutes = 60 } }
         });
         var package = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            version = 1, format = "contexthub-instance-transfer", encrypted = false, algorithm = "none",
+            version = 1,
+            format = "contexthub-instance-transfer",
+            encrypted = false,
+            algorithm = "none",
             payloadBase64 = Convert.ToBase64String(bundle)
         });
 
