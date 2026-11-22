@@ -206,7 +206,11 @@ public sealed record DashboardContextSavingsWindowResult(
     DateTimeOffset? LastSampleAtUtc,
     double ExactCoveragePercent = 0d,
     string TokenCountingMode = TokenCountingModes.Approximate,
-    long ActualToolCallCount = 0);
+    long ActualToolCallCount = 0,
+    long? PositiveSavedTokens = null,
+    long? IncreasedTokens = null,
+    int? UnusableSampleCount = null,
+    string? SavingsCalculationVersion = null);
 
 public sealed record DashboardContextSavingsTrendPointResult(
     DateTimeOffset TimestampUtc,

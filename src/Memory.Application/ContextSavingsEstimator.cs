@@ -14,7 +14,7 @@ public static class ContextSavingsEstimator
     {
         var baseline = EstimateBaselineTokens(hits, out var coveragePercent);
         var returned = EstimateReturnedTokens(result);
-        var saved = Math.Max(0, baseline - returned);
+        var saved = baseline - returned;
         var savingPercent = baseline > 0
             ? saved / (double)baseline * 100d
             : 0d;

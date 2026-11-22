@@ -47,7 +47,7 @@ public sealed class ContextSavingsEstimatorTests
     }
 
     [Fact]
-    public void Estimate_Should_Clamp_Saved_Tokens_When_Returned_Exceeds_Baseline()
+    public void Estimate_Should_Preserve_Net_Increase_When_Returned_Exceeds_Baseline()
     {
         var hit = CreateHit(Guid.NewGuid(), "small", sourceTokenEstimate: 4);
         var context = EmptyContext() with
@@ -65,9 +65,10 @@ public sealed class ContextSavingsEstimatorTests
         var estimate = ContextSavingsEstimator.Estimate([hit], context);
 
         estimate.ReturnedTokenEstimate.Should().BeGreaterThan(estimate.BaselineTokenEstimate);
-        estimate.EstimatedSavedTokens.Should().Be(0);
-        estimate.ApproxSavedTokens.Should().Be(0);
-        estimate.EstimatedSavingPercent.Should().Be(0d);
+        var net = estimate.BaselineTokenEstimate - estimate.ReturnedTokenEstimate;
+        estimate.EstimatedSavedTokens.Should().Be(net);
+        estimate.ApproxSavedTokens.Should().Be(net);
+        estimate.EstimatedSavingPercent.Should().Be(Math.Round(net / (double)estimate.BaselineTokenEstimate * 100d, 2));
     }
 
     [Fact]
