@@ -28,6 +28,16 @@ public interface IContextHubApiClient
     Task<ManagedFileInventoryResult?> GetManagedFileVersionAsync(string projectId, Guid fileId, Guid versionId, CancellationToken cancellationToken)
         => Task.FromResult<ManagedFileInventoryResult?>(null);
     Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken);
+    Task<SecretManagementExpiry?> GetSecretManagementExpiryAsync(string projectId, Guid secretId, CancellationToken ct)
+        => Task.FromResult<SecretManagementExpiry?>(null);
+    Task<SecretManagementLeasePage?> GetSecretManagementLeasesAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken ct)
+        => Task.FromResult<SecretManagementLeasePage?>(null);
+    Task<SecretManagementHistoryPage?> GetSecretManagementHistoryAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken ct)
+        => Task.FromResult<SecretManagementHistoryPage?>(null);
+    Task<ManagedFileContentMetadata?> ReadFileContentMetadataAsync(string projectId, Guid fileId, Guid versionId, string purpose, CancellationToken ct)
+        => Task.FromResult<ManagedFileContentMetadata?>(null);
+    Task<ManagedFileAuditPage?> ReadFileAuditAsync(string projectId, Guid fileId, Guid versionId, int limit, int offset, CancellationToken ct)
+        => Task.FromResult<ManagedFileAuditPage?>(null);
     Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<CanonicalTagQualityWindow>?>(null);
     Task<EffectiveRightsResult> GetEffectiveRightsAsync(string projectId, IReadOnlyList<string> rights, string? resourceType, string? resourceId, CancellationToken cancellationToken);
@@ -218,7 +228,30 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     }
 
     public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
-        => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken, FailureStatus.ForbiddenOnly);
+        => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken, FailureStatus.LegacyInventory);
+
+    public Task<SecretManagementExpiry?> GetSecretManagementExpiryAsync(string projectId, Guid secretId, CancellationToken ct)
+        => GetOptionalTelemetryAsync<SecretManagementExpiry>(FileMetadataUrl($"/api/secrets/{secretId:D}/management/expiry", projectId), ct);
+
+    public Task<SecretManagementLeasePage?> GetSecretManagementLeasesAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken ct)
+        => GetOptionalTelemetryAsync<SecretManagementLeasePage>(FileMetadataUrl($"/api/secrets/{secretId:D}/management/leases", projectId, limit, offset), ct);
+
+    public Task<SecretManagementHistoryPage?> GetSecretManagementHistoryAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken ct)
+        => GetOptionalTelemetryAsync<SecretManagementHistoryPage>(FileMetadataUrl($"/api/secrets/{secretId:D}/management/history", projectId, limit, offset), ct);
+
+    public async Task<ManagedFileContentMetadata?> ReadFileContentMetadataAsync(string projectId, Guid fileId, Guid versionId, string purpose, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(purpose) || purpose.Trim().Length > 200)
+            throw new ArgumentException("An explicit project and bounded purpose are required.");
+        using var response = await httpClient.PostAsJsonAsync($"/api/files/{fileId:D}/versions/{versionId:D}/content-metadata",
+            new FileContentMetadataRequest(projectId.Trim(), purpose), ct);
+        if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.NotImplemented) return null;
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<ManagedFileContentMetadata>(cancellationToken: ct);
+    }
+
+    public Task<ManagedFileAuditPage?> ReadFileAuditAsync(string projectId, Guid fileId, Guid versionId, int limit, int offset, CancellationToken ct)
+        => GetOptionalTelemetryAsync<ManagedFileAuditPage>(FileMetadataUrl($"/api/files/{fileId:D}/versions/{versionId:D}/audit", projectId, limit, offset), ct);
 
     public Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
     {

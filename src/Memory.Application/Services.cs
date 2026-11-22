@@ -2621,6 +2621,7 @@ public static class DependencyInjection
         services.AddScoped<IManagedObjectReconciliationService, ManagedObjectReconciliationService>();
         services.AddScoped<IManagedFileService, ManagedFileService>();
         services.AddScoped<IManagedFileReadService, ManagedFileReadService>();
+        services.AddScoped<IManagedFileDisclosureService, ManagedFileDisclosureService>();
         services.AddScoped<IManagedFileDeletionReconciler, ManagedFileDeletionReconciler>();
         services.AddScoped<IManagedFileProjectionReconciler, ManagedFileProjectionReconciler>();
         services.AddScoped<ICanonicalTagGovernanceService, CanonicalTagGovernanceService>();
@@ -2632,6 +2633,7 @@ public static class DependencyInjection
         services.AddScoped<IWebAuthnCeremonyVerifier, Fido2WebAuthnCeremonyVerifier>();
         services.AddScoped<IMultiFactorAuthenticationService, MultiFactorAuthenticationService>();
         services.AddScoped<ISecretManagementService, SecretManagementService>();
+        services.AddScoped<ISecretManagementReadService, SecretManagementReadService>();
         services.AddScoped<ISshCertificateService, SshCertificateService>();
         services.AddScoped<ISecretReconciliationService, SecretReconciliationService>();
         services.AddSingleton<ISshCertificateIssuer, DisabledSshCertificateIssuer>();

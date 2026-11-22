@@ -2211,6 +2211,7 @@ var files = app.MapGroup("/api/files");
 files.MapLogicalFileDownloadEndpoints(requireAuthentication);
 files.RequireAuthIfEnabled(requireAuthentication);
 files.MapFileMetadataReadEndpoints(requireAuthentication);
+files.MapFileDisclosureReadEndpoints(requireAuthentication);
 files.MapGet(string.Empty, async (string projectId, int? limit, IManagedFileService service, CancellationToken cancellationToken) =>
     Results.Ok(await service.ListAsync(projectId, limit ?? 50, cancellationToken)))
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
@@ -2344,6 +2345,7 @@ stepUpAuthentication.MapPost("/webauthn/{credentialId:guid}/remove", async (Guid
     Results.Ok(await service.RemoveWebAuthnCredentialAsync(new FactorRemovalRequest(credentialId, request.StepUp, request.ExternalApprovalReference, request.Reason), cancellationToken)));
 
 var secrets = app.MapGroup("/api/secrets");
+secrets.MapSecretManagementReadEndpoints(requireAuthentication);
 secrets.RequireAuthIfEnabled(requireAuthentication);
 secrets.MapGet(string.Empty, async (string projectId, ISecretManagementService service, CancellationToken cancellationToken) =>
     Results.Ok(await service.ListAsync(projectId, cancellationToken)))

@@ -300,7 +300,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     public Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken)
     {
-        CheckInventoryPermission(projectId, preserveFailureStatusCode: true);
+        CheckInventoryPermission(projectId);
         if (Profile == DashboardBrowserTestProfile.Empty)
         {
             return Task.FromResult<IReadOnlyList<ManagedFileInventoryResult>>([]);
@@ -327,7 +327,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             ]);
     }
 
-    private void CheckInventoryPermission(string projectId, bool preserveFailureStatusCode = false)
+    private void CheckInventoryPermission(string projectId)
     {
         if (Profile != DashboardBrowserTestProfile.InventoryPermissions) return;
         var reads = _inventoryPermissionReads.GetValueOrDefault(projectId) + 1;
@@ -335,12 +335,8 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         if (projectId == "dashboard-test-restricted" || (projectId == "dashboard-test-revoked" && reads > 1))
             throw new HttpRequestException("Synthetic inventory permission denied.", null, System.Net.HttpStatusCode.Forbidden);
         if (projectId == "dashboard-test-unavailable" || (projectId == "dashboard-test-transient" && reads > 1))
-        {
-            if (preserveFailureStatusCode)
-                throw new InvalidOperationException("API 回應 500 InternalServerError。",
-                    new HttpRequestException("Synthetic inventory service unavailable.", null, System.Net.HttpStatusCode.InternalServerError));
-            throw new InvalidOperationException("API 回應 500 InternalServerError。");
-        }
+            throw new InvalidOperationException("API 回應 500 InternalServerError。",
+                new HttpRequestException("Synthetic inventory service unavailable.", null, System.Net.HttpStatusCode.InternalServerError));
     }
 
     public Task<EffectiveRightsResult> GetEffectiveRightsAsync(
