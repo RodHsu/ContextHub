@@ -3,6 +3,7 @@
 @inject IInstanceTransferService InstanceTransferService
 @inject IDockerMetricsService DockerMetricsService
 @inject IJSRuntime JsRuntime
+@inject AuthenticationStateProvider AuthenticationState
 
 <PageTitle>Context Hub | 系統設定</PageTitle>
 
@@ -285,24 +286,24 @@
                 <section class="panel settings-transfer-panel memory-transfer-panel">
                     <div class="panel-title">資料匯出 / 匯入</div>
                     <div class="settings-section-meta">
-                        低頻維運操作集中在系統設定。可選擇單獨或合併處理 `系統設定`、`記憶資料`、`使用者偏好`，不再佔用執行參數頁的大面積版面。
+                        匯出目前帳號擁有的記憶與偏好。舊套件中的系統設定仍可選擇匯入。
                     </div>
 
                     <div class="transfer-scope-grid">
                         <label class="toggle-field transfer-scope-chip">
                             <input type="checkbox" @bind="_includeSystemSettingsTransfer" />
-                            <span>系統設定</span>
+                            <span>系統設定（僅舊套件匯入）</span>
                             <div class="stack-item-meta">應用行為、snapshot cadence、Dashboard 帳號與 session timeout</div>
                         </label>
                         <label class="toggle-field transfer-scope-chip">
                             <input type="checkbox" @bind="_includeMemoriesTransfer" />
                             <span>記憶資料</span>
-                            <div class="stack-item-meta">目前 instance 可匯出的記憶資料與 externalKey 衝突預覽</div>
+                            <div class="stack-item-meta">目前帳號的記憶資料</div>
                         </label>
                         <label class="toggle-field transfer-scope-chip">
                             <input type="checkbox" @bind="_includePreferencesTransfer" />
                             <span>使用者偏好</span>
-                            <div class="stack-item-meta">使用者偏好以 key 為識別，可單獨攜帶或和設定一起移轉</div>
+                            <div class="stack-item-meta">目前帳號的使用者偏好</div>
                         </label>
                     </div>
 
@@ -313,8 +314,8 @@
                                 以單一 package 匯出所選項目。若填入密碼，整包會以 AES-256-GCM 加密。
                             </div>
                             <div class="memory-transfer-controls">
-                                <input type="password" @bind="_exportTransferPassphrase" placeholder="匯出密碼（可留白）" />
-                                <button class="ghost-button" @onclick="ExportTransferAsync" disabled="@(_loading || !HasAnyTransferSectionSelected)">匯出所選項目</button>
+                                <input type="password" @bind="_exportTransferPassphrase" aria-label="匯出密碼（可留白）" placeholder="匯出密碼（可留白）" />
+                                <button type="button" class="ghost-button" @onclick="ExportTransferAsync" disabled="@(_loading || !(_includeMemoriesTransfer || _includePreferencesTransfer))">匯出所選項目</button>
                             </div>
                         </section>
 
@@ -455,7 +456,7 @@
     private int _sessionTimeoutMinutes;
     private string? _newPassword;
     private string? _confirmPassword;
-    private bool _includeSystemSettingsTransfer = true;
+    private bool _includeSystemSettingsTransfer;
     private bool _includeMemoriesTransfer = true;
     private bool _includePreferencesTransfer = true;
     private string? _exportTransferPassphrase;
@@ -552,12 +553,15 @@
     {
         await ExecuteAsync(async () =>
         {
+            var account = await DashboardExportAccount.RequireAsync(AuthenticationState);
             var result = await InstanceTransferService.ExportAsync(
                 new InstanceTransferExportRequest(
-                    BuildSelectedTransferSections(),
+                    BuildSelectedTransferSections(includeSystemSettings: false),
                     NormalizeEmpty(_exportTransferPassphrase)),
+                account,
                 CancellationToken.None);
 
+            await account.EnsureCurrentAsync(AuthenticationState);
             await JsRuntime.InvokeVoidAsync("contextHubTransfer.downloadBase64", result.FileName, result.ContentType, result.PayloadBase64);
             ShowMessage($"已匯出 {JoinOrDash(result.Sections.Select(section => section.Label).ToArray())}。");
         });
@@ -692,10 +696,10 @@
         _confirmPassword = null;
     }
 
-    private IReadOnlyList<InstanceTransferSection> BuildSelectedTransferSections()
+    private IReadOnlyList<InstanceTransferSection> BuildSelectedTransferSections(bool includeSystemSettings = true)
     {
         var selected = new List<InstanceTransferSection>(3);
-        if (_includeSystemSettingsTransfer)
+        if (includeSystemSettings && _includeSystemSettingsTransfer)
         {
             selected.Add(InstanceTransferSection.SystemSettings);
         }

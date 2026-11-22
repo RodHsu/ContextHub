@@ -2,6 +2,7 @@
 @using System.Text
 @using System.Text.Json
 @inject IContextHubApiClient ApiClient
+@inject AuthenticationStateProvider AuthenticationState
 
 <PageTitle>Context Hub | Agent Skills</PageTitle>
 
@@ -152,7 +153,14 @@
     private async Task ChangeLifecycleAsync(Guid versionId, SkillLifecycleStatus status) => await RunAsync(async () => { await ApiClient.ChangeSkillVersionLifecycleAsync(new(versionId, status, $"Dashboard {status}", $"dashboard-lifecycle-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
     private async Task SetDefaultAsync(SkillSummaryResult skill, Guid versionId) => await RunAsync(async () => { await ApiClient.SetSkillDefaultVersionAsync(new(skill.Id, versionId, skill.MetadataVersion, $"dashboard-default-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
     private async Task UpsertBindingAsync(SkillSummaryResult skill) => await RunAsync(async () => { var existing = skill.Bindings.FirstOrDefault(x => x.Scope == _bindingScope && string.Equals(x.ScopeValue, _bindingScopeValue, StringComparison.OrdinalIgnoreCase)); await ApiClient.UpsertSkillBindingAsync(new(skill.Id, _bindingScope, _bindingScopeValue, _bindingMode, _bindingVersionConstraint, existing?.Revision, $"dashboard-binding-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });
-    private async Task ExportAsync(Guid versionId) => await RunAsync(async () => _exportJson = JsonSerializer.Serialize(await ApiClient.ExportSkillVersionAsync(versionId, CancellationToken.None), new JsonSerializerOptions { WriteIndented = true }));
+    private Task ExportAsync(Guid versionId) => RunAsync(async () =>
+    {
+        _exportJson = string.Empty;
+        var account = await DashboardExportAccount.RequireAsync(AuthenticationState);
+        var bundle = await ApiClient.ExportSkillVersionAsync(versionId, account, CancellationToken.None);
+        await account.EnsureCurrentAsync(AuthenticationState);
+        _exportJson = JsonSerializer.Serialize(bundle, new JsonSerializerOptions { WriteIndented = true });
+    });
     private async Task CompareWithPreviousAsync(SkillSummaryResult skill, SkillVersionSummaryResult version) => await RunAsync(async () => { var ordered = skill.Versions.ToList(); var index = ordered.FindIndex(item => item.Id == version.Id); var previous = index >= 0 && index + 1 < ordered.Count ? ordered[index + 1] : ordered.First(item => item.Id != version.Id); _versionDiff = await ApiClient.DiffSkillVersionsAsync(skill.Id, previous.Id, version.Id, CancellationToken.None); });
     private async Task ObserveSourceAsync(SkillSummaryResult skill) => await RunAsync(async () => { var source = skill.Versions.FirstOrDefault()?.SourceRef ?? _importSourceRef; await ApiClient.RecordSkillSourceObservationAsync(new(skill.Id, source, _observedRevision, _observedHash, _sourceAvailable, _signatureVerified, false, "dashboard:manual-refresh", $"dashboard-source-{Guid.NewGuid():N}"), CancellationToken.None); await LoadSourceObservationsAsync(skill.Id); });
     private async Task ReindexAsync() => await RunAsync(async () => { await ApiClient.ReindexSkillsAsync(new("skill-search-v1", "context-hub-default", "1", 0.35m, true, true, $"dashboard-reindex-{Guid.NewGuid():N}"), CancellationToken.None); await LoadAsync(); });

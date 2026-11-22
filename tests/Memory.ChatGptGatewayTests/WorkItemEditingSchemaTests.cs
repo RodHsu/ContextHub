@@ -130,8 +130,6 @@ public sealed class WorkItemEditingSchemaTests
         public Task<ProjectWorkItemResult?> GetAsync(Guid id, bool includeArchived, CancellationToken ct) => Task.FromResult<ProjectWorkItemResult?>(null);
         public Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken ct) => Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>([]);
         public Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken ct) => throw new NotSupportedException();
-        public Task<ProjectWorkItemResult> SetArchivedAsync(Guid id, bool archived, CancellationToken ct) => throw new NotSupportedException("Legacy overload must not be used.");
-        public Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid id, Guid leaf, bool completed, CancellationToken ct) => throw new NotSupportedException("Legacy overload must not be used.");
         public Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken ct) => throw new NotSupportedException();
     }
 }

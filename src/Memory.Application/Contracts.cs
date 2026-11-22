@@ -2421,12 +2421,8 @@ public interface IProjectWorkItemService
     Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> UpdateAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken);
-    Task<ProjectWorkItemResult> SetArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken);
-    Task<ProjectWorkItemResult> SetArchivedAsync(ProjectWorkItemArchiveRequest request, CancellationToken cancellationToken)
-        => throw new NotSupportedException("Versioned work item lifecycle editing is unavailable.");
-    Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken);
-    Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(ProjectWorkItemChecklistUpdateRequest request, CancellationToken cancellationToken)
-        => throw new NotSupportedException("Versioned checklist editing is unavailable.");
+    Task<ProjectWorkItemResult> SetArchivedAsync(ProjectWorkItemArchiveRequest request, CancellationToken cancellationToken);
+    Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(ProjectWorkItemChecklistUpdateRequest request, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken cancellationToken);
 }
 

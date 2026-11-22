@@ -1,6 +1,6 @@
-# Work item editing core — staged source
+# Work item editing and recovery
 
-The source foundation adds the Application command/aggregate core and PostgreSQL store. The adapter stage routes ordinary existing REST/MCP WorkItem updates, archive/restore, checklist completion and governance-exclusion relationship edits through that core. The actual WorkItem page now uses the HTTP edit/recovery protocol and draft controller for metadata, lifecycle and checklist completion edits. WorkItem proposal archive/restore now uses the separate committed-dispatch and exact-receipt recovery protocol described in [proposal recovery](work-item-proposal-recovery.md). Governance immutable preconditions, Memory CAS and structural checklist editing remain separate dependencies. Do not deploy these stages alone or infer end-to-end CAS from the additional read revision. All writer adapters, public contract/host acceptance and database acceptance remain required gates before rollout.
+The Application command core and PostgreSQL store handle existing REST and MCP Work Item updates, archive and restore, checklist completion and governance exclusion. The Dashboard editor uses the HTTP edit and recovery protocol with its draft controller. Work Item archive and restore proposals use the committed-dispatch and exact-receipt protocol described in [proposal recovery](work-item-proposal-recovery.md). Integrate these writers together so Dashboard and proposal actions switch to the same original-read contract. Immutable original versions for historical governance plans, Memory CAS and structural checklist editing are separate work.
 
 ## Intent and original version
 
@@ -26,7 +26,7 @@ The managed component tests dispatch real Blazor render-tree events through the 
 
 ### Tool-surface review
 
-`project_work_item_edit_receipt_get` is a distinct read-only recovery query on the general backend and restricted gateway. Current WorkItem detail/list cannot answer whether a particular request committed, and adding optional historical-ledger modes to those queries would conflate current state with original results. The tool uses existing MemoryRead plus current resource authority and the exact actor-scoped request fingerprint; it grants no new role, mutation, delete, replay or global ledger capability. Both surfaces share the same Application use case and SDK input schema. The general catalog advances to 2026-10-26-v11; the dedicated Scheduled Governance four-tool catalog/schema and acceptance gates are unchanged. Host publication/reconnect/schema acceptance remain unexecuted release gates.
+`project_work_item_edit_receipt_get` is a read-only query on the general backend and restricted gateway. It uses existing MemoryRead permission, current resource authority and the exact actor-scoped request fingerprint. Both surfaces share the same Application use case and SDK input schema. The general catalog is `2026-11-22-v13`. The dedicated Scheduled Governance catalog continues to expose four tools. A deployment must confirm host discovery and schema refresh separately.
 
 ## Aggregate and commit
 
@@ -40,12 +40,12 @@ Current ambient transactions are explicitly rejected by this foundation. The Wor
 
 ## Migration and validation boundaries
 
-Embedded migration059 is additive: positive parent revision, scoped unique receipt key, unique work-item revision history, step/identity/hash checks and append-only history/receipt triggers. Apply it only through the normal approved migration path. EnsureCreated/model metadata does not install the SQL append-only triggers and is not equivalent acceptance. The source change has not executed this migration or any database query.
+Embedded migration 059 adds positive parent revisions, scoped unique receipt keys, revision history, and append-only history and receipt triggers. Apply it through the normal migration path. The isolated PostgreSQL verification ran the embedded migration and the production store. It covered competing requests, exact receipt recovery, stale revisions, no-op edits, and cancellation while waiting for a lock.
 
-Pure-helper, actor-dispatch, actual EF model/query translation and change-tracker tests can run without a connection. They do not establish PostgreSQL advisory-lock behavior, uniqueness/collision isolation, rollback/commit cancellation or trigger enforcement. Real database transaction/concurrency/restart evidence remains required and unexecuted under the current resource gate.
+Helper, mapping, authorization and adapter tests cover the application boundaries. Isolated fixtures use synthetic accounts and records. Host deployment and existing client adoption require their own operational checks.
 
 ## Rollout and rollback
 
-First finish all writer adapters and legacy rejection/read-reload flow, then verify schemas/host publication, migration readiness and actual database invariants. Existing immutable governance snapshot/execute/Natural gates are not weakened; old snapshots without an original version cannot be upgraded by reading latest. Source endpoint/tool registration does not establish deployment or host publication, and these incomplete stages are not ready for release.
+Switch the REST and MCP adapters, Dashboard editor and proposal workflow together. Clients still sending unversioned writes receive `MissingReadVersion`. An operator must check for outstanding v1 receipts before deploying to an instance that has used the v1 store. For a historical governance plan missing the original revision, preserve the plan and record that it needs review. Filling it with a later revision would change the approved intent.
 
 If rollout is incomplete, keep versioned edit entry points unavailable. Rollback preserves additive revision/history/receipt data and uses compatible writers or read-only editing; it must not drop evidence or return to blind overwrites after guarded edits have occurred. A destructive down migration is deliberately not supplied.

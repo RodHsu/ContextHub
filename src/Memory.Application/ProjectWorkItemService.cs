@@ -102,15 +102,9 @@ public sealed class ProjectWorkItemService(
         return items.Select(Map).ToArray();
     }
 
-    public Task<ProjectWorkItemResult> SetArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken)
-        => SetArchivedAsync(new ProjectWorkItemArchiveRequest(workItemId, archived), cancellationToken);
-
     public Task<ProjectWorkItemResult> SetArchivedAsync(ProjectWorkItemArchiveRequest request, CancellationToken cancellationToken)
         => ApplyVersionedAsync(request.WorkItemId, request.ExpectedRevision, request.RequestId,
             request.Archived ? WorkItemEditOperation.Archive : WorkItemEditOperation.Restore, new(), cancellationToken);
-
-    public Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
-        => SetChecklistItemCompletionAsync(new ProjectWorkItemChecklistUpdateRequest(workItemId, checklistItemId, isCompleted), cancellationToken);
 
     public Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(ProjectWorkItemChecklistUpdateRequest request, CancellationToken cancellationToken)
         => ApplyVersionedAsync(request.WorkItemId, request.ExpectedRevision, request.RequestId, WorkItemEditOperation.ChecklistComplete,

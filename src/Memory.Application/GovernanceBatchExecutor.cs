@@ -892,13 +892,9 @@ public sealed class GovernanceBatchExecutor(
             item.Classification == "CompletedHistoricalWorkItem" &&
             allowed.Contains(GovernanceBatchActionType.WorkItemReconcile))
         {
-            var proposal = await CreateAndApplyProposalAsync("project_work_item_archive", item.ProjectId,
-                "Archive terminal historical work item", "Archive a completed or cancelled historical work item without changing business status.",
-                new ProjectWorkItemArchiveRequest(item.Id), request.GovernanceRunId, cancellationToken);
-            var readBack = await dbContext.ProjectWorkItems.AsNoTracking().SingleOrDefaultAsync(x => x.Id == item.Id, cancellationToken);
-            if (readBack?.ArchivedAt is null) throw new InvalidOperationException("Work item archive proposal applied without resource read-back.");
-            return await AuditedResultAsync(item, GovernanceBatchActionType.WorkItemReconcile, GovernanceBatchItemDisposition.Applied,
-                "Terminal work item was proposal-applied, archived, and read back; business status was not changed.", [proposal.Id], [item.Id], actor, cancellationToken);
+            return await AuditedResultAsync(item, GovernanceBatchActionType.WorkItemReconcile, GovernanceBatchItemDisposition.RequiresUserDecision,
+                "This review snapshot lacks an original Work Item revision. Review the Work Item before creating a versioned archive proposal.",
+                [], item.RelatedResourceIds, actor, cancellationToken);
         }
 
         var disposition = item.Kind is nameof(GovernanceItemKind.LogPartition) or nameof(GovernanceItemKind.LogCandidate)

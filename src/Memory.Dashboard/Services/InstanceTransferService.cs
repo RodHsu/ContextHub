@@ -60,7 +60,7 @@ public sealed record InstanceTransferApplyResult(
 
 public interface IInstanceTransferService
 {
-    Task<InstanceTransferDownloadResult> ExportAsync(InstanceTransferExportRequest request, CancellationToken cancellationToken);
+    Task<InstanceTransferDownloadResult> ExportAsync(InstanceTransferExportRequest request, DashboardExportAccount account, CancellationToken cancellationToken);
     Task<InstanceTransferPreviewResult> PreviewImportAsync(InstanceTransferImportRequest request, CancellationToken cancellationToken);
     Task<InstanceTransferApplyResult> ApplyImportAsync(InstanceTransferImportRequest request, CancellationToken cancellationToken);
 }
@@ -80,58 +80,18 @@ public sealed class InstanceTransferService(
         WriteIndented = true
     };
 
-    public async Task<InstanceTransferDownloadResult> ExportAsync(InstanceTransferExportRequest request, CancellationToken cancellationToken)
+    public async Task<InstanceTransferDownloadResult> ExportAsync(InstanceTransferExportRequest request, DashboardExportAccount account, CancellationToken cancellationToken)
     {
-        var selectedSections = ResolveSelectedSections(request.Sections);
+        ArgumentNullException.ThrowIfNull(account);
+        var selectedSections = ResolveAccountExportSections(request.Sections);
         var snapshot = await instanceSettingsService.GetSnapshotAsync(cancellationToken);
         var summaries = new List<InstanceTransferSectionSummaryResult>(selectedSections.Count);
-        ExportedSystemSettings? systemSettings = null;
         string? memoryPackageBase64 = null;
         IReadOnlyList<ExportedUserPreference>? userPreferences = null;
 
-        if (selectedSections.Contains(InstanceTransferSection.SystemSettings))
-        {
-            systemSettings = new ExportedSystemSettings(
-                new InstanceBehaviorSettingsUpdateRequest(
-                    snapshot.Behavior.ConversationAutomationEnabled,
-                    snapshot.Behavior.HostEventIngestionEnabled,
-                    snapshot.Behavior.AgentSupplementalIngestionEnabled,
-                    snapshot.Behavior.IdleThresholdMinutes,
-                    snapshot.Behavior.PromotionMode,
-                    snapshot.Behavior.ExcerptMaxLength,
-                    snapshot.Behavior.DefaultProjectId,
-                    snapshot.Behavior.DefaultQueryMode,
-                    snapshot.Behavior.DefaultUseSummaryLayer,
-                    snapshot.Behavior.SharedSummaryAutoRefreshEnabled,
-                    new DashboardSnapshotPollingSettingsUpdateRequest(
-                        snapshot.Behavior.SnapshotPolling.StatusCoreSeconds,
-                        snapshot.Behavior.SnapshotPolling.EmbeddingRuntimeSeconds,
-                        snapshot.Behavior.SnapshotPolling.DependenciesHealthSeconds,
-                        snapshot.Behavior.SnapshotPolling.DockerHostSeconds,
-                        snapshot.Behavior.SnapshotPolling.DependencyResourcesSeconds,
-                        snapshot.Behavior.SnapshotPolling.RecentOperationsSeconds,
-                        snapshot.Behavior.SnapshotPolling.ResourceChartSeconds,
-                        snapshot.Behavior.SnapshotPolling.MemoryGraphIndexSeconds),
-                    snapshot.Behavior.OverviewPollingSeconds,
-                    snapshot.Behavior.MetricsPollingSeconds,
-                    snapshot.Behavior.JobsPollingSeconds,
-                    snapshot.Behavior.LogsPollingSeconds,
-                    snapshot.Behavior.PerformancePollingSeconds),
-                new ExportedDashboardAuthSettings(
-                    snapshot.DashboardAuth.AdminUsername,
-                    snapshot.DashboardAuth.SessionTimeoutMinutes));
-
-            summaries.Add(BuildSummary(
-                InstanceTransferSection.SystemSettings,
-                1,
-                1,
-                0,
-                "包含應用行為設定與 Dashboard 登入帳號 / session timeout，不含密碼 hash。"));
-        }
-
         if (selectedSections.Contains(InstanceTransferSection.Memories))
         {
-            var memoryExport = await apiClient.ExportMemoriesAsync(new MemoryExportRequest(Passphrase: null), cancellationToken);
+            var memoryExport = await apiClient.ExportMemoriesAsync(new MemoryExportRequest(Passphrase: null), account, cancellationToken);
             memoryPackageBase64 = memoryExport.PayloadBase64;
             summaries.Add(BuildSummary(
                 InstanceTransferSection.Memories,
@@ -143,7 +103,7 @@ public sealed class InstanceTransferService(
 
         if (selectedSections.Contains(InstanceTransferSection.UserPreferences))
         {
-            var exportedPreferences = await apiClient.GetPreferencesAsync(null, includeArchived: true, limit: UserPreferenceLimit, cancellationToken);
+            var exportedPreferences = await apiClient.ExportPreferencesAsync(UserPreferenceLimit, account, cancellationToken);
             userPreferences = exportedPreferences
                 .Select(preference => new ExportedUserPreference(
                     preference.Key,
@@ -170,7 +130,7 @@ public sealed class InstanceTransferService(
             snapshot.Namespace,
             DateTimeOffset.UtcNow,
             selectedSections,
-            systemSettings,
+            null,
             memoryPackageBase64,
             userPreferences);
 
@@ -384,15 +344,16 @@ public sealed class InstanceTransferService(
                 .ToArray());
     }
 
-    private static IReadOnlyList<InstanceTransferSection> ResolveSelectedSections(IReadOnlyList<InstanceTransferSection>? sections)
+    private static IReadOnlyList<InstanceTransferSection> ResolveAccountExportSections(IReadOnlyList<InstanceTransferSection>? sections)
     {
         var resolved = (sections ?? Array.Empty<InstanceTransferSection>())
             .Distinct()
             .ToArray();
 
-        return resolved.Length == 0
-            ? [InstanceTransferSection.SystemSettings, InstanceTransferSection.Memories, InstanceTransferSection.UserPreferences]
-            : resolved;
+        if (resolved.Any(section => section is not (InstanceTransferSection.Memories or InstanceTransferSection.UserPreferences)))
+            throw new InvalidOperationException("帳號匯出僅包含記憶資料與使用者偏好。");
+
+        return resolved.Length == 0 ? [InstanceTransferSection.Memories, InstanceTransferSection.UserPreferences] : resolved;
     }
 
     private static IReadOnlyList<InstanceTransferSection> ResolveImportSections(
@@ -402,7 +363,7 @@ public sealed class InstanceTransferService(
         var available = bundle.Sections
             .Distinct()
             .ToArray();
-        var selected = ResolveSelectedSections(requestedSections);
+        var selected = requestedSections is { Count: > 0 } ? requestedSections.Distinct().ToArray() : available;
         var missing = selected
             .Where(section => !available.Contains(section))
             .ToArray();

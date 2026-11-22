@@ -68,10 +68,9 @@ public interface IContextHubApiClient : IWorkItemEditingApi
     Task<AgentExecutionResult?> GetAgentExecutionAsync(Guid executionId, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken);
-    Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken);
-    Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
-    Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken);
+    Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, DashboardExportAccount account, CancellationToken cancellationToken);
+    Task<IReadOnlyList<UserPreferenceResult>> ExportPreferencesAsync(int limit, DashboardExportAccount account, CancellationToken cancellationToken);
     Task<MemoryImportPreviewResult> PreviewMemoryImportAsync(MemoryImportRequest request, CancellationToken cancellationToken);
     Task<MemoryImportApplyResult> ApplyMemoryImportAsync(MemoryImportRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<UserPreferenceResult>> GetPreferencesAsync(UserPreferenceKind? kind, bool includeArchived, int limit, CancellationToken cancellationToken);
@@ -145,7 +144,7 @@ public interface IContextHubApiClient : IWorkItemEditingApi
     Task<SkillVersionSummaryResult> ChangeSkillVersionLifecycleAsync(SkillLifecycleRequest request, CancellationToken cancellationToken);
     Task<SkillSummaryResult> SetSkillDefaultVersionAsync(SkillDefaultVersionRequest request, CancellationToken cancellationToken);
     Task<SkillBindingResult> UpsertSkillBindingAsync(SkillBindingUpsertRequest request, CancellationToken cancellationToken);
-    Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken);
+    Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, DashboardExportAccount account, CancellationToken cancellationToken);
     Task<SkillVersionDiffResult> DiffSkillVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken);
     Task<SkillSourceObservationResult> RecordSkillSourceObservationAsync(SkillSourceObservationRequest request, CancellationToken cancellationToken);
@@ -400,8 +399,11 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         return await ReadRequiredAsync<SkillBindingResult>(response, cancellationToken);
     }
 
-    public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken)
-        => GetRequiredAsync<PortableSkillBundle>($"/api/skills/versions/{skillVersionId:D}/export", cancellationToken);
+    public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, DashboardExportAccount account, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+        return GetRequiredAsync<PortableSkillBundle>($"/api/skills/versions/{skillVersionId:D}/export", cancellationToken, exportAccount: account);
+    }
 
     public Task<SkillVersionDiffResult> DiffSkillVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken)
         => GetRequiredAsync<SkillVersionDiffResult>(QueryHelpers.AddQueryString($"/api/skills/{skillId:D}/versions/diff", new Dictionary<string, string?>
@@ -655,19 +657,6 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         response.EnsureSuccessStatusCode();
     }
 
-    public async Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken)
-    {
-        var action = archived ? "archive" : "restore";
-        using var response = await httpClient.PostAsync($"/api/work-items/{workItemId:D}/{action}", content: null, cancellationToken);
-        return await ReadRequiredAsync<ProjectWorkItemResult>(response, cancellationToken);
-    }
-
-    public async Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
-    {
-        using var response = await httpClient.PutAsJsonAsync($"/api/work-items/{workItemId:D}/checklist/{checklistItemId:D}", new { isCompleted }, cancellationToken);
-        return await ReadRequiredAsync<ProjectWorkItemResult>(response, cancellationToken);
-    }
-
     public async Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)
     {
         using var response = await httpClient.GetAsync($"/api/memories/{id}/details", cancellationToken);
@@ -679,10 +668,24 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         return await ReadRequiredAsync<MemoryDetailsResult>(response, cancellationToken);
     }
 
-    public async Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken)
+    public async Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, DashboardExportAccount account, CancellationToken cancellationToken)
     {
-        using var response = await httpClient.PostAsJsonAsync("/api/memories/export", request, cancellationToken);
+        ArgumentNullException.ThrowIfNull(account);
+        using var message = new HttpRequestMessage(HttpMethod.Post, "/api/memories/export") { Content = JsonContent.Create(request) };
+        message.Options.Set(DashboardExportAccount.RequestOption, account);
+        using var response = await httpClient.SendAsync(message, cancellationToken);
         return await ReadRequiredAsync<MemoryTransferDownloadResult>(response, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<UserPreferenceResult>> ExportPreferencesAsync(int limit, DashboardExportAccount account, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+        var url = QueryHelpers.AddQueryString("/api/user/preferences", new Dictionary<string, string?>
+        {
+            ["includeArchived"] = bool.TrueString,
+            ["limit"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        });
+        return GetRequiredAsync<IReadOnlyList<UserPreferenceResult>>(url, cancellationToken, exportAccount: account);
     }
 
     public async Task<MemoryImportPreviewResult> PreviewMemoryImportAsync(MemoryImportRequest request, CancellationToken cancellationToken)
@@ -1096,16 +1099,18 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         _ => null
     };
 
-    private Task<T> GetRequiredAsync<T>(string url, CancellationToken cancellationToken, FailureStatus failureStatus = FailureStatus.None)
-        => GetAndReadAsync<T>(url, cancellationToken, failureStatus);
+    private Task<T> GetRequiredAsync<T>(string url, CancellationToken cancellationToken, FailureStatus failureStatus = FailureStatus.None, DashboardExportAccount? exportAccount = null)
+        => GetAndReadAsync<T>(url, cancellationToken, failureStatus, exportAccount);
 
-    private async Task<T> GetAndReadAsync<T>(string url, CancellationToken cancellationToken, FailureStatus failureStatus)
+    private async Task<T> GetAndReadAsync<T>(string url, CancellationToken cancellationToken, FailureStatus failureStatus, DashboardExportAccount? exportAccount)
     {
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                using var response = await httpClient.GetAsync(url, cancellationToken);
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                if (exportAccount is not null) request.Options.Set(DashboardExportAccount.RequestOption, exportAccount);
+                using var response = await httpClient.SendAsync(request, cancellationToken);
                 if (attempt < MaxGetAttempts && IsTransientStatusCode(response.StatusCode))
                 {
                     await DelayBeforeRetryAsync(attempt, cancellationToken);

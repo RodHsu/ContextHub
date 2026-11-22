@@ -426,6 +426,7 @@ public sealed class SkillService(
 
     public async Task<PortableSkillBundle> ExportAsync(Guid skillVersionId, CancellationToken cancellationToken)
     {
+        ActorAuthorization.EnsureAuthenticatedUser(actorAccessor.Current);
         EnsureReadAccess();
         var version = await ScopedVersions(includeArchivedSkills: true)
             .SingleOrDefaultAsync(item => item.Id == skillVersionId, cancellationToken)

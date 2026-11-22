@@ -1130,31 +1130,53 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
     {
         await using var scope = _factory.Services.CreateAsyncScope();
         var service = scope.ServiceProvider.GetRequiredService<IInstanceTransferService>();
-
-        var export = await service.ExportAsync(
-            new InstanceTransferExportRequest(
-                [InstanceTransferSection.SystemSettings, InstanceTransferSection.Memories, InstanceTransferSection.UserPreferences],
-                "secret-passphrase"),
-            CancellationToken.None);
+        var account = DashboardExportAccount.Require(ExportPrincipal());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ExportAsync(
+            new InstanceTransferExportRequest([InstanceTransferSection.SystemSettings]), account, CancellationToken.None));
+        var export = await service.ExportAsync(new InstanceTransferExportRequest(Passphrase: "secret-passphrase"), account, CancellationToken.None);
 
         export.Encrypted.Should().BeTrue();
-        export.Sections.Should().HaveCount(3);
+        export.Sections.Should().HaveCount(2);
         export.Sections.Select(section => section.Section).Should().BeEquivalentTo(
-            [InstanceTransferSection.SystemSettings, InstanceTransferSection.Memories, InstanceTransferSection.UserPreferences]);
+            [InstanceTransferSection.Memories, InstanceTransferSection.UserPreferences]);
 
         var preview = await service.PreviewImportAsync(
             new InstanceTransferImportRequest(
                 export.PayloadBase64,
-                [InstanceTransferSection.SystemSettings, InstanceTransferSection.Memories, InstanceTransferSection.UserPreferences],
-                "secret-passphrase"),
+                Passphrase: "secret-passphrase"),
             CancellationToken.None);
 
         preview.Encrypted.Should().BeTrue();
-        preview.Sections.Should().HaveCount(3);
-        preview.Conflicts.Should().Contain(conflict => conflict.Section == InstanceTransferSection.SystemSettings);
+        preview.Sections.Should().HaveCount(2);
+        preview.Conflicts.Should().NotContain(conflict => conflict.Section == InstanceTransferSection.SystemSettings);
         preview.Conflicts.Should().Contain(conflict => conflict.Section == InstanceTransferSection.Memories);
         preview.Conflicts.Should().Contain(conflict => conflict.Section == InstanceTransferSection.UserPreferences);
     }
+
+    [Fact]
+    public async Task Instance_Transfer_Service_Should_Preview_Legacy_System_Settings_Bundle()
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var service = scope.ServiceProvider.GetRequiredService<IInstanceTransferService>();
+        var bundle = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = 1, @namespace = "legacy", exportedAtUtc = DateTimeOffset.UnixEpoch,
+            sections = new[] { InstanceTransferSection.SystemSettings },
+            systemSettings = new { behavior = new { }, dashboardAuth = new { adminUsername = "legacy", sessionTimeoutMinutes = 60 } }
+        });
+        var package = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = 1, format = "contexthub-instance-transfer", encrypted = false, algorithm = "none",
+            payloadBase64 = Convert.ToBase64String(bundle)
+        });
+
+        var preview = await service.PreviewImportAsync(new(Convert.ToBase64String(package)), CancellationToken.None);
+
+        preview.Sections.Should().ContainSingle().Which.Section.Should().Be(InstanceTransferSection.SystemSettings);
+    }
+
+    private static ClaimsPrincipal ExportPrincipal() => new(new ClaimsIdentity(
+        [new("contexthub:tenant_id", Guid.NewGuid().ToString("D")), new("contexthub:user_id", Guid.NewGuid().ToString("D"))], "Test"));
 
     private sealed class PageRenderErrors : ILoggerProvider, ILogger
     {
@@ -1502,17 +1524,12 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
                 null)
         ]);
 
-    public Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid id, bool archived, CancellationToken cancellationToken)
-        => throw new NotSupportedException();
-
     public async Task<ProjectWorkItemResult?> GetWorkItemForEditAsync(string projectId, Guid workItemId, CancellationToken cancellationToken)
         => (await GetProjectWorkItemsAsync(new(projectId, IncludeArchived: true), cancellationToken)).FirstOrDefault(item => item.Id == workItemId);
     public Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectWorkItemResult(Guid.NewGuid(), request.ProjectId, request.Title, request.Description ?? string.Empty, request.Tags ?? [], [], ProjectWorkItemStatus.Pending, request.Priority, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
     public Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectWorkItemResult(request.Id, "ContextHub", request.Title ?? string.Empty, request.Description ?? string.Empty, request.Tags ?? [], [], request.Status ?? ProjectWorkItemStatus.Pending, request.Priority ?? 0, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
-    public Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
-        => UpdateProjectWorkItemAsync(new ProjectWorkItemUpdateRequest(workItemId), cancellationToken);
 
     public Task<IReadOnlyList<ChatGptProposalResult>> GetChatGptProposalsAsync(ChatGptProposalListRequest request, CancellationToken cancellationToken)
     {
@@ -2001,8 +2018,11 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
                 DateTimeOffset.UtcNow.AddMinutes(-20),
                 ["dashboard-ui-tests"])));
 
-    public Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken)
+    public Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, DashboardExportAccount account, CancellationToken cancellationToken)
         => Task.FromResult(new MemoryTransferDownloadResult("demo-export.json", "application/json", Convert.ToBase64String("{}"u8.ToArray()), 1, !string.IsNullOrWhiteSpace(request.Passphrase)));
+
+    public Task<IReadOnlyList<UserPreferenceResult>> ExportPreferencesAsync(int limit, DashboardExportAccount account, CancellationToken cancellationToken)
+        => GetPreferencesAsync(null, includeArchived: true, limit, cancellationToken);
 
     public Task<MemoryImportPreviewResult> PreviewMemoryImportAsync(MemoryImportRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new MemoryImportPreviewResult("test", 1, 0, 1, false, false, [
@@ -2438,7 +2458,7 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
     public Task<SkillBindingResult> UpsertSkillBindingAsync(SkillBindingUpsertRequest request, CancellationToken cancellationToken)
         => throw new NotSupportedException();
 
-    public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken)
+    public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, DashboardExportAccount account, CancellationToken cancellationToken)
         => throw new NotSupportedException();
 
     public Task<SkillVersionDiffResult> DiffSkillVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken)

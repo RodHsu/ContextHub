@@ -276,8 +276,8 @@ public sealed class ProjectWorkItemReadEndpointTests
         public Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken) { ListRequest = request; return Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>([]); }
         public Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<ProjectWorkItemResult> UpdateAsync(ProjectWorkItemUpdateRequest request, CancellationToken ct) => throw new NotSupportedException();
-        public Task<ProjectWorkItemResult> SetArchivedAsync(Guid id, bool archived, CancellationToken ct) => throw new NotSupportedException();
-        public Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid id, Guid checklist, bool completed, CancellationToken ct) => throw new NotSupportedException();
+        public Task<ProjectWorkItemResult> SetArchivedAsync(ProjectWorkItemArchiveRequest request, CancellationToken ct) => throw new NotSupportedException();
+        public Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(ProjectWorkItemChecklistUpdateRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken ct) => throw new NotSupportedException();
     }
 }

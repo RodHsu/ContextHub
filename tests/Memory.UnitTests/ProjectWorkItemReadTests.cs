@@ -40,15 +40,24 @@ public sealed class ProjectWorkItemReadTests
     [Theory]
     [InlineData("update")]
     [InlineData("archive")]
+    [InlineData("restore")]
     [InlineData("checklist")]
+    [InlineData("governance-exclusion")]
     public async Task Legacy_writers_without_original_revision_reject_instead_of_filling_the_stored_revision(string operation)
     {
         var item = Item(); item.Revision = 900;
-        var editing = new Editing(); var service = EditingService(Actor() with { Scopes = [SecurityScopes.MemoryWrite] }, editing, item);
+        var editing = new Editing();
+        var service = EditingService(Actor() with
+        {
+            Role = TenantUserRole.Owner,
+            Scopes = [SecurityScopes.MemoryWrite, SecurityScopes.GovernanceTrackerManage]
+        }, editing, item);
         Func<Task> call = operation switch
         {
-            "archive" => () => service.SetArchivedAsync(item.Id, true, default),
-            "checklist" => () => service.SetChecklistItemCompletionAsync(item.Id, Guid.NewGuid(), false, default),
+            "archive" => () => service.SetArchivedAsync(new(item.Id), default),
+            "restore" => () => service.SetArchivedAsync(new(item.Id, Archived: false), default),
+            "checklist" => () => service.SetChecklistItemCompletionAsync(new(item.Id, Guid.NewGuid(), false), default),
+            "governance-exclusion" => () => service.SetGovernanceExclusionAsync(new(item.Id, item.ProjectId, "run", "reason"), default),
             _ => () => service.UpdateAsync(new(item.Id, Title: "draft"), default)
         };
         (await call.Should().ThrowAsync<SafeEditConflictException>()).Which.Code.Should().Be(SafeEditConflictCodes.MissingReadVersion);

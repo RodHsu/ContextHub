@@ -605,7 +605,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 ["browser-tests", "graph-page"])));
     }
 
-    public Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, CancellationToken cancellationToken)
+    public Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, DashboardExportAccount account, CancellationToken cancellationToken)
         => Task.FromResult(new MemoryTransferDownloadResult(
             "demo-export.json",
             "application/json",
@@ -654,6 +654,9 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
         return Task.FromResult<IReadOnlyList<UserPreferenceResult>>(items.Take(limit).ToArray());
     }
+
+    public Task<IReadOnlyList<UserPreferenceResult>> ExportPreferencesAsync(int limit, DashboardExportAccount account, CancellationToken cancellationToken)
+        => GetPreferencesAsync(null, includeArchived: true, limit, cancellationToken);
 
     public Task<UserPreferenceResult> UpsertPreferenceAsync(UserPreferenceUpsertRequest request, CancellationToken cancellationToken)
     {
@@ -924,12 +927,6 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
     public Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new ProjectWorkItemResult(request.Id, "dashboard-test", request.Title ?? "更新後代辦", request.Description ?? string.Empty, request.Tags ?? [], [], request.Status ?? ProjectWorkItemStatus.InProgress, request.Priority ?? 0, request.DueAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, request.Status == ProjectWorkItemStatus.Completed ? DateTimeOffset.UtcNow : null));
-
-    public Task<ProjectWorkItemResult> SetProjectWorkItemArchivedAsync(Guid workItemId, bool archived, CancellationToken cancellationToken)
-        => Task.FromResult(new ProjectWorkItemResult(workItemId, "dashboard-test", "封存代辦", string.Empty, [], [], ProjectWorkItemStatus.Completed, 0, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, archived ? DateTimeOffset.UtcNow : null));
-
-    public Task<ProjectWorkItemResult> SetProjectWorkItemChecklistCompletionAsync(Guid workItemId, Guid checklistItemId, bool isCompleted, CancellationToken cancellationToken)
-        => UpdateProjectWorkItemAsync(new ProjectWorkItemUpdateRequest(workItemId), cancellationToken);
 
     public Task<MemoryDataRetentionRunResult> RunMemoryDataRetentionAsync(MemoryDataRetentionRunRequest request, CancellationToken cancellationToken)
         => Task.FromResult(BuildRetentionResult(request.Mode));
@@ -2163,7 +2160,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<SkillBindingResult> UpsertSkillBindingAsync(SkillBindingUpsertRequest request, CancellationToken cancellationToken)
         => throw new NotSupportedException();
 
-    public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, CancellationToken cancellationToken)
+    public Task<PortableSkillBundle> ExportSkillVersionAsync(Guid skillVersionId, DashboardExportAccount account, CancellationToken cancellationToken)
         => throw new NotSupportedException();
 
     public Task<SkillVersionDiffResult> DiffSkillVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken)

@@ -184,7 +184,6 @@ public sealed class ProjectWorkItemEditingEndpointTests
         using var response = await client.PostAsync(Path + "/archive", null);
         response.StatusCode.Should().Be(HttpStatusCode.Conflict);
         fixture.Legacy.ArchiveRequest.Should().Be(new ProjectWorkItemArchiveRequest(Id, true, null, null));
-        fixture.Legacy.OriginalScalarCalls.Should().Be(0);
         // The fake only dispatches a known failure; actual missing-version enforcement is an Application test.
     }
 
@@ -209,7 +208,6 @@ public sealed class ProjectWorkItemEditingEndpointTests
             requestId = Key
         })).StatusCode.Should().Be(HttpStatusCode.OK);
         fixture.Legacy.ExclusionRequest.Should().Be(new ProjectWorkItemGovernanceExclusionRequest(Id, Project, "synthetic-run", "Synthetic reason", false, 7, Key));
-        fixture.Legacy.OriginalScalarCalls.Should().Be(0);
         // These fakes do not assert the extra governance-management resource authorization.
     }
 
@@ -311,7 +309,6 @@ public sealed class ProjectWorkItemEditingEndpointTests
     private sealed class Legacy : IProjectWorkItemService
     {
         public int Calls { get; private set; }
-        public int OriginalScalarCalls { get; private set; }
         public Exception? Failure { get; set; }
         public ProjectWorkItemUpdateRequest? UpdateRequest { get; private set; }
         public ProjectWorkItemArchiveRequest? ArchiveRequest { get; private set; }
@@ -326,10 +323,6 @@ public sealed class ProjectWorkItemEditingEndpointTests
         { ChecklistRequest = request; return Result(request.WorkItemId); }
         public Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken ct)
         { ExclusionRequest = request; return Result(request.WorkItemId); }
-        public Task<ProjectWorkItemResult> SetArchivedAsync(Guid id, bool archived, CancellationToken ct)
-        { OriginalScalarCalls++; throw new NotSupportedException("The endpoint must call the versioned overload."); }
-        public Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(Guid id, Guid leaf, bool completed, CancellationToken ct)
-        { OriginalScalarCalls++; throw new NotSupportedException("The endpoint must call the versioned overload."); }
         public Task<ProjectWorkItemResult?> GetAsync(Guid id, bool includeArchived, CancellationToken ct) => throw new NotSupportedException();
         public Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken ct) => throw new NotSupportedException();
