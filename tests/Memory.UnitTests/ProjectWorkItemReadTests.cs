@@ -30,6 +30,73 @@ public sealed class ProjectWorkItemReadTests
         return new(db, new RequestActorAccessor { Current = actor }, new Clock());
     }
 
+    private static ProjectWorkItemService EditingService(ContextHubRequestActor actor, Editing editing, params ProjectWorkItem[] items)
+    {
+        var db = DispatchProxy.Create<IApplicationDbContext, ReadContext>();
+        ((ReadContext)db).Items = new ReadSet<ProjectWorkItem>(items);
+        return new(db, new RequestActorAccessor { Current = actor }, new Clock(), () => editing);
+    }
+
+    [Theory]
+    [InlineData("update")]
+    [InlineData("archive")]
+    [InlineData("checklist")]
+    public async Task Legacy_writers_without_original_revision_reject_instead_of_filling_the_stored_revision(string operation)
+    {
+        var item = Item(); item.Revision = 900;
+        var editing = new Editing(); var service = EditingService(Actor() with { Scopes = [SecurityScopes.MemoryWrite] }, editing, item);
+        Func<Task> call = operation switch
+        {
+            "archive" => () => service.SetArchivedAsync(item.Id, true, default),
+            "checklist" => () => service.SetChecklistItemCompletionAsync(item.Id, Guid.NewGuid(), false, default),
+            _ => () => service.UpdateAsync(new(item.Id, Title: "draft"), default)
+        };
+        (await call.Should().ThrowAsync<SafeEditConflictException>()).Which.Code.Should().Be(SafeEditConflictCodes.MissingReadVersion);
+        editing.Command.Should().BeNull(); item.Revision.Should().Be(900);
+    }
+
+    [Fact]
+    public async Task Typed_writer_resolves_only_authorized_project_and_preserves_the_callers_stale_revision()
+    {
+        var item = Item(); item.Revision = 900;
+        var editing = new Editing(); var service = EditingService(Actor() with { Scopes = [SecurityScopes.MemoryWrite] }, editing, item);
+        var result = await service.UpdateAsync(new(item.Id, ExpectedRevision: 7, RequestId: "original-key",
+            Edit: new(DueAt: new(EditDueAtMode.Clear))), default);
+        editing.Command!.ExpectedRevision.Should().Be(7); editing.Command.ProjectId.Should().Be("ContextHub");
+        editing.Command.RequestId.Should().Be("original-key"); editing.Command.Patch.DueAt!.Mode.Should().Be(EditDueAtMode.Clear);
+        result.EditReceipt!.RequestHash.Should().Be(WorkItemEditContract.Hash(editing.Command));
+        // The fake only observes adapter dispatch. It does not accept a stale write or simulate persistence.
+    }
+
+    [Theory]
+    [InlineData("owner")]
+    [InlineData("tenant")]
+    [InlineData("project")]
+    public async Task Unauthorized_target_never_reaches_the_versioned_editor(string boundary)
+    {
+        var item = boundary == "owner" ? Item(Guid.NewGuid()) : boundary == "tenant" ? Item(tenant: Guid.NewGuid()) : Item();
+        if (boundary == "project") item.ProjectId = "Other";
+        var editing = new Editing(); var service = EditingService(Actor() with { Scopes = [SecurityScopes.MemoryWrite] }, editing, item);
+        var error = await Record.ExceptionAsync(() => service.UpdateAsync(new(item.Id, ExpectedRevision: 1, RequestId: "key"), default));
+        error.Should().BeAssignableTo<Exception>();
+        (error is KeyNotFoundException or UnauthorizedAccessException).Should().BeTrue();
+        editing.Command.Should().BeNull();
+    }
+
+    private sealed class Editing : IWorkItemEditingService
+    {
+        public WorkItemEditCommand? Command { get; private set; }
+        public Task<WorkItemEditReceipt> ApplyAsync(WorkItemEditCommand command, CancellationToken ct)
+        {
+            Command = command;
+            var result = WorkItemEditProjection.ToResult(new ProjectWorkItem { Id = command.WorkItemId, ProjectId = command.ProjectId, Revision = command.ExpectedRevision!.Value });
+            return Task.FromResult(new WorkItemEditReceipt(Guid.NewGuid(), null, command.ProjectId, command.WorkItemId, command.RequestId,
+                WorkItemEditContract.Hash(command), WorkItemEditContract.IntentHashVersion, command.Operation, command.ExpectedRevision.Value,
+                command.ExpectedRevision.Value, false, DateTimeOffset.UnixEpoch, result));
+        }
+        public Task<WorkItemEditReceipt?> ReadReceiptAsync(WorkItemEditRecoveryRequest request, CancellationToken ct) => throw new NotSupportedException();
+    }
+
     [Fact]
     public async Task Get_respects_owner_tenant_and_service_actor_boundaries()
     {

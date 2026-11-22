@@ -110,6 +110,7 @@ public sealed class ProjectWorkItemReadEndpointTests
         var result = (await response.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
         result.Id.Should().Be(visible.Id);
         result.ProjectId.Should().Be(visible.ProjectId);
+        result.Revision.Should().Be(visible.Revision);
         result.ChecklistItems.Select(x => x.Content).Should().Equal("first", "last");
         foreach (var hidden in new[] { otherOwner, otherTenant })
         {
@@ -143,6 +144,18 @@ public sealed class ProjectWorkItemReadEndpointTests
         }
     }
 
+    [Fact]
+    public async Task Scoped_read_masks_foreign_project_errors_and_returns_no_private_resource_detail()
+    {
+        var service = new Reads { Failure = new UnauthorizedAccessException("Project 'private-project' is not readable.") };
+        await using var app = await Host(service);
+        using var client = app.GetTestClient();
+        var response = await client.GetAsync($"/api/work-items/{Guid.NewGuid()}?projectId=ContextHub");
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await response.Content.ReadAsStringAsync()).Should().NotContain("private-project");
+        response.Headers.CacheControl!.NoStore.Should().BeTrue();
+    }
+
     private static async Task<WebApplication> Host(IProjectWorkItemService service, bool readScope = true, IRequestActorAccessor? actorAccessor = null)
     {
         var builder = WebApplication.CreateBuilder();
@@ -151,7 +164,8 @@ public sealed class ProjectWorkItemReadEndpointTests
         builder.Services.AddSingleton<IRequestActorAccessor>(actorAccessor ?? new Actor(readScope));
         builder.Services.AddAuthentication("synthetic").AddScheme<AuthenticationSchemeOptions, SyntheticAuthentication>("synthetic", _ => { });
         var app = builder.Build();
-        // Retain the production error shape so a service regression exposes the old 403 detail.
+        // Retain the production error shape for exceptions reaching middleware.
+        // PR8 normalizes route denial; direct service tests must independently preserve the opaque read fix.
         // This is a synthetic host, not the full Program startup or a database integration test.
         app.Use(async (context, next) =>
         {
@@ -257,7 +271,8 @@ public sealed class ProjectWorkItemReadEndpointTests
         public ProjectWorkItemListRequest? ListRequest { get; private set; }
         public (Guid, bool) GetRequest { get; private set; }
         public ProjectWorkItemResult? Result { get; set; }
-        public Task<ProjectWorkItemResult?> GetAsync(Guid id, bool includeArchived, CancellationToken cancellationToken) { GetRequest = (id, includeArchived); return Task.FromResult(Result); }
+        public Exception? Failure { get; init; }
+        public Task<ProjectWorkItemResult?> GetAsync(Guid id, bool includeArchived, CancellationToken cancellationToken) { GetRequest = (id, includeArchived); return Failure is null ? Task.FromResult(Result) : Task.FromException<ProjectWorkItemResult?>(Failure); }
         public Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken) { ListRequest = request; return Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>([]); }
         public Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<ProjectWorkItemResult> UpdateAsync(ProjectWorkItemUpdateRequest request, CancellationToken ct) => throw new NotSupportedException();

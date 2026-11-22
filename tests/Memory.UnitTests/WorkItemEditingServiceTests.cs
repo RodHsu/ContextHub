@@ -49,7 +49,7 @@ public sealed class WorkItemEditingServiceTests
     {
         var store = new Store(); var service = Service(store, Actor() with { IsServiceActor = true });
         await service.ApplyAsync(Command() with { ExpectedRevision = 7 }, default);
-        store.Scope.Should().Be(new WorkItemEditScope(Tenant, ActorId, true, "ContextHub"));
+        store.Scope.Should().Be(new WorkItemEditScope(Tenant, ActorId, true, "ContextHub", ActorName: "synthetic"));
         store.Command!.ExpectedRevision.Should().Be(7);
         store.Command.RequestId.Should().Be("synthetic-request");
         store.Command.Patch.Title.Should().Be("trimmed");
@@ -76,6 +76,83 @@ public sealed class WorkItemEditingServiceTests
             .Should().ThrowAsync<SafeEditConflictException>();
         error.Which.Code.Should().Be(SafeEditConflictCodes.RequestIdentityMismatch);
         store.ApplyCalls.Should().Be(1); store.ReadCalls.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task Governance_exclusion_requires_both_existing_admin_and_tracker_scope(bool admin, bool trackerScope)
+    {
+        var actor = Actor() with
+        {
+            Role = admin ? TenantUserRole.Admin : TenantUserRole.Member,
+            Scopes = trackerScope ? [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.GovernanceTrackerManage]
+                : [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite]
+        };
+        var store = new Store();
+        await FluentActions.Awaiting(() => Service(store, actor).ApplyAsync(Command() with
+        {
+            Operation = WorkItemEditOperation.GovernanceExclusion,
+            Patch = new(GovernanceExclusion: new("review-id", "reason"))
+        }, default)).Should().ThrowAsync<UnauthorizedAccessException>();
+        store.ApplyCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Governance_authority_and_actor_name_are_server_resolved_not_client_patch_fields()
+    {
+        var actor = Actor() with
+        {
+            Role = TenantUserRole.Admin,
+            Scopes = [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.GovernanceTrackerManage]
+        };
+        var store = new Store();
+        await Service(store, actor).ApplyAsync(Command() with
+        {
+            Operation = WorkItemEditOperation.GovernanceExclusion,
+            Patch = new(GovernanceExclusion: new(" review-id ", " reason "))
+        }, default);
+        store.Scope!.CanManageGovernanceTrackers.Should().BeTrue();
+        store.Scope.ActorName.Should().Be("synthetic");
+        store.Command!.Patch.GovernanceExclusion.Should().Be(new WorkItemGovernanceExclusionChange("review-id", "reason"));
+        // Snapshot ownership and audit/receipt atomicity require the real PostgreSQL store; this only proves dispatch authority.
+    }
+
+    [Fact]
+    public void Privileged_relationship_change_is_hashed_and_cannot_be_smuggled_into_an_ordinary_edit()
+    {
+        var command = Command() with
+        {
+            Operation = WorkItemEditOperation.GovernanceExclusion,
+            Patch = new(GovernanceExclusion: new("review", "reason"))
+        };
+        WorkItemEditContract.Hash(command).Should().NotBe(WorkItemEditContract.Hash(command with
+        { Patch = new(GovernanceExclusion: new("review", "different")) }));
+        WorkItemEditContract.Hash(command).Should().NotBe(WorkItemEditContract.Hash(command with
+        { Patch = new(GovernanceExclusion: new("review", "reason", false)) }));
+        FluentActions.Invoking(() => WorkItemEditContract.Normalize(command with { Operation = WorkItemEditOperation.Update }))
+            .Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void Governance_relationship_change_preserves_revocation_history_and_real_noop_revision()
+    {
+        var item = new ProjectWorkItem { Id = WorkId, ProjectId = "ContextHub", Revision = 1 };
+        var command = Command() with
+        {
+            Operation = WorkItemEditOperation.GovernanceExclusion,
+            Patch = new(GovernanceExclusion: new("review", "reason"))
+        };
+        WorkItemEditAggregate.Apply(item, command, DateTimeOffset.UnixEpoch, "server-actor").Should().BeTrue();
+        item.Revision.Should().Be(2);
+        WorkItemEditAggregate.Apply(item, command with { ExpectedRevision = 2 }, DateTimeOffset.UnixEpoch.AddHours(1), "other-server-actor")
+            .Should().BeFalse();
+        item.Revision.Should().Be(2);
+        WorkItemEditAggregate.Apply(item, command with { ExpectedRevision = 2, Patch = new(GovernanceExclusion: new("review", "revoked", false)) },
+            DateTimeOffset.UnixEpoch.AddHours(2), "server-actor").Should().BeTrue();
+        var relation = WorkItemEditProjection.ToResult(item).GovernanceExclusions.Single();
+        relation.IsActive.Should().BeFalse(); relation.Actor.Should().Be("server-actor");
+        relation.RevokedAt.Should().Be(DateTimeOffset.UnixEpoch.AddHours(2)); item.Revision.Should().Be(3);
     }
 
     [Fact]
