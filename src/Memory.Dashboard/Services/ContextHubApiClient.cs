@@ -19,6 +19,14 @@ public interface IContextHubApiClient
         => Task.FromResult<DashboardGraphRefreshStatus?>(null);
     Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken);
+    Task<ManagedFileMetadataPage?> GetManagedFilePageAsync(string projectId, int limit, int offset, CancellationToken cancellationToken)
+        => Task.FromResult<ManagedFileMetadataPage?>(null);
+    Task<ManagedFileInventoryResult?> GetManagedFileMetadataAsync(string projectId, Guid fileId, CancellationToken cancellationToken)
+        => Task.FromResult<ManagedFileInventoryResult?>(null);
+    Task<ManagedFileMetadataPage?> GetManagedFileVersionsAsync(string projectId, Guid fileId, int limit, int offset, CancellationToken cancellationToken)
+        => Task.FromResult<ManagedFileMetadataPage?>(null);
+    Task<ManagedFileInventoryResult?> GetManagedFileVersionAsync(string projectId, Guid fileId, Guid versionId, CancellationToken cancellationToken)
+        => Task.FromResult<ManagedFileInventoryResult?>(null);
     Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<CanonicalTagQualityWindow>?>(null);
@@ -157,7 +165,7 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     public Task<DashboardGraphRefreshStatus?> GetGraphRefreshStatusAsync(CancellationToken cancellationToken)
         => GetOptionalTelemetryAsync<DashboardGraphRefreshStatus>("/api/dashboard/graph-refresh", cancellationToken);
 
-    private async Task<T?> GetOptionalTelemetryAsync<T>(string url, CancellationToken cancellationToken) where T : class
+    private async Task<T?> GetOptionalTelemetryAsync<T>(string url, CancellationToken cancellationToken, bool preserveFailureStatusCode = false) where T : class
     {
         using var response = await httpClient.GetAsync(url, cancellationToken);
         if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.NotImplemented)
@@ -165,7 +173,7 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
             return null;
         }
 
-        return await ReadRequiredAsync<T>(response, cancellationToken);
+        return await ReadRequiredAsync<T>(response, cancellationToken, preserveFailureStatusCode ? FailureStatus.Direct : FailureStatus.None);
     }
 
     public Task<DashboardOperationsResult> GetOperationsAsync(string? projectId, CancellationToken cancellationToken)
@@ -182,10 +190,35 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         {
             ["projectId"] = projectId,
             ["limit"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture)
-        }), cancellationToken, preserveForbiddenStatusCode: true);
+        }), cancellationToken, FailureStatus.LegacyInventory);
+
+    public Task<ManagedFileMetadataPage?> GetManagedFilePageAsync(string projectId, int limit, int offset, CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<ManagedFileMetadataPage>(FileMetadataUrl("/api/files/inventory", projectId, limit, offset), cancellationToken, preserveFailureStatusCode: true);
+
+    public Task<ManagedFileInventoryResult?> GetManagedFileMetadataAsync(string projectId, Guid fileId, CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<ManagedFileInventoryResult>(FileMetadataUrl($"/api/files/{fileId:D}", projectId), cancellationToken, preserveFailureStatusCode: true);
+
+    public Task<ManagedFileMetadataPage?> GetManagedFileVersionsAsync(string projectId, Guid fileId, int limit, int offset, CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<ManagedFileMetadataPage>(FileMetadataUrl($"/api/files/{fileId:D}/versions", projectId, limit, offset), cancellationToken, preserveFailureStatusCode: true);
+
+    public Task<ManagedFileInventoryResult?> GetManagedFileVersionAsync(string projectId, Guid fileId, Guid versionId, CancellationToken cancellationToken)
+        => GetOptionalTelemetryAsync<ManagedFileInventoryResult>(FileMetadataUrl($"/api/files/{fileId:D}/versions/{versionId:D}", projectId), cancellationToken, preserveFailureStatusCode: true);
+
+    private static string FileMetadataUrl(string path, string projectId, int? limit = null, int? offset = null)
+    {
+        if (string.IsNullOrWhiteSpace(projectId)) throw new ArgumentException("A project is required.", nameof(projectId));
+        if (limit is <= 0 or > 100) throw new ArgumentOutOfRangeException(nameof(limit));
+        if (offset is < 0) throw new ArgumentOutOfRangeException(nameof(offset));
+        return QueryHelpers.AddQueryString(path, new Dictionary<string, string?>
+        {
+            ["projectId"] = projectId.Trim(),
+            ["limit"] = limit?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["offset"] = offset?.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        });
+    }
 
     public Task<IReadOnlyList<SecretSummary>> GetSecretsAsync(string projectId, CancellationToken cancellationToken)
-        => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken, preserveForbiddenStatusCode: true);
+        => GetRequiredAsync<IReadOnlyList<SecretSummary>>(QueryHelpers.AddQueryString("/api/secrets", "projectId", projectId), cancellationToken, FailureStatus.ForbiddenOnly);
 
     public Task<IReadOnlyList<CanonicalTagQualityWindow>?> GetCanonicalTagQualityAsync(string projectId, int days, CancellationToken cancellationToken)
     {
@@ -945,10 +978,19 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
             }),
             cancellationToken);
 
-    private Task<T> GetRequiredAsync<T>(string url, CancellationToken cancellationToken, bool preserveForbiddenStatusCode = false)
-        => GetAndReadAsync<T>(url, cancellationToken, preserveForbiddenStatusCode);
+    private enum FailureStatus { None, ForbiddenOnly, Direct, LegacyInventory }
 
-    private async Task<T> GetAndReadAsync<T>(string url, CancellationToken cancellationToken, bool preserveForbiddenStatusCode)
+    internal static HttpRequestException? GetInventoryHttpFailure(Exception exception) => exception switch
+    {
+        HttpRequestException failure => failure,
+        InvalidOperationException { InnerException: HttpRequestException failure } => failure,
+        _ => null
+    };
+
+    private Task<T> GetRequiredAsync<T>(string url, CancellationToken cancellationToken, FailureStatus failureStatus = FailureStatus.None)
+        => GetAndReadAsync<T>(url, cancellationToken, failureStatus);
+
+    private async Task<T> GetAndReadAsync<T>(string url, CancellationToken cancellationToken, FailureStatus failureStatus)
     {
         for (var attempt = 1; ; attempt++)
         {
@@ -961,9 +1003,9 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
                     continue;
                 }
 
-                return await ReadRequiredAsync<T>(response, cancellationToken, preserveForbiddenStatusCode);
+                return await ReadRequiredAsync<T>(response, cancellationToken, failureStatus);
             }
-            catch (Exception ex) when (!(preserveForbiddenStatusCode && ex is HttpRequestException { StatusCode: HttpStatusCode.Forbidden }) && ShouldRetryGet(ex, cancellationToken, attempt))
+            catch (Exception ex) when (!(failureStatus != FailureStatus.None && ex is HttpRequestException { StatusCode: HttpStatusCode.Forbidden }) && ShouldRetryGet(ex, cancellationToken, attempt))
             {
                 await DelayBeforeRetryAsync(attempt, cancellationToken);
             }
@@ -988,15 +1030,15 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         return Task.Delay(delay, cancellationToken);
     }
 
-    private static async Task<T> ReadRequiredAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken, bool preserveForbiddenStatusCode = false)
+    private static async Task<T> ReadRequiredAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken, FailureStatus failureStatus = FailureStatus.None)
     {
         if (!response.IsSuccessStatusCode)
         {
             var message = await BuildApiErrorMessageAsync(response, cancellationToken);
-            if (preserveForbiddenStatusCode && response.StatusCode == HttpStatusCode.Forbidden)
-            {
-                throw new HttpRequestException(message, null, HttpStatusCode.Forbidden);
-            }
+            if (failureStatus == FailureStatus.Direct || (failureStatus != FailureStatus.None && response.StatusCode == HttpStatusCode.Forbidden))
+                throw new HttpRequestException(message, null, response.StatusCode);
+            if (failureStatus == FailureStatus.LegacyInventory)
+                throw new InvalidOperationException(message, new HttpRequestException(message, null, response.StatusCode));
             throw new InvalidOperationException(message);
         }
 

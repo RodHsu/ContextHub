@@ -301,9 +301,18 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
                 var firstDomainLink = page.Locator(".domain-surface-nav a").First;
                 await firstDomainLink.FocusAsync();
                 (await firstDomainLink.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
-                var firstRow = page.Locator(".domain-list-panel tbody tr").First;
-                await firstRow.FocusAsync();
-                (await firstRow.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+                var fileRoute = route.StartsWith("/files?", StringComparison.Ordinal);
+                var selectors = page.Locator(fileRoute ? ".domain-list-panel tbody .file-select-button" : ".domain-list-panel tbody tr");
+                var firstSelection = selectors.First;
+                await firstSelection.FocusAsync();
+                (await firstSelection.EvaluateAsync<bool>("element => element === document.activeElement")).Should().BeTrue();
+                if (fileRoute)
+                {
+                    var secondSelection = selectors.Nth(1);
+                    var name = await secondSelection.InnerTextAsync();
+                    await secondSelection.PressAsync("Enter");
+                    await Assertions.Expect(page.Locator(".domain-detail-panel .panel-title")).ToHaveTextAsync(name);
+                }
 
                 var layout = await AnalyzeLayoutAsync(
                     page,
