@@ -92,6 +92,7 @@ public static class DependencyInjection
         });
 
         services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<MemoryDbContext>());
+        services.AddScoped<IWorkItemEditStore, WorkItemEditStore>();
         services.AddScoped<IHybridSearchStore, NpgsqlSearchStore>();
         services.AddScoped<IVectorStore, NpgsqlSearchStore>();
         services.AddScoped<IStorageExplorerStore, NpgsqlStorageExplorerStore>();

@@ -1225,6 +1225,7 @@ public sealed class DiscussionMessage
 public sealed class ProjectWorkItem
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public long Revision { get; set; } = 1;
     public Guid? TenantId { get; set; }
     public Guid? OwnerUserId { get; set; }
     public string ProjectId { get; set; } = string.Empty;
