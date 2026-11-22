@@ -1,4 +1,6 @@
 @page "/chatgpt-proposals"
+@using System.Net
+@using System.Text.Json
 @using Memory.Application
 @using Memory.Dashboard.Services
 @inject IContextHubApiClient ApiClient
@@ -13,7 +15,7 @@
             <RefreshStatus LastUpdatedAt="_lastUpdatedAt" IsRefreshing="_loading" />
         </div>
         <div class="page-actions-primary">
-            <button type="button" class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button>
+            <button type="button" class="primary-button" @onclick="LoadAsync" disabled="@IsBusy">重新整理</button>
         </div>
     </Actions>
     <ChildContent>
@@ -35,14 +37,14 @@
                         </select>
                     </label>
                     <div class="filter-action-cell">
-                        <button type="button" class="ghost-button" @onclick="LoadAsync" disabled="@_loading">套用</button>
+                        <button type="button" class="ghost-button" @onclick="LoadAsync" disabled="@IsBusy">套用</button>
                     </div>
                 </div>
             </section>
 
             @if (!string.IsNullOrWhiteSpace(_error))
             {
-                <div class="inline-error">@_error</div>
+                <div class="inline-error" role="alert">@_error</div>
             }
 
             <div class="metric-grid chatgpt-proposals-summary">
@@ -190,9 +192,17 @@
                                         </div>
                                         @if (selected.Status == ChatGptProposalStatus.Pending)
                                         {
+                                            var unconfirmed = _unconfirmedProposals.Contains(selected.Id);
+                                            @if (unconfirmed)
+                                            {
+                                                <p role="status" data-testid="proposal-unconfirmed">無法確認原提案是否已寫入。請用下方按鈕確認同一筆提案，避免建立新的請求。</p>
+                                            }
                                             <div class="inline-actions">
-                                                <button type="button" class="primary-button" @onclick="() => ApproveAsync(selected.Id)" disabled="@_loading">批准寫入</button>
-                                                <button type="button" class="ghost-button chatgpt-proposals-reject-button" @onclick="() => RejectAsync(selected.Id)" disabled="@_loading">拒絕</button>
+                                                <button type="button" class="primary-button" data-testid="proposal-approve" @onclick="() => DecideAsync(selected.Id, approve: true)" disabled="@IsBusy">@(unconfirmed ? "確認原提案結果" : "批准寫入")</button>
+                                                @if (!unconfirmed)
+                                                {
+                                                    <button type="button" class="ghost-button chatgpt-proposals-reject-button" data-testid="proposal-reject" @onclick="() => DecideAsync(selected.Id, approve: false)" disabled="@IsBusy">拒絕</button>
+                                                }
                                             </div>
                                         }
                                     </div>
@@ -212,6 +222,9 @@
     private string _projectId = "ContextHub";
     private string _status = "Pending";
     private bool _loading;
+    private bool _deciding;
+    private readonly HashSet<Guid> _unconfirmedProposals = [];
+    private bool IsBusy => _loading || _deciding;
     private string _error = string.Empty;
     private DateTimeOffset? _lastUpdatedAt;
 
@@ -231,6 +244,7 @@
 
     private async Task LoadAsync()
     {
+        if (IsBusy) return;
         _loading = true;
         _error = string.Empty;
         try
@@ -245,6 +259,8 @@
                     100),
                 CancellationToken.None);
             _proposals = result.ToList();
+            foreach (var resolved in result.Where(item => item.Status != ChatGptProposalStatus.Pending))
+                _unconfirmedProposals.Remove(resolved.Id);
             _selectedProposalId = ResolveSelectedProposalId();
             _lastUpdatedAt = DateTimeOffset.UtcNow;
         }
@@ -267,17 +283,47 @@
             ? _selectedProposalId
             : _proposals.FirstOrDefault()?.Id;
 
-    private async Task ApproveAsync(Guid id)
+    private async Task DecideAsync(Guid id, bool approve)
     {
-        await ApiClient.ApproveChatGptProposalAsync(id, "Approved from Dashboard.", CancellationToken.None);
+        if (IsBusy || SelectedProposal is not { Status: ChatGptProposalStatus.Pending } proposal || proposal.Id != id ||
+            (!approve && _unconfirmedProposals.Contains(id))) return;
+
+        _deciding = true;
+        _error = string.Empty;
+        try
+        {
+            var result = approve
+                ? await ApiClient.ApproveChatGptProposalAsync(proposal.Id, "Approved from Dashboard.", CancellationToken.None)
+                : await ApiClient.RejectChatGptProposalAsync(proposal.Id, "Rejected from Dashboard.", CancellationToken.None);
+            if (result.Id != proposal.Id || result.Status == ChatGptProposalStatus.Pending)
+                throw new InvalidOperationException("The proposal result is unconfirmed.");
+            _unconfirmedProposals.Remove(proposal.Id);
+        }
+        catch (Exception exception) when (approve && proposal.ToolName == WorkItemProposalContract.ToolName && IsUnconfirmed(exception))
+        {
+            _unconfirmedProposals.Add(proposal.Id);
+            return;
+        }
+        catch (Exception)
+        {
+            _error = "無法完成提案決策。請重新整理並核對原提案的狀態。";
+            return;
+        }
+        finally
+        {
+            _deciding = false;
+        }
         await LoadAsync();
     }
 
-    private async Task RejectAsync(Guid id)
-    {
-        await ApiClient.RejectChatGptProposalAsync(id, "Rejected from Dashboard.", CancellationToken.None);
-        await LoadAsync();
-    }
+    private static bool IsUnconfirmed(Exception exception)
+        => exception switch
+        {
+            HttpRequestException { StatusCode: null or HttpStatusCode.RequestTimeout } => true,
+            HttpRequestException request => (int)request.StatusCode.GetValueOrDefault() >= 500,
+            OperationCanceledException or InvalidOperationException or JsonException => true,
+            _ => false
+        };
 
     private string ProposalItemCss(Guid id)
         => id == SelectedProposal?.Id

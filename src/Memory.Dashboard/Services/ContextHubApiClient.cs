@@ -461,13 +461,13 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
     public async Task<ChatGptProposalResult> ApproveChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken)
     {
         using var response = await httpClient.PostAsJsonAsync($"/api/chatgpt/proposals/{id:D}/approve", new { note }, cancellationToken);
-        return await ReadRequiredAsync<ChatGptProposalResult>(response, cancellationToken);
+        return await ReadRequiredAsync<ChatGptProposalResult>(response, cancellationToken, FailureStatus.Direct);
     }
 
     public async Task<ChatGptProposalResult> RejectChatGptProposalAsync(Guid id, string note, CancellationToken cancellationToken)
     {
         using var response = await httpClient.PostAsJsonAsync($"/api/chatgpt/proposals/{id:D}/reject", new { note }, cancellationToken);
-        return await ReadRequiredAsync<ChatGptProposalResult>(response, cancellationToken);
+        return await ReadRequiredAsync<ChatGptProposalResult>(response, cancellationToken, FailureStatus.Direct);
     }
 
     public Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken)
