@@ -324,7 +324,7 @@
                                     <span>快取 @DashboardFormatting.Percent(window.CacheHitPercent)</span>
                                 }
                                 <span class="context-savings-call-count">有效樣本：@(HasUsableSavings(window) || window.UnusableSampleCount.HasValue ? DashboardFormatting.Integer(window.SampleCount) + " 次" : "未知（無可用樣本）")</span>
-                                <span class="context-savings-call-count">實際呼叫次數：@(ContextSavingsSnapshotSection() is not null || window.SavingsCalculationVersion == "net-br-v1" ? DashboardFormatting.Integer(window.ActualToolCallCount) + " 次" : "未知（沒有可核快照）")</span>
+                                <span class="context-savings-call-count">實際呼叫次數：@ToolCallCountText(window, ContextSavingsSnapshotSection() is not null)</span>
                                 <span>滾動窗口：<ClientLocalTime Value="window.WindowStartedAtUtc" /> — <ClientLocalTime Value="window.WindowEndedAtUtc" /></span>
                             </small>
                         </article>
@@ -690,6 +690,11 @@
         => window.UnusableSampleCount is not { } rejected ? "舊快照：缺樣本完整性資訊"
             : rejected > 0 ? $"排除 {rejected} 筆缺值／無效樣本；其餘樣本可計算"
             : HasUsableSavings(window) ? "有效樣本可計算" : "無樣本";
+
+    private static string ToolCallCountText(DashboardContextSavingsWindowResult window, bool hasSnapshotSection)
+        => window.ActualToolCallCount > 0 || hasSnapshotSection || window.SavingsCalculationVersion == "net-br-v1"
+            ? DashboardFormatting.Integer(window.ActualToolCallCount) + " 次"
+            : "未知（沒有可核快照）";
 
     private DashboardSnapshotSectionStatusResult? ContextSavingsSnapshotSection()
         => _monitoring?.SnapshotStatus?.Sections.FirstOrDefault(x => x.Key == DashboardSnapshotKeys.ContextSavings && x.RefreshIntervalSeconds > 0);

@@ -30,11 +30,35 @@ public sealed class TokenSavingsMonitoringSourceTests
         Text("NetSavingsText", empty with { UnusableSampleCount = 2 }).Should().Contain("未知");
     }
 
+    [Theory]
+    [InlineData(96, null, false, "96 次")]
+    [InlineData(0, null, false, "未知（沒有可核快照）")]
+    [InlineData(0, "net-br-v1", false, "0 次")]
+    [InlineData(0, null, true, "0 次")]
+    public void Tool_call_count_distinguishes_legacy_default_from_known_values(
+        long callCount,
+        string? calculationVersion,
+        bool hasSnapshotSection,
+        string expected)
+    {
+        var window = Window(100, 20) with
+        {
+            ActualToolCallCount = callCount,
+            SavingsCalculationVersion = calculationVersion
+        };
+        Text("ToolCallCountText", window, hasSnapshotSection).Should().Be(expected);
+    }
+
     [Fact]
     public void New_parts_require_version_complete_nonnegative_matching_evidence()
     {
-        var row = Window(200, 200) with { PositiveSavedTokens = 100, IncreasedTokens = 100,
-            SavingsCalculationVersion = "net-br-v1", UnusableSampleCount = 0 };
+        var row = Window(200, 200) with
+        {
+            PositiveSavedTokens = 100,
+            IncreasedTokens = 100,
+            SavingsCalculationVersion = "net-br-v1",
+            UnusableSampleCount = 0
+        };
         Text("SavingsPartText", row, true).Should().Be("100 tokens");
         Text("SavingsPartText", row, false).Should().Be("100 tokens");
         Text("SavingsPartText", row with { IncreasedTokens = null }, true).Should().Contain("未知");
