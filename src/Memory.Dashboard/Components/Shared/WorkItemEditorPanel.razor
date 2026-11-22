@@ -1,0 +1,115 @@
+@implements IDisposable
+@inject IContextHubApiClient ApiClient
+
+<section class="panel project-work-item-editor" aria-label="專案待辦安全編輯" aria-busy="@Busy.ToString().ToLowerInvariant()">
+    <p class="panel-heading-meta">切換專案、待辦或身份會清除尚未儲存草稿；原請求核對資料僅在此編輯面板存續期間保留，離開或重新載入此頁尚未持久保存核對資料。</p>
+    @if (!ValidSelection)
+    {
+        <div data-testid="editor-empty" class="empty-state">從左側選擇一筆專案代辦</div>
+    }
+    else
+    {
+        var renderedGeneration = _generation;
+        <div role="status" data-testid="editor-status">@StatusText</div>
+        @if (State.Error is { } error)
+        {
+            <div role="alert" class="inline-error" data-testid="editor-error">@error</div>
+        }
+        @if (State.OutcomeUnknown)
+        {
+            <aside class="authority-callout" data-testid="editor-unknown">
+                <strong>儲存結果未知，禁止新的送出。</strong>
+                <p>只能核對原請求回執；尚未找到回執仍是未知，不代表原操作未執行。請留在此頁核對，避免失去原請求核對資料後重新送出。</p>
+                @if (State.CaptureCheckpoint() is { } checkpoint)
+                {
+                    <details><summary>查看核對資訊</summary><dl class="definition-grid"><div><dt>原請求</dt><dd>@checkpoint.RequestId</dd></div><div><dt>Intent fingerprint</dt><dd>@checkpoint.ExpectedRequestHash</dd></div><div><dt>Fingerprint version</dt><dd>@checkpoint.HashVersion</dd></div></dl></details>
+                }
+                <button class="primary-button" type="button" data-testid="editor-recover" disabled="@Busy" @onclick="@(() => InScopeAsync(renderedGeneration, RecoverAsync))">核對原請求回執</button>
+            </aside>
+        }
+        @if (State.Base is not { } item)
+        {
+            <p>目前沒有可編輯的授權讀取資料；請確認範圍或重新讀取。</p>
+            <button class="ghost-button" type="button" data-testid="editor-load" disabled="@(Busy || State.OutcomeUnknown)" @onclick="@(() => InScopeAsync(renderedGeneration, LoadAsync))">重新讀取</button>
+        }
+        else
+        {
+            <header class="panel-heading-row">
+                <div><h2 class="panel-title">@item.Title</h2><div class="panel-heading-meta">@item.ProjectId · @StatusLabel(item.Status)</div></div>
+                <span data-testid="editor-original-revision">原讀取版本：@(item.Revision?.ToString() ?? "未知")</span>
+            </header>
+            @if (item.Revision is not > 0)
+            {
+                <p class="authority-callout">唯讀：伺服器未提供有效的原讀取版本，不會以預設版本代填。</p>
+            }
+            @if (item.IsArchived) { <p class="authority-callout">已封存；先還原，再修改內容。還原只改封存狀態，保留草稿。</p> }
+            <div class="form-grid">
+                <label>標題<input data-testid="editor-title" value="@TitleValue" maxlength="200" disabled="@FieldsDisabled" @onchange="@((ChangeEventArgs args) => InScope(renderedGeneration, () => TitleChanged(args)))" /></label>
+                <label>說明<textarea data-testid="editor-description" value="@DescriptionValue" maxlength="12000" disabled="@FieldsDisabled" @onchange="@((ChangeEventArgs args) => InScope(renderedGeneration, () => DescriptionChanged(args)))"></textarea></label>
+                <label>標籤（逗號分隔）<input data-testid="editor-tags" value="@TagsValue" disabled="@FieldsDisabled" @onchange="@((ChangeEventArgs args) => InScope(renderedGeneration, () => TagsChanged(args)))" /></label>
+                <label>優先級<input type="number" data-testid="editor-priority" min="0" max="100" value="@PriorityValue" aria-invalid="@((!_priorityValid).ToString().ToLowerInvariant())" disabled="@FieldsDisabled" @onchange="@((ChangeEventArgs args) => InScope(renderedGeneration, () => PriorityChanged(args)))" /></label>
+                <label>定義成熟度<select data-testid="editor-definition" value="@DefinitionValue" disabled="@FieldsDisabled" @onchange="@((ChangeEventArgs args) => InScope(renderedGeneration, () => DefinitionChanged(args)))">
+                    @foreach (var definition in Enum.GetValues<ProjectWorkItemDefinitionState>()) { <option value="@definition">@DefinitionLabel(definition)</option> }
+                </select></label>
+                <label>到期時間處理<select data-testid="editor-due-mode" value="@DueMode" disabled="@FieldsDisabled" @onchange="@((ChangeEventArgs args) => InScope(renderedGeneration, () => DueModeChanged(args)))"><option value="Keep">未修改（保留）</option><option value="Set">設定 UTC 日期時間</option><option value="Clear">明確清除</option></select></label>
+                <label>到期時間（UTC）<input type="datetime-local" step="1" data-testid="editor-due-at" value="@DueInputValue" aria-label="到期時間 UTC" aria-invalid="@((!_dueValid).ToString().ToLowerInvariant())" disabled="@(FieldsDisabled || DueMode != EditDueAtMode.Set)" @onchange="@((ChangeEventArgs args) => InScope(renderedGeneration, () => DueValueChanged(args)))" /></label>
+            </div>
+            <p data-testid="editor-due-intent">@(DueMode == EditDueAtMode.Keep ? "未修改到期時間。" : DueMode == EditDueAtMode.Clear ? "儲存時將明確清除到期時間。" : "輸入值以 UTC 解讀，不套用瀏覽器本地時區。")</p>
+            @if (!_priorityValid) { <p class="inline-error">優先級須為 0 到 100 的整數。</p> }
+            @if (!_dueValid) { <p class="inline-error">請輸入有效的 UTC 日期時間，或改選保留／清除。</p> }
+            <div class="button-row">
+                <button class="primary-button" type="button" data-testid="editor-save" disabled="@(!CanSave)" @onclick="@(() => InScopeAsync(renderedGeneration, SaveAsync))">儲存草稿</button>
+                <button class="ghost-button" type="button" data-testid="editor-compare" disabled="@(Busy || State.OutcomeUnknown)" @onclick="@(() => InScopeAsync(renderedGeneration, CompareAsync))">重新載入比較</button>
+            </div>
+            @if (State.HasDraft) { <p>草稿尚未儲存；先儲存，再變更完成狀態、檢核清單或封存狀態。已封存時可先明確還原，草稿會保留。</p> }
+            @if (State.Comparison is { } current)
+            {
+                <section class="authority-callout" data-testid="editor-comparison" aria-label="原版本與新讀取對照">
+                    <h3>比較後明確採用讀取版本</h3>
+                    <p>不會因伺服器回報較新版本而自動代填。</p>
+                    <table class="data-table"><thead><tr><th>欄位</th><th>原讀取</th><th>新讀取</th><th>目前草稿</th></tr></thead><tbody>
+                        <tr><th>版本</th><td data-testid="comparison-base-revision">@item.Revision</td><td>@current.Revision</td><td>保留原草稿，尚未送出</td></tr>
+                        <tr><th>標題</th><td>@item.Title</td><td data-testid="comparison-current-title">@current.Title</td><td>@TitleValue</td></tr>
+                        <tr><th>說明</th><td>@item.Description</td><td>@current.Description</td><td>@DescriptionValue</td></tr>
+                        <tr><th>標籤</th><td>@string.Join(", ", item.Tags)</td><td>@string.Join(", ", current.Tags)</td><td>@TagsValue</td></tr>
+                        <tr><th>優先級</th><td>@item.Priority</td><td>@current.Priority</td><td>@PriorityValue</td></tr>
+                        <tr><th>定義成熟度</th><td>@DefinitionLabel(item.DefinitionState)</td><td>@DefinitionLabel(current.DefinitionState)</td><td>@DefinitionValue</td></tr>
+                        <tr><th>到期時間 UTC</th><td>@UtcText(item.DueAt)</td><td>@UtcText(current.DueAt)</td><td>@DueMode · @DueInputValue</td></tr>
+                    </tbody></table>
+                    <p>檢核項目數：@item.ChecklistItems.Count → @current.ChecklistItems.Count；採用後按新讀取的穩定 ID 操作。</p>
+                    <button class="primary-button" type="button" data-testid="editor-adopt" disabled="@(Busy || State.OutcomeUnknown || current.Revision is not > 0)" @onclick="@(() => InScope(renderedGeneration, AdoptComparison))">採用新讀取版本並保留草稿</button>
+                </section>
+            }
+            <section class="project-work-item-checklist-panel" aria-label="檢核清單執行面板">
+                <h3>檢核清單執行面板</h3>
+                <div>完成進度：@item.ChecklistItems.Count(row => row.IsCompleted) / @item.ChecklistItems.Count</div>
+                @if (item.Status == ProjectWorkItemStatus.Completed) { <p>已完成待辦須先明確重新開啟，才可取消完成勾選。</p> }
+                <div class="project-work-item-checklist">
+                    @foreach (var leaf in item.ChecklistItems.OrderBy(row => row.SortOrder))
+                    {
+                        <label class="project-work-item-checklist-row @(leaf.IsCompleted ? "completed" : string.Empty)">
+                            <input type="checkbox" data-testid="@($"editor-leaf-{leaf.Id:N}")" checked="@leaf.IsCompleted" disabled="@(StructuralDisabled || item.Status == ProjectWorkItemStatus.Completed && leaf.IsCompleted)" @onchange="@((ChangeEventArgs args) => InScopeAsync(renderedGeneration, () => ChecklistChangedAsync(leaf, args)))" />
+                            <span class="project-work-item-checklist-copy"><strong>@leaf.Content</strong><small>@(leaf.IsCompleted ? "已完成" : "待完成")</small></span>
+                        </label>
+                    }
+                </div>
+                <div class="button-row">
+                    @if (item.Status == ProjectWorkItemStatus.Completed)
+                    {
+                        <button class="primary-button" type="button" data-testid="editor-reopen" disabled="@StructuralDisabled" @onclick="@(() => InScopeAsync(renderedGeneration, ReopenAsync))">重新開啟為進行中</button>
+                    }
+                    else
+                    {
+                        <button class="primary-button" type="button" data-testid="editor-complete" disabled="@(StructuralDisabled || item.ChecklistItems.Any(row => !row.IsCompleted))" @onclick="@(() => InScopeAsync(renderedGeneration, CompleteAsync))">完成代辦</button>
+                    }
+                    @if (item.IsArchived) { <button class="ghost-button" type="button" data-testid="editor-restore" disabled="@RestoreDisabled" @onclick="@(() => InScopeAsync(renderedGeneration, RestoreAsync))">還原</button> }
+                    else { <button class="ghost-button" type="button" data-testid="editor-archive" disabled="@LifecycleDisabled" @onclick="@(() => InScopeAsync(renderedGeneration, ArchiveAsync))">封存</button> }
+                </div>
+            </section>
+            @if (State.LastReceipt is { } receipt)
+            {
+                <p data-testid="editor-receipt">原編輯回執：@receipt.ReceiptId · 版本 @receipt.Revision；這是原執行結果，不保證為目前資料快照。</p>
+            }
+        }
+    }
+</section>
