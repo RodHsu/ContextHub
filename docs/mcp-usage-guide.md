@@ -56,6 +56,8 @@ The Work Item proposal dispatch ledger (`work_item_proposal_operations`) retains
 
 If the generic review has committed and the Scheduled decision is still missing, `scheduled_governance_run_get` returns `status=Running`, `terminal=false`, `decision=null`, and `outcome=DecisionProjectionPending`. Read back the same run before retrying. If the prior call ended before committing a decision, retry the same review request with its original `governanceRunId` and `isReReview` value. Wait for the persisted Scheduled decision before interpreting convergence or calling execute.
 
+The dedicated review and executor share a lock for each tenant, owner, and run. A second review waits for the current review or batch to release that lock. A review cancelled while waiting leaves the active run's receipts intact.
+
 The reliability history reports `decision-projection-pending` for an observed review that is still waiting for its Scheduled decision. It verifies the immutable receipt when reading historical observations and leaves their stored records intact.
 
 After a completed batch that requires re-review, `run_get` reports `ReReviewRequired` until a Scheduled decision for a newer re-review snapshot commits. A delayed batch replay preserves its audit evidence and the current review status. Read-back of a final decision does not authorize executing an older batch.

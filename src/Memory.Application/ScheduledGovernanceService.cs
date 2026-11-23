@@ -20,6 +20,20 @@ public sealed class ScheduledGovernanceService(
     {
         EnsureScheduledAuthority();
         var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        ScheduledGovernanceReviewResult result;
+        GovernanceRunReceiptResult? receipt;
+        await using (await receipts.AcquireRunLockAsync(governanceRunId, cancellationToken))
+        {
+            (result, receipt) = await ReviewUnderRunLockAsync(request, governanceRunId, cancellationToken);
+        }
+
+        await ObserveReceiptAsync(receipt, cancellationToken);
+        return result;
+    }
+
+    private async Task<(ScheduledGovernanceReviewResult Result, GovernanceRunReceiptResult? Receipt)> ReviewUnderRunLockAsync(
+        ScheduledGovernanceReviewRequest request, string governanceRunId, CancellationToken cancellationToken)
+    {
         var lineage = await receipts.GetScheduledLineageAsync(
             governanceRunId,
             ReceiptContractIdentity,
@@ -146,8 +160,7 @@ public sealed class ScheduledGovernanceService(
 
         await receipts.RecordScheduledDecisionAsync(scheduledResult, startedAt, cancellationToken);
         receipt = await receipts.GetAsync(reviewedRunId, cancellationToken);
-        await ObserveReceiptAsync(receipt, cancellationToken);
-        return scheduledResult;
+        return (scheduledResult, receipt);
     }
 
     public async Task<ScheduledGovernanceExecutionResult> ExecuteAsync(

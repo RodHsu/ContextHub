@@ -8,12 +8,95 @@ using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace Memory.IntegrationTests;
 
 public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvironment environment)
     : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Same_run_review_waits_for_the_active_cycle_and_cancellation_does_not_append_a_receipt()
+    {
+        var services = environment.GetFactory().Services;
+        using var holderScope = services.CreateScope();
+        using var waiterScope = services.CreateScope();
+        var actor = UseBootstrapActor(holderScope.ServiceProvider);
+        waiterScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        var holderDb = holderScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var waiterDb = waiterScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await holderDb.Database.OpenConnectionAsync();
+        await waiterDb.Database.OpenConnectionAsync();
+        var holderPid = ((NpgsqlConnection)holderDb.Database.GetDbConnection()).ProcessID;
+        var waiterPid = ((NpgsqlConnection)waiterDb.Database.GetDbConnection()).ProcessID;
+        var runId = $"scheduled-serialized-review-{Guid.NewGuid():N}";
+        var snapshot = $"kg:snapshot:{runId}:i0";
+        var request = new ScheduledGovernanceReviewRequest(runId);
+        var holderEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiterEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseHolder = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holderReceipts = holderScope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var holder = CreateService(holderScope.ServiceProvider, async (_, token) =>
+        {
+            holderEntered.TrySetResult();
+            await releaseHolder.Task.WaitAsync(token);
+            var response = CreateGenericReview(runId, CurrentScheduledIdentity(), snapshot);
+            await holderReceipts.RecordReviewAsync(response, DateTimeOffset.UtcNow, token);
+            return response;
+        });
+        var waiter = CreateService(waiterScope.ServiceProvider, async (_, token) =>
+        {
+            waiterEntered.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            throw new InvalidOperationException("The test waiter must be cancelled.");
+        });
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        using var cancelWaiter = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+        var first = holder.ReviewAsync(request, deadline.Token);
+        await holderEntered.Task.WaitAsync(deadline.Token);
+        var second = waiter.ReviewAsync(request, cancelWaiter.Token);
+        try
+        {
+            await using var monitor = new NpgsqlConnection(environment.PostgresConnectionString);
+            await monitor.OpenAsync(deadline.Token);
+            await using var command = new NpgsqlCommand("SELECT @holder = ANY(pg_blocking_pids(@waiter))", monitor);
+            command.Parameters.AddWithValue("holder", holderPid);
+            command.Parameters.AddWithValue("waiter", waiterPid);
+            while (!(bool)(await command.ExecuteScalarAsync(deadline.Token))! && !waiterEntered.Task.IsCompleted)
+                await Task.Delay(25, deadline.Token);
+            waiterEntered.Task.IsCompleted.Should().BeFalse("the first review must own the run through decision persistence");
+        }
+        finally
+        {
+            cancelWaiter.Cancel();
+            try { await second; }
+            catch (OperationCanceledException) when (cancelWaiter.IsCancellationRequested) { }
+            finally { releaseHolder.TrySetResult(); }
+            await first;
+        }
+
+        var events = await holderDb.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.GovernanceRunId == runId).OrderBy(x => x.EventSequence)
+            .Select(x => x.EventType).ToArrayAsync();
+        events.Should().Equal("ReviewReceived", "ReviewCompleted", "ScheduledDecisionProjected");
+        var finalized = await holder.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        finalized.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
+        finalized.FinalSnapshotToken.Should().Be(snapshot);
+
+        static ScheduledGovernanceService CreateService(IServiceProvider provider,
+            Func<KnowledgeReviewRequest, CancellationToken, Task<KnowledgeReviewResult>> review) => new(
+            new CallbackKnowledgeReview(review), provider.GetRequiredService<IGovernanceBatchExecutor>(),
+            provider.GetRequiredService<IGovernanceRunReceiptService>(), provider.GetRequiredService<IRequestActorAccessor>());
+    }
+
+    private sealed class CallbackKnowledgeReview(
+        Func<KnowledgeReviewRequest, CancellationToken, Task<KnowledgeReviewResult>> review) : IKnowledgeReviewService
+    {
+        public Task<KnowledgeReviewResult> ReviewAsync(KnowledgeReviewRequest request, CancellationToken cancellationToken)
+            => review(request, cancellationToken);
+    }
+
     [DockerRequiredTheory]
     [InlineData(0)]
     [InlineData(1)]
