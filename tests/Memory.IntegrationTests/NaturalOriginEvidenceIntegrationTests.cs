@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
@@ -225,6 +226,166 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             .SingleAsync(row => row.GovernanceRunId == runId);
         persistedAfterEvidence.UpdatedAt.Should().Be(persistedBeforeEvidence.UpdatedAt,
             "run_get evidence re-evaluation must remain read-only");
+    }
+
+    [DockerRequiredFact]
+    public async Task Authority_Must_Match_Committed_Epoch_Through_History_Read()
+    {
+        var factory = environment.GetFactory();
+        using var scope = factory.Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var owner = new TenantUser
+        {
+            TenantId = actor.TenantId!.Value,
+            Username = $"epoch-owner-{Guid.NewGuid():N}",
+            DisplayName = "Authority epoch fixture",
+            Role = TenantUserRole.Owner,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.TenantUsers.Add(owner);
+        await db.SaveChangesAsync(CancellationToken.None);
+        actor = actor with { UserId = owner.Id, Username = owner.Username, Role = owner.Role };
+        accessor.Current = actor;
+
+        var ledger = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceAuthorityEpochLedger>();
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var safety = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>();
+        var evidence = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityEvidenceProvider>();
+        var configured = new ScheduledGovernanceNaturalOriginAuthoritySnapshot(
+            PlatformIssuer: "https://scheduler.example.test",
+            ControlPlaneSourceSystem: "control-plane-audit",
+            Environment: $"epoch-test-{Guid.NewGuid():N}",
+            TaskBindingHash: Digest("cloud-task"),
+            AutomationBindingHash: Digest("automation"),
+            ScheduleDigest: ScheduledGovernanceReliabilityService.CurrentScheduleDigest,
+            ConfigurationDigest: Digest("epoch-fixture-config"),
+            AuthorityEpochDigest: Digest("epoch-fixture-a"));
+        var advanceA = new ScheduledGovernanceAuthorityEpochAdvanceRequest(
+            actor.TenantId!.Value, actor.UserId!.Value, configured.Environment,
+            configured.ConfigurationDigest, configured.AuthorityEpochDigest);
+
+        ScheduledGovernanceReliabilityService CreateReader(
+            ScheduledGovernanceNaturalOriginAuthoritySnapshot snapshot,
+            IScheduledGovernanceReliabilityEvidenceProvider? naturalEvidence = null)
+            => new(
+                db, accessor, TimeProvider.System, naturalEvidence ?? evidence, safety,
+                new FixedAuthorityProvider(snapshot), authorityEpochLedger: ledger);
+
+        async Task<GovernanceRunReceiptResult> RecordDecisionAsync()
+        {
+            var runId = $"authority-epoch-{Guid.NewGuid():N}";
+            var startedAt = DateTimeOffset.UtcNow;
+            var identity = CurrentScheduledIdentity();
+            var projectId = ProjectContext.SharedProjectId;
+            var review = CreateReview(runId, projectId, identity);
+            await receipts.RecordReviewStartedAsync(runId, startedAt, identity, CancellationToken.None);
+            await receipts.RecordReviewAsync(review, startedAt, CancellationToken.None);
+            await receipts.RecordScheduledDecisionAsync(CreateScheduledDecision(
+                runId, projectId, review.DurableMemoryCoverage!.SnapshotToken), startedAt, CancellationToken.None);
+            return (await receipts.GetAsync(runId, CancellationToken.None))!;
+        }
+
+        Task<ScheduledGovernanceReliabilityRun> ReadProjectionAsync(string runId)
+            => db.ScheduledGovernanceReliabilityRuns.AsNoTracking().SingleAsync(row => row.GovernanceRunId == runId);
+
+        static bool HasEpoch(ScheduledGovernanceReliabilityRun row, string digest)
+        {
+            using var projection = JsonDocument.Parse(row.ProjectionJson);
+            return ScheduledGovernanceReliabilityReceiptProjection.HasAuthorityEpoch(
+                projection.RootElement.GetProperty("baselineIdentity").GetString(), digest);
+        }
+
+        var reader = CreateReader(configured);
+        var absent = await RecordDecisionAsync();
+        await reader.PersistObservationAsync(absent, CancellationToken.None);
+        HasEpoch(await ReadProjectionAsync(absent.GovernanceRunId), configured.AuthorityEpochDigest).Should().BeFalse();
+
+        (await ledger.AdvanceAsync(advanceA)).Status.Should().Be(ScheduledGovernanceAuthorityEpochAdvanceStatus.Advanced);
+        var wrongConfiguration = await RecordDecisionAsync();
+        await CreateReader(configured with { ConfigurationDigest = Digest("wrong-config") })
+            .PersistObservationAsync(wrongConfiguration, CancellationToken.None);
+        HasEpoch(await ReadProjectionAsync(wrongConfiguration.GovernanceRunId), configured.AuthorityEpochDigest).Should().BeFalse();
+
+        var receipt = await RecordDecisionAsync();
+        var eventKey = await db.GovernanceRunReceipts.AsNoTracking().Where(row => row.Id == receipt.ReceiptId)
+            .Select(row => row.EventKey).SingleAsync();
+        var expectedAt = receipt.StartedAt;
+        foreach (var kind in new[] { NaturalOriginEvidenceKind.PlatformAttestation, NaturalOriginEvidenceKind.ControlPlaneAudit })
+        {
+            var entry = CreateEvidence(
+                kind, actor, receipt, eventKey, expectedAt,
+                sourceSequence: kind == NaturalOriginEvidenceKind.ControlPlaneAudit ? 0 : null);
+            entry.Environment = configured.Environment;
+            entry.ScheduleDigest = configured.ScheduleDigest;
+            entry.ConfigurationDigest = ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(
+                configured.ConfigurationDigest, configured.AuthorityEpochDigest);
+            await store.AppendAsync(entry);
+        }
+
+        await reader.PersistObservationAsync(receipt, CancellationToken.None);
+        var capture = await ReadProjectionAsync(receipt.GovernanceRunId);
+        HasEpoch(capture, configured.AuthorityEpochDigest).Should().BeTrue();
+        var current = await reader.GetAsync(CancellationToken.None);
+        current.Runs.Single(run => run.GovernanceRunId == receipt.GovernanceRunId)
+            .NaturalOriginStatus.Should().Be("Verified");
+
+        using var rotationScope = factory.Services.CreateScope();
+        var rotationLedger = rotationScope.ServiceProvider.GetRequiredService<IScheduledGovernanceAuthorityEpochLedger>();
+        var advanceB = advanceA with
+        {
+            AuthorityEpochDigest = Digest("epoch-fixture-b"),
+            ExpectedPreviousAuthorityEpochDigest = advanceA.AuthorityEpochDigest,
+            ExpectedPreviousGeneration = 1
+        };
+        ScheduledGovernanceAuthorityEpochAdvanceResult? rotation = null;
+        var rotatingReader = CreateReader(configured, new EvidenceReadCallback(
+            evidence, receipt.ReceiptId, async cancellationToken =>
+            {
+                rotation = await rotationLedger.AdvanceAsync(advanceB, cancellationToken);
+            }));
+
+        var rotated = await rotatingReader.GetAsync(CancellationToken.None);
+        rotation.Should().NotBeNull();
+        rotation!.Status.Should().Be(ScheduledGovernanceAuthorityEpochAdvanceStatus.Advanced);
+        rotation.Epoch!.Generation.Should().Be(2);
+        rotated.Runs.Single(run => run.GovernanceRunId == receipt.GovernanceRunId)
+            .NaturalOriginStatus.Should().Be("Unattested");
+        var afterRead = await ReadProjectionAsync(receipt.GovernanceRunId);
+        afterRead.ProjectionJson.Should().Be(capture.ProjectionJson);
+        afterRead.UpdatedAt.Should().Be(capture.UpdatedAt);
+    }
+
+    private sealed class FixedAuthorityProvider(ScheduledGovernanceNaturalOriginAuthoritySnapshot snapshot)
+        : IScheduledGovernanceNaturalOriginAuthorityProvider
+    {
+        public ScheduledGovernanceNaturalOriginAuthoritySnapshot? GetCurrent() => snapshot;
+    }
+
+    private sealed class EvidenceReadCallback(
+        IScheduledGovernanceReliabilityEvidenceProvider provider,
+        Guid receiptId,
+        Func<CancellationToken, Task> afterRead) : IScheduledGovernanceReliabilityEvidenceProvider
+    {
+        private bool _called;
+
+        public async Task<ScheduledGovernanceReliabilityEvidenceSnapshot?> GetAsync(
+            ScheduledGovernanceReliabilityEvidenceQuery query,
+            CancellationToken cancellationToken)
+        {
+            var result = await provider.GetAsync(query, cancellationToken);
+            if (!_called && query.ReceiptId == receiptId)
+            {
+                _called = true;
+                await afterRead(cancellationToken);
+            }
+
+            return result;
+        }
     }
 
     [DockerRequiredFact]

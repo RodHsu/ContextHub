@@ -16,7 +16,8 @@ public sealed class ScheduledGovernanceReliabilityService(
     TimeProvider timeProvider,
     IScheduledGovernanceReliabilityEvidenceProvider? evidenceProvider = null,
     IScheduledGovernanceServerSafetyEvidenceProvider? serverSafetyEvidenceProvider = null,
-    IScheduledGovernanceNaturalOriginAuthorityProvider? naturalOriginAuthorityProvider = null) : IScheduledGovernanceReliabilityService
+    IScheduledGovernanceNaturalOriginAuthorityProvider? naturalOriginAuthorityProvider = null,
+    IScheduledGovernanceAuthorityEpochLedger? authorityEpochLedger = null) : IScheduledGovernanceReliabilityService
 {
     internal const int MaxGovernanceRunIdLength = 128;
 
@@ -40,9 +41,9 @@ public sealed class ScheduledGovernanceReliabilityService(
         GovernanceRunReceiptResult receipt,
         CancellationToken cancellationToken)
     {
-        var (actor, current) = await PersistObservationCoreAsync(receipt, cancellationToken);
+        var actor = await PersistObservationCoreAsync(receipt, cancellationToken);
         var rows = await ReadRowsAsync(actor, cancellationToken);
-        return await BuildSummaryAsync(actor, rows, current.Calculator, cancellationToken);
+        return await BuildSummaryAsync(actor, rows, cancellationToken);
     }
 
     public async Task PersistObservationAsync(
@@ -52,18 +53,13 @@ public sealed class ScheduledGovernanceReliabilityService(
         _ = await PersistObservationCoreAsync(receipt, cancellationToken);
     }
 
-    private async Task<(ContextHubRequestActor Actor, CurrentAuthorityContext Current)> PersistObservationCoreAsync(
+    private async Task<ContextHubRequestActor> PersistObservationCoreAsync(
         GovernanceRunReceiptResult receipt,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(receipt);
         var actor = RequireReadActor();
-        var current = CreateCurrentAuthorityContext();
-        var projection = await BuildProjectionAsync(
-            actor,
-            receipt,
-            current.Authority,
-            cancellationToken);
+        var (projection, calculator) = await BuildProjectionAsync(actor, receipt, cancellationToken);
         var now = timeProvider.GetUtcNow();
         var runId = NormalizeRunId(receipt.GovernanceRunId);
         var entity = await dbContext.ScheduledGovernanceReliabilityRuns
@@ -75,7 +71,7 @@ public sealed class ScheduledGovernanceReliabilityService(
 
         if (entity is null)
         {
-            entity = CreateEntity(actor, projection, now, current.Calculator);
+            entity = CreateEntity(actor, projection, now, calculator);
             await dbContext.ScheduledGovernanceReliabilityRuns.AddAsync(entity, cancellationToken);
         }
         else if (receipt.IsReplay)
@@ -88,7 +84,7 @@ public sealed class ScheduledGovernanceReliabilityService(
                 entity,
                 projection,
                 now,
-                current.Calculator,
+                calculator,
                 preserveReplayMetadata: true);
         }
 
@@ -99,26 +95,27 @@ public sealed class ScheduledGovernanceReliabilityService(
             entity,
             now,
             isNewEntity,
-            current.Calculator,
+            calculator,
             cancellationToken);
-        return (actor, current);
+        return actor;
     }
 
     public async Task<ScheduledGovernanceReliabilitySummary> GetAsync(
         CancellationToken cancellationToken)
     {
         var actor = RequireReadActor();
-        var current = CreateCurrentAuthorityContext();
         var rows = await ReadRowsAsync(actor, cancellationToken);
-        return await BuildSummaryAsync(actor, rows, current.Calculator, cancellationToken);
+        return await BuildSummaryAsync(actor, rows, cancellationToken);
     }
 
-    private async Task<ScheduledGovernanceReliabilityReceiptProjection> BuildProjectionAsync(
+    private async Task<(ScheduledGovernanceReliabilityReceiptProjection Projection, ScheduledGovernanceReliabilityWindowCalculator Calculator)> BuildProjectionAsync(
         ContextHubRequestActor actor,
         GovernanceRunReceiptResult receipt,
-        ScheduledGovernanceNaturalOriginAuthority? authority,
         CancellationToken cancellationToken)
     {
+        var observedAuthority = IsManual(receipt.ExecutionMode)
+            ? null
+            : await ReadCommittedAuthorityAsync(actor, cancellationToken);
         var serverSafetyEvidence = await GetServerSafetyEvidenceAsync(
             actor,
             receipt.ReceiptId,
@@ -132,7 +129,8 @@ public sealed class ScheduledGovernanceReliabilityService(
             serverSafetyEvidence?.ReviewRequestIdentityHash,
             cancellationToken);
 
-        return BuildProjection(receipt, actor, evidence, serverSafetyEvidence, authority);
+        var authority = await ConfirmAuthorityAsync(actor, observedAuthority, cancellationToken);
+        return (BuildProjection(receipt, actor, evidence, serverSafetyEvidence, authority), CreateCalculator(authority));
     }
 
     private async Task<ScheduledGovernanceServerSafetyEvidenceSnapshot?> GetServerSafetyEvidenceAsync(
@@ -322,7 +320,6 @@ public sealed class ScheduledGovernanceReliabilityService(
     private async Task<ScheduledGovernanceReliabilitySummary> BuildSummaryAsync(
         ContextHubRequestActor actor,
         IReadOnlyList<ScheduledGovernanceReliabilityRun> rows,
-        ScheduledGovernanceReliabilityWindowCalculator calculator,
         CancellationToken cancellationToken)
     {
         var canonical = rows.Select(row => (
@@ -338,6 +335,9 @@ public sealed class ScheduledGovernanceReliabilityService(
             })).ToArray();
         var scheduled = canonical.Where(x => IsScheduled(x.Projection.ExecutionMode))
             .Select(x => x.Projection).ToArray();
+        var observedAuthority = scheduled.Length == 0
+            ? null
+            : await ReadCommittedAuthorityAsync(actor, cancellationToken);
         ScheduledGovernanceServerSafetyEvidenceQuery SafetyQuery(ScheduledGovernanceReliabilityReceiptProjection projection)
             => new(actor.TenantId!.Value, actor.UserId!.Value, projection.ReceiptId, projection.GovernanceRunId);
 
@@ -410,7 +410,8 @@ public sealed class ScheduledGovernanceReliabilityService(
             }
         }
 
-        var result = calculator.Calculate(projections);
+        var authority = await ConfirmAuthorityAsync(actor, observedAuthority, cancellationToken);
+        var result = CreateCalculator(authority).Calculate(projections);
         return ToSummary(result);
     }
 
@@ -796,41 +797,72 @@ public sealed class ScheduledGovernanceReliabilityService(
                storedReceiptId == incomingReceiptId;
     }
 
-    private CurrentAuthorityContext CreateCurrentAuthorityContext()
+    private async Task<ObservedNaturalOriginAuthority?> ReadCommittedAuthorityAsync(
+        ContextHubRequestActor actor,
+        CancellationToken cancellationToken)
     {
-        ScheduledGovernanceNaturalOriginAuthority? authority = null;
+        if (naturalOriginAuthorityProvider is null || authorityEpochLedger is null ||
+            actor.TenantId is not Guid tenantId || actor.UserId is not Guid ownerUserId)
+        {
+            return null;
+        }
+
         try
         {
-            var snapshot = naturalOriginAuthorityProvider?.GetCurrent();
-            if (snapshot is not null && IsCurrentScheduleDigest(snapshot.ScheduleDigest))
+            var snapshot = naturalOriginAuthorityProvider.GetCurrent();
+            if (snapshot is null || !IsCurrentScheduleDigest(snapshot.ScheduleDigest))
             {
-                authority = new ScheduledGovernanceNaturalOriginAuthority(
-                    snapshot.PlatformIssuer,
-                    snapshot.ControlPlaneSourceSystem,
-                    snapshot.Environment,
-                    snapshot.TaskBindingHash,
-                    snapshot.AutomationBindingHash,
-                    snapshot.ScheduleDigest,
-                    ComputeConfigurationDigest(
-                        snapshot.ConfigurationDigest,
-                        snapshot.AuthorityEpochDigest),
-                    snapshot.AuthorityEpochDigest);
-                authority.Validate();
+                return null;
             }
+
+            var authority = new ScheduledGovernanceNaturalOriginAuthority(
+                snapshot.PlatformIssuer,
+                snapshot.ControlPlaneSourceSystem,
+                snapshot.Environment,
+                snapshot.TaskBindingHash,
+                snapshot.AutomationBindingHash,
+                snapshot.ScheduleDigest,
+                ComputeConfigurationDigest(snapshot.ConfigurationDigest, snapshot.AuthorityEpochDigest),
+                snapshot.AuthorityEpochDigest);
+            authority.Validate();
+
+            var scope = new ScheduledGovernanceAuthorityEpochScope(tenantId, ownerUserId, snapshot.Environment);
+            var head = await authorityEpochLedger.GetCurrentAsync(scope, cancellationToken);
+            return head is { Generation: > 0 } && head.Id != Guid.Empty &&
+                   head.TenantId == scope.TenantId && head.OwnerUserId == scope.OwnerUserId &&
+                   string.Equals(head.Environment, scope.Environment, StringComparison.Ordinal) &&
+                   string.Equals(head.ConfigurationDigest, snapshot.ConfigurationDigest, StringComparison.Ordinal) &&
+                   string.Equals(head.AuthorityEpochDigest, snapshot.AuthorityEpochDigest, StringComparison.Ordinal) &&
+                   naturalOriginAuthorityProvider.GetCurrent() == snapshot
+                ? new(head.Id, head.Generation, authority)
+                : null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
-            // Configuration/provider failures are deliberately represented as
-            // unavailable authority. The calculator then fails closed.
-            authority = null;
+            // Configuration and ledger outages must not grant authority.
+            return null;
         }
-
-        var calculator = new ScheduledGovernanceReliabilityWindowCalculator(Options with
-        {
-            ExpectedNaturalOriginAuthority = authority
-        });
-        return new CurrentAuthorityContext(authority, calculator);
     }
+
+    private async Task<ScheduledGovernanceNaturalOriginAuthority?> ConfirmAuthorityAsync(
+        ContextHubRequestActor actor,
+        ObservedNaturalOriginAuthority? observed,
+        CancellationToken cancellationToken)
+    {
+        // The committed epoch chain is monotonic and cannot reuse a digest. A changed head
+        // invalidates this observation, without holding the epoch lock during evidence reads.
+        return observed is not null && observed == await ReadCommittedAuthorityAsync(actor, cancellationToken)
+            ? observed.Authority
+            : null;
+    }
+
+    private static ScheduledGovernanceReliabilityWindowCalculator CreateCalculator(
+        ScheduledGovernanceNaturalOriginAuthority? authority)
+        => new(Options with { ExpectedNaturalOriginAuthority = authority });
 
     private static string ComputeScheduleDigest(ScheduledGovernanceReliabilityWindowOptions options)
         => ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(string.Join('|',
@@ -1001,7 +1033,8 @@ public sealed class ScheduledGovernanceReliabilityService(
            $"=> intended {options.IntendedTimeZoneId} " +
            string.Join('/', options.IntendedLocalRunTimes.Select(x => x.ToString("HH:mm")));
 
-    private sealed record CurrentAuthorityContext(
-        ScheduledGovernanceNaturalOriginAuthority? Authority,
-        ScheduledGovernanceReliabilityWindowCalculator Calculator);
+    private sealed record ObservedNaturalOriginAuthority(
+        Guid EpochId,
+        long Generation,
+        ScheduledGovernanceNaturalOriginAuthority Authority);
 }
