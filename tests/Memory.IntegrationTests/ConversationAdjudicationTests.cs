@@ -483,6 +483,71 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
     }
 
     [DockerRequiredFact]
+    public async Task Archive_proposal_reconciles_only_when_the_exact_scoped_target_is_already_archived()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var row = await SeedAsync(db, actor);
+        var target = new MemoryItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = row.ProjectId,
+            Title = "Retain exact archive target",
+            Content = "The reconciliation may only update the exception.",
+            Status = MemoryStatus.Active,
+            CreatedAt = row.CreatedAt,
+            UpdatedAt = row.UpdatedAt
+        };
+        db.MemoryItems.Add(target);
+        row.SourceSystem = "chatgpt-mcp-gateway";
+        row.Tags = ["chatgpt-proposal"];
+        row.MetadataJson = Payload(row.ProjectId);
+        await db.SaveChangesAsync();
+
+        (await Preview(service, row)).Items.Single().CanReconcile.Should().BeFalse();
+        target.Status = MemoryStatus.Archived;
+        row.MetadataJson = Payload("other-project");
+        row.PromotedMemoryId = target.Id;
+        await db.SaveChangesAsync();
+        (await Preview(service, row)).Items.Single().CanReconcile.Should().BeFalse(
+            "a promoted memory ID cannot supply a missing exact archive intent binding");
+
+        row.MetadataJson = Payload(row.ProjectId, archived: false);
+        await db.SaveChangesAsync();
+        (await Preview(service, row)).Items.Single().CanReconcile.Should().BeFalse(
+            "memory_archive with archived=false requests restoration");
+
+        row.MetadataJson = Payload(row.ProjectId.ToUpperInvariant());
+        target.Tags = ["legal-hold"];
+        await db.SaveChangesAsync();
+        var protectedTarget = (await Preview(service, row)).Items.Single();
+        protectedTarget.Classification.Should().Be("ProtectedHold");
+        protectedTarget.CanReconcile.Should().BeFalse();
+
+        target.Tags = [];
+        await db.SaveChangesAsync();
+        var candidate = (await Preview(service, row)).Items.Single();
+        candidate.Classification.Should().Be("ResolvedAlreadyArchived");
+        candidate.CanReconcile.Should().BeTrue();
+        var original = await db.MemoryItems.AsNoTracking().SingleAsync(item => item.Id == target.Id);
+        var request = Request(row, candidate, ConversationAdjudicationAction.Reconcile);
+        var receipt = await service.AdjudicateAsync(request, default);
+        receipt.Outcome.Should().Be("ResolvedAlreadyArchived");
+        receipt.ResultStatus.Should().Be("Skipped");
+        (await service.AdjudicateAsync(request, default)).Should().Be(receipt with { IsReplay = true });
+        (await db.ConversationAdjudications.CountAsync(item => item.InsightId == row.Id)).Should().Be(1);
+        var persisted = await db.MemoryItems.AsNoTracking().SingleAsync(item => item.Id == target.Id);
+        persisted.Should().BeEquivalentTo(original);
+
+        string Payload(string project, bool archived = true) => JsonSerializer.Serialize(new
+        {
+            proposal = true,
+            toolName = "memory_archive",
+            payload = new { id = target.Id, projectId = project, archived }
+        });
+    }
+
+    [DockerRequiredFact]
     public async Task Holds_host_blocks_and_scheduled_or_wrong_owner_actors_should_fail_closed()
     {
         using var scope = CreateScope(out var db, out var service, out var actor);

@@ -341,7 +341,8 @@ public sealed class ConversationAdjudicationService(
     private async Task<EvidenceContext> LoadEvidenceAsync(string project, ConversationInsight[] rows, CancellationToken cancellationToken)
     {
         var ids = rows.Select(x => x.Id).ToArray();
-        var targetIds = rows.Select(TargetId).Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
+        var targetIds = rows.Select(row => EvidenceTargetId(row, ReadMemoryDisposition(row)))
+            .Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
         var proposalIds = rows.Select(LinkedProposalId).Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
         var memories = await db.MemoryItems.AsNoTracking().Where(x =>
             x.TenantId == actors.Current.TenantId && x.OwnerUserId == actors.Current.UserId &&
@@ -355,7 +356,8 @@ public sealed class ConversationAdjudicationService(
 
     private static ConversationAdjudicationCandidate Evaluate(ConversationInsight row, EvidenceContext context)
     {
-        context.Memories.TryGetValue(TargetId(row) ?? Guid.Empty, out var target);
+        var disposition = ReadMemoryDisposition(row);
+        context.Memories.TryGetValue(EvidenceTargetId(row, disposition) ?? Guid.Empty, out var target);
         context.Proposals.TryGetValue(LinkedProposalId(row) ?? Guid.Empty, out var linked);
         context.Receipts.TryGetValue(row.Id, out var receipt);
         var fingerprint = Hash(JsonSerializer.Serialize(new
@@ -403,9 +405,9 @@ public sealed class ConversationAdjudicationService(
             classification = "ProtectedHold";
         else if (terminal)
             classification = receipt is null ? "AlreadyTerminal" : "ResolvedHumanDecision";
-        else if (IsDeleteProposal(row) && target?.Status == MemoryStatus.Archived)
+        else if (disposition.TargetId.HasValue && target?.Status == MemoryStatus.Archived)
         {
-            classification = "ResolvedWithoutDelete";
+            classification = disposition.Tool == "memory_delete" ? "ResolvedWithoutDelete" : "ResolvedAlreadyArchived";
             canReconcile = true;
         }
         else if (linkedProposal?.PromotionStatus == ConversationPromotionStatus.Skipped)
@@ -438,23 +440,33 @@ public sealed class ConversationAdjudicationService(
             x.Equals("immutable-quarantine", StringComparison.OrdinalIgnoreCase)) ||
             Flag(json, "legalHold") || Flag(json, "securityHold");
 
-    private static bool IsDeleteProposal(ConversationInsight row)
-        => ChatGptProposalService.IsProposal(row) && StringProperty(row.MetadataJson, "toolName") == "memory_delete";
+    private static Guid? EvidenceTargetId(ConversationInsight row, (string? Tool, Guid? TargetId) disposition)
+        => disposition.Tool == "memory_delete" ? disposition.TargetId : disposition.TargetId ?? row.PromotedMemoryId;
 
-    private static Guid? TargetId(ConversationInsight row)
+    private static (string? Tool, Guid? TargetId) ReadMemoryDisposition(ConversationInsight row)
     {
-        if (!IsDeleteProposal(row)) return row.PromotedMemoryId;
+        if (!ChatGptProposalService.IsProposal(row)) return default;
         try
         {
             using var doc = JsonDocument.Parse(row.MetadataJson);
-            if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object &&
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("toolName", out var name) ||
+                name.ValueKind != JsonValueKind.String || name.GetString() is not ("memory_archive" or "memory_delete"))
+            {
+                return default;
+            }
+
+            var tool = name.GetString();
+            if (root.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object &&
+                (tool == "memory_delete" || !payload.TryGetProperty("archived", out var archived) || archived.ValueKind == JsonValueKind.True) &&
                 payload.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String && id.TryGetGuid(out var target) &&
                 payload.TryGetProperty("projectId", out var project) && project.ValueKind == JsonValueKind.String &&
                 ProjectContext.Matches(project.GetString(), row.ProjectId))
-                return target;
+                return (tool, target);
+            return (tool, null);
         }
         catch (JsonException) { }
-        return null;
+        return default;
     }
 
     // Legacy free text, titles, and fuzzy payload matches are never treated as evidence links.
