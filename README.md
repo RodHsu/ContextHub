@@ -325,7 +325,7 @@ Notes:
 
 - Unit tests use deterministic providers and do not require model downloads.
 - Container-backed tests skip when Docker is unavailable.
-- Compose smoke tests require `RUN_COMPOSE_SMOKE_TESTS=1`.
+- Set `RUN_COMPOSE_SMOKE_TESTS=1` to run the Compose smoke test with a local Docker engine. It builds an isolated project, uses dynamic loopback ports, and removes the project's containers, volumes, and locally built images on exit.
 - Dashboard browser tests use Playwright and cover responsive routes.
 
 ## Documentation
