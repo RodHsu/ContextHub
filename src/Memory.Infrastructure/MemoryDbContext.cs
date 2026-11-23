@@ -323,6 +323,28 @@ public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> op
         }
     }
 
+    public async Task<bool> LockAdjudicationInsightEvidenceAsync(Guid insightId, Guid linkedInsightId, Guid tenantId,
+        Guid ownerUserId, string projectId, CancellationToken cancellationToken)
+    {
+        if (!Database.IsNpgsql() || Database.CurrentTransaction?.GetDbTransaction().IsolationLevel != IsolationLevel.Serializable)
+        {
+            throw new InvalidOperationException("Adjudication insight evidence requires a serializable PostgreSQL transaction.");
+        }
+
+        // Both rows are locked in the same order even when two insights reference one another.
+        var locked = await ConversationInsights.FromSqlInterpolated($"""
+            SELECT *
+            FROM conversation_insights
+            WHERE id IN ({insightId}, {linkedInsightId})
+              AND tenant_id = {tenantId}
+              AND owner_user_id = {ownerUserId}
+              AND public.project_identity_equals(project_id, {projectId})
+            ORDER BY id
+            FOR NO KEY UPDATE
+            """).AsNoTracking().Select(insight => insight.Id).ToListAsync(cancellationToken);
+        return locked.Count == 2;
+    }
+
     public async Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default)
     {
         if (Database.CurrentTransaction is not null)

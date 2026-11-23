@@ -775,6 +775,135 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
         (await db.ConversationAdjudications.CountAsync(row => row.InsightId == seed.Id)).Should().Be(0);
     }
 
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Reconciliation_fails_when_bound_authority_changes_before_the_subject_update(bool linkedProposal)
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var insight = await SeedAsync(db, actor);
+        var target = new MemoryItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = insight.ProjectId,
+            Title = "Archived authority",
+            Content = "Preserve the original evidence",
+            Status = MemoryStatus.Archived,
+            CreatedAt = insight.CreatedAt,
+            UpdatedAt = insight.UpdatedAt
+        };
+        var proposal = new ConversationInsight
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = insight.ProjectId,
+            SessionId = insight.SessionId,
+            CheckpointId = insight.CheckpointId,
+            SourceSystem = ChatGptProposalService.SourceSystem,
+            Tags = ["chatgpt-proposal"],
+            DedupKey = Guid.NewGuid().ToString("N"),
+            PromotionStatus = ConversationPromotionStatus.Skipped,
+            CreatedAt = insight.CreatedAt,
+            UpdatedAt = insight.UpdatedAt
+        };
+        if (linkedProposal)
+        {
+            db.ConversationInsights.Add(proposal);
+            insight.SourceRef = $"chatgpt-proposal:{proposal.Id:D}";
+            insight.MetadataJson = JsonSerializer.Serialize(new { proposalId = proposal.Id });
+        }
+        else
+        {
+            db.MemoryItems.Add(target);
+            insight.SourceSystem = ChatGptProposalService.SourceSystem;
+            insight.Tags = ["chatgpt-proposal"];
+            insight.MetadataJson = JsonSerializer.Serialize(new
+            {
+                proposal = true,
+                toolName = "memory_archive",
+                payload = new { id = target.Id, insight.ProjectId }
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        }
+        await db.SaveChangesAsync();
+        var before = (await Preview(service, insight)).Items.Single();
+        before.CanReconcile.Should().BeTrue();
+        var request = Request(insight, before, ConversationAdjudicationAction.Reconcile);
+
+        using var writerScope = CreateScope(out var writer, out _, out _);
+        var interceptor = new ChangeAdjudicationEvidenceAfterRead(async token =>
+        {
+            if (linkedProposal)
+            {
+                var changed = await writer.ConversationInsights.Where(x => x.Id == proposal.Id)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.PromotionStatus, ConversationPromotionStatus.HostBlocked), token);
+                changed.Should().Be(1);
+            }
+            else
+            {
+                var restored = await writerScope.ServiceProvider.GetRequiredService<IMemoryService>()
+                    .ArchiveAsync(new MemoryArchiveRequest(target.Id, insight.ProjectId, false, "Reopened authority"), token);
+                restored.Status.Should().Be(MemoryStatus.Active);
+            }
+        });
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .AddInterceptors(interceptor)
+            .Options;
+        await using var reader = new MemoryDbContext(options);
+        var guarded = new ConversationAdjudicationService(reader,
+            scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>(),
+            scope.ServiceProvider.GetRequiredService<IClock>());
+
+        await FluentActions.Invoking(() => guarded.AdjudicateAsync(request, default))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*new preview*");
+        interceptor.CommittedChange.Should().BeTrue();
+        (await service.ReadReceiptAsync(request, default)).Found.Should().BeFalse();
+        var operationBinding = JsonSerializer.Serialize(new { operationId = request.OperationId });
+        (await db.SecurityAuditEvents.AnyAsync(x =>
+            x.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated &&
+            EF.Functions.JsonContains(x.DetailsJson, operationBinding))).Should().BeFalse();
+        (await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.RequiresUserDecision);
+        var refreshed = (await Preview(service, insight)).Items.Single(x => x.InsightId == insight.Id);
+        refreshed.Classification.Should().Be(linkedProposal ? "HostBlocked" : "RequiresManualDecision");
+        refreshed.CanReconcile.Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
+    public async Task A_self_reference_does_not_reopen_a_manually_resolved_insight()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var row = await SeedAsync(db, actor);
+        row.SourceRef = $"chatgpt-proposal:{row.Id:D}";
+        row.MetadataJson = JsonSerializer.Serialize(new { proposalId = row.Id });
+        await db.SaveChangesAsync();
+        var before = (await Preview(service, row)).Items.Single();
+        await service.AdjudicateAsync(Request(row, before, ConversationAdjudicationAction.ResolveSkipped), default);
+        var resolved = (await Preview(service, row)).Items.Single();
+        resolved.CanReopen.Should().BeFalse();
+        resolved.EvidenceFingerprint.Should().Be(before.EvidenceFingerprint);
+    }
+
+    private sealed class ChangeAdjudicationEvidenceAfterRead(Func<CancellationToken, Task> write) : DbCommandInterceptor
+    {
+        public bool CommittedChange { get; private set; }
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command, CommandExecutedEventData eventData, DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            if (!CommittedChange && command.Transaction is not null &&
+                command.CommandText.Contains("conversation_adjudications", StringComparison.OrdinalIgnoreCase) &&
+                command.CommandText.Contains("ORDER BY", StringComparison.OrdinalIgnoreCase))
+            {
+                await write(cancellationToken);
+                CommittedChange = true;
+            }
+
+            return result;
+        }
+    }
+
     private sealed class FirstConversationCountInterceptor(Func<CancellationToken, Task> afterCount) : DbCommandInterceptor
     {
         public bool CommittedChange { get; private set; }

@@ -2186,6 +2186,8 @@ public interface IApplicationDbContext
     Task AcquireTransactionLockAsync(string lockKey, CancellationToken cancellationToken = default);
     Task<bool> LockMemoryEvidenceAsync(Guid memoryId, Guid tenantId, Guid ownerUserId, string projectId,
         CancellationToken cancellationToken) => throw new NotSupportedException("Transactional memory evidence locking is required.");
+    Task<bool> LockAdjudicationInsightEvidenceAsync(Guid insightId, Guid linkedInsightId, Guid tenantId, Guid ownerUserId,
+        string projectId, CancellationToken cancellationToken) => throw new NotSupportedException("Transactional insight evidence locking is required.");
     Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default);
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

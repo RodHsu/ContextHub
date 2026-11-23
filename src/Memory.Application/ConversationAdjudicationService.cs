@@ -226,14 +226,29 @@ public sealed class ConversationAdjudicationService(
         }
 
         var actor = actors.Current;
+        var tenantId = actor.TenantId!.Value;
+        var ownerId = actor.UserId!.Value;
+        if (EvidenceTargetId(insight, ReadMemoryDisposition(insight)) is { } memoryId &&
+            context.Memories.ContainsKey(memoryId) &&
+            !await db.LockMemoryEvidenceAsync(memoryId, tenantId, ownerId, project, cancellationToken))
+        {
+            throw new InvalidOperationException("Bound memory evidence changed. Obtain a new preview before adjudicating.");
+        }
+        if (LinkedProposalId(insight) is { } linkedId &&
+            context.Proposals.ContainsKey(linkedId) &&
+            !await db.LockAdjudicationInsightEvidenceAsync(insight.Id, linkedId, tenantId, ownerId, project, cancellationToken))
+        {
+            throw new InvalidOperationException("Bound insight evidence changed. Obtain a new preview before adjudicating.");
+        }
+
         var now = new DateTimeOffset(clock.UtcNow.UtcTicks / 10 * 10, TimeSpan.Zero);
         if (context.Receipts.TryGetValue(insight.Id, out var lastReceipt) && now <= lastReceipt.CreatedAt)
             now = lastReceipt.CreatedAt.AddTicks(10); // PostgreSQL timestamps have microsecond precision.
         var receipt = new ConversationAdjudication
         {
             Id = request.OperationId,
-            TenantId = actor.TenantId!.Value,
-            OwnerUserId = actor.UserId!.Value,
+            TenantId = tenantId,
+            OwnerUserId = ownerId,
             ProjectId = insight.ProjectId,
             InsightId = insight.Id,
             RequestHash = requestHash,
@@ -473,7 +488,7 @@ public sealed class ConversationAdjudicationService(
     private static Guid? LinkedProposalId(ConversationInsight row)
     {
         var value = StringProperty(row.MetadataJson, "proposalId");
-        return Guid.TryParse(value, out var id) && row.SourceRef == $"chatgpt-proposal:{id:D}" ? id : null;
+        return Guid.TryParse(value, out var id) && id != row.Id && row.SourceRef == $"chatgpt-proposal:{id:D}" ? id : null;
     }
 
     private static string? StringProperty(string json, string name)
