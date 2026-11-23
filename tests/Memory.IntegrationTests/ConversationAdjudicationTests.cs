@@ -256,6 +256,62 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
     }
 
     [DockerRequiredFact]
+    public async Task Failed_linked_proposal_requires_manual_review_and_inherits_a_host_block()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var row = await SeedAsync(db, actor);
+        var proposal = new ConversationInsight
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = row.ProjectId,
+            SessionId = row.SessionId,
+            CheckpointId = row.CheckpointId,
+            SourceSystem = "chatgpt-mcp-gateway",
+            Tags = ["chatgpt-proposal"],
+            DedupKey = Guid.NewGuid().ToString(),
+            PromotionStatus = ConversationPromotionStatus.Failed,
+            CreatedAt = row.CreatedAt,
+            UpdatedAt = row.UpdatedAt
+        };
+        db.ConversationInsights.Add(proposal);
+        row.MetadataJson = JsonSerializer.Serialize(new { proposalId = proposal.Id });
+        await db.SaveChangesAsync();
+
+        var unbound = (await Preview(service, row)).Items.ToDictionary(item => item.InsightId);
+        unbound[row.Id].Classification.Should().Be("RequiresManualDecision");
+        unbound[proposal.Id].Classification.Should().Be("ProposalApplyFailed");
+
+        row.SourceRef = $"chatgpt-proposal:{proposal.Id:D}";
+        await db.SaveChangesAsync();
+        var preview = await Preview(service, row);
+        var failed = preview.Items.Single(item => item.InsightId == row.Id);
+        failed.Classification.Should().Be("ProposalApplyFailed");
+        failed.CanReconcile.Should().BeFalse();
+        preview.UnresolvedHumanDecisionCount.Should().Be(1);
+        preview.ResolvedHumanDecisionCount.Should().Be(0);
+        var reconcile = Request(row, failed, ConversationAdjudicationAction.Reconcile);
+        await FluentActions.Invoking(() => service.AdjudicateAsync(reconcile, default))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*terminal resource evidence*");
+
+        proposal = await db.ConversationInsights.SingleAsync(item => item.Id == proposal.Id);
+        proposal.PromotionStatus = ConversationPromotionStatus.HostBlocked;
+        await db.SaveChangesAsync();
+        var blocked = (await Preview(service, row)).Items.Single(item => item.InsightId == row.Id);
+        blocked.Classification.Should().Be("HostBlocked");
+        blocked.CanReconcile.Should().BeFalse();
+        blocked.CanReopen.Should().BeFalse();
+        await FluentActions.Invoking(() => service.AdjudicateAsync(reconcile, default))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*evidence changed*");
+        await FluentActions.Invoking(() => service.AdjudicateAsync(
+                Request(row, blocked, ConversationAdjudicationAction.ResolveSkipped), default))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*Host-blocked*");
+        (await db.ConversationAdjudications.CountAsync(item => item.InsightId == row.Id)).Should().Be(0);
+        (await db.ConversationInsights.AsNoTracking().SingleAsync(item => item.Id == row.Id))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.RequiresUserDecision);
+    }
+
+    [DockerRequiredFact]
     public async Task Applied_proposal_reconciliation_should_require_the_exact_promoted_memory_and_only_resolve_the_exception()
     {
         using var scope = CreateScope(out var db, out var service, out var actor);

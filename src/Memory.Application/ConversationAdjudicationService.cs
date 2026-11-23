@@ -394,7 +394,9 @@ public sealed class ConversationAdjudicationService(
         var classification = "RequiresManualDecision";
         var canReconcile = false;
         var terminal = row.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped;
-        if (row.PromotionStatus == ConversationPromotionStatus.HostBlocked)
+        var linkedProposal = linked is not null && ChatGptProposalService.IsProposal(linked) ? linked : null;
+        if (row.PromotionStatus == ConversationPromotionStatus.HostBlocked ||
+            linkedProposal?.PromotionStatus == ConversationPromotionStatus.HostBlocked)
             classification = "HostBlocked";
         else if (HasHold(row) || (linked is not null && HasHold(linked)) ||
                  (target is not null && HasProtectedMetadata(target.Tags, target.MetadataJson)))
@@ -406,21 +408,24 @@ public sealed class ConversationAdjudicationService(
             classification = "ResolvedWithoutDelete";
             canReconcile = true;
         }
-        else if (linked is not null && ChatGptProposalService.IsProposal(linked) &&
-                 linked.PromotionStatus == ConversationPromotionStatus.Skipped)
+        else if (linkedProposal?.PromotionStatus == ConversationPromotionStatus.Skipped)
         {
             classification = "ResolvedRejectedProposal";
             canReconcile = true;
         }
-        else if (linked is not null && ChatGptProposalService.IsProposal(linked) &&
-                 linked.PromotionStatus == ConversationPromotionStatus.Promoted &&
-                 target is not null && linked.PromotedMemoryId == target.Id)
+        else if (linkedProposal?.PromotionStatus == ConversationPromotionStatus.Promoted &&
+                 target is not null && linkedProposal.PromotedMemoryId == target.Id)
         {
             classification = "ResolvedAppliedProposal";
             canReconcile = true;
         }
+        else if (linkedProposal?.PromotionStatus == ConversationPromotionStatus.Failed ||
+                 (row.PromotionStatus == ConversationPromotionStatus.Failed && ChatGptProposalService.IsProposal(row)))
+        {
+            classification = "ProposalApplyFailed";
+        }
         return new(row.Id, row.ProjectId, row.Title, row.PromotionStatus, token, fingerprint, classification,
-            canReconcile, terminal && receipt is not null && classification != "ProtectedHold" &&
+            canReconcile, terminal && receipt is not null && classification is not ("ProtectedHold" or "HostBlocked") &&
             receipt.EvidenceFingerprint != fingerprint);
     }
 

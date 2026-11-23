@@ -20,6 +20,8 @@ REST follows the server's standard enum serialization. Clients using numeric enu
 
 Reconciliation accepts an archived delete-proposal target only when `metadata.toolName=memory_delete` and `metadata.payload.id/projectId` bind the target to the same project and owner. It records `ResolvedWithoutDelete`. A rejected or applied linked proposal requires both `metadata.proposalId` and an exact `sourceRef=chatgpt-proposal:<UUID>`; applied proposals additionally require the matching promoted memory. Free-text references and approximate title matches remain manual decisions. Existing pending proposals continue through the ordinary proposal workflow.
 
+An exact linked proposal with `Failed` status appears as `ProposalApplyFailed` when there is no independent proof for reconciliation. Approval can record a failure after releasing control to the target operation, so verify the target outcome before making a decision. An exact link to a `HostBlocked` proposal blocks adjudication of the referring exception, including explicit skip and reopen.
+
 HostBlocked, legal/security holds, and malformed protection metadata fail closed. Read and write require the corresponding memory scope, an actual Owner/Admin role, and the same tenant, owner, and authorized project. Service actors and scheduled-scoped actors are rejected. Existing skip, host, deletion, score and retention policies remain unchanged.
 
 ## Evidence and accounting
