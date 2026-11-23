@@ -452,38 +452,44 @@ function Get-ScheduledGovernanceReviewEvidence {
         humanDecisionCount = [int](Get-ScheduledGovernancePropertyValue $Review "humanDecisionCount")
         governedExceptionCount = [int](Get-ScheduledGovernancePropertyValue $Review "governedExceptionCount")
         businessWorkItemActionableCount = [int](Get-ScheduledGovernancePropertyValue $Review "businessWorkItemActionableCount")
-        resolvedProjectCount = (Get-ScheduledGovernanceArrayProperty $Review "resolvedProjectIds").Count
+        resolvedProjectCount = @(Get-ScheduledGovernanceArrayProperty $Review "resolvedProjectIds").Count
     }
 }
 
 function Get-ScheduledGovernanceReceiptEvidence {
-    param([AllowNull()][object]$Receipt)
+    param(
+        [AllowNull()][object]$Receipt,
+        [Parameter(Mandatory)][string]$ExpectedRunId
+    )
 
     if ($null -eq $Receipt) {
         return [ordered]@{
             present = $false
             runExists = $false
-            latestBatchExecuted = $false
-            latestBatchStatus = ""
+            latestBatchExecuted = $null
+            latestBatchStatus = $null
         }
     }
 
-    $latestBatch = Get-ScheduledGovernancePropertyValue $Receipt "latestBatch"
+    if ((Get-ScheduledGovernancePropertyValue $Receipt "governanceRunId") -cne $ExpectedRunId) {
+        throw "Scheduled governance receipt did not match the requested run."
+    }
+
     [ordered]@{
         present = $true
         runExists = [bool](Get-ScheduledGovernancePropertyValue $Receipt "runExists")
         status = [string](Get-ScheduledGovernancePropertyValue $Receipt "status")
         latestBatchReceived = [bool](Get-ScheduledGovernancePropertyValue $Receipt "latestBatchReceived")
-        latestBatchExecuted = [bool](Get-ScheduledGovernancePropertyValue $latestBatch "executed")
-        latestBatchStatus = [string](Get-ScheduledGovernancePropertyValue $latestBatch "status")
-        latestBatchRequiresReReview = [bool](Get-ScheduledGovernancePropertyValue $latestBatch "requiresReReview")
+        latestBatchExecuted = $null
+        latestBatchStatus = $null
+        latestBatchRequiresReReview = $null
         isReplay = [bool](Get-ScheduledGovernancePropertyValue $Receipt "isReplay")
         initialGovernanceActionable = [int](Get-ScheduledGovernancePropertyValue $Receipt "initialGovernanceActionable")
         finalGovernanceActionable = [int](Get-ScheduledGovernancePropertyValue $Receipt "finalGovernanceActionable")
         finalConvergenceStatus = [string](Get-ScheduledGovernancePropertyValue $Receipt "finalConvergenceStatus")
         finalSnapshotPresent = -not [string]::IsNullOrWhiteSpace([string](Get-ScheduledGovernancePropertyValue $Receipt "finalSnapshotToken"))
         requestIdentityHashPresent = [string](Get-ScheduledGovernancePropertyValue $Receipt "requestIdentityHash") -match "^[a-f0-9]{64}$"
-        auditCount = (Get-ScheduledGovernanceArrayProperty $Receipt "auditIds").Count
+        auditCount = @(Get-ScheduledGovernanceArrayProperty $Receipt "auditIds").Count
     }
 }
 
@@ -746,6 +752,17 @@ try {
                 throw "Automation tools/list did not expose exactly the four canonical tools."
             }
 
+            $receiptTool = @($publishedTools | Where-Object {
+                    [string](Get-ScheduledGovernancePropertyValue $_ "name") -ceq "scheduled_governance_run_get"
+                })[0]
+            $receiptInput = Get-ScheduledGovernancePropertyValue $receiptTool "inputSchema"
+            $receiptProperties = Get-ScheduledGovernancePropertyValue $receiptInput "properties"
+            $historySchema = Get-ScheduledGovernancePropertyValue $receiptProperties "includeReliabilityHistory"
+            if ((Get-ScheduledGovernancePropertyValue $historySchema "type") -cne "boolean" -or
+                (Get-ScheduledGovernanceArrayProperty $receiptInput "required") -ccontains "includeReliabilityHistory") {
+                throw "Scheduled receipt discovery did not expose optional boolean includeReliabilityHistory."
+            }
+
             foreach ($tool in $publishedTools) {
                 $annotations = Get-ScheduledGovernancePropertyValue $tool "annotations"
                 foreach ($annotation in @("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")) {
@@ -873,10 +890,10 @@ try {
                 $initialReceiptJson = Invoke-ScheduledGovernanceTool `
                     -Token $token `
                     -ToolName "scheduled_governance_run_get" `
-                    -Arguments @{ governanceRunId = $runId } `
+                    -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $false } `
                     -RequestId 31
                 $initialReceipt = Get-ScheduledGovernanceToolData -Json $initialReceiptJson -Operation "scheduled_governance_run_get"
-                $evidence.receipt.initial = Get-ScheduledGovernanceReceiptEvidence $initialReceipt
+                $evidence.receipt.initial = Get-ScheduledGovernanceReceiptEvidence $initialReceipt -ExpectedRunId $runId
                 if (-not $evidence.receipt.initial.present -or -not $evidence.receipt.initial.runExists) {
                     throw "Initial scheduled governance review receipt was not readable."
                 }
@@ -902,10 +919,10 @@ try {
                         $finalReceiptJson = Invoke-ScheduledGovernanceTool `
                             -Token $token `
                             -ToolName "scheduled_governance_run_get" `
-                            -Arguments @{ governanceRunId = $runId } `
+                            -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $true } `
                             -RequestId 33
                         $finalReceipt = Get-ScheduledGovernanceToolData -Json $finalReceiptJson -Operation "scheduled_governance_run_get"
-                        $evidence.receipt.final = Get-ScheduledGovernanceReceiptEvidence $finalReceipt
+                        $evidence.receipt.final = Get-ScheduledGovernanceReceiptEvidence $finalReceipt -ExpectedRunId $runId
                         if (-not $evidence.receipt.final.present -or -not $evidence.receipt.final.runExists) {
                             throw "Final A0 scheduled governance receipt was not readable."
                         }
@@ -968,36 +985,22 @@ try {
                         }
 
                         if ($unknownOutcome) {
-                            $recoveryReceiptJson = Invoke-ScheduledGovernanceTool `
-                                -Token $token `
-                                -ToolName "scheduled_governance_run_get" `
-                                -Arguments @{ governanceRunId = $runId } `
-                                -RequestId 41
-                            $recoveryReceipt = Get-ScheduledGovernanceToolData `
-                                -Json $recoveryReceiptJson -Operation "scheduled_governance_run_get"
-                            $recoveryEvidence = Get-ScheduledGovernanceReceiptEvidence $recoveryReceipt
-                            $evidence.receipt.afterUnknownOutcome = $recoveryEvidence
-                            $latestBatch = Get-ScheduledGovernancePropertyValue $recoveryReceipt "latestBatch"
-                            if ([bool](Get-ScheduledGovernancePropertyValue $latestBatch "executed")) {
-                                $unknownOutcome = $false
-                                $evidence.replay.outcomeRecovery = "recovered-from-receipt-no-retry"
-                                $firstExecution = $null
-                            }
-                            elseif ([string](Get-ScheduledGovernancePropertyValue $latestBatch "status") -ne "Running" -and
-                                [bool](Get-ScheduledGovernancePropertyValue $latestBatch "received")) {
-                                $evidence.outcome.executorCalls++
-                                $firstExecutionJson = Invoke-ScheduledGovernanceTool `
+                            $evidence.outcome.status = "outcome-unknown-no-retry"
+                            $exitCode = 2
+                            try {
+                                $recoveryReceiptJson = Invoke-ScheduledGovernanceTool `
                                     -Token $token `
-                                    -ToolName "scheduled_governance_execute" `
-                                    -Arguments $executeArguments `
-                                    -RequestId 42
-                                $firstExecution = Get-ScheduledGovernanceToolData `
-                                    -Json $firstExecutionJson -Operation "scheduled_governance_execute-replay-after-recovery"
-                                $evidence.replay.outcomeRecovery = "exact-replay-after-receipt-confirmed-no-execution"
+                                    -ToolName "scheduled_governance_run_get" `
+                                    -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $false } `
+                                    -RequestId 41
+                                $recoveryReceipt = Get-ScheduledGovernanceToolData -Json $recoveryReceiptJson -Operation "scheduled_governance_run_get"
+                                $evidence.receipt.afterUnknownOutcome = Get-ScheduledGovernanceReceiptEvidence $recoveryReceipt -ExpectedRunId $runId
+                                # This receipt lacks a batch result and proof that the batch matched the request.
+                                $evidence.replay.outcomeRecovery = "receipt-readback-insufficient-for-exact-replay"
                             }
-                            else {
-                                $evidence.outcome.status = "outcome-unknown-no-retry"
-                                $exitCode = 2
+                            catch {
+                                $evidence.replay.outcomeRecovery = "receipt-readback-unavailable"
+                                $evidence.errors += $_.Exception.Message
                             }
                         }
 
@@ -1041,11 +1044,11 @@ try {
                             $finalReceiptJson = Invoke-ScheduledGovernanceTool `
                                 -Token $token `
                                 -ToolName "scheduled_governance_run_get" `
-                                -Arguments @{ governanceRunId = $runId } `
+                                -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $true } `
                                 -RequestId 45
                             $finalReceipt = Get-ScheduledGovernanceToolData `
                                 -Json $finalReceiptJson -Operation "scheduled_governance_run_get-after-execute"
-                            $evidence.receipt.final = Get-ScheduledGovernanceReceiptEvidence $finalReceipt
+                            $evidence.receipt.final = Get-ScheduledGovernanceReceiptEvidence $finalReceipt -ExpectedRunId $runId
                             if (-not $evidence.receipt.final.present -or -not $evidence.receipt.final.runExists) {
                                 throw "Final A1 scheduled governance receipt was not readable."
                             }
