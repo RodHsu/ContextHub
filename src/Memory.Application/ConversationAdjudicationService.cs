@@ -14,11 +14,19 @@ public sealed class ConversationAdjudicationService(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const string Policy = "conversation-adjudication-v1";
+    private const int MaximumPreviewPageSize = 200;
 
     public async Task<ConversationAdjudicationPreviewResult> PreviewAsync(
         ConversationAdjudicationPreviewRequest request, CancellationToken cancellationToken)
     {
         var project = Authorize(request.ProjectId, write: false);
+        if (request.ExpectedInventoryToken is { } expected &&
+            (expected.Length != 64 || expected.Any(x => x is not (>= '0' and <= '9' or >= 'a' and <= 'f'))))
+        {
+            throw new ConversationAdjudicationInventoryException("ExpectedInventoryToken must be a lowercase SHA-256 digest.");
+        }
+
+        await using var transaction = await db.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
         var query = Insights(project).AsNoTracking();
         var receipts = Receipts(project);
         var candidates = query.Where(x =>
@@ -34,7 +42,7 @@ public sealed class ConversationAdjudicationService(
             (x.PromotionStatus == ConversationPromotionStatus.Skipped || x.PromotionStatus == ConversationPromotionStatus.Promoted) &&
             receipts.Any(r => r.InsightId == x.Id), cancellationToken);
         var offset = Math.Max(0, request.Offset);
-        var rows = await candidates.OrderBy(x => x.Id).Skip(offset).Take(Math.Clamp(request.Limit, 1, 200))
+        var rows = await candidates.OrderBy(x => x.Id).Skip(offset).Take(Math.Clamp(request.Limit, 1, MaximumPreviewPageSize))
             .ToArrayAsync(cancellationToken);
         var context = await LoadEvidenceAsync(project, rows, cancellationToken);
         var results = rows.Select(row => Evaluate(row, context)).ToArray();
@@ -43,13 +51,77 @@ public sealed class ConversationAdjudicationService(
         var newlyResolved = await transitions.CountAsync(x => x.Action != nameof(ConversationAdjudicationAction.Reopen), cancellationToken);
         var reopened = await transitions.CountAsync(x => x.Action == nameof(ConversationAdjudicationAction.Reopen), cancellationToken);
         var unchanged = await candidates.CountAsync(x => !transitions.Any(r => r.InsightId == x.Id), cancellationToken);
-        return new(project, total, unresolved, resolved, offset, offset + rows.Length < total, results)
+        var preview = new ConversationAdjudicationPreviewResult(
+            project, total, unresolved, resolved, offset, offset + rows.Length < total, results)
         {
             CounterGovernanceRunId = counterRun,
             NewlyResolvedCount = newlyResolved,
             ReopenedCount = reopened,
             UnchangedCount = unchanged
         };
+
+        if (request.IncludeInventoryToken || request.ExpectedInventoryToken is not null)
+        {
+            preview = preview with { InventoryToken = await BuildInventoryTokenAsync(project, candidates, preview, cancellationToken) };
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        if (request.ExpectedInventoryToken is not null &&
+            !string.Equals(request.ExpectedInventoryToken, preview.InventoryToken, StringComparison.Ordinal))
+        {
+            throw new ConversationAdjudicationInventoryException("The adjudication inventory changed. Restart the preview from offset zero.");
+        }
+
+        return preview;
+    }
+
+    private async Task<string> BuildInventoryTokenAsync(
+        string project,
+        IQueryable<ConversationInsight> candidates,
+        ConversationAdjudicationPreviewResult preview,
+        CancellationToken cancellationToken)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var actor = actors.Current;
+        hash.AppendData(JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            Version = "conversation-adjudication-inventory-v1",
+            actor.TenantId,
+            actor.UserId,
+            Project = ProjectContext.IdentityKey(project),
+            preview.CounterGovernanceRunId,
+            preview.TotalCount,
+            preview.UnresolvedHumanDecisionCount,
+            preview.ResolvedHumanDecisionCount,
+            preview.NewlyResolvedCount,
+            preview.ReopenedCount,
+            preview.UnchangedCount
+        }, JsonOptions));
+
+        // Keep materialized evidence bounded while hashing the entire ordered inventory,
+        // including linked evidence behind candidates outside this response page.
+        var ids = await candidates.OrderBy(x => x.Id).Select(x => x.Id).ToArrayAsync(cancellationToken);
+        foreach (var batch in ids.Chunk(MaximumPreviewPageSize))
+        {
+            var rows = await candidates.Where(x => batch.Contains(x.Id)).OrderBy(x => x.Id)
+                .ToArrayAsync(cancellationToken);
+            var evidence = await LoadEvidenceAsync(project, rows, cancellationToken);
+            foreach (var row in rows)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var item = Evaluate(row, evidence);
+                hash.AppendData(JsonSerializer.SerializeToUtf8Bytes(new
+                {
+                    item.InsightId,
+                    item.EvidenceToken,
+                    item.Classification,
+                    item.CanReconcile,
+                    item.CanReopen
+                }, JsonOptions));
+            }
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
     public async Task<ConversationAdjudicationReceipt> AdjudicateAsync(

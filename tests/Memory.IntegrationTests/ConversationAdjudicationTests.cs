@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using FluentAssertions;
 using Memory.Application;
@@ -5,6 +6,7 @@ using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Memory.IntegrationTests;
@@ -297,11 +299,13 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
     }
 
     [DockerRequiredFact]
-    public async Task Dry_run_should_page_more_than_one_thousand_exceptions_without_mutation()
+    public async Task Guarded_dry_run_should_page_the_1492_exception_baseline_without_mutation()
     {
         using var scope = CreateScope(out var db, out var service, out var actor);
         var seed = await SeedAsync(db, actor);
-        var rows = Enumerable.Range(0, 1006).Select(i => new ConversationInsight
+        const int baselineCount = 1492;
+        const string runId = "backfill-test";
+        var rows = Enumerable.Range(0, baselineCount - 1).Select(i => new ConversationInsight
         {
             SessionId = seed.SessionId,
             CheckpointId = seed.CheckpointId,
@@ -318,29 +322,192 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
         db.ConversationInsights.AddRange(rows);
         await db.SaveChangesAsync();
         var ids = new HashSet<Guid>();
+        ConversationAdjudicationCandidate? first = null;
+        string? inventoryToken = null;
         var offset = 0;
         while (true)
         {
-            var page = await service.PreviewAsync(new(seed.ProjectId, offset, 200), default);
-            page.TotalCount.Should().Be(1007);
-            page.UnresolvedHumanDecisionCount.Should().Be(1007);
+            var page = await service.PreviewAsync(new(seed.ProjectId, offset, 200, runId,
+                IncludeInventoryToken: offset == 0, ExpectedInventoryToken: inventoryToken), default);
+            if (offset == 0)
+            {
+                inventoryToken = page.InventoryToken;
+                inventoryToken.Should().NotBeNullOrWhiteSpace();
+                first = page.Items.First();
+            }
+            page.InventoryToken.Should().Be(inventoryToken);
+            page.TotalCount.Should().Be(baselineCount);
+            page.UnresolvedHumanDecisionCount.Should().Be(baselineCount);
+            page.UnchangedCount.Should().Be(baselineCount);
             foreach (var item in page.Items) ids.Add(item.InsightId).Should().BeTrue();
             if (!page.HasMore) break;
             offset += page.Items.Count;
         }
-        ids.Count.Should().Be(1007);
+        ids.Should().BeEquivalentTo(rows.Select(row => row.Id).Append(seed.Id));
         (await db.ConversationAdjudications.CountAsync(x => x.ProjectId == seed.ProjectId)).Should().Be(0);
-        var firstPage = await service.PreviewAsync(new(seed.ProjectId, 0, 200), default);
-        var selected = firstPage.Items.First();
-        await service.AdjudicateAsync(new(seed.ProjectId, selected.InsightId, Guid.NewGuid(),
-            ConversationAdjudicationAction.ResolveSkipped, selected.EvidenceToken, "Explicit historical adjudication", "backfill-test"), default);
-        var readBack = await service.PreviewAsync(new(seed.ProjectId, GovernanceRunId: "backfill-test"), default);
-        readBack.TotalCount.Should().Be(1007);
-        readBack.UnresolvedHumanDecisionCount.Should().Be(1006);
+        await service.AdjudicateAsync(new(seed.ProjectId, first!.InsightId, Guid.NewGuid(),
+            ConversationAdjudicationAction.ResolveSkipped, first.EvidenceToken, "Explicit historical adjudication", runId), default);
+        await FluentActions.Invoking(() => service.PreviewAsync(new(seed.ProjectId, GovernanceRunId: runId,
+                ExpectedInventoryToken: inventoryToken), default))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*preview*");
+        var readBack = await service.PreviewAsync(new(seed.ProjectId, GovernanceRunId: runId), default);
+        readBack.InventoryToken.Should().BeNull();
+        readBack.TotalCount.Should().Be(baselineCount);
+        readBack.UnresolvedHumanDecisionCount.Should().Be(baselineCount - 1);
         readBack.ResolvedHumanDecisionCount.Should().Be(1);
         readBack.NewlyResolvedCount.Should().Be(1);
-        readBack.UnchangedCount.Should().Be(1006);
+        readBack.UnchangedCount.Should().Be(baselineCount - 1);
         (await db.ConversationInsights.CountAsync(x => x.ProjectId == seed.ProjectId && x.PromotionStatus == ConversationPromotionStatus.Promoted)).Should().Be(0);
+    }
+
+    [DockerRequiredFact]
+    public async Task Inventory_guard_should_detect_off_page_evidence_and_same_count_membership_changes()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var seed = await SeedAsync(db, actor);
+        ConversationInsight NewInsight(ConversationPromotionStatus status) => new()
+        {
+            SessionId = seed.SessionId,
+            CheckpointId = seed.CheckpointId,
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = seed.ProjectId,
+            Title = "Additional historical record",
+            Content = "Scoped inventory fixture",
+            DedupKey = Guid.NewGuid().ToString("N"),
+            PromotionStatus = status,
+            CreatedAt = seed.CreatedAt,
+            UpdatedAt = seed.UpdatedAt
+        };
+
+        var second = NewInsight(ConversationPromotionStatus.RequiresUserDecision);
+        var proposal = NewInsight(ConversationPromotionStatus.Pending);
+        proposal.SourceSystem = "chatgpt-mcp-gateway";
+        proposal.Tags = ["chatgpt-proposal"];
+        db.ConversationInsights.AddRange(second, proposal);
+        await db.SaveChangesAsync();
+
+        const string runId = "inventory-watch";
+        var baseline = await service.PreviewAsync(new(seed.ProjectId, Limit: 1, GovernanceRunId: runId),
+            default);
+        var offPage = baseline.Items.Single().InsightId == seed.Id ? second : seed;
+        offPage.MetadataJson = JsonSerializer.Serialize(new { proposalId = proposal.Id });
+        offPage.SourceRef = $"chatgpt-proposal:{proposal.Id:D}";
+        await db.SaveChangesAsync();
+
+        var request = new ConversationAdjudicationPreviewRequest(seed.ProjectId, Limit: 1, GovernanceRunId: runId,
+            IncludeInventoryToken: true);
+        var firstPage = await service.PreviewAsync(request, default);
+        var nextPage = await service.PreviewAsync(request with
+        {
+            Offset = 1,
+            IncludeInventoryToken = false,
+            ExpectedInventoryToken = firstPage.InventoryToken
+        }, default);
+        nextPage.Items.Single().InsightId.Should().Be(offPage.Id);
+        nextPage.Items.Single().CanReconcile.Should().BeFalse();
+        nextPage.InventoryToken.Should().Be(firstPage.InventoryToken);
+        await FluentActions.Invoking(() => service.PreviewAsync(request with
+        {
+            GovernanceRunId = "another-counter-scope",
+            ExpectedInventoryToken = firstPage.InventoryToken
+        }, default)).Should().ThrowAsync<InvalidOperationException>().WithMessage("*preview*");
+
+        proposal.PromotionStatus = ConversationPromotionStatus.Skipped;
+        await db.SaveChangesAsync();
+        var afterEvidenceChange = await service.PreviewAsync(request, default);
+        afterEvidenceChange.TotalCount.Should().Be(firstPage.TotalCount);
+        afterEvidenceChange.Items.Single().EvidenceToken.Should().Be(firstPage.Items.Single().EvidenceToken);
+        await FluentActions.Invoking(() => service.PreviewAsync(request with
+        {
+            Offset = 1,
+            ExpectedInventoryToken = firstPage.InventoryToken
+        }, default)).Should().ThrowAsync<InvalidOperationException>().WithMessage("*preview*");
+        (await service.PreviewAsync(request with { Offset = 1 }, default)).Items.Single().CanReconcile.Should().BeTrue();
+
+        offPage.PromotionStatus = ConversationPromotionStatus.Pending;
+        var replacement = NewInsight(ConversationPromotionStatus.RequiresUserDecision);
+        db.ConversationInsights.Add(replacement);
+        await db.SaveChangesAsync();
+        var afterReplacement = await service.PreviewAsync(request with { Limit = 200 }, default);
+        afterReplacement.TotalCount.Should().Be(firstPage.TotalCount);
+        afterReplacement.UnresolvedHumanDecisionCount.Should().Be(firstPage.UnresolvedHumanDecisionCount);
+        afterReplacement.Items.Select(item => item.InsightId).Should().Contain(replacement.Id).And.NotContain(offPage.Id);
+        await FluentActions.Invoking(() => service.PreviewAsync(request with
+        {
+            ExpectedInventoryToken = afterEvidenceChange.InventoryToken
+        }, default)).Should().ThrowAsync<InvalidOperationException>().WithMessage("*preview*");
+        (await db.ConversationAdjudications.CountAsync(x => x.ProjectId == seed.ProjectId)).Should().Be(0);
+    }
+
+    [DockerRequiredFact]
+    public async Task Preview_should_hold_one_snapshot_when_a_change_commits_after_the_first_count()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var seed = await SeedAsync(db, actor);
+        var request = new ConversationAdjudicationPreviewRequest(seed.ProjectId, IncludeInventoryToken: true);
+        var baseline = await service.PreviewAsync(request, default);
+        baseline.InventoryToken.Should().NotBeNullOrWhiteSpace();
+
+        using var writerScope = environment.GetFactory().Services.CreateScope();
+        var writer = writerScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var interceptor = new FirstConversationCountInterceptor(async cancellationToken =>
+        {
+            await using var transaction = await writer.Database.BeginTransactionAsync(cancellationToken);
+            var changed = await writer.ConversationInsights.Where(row => row.Id == seed.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(row => row.PromotionStatus,
+                    ConversationPromotionStatus.Pending), cancellationToken);
+            changed.Should().Be(1);
+            await transaction.CommitAsync(cancellationToken);
+        });
+        var readerOptions = new DbContextOptionsBuilder<MemoryDbContext>(
+                scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .AddInterceptors(interceptor)
+            .Options;
+        await using var reader = new MemoryDbContext(readerOptions);
+        var guardedService = new ConversationAdjudicationService(
+            reader,
+            scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>(),
+            scope.ServiceProvider.GetRequiredService<IClock>());
+        var guardedRequest = request with { ExpectedInventoryToken = baseline.InventoryToken };
+        var observed = await guardedService.PreviewAsync(guardedRequest, default);
+
+        interceptor.CommittedChange.Should().BeTrue();
+        observed.TotalCount.Should().Be(1);
+        observed.UnresolvedHumanDecisionCount.Should().Be(1);
+        observed.UnchangedCount.Should().Be(1);
+        observed.Items.Should().BeEquivalentTo(baseline.Items);
+        observed.InventoryToken.Should().Be(baseline.InventoryToken);
+
+        var refreshed = await service.PreviewAsync(request, default);
+        refreshed.TotalCount.Should().Be(0);
+        refreshed.Items.Should().BeEmpty();
+        refreshed.InventoryToken.Should().NotBe(baseline.InventoryToken);
+        await FluentActions.Invoking(() => service.PreviewAsync(guardedRequest, default))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*preview*");
+        (await db.ConversationAdjudications.CountAsync(row => row.InsightId == seed.Id)).Should().Be(0);
+    }
+
+    private sealed class FirstConversationCountInterceptor(Func<CancellationToken, Task> afterCount) : DbCommandInterceptor
+    {
+        public bool CommittedChange { get; private set; }
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            DbDataReader result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!CommittedChange && eventData.CommandSource == CommandSource.LinqQuery &&
+                command.CommandText.Contains("count(", StringComparison.OrdinalIgnoreCase) &&
+                command.CommandText.Contains("conversation_insights", StringComparison.OrdinalIgnoreCase))
+            {
+                await afterCount(cancellationToken);
+                CommittedChange = true;
+            }
+
+            return result;
+        }
     }
 
     private IServiceScope CreateScope(out MemoryDbContext db, out IConversationAdjudicationService service, out ContextHubRequestActor actor)

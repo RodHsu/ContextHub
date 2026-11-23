@@ -87,6 +87,45 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task General_Adjudication_Preview_Should_Publish_And_Enforce_Inventory_Token()
+    {
+        using var client = CreateAuthorizedClient(environment.GetFactory());
+        const string toolName = "conversation_adjudication_preview";
+        var listed = ExtractSseJson(await SendMcpAsync(client, null, 31, "tools/list", new { }));
+        var tool = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+            .Single(x => x.GetProperty("name").GetString() == toolName);
+        var requestSchema = tool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties");
+        requestSchema.TryGetProperty("includeInventoryToken", out _).Should().BeTrue();
+        requestSchema.TryGetProperty("expectedInventoryToken", out _).Should().BeTrue();
+        tool.GetProperty("outputSchema").GetProperty("properties").TryGetProperty("inventoryToken", out _).Should().BeTrue();
+
+        async Task<JsonElement> PreviewAsync(int id, object request)
+        {
+            var response = await SendMcpAsync(client, null, id, "tools/call", new
+            {
+                name = toolName,
+                arguments = new { request }
+            });
+            return ExtractSseJson(response);
+        }
+
+        var first = await PreviewAsync(32, new { projectId = ProjectId, includeInventoryToken = true });
+        var token = first.GetProperty("result").GetProperty("structuredContent").GetProperty("inventoryToken").GetString();
+        token.Should().MatchRegex("^[0-9a-f]{64}$");
+        var continued = await PreviewAsync(33, new { projectId = ProjectId, offset = 200, expectedInventoryToken = token });
+        continued.GetProperty("result").GetProperty("structuredContent").GetProperty("inventoryToken").GetString()
+            .Should().Be(token);
+
+        var changed = await PreviewAsync(34, new { projectId = ProjectId, governanceRunId = "different-run", expectedInventoryToken = token });
+        var protocolError = changed.TryGetProperty("error", out _);
+        var toolError = changed.TryGetProperty("result", out var result) &&
+                        result.TryGetProperty("isError", out var isError) && isError.GetBoolean();
+        (protocolError || toolError).Should().BeTrue();
+        changed.GetRawText().Should().NotContain("inventoryToken");
+    }
+
+    [DockerRequiredFact]
     public async Task Automation_Kestrel_Public_Http_Schema_Should_Survive_Host_Projection()
     {
         await using var factory = new ChatGptGatewayApplicationFactory(

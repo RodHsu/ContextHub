@@ -4,7 +4,7 @@ Owner/Admin users can resolve historical conversation exceptions through the gen
 
 ## Preview and apply
 
-1. Call `conversation_adjudication_preview` with an explicit `projectId`, `offset` and `limit` (maximum 200), or `GET /api/conversations/adjudication-preview`. Continue until `hasMore=false`. Preview is read-only. Counts cover the scoped dataset, not just the returned page. Offset pagination should be restarted if records are added concurrently.
+1. Call `conversation_adjudication_preview` with an explicit `projectId`, `offset` and `limit` (maximum 200), or `GET /api/conversations/adjudication-preview`. Preview is read-only. Each page and its scoped counts use a single database snapshot.
 2. Inspect the insight with `conversation_insight_status` and any linked resources. The preview returns an `evidenceToken`, semantic `evidenceFingerprint`, classification, and whether reconciliation or reopening is available.
 3. Call `conversation_insight_adjudicate` or `POST /api/conversations/adjudications` with `projectId`, `insightId`, a new UUID `operationId`, `action`, `expectedEvidenceToken`, a nonempty `reason` and `governanceRunId`. A run ID is an audit correlation label; it does not grant execution authority.
 4. Retain the returned receipt and read a fresh preview. An identical retry with the same operation ID returns the original receipt with `isReplay=true`. Reusing the ID with a different request fails. After a serialization conflict, retry the identical request; refresh the preview before making a different decision.
@@ -28,10 +28,12 @@ Migration 052 adds an append-only `conversation_adjudications` ledger. The dispo
 
 Dry-run preview supports historical backfill without automatic mutation. Apply decisions individually with their preview tokens; ambiguous links stay unresolved. `unresolvedHumanDecisionCount` counts current RequiresUserDecision records; `resolvedHumanDecisionCount` counts terminal records with adjudication evidence. Reopening removes the record from the resolved count. Manually adjudicated records are excluded from automatic exception-to-Pending reopening.
 
+For a historical inventory, set `includeInventoryToken=true` on the first page. Send the returned `inventoryToken` as `expectedInventoryToken` on each following page, keeping the project and optional `governanceRunId` fixed. Stop at `hasMore=false`. A changed candidate set, linked evidence, disposition, or scoped counter invalidates the token. REST returns HTTP 409 and MCP returns a tool error. Restart from offset zero if this happens. The token covers the full inventory, so requesting it adds work to each page. Ordinary previews can omit it. Applying a decision still requires the individual candidate's `evidenceToken`.
+
 An optional preview `governanceRunId` scopes `newlyResolvedCount` and `reopenedCount` to committed ledger transitions in that run. Omitting it counts all retained adjudication history. `unchangedCount` counts current candidates with no transition in that interval; inventory counts always describe current state. A record resolved and subsequently reopened contributes one event to each transition count, and only to the current unresolved inventory. Exact retries never add events.
 
 General `knowledge_review` also exposes current `unresolvedHumanDecisionCount` and `resolvedHumanDecisionCount`, plus `newlyResolvedHumanDecisionCount` and `reopenedHumanDecisionCount` for its run ID. Receipt exception deltas continue to report unchanged exceptions. Resolved ledger records are absent from the active exception inventory.
 
 Review exception identity uses the underlying finding/insight ID, excluding refresh timestamps. Legacy receipt keys are normalized during comparison without rewriting old receipts. Semantic changes appear as escalations, while timestamp-only refreshes remain unchanged. Execution cursors remain version-bound. Unknown actions such as `NeedsReview` count as human decisions, not executable actions. A general execution candidate still requires the executor's current policy checks; this count is not Scheduled execution authorization.
 
-The general catalog version is `2026-11-21-v12` with 88 tools. Deployment and fresh authenticated host acceptance are separate from local tests.
+The general catalog version is `2026-11-22-v13` with 88 tools. Deployment and fresh authenticated host acceptance are separate from local tests.

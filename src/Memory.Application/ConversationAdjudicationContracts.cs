@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Memory.Domain;
 
 namespace Memory.Application;
@@ -10,7 +11,13 @@ public enum ConversationAdjudicationAction
     Reopen
 }
 
-public sealed record ConversationAdjudicationPreviewRequest(string ProjectId, int Offset = 0, int Limit = 100, string? GovernanceRunId = null);
+public sealed record ConversationAdjudicationPreviewRequest(
+    string ProjectId,
+    int Offset = 0,
+    int Limit = 100,
+    string? GovernanceRunId = null,
+    bool IncludeInventoryToken = false,
+    string? ExpectedInventoryToken = null);
 
 public sealed record ConversationAdjudicationRequest(
     string ProjectId,
@@ -45,6 +52,12 @@ public sealed record ConversationAdjudicationPreviewResult(
     public int NewlyResolvedCount { get; init; }
     public int ReopenedCount { get; init; }
     public int UnchangedCount { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? InventoryToken { get; init; }
+}
+
+public sealed class ConversationAdjudicationInventoryException(string message) : InvalidOperationException(message)
+{
 }
 
 public sealed record ConversationAdjudicationReceipt(

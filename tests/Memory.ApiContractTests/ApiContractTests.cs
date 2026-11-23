@@ -27,6 +27,20 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         preview.Should().NotBeNull();
         preview!.ProjectId.Should().Be(project);
         preview.TotalCount.Should().Be(0);
+        preview.InventoryToken.Should().BeNull();
+
+        var auditUrl = $"/api/conversations/adjudication-preview?projectId={project}&governanceRunId=preview-audit";
+        var tracked = await client.GetFromJsonAsync<ConversationAdjudicationPreviewResult>(
+            $"{auditUrl}&includeInventoryToken=true");
+        tracked!.InventoryToken.Should().MatchRegex("^[0-9a-f]{64}$");
+        var continued = await client.GetFromJsonAsync<ConversationAdjudicationPreviewResult>(
+            $"{auditUrl}&offset=200&expectedInventoryToken={tracked.InventoryToken}");
+        continued!.InventoryToken.Should().Be(tracked.InventoryToken);
+        using var stale = await client.GetAsync(
+            $"/api/conversations/adjudication-preview?projectId={project}&governanceRunId=different-audit&expectedInventoryToken={tracked.InventoryToken}");
+        stale.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
+        (await stale.Content.ReadAsStringAsync()).Should().Contain("Restart the preview from offset zero");
+
         var response = await client.PostAsJsonAsync("/api/conversations/adjudications", new ConversationAdjudicationRequest(
             project, Guid.NewGuid(), Guid.NewGuid(), ConversationAdjudicationAction.ResolveSkipped, "", "", ""));
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
