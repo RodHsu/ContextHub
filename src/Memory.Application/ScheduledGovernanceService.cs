@@ -242,12 +242,14 @@ public sealed class ScheduledGovernanceService(
         var status = pendingDecision ? "Running" : receipt.Status;
         var convergence = pendingDecision ? "DecisionProjectionPending" : receipt.FinalConvergenceStatus;
         var requiresReReview = !pendingDecision &&
+                               status == "Completed" &&
+                               !receipt.ScheduledBatchReReviewed &&
                                string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
                                receipt.LatestBatch is { RequiresReReview: true, Status: "Completed" };
         var decision = pendingDecision || requiresReReview ? null : ReadPersistedDecision(receipt);
-        var outcome = requiresReReview
-            ? "ReReviewRequired"
-            : string.IsNullOrWhiteSpace(convergence) ? status : convergence;
+        var outcome = pendingDecision ? convergence
+            : requiresReReview ? "ReReviewRequired"
+            : status == "Running" || string.IsNullOrWhiteSpace(convergence) ? status : convergence;
 
         return new ScheduledGovernanceRunResult(
             receipt.ReceiptId,

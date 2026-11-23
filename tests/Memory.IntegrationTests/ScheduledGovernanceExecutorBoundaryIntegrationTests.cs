@@ -122,8 +122,10 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .Should().BeGreaterThan(0);
     }
 
-    [DockerRequiredFact]
-    public async Task Scheduled_Executor_Allows_Only_Deterministic_Reversible_Retention_Quarantine()
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Scheduled_Executor_Allows_Only_Deterministic_Reversible_Retention_Quarantine(bool replayDuringReview)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -194,6 +196,73 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .Should().Be(MemoryStatus.Archived);
         (await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == memory.Id))
             .LifecycleStatus.Should().Be("Eligible");
+
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var completed = (await receipts.GetAsync(runId, default))!;
+        completed.LatestBatch.Should().NotBeNull();
+        completed.LatestBatch!.Executed.Should().BeTrue();
+        completed.LatestBatch.RequiresReReview.Should().BeTrue();
+        var afterBatch = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        afterBatch.Decision.Should().BeNull();
+        afterBatch.Outcome.Should().Be("ReReviewRequired");
+
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [projectId] };
+        var reviewRequest = new ScheduledGovernanceReviewRequest(runId, IsReReview: true);
+        var reReviewStartedAt = DateTimeOffset.UtcNow;
+        await receipts.RecordReviewStartedAsync(runId, reReviewStartedAt, CurrentScheduledReceiptIdentity(), default, isReReview: true);
+        var running = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        running.Status.Should().Be("Running");
+        running.Terminal.Should().BeFalse();
+        running.Decision.Should().BeNull();
+        if (replayDuringReview)
+        {
+            await receipts.RecordExecutionAsync(request, result with { IsReplay = true }, DateTimeOffset.UtcNow, default);
+            var replayWhileRunning = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+            replayWhileRunning.IsReplay.Should().BeTrue();
+            replayWhileRunning.Status.Should().Be("Running");
+            replayWhileRunning.Outcome.Should().Be("Running");
+            replayWhileRunning.Terminal.Should().BeFalse();
+            replayWhileRunning.Decision.Should().BeNull();
+        }
+        await receipts.RecordReviewStoppedAsync(runId, reReviewStartedAt, "Stopped", "OperationCanceled",
+            "KnowledgeReview", CurrentScheduledReceiptIdentity(), default, isReReview: true);
+        var stopped = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        stopped.Status.Should().Be("Stopped");
+        stopped.Outcome.Should().Be("Stopped");
+        stopped.StoppedReason.Should().Be("OperationCanceled");
+        stopped.Decision.Should().BeNull();
+        var reReview = await scheduled.ReviewAsync(reviewRequest, default);
+        reReview.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
+
+        var finalized = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        finalized.Decision.Should().Be(reReview.Decision);
+        finalized.Outcome.Should().Be(reReview.Decision.ToString());
+        finalized.Terminal.Should().BeTrue();
+        finalized.FinalSnapshotToken.Should().Be(reReview.SnapshotToken);
+        finalized.LatestBatchReceived.Should().BeTrue();
+        finalized.RequestIdentityHash.Should().Be(afterBatch.RequestIdentityHash);
+
+        var staleRequest = await scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+            .ExecuteAsync(request, default);
+        staleRequest.ErrorCode.Should().Be(GovernanceBatchErrorCode.ReReviewRequired);
+
+        (await db.GovernanceBatchExecutions.AsNoTracking().CountAsync(x =>
+            x.Run!.GovernanceRunId == runId)).Should().Be(1);
+        if (replayDuringReview)
+            return;
+
+        // Publish an already concluded batch replay after the new review, as can
+        // happen when receipt delivery arrives out of order.
+        await receipts.RecordExecutionAsync(request, result with { IsReplay = true }, DateTimeOffset.UtcNow, default);
+        var afterReplay = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        afterReplay.IsReplay.Should().BeTrue();
+        afterReplay.Decision.Should().Be(reReview.Decision);
+        afterReplay.Outcome.Should().Be(reReview.Decision.ToString());
+        afterReplay.FinalSnapshotToken.Should().Be(reReview.SnapshotToken);
+        afterReplay.RequestIdentityHash.Should().Be(afterBatch.RequestIdentityHash);
+        afterReplay.AuditIds.Should().Contain(result.AuditIds);
+        afterReplay.Applied.Should().Be(afterBatch.Applied);
     }
 
     [DockerRequiredFact]
