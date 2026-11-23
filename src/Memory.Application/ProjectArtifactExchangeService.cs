@@ -268,22 +268,68 @@ public sealed class ProjectArtifactExchangeService(
         try
         {
             using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(metadataJson) ? "{}" : metadataJson);
-            var root = document.RootElement;
-            ValidateMetadataNode(root);
-            if (!root.TryGetProperty("kind", out var kindValue) ||
-                !Enum.TryParse<ProjectArtifactKind>(kindValue.GetString(), true, out var kind)) return null;
-            var sourceSystem = root.TryGetProperty("sourceSystem", out var sourceSystemValue) ? sourceSystemValue.GetString() ?? string.Empty : string.Empty;
-            var fileId = ReadGuid(root, "fileId");
-            var fileVersionId = ReadGuid(root, "fileVersionId");
-            if (kind == ProjectArtifactKind.FileReference && (!fileId.HasValue || !fileVersionId.HasValue)) return null;
-            if (kind != ProjectArtifactKind.FileReference && (fileId.HasValue || fileVersionId.HasValue)) return null;
-            return new ArtifactMetadata(kind, sourceSystem, fileId, fileVersionId);
+            return ReadMetadata(document.RootElement);
         }
         catch (Exception exception) when (exception is JsonException or InvalidOperationException)
         {
             return null;
         }
     }
+
+    private static ArtifactMetadata? ReadMetadata(JsonElement root)
+    {
+        ValidateMetadataNode(root);
+        if (!root.TryGetProperty("kind", out var kindValue) ||
+            !Enum.TryParse<ProjectArtifactKind>(kindValue.GetString(), true, out var kind) ||
+            !Enum.IsDefined(kind)) return null;
+        var sourceSystem = root.TryGetProperty("sourceSystem", out var sourceSystemValue) ? sourceSystemValue.GetString() ?? string.Empty : string.Empty;
+        var fileId = ReadGuid(root, "fileId");
+        var fileVersionId = ReadGuid(root, "fileVersionId");
+        if (kind == ProjectArtifactKind.FileReference &&
+            (!fileId.HasValue || fileId == Guid.Empty || !fileVersionId.HasValue || fileVersionId == Guid.Empty)) return null;
+        if (kind != ProjectArtifactKind.FileReference && (root.TryGetProperty("fileId", out _) || root.TryGetProperty("fileVersionId", out _))) return null;
+        return new ArtifactMetadata(kind, sourceSystem, fileId, fileVersionId);
+    }
+
+    internal static ArtifactDuplicateIdentity? GetDuplicateIdentity(MemoryItem item)
+        => GetDuplicateIdentity(item.MemoryType, item.SourceType, item.Tags, item.MetadataJson);
+
+    internal static ArtifactDuplicateIdentity? GetDuplicateIdentity(MemoryDocument item)
+        => GetDuplicateIdentity(item.MemoryType, item.SourceType, item.Tags, item.MetadataJson);
+
+    internal static ArtifactDuplicateIdentity? GetDuplicateIdentity(
+        MemoryType type, string sourceType, IReadOnlyList<string> tags, string metadataJson)
+    {
+        var ordinary = new ArtifactDuplicateIdentity();
+        if (type != MemoryType.Artifact) return ordinary;
+
+        var taggedReference = tags.Contains("artifact-kind:filereference", StringComparer.OrdinalIgnoreCase);
+        var exchangeSource = string.Equals(sourceType, SourceType, StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(metadataJson) ? "{}" : metadataJson);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return exchangeSource || taggedReference ? null : ordinary;
+            var declaresReference = root.TryGetProperty("kind", out var kind) &&
+                                    kind.ValueKind == JsonValueKind.String &&
+                                    Enum.TryParse<ProjectArtifactKind>(kind.GetString(), true, out var parsedKind) &&
+                                    parsedKind == ProjectArtifactKind.FileReference;
+            var hasPin = root.TryGetProperty("fileId", out _) || root.TryGetProperty("fileVersionId", out _);
+            var markedExchange = root.TryGetProperty("artifactExchange", out var mark) && mark.ValueKind == JsonValueKind.True;
+            if (!exchangeSource && !markedExchange && !taggedReference && !declaresReference && !hasPin) return ordinary;
+
+            var metadata = ReadMetadata(root);
+            if (metadata?.Kind == ProjectArtifactKind.FileReference)
+                return new ArtifactDuplicateIdentity(metadata.FileId, metadata.FileVersionId);
+            return metadata is null || taggedReference || declaresReference || hasPin ? null : ordinary;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    internal readonly record struct ArtifactDuplicateIdentity(Guid? FileId, Guid? FileVersionId);
 
     private static Guid? ReadGuid(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var parsed)

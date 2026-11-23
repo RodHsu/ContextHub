@@ -3409,7 +3409,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 SourceRef = "fixture-a",
                 Importance = .7m,
                 Confidence = .8m,
-                MetadataJson = "{}",
+                MetadataJson = """{"artifactExchange":true,"kind":"Summary","sourceSystem":"fixture"}""",
                 CreatedAt = now,
                 UpdatedAt = now
             },
@@ -3428,7 +3428,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 SourceRef = "fixture-b",
                 Importance = .65m,
                 Confidence = .75m,
-                MetadataJson = "{}",
+                MetadataJson = """{"artifactExchange":true,"kind":"Summary","sourceSystem":"fixture"}""",
                 CreatedAt = now,
                 UpdatedAt = now
             });

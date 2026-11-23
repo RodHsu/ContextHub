@@ -156,7 +156,17 @@ public sealed class FullGovernancePlanService(
         var artifacts = scopedMemories.Where(x => Memory.Application.ProjectContext.IdentityKeys(projectSet).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && x.MemoryType == MemoryType.Artifact &&
                                                    x.ExternalKey != ProjectInformationExternalKey).ToArray();
         foreach (var group in artifacts.Where(x => x.Status == MemoryStatus.Active)
-                     .GroupBy(x => $"{x.ProjectId}\nvalue:{NormalizeText(x.Title)}\n{NormalizeText(x.Summary)}\n{NormalizeText(x.SourceType)}", StringComparer.OrdinalIgnoreCase)
+                     .Select(x => (Item: x, Identity: ProjectArtifactExchangeService.GetDuplicateIdentity(
+                         x.MemoryType, x.SourceType, x.Tags, x.MetadataJson)))
+                     .Where(x => x.Identity.HasValue)
+                     .GroupBy(x => new
+                     {
+                         Project = Memory.Application.ProjectContext.IdentityKey(x.Item.ProjectId),
+                         Title = NormalizeText(x.Item.Title),
+                         Summary = NormalizeText(x.Item.Summary),
+                         Source = NormalizeText(x.Item.SourceType),
+                         x.Identity
+                     }, x => x.Item)
                      .Where(x => x.Count() > 1))
         {
             var authority = group.OrderByDescending(x => x.Confidence).ThenByDescending(x => x.Importance).ThenByDescending(x => x.UpdatedAt).First();

@@ -872,6 +872,8 @@ public sealed class GovernanceBatchExecutor(
             }
             if (!Memory.Application.ProjectContext.Matches(duplicate.ProjectId, authority.ProjectId) ||
                 duplicate.MemoryType != MemoryType.Artifact || authority.MemoryType != MemoryType.Artifact ||
+                ProjectArtifactExchangeService.GetDuplicateIdentity(duplicate) is not { } identity ||
+                identity != ProjectArtifactExchangeService.GetDuplicateIdentity(authority) ||
                 !string.Equals(Normalize(duplicate.Title), Normalize(authority.Title), StringComparison.Ordinal) ||
                 !string.Equals(Normalize(duplicate.Summary), Normalize(authority.Summary), StringComparison.Ordinal) ||
                 !string.Equals(Normalize(duplicate.SourceType), Normalize(authority.SourceType), StringComparison.Ordinal))
@@ -2215,6 +2217,8 @@ public sealed class GovernanceBatchExecutor(
     private static bool IsExactOrSameKeyDuplicate(MemoryDocument left, MemoryDocument right)
     {
         if (left.MemoryType != right.MemoryType || left.Status != MemoryStatus.Active || right.Status != MemoryStatus.Active) return false;
+        if (ProjectArtifactExchangeService.GetDuplicateIdentity(left) is not { } identity ||
+            identity != ProjectArtifactExchangeService.GetDuplicateIdentity(right)) return false;
         var exact = Normalize(left.Title) == Normalize(right.Title) && Normalize(left.Content) == Normalize(right.Content) && Normalize(left.Summary) == Normalize(right.Summary);
         var sameKey = !string.IsNullOrWhiteSpace(left.ExternalKey) && string.Equals(left.ExternalKey, right.ExternalKey, StringComparison.OrdinalIgnoreCase);
         var contained = Normalize(left.Content).Contains(Normalize(right.Content), StringComparison.Ordinal) || Normalize(right.Content).Contains(Normalize(left.Content), StringComparison.Ordinal);
