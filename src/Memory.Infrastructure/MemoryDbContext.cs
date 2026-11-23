@@ -366,6 +366,24 @@ public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> op
         }
     }
 
+    public async Task<IReadOnlyList<MemoryItem>> LoadLockedArtifactPairAsync(Guid duplicateId, Guid authorityId,
+        Guid tenantId, Guid ownerUserId, string projectId, CancellationToken cancellationToken)
+    {
+        if (!Database.IsNpgsql() || Database.CurrentTransaction is null)
+            throw new InvalidOperationException("Artifact evidence requires a PostgreSQL transaction.");
+
+        return await MemoryItems.FromSqlInterpolated($"""
+            SELECT *
+            FROM memory_items
+            WHERE id IN ({duplicateId}, {authorityId})
+              AND tenant_id = {tenantId}
+              AND owner_user_id = {ownerUserId}
+              AND public.project_identity_equals(project_id, {projectId})
+            ORDER BY id
+            FOR NO KEY UPDATE
+            """).AsNoTracking().ToListAsync(cancellationToken);
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasDbFunction(typeof(ProjectContext).GetMethod(nameof(ProjectContext.IdentityKey), [typeof(string)])!)

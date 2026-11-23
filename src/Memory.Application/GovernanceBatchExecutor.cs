@@ -859,42 +859,54 @@ public sealed class GovernanceBatchExecutor(
             item.Classification == "DuplicateArtifact" &&
             allowed.Contains(GovernanceBatchActionType.ArtifactReconcile))
         {
-            var duplicate = await dbContext.MemoryItems.AsNoTracking().SingleOrDefaultAsync(x => x.Id == item.Id, cancellationToken);
+            await using var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
             var authorityId = item.RelatedResourceIds.FirstOrDefault();
-            var authority = authorityId == Guid.Empty
-                ? null
-                : await dbContext.MemoryItems.AsNoTracking().SingleOrDefaultAsync(x => x.Id == authorityId, cancellationToken);
-            if (duplicate is null || authority is null || duplicate.Status == MemoryStatus.Archived)
+            var rows = await dbContext.LoadLockedArtifactPairAsync(item.Id, authorityId, actor.TenantId!.Value,
+                actor.UserId!.Value, item.ProjectId, cancellationToken);
+            var duplicate = rows.SingleOrDefault(x => x.Id == item.Id);
+            var authority = rows.SingleOrDefault(x => x.Id == authorityId && x.Id != item.Id);
+            GovernanceBatchItemResult result;
+            if (duplicate is null || duplicate.Status == MemoryStatus.Archived)
             {
-                return await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
+                result = await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
                     GovernanceBatchItemDisposition.NoOp, "Artifact duplicate is already reconciled or no longer exists.", [],
                     authority is null ? [] : [authority.Id], actor, cancellationToken);
             }
-            if (!Memory.Application.ProjectContext.Matches(duplicate.ProjectId, authority.ProjectId) ||
-                duplicate.MemoryType != MemoryType.Artifact || authority.MemoryType != MemoryType.Artifact ||
-                ProjectArtifactExchangeService.GetDuplicateIdentity(duplicate) is not { } identity ||
-                identity != ProjectArtifactExchangeService.GetDuplicateIdentity(authority) ||
-                !string.Equals(Normalize(duplicate.Title), Normalize(authority.Title), StringComparison.Ordinal) ||
-                !string.Equals(Normalize(duplicate.Summary), Normalize(authority.Summary), StringComparison.Ordinal) ||
-                !string.Equals(Normalize(duplicate.SourceType), Normalize(authority.SourceType), StringComparison.Ordinal))
+            else if (authority is null || duplicate.Status != MemoryStatus.Active || authority.Status != MemoryStatus.Active ||
+                     duplicate.MemoryType != MemoryType.Artifact || authority.MemoryType != MemoryType.Artifact ||
+                     ProjectArtifactExchangeService.GetDuplicateIdentity(duplicate) is not { } identity ||
+                     identity != ProjectArtifactExchangeService.GetDuplicateIdentity(authority) ||
+                     !string.Equals(Normalize(duplicate.Title), Normalize(authority.Title), StringComparison.Ordinal) ||
+                     !string.Equals(Normalize(duplicate.Summary), Normalize(authority.Summary), StringComparison.Ordinal) ||
+                     !string.Equals(Normalize(duplicate.SourceType), Normalize(authority.SourceType), StringComparison.Ordinal) ||
+                     (duplicate.Confidence, duplicate.Importance, duplicate.UpdatedAt)
+                     .CompareTo((authority.Confidence, authority.Importance, authority.UpdatedAt)) > 0)
             {
-                return await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
+                result = await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
                     GovernanceBatchItemDisposition.RequiresUserDecision,
                     "Artifact semantic evidence no longer establishes a deterministic authority winner.", [], [duplicate.Id], actor, cancellationToken);
             }
-            var proposal = await CreateAndApplyProposalAsync("memory_archive", duplicate.ProjectId,
-                "Archive deterministic duplicate artifact",
-                $"Archive duplicate artifact {duplicate.Id:D}; authority {authority.Id:D} remains active.",
-                new MemoryArchiveRequest(duplicate.Id, duplicate.ProjectId, true, "Autonomous semantic duplicate resolution."),
-                request.GovernanceRunId, cancellationToken);
-            var readBack = await memoryService.GetAsync(duplicate.Id, cancellationToken);
-            if (readBack?.Status != MemoryStatus.Archived)
-                throw new InvalidOperationException("Semantic artifact resolution failed resource read-back.");
-            var result = await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
-                GovernanceBatchItemDisposition.Applied,
-                "Deterministic duplicate artifact was autonomously archived with authority and resource read-back.",
-                [proposal.Id], [duplicate.Id, authority.Id], actor, cancellationToken);
-            return result with { SemanticAutoResolved = true };
+            else
+            {
+                var proposal = await CreateAndApplyProposalAsync("memory_archive", duplicate.ProjectId,
+                    "Archive deterministic duplicate artifact",
+                    $"Archive duplicate artifact {duplicate.Id:D}; authority {authority.Id:D} remains active.",
+                    new MemoryArchiveRequest(duplicate.Id, duplicate.ProjectId, true, "Autonomous semantic duplicate resolution."),
+                    request.GovernanceRunId, cancellationToken);
+                var readBack = await memoryService.GetAsync(duplicate.Id, cancellationToken);
+                if (readBack?.Status != MemoryStatus.Archived)
+                    throw new InvalidOperationException("Semantic artifact resolution failed resource read-back.");
+                result = (await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
+                    GovernanceBatchItemDisposition.Applied,
+                    "Deterministic duplicate artifact was autonomously archived with authority and resource read-back.",
+                    [proposal.Id], [duplicate.Id, authority.Id], actor, cancellationToken)) with
+                {
+                    SemanticAutoResolved = true
+                };
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return result;
         }
 
         if (item.Kind == nameof(GovernanceItemKind.Discussion) &&

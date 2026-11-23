@@ -6,6 +6,7 @@ using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace Memory.IntegrationTests;
 
@@ -13,17 +14,20 @@ public sealed class ArtifactGovernanceIdentityTests(ContainerTestEnvironment env
     : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredTheory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Governance_keeps_distinct_file_version_pins_out_of_duplicate_and_authority_cohorts(bool repinBeforeExecution)
+    [InlineData("unchanged")]
+    [InlineData("repinned")]
+    [InlineData("authority-archived")]
+    [InlineData("competing-runs")]
+    public async Task Governance_keeps_distinct_file_version_pins_out_of_duplicate_and_authority_cohorts(string evidenceChange)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         var services = scope.ServiceProvider;
         var db = services.GetRequiredService<MemoryDbContext>();
         var user = await db.TenantUsers.SingleAsync(x => x.Username == "contract-test-admin");
-        services.GetRequiredService<IRequestActorAccessor>().Current = new ContextHubRequestActor(
+        var actor = new ContextHubRequestActor(
             user.TenantId, user.Id, user.Username, user.Role,
             [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.PreferencesRead], [], true);
+        services.GetRequiredService<IRequestActorAccessor>().Current = actor;
         var project = $"file-pins-{Guid.NewGuid():N}";
         var run = $"file-pins-{Guid.NewGuid():N}";
         var file = Guid.NewGuid();
@@ -57,7 +61,84 @@ public sealed class ArtifactGovernanceIdentityTests(ContainerTestEnvironment env
         var executor = services.GetRequiredService<IGovernanceBatchExecutor>();
         var request = new GovernanceBatchExecuteRequest(run, [project], review.DurableMemoryCoverage!.SnapshotToken,
             AllowedActionTypes: [GovernanceBatchActionType.ArtifactReconcile], MaxRiskLevel: GovernanceBatchRiskLevel.Medium);
-        if (repinBeforeExecution)
+        if (evidenceChange == "competing-runs")
+        {
+            var secondRun = $"file-pins-{Guid.NewGuid():N}";
+            var secondReview = await reviewService.ReviewAsync(new KnowledgeReviewRequest([project], GovernanceRunId: secondRun), default);
+            var secondRequest = request with
+            {
+                GovernanceRunId = secondRun,
+                SnapshotToken = secondReview.DurableMemoryCoverage!.SnapshotToken
+            };
+            using var firstScope = environment.GetFactory().Services.CreateScope();
+            using var secondScope = environment.GetFactory().Services.CreateScope();
+            var firstDb = firstScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var secondDb = secondScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            await firstDb.Database.OpenConnectionAsync();
+            await secondDb.Database.OpenConnectionAsync();
+            var pids = new[]
+            {
+                ((NpgsqlConnection)firstDb.Database.GetDbConnection()).ProcessID,
+                ((NpgsqlConnection)secondDb.Database.GetDbConnection()).ProcessID
+            };
+
+            await using var held = await db.Database.BeginTransactionAsync();
+            var locked = await db.LoadLockedArtifactPairAsync(samePin.Id, first.Id, user.TenantId, user.Id, project, default);
+            locked.Should().HaveCount(2);
+            var firstExecution = ExecuteInScopeAsync(firstScope, request);
+            var secondExecution = ExecuteInScopeAsync(secondScope, secondRequest);
+            await using var monitor = new NpgsqlConnection(environment.PostgresConnectionString);
+            await monitor.OpenAsync();
+            await using var waiting = new NpgsqlCommand(
+                "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY(@pids) AND wait_event_type = 'Lock'", monitor);
+            waiting.Parameters.AddWithValue("pids", pids);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            while ((long)(await waiting.ExecuteScalarAsync(deadline.Token))! != 2)
+                await Task.Delay(25, deadline.Token);
+            await held.CommitAsync();
+
+            var competing = await Task.WhenAll(firstExecution, secondExecution).WaitAsync(TimeSpan.FromSeconds(15));
+            var outcomes = competing.SelectMany(x => x.Items).Where(x =>
+                x.ActionType == GovernanceBatchActionType.ArtifactReconcile && x.ResourceId == samePin.Id).ToArray();
+            outcomes.Select(x => x.Disposition).Should().BeEquivalentTo(new[]
+            {
+                GovernanceBatchItemDisposition.Applied,
+                GovernanceBatchItemDisposition.NoOp
+            });
+            outcomes.SelectMany(x => x.ProposalIds).Should().ContainSingle();
+            competing.Sum(x => x.SemanticAutoResolvedCount).Should().Be(1);
+            (await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == samePin.Id)).Status.Should().Be(MemoryStatus.Archived);
+            (await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == first.Id)).Status.Should().Be(MemoryStatus.Active);
+            (await db.MemoryItemRevisions.CountAsync(x => x.MemoryItemId == samePin.Id && x.ChangedBy == "archive"))
+                .Should().Be(1);
+            var receipts = services.GetRequiredService<IGovernanceRunReceiptService>();
+            var firstReceipt = await receipts.GetAsync(run, default);
+            var secondReceipt = await receipts.GetAsync(secondRun, default);
+            firstReceipt.Should().NotBeNull();
+            secondReceipt.Should().NotBeNull();
+            (firstReceipt!.Applied + secondReceipt!.Applied).Should().Be(1);
+            (firstReceipt.SemanticAutoResolved + secondReceipt.SemanticAutoResolved).Should().Be(1);
+            return;
+        }
+        if (evidenceChange == "authority-archived")
+        {
+            var planned = await executor.ExecuteAsync(request with { DryRun = true }, default);
+            planned.ErrorCode.Should().Be(GovernanceBatchErrorCode.None, planned.StoppedReason);
+            var archivedAuthority = await services.GetRequiredService<IMemoryService>().ArchiveAsync(
+                new MemoryArchiveRequest(first.Id, project, true, "Authority withdrawn after review"), default);
+            archivedAuthority.Status.Should().Be(MemoryStatus.Archived);
+
+            var stale = await executor.ExecuteAsync(request, default);
+            stale.ErrorCode.Should().Be(GovernanceBatchErrorCode.None, stale.StoppedReason);
+            stale.Items.Should().Contain(x => x.ResourceId == samePin.Id &&
+                x.ActionType == GovernanceBatchActionType.ArtifactReconcile &&
+                x.Disposition == GovernanceBatchItemDisposition.RequiresUserDecision);
+            stale.Items.SelectMany(x => x.ProposalIds).Should().BeEmpty();
+            stale.SemanticAutoResolvedCount.Should().Be(0);
+            (await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == samePin.Id)).Status.Should().Be(MemoryStatus.Active);
+            return;
+        }
+        if (evidenceChange == "repinned")
         {
             request = request with { AllowedActionTypes = [GovernanceBatchActionType.ArtifactReconcile, GovernanceBatchActionType.Merge] };
             var planned = await executor.ExecuteAsync(request with { DryRun = true }, default);
@@ -126,5 +207,12 @@ public sealed class ArtifactGovernanceIdentityTests(ContainerTestEnvironment env
 
         static string Pin(Guid fileId, Guid versionId)
             => JsonSerializer.Serialize(new { artifactExchange = true, kind = "FileReference", fileId, fileVersionId = versionId });
+
+        async Task<GovernanceBatchExecuteResult> ExecuteInScopeAsync(IServiceScope executionScope, GovernanceBatchExecuteRequest batch)
+        {
+            var provider = executionScope.ServiceProvider;
+            provider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+            return await provider.GetRequiredService<IGovernanceBatchExecutor>().ExecuteAsync(batch, default);
+        }
     }
 }

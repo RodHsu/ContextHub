@@ -50,6 +50,8 @@ Its OAuth token must include `governance:scheduled`, which can be authorized onl
 
 When publishing a FileReference with both `externalKey` and `sourceRef` omitted, the generated identity includes the logical file and version IDs. An existing legacy default reference is reused if its stored pin matches. Supply an explicit key or source reference when you intend to update an existing Artifact across file versions.
 
+Artifact reconciliation requires an active authority in the same project and owner scope at execution time. Competing governance runs check the same Artifact rows under one transaction, so an already completed archive is recorded as a no-op.
+
 The Work Item proposal dispatch ledger (`work_item_proposal_operations`) retains dispatch and terminal evidence outside that coverage, including after a proposal stops being Pending. Use the original proposal workflow to recover a `Dispatched` operation from its exact bound edit receipt. If the receipt is unavailable, the outcome remains unknown and the recovery path leaves the operation in `Dispatched`. See [Work Item proposal recovery](work-item-proposal-recovery.md#boundaries-and-rollout) for account export and backup boundaries.
 
 If the generic review has committed and the Scheduled decision is still missing, `scheduled_governance_run_get` returns `status=Running`, `terminal=false`, `decision=null`, and `outcome=DecisionProjectionPending`. Read back the same run before retrying. If the prior call ended before committing a decision, retry the same review request with its original `governanceRunId` and `isReReview` value. Wait for the persisted Scheduled decision before interpreting convergence or calling execute.
