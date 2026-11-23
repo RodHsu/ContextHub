@@ -493,6 +493,72 @@ function Get-ScheduledGovernanceReceiptEvidence {
     }
 }
 
+function Get-ScheduledGovernanceReviewReceiptEvidence {
+    param(
+        [AllowNull()][object]$Receipt,
+        [Parameter(Mandatory)][string]$ExpectedRunId,
+        [Parameter(Mandatory)][object]$Review,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Contract,
+        [switch]$AllowCompletedBatchOverlay
+    )
+
+    $evidence = Get-ScheduledGovernanceReceiptEvidence $Receipt -ExpectedRunId $ExpectedRunId
+    $receiptId = [Guid]::Empty
+    if (-not $evidence.present -or $evidence.status -cne "Completed" -or
+        -not [Guid]::TryParse((Get-ScheduledGovernancePropertyValue $Receipt "receiptId"), [ref]$receiptId) -or
+        $receiptId -eq [Guid]::Empty) {
+        throw "Scheduled governance review did not have a completed receipt."
+    }
+
+    foreach ($field in @("runExists", "received", "terminal")) {
+        $value = Get-ScheduledGovernancePropertyValue $Receipt $field
+        if ($value -isnot [bool] -or -not $value) {
+            throw "Scheduled governance review receipt did not confirm $field."
+        }
+    }
+    foreach ($field in @("toolContractVersion", "schemaHash", "publishedCatalogVersion")) {
+        if ((Get-ScheduledGovernancePropertyValue $Receipt $field) -cne $Contract[$field]) {
+            throw "Scheduled governance review receipt did not match the verified $field."
+        }
+    }
+
+    $reviewDecision = Get-ScheduledGovernancePropertyValue $Review "decision"
+    $reviewCoverage = Get-ScheduledGovernancePropertyValue $Review "coverageComplete"
+    $receiptCoverage = Get-ScheduledGovernancePropertyValue $Receipt "coverageComplete"
+    if ($reviewCoverage -isnot [bool] -or $receiptCoverage -isnot [bool] -or
+        $reviewCoverage -ne ($reviewDecision -cne "CoverageIncomplete") -or
+        $receiptCoverage -ne $reviewCoverage) {
+        throw "Scheduled governance review receipt did not match the review coverage."
+    }
+
+    $reviewSnapshot = Get-ScheduledGovernancePropertyValue $Review "snapshotToken"
+    $receiptSnapshot = Get-ScheduledGovernancePropertyValue $Receipt "finalSnapshotToken"
+    if ($reviewSnapshot -isnot [string] -or ($reviewCoverage -and [string]::IsNullOrWhiteSpace($reviewSnapshot)) -or
+        $receiptSnapshot -cne $reviewSnapshot) {
+        throw "Scheduled governance review receipt did not match the review snapshot."
+    }
+
+    $decision = Get-ScheduledGovernancePropertyValue $Receipt "decision"
+    $outcome = Get-ScheduledGovernancePropertyValue $Receipt "outcome"
+    # The service may retain the completed batch's outcome alongside a newer review projection.
+    $isReReview = Get-ScheduledGovernancePropertyValue $Review "isReReview"
+    $latestBatchReceived = Get-ScheduledGovernancePropertyValue $Receipt "latestBatchReceived"
+    $completedBatchOverlay = $AllowCompletedBatchOverlay -and
+        ($null -eq $decision) -and $outcome -ceq "ReReviewRequired" -and
+        $isReReview -is [bool] -and $isReReview -and
+        $latestBatchReceived -is [bool] -and $latestBatchReceived
+    if ($evidence.finalConvergenceStatus -cne $reviewDecision -or
+        (-not $completedBatchOverlay -and ($decision -cne $reviewDecision -or $outcome -cne $reviewDecision))) {
+        throw "Scheduled governance review receipt did not match the persisted review decision."
+    }
+
+    $evidence.receiptId = $receiptId.ToString("D")
+    $evidence.decision = $decision
+    $evidence.outcome = $outcome
+    $evidence.coverageComplete = $receiptCoverage
+    return $evidence
+}
+
 function Read-ScheduledGovernanceProtectedInvariantEvidence {
     param([string]$Path)
 
@@ -893,10 +959,8 @@ try {
                     -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $false } `
                     -RequestId 31
                 $initialReceipt = Get-ScheduledGovernanceToolData -Json $initialReceiptJson -Operation "scheduled_governance_run_get"
-                $evidence.receipt.initial = Get-ScheduledGovernanceReceiptEvidence $initialReceipt -ExpectedRunId $runId
-                if (-not $evidence.receipt.initial.present -or -not $evidence.receipt.initial.runExists) {
-                    throw "Initial scheduled governance review receipt was not readable."
-                }
+                $evidence.receipt.initial = Get-ScheduledGovernanceReviewReceiptEvidence `
+                    -Receipt $initialReceipt -ExpectedRunId $runId -Review $review -Contract $observedContract
 
                 if ($Mode -eq "A0") {
                     $evidence.outcome.executorCalls = 0
@@ -922,10 +986,8 @@ try {
                             -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $true } `
                             -RequestId 33
                         $finalReceipt = Get-ScheduledGovernanceToolData -Json $finalReceiptJson -Operation "scheduled_governance_run_get"
-                        $evidence.receipt.final = Get-ScheduledGovernanceReceiptEvidence $finalReceipt -ExpectedRunId $runId
-                        if (-not $evidence.receipt.final.present -or -not $evidence.receipt.final.runExists) {
-                            throw "Final A0 scheduled governance receipt was not readable."
-                        }
+                        $evidence.receipt.final = Get-ScheduledGovernanceReviewReceiptEvidence `
+                            -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract
                         $evidence.protectedInvariants = Read-ScheduledGovernanceProtectedInvariantEvidence -Path $ProtectedInvariantEvidencePath
                         $evidence.outcome.status = if (
                             $finalReviewEvidence.decision -eq "NoOpConverged" -and
@@ -1048,10 +1110,9 @@ try {
                                 -RequestId 45
                             $finalReceipt = Get-ScheduledGovernanceToolData `
                                 -Json $finalReceiptJson -Operation "scheduled_governance_run_get-after-execute"
-                            $evidence.receipt.final = Get-ScheduledGovernanceReceiptEvidence $finalReceipt -ExpectedRunId $runId
-                            if (-not $evidence.receipt.final.present -or -not $evidence.receipt.final.runExists) {
-                                throw "Final A1 scheduled governance receipt was not readable."
-                            }
+                            $evidence.receipt.final = Get-ScheduledGovernanceReviewReceiptEvidence `
+                                -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract `
+                                -AllowCompletedBatchOverlay:$evidence.replay.exact
                             $evidence.protectedInvariants = Read-ScheduledGovernanceProtectedInvariantEvidence -Path $ProtectedInvariantEvidencePath
                             $finalConverged = $finalReviewEvidence.decision -eq "NoOpConverged" -or
                                 ($finalReviewEvidence.decision -eq "HumanDecisionOnly" -and
