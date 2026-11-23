@@ -592,8 +592,15 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
         await LoginAndOpenAsync(page, "/project-work-items");
         await page.Locator(".project-work-items-workspace").WaitForAsync();
         (await page.Locator(".project-work-item-list-item").CountAsync()).Should().BeGreaterThan(0);
-        (await page.Locator(".project-work-item-checklist input[type='checkbox']").CountAsync()).Should().BeGreaterThan(0);
-        (await page.Locator("button:has-text('完成待辦')").IsDisabledAsync()).Should().BeTrue();
+        var checklist = page.Locator(".project-work-item-checklist");
+        await Assertions.Expect(checklist.Locator("input[type='checkbox']:checked")).ToHaveCountAsync(1);
+        var incomplete = checklist.Locator("input[type='checkbox']:not(:checked)");
+        await Assertions.Expect(incomplete).ToHaveCountAsync(1);
+        await Assertions.Expect(incomplete).ToBeEnabledAsync();
+
+        var complete = page.GetByTestId("editor-complete");
+        await Assertions.Expect(complete).ToHaveTextAsync("完成待辦");
+        await Assertions.Expect(complete).ToBeDisabledAsync();
     }
 
     [Fact]

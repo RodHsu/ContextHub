@@ -100,7 +100,7 @@
                     }
                     else
                     {
-                        <button class="primary-button" type="button" data-testid="editor-complete" disabled="@(StructuralDisabled || item.ChecklistItems.Any(row => !row.IsCompleted))" @onclick="@(() => InScopeAsync(renderedGeneration, CompleteAsync))">完成代辦</button>
+                        <button class="primary-button" type="button" data-testid="editor-complete" disabled="@(StructuralDisabled || item.ChecklistItems.Any(row => !row.IsCompleted))" @onclick="@(() => InScopeAsync(renderedGeneration, CompleteAsync))">完成待辦</button>
                     }
                     @if (item.IsArchived) { <button class="ghost-button" type="button" data-testid="editor-restore" disabled="@RestoreDisabled" @onclick="@(() => InScopeAsync(renderedGeneration, RestoreAsync))">還原</button> }
                     else { <button class="ghost-button" type="button" data-testid="editor-archive" disabled="@LifecycleDisabled" @onclick="@(() => InScopeAsync(renderedGeneration, ArchiveAsync))">封存</button> }

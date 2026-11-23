@@ -917,7 +917,11 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<IReadOnlyList<ProjectWorkItemResult>> GetProjectWorkItemsAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)
         => !ProjectContext.Matches(request.ProjectId, "dashboard-test") ? Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>([])
         : Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>(
-        [new ProjectWorkItemResult(Guid.Parse("88000000-0000-0000-0000-000000000001"), "dashboard-test", "完成 Dashboard 驗證", "測試自訂專案代辦。", ["release", "ui"], [new(Guid.Parse("88000000-0000-0000-0000-000000000011"), "完成 API 測試", true, 0), new(Guid.Parse("88000000-0000-0000-0000-000000000012"), "完成瀏覽器測試", false, 1)], ProjectWorkItemStatus.InProgress, 80, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null) { DefinitionState = ProjectWorkItemDefinitionState.ReadyForDevelopment }]);
+        [new ProjectWorkItemResult(Guid.Parse("88000000-0000-0000-0000-000000000001"), "dashboard-test", "完成 Dashboard 驗證", "測試自訂專案代辦。", ["release", "ui"], [new(Guid.Parse("88000000-0000-0000-0000-000000000011"), "完成 API 測試", true, 0), new(Guid.Parse("88000000-0000-0000-0000-000000000012"), "完成瀏覽器測試", false, 1)], ProjectWorkItemStatus.InProgress, 80, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null)
+        {
+            DefinitionState = ProjectWorkItemDefinitionState.ReadyForDevelopment,
+            Revision = 1
+        }]);
 
     public async Task<ProjectWorkItemResult?> GetWorkItemForEditAsync(string projectId, Guid workItemId, CancellationToken cancellationToken)
         => (await GetProjectWorkItemsAsync(new(projectId, IncludeArchived: true), cancellationToken)).SingleOrDefault(item => item.Id == workItemId);
