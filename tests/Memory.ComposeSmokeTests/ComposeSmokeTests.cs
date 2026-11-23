@@ -75,7 +75,10 @@ public sealed class ComposeSmokeTests
             ["DASHBOARD_API_TOKEN"] = token,
             ["DASHBOARD_ADMIN_USERNAME"] = username,
             ["DASHBOARD_ADMIN_PASSWORD_HASH"] = new PasswordHasher<object>().HashPassword(new object(), password),
-            ["DASHBOARD_COMPOSE_PROJECT"] = project
+            ["DASHBOARD_COMPOSE_PROJECT"] = project,
+            ["CHATGPT_GATEWAY_OAUTH_SELF_HOSTED"] = "true",
+            ["CHATGPT_GATEWAY_OAUTH_CLIENT_ID"] = "contexthub-compose-smoke",
+            ["CHATGPT_GATEWAY_OAUTH_SELF_HOSTED_SIGNING_KEY"] = Convert.ToHexString(RandomNumberGenerator.GetBytes(32))
         };
         foreach (var service in new[] { "MCP_SERVER", "DASHBOARD", "CHATGPT_GATEWAY", "AUTOMATION_GATEWAY" })
         {
