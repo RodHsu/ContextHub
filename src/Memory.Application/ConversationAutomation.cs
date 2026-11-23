@@ -422,6 +422,10 @@ public sealed class ConversationAutomationService(
     }
 
     public async Task<ConversationInsightResult> SkipInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken)
+        => (await SkipInsightWithOutcomeAsync(request, cancellationToken)).Insight;
+
+    public async Task<(ConversationInsightResult Insight, bool Applied)> SkipInsightWithOutcomeAsync(
+        ConversationInsightGovernanceRequest request, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
@@ -434,7 +438,7 @@ public sealed class ConversationAutomationService(
         if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
         {
             await transaction.CommitAsync(cancellationToken);
-            return MapInsight(insight);
+            return (MapInsight(insight), false);
         }
         if (insight.PromotionStatus is not (ConversationPromotionStatus.Pending or ConversationPromotionStatus.Failed))
         {
@@ -451,7 +455,7 @@ public sealed class ConversationAutomationService(
         await AddInsightGovernanceAuditAsync(insight, "Skip", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return MapInsight(insight);
+        return (MapInsight(insight), true);
     }
 
     public async Task<ConversationInsightResult> SetInsightDispositionAsync(ConversationInsightDispositionRequest request, CancellationToken cancellationToken)

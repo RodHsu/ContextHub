@@ -2542,6 +2542,8 @@ public interface IConversationAutomationService
     Task<ConversationInsightResult?> GetInsightAsync(Guid insightId, CancellationToken cancellationToken);
     Task<ConversationInsightResult> RetryInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
     Task<ConversationInsightResult> SkipInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
+    Task<(ConversationInsightResult Insight, bool Applied)> SkipInsightWithOutcomeAsync(
+        ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
     Task<ConversationInsightResult> SetInsightDispositionAsync(ConversationInsightDispositionRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
     Task<ConversationPipelineStatusResult?> GetPipelineStatusAsync(Guid checkpointId, CancellationToken cancellationToken);

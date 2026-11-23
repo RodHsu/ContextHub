@@ -1,6 +1,7 @@
 extern alias mcpserver;
 
 using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Diagnostics;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
@@ -23,6 +24,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol;
@@ -2793,8 +2795,11 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         dbContext.ChangeTracker.Clear();
     }
 
-    [DockerRequiredFact]
-    public async Task Scheduled_Governance_Should_AutoResolve_Reversible_Semantic_Candidate_With_Exact_Durable_Evidence()
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Scheduled_Governance_Should_AutoResolve_Reversible_Semantic_Candidate_With_Exact_Durable_Evidence(
+        bool competingRun)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         UseGatewayActor(scope.ServiceProvider);
@@ -2895,18 +2900,84 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             new ScheduledGovernanceReviewRequest(runId),
             CancellationToken.None);
         review.Decision.Should().Be(ScheduledGovernanceDecision.ReversibleExecutionRequired);
-        var result = await scheduled.ExecuteAsync(new ScheduledGovernanceExecuteRequest(
+        var request = new ScheduledGovernanceExecuteRequest(
             runId,
             review.SnapshotToken,
             MaxMutations: 20,
             MaxDurationSeconds: 60,
             ToolContractVersion: ScheduledGovernanceContract.ToolContractVersion,
-            SchemaHash: ScheduledGovernanceContract.SchemaHash), CancellationToken.None);
+            SchemaHash: ScheduledGovernanceContract.SchemaHash);
+        if (competingRun)
+        {
+            using var winnerScope = environment.GetFactory().Services.CreateScope();
+            var winnerServices = winnerScope.ServiceProvider;
+            winnerServices.GetRequiredService<IRequestActorAccessor>().Current = owner;
+            var winner = winnerServices.GetRequiredService<IScheduledGovernanceService>();
+            var winnerRunId = $"semantic-first-{Guid.NewGuid():N}";
+            var winnerReview = await winner.ReviewAsync(new ScheduledGovernanceReviewRequest(winnerRunId), default);
+            winnerReview.Decision.Should().Be(ScheduledGovernanceDecision.ReversibleExecutionRequired);
+
+            var intercept = new RunCompetingSemanticBatch(async cancellationToken =>
+            {
+                var first = await winner.ExecuteAsync(request with
+                {
+                    GovernanceRunId = winnerRunId,
+                    SnapshotToken = winnerReview.SnapshotToken
+                }, cancellationToken);
+                first.Items.Should().ContainSingle(item => item.ResourceId == insight.Id && item.SemanticAutoResolved);
+            });
+            var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                    scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+                .AddInterceptors(intercept).Options;
+            await using var contenderDb = new MemoryDbContext(options);
+            var contender = scope.ServiceProvider;
+            var receipts = ActivatorUtilities.CreateInstance<GovernanceRunReceiptService>(contender, contenderDb);
+            var conversation = ActivatorUtilities.CreateInstance<ConversationAutomationService>(contender, contenderDb);
+            var executor = ActivatorUtilities.CreateInstance<GovernanceBatchExecutor>(contender, contenderDb, conversation, receipts);
+            var run = ActivatorUtilities.CreateInstance<ScheduledGovernanceService>(contender, executor, receipts);
+            var lateResult = await run.ExecuteAsync(request, default);
+
+            intercept.Completed.Should().BeTrue();
+            lateResult.SemanticAutoResolvedCount.Should().Be(0);
+            lateResult.Items.Should().ContainSingle(item => item.ResourceId == insight.Id &&
+                item.Disposition == nameof(GovernanceBatchItemDisposition.NoOp) && !item.SemanticAutoResolved);
+            var lateReceipt = await run.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+            lateReceipt.SemanticAutoResolved.Should().Be(0);
+            var winningInsight = await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id);
+            winningInsight.GovernanceRunId.Should().Be(winnerRunId);
+            var audits = await dbContext.SecurityAuditEvents.AsNoTracking()
+                .Where(row => row.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated)
+                .Select(row => row.DetailsJson).ToArrayAsync();
+            audits.Count(details => details.Contains(insight.Id.ToString("D"), StringComparison.Ordinal)).Should().Be(1);
+            return;
+        }
+
+        var result = await scheduled.ExecuteAsync(request, default);
 
         result.SemanticAutoResolvedCount.Should().Be(1, JsonSerializer.Serialize(result));
         result.Items.Should().ContainSingle(x => x.ResourceId == insight.Id && x.SemanticAutoResolved);
         (await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
             .PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
+    }
+
+    private sealed class RunCompetingSemanticBatch(Func<CancellationToken, Task> execute) : DbCommandInterceptor
+    {
+        public bool Completed { get; private set; }
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command, CommandExecutedEventData eventData, DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            if (!Completed && eventData.CommandSource == CommandSource.LinqQuery &&
+                command.CommandText.Contains("memory_items", StringComparison.OrdinalIgnoreCase) &&
+                command.CommandText.Contains("lower(", StringComparison.OrdinalIgnoreCase) &&
+                command.CommandText.Contains("valid_from", StringComparison.OrdinalIgnoreCase))
+            {
+                await execute(cancellationToken);
+                Completed = true;
+            }
+
+            return result;
+        }
     }
 
     [DockerRequiredFact]

@@ -1607,9 +1607,16 @@ public sealed class GovernanceBatchExecutor(
             if (durableEquivalents.Length == 1)
             {
                 var durableEquivalent = durableEquivalents[0];
-                await conversationService.SkipInsightAsync(new ConversationInsightGovernanceRequest(
+                var (_, applied) = await conversationService.SkipInsightWithOutcomeAsync(new ConversationInsightGovernanceRequest(
                     insight.Id, request.GovernanceRunId,
                     $"Autonomously resolved against durable evidence {durableEquivalent.Id:D}."), cancellationToken);
+                if (!applied)
+                {
+                    return await AuditedResultAsync(item, GovernanceBatchActionType.ConversationInsightDisposition,
+                        GovernanceBatchItemDisposition.NoOp, "The insight had already reached a terminal state.", [],
+                        [insight.Id], actor, cancellationToken);
+                }
+
                 var semantic = await AuditedResultAsync(item, GovernanceBatchActionType.SemanticReevaluate,
                     GovernanceBatchItemDisposition.Applied,
                     "Reopened or pending insight was autonomously resolved against an exact durable evidence match.",
