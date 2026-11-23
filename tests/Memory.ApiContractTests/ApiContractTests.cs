@@ -3136,33 +3136,36 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using var frozenResponse = await client.PutAsJsonAsync(
             $"/api/work-items/{created.Id:D}",
-            new { definitionState = ProjectWorkItemDefinitionState.Frozen });
+            new { definitionState = ProjectWorkItemDefinitionState.Frozen, expectedRevision = created.Revision, requestId = Guid.NewGuid().ToString("N") });
         frozenResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
-        (await frozenResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!.DefinitionState
-            .Should().Be(ProjectWorkItemDefinitionState.Frozen);
+        var frozen = (await frozenResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
+        frozen.DefinitionState.Should().Be(ProjectWorkItemDefinitionState.Frozen);
 
         using var invalidDefinitionResponse = await client.PutAsJsonAsync(
             $"/api/work-items/{created.Id:D}",
-            new { definitionState = ProjectWorkItemDefinitionState.Discussing });
+            new { definitionState = ProjectWorkItemDefinitionState.Discussing, expectedRevision = frozen.Revision, requestId = Guid.NewGuid().ToString("N") });
         invalidDefinitionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
 
-        using var guardedCompletionResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed });
+        using var guardedCompletionResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed, expectedRevision = frozen.Revision, requestId = Guid.NewGuid().ToString("N") });
         guardedCompletionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
 
         using var checklistResponse = await client.PutAsJsonAsync(
             $"/api/work-items/{created.Id:D}/checklist/{created.ChecklistItems.Single().Id:D}",
-            new { isCompleted = true });
+            new { isCompleted = true, expectedRevision = frozen.Revision, requestId = Guid.NewGuid().ToString("N") });
         checklistResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var checkedItem = (await checklistResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
 
-        using var updateResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed });
+        using var updateResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed, expectedRevision = checkedItem.Revision, requestId = Guid.NewGuid().ToString("N") });
         updateResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var completed = (await updateResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
 
         var listed = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&status=Completed");
         listed.Should().ContainSingle(x => x.Id == created.Id);
         var definitionListed = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&definitionState=Frozen");
         definitionListed.Should().ContainSingle(x => x.Id == created.Id && x.Status == ProjectWorkItemStatus.Completed);
 
-        using var archiveResponse = await client.PostAsync($"/api/work-items/{created.Id:D}/archive", null);
+        using var archiveResponse = await client.PostAsJsonAsync($"/api/work-items/{created.Id:D}/archive",
+            new { expectedRevision = completed.Revision, requestId = Guid.NewGuid().ToString("N") });
         archiveResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         var archived = await archiveResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>();
         archived.Should().NotBeNull();
@@ -3174,10 +3177,11 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var archivedList = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&includeArchived=true");
         archivedList.Should().ContainSingle(x => x.Id == created.Id && x.IsArchived);
 
-        using var rejectedMutation = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { priority = 99 });
+        using var rejectedMutation = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { priority = 99, expectedRevision = archived.Revision, requestId = Guid.NewGuid().ToString("N") });
         rejectedMutation.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
 
-        using var restoreResponse = await client.PostAsync($"/api/work-items/{created.Id:D}/restore", null);
+        using var restoreResponse = await client.PostAsJsonAsync($"/api/work-items/{created.Id:D}/restore",
+            new { expectedRevision = archived.Revision, requestId = Guid.NewGuid().ToString("N") });
         restoreResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         var restored = await restoreResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>();
         restored.Should().NotBeNull();
@@ -3227,7 +3231,15 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using var exclusionResponse = await client.PutAsJsonAsync(
             $"/api/work-items/{tracker.Id:D}/governance-exclusion",
-            new { projectId, governanceRunId, reason = "Tracks this exact API governance acceptance run.", excluded = true });
+            new
+            {
+                projectId,
+                governanceRunId,
+                reason = "Tracks this exact API governance acceptance run.",
+                excluded = true,
+                expectedRevision = tracker.Revision,
+                requestId = Guid.NewGuid().ToString("N")
+            });
         exclusionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         var excluded = (await exclusionResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
         excluded.GovernanceExclusions.Should().ContainSingle(x => x.GovernanceRunId == governanceRunId && x.IsActive);

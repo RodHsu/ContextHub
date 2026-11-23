@@ -22,6 +22,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol;
 using ModelContextProtocol.Client;
 using StackExchange.Redis;
 using Testcontainers.PostgreSql;
@@ -3121,10 +3122,15 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         await dbContext.SaveChangesAsync();
 
         var businessWorkItem = await workItemService.CreateAsync(new ProjectWorkItemCreateRequest(projectId, "Normal business work remains active"), CancellationToken.None);
-        businessWorkItem = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(businessWorkItem.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+        businessWorkItem = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(
+            businessWorkItem.Id, Status: ProjectWorkItemStatus.InProgress, ExpectedRevision: businessWorkItem.Revision, RequestId: Guid.NewGuid().ToString("N")),
+            CancellationToken.None);
         var historical = await workItemService.CreateAsync(new ProjectWorkItemCreateRequest(projectId, "Completed historical fixture"), CancellationToken.None);
-        historical = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(historical.Id, Status: ProjectWorkItemStatus.Completed), CancellationToken.None);
+        historical = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(
+            historical.Id, Status: ProjectWorkItemStatus.Completed, ExpectedRevision: historical.Revision, RequestId: Guid.NewGuid().ToString("N")),
+            CancellationToken.None);
         var historicalEntity = await dbContext.ProjectWorkItems.SingleAsync(x => x.Id == historical.Id);
+        await dbContext.Entry(historicalEntity).ReloadAsync(CancellationToken.None);
         historicalEntity.UpdatedAt = now.AddDays(-120);
         await dbContext.SaveChangesAsync();
 
@@ -3282,7 +3288,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "Business item must remain unchanged"), CancellationToken.None);
         businessWorkItem = await workItems.UpdateAsync(new ProjectWorkItemUpdateRequest(
             businessWorkItem.Id,
-            Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+            Status: ProjectWorkItemStatus.InProgress,
+            ExpectedRevision: businessWorkItem.Revision,
+            RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
 
         var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
             [projectId], LimitPerSection: 1, GovernanceRunId: governanceRunId), CancellationToken.None);
@@ -4041,15 +4049,20 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var cancelled = await gatewayTools.project_work_item_create(
             new ProjectWorkItemCreateRequest(projectId, "Cancelled work"), CancellationToken.None);
         ordinary = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(ordinary.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(ordinary.Id, Status: ProjectWorkItemStatus.InProgress,
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
         tracker = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(tracker.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(tracker.Id, Status: ProjectWorkItemStatus.InProgress,
+                ExpectedRevision: tracker.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
         blocked = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(blocked.Id, Status: ProjectWorkItemStatus.Blocked), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(blocked.Id, Status: ProjectWorkItemStatus.Blocked,
+                ExpectedRevision: blocked.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
         completed = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(completed.Id, Status: ProjectWorkItemStatus.Completed), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(completed.Id, Status: ProjectWorkItemStatus.Completed,
+                ExpectedRevision: completed.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
         cancelled = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(cancelled.Id, Status: ProjectWorkItemStatus.Cancelled), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(cancelled.Id, Status: ProjectWorkItemStatus.Cancelled,
+                ExpectedRevision: cancelled.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
 
         var initial = await gatewayTools.knowledge_review(
             new KnowledgeReviewRequest([projectId], GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
@@ -4064,7 +4077,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         initial.Convergence.ExcludedGovernanceTrackerCount.Should().Be(0);
 
         var exclusionRequest = new ProjectWorkItemGovernanceExclusionRequest(
-            tracker.Id, projectId, governanceRunId, "Tracks acceptance of this exact governance run.");
+            tracker.Id, projectId, governanceRunId, "Tracks acceptance of this exact governance run.",
+            ExpectedRevision: tracker.Revision, RequestId: Guid.NewGuid().ToString("N"));
         var excluded = await gatewayTools.project_work_item_set_governance_exclusion(exclusionRequest, CancellationToken.None);
         excluded.GovernanceExclusions.Should().ContainSingle(x => x.GovernanceRunId == governanceRunId && x.IsActive);
         (await gatewayTools.project_work_item_set_governance_exclusion(exclusionRequest, CancellationToken.None)).UpdatedAt.Should().Be(excluded.UpdatedAt);
@@ -4088,27 +4102,32 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             Scopes = adminActor.Scopes.Where(x => !string.Equals(x, SecurityScopes.GovernanceTrackerManage, StringComparison.OrdinalIgnoreCase)).ToArray()
         };
         var missingScope = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing dedicated scope."), CancellationToken.None);
-        await missingScope.Should().ThrowAsync<UnauthorizedAccessException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing dedicated scope.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await missingScope.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         actorAccessor.Current = adminActor with
         {
             Scopes = adminActor.Scopes.Where(x => !string.Equals(x, SecurityScopes.MemoryWrite, StringComparison.OrdinalIgnoreCase)).ToArray()
         };
         var missingWriteScope = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing memory write scope."), CancellationToken.None);
-        await missingWriteScope.Should().ThrowAsync<UnauthorizedAccessException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing memory write scope.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await missingWriteScope.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         actorAccessor.Current = adminActor with { Role = TenantUserRole.Member };
         var unauthorized = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Unauthorized escape."), CancellationToken.None);
-        await unauthorized.Should().ThrowAsync<UnauthorizedAccessException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Unauthorized escape.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await unauthorized.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         actorAccessor.Current = adminActor;
 
         var wrongProject = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, $"wrong-{projectId}", governanceRunId, "Wrong project."), CancellationToken.None);
-        await wrongProject.Should().ThrowAsync<UnauthorizedAccessException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, $"wrong-{projectId}", governanceRunId, "Wrong project.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await wrongProject.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         var invalidRun = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, $"missing-{Guid.NewGuid():N}", "Missing relationship."), CancellationToken.None);
-        await invalidRun.Should().ThrowAsync<InvalidOperationException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, $"missing-{Guid.NewGuid():N}", "Missing relationship.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await invalidRun.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         (await dbContext.SecurityAuditEvents.AsNoTracking()
             .Where(x => x.EventType == SecurityAuditEventType.ProjectWorkItemGovernanceExclusionUpdated)
             .Select(x => x.DetailsJson)
@@ -4179,12 +4198,19 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         secondPage.WorkItems[0].Id.Should().NotBe(review.WorkItems[0].Id);
 
         var tracked = workItems[0];
-        tracked = await gatewayTools.project_work_item_checklist_update(tracked.Id, tracked.ChecklistItems[0].Id, true, CancellationToken.None);
-        tracked = await gatewayTools.project_work_item_update(new ProjectWorkItemUpdateRequest(tracked.Id, Status: ProjectWorkItemStatus.Completed), CancellationToken.None);
+        tracked = await gatewayTools.project_work_item_checklist_update(tracked.Id, tracked.ChecklistItems[0].Id, true,
+            CancellationToken.None, expectedRevision: tracked.Revision, requestId: Guid.NewGuid().ToString("N"));
+        tracked = await gatewayTools.project_work_item_update(new ProjectWorkItemUpdateRequest(
+            tracked.Id, Status: ProjectWorkItemStatus.Completed, ExpectedRevision: tracked.Revision, RequestId: Guid.NewGuid().ToString("N")),
+            CancellationToken.None);
         tracked.Status.Should().Be(ProjectWorkItemStatus.Completed);
-        (await gatewayTools.project_work_item_archive(tracked.Id, CancellationToken.None)).IsArchived.Should().BeTrue();
+        var archived = await gatewayTools.project_work_item_archive(
+            tracked.Id, CancellationToken.None, expectedRevision: tracked.Revision, requestId: Guid.NewGuid().ToString("N"));
+        archived.IsArchived.Should().BeTrue();
         (await gatewayTools.project_work_items_list(new ProjectWorkItemListRequest(projectId), CancellationToken.None)).Should().NotContain(x => x.Id == tracked.Id);
-        (await gatewayTools.project_work_item_restore(tracked.Id, CancellationToken.None)).Status.Should().Be(ProjectWorkItemStatus.Completed);
+        (await gatewayTools.project_work_item_restore(
+            tracked.Id, CancellationToken.None, expectedRevision: archived.Revision, requestId: Guid.NewGuid().ToString("N")))
+            .Status.Should().Be(ProjectWorkItemStatus.Completed);
 
         var payload = JsonSerializer.Serialize(new MemoryUpsertRequest(
             $"governance:{Guid.NewGuid():N}",

@@ -88,6 +88,84 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
     }
 
     [DockerRequiredFact]
+    public async Task Applied_proposal_reconciliation_should_require_the_exact_promoted_memory_and_only_resolve_the_exception()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var row = await SeedAsync(db, actor);
+        var memories = new[] { "Applied proposal result", "Unrelated memory" }
+            .Select(title => new MemoryItem
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = row.ProjectId,
+                ExternalKey = Guid.NewGuid().ToString("N"),
+                Title = title,
+                Content = title,
+                Status = MemoryStatus.Active,
+                CreatedAt = row.CreatedAt,
+                UpdatedAt = row.UpdatedAt
+            })
+            .ToArray();
+        var target = memories[0];
+        var proposal = new ConversationInsight
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = row.ProjectId,
+            SessionId = row.SessionId,
+            CheckpointId = row.CheckpointId,
+            SourceSystem = "chatgpt-mcp-gateway",
+            Tags = ["chatgpt-proposal"],
+            DedupKey = Guid.NewGuid().ToString(),
+            PromotionStatus = ConversationPromotionStatus.Promoted,
+            PromotedMemoryId = target.Id,
+            CreatedAt = row.CreatedAt,
+            UpdatedAt = row.UpdatedAt
+        };
+        db.MemoryItems.AddRange(memories);
+        db.ConversationInsights.Add(proposal);
+        row.MetadataJson = JsonSerializer.Serialize(new { proposalId = proposal.Id });
+        row.SourceRef = $"chatgpt-proposal:{proposal.Id:D}";
+        row.PromotedMemoryId = memories[1].Id;
+        await db.SaveChangesAsync();
+
+        var originalProposal = await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == proposal.Id);
+        var originalTarget = await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == target.Id);
+
+        var mismatched = (await Preview(service, row)).Items.Single();
+        mismatched.CanReconcile.Should().BeFalse();
+        await FluentActions.Invoking(() => service.AdjudicateAsync(
+                Request(row, mismatched, ConversationAdjudicationAction.Reconcile), default))
+            .Should().ThrowAsync<InvalidOperationException>();
+
+        row = await db.ConversationInsights.SingleAsync(x => x.Id == row.Id);
+        row.PromotedMemoryId = target.Id;
+        await db.SaveChangesAsync();
+
+        var candidate = (await Preview(service, row)).Items.Single();
+        candidate.Classification.Should().Be("ResolvedAppliedProposal");
+        candidate.CanReconcile.Should().BeTrue();
+        var request = Request(row, candidate, ConversationAdjudicationAction.Reconcile);
+        var receipt = await service.AdjudicateAsync(request, default);
+        receipt.Outcome.Should().Be("ResolvedAppliedProposal");
+        receipt.ResultStatus.Should().Be("Skipped");
+        (await service.AdjudicateAsync(request, default)).IsReplay.Should().BeTrue();
+
+        var preview = await Preview(service, row);
+        preview.UnresolvedHumanDecisionCount.Should().Be(0);
+        preview.ResolvedHumanDecisionCount.Should().Be(1);
+        (await db.ConversationAdjudications.CountAsync(x => x.InsightId == row.Id)).Should().Be(1);
+        var persistedProposal = await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == proposal.Id);
+        persistedProposal.PromotionStatus.Should().Be(ConversationPromotionStatus.Promoted);
+        persistedProposal.PromotedMemoryId.Should().Be(target.Id);
+        persistedProposal.UpdatedAt.Should().Be(originalProposal.UpdatedAt);
+        var persistedTarget = await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == target.Id);
+        persistedTarget.Status.Should().Be(MemoryStatus.Active);
+        persistedTarget.Content.Should().Be(originalTarget.Content);
+        persistedTarget.UpdatedAt.Should().Be(originalTarget.UpdatedAt);
+    }
+
+    [DockerRequiredFact]
     public async Task Resolution_replay_reopen_and_ledger_should_preserve_audit_and_require_changed_evidence()
     {
         using var scope = CreateScope(out var db, out var service, out var actor);

@@ -281,9 +281,11 @@ public sealed class ProposalLifecycleParityIntegrationTests(ContainerTestEnviron
         var terminal = await workItems.CreateAsync(
             new ProjectWorkItemCreateRequest(projectId, "Ordinary terminal business work"), CancellationToken.None);
         terminal = await workItems.UpdateAsync(
-            new ProjectWorkItemUpdateRequest(terminal.Id, Status: ProjectWorkItemStatus.Completed),
+            new ProjectWorkItemUpdateRequest(terminal.Id, Status: ProjectWorkItemStatus.Completed,
+                ExpectedRevision: terminal.Revision, RequestId: Guid.NewGuid().ToString("N")),
             CancellationToken.None);
         var terminalEntity = await db.ProjectWorkItems.SingleAsync(x => x.Id == terminal.Id);
+        await db.Entry(terminalEntity).ReloadAsync(CancellationToken.None);
         terminalEntity.UpdatedAt = DateTimeOffset.UtcNow.AddDays(-120);
         await db.SaveChangesAsync(CancellationToken.None);
 
