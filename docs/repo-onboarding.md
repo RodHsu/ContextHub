@@ -184,6 +184,8 @@ Need only task recovery?                   -> conversation checkpoint
 
 ## Close A Task
 
+For GitHub summaries, ContextHub records, and private test artifacts, see [Validation evidence](validation-evidence.md).
+
 Use `conversation_ingest` for a concise checkpoint when the work should be recoverable later.
 
 Good checkpoint content:
