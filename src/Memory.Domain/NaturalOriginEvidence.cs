@@ -107,4 +107,10 @@ public interface INaturalOriginEvidenceStore
         Guid ownerUserId,
         string governanceRunId,
         CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<NaturalOriginEvidenceLedgerEntry>> ListForRunsAsync(
+        Guid tenantId,
+        Guid ownerUserId,
+        IReadOnlyList<string> governanceRunIds,
+        CancellationToken cancellationToken = default);
 }

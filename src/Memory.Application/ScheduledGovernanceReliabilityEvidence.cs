@@ -220,3 +220,10 @@ public interface IScheduledGovernanceReliabilityEvidenceProvider
         ScheduledGovernanceReliabilityEvidenceQuery query,
         CancellationToken cancellationToken);
 }
+
+public interface IScheduledGovernanceReliabilityHistoryEvidenceProvider : IScheduledGovernanceReliabilityEvidenceProvider
+{
+    Task<IReadOnlyDictionary<ScheduledGovernanceReliabilityEvidenceQuery, ScheduledGovernanceReliabilityEvidenceSnapshot?>> GetHistoryAsync(
+        IReadOnlyList<ScheduledGovernanceReliabilityEvidenceQuery> queries,
+        CancellationToken cancellationToken);
+}

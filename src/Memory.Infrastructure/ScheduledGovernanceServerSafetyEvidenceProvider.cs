@@ -10,8 +10,8 @@ namespace Memory.Infrastructure;
 /// server-side receipt events. Missing or conflicting evidence is represented
 /// as unknown/false; this provider never treats a scheduled label as proof.
 /// </summary>
-public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbContext dbContext)
-    : IScheduledGovernanceServerSafetyEvidenceProvider
+public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbContext dbContext)
+    : IScheduledGovernanceServerSafetyHistoryProvider
 {
     private static readonly HashSet<string> AllowedReceiptEventTypes =
     [
@@ -30,10 +30,7 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
         ScheduledGovernanceServerSafetyEvidenceQuery query,
         CancellationToken cancellationToken)
     {
-        if (query.TenantId == Guid.Empty ||
-            query.OwnerUserId == Guid.Empty ||
-            query.ReceiptId == Guid.Empty ||
-            string.IsNullOrWhiteSpace(query.GovernanceRunId))
+        if (!CanRead(query))
         {
             return null;
         }
@@ -59,9 +56,47 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
                 row.OwnerUserId == query.OwnerUserId &&
                 row.GovernanceRunId == runId)
             .OrderBy(row => row.EventSequence)
-            .Take(1_001)
+            .Take(EventReadLimit)
             .ToArrayAsync(cancellationToken);
-        if (events.Length == 0)
+
+        return await EvaluateAsync(
+            observedReceipt, events, runId,
+            async () =>
+            {
+                var auditRunBinding = JsonSerializer.Serialize(new { governanceRunId = runId });
+                return await dbContext.GovernanceBatchRuns.AsNoTracking().AnyAsync(
+                           run => run.TenantId == query.TenantId &&
+                                  run.GovernanceRunId == runId, cancellationToken) ||
+                       await dbContext.SecurityAuditEvents.AsNoTracking().AnyAsync(
+                           audit => audit.TenantId == query.TenantId &&
+                                    EF.Functions.JsonContains(audit.DetailsJson, auditRunBinding), cancellationToken);
+            },
+            () => dbContext.GovernanceRunReceipts.AsNoTracking().AnyAsync(row =>
+                row.TenantId == query.TenantId && row.OwnerUserId == query.OwnerUserId &&
+                row.GovernanceRunId == runId && row.EventSequence > observedReceipt.EventSequence,
+                cancellationToken));
+    }
+
+    private const int EventReadLimit = 1_001;
+
+    private static bool CanRead(ScheduledGovernanceServerSafetyEvidenceQuery query)
+        => query.TenantId != Guid.Empty && query.OwnerUserId != Guid.Empty && query.ReceiptId != Guid.Empty &&
+           !string.IsNullOrWhiteSpace(query.GovernanceRunId);
+
+    private static bool HasNoReceiptMutationSignals(IReadOnlyList<GovernanceRunReceipt> events)
+        => events.All(row =>
+            row.EventType is not ("BatchReceived" or "BatchCompleted" or "BatchReplay" or "BatchStopped" or
+                "InternalRetentionCompleted") &&
+            !row.LatestBatchReceived && row.Applied == 0 && row.Failed == 0 && EmptyAuditIds(row.AuditIdsJson));
+
+    private static async Task<ScheduledGovernanceServerSafetyEvidenceSnapshot?> EvaluateAsync(
+        GovernanceRunReceipt observedReceipt,
+        IReadOnlyList<GovernanceRunReceipt> events,
+        string runId,
+        Func<Task<bool>> hasExternalMutationSignals,
+        Func<Task<bool>> hasNewerReceipt)
+    {
+        if (events.Count == 0)
         {
             return null;
         }
@@ -73,7 +108,7 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             row.PublishedCatalogVersion == observedReceipt.PublishedCatalogVersion &&
             row.ExecutionMode == "Scheduled");
         var observedReceiptIsLatest = events[^1].EventSequence == observedReceipt.EventSequence;
-        if (events.Length > 1_000 ||
+        if (events.Count == EventReadLimit ||
             !observedReceiptIsLatest || !contractLineageConsistent ||
             !IsCurrentCompletedScheduledReceipt(observedReceipt))
         {
@@ -172,21 +207,9 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
         // history with no executor/retention event and zero mutation outcomes
         // proves this run did not mutate, without claiming host provenance or
         // that another actor did not change resources concurrently.
-        var auditRunBinding = JsonSerializer.Serialize(new { governanceRunId = runId });
         var zeroMutationRun = reviewLifecycleValid && allEventTypesAllowed &&
-                              events.All(row =>
-                                  row.EventType is not ("BatchReceived" or "BatchCompleted" or
-                                      "BatchReplay" or "BatchStopped" or "InternalRetentionCompleted") &&
-                                  !row.LatestBatchReceived && row.Applied == 0 && row.Failed == 0 &&
-                                  EmptyAuditIds(row.AuditIdsJson)) &&
-                              !await dbContext.GovernanceBatchRuns.AsNoTracking().AnyAsync(
-                                  run => run.TenantId == query.TenantId &&
-                                         run.GovernanceRunId == runId,
-                                  cancellationToken) &&
-                              !await dbContext.SecurityAuditEvents.AsNoTracking().AnyAsync(
-                                  audit => audit.TenantId == query.TenantId &&
-                                           EF.Functions.JsonContains(audit.DetailsJson, auditRunBinding),
-                                  cancellationToken);
+                              HasNoReceiptMutationSignals(events) &&
+                              !await hasExternalMutationSignals();
 
         var decisionObeyed = EvaluateDecisionObedience(
             events, decisionReceipt, observedReceipt.EventSequence,
@@ -220,10 +243,7 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
 
         // Do not publish a zero-execute proof against an observation that
         // became stale while its ledger/audit evidence was read.
-        if (await dbContext.GovernanceRunReceipts.AsNoTracking().AnyAsync(row =>
-                row.TenantId == query.TenantId && row.OwnerUserId == query.OwnerUserId &&
-                row.GovernanceRunId == runId && row.EventSequence > observedReceipt.EventSequence,
-                cancellationToken))
+        if (await hasNewerReceipt())
         {
             return Unknown(observedReceipt.EventSequence);
         }

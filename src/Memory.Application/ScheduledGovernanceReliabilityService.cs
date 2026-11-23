@@ -183,27 +183,16 @@ public sealed class ScheduledGovernanceReliabilityService(
             return null;
         }
 
-        var runId = NormalizeRunId(governanceRunId);
-        var projectScopeHash = ScheduledGovernanceReliabilityEvidenceContract
-            .ComputeProjectScopeHash(projectIds);
-        if (receiptId == Guid.Empty ||
-            string.IsNullOrWhiteSpace(projectScopeHash) ||
-            string.IsNullOrWhiteSpace(reviewRequestIdentityHash))
+        var query = CreateNaturalEvidenceQuery(
+            actor, receiptId, governanceRunId, projectIds, reviewRequestIdentityHash);
+        if (query is null)
         {
             return null;
         }
 
         try
         {
-            return await evidenceProvider.GetAsync(
-                new ScheduledGovernanceReliabilityEvidenceQuery(
-                    actor.TenantId.Value,
-                    actor.UserId.Value,
-                    receiptId,
-                    runId,
-                    reviewRequestIdentityHash,
-                    projectScopeHash),
-                cancellationToken);
+            return await evidenceProvider.GetAsync(query, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -215,6 +204,21 @@ public sealed class ScheduledGovernanceReliabilityService(
             // verification result must never promote timing-only evidence.
             return null;
         }
+    }
+
+    private static ScheduledGovernanceReliabilityEvidenceQuery? CreateNaturalEvidenceQuery(
+        ContextHubRequestActor actor,
+        Guid receiptId,
+        string governanceRunId,
+        IReadOnlyList<string> projectIds,
+        string? reviewRequestIdentityHash)
+    {
+        var runId = NormalizeRunId(governanceRunId);
+        var projectScopeHash = ScheduledGovernanceReliabilityEvidenceContract.ComputeProjectScopeHash(projectIds);
+        return receiptId != Guid.Empty && !string.IsNullOrWhiteSpace(projectScopeHash) &&
+               !string.IsNullOrWhiteSpace(reviewRequestIdentityHash)
+            ? new(actor.TenantId!.Value, actor.UserId!.Value, receiptId, runId, reviewRequestIdentityHash, projectScopeHash)
+            : null;
     }
 
     private async Task SaveWithConcurrentInsertRecoveryAsync(
@@ -321,16 +325,9 @@ public sealed class ScheduledGovernanceReliabilityService(
         ScheduledGovernanceReliabilityWindowCalculator calculator,
         CancellationToken cancellationToken)
     {
-        var projections = new List<ScheduledGovernanceReliabilityReceiptProjection>(rows.Count * 2);
-        foreach (var row in rows)
-        {
-            var projection = DeserializeProjection(row);
-            if (projection is null)
-            {
-                projection = CorruptProjection(row);
-            }
-
-            projection = projection with
+        var canonical = rows.Select(row => (
+            Row: row,
+            Projection: (DeserializeProjection(row) ?? CorruptProjection(row)) with
             {
                 TenantId = row.TenantId,
                 OwnerUserId = row.OwnerUserId,
@@ -338,21 +335,40 @@ public sealed class ScheduledGovernanceReliabilityService(
                 ReceiptId = row.ReceiptId,
                 ReceiptEventSequence = row.ReceiptEventSequence,
                 IsReplay = row.IsReplay
-            };
+            })).ToArray();
+        var scheduled = canonical.Where(x => IsScheduled(x.Projection.ExecutionMode))
+            .Select(x => x.Projection).ToArray();
+        ScheduledGovernanceServerSafetyEvidenceQuery SafetyQuery(ScheduledGovernanceReliabilityReceiptProjection projection)
+            => new(actor.TenantId!.Value, actor.UserId!.Value, projection.ReceiptId, projection.GovernanceRunId);
+
+        var safetyByReceipt = await ReadEvidenceHistoryAsync<ScheduledGovernanceServerSafetyEvidenceQuery, ScheduledGovernanceServerSafetyEvidenceSnapshot>(
+            scheduled.Where(projection => projection.ReceiptId != Guid.Empty).Select(SafetyQuery).ToArray(),
+            serverSafetyEvidenceProvider is IScheduledGovernanceServerSafetyHistoryProvider safetyHistory ? safetyHistory.GetHistoryAsync : null,
+            serverSafetyEvidenceProvider is null ? null : serverSafetyEvidenceProvider.GetAsync,
+            cancellationToken);
+        ScheduledGovernanceReliabilityEvidenceQuery? NaturalQuery(
+            ScheduledGovernanceReliabilityReceiptProjection projection,
+            ScheduledGovernanceServerSafetyEvidenceSnapshot? safety)
+            => CreateNaturalEvidenceQuery(
+                actor, projection.ReceiptId, projection.GovernanceRunId, projection.ProjectIds, safety?.ReviewRequestIdentityHash);
+
+        var naturalByReceipt = await ReadEvidenceHistoryAsync<ScheduledGovernanceReliabilityEvidenceQuery, ScheduledGovernanceReliabilityEvidenceSnapshot>(
+            scheduled.Select(projection => NaturalQuery(projection, safetyByReceipt.GetValueOrDefault(SafetyQuery(projection))))
+                .OfType<ScheduledGovernanceReliabilityEvidenceQuery>().ToArray(),
+            evidenceProvider is IScheduledGovernanceReliabilityHistoryEvidenceProvider naturalHistory ? naturalHistory.GetHistoryAsync : null,
+            evidenceProvider is null ? null : evidenceProvider.GetAsync,
+            cancellationToken);
+
+        var projections = new List<ScheduledGovernanceReliabilityReceiptProjection>(rows.Count * 2);
+        foreach (var (row, canonicalProjection) in canonical)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var projection = canonicalProjection;
             if (IsScheduled(projection.ExecutionMode))
             {
-                var serverSafetyEvidence = await GetServerSafetyEvidenceAsync(
-                    actor,
-                    projection.ReceiptId,
-                    projection.GovernanceRunId,
-                    cancellationToken);
-                var evidence = await GetNaturalOriginEvidenceAsync(
-                    actor,
-                    projection.ReceiptId,
-                    projection.GovernanceRunId,
-                    projection.ProjectIds,
-                    serverSafetyEvidence?.ReviewRequestIdentityHash,
-                    cancellationToken);
+                var serverSafetyEvidence = safetyByReceipt.GetValueOrDefault(SafetyQuery(projection));
+                var naturalQuery = NaturalQuery(projection, serverSafetyEvidence);
+                var evidence = naturalQuery is null ? null : naturalByReceipt.GetValueOrDefault(naturalQuery);
                 projection = projection with
                 {
                     NaturalOriginEvidence = evidence,
@@ -396,6 +412,56 @@ public sealed class ScheduledGovernanceReliabilityService(
 
         var result = calculator.Calculate(projections);
         return ToSummary(result);
+    }
+
+    private static async Task<IReadOnlyDictionary<TQuery, TEvidence?>> ReadEvidenceHistoryAsync<TQuery, TEvidence>(
+        IReadOnlyList<TQuery> queries,
+        Func<IReadOnlyList<TQuery>, CancellationToken, Task<IReadOnlyDictionary<TQuery, TEvidence?>>>? readHistory,
+        Func<TQuery, CancellationToken, Task<TEvidence?>>? readSingle,
+        CancellationToken cancellationToken)
+        where TQuery : notnull
+        where TEvidence : class
+    {
+        var results = new Dictionary<TQuery, TEvidence?>();
+        if (readSingle is null || queries.Count == 0)
+        {
+            return results;
+        }
+
+        if (readHistory is not null)
+        {
+            try
+            {
+                return await readHistory(queries, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                // Recover unaffected runs through the original exact reader if the batch failed.
+            }
+        }
+
+        foreach (var query in queries.Distinct())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                results.Add(query, await readSingle(query, cancellationToken));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                // An unavailable or invalid proof stays unknown for this run.
+            }
+        }
+
+        return results;
     }
 
     private static ScheduledGovernanceReliabilitySummary ToSummary(

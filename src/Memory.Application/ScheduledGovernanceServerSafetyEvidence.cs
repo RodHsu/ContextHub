@@ -72,3 +72,10 @@ public interface IScheduledGovernanceServerSafetyEvidenceProvider
         ScheduledGovernanceServerSafetyEvidenceQuery query,
         CancellationToken cancellationToken);
 }
+
+public interface IScheduledGovernanceServerSafetyHistoryProvider : IScheduledGovernanceServerSafetyEvidenceProvider
+{
+    Task<IReadOnlyDictionary<ScheduledGovernanceServerSafetyEvidenceQuery, ScheduledGovernanceServerSafetyEvidenceSnapshot?>> GetHistoryAsync(
+        IReadOnlyList<ScheduledGovernanceServerSafetyEvidenceQuery> queries,
+        CancellationToken cancellationToken);
+}

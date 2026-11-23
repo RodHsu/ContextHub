@@ -285,6 +285,28 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         receipt.GetProperty("received").GetBoolean().Should().BeTrue();
         receipt.GetProperty("governanceRunId").GetString().Should().Be(governanceRunId);
         receipt.GetProperty("reliability").ValueKind.Should().Be(JsonValueKind.Object);
+        receipt.GetProperty("reliability").GetProperty("runs").EnumerateArray().Should()
+            .Contain(run => run.GetProperty("governanceRunId").GetString() == governanceRunId);
+
+        using (var anonymous = factory.CreateClient())
+        using (var unauthorizedRequest = CreateModernMcpRequest("tools/call"))
+        {
+            anonymous.DefaultRequestHeaders.Authorization = null;
+            unauthorizedRequest.Content = new StringContent(JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 24,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ScheduledGovernanceContract.ReceiptToolName,
+                    arguments = new { governanceRunId }
+                }
+            }), Encoding.UTF8, "application/json");
+            using var unauthorized = await anonymous.SendAsync(unauthorizedRequest);
+            unauthorized.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+            (await unauthorized.Content.ReadAsStringAsync()).Should().NotContain(governanceRunId);
+        }
 
         var compactPayload = await SendMcpAsync(client, null, 23, "tools/call", new
         {

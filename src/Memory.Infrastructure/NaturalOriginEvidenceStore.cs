@@ -67,11 +67,7 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
         string governanceRunId,
         CancellationToken cancellationToken = default)
     {
-        if (tenantId == Guid.Empty || ownerUserId == Guid.Empty)
-        {
-            throw new ArgumentException("Tenant and owner identifiers are required.");
-        }
-
+        ValidateReadScope(tenantId, ownerUserId);
         if (string.IsNullOrWhiteSpace(governanceRunId))
         {
             throw new ArgumentException("GovernanceRunId is required.", nameof(governanceRunId));
@@ -79,15 +75,49 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
 
         var governanceRunIdHash = ScheduledGovernanceReliabilityEvidenceContract
             .ComputeOpaqueHash(governanceRunId);
-        return await dbContext.NaturalOriginEvidenceLedgerEntries
-            .AsNoTracking()
-            .Where(x => x.TenantId == tenantId &&
-                        x.OwnerUserId == ownerUserId &&
-                        x.GovernanceRunIdHash == governanceRunIdHash)
+        return await ReadScopedEvidence(tenantId, ownerUserId)
+            .Where(x => x.GovernanceRunIdHash == governanceRunIdHash)
+            .ToArrayAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<NaturalOriginEvidenceLedgerEntry>> ListForRunsAsync(
+        Guid tenantId,
+        Guid ownerUserId,
+        IReadOnlyList<string> governanceRunIds,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateReadScope(tenantId, ownerUserId);
+        if (governanceRunIds.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("GovernanceRunId is required.", nameof(governanceRunIds));
+        }
+
+        var hashes = governanceRunIds
+            .Select(ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        return hashes.Length == 0
+            ? []
+            : await ReadScopedEvidence(tenantId, ownerUserId)
+                .Where(x => hashes.Contains(x.GovernanceRunIdHash))
+                .ToArrayAsync(cancellationToken);
+    }
+
+    private IQueryable<NaturalOriginEvidenceLedgerEntry> ReadScopedEvidence(Guid tenantId, Guid ownerUserId)
+        => dbContext.NaturalOriginEvidenceLedgerEntries.AsNoTracking()
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId)
             .OrderBy(x => x.ExpectedAtUtc)
             .ThenBy(x => x.EvidenceKind)
             .ThenBy(x => x.CreatedAtUtc)
-            .ToArrayAsync(cancellationToken);
+            .ThenBy(x => x.Id);
+
+    private static void ValidateReadScope(Guid tenantId, Guid ownerUserId)
+    {
+        if (tenantId == Guid.Empty || ownerUserId == Guid.Empty)
+        {
+            throw new ArgumentException("Tenant and owner identifiers are required.");
+        }
     }
 
     private static void Validate(NaturalOriginEvidenceLedgerEntry entry, DateTimeOffset nowUtc)

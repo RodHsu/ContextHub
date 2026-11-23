@@ -1,17 +1,128 @@
+using System.Diagnostics;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
+using Xunit.Abstractions;
 
 namespace Memory.IntegrationTests;
 
-public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironment environment)
+public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironment environment, ITestOutputHelper output)
     : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Batched_history_matches_exact_readers_with_mixed_natural_evidence_and_bounded_queries()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var now = DateTimeOffset.UtcNow;
+        var owner = new TenantUser
+        {
+            TenantId = actor.TenantId!.Value,
+            Username = $"history-projection-{Guid.NewGuid():N}",
+            DisplayName = "Reliability history fixture",
+            Role = TenantUserRole.Owner,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.TenantUsers.Add(owner);
+        await db.SaveChangesAsync(CancellationToken.None);
+        actor = actor with { UserId = owner.Id };
+        accessor.Current = actor;
+
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var reliability = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityService>();
+        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var recorded = new List<GovernanceRunReceiptResult>();
+        for (var index = 0; index < 34; index++)
+        {
+            var runId = $"mixed-history-{index:D2}-{Guid.NewGuid():N}";
+            var startedAt = now.AddSeconds(index);
+            var identity = CurrentScheduledIdentity();
+            var review = CreateReview(runId, ProjectContext.SharedProjectId, identity);
+            await receipts.RecordReviewStartedAsync(runId, startedAt, identity, CancellationToken.None);
+            await receipts.RecordReviewAsync(review, startedAt, CancellationToken.None);
+            await receipts.RecordScheduledDecisionAsync(
+                CreateScheduledDecision(runId, ProjectContext.SharedProjectId, review.DurableMemoryCoverage!.SnapshotToken),
+                startedAt, CancellationToken.None);
+            var receipt = (await receipts.GetAsync(runId, CancellationToken.None))!;
+            await reliability.PersistObservationAsync(receipt, CancellationToken.None);
+            recorded.Add(receipt);
+
+            if (index < 3)
+            {
+                var eventKey = await db.GovernanceRunReceipts.AsNoTracking().Where(row => row.Id == receipt.ReceiptId)
+                    .Select(row => row.EventKey).SingleAsync(CancellationToken.None);
+                await store.AppendAsync(CreateEvidence(
+                    NaturalOriginEvidenceKind.PlatformAttestation, actor, receipt, eventKey, startedAt, null));
+                if (index == 0 || index == 2)
+                {
+                    var secondKind = index == 0 ? NaturalOriginEvidenceKind.ControlPlaneAudit : NaturalOriginEvidenceKind.PlatformAttestation;
+                    var secondSlot = index == 0 ? startedAt : startedAt.AddMinutes(-1);
+                    await store.AppendAsync(CreateEvidence(
+                        secondKind, actor, receipt, eventKey, secondSlot, index == 0 ? 0 : null));
+                }
+            }
+        }
+
+        var commandCount = 0;
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .LogTo(_ => commandCount++, [RelationalEventId.CommandExecuted])
+            .Options;
+        await using var historyDb = new MemoryDbContext(options);
+        var safety = new ScheduledGovernanceServerSafetyEvidenceProvider(historyDb);
+        var natural = new ScheduledGovernanceReliabilityEvidenceProvider(
+            historyDb, new NaturalOriginEvidenceStore(historyDb, TimeProvider.System));
+        var exactReader = new ScheduledGovernanceReliabilityService(
+            historyDb, accessor, TimeProvider.System, new ExactNaturalReader(natural), new ExactSafetyReader(safety));
+        var historyReader = new ScheduledGovernanceReliabilityService(
+            historyDb, accessor, TimeProvider.System, natural, safety);
+
+        var elapsed = Stopwatch.StartNew();
+        var expected = await exactReader.GetAsync(CancellationToken.None);
+        var exactCommands = commandCount;
+        var exactMilliseconds = elapsed.Elapsed.TotalMilliseconds;
+        commandCount = 0;
+        elapsed.Restart();
+        var actual = await historyReader.GetAsync(CancellationToken.None);
+        output.WriteLine($"Scheduled history reads for 34 runs: exact {exactCommands} commands {exactMilliseconds:F1} ms, batch {commandCount} commands {elapsed.Elapsed.TotalMilliseconds:F1} ms.");
+
+        actual.Should().BeEquivalentTo(expected, options => options.WithStrictOrdering());
+        actual.Runs.Should().HaveCount(recorded.Count);
+        actual.Runs.Single(run => run.GovernanceRunId == recorded[0].GovernanceRunId)
+            .PlatformSignedNaturalOriginAttested.Should().BeTrue();
+        actual.GatePassed.Should().BeFalse();
+        commandCount.Should().Be(10, "one actor history read, six safety reads, two ledger reads and one bound receipt read");
+        commandCount.Should().BeLessThan(exactCommands);
+        historyDb.ChangeTracker.HasChanges().Should().BeFalse();
+    }
+
+    private sealed class ExactNaturalReader(IScheduledGovernanceReliabilityEvidenceProvider provider)
+        : IScheduledGovernanceReliabilityEvidenceProvider
+    {
+        public Task<ScheduledGovernanceReliabilityEvidenceSnapshot?> GetAsync(
+            ScheduledGovernanceReliabilityEvidenceQuery query,
+            CancellationToken cancellationToken)
+            => provider.GetAsync(query, cancellationToken);
+    }
+
+    private sealed class ExactSafetyReader(IScheduledGovernanceServerSafetyEvidenceProvider provider)
+        : IScheduledGovernanceServerSafetyEvidenceProvider
+    {
+        public Task<ScheduledGovernanceServerSafetyEvidenceSnapshot?> GetAsync(
+            ScheduledGovernanceServerSafetyEvidenceQuery query,
+            CancellationToken cancellationToken)
+            => provider.GetAsync(query, cancellationToken);
+    }
+
     [DockerRequiredFact]
     public async Task Verified_A_And_B_Without_Current_Server_Authority_Should_Remain_Unattested()
     {

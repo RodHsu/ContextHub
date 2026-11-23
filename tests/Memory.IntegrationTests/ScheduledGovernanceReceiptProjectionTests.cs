@@ -4,6 +4,7 @@ using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Memory.IntegrationTests;
@@ -11,6 +12,95 @@ namespace Memory.IntegrationTests;
 public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvironment environment)
     : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Batched_safety_history_matches_exact_receipt_lookup_and_limits_each_owner_run_independently()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var tenantId = actor.TenantId!.Value;
+        var ownerId = actor.UserId!.Value;
+        var runId = $"history-shared-key-{Guid.NewGuid():N}";
+        var overLimitRunId = $"history-over-limit-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var otherOwner = new TenantUser
+        {
+            TenantId = tenantId,
+            Username = $"history-owner-{Guid.NewGuid():N}",
+            DisplayName = "Safety history scope fixture",
+            Role = TenantUserRole.Owner,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.TenantUsers.Add(otherOwner);
+        await db.SaveChangesAsync(CancellationToken.None);
+
+        async Task<Guid> RecordCompletedRunAsync(string key)
+        {
+            var snapshot = $"kg:snapshot:{key}";
+            var identity = CurrentScheduledIdentity();
+            await receipts.RecordReviewStartedAsync(key, now, identity, CancellationToken.None);
+            await receipts.RecordReviewAsync(CreateGenericReview(key, identity, snapshot), now, CancellationToken.None);
+            await receipts.RecordScheduledDecisionAsync(
+                CreateScheduledDecision(key, snapshot, isReReview: false, actionable: 0), now, CancellationToken.None);
+            return (await receipts.GetAsync(key, CancellationToken.None))!.ReceiptId;
+        }
+
+        var receiptId = await RecordCompletedRunAsync(runId);
+        var overLimitReceiptId = await RecordCompletedRunAsync(overLimitRunId);
+        var overLimitSource = await db.GovernanceRunReceipts.AsNoTracking()
+            .SingleAsync(row => row.Id == overLimitReceiptId, CancellationToken.None);
+        var extraEvents = Enumerable.Range(0, 1_000)
+            .Select(index => CloneReceipt(overLimitSource, $"history-extra-{index:D4}", "ReviewCompleted"))
+            .ToArray();
+        db.GovernanceRunReceipts.AddRange(extraEvents);
+        await db.SaveChangesAsync(CancellationToken.None);
+        var latestOverLimit = extraEvents.MaxBy(row => row.EventSequence)!;
+
+        accessor.Current = actor with { UserId = otherOwner.Id };
+        var otherReceiptId = await RecordCompletedRunAsync(runId);
+        accessor.Current = actor;
+
+        var own = new ScheduledGovernanceServerSafetyEvidenceQuery(tenantId, ownerId, receiptId, runId);
+        var foreign = new ScheduledGovernanceServerSafetyEvidenceQuery(tenantId, otherOwner.Id, otherReceiptId, runId);
+        var wrongOwner = own with { ReceiptId = otherReceiptId };
+        var wrongRun = own with { GovernanceRunId = overLimitRunId };
+        var missing = own with { ReceiptId = Guid.NewGuid() };
+        var tooManyEvents = own with { GovernanceRunId = overLimitRunId, ReceiptId = latestOverLimit.Id };
+        ScheduledGovernanceServerSafetyEvidenceQuery[] queries = [tooManyEvents, own, wrongOwner, wrongRun, missing, foreign];
+
+        var commandCount = 0;
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .LogTo(_ => commandCount++, [RelationalEventId.CommandExecuted])
+            .Options;
+        await using var readDb = new MemoryDbContext(options);
+        var provider = new ScheduledGovernanceServerSafetyEvidenceProvider(readDb);
+        var expected = new Dictionary<ScheduledGovernanceServerSafetyEvidenceQuery, ScheduledGovernanceServerSafetyEvidenceSnapshot?>();
+        foreach (var query in queries)
+        {
+            expected[query] = await provider.GetAsync(query, CancellationToken.None);
+        }
+        var singleReadCommandCount = commandCount;
+
+        commandCount = 0;
+        var actual = await provider.GetHistoryAsync([.. queries, own], CancellationToken.None);
+        actual.Should().BeEquivalentTo(expected);
+        commandCount.Should().BeLessThan(singleReadCommandCount, "batch history must share the PostgreSQL reads");
+        commandCount.Should().BeLessThanOrEqualTo(8, "queries are bounded per owner and chunk rather than per run");
+        actual[own]!.InitialReviewReceived.Should().BeTrue();
+        actual[foreign]!.InitialReviewReceived.Should().BeTrue();
+        actual[own]!.ReceiptEventSequence.Should().NotBe(actual[foreign]!.ReceiptEventSequence);
+        actual[wrongOwner].Should().BeNull();
+        actual[wrongRun].Should().BeNull();
+        actual[missing].Should().BeNull();
+        actual[tooManyEvents]!.ReceiptEventSequence.Should().Be(latestOverLimit.EventSequence);
+        actual[tooManyEvents]!.InitialReviewReceived.Should().BeNull();
+        actual[tooManyEvents]!.DecisionObeyed.Should().BeNull();
+    }
+
     [DockerRequiredFact]
     public async Task Zero_execute_decisions_have_typed_structural_proof_with_user_scope_handled_separately()
     {
