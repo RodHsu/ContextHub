@@ -65,6 +65,9 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     {
         Guid versionId;
         Guid fileId;
+        Guid otherVersionId;
+        Guid otherFileId;
+        Guid otherFileVersionId;
         string projectId;
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
@@ -104,9 +107,21 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 CreatedAt = now,
                 UpdatedAt = now
             };
+            var otherFile = new FileAsset
+            {
+                TenantId = file.TenantId,
+                OwnerUserId = file.OwnerUserId,
+                ProjectId = projectId,
+                LogicalFileName = "other.txt",
+                NormalizedFileName = "other.txt",
+                State = FileAssetState.Active,
+                CreatedByActorId = file.CreatedByActorId,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
             db.ManagedObjects.Add(managedObject);
-            db.FileAssets.Add(file);
-            db.ProjectAuthorizationPolicies.Add(new ProjectAuthorizationPolicy
+            db.FileAssets.AddRange(file, otherFile);
+            db.ProjectAuthorizationPolicies.AddRange(new[] { file.Id, otherFile.Id }.Select(id => new ProjectAuthorizationPolicy
             {
                 TenantId = actor.TenantId,
                 OwnerUserId = actor.UserId,
@@ -115,30 +130,41 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 Right = "metadata",
                 Effect = AuthorizationEffect.Allow,
                 ResourceType = "File",
-                ResourceId = file.Id.ToString("D"),
+                ResourceId = id.ToString("D"),
                 EvidenceRef = "api-contract:file-metadata",
                 CreatedAt = now,
                 UpdatedAt = now
-            });
+            }));
             await db.SaveChangesAsync();
-            var version = new FileVersion
-            {
-                FileAssetId = file.Id,
-                ManagedObjectId = managedObject.Id,
-                VersionNumber = 1,
-                ContentSha256 = managedObject.PlaintextSha256,
-                ContentType = "text/plain",
-                DeduplicationScopeKey = Convert.ToHexString(SHA256.HashData(Guid.NewGuid().ToByteArray())).ToLowerInvariant(),
-                Lifecycle = FileVersionLifecycle.IntegrityVerified,
-                Classification = FileClassification.Restricted,
-                NeedsRescan = true,
-                CreatedAt = now,
-                UpdatedAt = now
-            };
-            db.FileVersions.Add(version);
+            var version = AddVersion(file.Id, 1);
+            var otherVersion = AddVersion(file.Id, 2);
+            var distinctFileVersion = AddVersion(otherFile.Id, 1);
             await db.SaveChangesAsync();
             versionId = version.Id;
             fileId = file.Id;
+            otherVersionId = otherVersion.Id;
+            otherFileId = otherFile.Id;
+            otherFileVersionId = distinctFileVersion.Id;
+
+            FileVersion AddVersion(Guid assetId, int number)
+            {
+                var row = new FileVersion
+                {
+                    FileAssetId = assetId,
+                    ManagedObjectId = managedObject.Id,
+                    VersionNumber = number,
+                    ContentSha256 = managedObject.PlaintextSha256,
+                    ContentType = "text/plain",
+                    DeduplicationScopeKey = Convert.ToHexString(SHA256.HashData(Guid.NewGuid().ToByteArray())).ToLowerInvariant(),
+                    Lifecycle = FileVersionLifecycle.IntegrityVerified,
+                    Classification = FileClassification.Restricted,
+                    NeedsRescan = true,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                };
+                db.FileVersions.Add(row);
+                return row;
+            }
         }
 
         using var client = environment.GetFactory().CreateClient();
@@ -161,8 +187,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         using var artifactScope = environment.GetFactory().Services.CreateScope();
         UseBootstrapActor(artifactScope.ServiceProvider);
         var artifacts = artifactScope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>();
-        var published = await artifacts.PublishAsync(
-            new ProjectArtifactPublishRequest(
+        var request = new ProjectArtifactPublishRequest(
                 projectId,
                 "Logical managed file reference",
                 "Only ContextHub logical identifiers may cross the artifact contract.",
@@ -170,8 +195,70 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 ProjectArtifactKind.FileReference,
                 FileId: fileId,
                 FileVersionId: versionId,
-                MetadataJson: "{\"safeLabel\":\"contract\"}"),
-            CancellationToken.None);
+                MetadataJson: "{\"safeLabel\":\"contract\"}");
+        var legacyHash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            string.Join("|", request.Title, request.Summary, request.Content))))[..16];
+        var legacySourceRef = $"codex:filereference:{legacyHash}";
+        var legacy = await artifacts.PublishAsync(request with
+        {
+            SourceRef = legacySourceRef
+        }, default);
+        var published = await artifacts.PublishAsync(request, default);
+        published.MemoryId.Should().Be(legacy.MemoryId);
+        published.ExternalKey.Should().Be(legacy.ExternalKey);
+        published.SourceRef.Should().Be(legacySourceRef);
+        var otherVersionReference = await artifacts.PublishAsync(request with { FileVersionId = otherVersionId }, default);
+        var otherFileReference = await artifacts.PublishAsync(request with { FileId = otherFileId, FileVersionId = otherFileVersionId }, default);
+        new[] { published.MemoryId, otherVersionReference.MemoryId, otherFileReference.MemoryId }.Should().OnlyHaveUniqueItems();
+        (await artifacts.PublishAsync(request with { ProjectId = projectId.ToUpperInvariant() }, default))
+            .MemoryId.Should().Be(legacy.MemoryId);
+        (await artifacts.PublishAsync(request with
+        {
+            ProjectId = projectId.ToUpperInvariant(),
+            FileVersionId = otherVersionId
+        }, default)).MemoryId.Should().Be(otherVersionReference.MemoryId);
+        var concurrent = request with { Title = "Concurrent default publication" };
+        var concurrentResults = await Task.WhenAll(
+            PublishInScopeAsync(concurrent),
+            PublishInScopeAsync(concurrent with { ProjectId = projectId.ToUpperInvariant() }));
+        concurrentResults.Select(x => x.MemoryId).Distinct().Should().ContainSingle();
+
+        var explicitSource = request with { SourceRef = "maintained-artifact-reference" };
+        var explicitSourceResult = await artifacts.PublishAsync(explicitSource, default);
+        (await artifacts.PublishAsync(explicitSource with { FileVersionId = otherVersionId }, default))
+            .MemoryId.Should().Be(explicitSourceResult.MemoryId);
+        var explicitKey = request with { ExternalKey = "maintained-artifact-key" };
+        var explicitKeyResult = await artifacts.PublishAsync(explicitKey, default);
+        (await artifacts.PublishAsync(explicitKey with { FileVersionId = otherVersionId }, default))
+            .MemoryId.Should().Be(explicitKeyResult.MemoryId);
+
+        var proposals = artifactScope.ServiceProvider.GetRequiredService<IChatGptProposalService>();
+        var firstApproval = await ApproveAsync(request with { Title = "Approved file reference" });
+        var secondApproval = await ApproveAsync(request with { Title = "Approved file reference", FileVersionId = otherVersionId });
+        new[] { firstApproval.AppliedResourceId, secondApproval.AppliedResourceId }.Should().OnlyHaveUniqueItems();
+        (await artifacts.GetAsync(firstApproval.AppliedResourceId!.Value, default))!.FileVersionId.Should().Be(versionId);
+        (await artifacts.GetAsync(secondApproval.AppliedResourceId!.Value, default))!.FileVersionId.Should().Be(otherVersionId);
+
+        async Task<ChatGptProposalResult> ApproveAsync(ProjectArtifactPublishRequest input)
+        {
+            var proposal = await proposals.CreateAsync(new ChatGptProposalCreateRequest(
+                "project_artifact_publish", projectId, JsonSerializer.Serialize(input, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                input.Title, input.Summary), default);
+            var result = await proposals.ApproveAsync(new ChatGptProposalDecisionRequest(proposal.Id), default);
+            result.Status.Should().Be(ChatGptProposalStatus.Applied, result.Error);
+            result.AppliedResourceId.Should().NotBeNull();
+            (await proposals.ApproveAsync(new ChatGptProposalDecisionRequest(proposal.Id), default))
+                .AppliedResourceId.Should().Be(result.AppliedResourceId);
+            return result;
+        }
+
+        async Task<ProjectArtifactResult> PublishInScopeAsync(ProjectArtifactPublishRequest input)
+        {
+            using var publisherScope = environment.GetFactory().Services.CreateScope();
+            UseBootstrapActor(publisherScope.ServiceProvider);
+            return await publisherScope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>()
+                .PublishAsync(input, default);
+        }
         var artifactJson = JsonSerializer.Serialize(published);
         artifactJson.Should().Contain(fileId.ToString()).And.Contain(versionId.ToString());
         artifactJson.Should().NotContain("managedObjectId").And.NotContain("storageId").And.NotContain("provider")

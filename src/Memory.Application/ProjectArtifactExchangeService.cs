@@ -33,31 +33,97 @@ public sealed class ProjectArtifactExchangeService(
         var sourceSystem = NormalizeRequired(request.SourceSystem, nameof(request.SourceSystem));
         var logicalReference = await ValidateLogicalReferenceAsync(request, projectId, cancellationToken);
         var content = NormalizeArtifactContent(request, logicalReference);
-        var sourceRef = string.IsNullOrWhiteSpace(request.SourceRef)
+        var defaultSource = string.IsNullOrWhiteSpace(request.SourceRef);
+        var sourceRef = defaultSource
             ? $"{sourceSystem}:{request.Kind.ToString().ToLowerInvariant()}:{Hash(title, summary, content)[..16]}"
             : request.SourceRef.Trim();
+        var metadata = BuildMetadataJson(request, sourceSystem, logicalReference);
+
+        if (logicalReference is not null && defaultSource && string.IsNullOrWhiteSpace(request.ExternalKey))
+        {
+            // Use a structured identity so separators in titles or content cannot alias a file version.
+            var pinHash = Hash(JsonSerializer.Serialize(new
+            {
+                title,
+                summary,
+                content,
+                logicalReference.FileId,
+                logicalReference.FileVersionId
+            }, JsonOptions));
+            var pinnedSourceRef = $"{sourceSystem}:filereference:v2:{pinHash[..32]}";
+            var pinnedKey = BuildExternalKey(ProjectContext.IdentityKey(projectId), sourceSystem, pinnedSourceRef, request.Kind);
+            return await dbContext.ExecuteInTransactionAsync(async token =>
+            {
+                await dbContext.AcquireTransactionLockAsync(
+                    $"artifact-file-reference:{actor.TenantId}:{actor.UserId}:{ProjectContext.IdentityKey(projectId)}:{Hash(sourceRef)}", token);
+                var identity = await ResolveGeneratedFileReferenceAsync(
+                    projectId, sourceSystem, sourceRef, pinnedSourceRef, pinnedKey, logicalReference, actor, token);
+                return await UpsertAsync(identity.ExternalKey, identity.SourceRef, token);
+            }, cancellationToken);
+        }
+
         var externalKey = string.IsNullOrWhiteSpace(request.ExternalKey)
             ? BuildExternalKey(projectId, sourceSystem, sourceRef, request.Kind)
             : request.ExternalKey.Trim();
+        return await UpsertAsync(externalKey, sourceRef, cancellationToken);
 
-        var document = await memoryService.UpsertAsync(
-            new MemoryUpsertRequest(
-                externalKey,
-                MemoryScope.Project,
-                MemoryType.Artifact,
-                title,
-                content,
-                summary,
-                SourceType,
-                sourceRef,
-                NormalizeTags(request.Tags, request.Kind, sourceSystem),
-                Importance: 0.76m,
-                Confidence: 0.88m,
-                MetadataJson: BuildMetadataJson(request, sourceSystem, logicalReference),
-                ProjectId: projectId),
-            cancellationToken);
+        async Task<ProjectArtifactResult> UpsertAsync(string key, string reference, CancellationToken token)
+        {
+            var document = await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    key,
+                    MemoryScope.Project,
+                    MemoryType.Artifact,
+                    title,
+                    content,
+                    summary,
+                    SourceType,
+                    reference,
+                    NormalizeTags(request.Tags, request.Kind, sourceSystem),
+                    Importance: 0.76m,
+                    Confidence: 0.88m,
+                    MetadataJson: metadata,
+                    ProjectId: projectId),
+                token);
+            return ToResult(document, logicalReference);
+        }
+    }
 
-        return ToResult(document, logicalReference);
+    private async Task<(string ExternalKey, string SourceRef)> ResolveGeneratedFileReferenceAsync(
+        string projectId, string sourceSystem, string legacySourceRef, string pinnedSourceRef, string pinnedKey,
+        LogicalFileReference pin, ContextHubRequestActor actor, CancellationToken cancellationToken)
+    {
+        var rows = await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
+                        ProjectContext.Matches(x.ProjectId, projectId) &&
+                        (x.ExternalKey == pinnedKey ||
+                         (x.SourceType == SourceType && x.MemoryType == MemoryType.Artifact && x.SourceRef == legacySourceRef)))
+            .Select(x => new { x.ProjectId, x.ExternalKey, x.SourceType, x.MemoryType, x.MetadataJson })
+            .ToArrayAsync(cancellationToken);
+
+        var current = rows.SingleOrDefault(x => x.ExternalKey == pinnedKey);
+        if (current is not null)
+        {
+            if (current.SourceType != SourceType || current.MemoryType != MemoryType.Artifact || !HasPin(current.MetadataJson))
+                throw new InvalidOperationException("The generated artifact key belongs to a different record. Supply an explicit key for publication.");
+            return (pinnedKey, pinnedSourceRef);
+        }
+
+        var legacyKey = BuildExternalKey(projectId, sourceSystem, legacySourceRef, ProjectArtifactKind.FileReference);
+        var matchingLegacyKeys = rows
+            .Where(x => (x.ExternalKey == legacyKey ||
+                         x.ExternalKey == BuildExternalKey(x.ProjectId, sourceSystem, legacySourceRef, ProjectArtifactKind.FileReference)) &&
+                        HasPin(x.MetadataJson))
+            .Select(x => x.ExternalKey)
+            .ToArray();
+        if (matchingLegacyKeys.Contains(legacyKey, StringComparer.Ordinal))
+            return (legacyKey, legacySourceRef);
+        if (matchingLegacyKeys.Length > 1)
+            throw new InvalidOperationException("Multiple legacy artifacts match this file version. Supply the exact existing artifact key.");
+        return matchingLegacyKeys.Length == 1 ? (matchingLegacyKeys[0], legacySourceRef) : (pinnedKey, pinnedSourceRef);
+
+        bool HasPin(string json) => ReadMetadata(json) is { Kind: ProjectArtifactKind.FileReference } metadata &&
+                                    metadata.FileId == pin.FileId && metadata.FileVersionId == pin.FileVersionId;
     }
 
     public async Task<IReadOnlyList<ProjectArtifactResult>> ListAsync(ProjectArtifactListRequest request, CancellationToken cancellationToken)
