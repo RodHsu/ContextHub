@@ -98,7 +98,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .GetProperty("properties");
         requestSchema.TryGetProperty("includeInventoryToken", out _).Should().BeTrue();
         requestSchema.TryGetProperty("expectedInventoryToken", out _).Should().BeTrue();
-        tool.GetProperty("outputSchema").GetProperty("properties").TryGetProperty("inventoryToken", out _).Should().BeTrue();
+        requestSchema.TryGetProperty("receiptRequest", out _).Should().BeTrue();
+        var outputSchema = tool.GetProperty("outputSchema").GetProperty("properties");
+        outputSchema.TryGetProperty("inventoryToken", out _).Should().BeTrue();
+        outputSchema.TryGetProperty("receiptLookup", out _).Should().BeTrue();
 
         async Task<JsonElement> PreviewAsync(int id, object request)
         {
@@ -123,6 +126,26 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                         result.TryGetProperty("isError", out var isError) && isError.GetBoolean();
         (protocolError || toolError).Should().BeTrue();
         changed.GetRawText().Should().NotContain("inventoryToken");
+
+        var operationId = Guid.NewGuid();
+        var lookup = await PreviewAsync(35, new
+        {
+            projectId = ProjectId,
+            limit = 1,
+            receiptRequest = new
+            {
+                projectId = ProjectId,
+                insightId = Guid.NewGuid(),
+                operationId,
+                action = (int)ConversationAdjudicationAction.ResolveSkipped,
+                expectedEvidenceToken = new string('a', 64),
+                reason = "Reviewed original evidence",
+                governanceRunId = "unknown-result"
+            }
+        });
+        var receipt = lookup.GetProperty("result").GetProperty("structuredContent").GetProperty("receiptLookup");
+        receipt.GetProperty("operationId").GetGuid().Should().Be(operationId);
+        receipt.GetProperty("found").GetBoolean().Should().BeFalse();
     }
 
     [DockerRequiredFact]

@@ -25,6 +25,13 @@ public sealed class ConversationAdjudicationService(
         {
             throw new ConversationAdjudicationInventoryException("ExpectedInventoryToken must be a lowercase SHA-256 digest.");
         }
+        var receiptRequest = request.ReceiptRequest;
+        if (receiptRequest is not null && !ProjectContext.Matches(receiptRequest.ProjectId, project))
+        {
+            throw new InvalidConversationAdjudicationRequestException("The receipt request must name the preview project.");
+        }
+
+        var receiptHash = receiptRequest is null ? null : ValidateAndHash(project, receiptRequest);
 
         await using var transaction = await db.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
         var query = Insights(project).AsNoTracking();
@@ -63,6 +70,13 @@ public sealed class ConversationAdjudicationService(
         if (request.IncludeInventoryToken || request.ExpectedInventoryToken is not null)
         {
             preview = preview with { InventoryToken = await BuildInventoryTokenAsync(project, candidates, preview, cancellationToken) };
+        }
+        if (receiptRequest is not null && receiptHash is not null)
+        {
+            preview = preview with
+            {
+                ReceiptLookup = await FindCommittedReceiptAsync(project, receiptRequest, receiptHash, cancellationToken)
+            };
         }
 
         await transaction.CommitAsync(cancellationToken);
@@ -128,13 +142,7 @@ public sealed class ConversationAdjudicationService(
         ConversationAdjudicationRequest request, CancellationToken cancellationToken)
     {
         var project = Authorize(request.ProjectId, write: true);
-        if (request.OperationId == Guid.Empty || request.InsightId == Guid.Empty || !Enum.IsDefined(request.Action) ||
-            string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Length > 2000 ||
-            string.IsNullOrWhiteSpace(request.GovernanceRunId) || request.GovernanceRunId.Length > 128 ||
-            string.IsNullOrWhiteSpace(request.ExpectedEvidenceToken) || request.ExpectedEvidenceToken.Length != 64)
-            throw new InvalidOperationException("A valid operation, insight, preview token, reason and GovernanceRunId are required.");
-
-        var requestHash = Hash(JsonSerializer.Serialize(request with { ProjectId = ProjectContext.IdentityKey(project) }, JsonOptions));
+        var requestHash = ValidateAndHash(project, request);
         await using var transaction = await db.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         var previousReceipt = await Receipts(project).SingleOrDefaultAsync(x => x.Id == request.OperationId, cancellationToken);
         if (previousReceipt is not null)
@@ -251,6 +259,35 @@ public sealed class ConversationAdjudicationService(
         return Map(readBack, replay: false);
     }
 
+    public Task<ConversationAdjudicationReceiptLookupResult> ReadReceiptAsync(
+        ConversationAdjudicationRequest request, CancellationToken cancellationToken)
+    {
+        var project = Authorize(request.ProjectId, write: false);
+        return FindCommittedReceiptAsync(project, request, ValidateAndHash(project, request), cancellationToken);
+    }
+
+    private async Task<ConversationAdjudicationReceiptLookupResult> FindCommittedReceiptAsync(
+        string project, ConversationAdjudicationRequest request, string requestHash, CancellationToken cancellationToken)
+    {
+        var row = await Receipts(project).SingleOrDefaultAsync(x => x.Id == request.OperationId &&
+            x.InsightId == request.InsightId && x.RequestHash == requestHash, cancellationToken);
+        return new(request.OperationId, row is null ? null : Map(row, replay: false));
+    }
+
+    private static string ValidateAndHash(string project, ConversationAdjudicationRequest request)
+    {
+        if (request.OperationId == Guid.Empty || request.InsightId == Guid.Empty || !Enum.IsDefined(request.Action) ||
+            string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Length > 2000 ||
+            string.IsNullOrWhiteSpace(request.GovernanceRunId) || request.GovernanceRunId.Length > 128 ||
+            string.IsNullOrWhiteSpace(request.ExpectedEvidenceToken) || request.ExpectedEvidenceToken.Length != 64)
+        {
+            throw new InvalidConversationAdjudicationRequestException(
+                "A valid operation, insight, preview token, reason and GovernanceRunId are required.");
+        }
+
+        return Hash(JsonSerializer.Serialize(request with { ProjectId = ProjectContext.IdentityKey(project) }, JsonOptions));
+    }
+
     private string Authorize(string projectId, bool write)
     {
         var actor = actors.Current;
@@ -259,7 +296,8 @@ public sealed class ConversationAdjudicationService(
         if (actor.Role is not (TenantUserRole.Owner or TenantUserRole.Admin) ||
             actor.IsServiceActor || actor.HasScope(SecurityScopes.ScheduledGovernance))
             throw new UnauthorizedAccessException("An Owner/Admin on the general interactive surface is required.");
-        if (string.IsNullOrWhiteSpace(projectId)) throw new InvalidOperationException("ProjectId is required.");
+        if (string.IsNullOrWhiteSpace(projectId))
+            throw new InvalidConversationAdjudicationRequestException("ProjectId is required.");
         var project = ProjectContext.Normalize(projectId);
         ActorAuthorization.EnsureProjectAllowed(actor, project, write);
         return project;

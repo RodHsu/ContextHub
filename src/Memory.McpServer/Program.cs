@@ -1432,6 +1432,15 @@ conversations.MapGet("/adjudication-preview", async (string projectId, int? offs
     catch (ConversationAdjudicationInventoryException ex) { return Results.Conflict(new { error = ex.Message }); }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
+conversations.MapPost("/adjudications/receipt-lookup", async (ConversationAdjudicationRequest request,
+    IConversationAdjudicationService service, HttpContext context, CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    try { return Results.Ok(await service.ReadReceiptAsync(request, cancellationToken)); }
+    catch (InvalidConversationAdjudicationRequestException ex) { return Results.BadRequest(new { error = ex.Message }); }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+
 conversations.MapPost("/adjudications", async (ConversationAdjudicationRequest request,
     IConversationAdjudicationService service, CancellationToken cancellationToken) =>
 {

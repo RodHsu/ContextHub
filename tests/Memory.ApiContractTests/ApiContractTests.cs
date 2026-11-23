@@ -41,6 +41,20 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         stale.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
         (await stale.Content.ReadAsStringAsync()).Should().Contain("Restart the preview from offset zero");
 
+        var original = new ConversationAdjudicationRequest(
+            project, Guid.NewGuid(), Guid.NewGuid(), ConversationAdjudicationAction.ResolveSkipped,
+            new string('a', 64), "Reviewed original evidence", "unknown-result");
+        using var lookup = await client.PostAsJsonAsync("/api/conversations/adjudications/receipt-lookup", original);
+        lookup.EnsureSuccessStatusCode();
+        lookup.Headers.CacheControl!.NoStore.Should().BeTrue();
+        var missing = await lookup.Content.ReadFromJsonAsync<ConversationAdjudicationReceiptLookupResult>();
+        missing!.OperationId.Should().Be(original.OperationId);
+        missing.Found.Should().BeFalse();
+        missing.Receipt.Should().BeNull();
+        using var invalidLookup = await client.PostAsJsonAsync("/api/conversations/adjudications/receipt-lookup",
+            original with { OperationId = Guid.Empty });
+        invalidLookup.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+
         var response = await client.PostAsJsonAsync("/api/conversations/adjudications", new ConversationAdjudicationRequest(
             project, Guid.NewGuid(), Guid.NewGuid(), ConversationAdjudicationAction.ResolveSkipped, "", "", ""));
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);

@@ -14,6 +14,116 @@ namespace Memory.IntegrationTests;
 public sealed class ConversationAdjudicationTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Exact_receipt_read_should_recover_after_commit_when_the_response_is_lost()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var insight = await SeedAsync(db, actor);
+        var request = Request(insight, (await Preview(service, insight)).Items.Single(),
+            ConversationAdjudicationAction.ResolveSkipped) with
+        {
+            Reason = "  Exact historical decision  ",
+            GovernanceRunId = "  exact-receipt-recovery  "
+        };
+        var missing = await service.ReadReceiptAsync(request, default);
+        missing.Found.Should().BeFalse();
+        missing.Receipt.Should().BeNull();
+
+        var interceptor = new InterruptCommittedReceiptRead();
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .AddInterceptors(interceptor)
+            .Options;
+        await using var interruptedDb = new MemoryDbContext(options);
+        var interruptedService = new ConversationAdjudicationService(
+            interruptedDb,
+            scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>(),
+            scope.ServiceProvider.GetRequiredService<IClock>());
+        await FluentActions.Invoking(() => interruptedService.AdjudicateAsync(request, default))
+            .Should().ThrowAsync<IOException>().WithMessage("Committed receipt response was interrupted.");
+        interceptor.Interrupted.Should().BeTrue();
+
+        using var recoveryScope = CreateScope(out _, out var recoveryService, out var recoveryActor);
+        var actors = recoveryScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var readOnly = recoveryActor with { Scopes = [SecurityScopes.MemoryRead] };
+        actors.Current = readOnly;
+        var recovered = await recoveryService.ReadReceiptAsync(request with { ProjectId = insight.ProjectId.ToUpperInvariant() }, default);
+        recovered.Found.Should().BeTrue();
+        recovered.Receipt.Should().NotBeNull();
+        recovered.Receipt!.OperationId.Should().Be(request.OperationId);
+        recovered.Receipt.InsightId.Should().Be(insight.Id);
+        recovered.Receipt.ResultStatus.Should().Be(nameof(ConversationPromotionStatus.Skipped));
+        recovered.Receipt.Reason.Should().Be(request.Reason.Trim());
+        recovered.Receipt.GovernanceRunId.Should().Be(request.GovernanceRunId.Trim());
+        recovered.Receipt.IsReplay.Should().BeFalse();
+
+        foreach (var mismatched in new[]
+                 {
+                     request with { Reason = request.Reason.Trim() },
+                     request with { Action = ConversationAdjudicationAction.Reopen },
+                     request with { ExpectedEvidenceToken = new string('0', 64) },
+                     request with { GovernanceRunId = "different-recovery-run" },
+                     request with { InsightId = Guid.NewGuid() },
+                     request with { ProjectId = "other-project" }
+                 })
+        {
+            var result = await recoveryService.ReadReceiptAsync(mismatched, default);
+            result.Found.Should().BeFalse();
+            result.Receipt.Should().BeNull();
+        }
+
+        actors.Current = readOnly with { UserId = Guid.NewGuid() };
+        (await recoveryService.ReadReceiptAsync(request, default)).Found.Should().BeFalse();
+        actors.Current = readOnly with { TenantId = Guid.NewGuid() };
+        (await recoveryService.ReadReceiptAsync(request, default)).Found.Should().BeFalse();
+        foreach (var denied in new[]
+                 {
+                     readOnly with { Role = TenantUserRole.Member },
+                     readOnly with { IsServiceActor = true },
+                     readOnly with { AllowedProjectIds = ["other-project"] },
+                     readOnly with { Scopes = [SecurityScopes.ScheduledGovernance, SecurityScopes.MemoryRead] }
+                 })
+        {
+            actors.Current = denied;
+            await FluentActions.Invoking(() => recoveryService.ReadReceiptAsync(request, default))
+                .Should().ThrowAsync<UnauthorizedAccessException>();
+        }
+
+        actors.Current = readOnly;
+        await FluentActions.Invoking(() => recoveryService.AdjudicateAsync(request, default))
+            .Should().ThrowAsync<UnauthorizedAccessException>();
+        (await db.ConversationInsights.AsNoTracking().SingleAsync(row => row.Id == insight.Id)).PromotionStatus
+            .Should().Be(ConversationPromotionStatus.Skipped);
+        (await db.ConversationAdjudications.CountAsync(row => row.InsightId == insight.Id)).Should().Be(1);
+        var operationBinding = JsonSerializer.Serialize(new { operationId = request.OperationId });
+        (await db.SecurityAuditEvents.CountAsync(row =>
+                row.TenantId == actor.TenantId && row.ActorUserId == actor.UserId &&
+                row.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated &&
+                EF.Functions.JsonContains(row.DetailsJson, operationBinding)))
+            .Should().Be(1);
+    }
+
+    private sealed class InterruptCommittedReceiptRead : DbCommandInterceptor
+    {
+        public bool Interrupted { get; private set; }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.Transaction is null && eventData.CommandSource == CommandSource.LinqQuery &&
+                command.CommandText.Contains("conversation_adjudications", StringComparison.OrdinalIgnoreCase))
+            {
+                Interrupted = true;
+                throw new IOException("Committed receipt response was interrupted.");
+            }
+
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Receipt_collision_should_roll_back_the_disposition_and_audit_atomically()
     {
         using var scope = CreateScope(out var db, out var service, out var actor);

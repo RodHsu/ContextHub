@@ -17,7 +17,8 @@ public sealed record ConversationAdjudicationPreviewRequest(
     int Limit = 100,
     string? GovernanceRunId = null,
     bool IncludeInventoryToken = false,
-    string? ExpectedInventoryToken = null);
+    string? ExpectedInventoryToken = null,
+    ConversationAdjudicationRequest? ReceiptRequest = null);
 
 public sealed record ConversationAdjudicationRequest(
     string ProjectId,
@@ -54,9 +55,15 @@ public sealed record ConversationAdjudicationPreviewResult(
     public int UnchangedCount { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? InventoryToken { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ConversationAdjudicationReceiptLookupResult? ReceiptLookup { get; init; }
 }
 
 public sealed class ConversationAdjudicationInventoryException(string message) : InvalidOperationException(message)
+{
+}
+
+public sealed class InvalidConversationAdjudicationRequestException(string message) : InvalidOperationException(message)
 {
 }
 
@@ -74,8 +81,14 @@ public sealed record ConversationAdjudicationReceipt(
     DateTimeOffset CreatedAt,
     bool IsReplay);
 
+public sealed record ConversationAdjudicationReceiptLookupResult(Guid OperationId, ConversationAdjudicationReceipt? Receipt)
+{
+    public bool Found => Receipt is not null;
+}
+
 public interface IConversationAdjudicationService
 {
     Task<ConversationAdjudicationPreviewResult> PreviewAsync(ConversationAdjudicationPreviewRequest request, CancellationToken cancellationToken);
+    Task<ConversationAdjudicationReceiptLookupResult> ReadReceiptAsync(ConversationAdjudicationRequest request, CancellationToken cancellationToken);
     Task<ConversationAdjudicationReceipt> AdjudicateAsync(ConversationAdjudicationRequest request, CancellationToken cancellationToken);
 }
