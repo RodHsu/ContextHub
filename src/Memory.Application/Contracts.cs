@@ -2174,6 +2174,7 @@ public interface IApplicationDbContext
 
 public interface IApplicationTransaction : IAsyncDisposable
 {
+    bool OwnsTransaction => false;
     Task CommitAsync(CancellationToken cancellationToken = default);
 }
 

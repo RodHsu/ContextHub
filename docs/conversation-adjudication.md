@@ -7,7 +7,7 @@ Owner/Admin users can resolve historical conversation exceptions through the gen
 1. Call `conversation_adjudication_preview` with an explicit `projectId`, `offset` and `limit` (maximum 200), or `GET /api/conversations/adjudication-preview`. Preview is read-only. Each page and its scoped counts use a single database snapshot.
 2. Inspect the insight with `conversation_insight_status` and any linked resources. The preview returns an `evidenceToken`, semantic `evidenceFingerprint`, classification, and whether reconciliation or reopening is available.
 3. Call `conversation_insight_adjudicate` or `POST /api/conversations/adjudications` with `projectId`, `insightId`, a new UUID `operationId`, `action`, `expectedEvidenceToken`, a nonempty `reason` and `governanceRunId`. A run ID is an audit correlation label; it does not grant execution authority.
-4. Retain the returned receipt and read a fresh preview. An identical retry with the same operation ID returns the original receipt with `isReplay=true`. Reusing the ID with a different request fails. After a serialization conflict, retry the identical request; refresh the preview before making a different decision.
+4. Retain the returned receipt and read a fresh preview. An identical retry with the same operation ID returns the original receipt with `isReplay=true`. Reusing the ID with a different request fails. The service retries the identical request once after PostgreSQL confirms serialization failure in a transaction the service owns. If the conflict still reaches the caller, reuse the identical request. Refresh the preview before making a different decision.
 
 | Action | Requirement | Result |
 | --- | --- | --- |

@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -143,14 +144,42 @@ public sealed class ConversationAdjudicationService(
     {
         var project = Authorize(request.ProjectId, write: true);
         var requestHash = ValidateAndHash(project, request);
-        await using var transaction = await db.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        for (var attempt = 0; ; attempt++)
+        {
+            await using var transaction = await db.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            ConversationAdjudication receipt;
+            bool replay;
+            try
+            {
+                (receipt, replay) = await ApplyAsync(project, request, requestHash, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+            }
+            catch (Exception error) when (attempt == 0 && transaction.OwnsTransaction &&
+                                         System.Transactions.Transaction.Current is null &&
+                                         error.GetBaseException() is DbException { SqlState: "40001" })
+            {
+                // PostgreSQL aborted this transaction. Dispose it before retrying with a fresh snapshot.
+                continue;
+            }
+
+            if (replay)
+                return Map(receipt, replay: true);
+
+            // A failed read after commit leaves the outcome unknown to the caller.
+            var readBack = await Receipts(project).SingleAsync(x => x.Id == receipt.Id, cancellationToken);
+            return Map(readBack, replay: false);
+        }
+    }
+
+    private async Task<(ConversationAdjudication Receipt, bool Replay)> ApplyAsync(
+        string project, ConversationAdjudicationRequest request, string requestHash, CancellationToken cancellationToken)
+    {
         var previousReceipt = await Receipts(project).SingleOrDefaultAsync(x => x.Id == request.OperationId, cancellationToken);
         if (previousReceipt is not null)
         {
             if (previousReceipt.RequestHash != requestHash)
                 throw new InvalidOperationException("OperationId was already used with a different request.");
-            await transaction.CommitAsync(cancellationToken);
-            return Map(previousReceipt, replay: true);
+            return (previousReceipt, true);
         }
 
         var insight = await Insights(project).AsNoTracking().SingleOrDefaultAsync(x => x.Id == request.InsightId, cancellationToken)
@@ -254,9 +283,7 @@ public sealed class ConversationAdjudicationService(
             CreatedAt = now
         });
         await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        var readBack = await Receipts(project).SingleAsync(x => x.Id == receipt.Id, cancellationToken);
-        return Map(readBack, replay: false);
+        return (receipt, false);
     }
 
     public Task<ConversationAdjudicationReceiptLookupResult> ReadReceiptAsync(

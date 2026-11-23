@@ -151,20 +151,76 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
         var row = await SeedAsync(db, actor);
         var candidate = (await Preview(service, row)).Items.Single();
         var request = Request(row, candidate, ConversationAdjudicationAction.ResolveSkipped);
-        using var first = CreateScope(out _, out var firstService, out _);
-        using var second = CreateScope(out _, out var secondService, out _);
-        async Task<ConversationAdjudicationReceipt?> Attempt(IConversationAdjudicationService target)
-        {
-            try { return await target.AdjudicateAsync(request, default); }
-            catch (Exception ex) when (ex.GetBaseException() is Npgsql.PostgresException { SqlState: "40001" or "23505" }) { return null; }
-        }
-        var results = await Task.WhenAll(Attempt(firstService), Attempt(secondService));
-        results.Count(x => x is { IsReplay: false }).Should().Be(1);
+        var interceptor = new ConcurrentAdjudicationUpdateBarrier();
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                seedScope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .AddInterceptors(interceptor)
+            .Options;
+        await using var firstDb = new MemoryDbContext(options);
+        await using var secondDb = new MemoryDbContext(options);
+        var actors = seedScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var clock = seedScope.ServiceProvider.GetRequiredService<IClock>();
+        var firstService = new ConversationAdjudicationService(firstDb, actors, clock);
+        var secondService = new ConversationAdjudicationService(secondDb, actors, clock);
+
+        var results = await Task.WhenAll(
+            firstService.AdjudicateAsync(request, default),
+            secondService.AdjudicateAsync(request, default));
+
+        interceptor.SerializationFailures.Should().Be(1);
+        var committed = results.Should().ContainSingle(x => !x.IsReplay).Subject;
+        var replayed = results.Should().ContainSingle(x => x.IsReplay).Subject;
+        replayed.Should().Be(committed with { IsReplay = true });
         (await db.ConversationAdjudications.CountAsync(x => x.InsightId == row.Id)).Should().Be(1);
+        var operationBinding = JsonSerializer.Serialize(new { operationId = request.OperationId });
+        (await db.SecurityAuditEvents.CountAsync(audit =>
+            audit.TenantId == actor.TenantId && audit.ActorUserId == actor.UserId &&
+            audit.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated &&
+            EF.Functions.JsonContains(audit.DetailsJson, operationBinding))).Should().Be(1);
         using var retry = CreateScope(out _, out var retryService, out _);
         (await retryService.AdjudicateAsync(request, default)).IsReplay.Should().BeTrue();
         await FluentActions.Invoking(() => retryService.AdjudicateAsync(request with { OperationId = Guid.NewGuid() }, default))
             .Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    private sealed class ConcurrentAdjudicationUpdateBarrier : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource bothReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int arrived;
+        private int serializationFailures;
+
+        public int SerializationFailures => Volatile.Read(ref serializationFailures);
+
+        public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (eventData.CommandSource == CommandSource.ExecuteUpdate)
+            {
+                // Both attempts have read the receipt and insight before either is allowed to update.
+                if (Interlocked.Increment(ref arrived) == 2)
+                    bothReady.TrySetResult();
+                await bothReady.Task.WaitAsync(TimeSpan.FromSeconds(20), cancellationToken);
+            }
+
+            return result;
+        }
+
+        public override Task CommandFailedAsync(
+            DbCommand command,
+            CommandErrorEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            if (eventData.Exception.GetBaseException() is Npgsql.PostgresException
+                { SqlState: Npgsql.PostgresErrorCodes.SerializationFailure })
+            {
+                Interlocked.Increment(ref serializationFailures);
+            }
+
+            return Task.CompletedTask;
+        }
     }
 
     [DockerRequiredFact]

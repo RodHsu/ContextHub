@@ -264,6 +264,8 @@ public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> op
     {
         private bool committed;
 
+        public bool OwnsTransaction => true;
+
         public async Task CommitAsync(CancellationToken cancellationToken = default)
         {
             await transaction.CommitAsync(cancellationToken);
