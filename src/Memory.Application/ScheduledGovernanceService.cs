@@ -238,18 +238,7 @@ public sealed class ScheduledGovernanceService(
                 Reliability = reliabilitySummary
             };
         }
-        var pendingDecision = receipt.ScheduledDecisionProjectionPending;
-        var status = pendingDecision ? "Running" : receipt.Status;
-        var convergence = pendingDecision ? "DecisionProjectionPending" : receipt.FinalConvergenceStatus;
-        var requiresReReview = !pendingDecision &&
-                               status == "Completed" &&
-                               !receipt.ScheduledBatchReReviewed &&
-                               string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
-                               receipt.LatestBatch is { RequiresReReview: true, Status: "Completed" };
-        var decision = pendingDecision || requiresReReview ? null : ReadPersistedDecision(receipt);
-        var outcome = pendingDecision ? convergence
-            : requiresReReview ? "ReReviewRequired"
-            : status == "Running" || string.IsNullOrWhiteSpace(convergence) ? status : convergence;
+        var (status, convergence, decision, outcome) = ReadReceiptState(receipt);
 
         return new ScheduledGovernanceRunResult(
             receipt.ReceiptId,
@@ -397,27 +386,30 @@ public sealed class ScheduledGovernanceService(
             Outcome = "NotReceived"
         };
 
-    private static ScheduledGovernanceDecision? ReadPersistedDecision(GovernanceRunReceiptResult receipt)
+    internal const string DecisionProjectionPending = "DecisionProjectionPending";
+
+    internal static (string Status, string Convergence, ScheduledGovernanceDecision? Decision, string Outcome)
+        ReadReceiptState(GovernanceRunReceiptResult receipt)
     {
-        if (string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
+        if (receipt.ScheduledDecisionProjectionPending)
+            return ("Running", DecisionProjectionPending, null, DecisionProjectionPending);
 
-        if (string.Equals(receipt.Status, "Failed", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(receipt.Status, "Stopped", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
+        var status = receipt.Status;
+        var convergence = receipt.FinalConvergenceStatus;
+        var scheduledCompleted = receipt.ExecutionMode == "Scheduled" &&
+                                 string.Equals(status, "Completed", StringComparison.OrdinalIgnoreCase);
+        if (scheduledCompleted && !receipt.ScheduledBatchReReviewed &&
+            receipt.LatestBatch is { RequiresReReview: true, Status: "Completed" })
+            return (status, convergence, null, "ReReviewRequired");
 
-        if (string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
-            Enum.TryParse<ScheduledGovernanceDecision>(receipt.FinalConvergenceStatus, ignoreCase: false, out var persistedDecision))
-        {
-            return persistedDecision;
-        }
-
-        return null;
+        var decision = scheduledCompleted ? ParsePersistedDecision(convergence) : null;
+        var outcome = status == "Running" || string.IsNullOrWhiteSpace(convergence) ? status : convergence;
+        return (status, convergence, decision, outcome);
     }
+
+    internal static ScheduledGovernanceDecision? ParsePersistedDecision(string convergence)
+        => Enum.TryParse<ScheduledGovernanceDecision>(convergence, ignoreCase: false, out var decision) &&
+           string.Equals(convergence, decision.ToString(), StringComparison.Ordinal) ? decision : null;
 
     private static ScheduledGovernanceDecision ResolveDecision(
         bool coverageComplete,

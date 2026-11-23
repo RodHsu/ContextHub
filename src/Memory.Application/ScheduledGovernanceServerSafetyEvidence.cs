@@ -31,6 +31,9 @@ public sealed record ScheduledGovernanceServerSafetyEvidenceSnapshot(
     bool? ImmutableSnapshotBound,
     bool? FixedReversibleExecutorUsed)
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool DecisionProjectionPending { get; init; }
+
     public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> InvariantProofs { get; init; } =
         new Dictionary<string, ScheduledGovernanceInvariantProof>();
 }

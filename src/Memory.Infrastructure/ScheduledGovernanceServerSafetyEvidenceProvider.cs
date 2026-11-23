@@ -101,6 +101,9 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
             return null;
         }
 
+        if (observedReceipt.ExecutionMode == "Scheduled" && observedReceipt.EventType == "ReviewCompleted")
+            return Unknown(observedReceipt.EventSequence) with { DecisionProjectionPending = true };
+
         var allEventTypesAllowed = events.All(row => AllowedReceiptEventTypes.Contains(row.EventType));
         var contractLineageConsistent = events.All(row =>
             row.ToolContractVersion == observedReceipt.ToolContractVersion &&

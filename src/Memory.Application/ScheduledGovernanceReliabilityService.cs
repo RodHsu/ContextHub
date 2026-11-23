@@ -369,7 +369,7 @@ public sealed class ScheduledGovernanceReliabilityService(
                 var serverSafetyEvidence = safetyByReceipt.GetValueOrDefault(SafetyQuery(projection));
                 var naturalQuery = NaturalQuery(projection, serverSafetyEvidence);
                 var evidence = naturalQuery is null ? null : naturalByReceipt.GetValueOrDefault(naturalQuery);
-                projection = projection with
+                projection = projection.ValidateStoredDecision(serverSafetyEvidence?.DecisionProjectionPending == true) with
                 {
                     NaturalOriginEvidence = evidence,
                     RequestIdentityHash = serverSafetyEvidence?.ReviewRequestIdentityHash ?? string.Empty,
@@ -601,6 +601,8 @@ public sealed class ScheduledGovernanceReliabilityService(
         var baseProjection = ScheduledGovernanceReliabilityReceiptProjection.FromReceipt(
             receipt,
             capturedRuntimeIdentity);
+        if (serverSafetyEvidence?.DecisionProjectionPending == true)
+            baseProjection = baseProjection.ValidateStoredDecision(reviewAwaitingDecision: true);
         var projection = baseProjection with
         {
             TenantId = actor?.TenantId,

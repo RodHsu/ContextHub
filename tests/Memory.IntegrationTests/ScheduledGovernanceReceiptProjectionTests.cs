@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Text.Json;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
@@ -22,6 +23,8 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         UseBootstrapActor(scope.ServiceProvider);
         var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
         var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var reliability = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var runId = $"scheduled-projection-pending-{Guid.NewGuid():N}";
         var identity = CurrentScheduledIdentity();
         var startedAt = DateTimeOffset.UtcNow;
@@ -45,6 +48,32 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             pending.FinalConvergenceStatus.Should().Be("DecisionProjectionPending");
             (await receipts.GetAsync(runId, default))!.ReceiptId.Should().Be(generic.ReceiptId);
 
+            await reliability.PersistObservationAsync(generic, default);
+            var waitingObservation = await ReadObservationAsync();
+            waitingObservation.Status.Should().Be("Running");
+            waitingObservation.Terminal.Should().BeFalse();
+            waitingObservation.Decision.Should().BeNull();
+            waitingObservation.FinalConvergenceStatus.Should().Be("DecisionProjectionPending");
+
+            var legacyProjection = JsonSerializer.Serialize(waitingObservation with
+            {
+                Status = "Completed",
+                Terminal = true,
+                Decision = actionable == 0 ? ScheduledGovernanceDecision.NoOpConverged : ScheduledGovernanceDecision.ReversibleExecutionRequired,
+                FinalConvergenceStatus = generic.FinalConvergenceStatus,
+                StoppedReason = "Completed"
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await db.ScheduledGovernanceReliabilityRuns.Where(x => x.GovernanceRunId == runId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.ProjectionJson, legacyProjection));
+            var storedLegacyProjection = await ReadObservationJsonAsync();
+            var history = await reliability.GetAsync(default);
+            var pendingHistory = history.Runs.Single(x => x.GovernanceRunId == runId);
+            pendingHistory.Reasons.Should().Contain("decision-projection-pending");
+            pendingHistory.ServerInvariants["decisionObeyed"].Should().BeNull();
+            pendingHistory.CountedTowardGate.Should().BeFalse();
+            (await ReadObservationJsonAsync()).Should().Be(storedLegacyProjection);
+            (await receipts.GetAsync(runId, default))!.ReceiptId.Should().Be(generic.ReceiptId);
+
             var decision = CreateScheduledDecision(runId, snapshot, isReReview, actionable);
             await receipts.RecordScheduledDecisionAsync(decision, startedAt, default);
             var finalized = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
@@ -52,7 +81,21 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             finalized.Terminal.Should().BeTrue();
             finalized.Decision.Should().Be(decision.Decision);
             finalized.Outcome.Should().Be(decision.Decision.ToString());
+            await reliability.PersistObservationAsync((await receipts.GetAsync(runId, default))!, default);
+            var completedObservation = await ReadObservationAsync();
+            completedObservation.ReceiptId.Should().Be(finalized.ReceiptId);
+            completedObservation.Terminal.Should().BeTrue();
+            completedObservation.Decision.Should().Be(decision.Decision);
+            (await reliability.GetAsync(default)).Runs.Single(x => x.GovernanceRunId == runId)
+                .Reasons.Should().NotContain("decision-projection-pending");
         }
+
+        async Task<ScheduledGovernanceReliabilityReceiptProjection> ReadObservationAsync() =>
+            JsonSerializer.Deserialize<ScheduledGovernanceReliabilityReceiptProjection>(
+                await ReadObservationJsonAsync(), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Task<string> ReadObservationJsonAsync() =>
+            db.ScheduledGovernanceReliabilityRuns.AsNoTracking().Where(x => x.GovernanceRunId == runId)
+                .Select(x => x.ProjectionJson).SingleAsync();
     }
 
     [DockerRequiredFact]

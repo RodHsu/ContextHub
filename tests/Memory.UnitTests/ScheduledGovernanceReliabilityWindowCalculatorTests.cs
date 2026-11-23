@@ -283,6 +283,23 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
         result.NonQualifyingRuns.Should().BeEmpty();
     }
 
+    [Theory]
+    [InlineData("Completed", "Converged")]
+    [InlineData("Completed", "0")]
+    [InlineData("Stopped", "NoOpConverged")]
+    public void Receipt_And_History_Reject_Unproven_Scheduled_Decisions(string status, string convergence)
+    {
+        var receipt = ReceiptFrom(QualifyingRun(0)) with
+        {
+            Status = status,
+            FinalConvergenceStatus = convergence
+        };
+        var observation = ScheduledGovernanceReliabilityReceiptProjection.FromReceipt(receipt);
+        observation.Decision.Should().BeNull();
+        var historical = observation with { Decision = ScheduledGovernanceDecision.NoOpConverged };
+        historical.ValidateStoredDecision(reviewAwaitingDecision: false).Decision.Should().BeNull();
+    }
+
     [Fact]
     public void Missing_Natural_Slot_Should_Reset_And_Allow_A_New_Streak_From_The_Next_Slot()
     {

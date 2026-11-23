@@ -66,6 +66,7 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
         DateTimeOffset? expectedAtUtc = null)
     {
         ArgumentNullException.ThrowIfNull(receipt);
+        var state = ScheduledGovernanceService.ReadReceiptState(receipt);
 
         return new ScheduledGovernanceReliabilityReceiptProjection
         {
@@ -78,8 +79,8 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
             ExecutionMode = receipt.ExecutionMode,
             IsReplay = receipt.IsReplay,
             RunExists = receipt.RunExists,
-            Terminal = !string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase),
-            Status = receipt.Status,
+            Terminal = !string.Equals(state.Status, "Running", StringComparison.OrdinalIgnoreCase),
+            Status = state.Status,
             ToolContractVersion = receipt.ToolContractVersion,
             SchemaHash = receipt.SchemaHash,
             PublishedCatalogVersion = receipt.PublishedCatalogVersion,
@@ -88,7 +89,7 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
             RuntimeIdentity = runtimeIdentity,
             NaturalOriginEvidence = evidence?.NaturalOriginEvidence,
             BaselineIdentity = BuildBaselineIdentity(receipt, runtimeIdentity),
-            Decision = ResolveDecision(receipt),
+            Decision = state.Decision,
             InitialReviewReceived = evidence?.InitialReviewReceived ??
                 !string.IsNullOrWhiteSpace(receipt.InitialSnapshotToken),
             CoverageComplete = receipt.CoverageComplete,
@@ -110,7 +111,7 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
             Applied = receipt.Applied,
             Failed = receipt.Failed,
             AuditIds = receipt.AuditIds,
-            FinalConvergenceStatus = receipt.FinalConvergenceStatus,
+            FinalConvergenceStatus = state.Convergence,
             StoppedReason = receipt.StoppedReason,
             ResetReason = evidence?.ResetReason
         };
@@ -217,39 +218,24 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
             run.RuntimeIdentity?.BuildVersion ?? string.Empty,
             run.RuntimeIdentity?.DerivedIdentity ?? string.Empty);
 
-    private static ScheduledGovernanceDecision? ResolveDecision(GovernanceRunReceiptResult receipt)
+    internal ScheduledGovernanceReliabilityReceiptProjection ValidateStoredDecision(bool reviewAwaitingDecision)
     {
-        if (string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase))
+        if (reviewAwaitingDecision ||
+            FinalConvergenceStatus == ScheduledGovernanceService.DecisionProjectionPending)
         {
-            return null;
+            return this with
+            {
+                Status = "Running",
+                Terminal = false,
+                Decision = null,
+                FinalConvergenceStatus = ScheduledGovernanceService.DecisionProjectionPending
+            };
         }
 
-        // The dedicated service has already projected its fixed decision into
-        // the immutable receipt. Raw candidate/exception counts need not equal
-        // reversible actionable work and must not relabel a NoOp decision.
-        if (string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
-            Enum.TryParse<ScheduledGovernanceDecision>(receipt.FinalConvergenceStatus,
-                ignoreCase: false, out var projectedDecision))
-        {
-            return projectedDecision;
-        }
-
-        if (!receipt.CoverageComplete)
-        {
-            return ScheduledGovernanceDecision.CoverageIncomplete;
-        }
-
-        if (receipt.ExecutionActionableCount > 0)
-        {
-            return ScheduledGovernanceDecision.ReversibleExecutionRequired;
-        }
-
-        if (receipt.CandidateCount > 0 || receipt.GovernedExceptionCount > 0)
-        {
-            return ScheduledGovernanceDecision.HumanDecisionOnly;
-        }
-
-        return ScheduledGovernanceDecision.NoOpConverged;
+        return Terminal && string.Equals(Status, "Completed", StringComparison.OrdinalIgnoreCase) &&
+               Decision == ScheduledGovernanceService.ParsePersistedDecision(FinalConvergenceStatus)
+            ? this
+            : this with { Decision = null };
     }
 }
 
@@ -527,6 +513,8 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
             }
 
             var reasons = new List<string>();
+            if (projection.FinalConvergenceStatus == ScheduledGovernanceService.DecisionProjectionPending)
+                reasons.Add("decision-projection-pending");
             var naturalOrigin = EvaluateNaturalOrigin(projection, observedAt, reasons);
             // Surface authorization never establishes scheduler dispatch. Excluded
             // observations must not touch slot, baseline, drift or streak state,
