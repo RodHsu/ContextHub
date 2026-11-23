@@ -113,43 +113,54 @@ internal static class GovernanceEvidenceFingerprint
                 .ToArrayAsync(cancellationToken);
         var retentionEvidence = retentionRows.Select(x =>
             $"{x.ResourceId:N}:{x.LifecycleStatus}:{x.PolicyVersion}:{x.EvidenceFingerprint}:{x.UpdatedAt.UtcTicks}").ToArray();
-        var projectInformationUpdated = await dbContext.MemoryItems.AsNoTracking()
+        // Aggregate the same scoped watermarks in one database statement per fingerprint.
+        var watermarks = dbContext.MemoryItems.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
-                        Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.ExternalKey == "system:project-information")
-            .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
-        var workItemUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.ProjectWorkItems.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
-                        (x.Title.Contains(referenceNeedle) || x.Description.Contains(referenceNeedle) ||
-                         x.ChecklistItems.Any(item => item.Content.Contains(referenceNeedle))))
-            .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
-        var workItemChecklistUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.ProjectWorkItemChecklistItems.AsNoTracking()
-            .Where(x => x.WorkItem != null && x.WorkItem.TenantId == tenantId &&
-                        x.WorkItem.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.WorkItem.ProjectId, projectId) &&
-                        x.Content.Contains(referenceNeedle))
-            .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
-        var discussionUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.DiscussionThreads.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.HostProjectId, projectId) &&
-                        (x.Title.Contains(referenceNeedle) || x.Messages.Any(m => m.Content.Contains(referenceNeedle))))
-            .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
-        var discussionMessageUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.DiscussionMessages.AsNoTracking()
-            .Where(x => x.Thread != null && x.Thread.TenantId == tenantId &&
-                        x.Thread.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.Thread.HostProjectId, projectId) &&
-                        x.Content.Contains(referenceNeedle))
-            .Select(x => (DateTimeOffset?)x.CreatedAt).MaxAsync(cancellationToken);
-        var actionUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.SuggestedActions.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
-                        Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.DedupKey.Contains(referenceNeedle))
-            .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
-        var insightUpdated = string.IsNullOrEmpty(referenceNeedle) ? null : await dbContext.ConversationInsights.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
-                        (!excludedInsightId.HasValue || x.Id != excludedInsightId.Value) &&
-                        (x.Title.Contains(referenceNeedle) || x.Content.Contains(referenceNeedle) ||
-                         x.Summary.Contains(referenceNeedle) || x.DedupKey.Contains(referenceNeedle)))
-            .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
-        var hierarchyUpdated = await dbContext.ProjectHierarchies.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
-                        (Memory.Application.ProjectContext.Matches(x.ParentProjectId, projectId) || Memory.Application.ProjectContext.Matches(x.ChildProjectId, projectId)))
-            .Select(x => (DateTimeOffset?)x.UpdatedAt).MaxAsync(cancellationToken);
+                        ProjectContext.Matches(x.ProjectId, projectId) && x.ExternalKey == "system:project-information")
+            .Select(x => new { Kind = WatermarkKind.ProjectInformation, At = x.UpdatedAt })
+            .Concat(dbContext.ProjectHierarchies.AsNoTracking()
+                .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
+                            (ProjectContext.Matches(x.ParentProjectId, projectId) || ProjectContext.Matches(x.ChildProjectId, projectId)))
+                .Select(x => new { Kind = WatermarkKind.Hierarchy, At = x.UpdatedAt }));
+        if (!string.IsNullOrEmpty(referenceNeedle))
+        {
+            watermarks = watermarks
+                .Concat(dbContext.ProjectWorkItems.AsNoTracking()
+                    .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && ProjectContext.Matches(x.ProjectId, projectId) &&
+                                (x.Title.Contains(referenceNeedle) || x.Description.Contains(referenceNeedle) ||
+                                 x.ChecklistItems.Any(item => item.Content.Contains(referenceNeedle))))
+                    .Select(x => new { Kind = WatermarkKind.WorkItem, At = x.UpdatedAt }))
+                .Concat(dbContext.ProjectWorkItemChecklistItems.AsNoTracking()
+                    .Where(x => x.WorkItem != null && x.WorkItem.TenantId == tenantId &&
+                                x.WorkItem.OwnerUserId == ownerUserId && ProjectContext.Matches(x.WorkItem.ProjectId, projectId) &&
+                                x.Content.Contains(referenceNeedle))
+                    .Select(x => new { Kind = WatermarkKind.Checklist, At = x.UpdatedAt }))
+                .Concat(dbContext.DiscussionThreads.AsNoTracking()
+                    .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && ProjectContext.Matches(x.HostProjectId, projectId) &&
+                                (x.Title.Contains(referenceNeedle) || x.Messages.Any(m => m.Content.Contains(referenceNeedle))))
+                    .Select(x => new { Kind = WatermarkKind.Discussion, At = x.UpdatedAt }))
+                .Concat(dbContext.DiscussionMessages.AsNoTracking()
+                    .Where(x => x.Thread != null && x.Thread.TenantId == tenantId &&
+                                x.Thread.OwnerUserId == ownerUserId && ProjectContext.Matches(x.Thread.HostProjectId, projectId) &&
+                                x.Content.Contains(referenceNeedle))
+                    .Select(x => new { Kind = WatermarkKind.Message, At = x.CreatedAt }))
+                .Concat(dbContext.SuggestedActions.AsNoTracking()
+                    .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
+                                ProjectContext.Matches(x.ProjectId, projectId) && x.DedupKey.Contains(referenceNeedle))
+                    .Select(x => new { Kind = WatermarkKind.Action, At = x.UpdatedAt }))
+                .Concat(dbContext.ConversationInsights.AsNoTracking()
+                    .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && ProjectContext.Matches(x.ProjectId, projectId) &&
+                                (!excludedInsightId.HasValue || x.Id != excludedInsightId.Value) &&
+                                (x.Title.Contains(referenceNeedle) || x.Content.Contains(referenceNeedle) ||
+                                 x.Summary.Contains(referenceNeedle) || x.DedupKey.Contains(referenceNeedle)))
+                    .Select(x => new { Kind = WatermarkKind.Insight, At = x.UpdatedAt }));
+        }
+
+        var latestWatermarks = await watermarks.GroupBy(x => x.Kind)
+            .Select(group => new { Kind = group.Key, At = group.Max(x => x.At) })
+            .ToDictionaryAsync(x => x.Kind, x => x.At, cancellationToken);
+        string Watermark(WatermarkKind kind) =>
+            latestWatermarks.TryGetValue(kind, out var timestamp) ? timestamp.UtcTicks.ToString() : string.Empty;
 
         var canonical = string.Join('\n', new[]
         {
@@ -160,16 +171,28 @@ internal static class GovernanceEvidenceFingerprint
             string.Join('\n', linkEvidence),
             string.Join('\n', retrievalWatermarks),
             string.Join('\n', retentionEvidence),
-            projectInformationUpdated?.UtcTicks.ToString() ?? string.Empty,
-            workItemUpdated?.UtcTicks.ToString() ?? string.Empty,
-            workItemChecklistUpdated?.UtcTicks.ToString() ?? string.Empty,
-            discussionUpdated?.UtcTicks.ToString() ?? string.Empty,
-            discussionMessageUpdated?.UtcTicks.ToString() ?? string.Empty,
-            actionUpdated?.UtcTicks.ToString() ?? string.Empty,
-            insightUpdated?.UtcTicks.ToString() ?? string.Empty,
-            hierarchyUpdated?.UtcTicks.ToString() ?? string.Empty
+            Watermark(WatermarkKind.ProjectInformation),
+            Watermark(WatermarkKind.WorkItem),
+            Watermark(WatermarkKind.Checklist),
+            Watermark(WatermarkKind.Discussion),
+            Watermark(WatermarkKind.Message),
+            Watermark(WatermarkKind.Action),
+            Watermark(WatermarkKind.Insight),
+            Watermark(WatermarkKind.Hierarchy)
         });
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+    }
+
+    private enum WatermarkKind
+    {
+        ProjectInformation,
+        WorkItem,
+        Checklist,
+        Discussion,
+        Message,
+        Action,
+        Insight,
+        Hierarchy
     }
 
     public static string FindingPayload(GovernanceFinding finding)

@@ -6,6 +6,7 @@ using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
@@ -249,6 +250,131 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         var readBack = await seedDb.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
         readBack.Status.Should().Be(GovernanceFindingStatus.HostBlocked);
         readBack.GovernanceReasonClass.Should().Be("HostCapabilityUnavailable");
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_fingerprint_should_preserve_scoped_evidence_watermarks_and_the_no_reference_hash()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var tenantId = actor.TenantId!.Value;
+        var ownerId = actor.UserId!.Value;
+        var projectId = $"fingerprint-parity-{Guid.NewGuid():N}";
+        var alias = projectId.ToUpperInvariant();
+        var unrelatedProjectId = $"{projectId}-other";
+        var insight = await SeedGovernanceInsightAsync(db, actor, projectId);
+        var related = await SeedGovernanceInsightAsync(db, actor, alias);
+        var needle = insight.Id.ToString("D");
+        var stamp = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        insight.Content = needle;
+        insight.UpdatedAt = stamp.AddMinutes(20);
+        related.Summary = needle;
+        related.UpdatedAt = stamp.AddMinutes(6);
+
+        var checklistEntry = new ProjectWorkItemChecklistItem
+        {
+            Content = needle,
+            CreatedAt = stamp,
+            UpdatedAt = stamp.AddMinutes(3)
+        };
+        var message = new DiscussionMessage
+        {
+            SenderProjectId = alias,
+            Content = needle,
+            CreatedAt = stamp.AddMinutes(5)
+        };
+        db.AddRange(
+            new MemoryItem
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                ExternalKey = "system:project-information",
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(1)
+            },
+            new ProjectWorkItem
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                Title = needle,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(2),
+                ChecklistItems = [checklistEntry]
+            },
+            new DiscussionThread
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                HostProjectId = alias,
+                Title = needle,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(4),
+                Messages = [message]
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                DedupKey = needle,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(7)
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = unrelatedProjectId,
+                DedupKey = needle,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(21)
+            },
+            new ProjectHierarchy
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ParentProjectId = unrelatedProjectId,
+                ChildProjectId = alias,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(8)
+            });
+        await db.SaveChangesAsync(CancellationToken.None);
+
+        const string semanticPayload = "deterministic parity payload";
+        string ExpectedHash(params int?[] watermarks)
+        {
+            var canonical = string.Join('\n', new[]
+            {
+                "autonomous-semantic-2026-09-01-v2", projectId, semanticPayload,
+                string.Empty, string.Empty, string.Empty, string.Empty
+            }.Concat(watermarks.Select(value =>
+                value is int offset ? stamp.AddMinutes(offset).UtcTicks.ToString() : string.Empty)));
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+        }
+
+        var executedCommands = 0;
+        var readOptions = new DbContextOptionsBuilder<MemoryDbContext>(
+                scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .LogTo(_ => executedCommands++, [RelationalEventId.CommandExecuted])
+            .Options;
+        await using var readDb = new MemoryDbContext(readOptions);
+        Task<string> BuildAsync(Guid? excludedInsightId) => GovernanceEvidenceFingerprint.BuildAsync(
+            readDb, projectId, tenantId, ownerId, null, null, excludedInsightId, semanticPayload, CancellationToken.None);
+
+        (await BuildAsync(insight.Id)).Should().Be(ExpectedHash(1, 2, 3, 4, 5, 7, 6, 8));
+        executedCommands.Should().Be(1);
+        (await BuildAsync(null)).Should().Be(ExpectedHash(1, null, null, null, null, null, null, 8));
+        executedCommands.Should().Be(2);
+
+        checklistEntry.Content = "No checklist reference.";
+        message.Content = "No message reference.";
+        await db.SaveChangesAsync(CancellationToken.None);
+        (await BuildAsync(insight.Id)).Should().Be(ExpectedHash(1, 2, null, 4, null, 7, 6, 8));
+        executedCommands.Should().Be(3);
     }
 
     [DockerRequiredFact]
