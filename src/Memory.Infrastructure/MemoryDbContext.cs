@@ -296,6 +296,25 @@ public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> op
     public void ClearTrackedChanges()
         => ChangeTracker.Clear();
 
+    public async Task<bool> LockMemoryEvidenceAsync(Guid memoryId, Guid tenantId, Guid ownerUserId, string projectId,
+        CancellationToken cancellationToken)
+    {
+        if (!Database.IsNpgsql() || Database.CurrentTransaction?.GetDbTransaction().IsolationLevel != IsolationLevel.Serializable)
+        {
+            throw new InvalidOperationException("Memory evidence requires a serializable PostgreSQL transaction.");
+        }
+
+        return await MemoryItems.FromSqlInterpolated($"""
+            SELECT *
+            FROM memory_items
+            WHERE id = {memoryId}
+              AND tenant_id = {tenantId}
+              AND owner_user_id = {ownerUserId}
+              AND public.project_identity_equals(project_id, {projectId})
+            FOR SHARE
+            """).AsNoTracking().Select(memory => (Guid?)memory.Id).SingleOrDefaultAsync(cancellationToken) is not null;
+    }
+
     public async Task AcquireTransactionLockAsync(string lockKey, CancellationToken cancellationToken = default)
     {
         if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)

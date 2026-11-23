@@ -1143,6 +1143,16 @@ public sealed record ConversationInsightGovernanceRequest(
     string? GovernanceRunId = null,
     string? Reason = null);
 
+public enum ConversationInsightSkipOutcome
+{
+    Applied,
+    AlreadyTerminal,
+    EvidenceChanged
+}
+
+public sealed record ConversationInsightSemanticEvidence(
+    Guid MemoryId, string ProjectId, DateTimeOffset InsightUpdatedAt, decimal MinimumConfidence);
+
 public sealed record ConversationInsightDispositionRequest(
     Guid InsightId,
     ConversationInsightDisposition Disposition,
@@ -2168,6 +2178,8 @@ public interface IApplicationDbContext
     Task<IApplicationTransaction> BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken = default);
     void ClearTrackedChanges();
     Task AcquireTransactionLockAsync(string lockKey, CancellationToken cancellationToken = default);
+    Task<bool> LockMemoryEvidenceAsync(Guid memoryId, Guid tenantId, Guid ownerUserId, string projectId,
+        CancellationToken cancellationToken) => throw new NotSupportedException("Transactional memory evidence locking is required.");
     Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default);
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
@@ -2542,8 +2554,8 @@ public interface IConversationAutomationService
     Task<ConversationInsightResult?> GetInsightAsync(Guid insightId, CancellationToken cancellationToken);
     Task<ConversationInsightResult> RetryInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
     Task<ConversationInsightResult> SkipInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
-    Task<(ConversationInsightResult Insight, bool Applied)> SkipInsightWithOutcomeAsync(
-        ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
+    Task<ConversationInsightSkipOutcome> SkipInsightWithEvidenceAsync(ConversationInsightGovernanceRequest request,
+        ConversationInsightSemanticEvidence evidence, CancellationToken cancellationToken);
     Task<ConversationInsightResult> SetInsightDispositionAsync(ConversationInsightDispositionRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
     Task<ConversationPipelineStatusResult?> GetPipelineStatusAsync(Guid checkpointId, CancellationToken cancellationToken);

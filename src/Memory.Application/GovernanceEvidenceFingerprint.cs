@@ -225,6 +225,23 @@ internal static class GovernanceEvidenceFingerprint
     public static string InsightPayload(ConversationInsight insight)
         => $"{insight.InsightType}|{insight.Title}|{insight.Content}|{insight.Summary}|{string.Join(',', insight.Tags.Order(StringComparer.OrdinalIgnoreCase))}|{insight.Importance}|{insight.Confidence}";
 
+    internal static Task<Guid[]> FindCurrentExactMemoryIdsAsync(IApplicationDbContext dbContext,
+        ContextHubRequestActor actor, ConversationInsight insight, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var title = NormalizeExactText(insight.Title);
+        var summary = NormalizeExactText(insight.Summary);
+        return dbContext.MemoryItems.AsNoTracking().Where(memory =>
+                memory.TenantId == actor.TenantId && memory.OwnerUserId == actor.UserId &&
+                ProjectContext.Matches(memory.ProjectId, insight.ProjectId) &&
+                memory.Status == MemoryStatus.Active && memory.AuthorityState == MemoryAuthorityState.Current &&
+                memory.ValidFrom <= now && (!memory.ValidUntil.HasValue || memory.ValidUntil > now) &&
+                memory.Title.Trim().ToLower() == title && memory.Summary.Trim().ToLower() == summary)
+            .Select(memory => memory.Id).Take(2).ToArrayAsync(cancellationToken);
+    }
+
+    internal static bool IsProtectedInsight(ConversationInsight insight)
+        => insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact || insight.Importance >= 0.8m;
+
     internal static string NormalizeExactText(string? value)
         => value?.Trim().ToLowerInvariant() ?? string.Empty;
 }

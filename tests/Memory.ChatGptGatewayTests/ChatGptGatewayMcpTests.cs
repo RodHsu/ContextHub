@@ -29,6 +29,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol;
 using ModelContextProtocol.Client;
+using Npgsql;
 using StackExchange.Redis;
 using Testcontainers.PostgreSql;
 using Testcontainers.Redis;
@@ -2796,10 +2797,12 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredTheory]
-    [InlineData(false)]
-    [InlineData(true)]
+    [InlineData("single-run")]
+    [InlineData("competing-run")]
+    [InlineData("archived-authority")]
+    [InlineData("locked-authority")]
     public async Task Scheduled_Governance_Should_AutoResolve_Reversible_Semantic_Candidate_With_Exact_Durable_Evidence(
-        bool competingRun)
+        string scenario)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         UseGatewayActor(scope.ServiceProvider);
@@ -2907,7 +2910,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             MaxDurationSeconds: 60,
             ToolContractVersion: ScheduledGovernanceContract.ToolContractVersion,
             SchemaHash: ScheduledGovernanceContract.SchemaHash);
-        if (competingRun)
+        if (scenario != "single-run")
         {
             using var winnerScope = environment.GetFactory().Services.CreateScope();
             var winnerServices = winnerScope.ServiceProvider;
@@ -2919,13 +2922,33 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
 
             var intercept = new RunCompetingSemanticBatch(async cancellationToken =>
             {
+                if (scenario == "locked-authority")
+                {
+                    var writerDb = winnerServices.GetRequiredService<MemoryDbContext>();
+                    await using var transaction = await writerDb.Database.BeginTransactionAsync(cancellationToken);
+                    await writerDb.Database.ExecuteSqlRawAsync("SET LOCAL lock_timeout = '250ms'", cancellationToken);
+                    var update = () => writerDb.Database.ExecuteSqlInterpolatedAsync(
+                        $"UPDATE memory_items SET updated_at = updated_at WHERE id = {durable.Id}", cancellationToken);
+                    var error = await update.Should().ThrowAsync<PostgresException>();
+                    error.Which.SqlState.Should().Be(PostgresErrorCodes.LockNotAvailable);
+                    return;
+                }
+
+                if (scenario == "archived-authority")
+                {
+                    await winnerServices.GetRequiredService<IMemoryService>().ArchiveAsync(
+                        new MemoryArchiveRequest(durable.Id, projectId, Reason: "Remove authority during batch execution."),
+                        cancellationToken);
+                    return;
+                }
+
                 var first = await winner.ExecuteAsync(request with
                 {
                     GovernanceRunId = winnerRunId,
                     SnapshotToken = winnerReview.SnapshotToken
                 }, cancellationToken);
                 first.Items.Should().ContainSingle(item => item.ResourceId == insight.Id && item.SemanticAutoResolved);
-            });
+            }, lockProbe: scenario == "locked-authority");
             var options = new DbContextOptionsBuilder<MemoryDbContext>(
                     scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
                 .AddInterceptors(intercept).Options;
@@ -2938,11 +2961,28 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             var lateResult = await run.ExecuteAsync(request, default);
 
             intercept.Completed.Should().BeTrue();
+            if (scenario == "locked-authority")
+            {
+                lateResult.SemanticAutoResolvedCount.Should().Be(1);
+                lateResult.Items.Should().ContainSingle(item => item.ResourceId == insight.Id && item.SemanticAutoResolved);
+                return;
+            }
+
             lateResult.SemanticAutoResolvedCount.Should().Be(0);
-            lateResult.Items.Should().ContainSingle(item => item.ResourceId == insight.Id &&
-                item.Disposition == nameof(GovernanceBatchItemDisposition.NoOp) && !item.SemanticAutoResolved);
             var lateReceipt = await run.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
             lateReceipt.SemanticAutoResolved.Should().Be(0);
+            if (scenario == "archived-authority")
+            {
+                lateResult.Items.Should().ContainSingle(item => item.ResourceId == insight.Id &&
+                    item.Disposition == nameof(GovernanceBatchItemDisposition.RequiresUserDecision));
+                (await dbContext.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == durable.Id))
+                    .Status.Should().Be(MemoryStatus.Archived);
+                (await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
+                    .PromotionStatus.Should().Be(ConversationPromotionStatus.Pending);
+                return;
+            }
+            lateResult.Items.Should().ContainSingle(item => item.ResourceId == insight.Id &&
+                item.Disposition == nameof(GovernanceBatchItemDisposition.NoOp) && !item.SemanticAutoResolved);
             var winningInsight = await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id);
             winningInsight.GovernanceRunId.Should().Be(winnerRunId);
             var audits = await dbContext.SecurityAuditEvents.AsNoTracking()
@@ -2960,7 +3000,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
     }
 
-    private sealed class RunCompetingSemanticBatch(Func<CancellationToken, Task> execute) : DbCommandInterceptor
+    private sealed class RunCompetingSemanticBatch(Func<CancellationToken, Task> execute, bool lockProbe) : DbCommandInterceptor
     {
         public bool Completed { get; private set; }
 
@@ -2969,8 +3009,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         {
             if (!Completed && eventData.CommandSource == CommandSource.LinqQuery &&
                 command.CommandText.Contains("memory_items", StringComparison.OrdinalIgnoreCase) &&
-                command.CommandText.Contains("lower(", StringComparison.OrdinalIgnoreCase) &&
-                command.CommandText.Contains("valid_from", StringComparison.OrdinalIgnoreCase))
+                (lockProbe
+                    ? command.CommandText.Contains("FOR SHARE", StringComparison.OrdinalIgnoreCase)
+                    : command.CommandText.Contains("lower(", StringComparison.OrdinalIgnoreCase) &&
+                      command.CommandText.Contains("valid_from", StringComparison.OrdinalIgnoreCase)))
             {
                 await execute(cancellationToken);
                 Completed = true;

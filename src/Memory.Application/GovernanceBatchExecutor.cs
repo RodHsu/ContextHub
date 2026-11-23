@@ -1589,41 +1589,44 @@ public sealed class GovernanceBatchExecutor(
         {
             return await AuditedResultAsync(item, null, GovernanceBatchItemDisposition.Deferred, "Conversation Insight disposition is not allowed by this execution payload.", [], [], actor, cancellationToken);
         }
-        var protectedInsight = insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact || insight.Importance >= 0.8m;
+        var protectedInsight = GovernanceEvidenceFingerprint.IsProtectedInsight(insight);
+        var scheduled = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled;
         if (!protectedInsight && insight.Confidence >= request.SemanticAutoResolutionConfidenceThreshold)
         {
-            var title = GovernanceEvidenceFingerprint.NormalizeExactText(insight.Title);
-            var summary = GovernanceEvidenceFingerprint.NormalizeExactText(insight.Summary);
-            var now = clock.UtcNow;
-            var durableEquivalents = await dbContext.MemoryItems.AsNoTracking().Where(x =>
-                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && Memory.Application.ProjectContext.Matches(x.ProjectId, insight.ProjectId) &&
-                x.Status == MemoryStatus.Active &&
-                x.AuthorityState == MemoryAuthorityState.Current &&
-                x.ValidFrom <= now &&
-                (!x.ValidUntil.HasValue || x.ValidUntil > now) &&
-                x.Title.Trim().ToLower() == title && x.Summary.Trim().ToLower() == summary)
-                .Take(2)
-                .ToArrayAsync(cancellationToken);
-            if (durableEquivalents.Length == 1)
+            var exactIds = await GovernanceEvidenceFingerprint.FindCurrentExactMemoryIdsAsync(
+                dbContext, actor, insight, clock.UtcNow, cancellationToken);
+            if (exactIds.Length == 1 && (!scheduled ||
+                (ProjectContext.Matches(insight.ProjectId, item.ProjectId) &&
+                 item.RelatedResourceIds.Count == 1 && item.RelatedResourceIds[0] == exactIds[0])))
             {
-                var durableEquivalent = durableEquivalents[0];
-                var (_, applied) = await conversationService.SkipInsightWithOutcomeAsync(new ConversationInsightGovernanceRequest(
+                var evidenceId = exactIds[0];
+                var outcome = await conversationService.SkipInsightWithEvidenceAsync(new ConversationInsightGovernanceRequest(
                     insight.Id, request.GovernanceRunId,
-                    $"Autonomously resolved against durable evidence {durableEquivalent.Id:D}."), cancellationToken);
-                if (!applied)
+                    $"Autonomously resolved against durable evidence {evidenceId:D}."),
+                    new(evidenceId, insight.ProjectId, insight.UpdatedAt, request.SemanticAutoResolutionConfidenceThreshold),
+                    cancellationToken);
+                if (outcome == ConversationInsightSkipOutcome.AlreadyTerminal)
                 {
                     return await AuditedResultAsync(item, GovernanceBatchActionType.ConversationInsightDisposition,
                         GovernanceBatchItemDisposition.NoOp, "The insight had already reached a terminal state.", [],
                         [insight.Id], actor, cancellationToken);
                 }
 
-                var semantic = await AuditedResultAsync(item, GovernanceBatchActionType.SemanticReevaluate,
-                    GovernanceBatchItemDisposition.Applied,
-                    "Reopened or pending insight was autonomously resolved against an exact durable evidence match.",
-                    [], [insight.Id, durableEquivalent.Id], actor, cancellationToken);
-                return semantic with { SemanticAutoResolved = true };
+                if (outcome == ConversationInsightSkipOutcome.Applied)
+                {
+                    var semantic = await AuditedResultAsync(item, GovernanceBatchActionType.SemanticReevaluate,
+                        GovernanceBatchItemDisposition.Applied,
+                        "Reopened or pending insight was autonomously resolved against an exact durable evidence match.",
+                        [], [insight.Id, evidenceId], actor, cancellationToken);
+                    return semantic with { SemanticAutoResolved = true };
+                }
+
+                return await InsightEvidenceChangedAsync(item, actor, cancellationToken);
             }
         }
+        if (scheduled)
+            return await InsightEvidenceChangedAsync(item, actor, cancellationToken);
+
         var disposition = protectedInsight ? ConversationInsightDisposition.RequiresUserDecision : ConversationInsightDisposition.Deferred;
         var updated = await conversationService.SetInsightDispositionAsync(new ConversationInsightDispositionRequest(
             insight.Id,
@@ -1639,6 +1642,13 @@ public sealed class GovernanceBatchExecutor(
         return await AuditedResultAsync(item, GovernanceBatchActionType.ConversationInsightDisposition, resultDisposition,
             updated.GovernanceReason, [], [insight.Id], actor, cancellationToken);
     }
+
+    private Task<GovernanceBatchItemResult> InsightEvidenceChangedAsync(
+        BatchPlanItem item, ContextHubRequestActor actor, CancellationToken cancellationToken)
+        => AuditedResultAsync(item, GovernanceBatchActionType.ConversationInsightDisposition,
+            GovernanceBatchItemDisposition.RequiresUserDecision,
+            "The reviewed insight or its exact durable evidence changed. Obtain a fresh review.", [],
+            [item.Id], actor, cancellationToken);
 
     private async Task<GovernanceBatchItemResult> ProcessPendingProposalAsync(
         BatchPlanItem item,
