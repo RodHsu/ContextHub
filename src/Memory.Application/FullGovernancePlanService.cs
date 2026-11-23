@@ -410,6 +410,7 @@ public sealed class FullGovernancePlanService(
         string governanceRunId,
         CancellationToken cancellationToken)
     {
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.plan.insight-reevaluation");
         // Re-evaluation reads the current exception state and writes both the
         // lifecycle transition and its audit event. Keep that read/write set in
         // one serializable transaction so a concurrent HostBlocked disposition

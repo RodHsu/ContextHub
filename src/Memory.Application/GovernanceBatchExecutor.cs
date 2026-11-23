@@ -34,6 +34,7 @@ public sealed class GovernanceBatchExecutor(
         GovernanceBatchExecuteRequest request,
         CancellationToken cancellationToken)
     {
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch");
         var startedAt = clock.UtcNow;
         var receiptEligible = false;
         IAsyncDisposable? runLock = null;
@@ -89,13 +90,16 @@ public sealed class GovernanceBatchExecutor(
                         request.GovernanceRunId.Trim(), request.SnapshotToken.Trim(), request.IsReReview,
                         requireWriteAuthorization: true, cancellationToken);
                 }
-                await runReceipts.RecordExecutionAsync(request, terminalReplay, startedAt, CancellationToken.None);
+                await RecordCompletionReceiptAsync(request, terminalReplay, startedAt);
                 return terminalReplay;
             }
 
-            await runReceipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
+            using (GovernanceDiagnostics.Activities.StartActivity("governance.batch.start-receipt"))
+            {
+                await runReceipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
+            }
             var result = await ExecuteCoreAsync(request, cancellationToken);
-            await runReceipts.RecordExecutionAsync(request, result, startedAt, CancellationToken.None);
+            await RecordCompletionReceiptAsync(request, result, startedAt);
             return result;
         }
         catch (GovernanceBatchException ex)
@@ -103,7 +107,7 @@ public sealed class GovernanceBatchExecutor(
             var failure = GovernanceBatchExecuteResult.Failure(request, ex);
             if (receiptEligible)
             {
-                await runReceipts.RecordExecutionAsync(request, failure, startedAt, CancellationToken.None);
+                await RecordCompletionReceiptAsync(request, failure, startedAt);
             }
             return failure;
         }
@@ -134,6 +138,15 @@ public sealed class GovernanceBatchExecutor(
         }
     }
 
+    private async Task RecordCompletionReceiptAsync(
+        GovernanceBatchExecuteRequest request,
+        GovernanceBatchExecuteResult result,
+        DateTimeOffset startedAt)
+    {
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch.completion-receipt");
+        await runReceipts.RecordExecutionAsync(request, result, startedAt, CancellationToken.None);
+    }
+
     private async Task<GovernanceBatchExecuteResult> ExecuteCoreAsync(
         GovernanceBatchExecuteRequest request,
         CancellationToken cancellationToken)
@@ -159,26 +172,29 @@ public sealed class GovernanceBatchExecutor(
         }
         DurableMemoryGovernanceSnapshotResult snapshot;
         IReadOnlyList<string> projectIds;
-        if (!string.IsNullOrWhiteSpace(request.SnapshotToken))
+        using (GovernanceDiagnostics.Activities.StartActivity("governance.batch.snapshot"))
         {
-            snapshot = await durableGovernance.GetSnapshotAsync(
-                request.GovernanceRunId.Trim(),
-                request.SnapshotToken.Trim(),
-                request.IsReReview,
-                requireWriteAuthorization: true,
-                cancellationToken);
-            projectIds = DurableMemoryGovernancePolicy.ToExecutionProjectIds(snapshot.Coverage.GovernanceProjectIds);
-            EnsureExplicitScopeMatchesSnapshot(request.ProjectIds, projectIds);
-            projectIds = await ResolveProjectIdsAsync(projectIds, actor, cancellationToken);
-        }
-        else
-        {
-            projectIds = await ResolveProjectIdsAsync(request.ProjectIds, actor, cancellationToken);
-            snapshot = await durableGovernance.GetOrCreateSnapshotAsync(
-                projectIds,
-                request.GovernanceRunId.Trim(),
-                request.IsReReview,
-                cancellationToken);
+            if (!string.IsNullOrWhiteSpace(request.SnapshotToken))
+            {
+                snapshot = await durableGovernance.GetSnapshotAsync(
+                    request.GovernanceRunId.Trim(),
+                    request.SnapshotToken.Trim(),
+                    request.IsReReview,
+                    requireWriteAuthorization: true,
+                    cancellationToken);
+                projectIds = DurableMemoryGovernancePolicy.ToExecutionProjectIds(snapshot.Coverage.GovernanceProjectIds);
+                EnsureExplicitScopeMatchesSnapshot(request.ProjectIds, projectIds);
+                projectIds = await ResolveProjectIdsAsync(projectIds, actor, cancellationToken);
+            }
+            else
+            {
+                projectIds = await ResolveProjectIdsAsync(request.ProjectIds, actor, cancellationToken);
+                snapshot = await durableGovernance.GetOrCreateSnapshotAsync(
+                    projectIds,
+                    request.GovernanceRunId.Trim(),
+                    request.IsReReview,
+                    cancellationToken);
+            }
         }
         var projectSetHash = Hash(string.Join('\n', projectIds.Append(ProjectContext.SharedProjectId)
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -367,11 +383,15 @@ public sealed class GovernanceBatchExecutor(
                 actor,
                 cancellationToken);
         }
-        var terminalItemKeys = await GetTerminalItemKeysAsync(
-            logicalRunIds,
-            run.Id,
-            planItems.Select(x => x.Key).ToHashSet(StringComparer.Ordinal),
-            cancellationToken);
+        HashSet<string> terminalItemKeys;
+        using (GovernanceDiagnostics.Activities.StartActivity("governance.batch.terminal-items"))
+        {
+            terminalItemKeys = await GetTerminalItemKeysAsync(
+                logicalRunIds,
+                run.Id,
+                planItems.Select(x => x.Key).ToHashSet(StringComparer.Ordinal),
+                cancellationToken);
+        }
         var executablePlanItems = planItems.Where(x => !terminalItemKeys.Contains(x.Key)).ToList();
         var index = 0;
         var lastItemKey = cursorPayload?.ItemKey ?? string.Empty;
@@ -1726,6 +1746,7 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch.plan-build");
         var fullPlan = await fullGovernance.BuildAsync(projectIds, governanceRunId, snapshot, cancellationToken);
         return fullPlan.Items.Select(x => new BatchPlanItem(
                 x.ItemKey,
@@ -1757,6 +1778,7 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch.plan-validation");
         if (persistedPlan.Count > MaximumPlanItems)
         {
             throw new GovernanceBatchException(

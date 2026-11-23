@@ -1,5 +1,7 @@
 extern alias mcpserver;
 
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -27,10 +29,11 @@ using ModelContextProtocol.Client;
 using StackExchange.Redis;
 using Testcontainers.PostgreSql;
 using Testcontainers.Redis;
+using Xunit.Abstractions;
 
 namespace Memory.ChatGptGatewayTests;
 
-public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environment) : IClassFixture<ChatGptGatewayTestEnvironment>
+public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environment, ITestOutputHelper output) : IClassFixture<ChatGptGatewayTestEnvironment>
 {
     private const string ProjectId = ChatGptGatewayTestConstants.ProjectId;
     private const string TestToken = ChatGptGatewayTestConstants.TestToken;
@@ -3378,18 +3381,75 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         reReview.GovernancePlan.Count.Should().BeLessThan(initialCandidateCount);
         reReview.ProjectKnowledgeGovernance!.Pagination.TotalCount.Should().Be(0);
         reReview.Pagination.HighSignalConversationInsights.TotalCount.Should().Be(1);
-        var catchUp = await gatewayTools.governance_batch_execute(new GovernanceBatchExecuteRequest(
-            governanceRunId,
-            [projectId],
-            reReview.DurableMemoryCoverage!.SnapshotToken,
-            MaxMutations: 10,
-            MaxDurationSeconds: 30,
-            AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition],
-            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
-            DryRun: false,
-            AllowHardDelete: false,
-            IsReReview: true,
-            ExecutionMode: GovernanceBatchExecutionMode.Interactive), CancellationToken.None);
+        static bool IsWithinCatchUp(Activity? activity, Activity correlation)
+        {
+            for (; activity is not null; activity = activity.Parent)
+            {
+                if (ReferenceEquals(activity, correlation))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        var activities = new ConcurrentQueue<(string Name, ActivitySpanId SpanId, ActivitySpanId ParentSpanId, TimeSpan Duration)>();
+        GovernanceBatchExecuteResult catchUp;
+        ActivitySpanId correlationSpanId;
+        using (var correlation = new Activity("governance.phase-test").SetIdFormat(ActivityIdFormat.W3C).Start())
+        using (var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == "ContextHub.Governance",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => IsWithinCatchUp(Activity.Current, correlation)
+                ? ActivitySamplingResult.AllData
+                : ActivitySamplingResult.None,
+            ActivityStopped = activity =>
+            {
+                if (IsWithinCatchUp(activity, correlation))
+                {
+                    activities.Enqueue((activity.OperationName, activity.SpanId, activity.ParentSpanId, activity.Duration));
+                }
+            }
+        })
+        {
+            correlationSpanId = correlation.SpanId;
+            ActivitySource.AddActivityListener(listener);
+            catchUp = await gatewayTools.governance_batch_execute(new GovernanceBatchExecuteRequest(
+                governanceRunId,
+                [projectId],
+                reReview.DurableMemoryCoverage!.SnapshotToken,
+                MaxMutations: 10,
+                MaxDurationSeconds: 30,
+                AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition],
+                MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+                DryRun: false,
+                AllowHardDelete: false,
+                IsReReview: true,
+                ExecutionMode: GovernanceBatchExecutionMode.Interactive), CancellationToken.None);
+        }
+
+        var requiredPhases = new (string Name, string? ParentName)[]
+        {
+            ("governance.batch", null),
+            ("governance.batch.start-receipt", "governance.batch"),
+            ("governance.batch.snapshot", "governance.batch"),
+            ("governance.batch.plan-build", "governance.batch"),
+            ("governance.plan.insight-reevaluation", "governance.batch.plan-build"),
+            ("governance.batch.terminal-items", "governance.batch"),
+            ("governance.batch.completion-receipt", "governance.batch")
+        };
+        var spanIds = new Dictionary<string, ActivitySpanId>(StringComparer.Ordinal);
+        foreach (var (name, parentName) in requiredPhases)
+        {
+            activities.Count(activity => activity.Name == name).Should().Be(1, "the catch-up should emit {0}", name);
+            var activity = activities.Single(activity => activity.Name == name);
+            var expectedParent = parentName is null ? correlationSpanId : spanIds[parentName];
+            (activity.ParentSpanId == expectedParent).Should().BeTrue("the catch-up should nest {0} under its expected parent", name);
+            spanIds.Add(name, activity.SpanId);
+            output.WriteLine(FormattableString.Invariant($"{name} {activity.Duration.TotalMilliseconds:F1} ms"));
+        }
+        activities.Count(activity => activity.Name == "governance.batch.plan-validation").Should().Be(0);
         catchUp.RequiresUserDecisionCount.Should().Be(1);
         var finalReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
             [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
