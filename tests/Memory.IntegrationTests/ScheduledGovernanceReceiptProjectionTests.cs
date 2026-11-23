@@ -13,6 +13,48 @@ namespace Memory.IntegrationTests;
 public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvironment environment)
     : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredTheory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task Scheduled_run_get_waits_for_the_persisted_decision_after_generic_review_completes(int actionable)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var runId = $"scheduled-projection-pending-{Guid.NewGuid():N}";
+        var identity = CurrentScheduledIdentity();
+        var startedAt = DateTimeOffset.UtcNow;
+
+        for (var generation = 0; generation < 2; generation++)
+        {
+            var isReReview = generation > 0;
+            var snapshot = $"kg:snapshot:{runId}:{generation}";
+            await receipts.RecordReviewStartedAsync(runId, startedAt, identity, default, isReReview);
+            await receipts.RecordReviewAsync(CreateGenericReview(runId, identity, snapshot, isReReview, actionable), startedAt, default);
+            var generic = (await receipts.GetAsync(runId, default))!;
+            generic.Status.Should().Be("Completed");
+
+            var pending = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+            pending.ReceiptId.Should().Be(generic.ReceiptId);
+            pending.Received.Should().BeTrue();
+            pending.Terminal.Should().BeFalse();
+            pending.Status.Should().Be("Running");
+            pending.Decision.Should().BeNull();
+            pending.Outcome.Should().Be("DecisionProjectionPending");
+            pending.FinalConvergenceStatus.Should().Be("DecisionProjectionPending");
+            (await receipts.GetAsync(runId, default))!.ReceiptId.Should().Be(generic.ReceiptId);
+
+            var decision = CreateScheduledDecision(runId, snapshot, isReReview, actionable);
+            await receipts.RecordScheduledDecisionAsync(decision, startedAt, default);
+            var finalized = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+            finalized.ReceiptId.Should().NotBe(generic.ReceiptId);
+            finalized.Terminal.Should().BeTrue();
+            finalized.Decision.Should().Be(decision.Decision);
+            finalized.Outcome.Should().Be(decision.Decision.ToString());
+        }
+    }
+
     [DockerRequiredFact]
     public async Task Scheduled_run_get_uses_one_snapshot_when_a_batch_receipt_commits_mid_read()
     {

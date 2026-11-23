@@ -1710,6 +1710,9 @@ public sealed record GovernanceRunReceiptResult(
     string RequestIdentityHash,
     GovernanceBatchOutcomeResult? LatestBatch)
 {
+    [JsonIgnore]
+    public bool ScheduledDecisionProjectionPending { get; init; }
+
     public GovernanceExceptionDeltaResult ExceptionDelta { get; init; } = new(0, 0, 0, 0);
     public IReadOnlyList<GovernanceExceptionStateResult> GovernedExceptionStates { get; init; } = [];
     public GovernanceSurfaceCoverageResult SkillCoverage { get; init; } = new(0, 0, 0, 0, 0, 0, 0, false, true);

@@ -238,14 +238,16 @@ public sealed class ScheduledGovernanceService(
                 Reliability = reliabilitySummary
             };
         }
-        var requiresReReview = string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
+        var pendingDecision = receipt.ScheduledDecisionProjectionPending;
+        var status = pendingDecision ? "Running" : receipt.Status;
+        var convergence = pendingDecision ? "DecisionProjectionPending" : receipt.FinalConvergenceStatus;
+        var requiresReReview = !pendingDecision &&
+                               string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
                                receipt.LatestBatch is { RequiresReReview: true, Status: "Completed" };
-        var decision = requiresReReview ? null : ResolveDecision(receipt);
+        var decision = pendingDecision || requiresReReview ? null : ReadPersistedDecision(receipt);
         var outcome = requiresReReview
             ? "ReReviewRequired"
-            : string.IsNullOrWhiteSpace(receipt.FinalConvergenceStatus)
-                ? receipt.Status
-                : receipt.FinalConvergenceStatus;
+            : string.IsNullOrWhiteSpace(convergence) ? status : convergence;
 
         return new ScheduledGovernanceRunResult(
             receipt.ReceiptId,
@@ -270,20 +272,20 @@ public sealed class ScheduledGovernanceService(
             receipt.Quarantined,
             receipt.SemanticAutoResolved,
             receipt.BusinessWorkItemActionable,
-            receipt.FinalConvergenceStatus,
+            convergence,
             receipt.StoppedReason,
             receipt.AuditIds,
             receipt.ProjectIds,
             receipt.IsReplay,
             receipt.RunExists,
-            receipt.Status,
+            status,
             receipt.LatestBatchReceived,
             receipt.RequestIdentityHash,
             receipt.ExceptionDelta,
             ScheduledGovernanceContract.RuntimeIdentity)
         {
             Received = true,
-            Terminal = !string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase),
+            Terminal = !string.Equals(status, "Running", StringComparison.OrdinalIgnoreCase),
             Decision = decision,
             Outcome = outcome,
             Reliability = reliabilitySummary,
@@ -393,7 +395,7 @@ public sealed class ScheduledGovernanceService(
             Outcome = "NotReceived"
         };
 
-    private static ScheduledGovernanceDecision? ResolveDecision(GovernanceRunReceiptResult receipt)
+    private static ScheduledGovernanceDecision? ReadPersistedDecision(GovernanceRunReceiptResult receipt)
     {
         if (string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase))
         {
@@ -412,15 +414,7 @@ public sealed class ScheduledGovernanceService(
             return persistedDecision;
         }
 
-        var currentHumanDecision = Math.Max(
-            receipt.CandidateCount - receipt.ExecutionActionableCount,
-            receipt.RequiresUserDecision + receipt.Deferred + receipt.HostBlocked);
-        return ResolveDecision(
-            receipt.CoverageComplete,
-            receipt.ExecutionActionableCount,
-            currentHumanDecision,
-            receipt.GovernedExceptionCount,
-            receipt.ExceptionDelta);
+        return null;
     }
 
     private static ScheduledGovernanceDecision ResolveDecision(

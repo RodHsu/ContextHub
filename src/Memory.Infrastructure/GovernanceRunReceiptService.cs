@@ -761,6 +761,7 @@ public sealed class GovernanceRunReceiptService(
             RequestIdentityHash: batchReceipt?.RequestIdentityHash ?? string.Empty,
             LatestBatch: latestBatch)
         {
+            ScheduledDecisionProjectionPending = receipt.ExecutionMode == "Scheduled" && receipt.EventType == "ReviewCompleted",
             ExceptionDelta = new GovernanceExceptionDeltaResult(
                 canonical.ExceptionNew,
                 canonical.ExceptionResolved,
