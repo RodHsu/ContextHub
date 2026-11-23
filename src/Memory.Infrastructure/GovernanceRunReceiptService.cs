@@ -481,6 +481,21 @@ public sealed class GovernanceRunReceiptService(
         return await MapAsync(entity, actor, cancellationToken);
     }
 
+    public async Task<(GovernanceRunReceiptResult Receipt, GovernanceRunLineageResult Lineage)?> GetScheduledReceiptSnapshotAsync(
+        string governanceRunId,
+        GovernanceReceiptContractIdentity expectedContractIdentity,
+        CancellationToken cancellationToken)
+    {
+        // Receipt enrichment and lineage must see the same committed events while writers remain free to append.
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        var receipt = await GetAsync(governanceRunId, cancellationToken);
+        var lineage = receipt is null
+            ? null
+            : await GetScheduledLineageAsync(governanceRunId, expectedContractIdentity, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return receipt is not null && lineage is not null ? (receipt, lineage) : null;
+    }
+
     public async Task<GovernanceRunLineageResult> GetScheduledLineageAsync(
         string governanceRunId,
         GovernanceReceiptContractIdentity expectedContractIdentity,

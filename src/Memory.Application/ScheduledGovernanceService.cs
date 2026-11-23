@@ -214,8 +214,9 @@ public sealed class ScheduledGovernanceService(
     {
         EnsureScheduledAuthority();
         var normalizedRunId = NormalizeGovernanceRunId(governanceRunId);
-        var receipt = await receipts.GetAsync(normalizedRunId, cancellationToken);
-        if (receipt is null)
+        var snapshot = await receipts.GetScheduledReceiptSnapshotAsync(
+            normalizedRunId, ReceiptContractIdentity, cancellationToken);
+        if (snapshot is not { } receiptSnapshot)
         {
             var missing = MissingRun(normalizedRunId);
             return reliability is null || !includeReliabilityHistory
@@ -223,10 +224,7 @@ public sealed class ScheduledGovernanceService(
                 : missing with { Reliability = await reliability.GetAsync(cancellationToken) };
         }
 
-        var lineage = await receipts.GetScheduledLineageAsync(
-            normalizedRunId,
-            ReceiptContractIdentity,
-            cancellationToken);
+        var (receipt, lineage) = receiptSnapshot;
 
         // run_get is intentionally read-only. Projection persistence belongs to
         // review/execute mutation paths, never to receipt retrieval.

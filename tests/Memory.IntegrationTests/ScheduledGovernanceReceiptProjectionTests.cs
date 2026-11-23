@@ -1,3 +1,4 @@
+using System.Data.Common;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
@@ -12,6 +13,85 @@ namespace Memory.IntegrationTests;
 public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvironment environment)
     : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Scheduled_run_get_uses_one_snapshot_when_a_batch_receipt_commits_mid_read()
+    {
+        var services = environment.GetFactory().Services;
+        using var writerScope = services.CreateScope();
+        UseBootstrapActor(writerScope.ServiceProvider);
+        var writer = writerScope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"scheduled-receipt-snapshot-{Guid.NewGuid():N}";
+        var identity = CurrentScheduledIdentity();
+        const string snapshot = "kg:snapshot:receipt-race";
+        var startedAt = DateTimeOffset.UtcNow;
+        await writer.RecordReviewStartedAsync(runId, startedAt, identity, default);
+        await writer.RecordReviewAsync(CreateGenericReview(runId, identity, snapshot, actionable: 1), startedAt, default);
+        await writer.RecordScheduledDecisionAsync(
+            CreateScheduledDecision(runId, snapshot, isReReview: false, actionable: 1), startedAt, default);
+        var initial = (await writer.GetAsync(runId, default))!;
+
+        var request = new GovernanceBatchExecuteRequest(
+            runId,
+            [ProjectContext.SharedProjectId],
+            snapshot,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled,
+            ToolContractVersion: GovernanceToolContract.ToolContractVersion,
+            SchemaHash: GovernanceToolContract.SchemaHash)
+        {
+            ReceiptContractIdentity = identity
+        };
+        var write = new AppendBatchAfterReceiptRead(
+            cancellationToken => writer.RecordExecutionStartedAsync(request, DateTimeOffset.UtcNow, cancellationToken));
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                writerScope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .AddInterceptors(write)
+            .Options;
+        await using var readerDb = new MemoryDbContext(options);
+        var actorAccessor = writerScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var reader = new GovernanceRunReceiptService(readerDb, actorAccessor, TimeProvider.System);
+        var scheduled = new ScheduledGovernanceService(
+            writerScope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>(),
+            writerScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>(),
+            reader, actorAccessor);
+
+        var before = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        write.Committed.Should().BeTrue();
+        before.ReceiptId.Should().Be(initial.ReceiptId);
+        before.Status.Should().Be(initial.Status);
+        before.Decision.Should().Be(ScheduledGovernanceDecision.ReversibleExecutionRequired);
+        before.Terminal.Should().BeTrue();
+        before.LatestBatchReceived.Should().BeFalse();
+        before.RequestIdentityHash.Should().BeEmpty();
+
+        var after = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        after.ReceiptId.Should().NotBe(initial.ReceiptId);
+        after.Status.Should().Be("Running");
+        after.Terminal.Should().BeFalse();
+        after.LatestBatchReceived.Should().BeTrue();
+        after.RequestIdentityHash.Should().NotBeNullOrWhiteSpace();
+    }
+
+    private sealed class AppendBatchAfterReceiptRead(Func<CancellationToken, Task> append) : DbCommandInterceptor
+    {
+        public bool Committed { get; private set; }
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command, CommandExecutedEventData eventData, DbDataReader result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!Committed && eventData.CommandSource == CommandSource.LinqQuery &&
+                command.CommandText.Contains("governance_run_receipts", StringComparison.OrdinalIgnoreCase) &&
+                command.CommandText.Contains("ORDER BY", StringComparison.OrdinalIgnoreCase) &&
+                command.CommandText.Contains("DESC", StringComparison.OrdinalIgnoreCase))
+            {
+                await append(cancellationToken);
+                Committed = true;
+            }
+
+            return result;
+        }
+    }
+
     [DockerRequiredFact]
     public async Task Batched_safety_history_matches_exact_receipt_lookup_and_limits_each_owner_run_independently()
     {
