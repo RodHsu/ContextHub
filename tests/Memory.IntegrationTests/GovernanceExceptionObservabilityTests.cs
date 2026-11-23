@@ -267,6 +267,10 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         var related = await SeedGovernanceInsightAsync(db, actor, alias);
         var needle = insight.Id.ToString("D");
         var stamp = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        var firstOverlappingId = Guid.Parse("deadbeef-1111-2222-3333-aaaaaaaaaaaa");
+        var secondOverlappingId = Guid.Parse("aaaabbbb-4444-5555-6666-777777777777");
+        var secondNeedle = secondOverlappingId.ToString("D");
+        var overlappingReferences = $"{firstOverlappingId:D}{secondNeedle[4..]}";
         insight.Content = needle;
         insight.UpdatedAt = stamp.AddMinutes(20);
         related.Summary = needle;
@@ -280,10 +284,62 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         };
         var message = new DiscussionMessage
         {
-            SenderProjectId = alias,
+            SenderProjectId = unrelatedProjectId,
             Content = needle,
             CreatedAt = stamp.AddMinutes(5)
         };
+        var workItem = new ProjectWorkItem
+        {
+            TenantId = tenantId,
+            OwnerUserId = ownerId,
+            ProjectId = alias,
+            Title = needle,
+            CreatedAt = stamp,
+            UpdatedAt = stamp.AddMinutes(2),
+            ChecklistItems = [checklistEntry]
+        };
+        var thread = new DiscussionThread
+        {
+            TenantId = tenantId,
+            OwnerUserId = ownerId,
+            HostProjectId = alias,
+            Title = needle,
+            CreatedAt = stamp,
+            UpdatedAt = stamp.AddMinutes(4),
+            Messages = [message]
+        };
+        var alternateOwner = new TenantUser
+        {
+            TenantId = tenantId,
+            Username = $"fingerprint-owner-{Guid.NewGuid():N}",
+            DisplayName = "Fingerprint parity control",
+            Role = TenantUserRole.Member,
+            Status = TenantUserStatus.Active,
+            CreatedAt = stamp,
+            UpdatedAt = stamp
+        };
+        db.TenantUsers.Add(alternateOwner);
+        await db.SaveChangesAsync(CancellationToken.None);
+        var otherOwnerInsight = await SeedGovernanceInsightAsync(db, actor with { UserId = alternateOwner.Id }, projectId);
+
+        ConversationInsight CreateSubject(Guid id) => new()
+        {
+            Id = id,
+            SessionId = insight.SessionId,
+            CheckpointId = insight.CheckpointId,
+            TenantId = tenantId,
+            OwnerUserId = ownerId,
+            ProjectId = projectId,
+            DedupKey = $"fingerprint-parity:{id:N}",
+            CreatedAt = stamp,
+            UpdatedAt = stamp
+        };
+        var additionalSubjects = Enumerable.Range(0, 125)
+            .Select(_ => CreateSubject(Guid.NewGuid()))
+            .Append(CreateSubject(firstOverlappingId))
+            .Append(CreateSubject(secondOverlappingId))
+            .ToArray();
+        db.ConversationInsights.AddRange(additionalSubjects);
         db.AddRange(
             new MemoryItem
             {
@@ -294,25 +350,17 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
                 CreatedAt = stamp,
                 UpdatedAt = stamp.AddMinutes(1)
             },
+            workItem,
+            thread,
             new ProjectWorkItem
             {
                 TenantId = tenantId,
                 OwnerUserId = ownerId,
                 ProjectId = alias,
-                Title = needle,
+                Title = secondNeedle[..18],
+                Description = secondNeedle[18..],
                 CreatedAt = stamp,
-                UpdatedAt = stamp.AddMinutes(2),
-                ChecklistItems = [checklistEntry]
-            },
-            new DiscussionThread
-            {
-                TenantId = tenantId,
-                OwnerUserId = ownerId,
-                HostProjectId = alias,
-                Title = needle,
-                CreatedAt = stamp,
-                UpdatedAt = stamp.AddMinutes(4),
-                Messages = [message]
+                UpdatedAt = stamp.AddMinutes(23)
             },
             new SuggestedAction
             {
@@ -331,6 +379,33 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
                 DedupKey = needle,
                 CreatedAt = stamp,
                 UpdatedAt = stamp.AddMinutes(21)
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = alternateOwner.Id,
+                ProjectId = alias,
+                DedupKey = needle,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(22)
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                DedupKey = overlappingReferences,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(9)
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                DedupKey = secondNeedle.ToUpperInvariant(),
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(24)
             },
             new ProjectHierarchy
             {
@@ -362,19 +437,50 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
             .LogTo(_ => executedCommands++, [RelationalEventId.CommandExecuted])
             .Options;
         await using var readDb = new MemoryDbContext(readOptions);
-        Task<string> BuildAsync(Guid? excludedInsightId) => GovernanceEvidenceFingerprint.BuildAsync(
-            readDb, projectId, tenantId, ownerId, null, null, excludedInsightId, semanticPayload, CancellationToken.None);
+        Task<string> BuildAsync(Guid? excludedInsightId, GovernanceInsightReferenceWatermarks? referenceWatermarks = null)
+            => GovernanceEvidenceFingerprint.BuildAsync(
+                readDb, projectId, tenantId, ownerId, null, null, excludedInsightId, semanticPayload,
+                CancellationToken.None, referenceWatermarks: referenceWatermarks);
 
-        (await BuildAsync(insight.Id)).Should().Be(ExpectedHash(1, 2, 3, 4, 5, 7, 6, 8));
+        var originalHash = await BuildAsync(insight.Id);
+        originalHash.Should().Be(ExpectedHash(1, 2, 3, 4, 5, 7, 6, 8));
         executedCommands.Should().Be(1);
         (await BuildAsync(null)).Should().Be(ExpectedHash(1, null, null, null, null, null, null, 8));
         executedCommands.Should().Be(2);
 
+        var eligibleIds = additionalSubjects.Select(subject => subject.Id).Append(insight.Id).Append(related.Id).ToArray();
+        var batch = await readDb.ReadInsightReferenceWatermarksAsync(
+            tenantId, ownerId, [.. eligibleIds, otherOwnerInsight.Id, insight.Id], CancellationToken.None);
+        batch.Keys.Should().BeEquivalentTo(eligibleIds);
+        executedCommands.Should().Be(3, "all 129 eligible insights use one scoped SQL query");
+        (await BuildAsync(insight.Id, batch[insight.Id])).Should().Be(originalHash);
+        foreach (var overlappingId in new[] { firstOverlappingId, secondOverlappingId })
+        {
+            (await BuildAsync(overlappingId, batch[overlappingId])).Should()
+                .Be(ExpectedHash(1, null, null, null, null, 9, null, 8));
+        }
+        executedCommands.Should().Be(3, "using the preloaded watermarks adds no SQL query");
+        foreach (var overlappingId in new[] { firstOverlappingId, secondOverlappingId })
+        {
+            (await BuildAsync(overlappingId)).Should().Be(await BuildAsync(overlappingId, batch[overlappingId]));
+        }
+        executedCommands.Should().Be(5);
+
+        workItem.Title = "No title reference.";
+        thread.Title = "No title reference.";
+        await db.SaveChangesAsync(CancellationToken.None);
+        var childOnly = await readDb.ReadInsightReferenceWatermarksAsync(tenantId, ownerId, [insight.Id], CancellationToken.None);
+        (await BuildAsync(insight.Id, childOnly[insight.Id])).Should().Be(originalHash);
+
         checklistEntry.Content = "No checklist reference.";
         message.Content = "No message reference.";
         await db.SaveChangesAsync(CancellationToken.None);
-        (await BuildAsync(insight.Id)).Should().Be(ExpectedHash(1, 2, null, 4, null, 7, 6, 8));
-        executedCommands.Should().Be(3);
+        var removedReferences = await readDb.ReadInsightReferenceWatermarksAsync(
+            tenantId, ownerId, [insight.Id], CancellationToken.None);
+        var updatedHash = await BuildAsync(insight.Id);
+        updatedHash.Should().Be(ExpectedHash(1, null, null, null, null, 7, 6, 8));
+        (await BuildAsync(insight.Id, removedReferences[insight.Id])).Should().Be(updatedHash);
+        executedCommands.Should().Be(8);
     }
 
     [DockerRequiredFact]

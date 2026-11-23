@@ -425,6 +425,10 @@ public sealed class FullGovernancePlanService(
                          x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision ||
                          x.PromotionStatus == ConversationPromotionStatus.HostBlocked))
             .ToListAsync(cancellationToken);
+        var referenceWatermarks = exceptions.Count > 0 && dbContext is IGovernanceInsightReferenceReader referenceReader
+            ? await referenceReader.ReadInsightReferenceWatermarksAsync(
+                tenantId, ownerUserId, exceptions.Select(x => x.Id).ToArray(), cancellationToken)
+            : null;
         var reevaluated = false;
         foreach (var insight in exceptions)
         {
@@ -434,7 +438,8 @@ public sealed class FullGovernancePlanService(
                 GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
                 [insight.Id.ToString("D"), insight.Title],
                 insight.Title,
-                insight.Summary);
+                insight.Summary,
+                referenceWatermarks?[insight.Id]);
             var now = clock.UtcNow;
             var hasBaseline = !string.IsNullOrWhiteSpace(insight.GovernanceEvidenceFingerprint);
             var evidenceChanged = hasBaseline && (

@@ -9,7 +9,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace Memory.Infrastructure;
 
-public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) : DbContext(options), IApplicationDbContext
+public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> options) : DbContext(options), IApplicationDbContext
 {
     private readonly HashSet<Guid> automaticallyCapturedOutboxIds = [];
 

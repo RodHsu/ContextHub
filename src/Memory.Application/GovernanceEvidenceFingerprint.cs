@@ -21,7 +21,8 @@ internal static class GovernanceEvidenceFingerprint
         CancellationToken cancellationToken,
         IReadOnlyList<string>? referenceTexts = null,
         string? exactMemoryTitle = null,
-        string? exactMemorySummary = null)
+        string? exactMemorySummary = null,
+        GovernanceInsightReferenceWatermarks? referenceWatermarks = null)
     {
         var memoryIds = new[] { primaryMemoryId, secondaryMemoryId }.Where(x => x.HasValue).Select(x => x!.Value).ToArray();
         var normalizedExactTitle = NormalizeExactText(exactMemoryTitle);
@@ -113,7 +114,39 @@ internal static class GovernanceEvidenceFingerprint
                 .ToArrayAsync(cancellationToken);
         var retentionEvidence = retentionRows.Select(x =>
             $"{x.ResourceId:N}:{x.LifecycleStatus}:{x.PolicyVersion}:{x.EvidenceFingerprint}:{x.UpdatedAt.UtcTicks}").ToArray();
-        // Aggregate the same scoped watermarks in one database statement per fingerprint.
+        referenceWatermarks ??= await ReadReferenceWatermarksAsync(
+            dbContext, projectId, tenantId, ownerUserId, excludedInsightId, referenceNeedle, cancellationToken);
+
+        var canonical = string.Join('\n', new[]
+        {
+            PolicyVersion,
+            projectId.ToLowerInvariant(),
+            semanticPayload,
+            string.Join('\n', memoryEvidence),
+            string.Join('\n', linkEvidence),
+            string.Join('\n', retrievalWatermarks),
+            string.Join('\n', retentionEvidence),
+            FormatWatermark(referenceWatermarks.ProjectInformation),
+            FormatWatermark(referenceWatermarks.WorkItem),
+            FormatWatermark(referenceWatermarks.Checklist),
+            FormatWatermark(referenceWatermarks.Discussion),
+            FormatWatermark(referenceWatermarks.Message),
+            FormatWatermark(referenceWatermarks.Action),
+            FormatWatermark(referenceWatermarks.Insight),
+            FormatWatermark(referenceWatermarks.Hierarchy)
+        });
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+    }
+
+    private static async Task<GovernanceInsightReferenceWatermarks> ReadReferenceWatermarksAsync(
+        IApplicationDbContext dbContext,
+        string projectId,
+        Guid tenantId,
+        Guid ownerUserId,
+        Guid? excludedInsightId,
+        string referenceNeedle,
+        CancellationToken cancellationToken)
+    {
         var watermarks = dbContext.MemoryItems.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId &&
                         ProjectContext.Matches(x.ProjectId, projectId) && x.ExternalKey == "system:project-information")
@@ -157,31 +190,22 @@ internal static class GovernanceEvidenceFingerprint
         }
 
         var latestWatermarks = await watermarks.GroupBy(x => x.Kind)
-            .Select(group => new { Kind = group.Key, At = group.Max(x => x.At) })
+            .Select(group => new { Kind = group.Key, At = (DateTimeOffset?)group.Max(x => x.At) })
             .ToDictionaryAsync(x => x.Kind, x => x.At, cancellationToken);
-        string Watermark(WatermarkKind kind) =>
-            latestWatermarks.TryGetValue(kind, out var timestamp) ? timestamp.UtcTicks.ToString() : string.Empty;
-
-        var canonical = string.Join('\n', new[]
-        {
-            PolicyVersion,
-            projectId.ToLowerInvariant(),
-            semanticPayload,
-            string.Join('\n', memoryEvidence),
-            string.Join('\n', linkEvidence),
-            string.Join('\n', retrievalWatermarks),
-            string.Join('\n', retentionEvidence),
-            Watermark(WatermarkKind.ProjectInformation),
-            Watermark(WatermarkKind.WorkItem),
-            Watermark(WatermarkKind.Checklist),
-            Watermark(WatermarkKind.Discussion),
-            Watermark(WatermarkKind.Message),
-            Watermark(WatermarkKind.Action),
-            Watermark(WatermarkKind.Insight),
-            Watermark(WatermarkKind.Hierarchy)
-        });
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+        return new(
+            excludedInsightId.GetValueOrDefault(),
+            latestWatermarks.GetValueOrDefault(WatermarkKind.ProjectInformation),
+            latestWatermarks.GetValueOrDefault(WatermarkKind.WorkItem),
+            latestWatermarks.GetValueOrDefault(WatermarkKind.Checklist),
+            latestWatermarks.GetValueOrDefault(WatermarkKind.Discussion),
+            latestWatermarks.GetValueOrDefault(WatermarkKind.Message),
+            latestWatermarks.GetValueOrDefault(WatermarkKind.Action),
+            latestWatermarks.GetValueOrDefault(WatermarkKind.Insight),
+            latestWatermarks.GetValueOrDefault(WatermarkKind.Hierarchy));
     }
+
+    private static string FormatWatermark(DateTimeOffset? timestamp)
+        => timestamp?.UtcTicks.ToString() ?? string.Empty;
 
     private enum WatermarkKind
     {
