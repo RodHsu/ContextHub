@@ -24,11 +24,13 @@ foreach ($name in @(
         "Test-ScheduledGovernanceIdsEqual",
         "Test-ScheduledGovernanceExecutionResult",
         "Get-ScheduledGovernanceReceiptEvidence",
+        "Get-ScheduledGovernanceReviewEvidence",
         "Get-ScheduledGovernanceReviewReceiptEvidence",
         "Get-ScheduledGovernanceBatchCounts",
         "Get-ScheduledGovernanceBatchAuditIds",
         "Assert-ScheduledGovernanceFirstBatchBaseline",
         "Get-ScheduledGovernanceBatchReceiptEvidence",
+        "Assert-ScheduledGovernanceFinalBatchContinuity",
         "Invoke-ScheduledGovernanceVerifiedReplay",
         "Read-ScheduledGovernanceProtectedInvariantEvidence",
         "Assert-ScheduledGovernanceReadbackPaths",
@@ -99,13 +101,12 @@ function Assert-RejectedReceiptFixture {
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][hashtable]$Fixture,
-        [Parameter(Mandatory)][string]$ExpectedError,
-        [switch]$AllowCompletedBatchOverlay
+        [Parameter(Mandatory)][string]$ExpectedError
     )
 
     try {
         $null = Get-ScheduledGovernanceReviewReceiptEvidence -Receipt $Fixture.Receipt -ExpectedRunId $runId `
-            -Review $Fixture.Review -Contract $verifiedContract -AllowCompletedBatchOverlay:$AllowCompletedBatchOverlay
+            -Review $Fixture.Review -Contract $verifiedContract
     }
     catch {
         if ($_.Exception.Message -ceq $ExpectedError) {
@@ -139,22 +140,16 @@ $fixture.Receipt.decision = $null
 $fixture.Receipt.outcome = "ReReviewRequired"
 $fixture.Receipt.latestBatchReceived = $true
 $fixture.Receipt.auditIds = @("e8b0fd25-2506-4dcc-b84c-b74ff1c6b379")
-$evidence = Get-ScheduledGovernanceReviewReceiptEvidence -Receipt $fixture.Receipt -ExpectedRunId $runId `
-    -Review $fixture.Review -Contract $verifiedContract -AllowCompletedBatchOverlay
-if ($null -ne $evidence.decision -or $evidence.outcome -cne "ReReviewRequired" -or $evidence.auditCount -ne 1) {
-    throw "The completed batch overlay did not preserve the raw outcome or the single audit count."
-}
-
 $decisionMismatch = "Scheduled governance review receipt did not match the persisted review decision."
-Assert-RejectedReceiptFixture -Name "completed batch overlay without permission" -Fixture $fixture -ExpectedError $decisionMismatch
+Assert-RejectedReceiptFixture -Name "batch still requires a bound re-review" -Fixture $fixture -ExpectedError $decisionMismatch
 $fixture.Receipt.latestBatchReceived = "true"
 Assert-RejectedReceiptFixture -Name "completed batch overlay without boolean batch evidence" -Fixture $fixture `
-    -ExpectedError $decisionMismatch -AllowCompletedBatchOverlay
+    -ExpectedError $decisionMismatch
 
 $fixture.Receipt.latestBatchReceived = $true
 $fixture.Review.isReReview = $false
 Assert-RejectedReceiptFixture -Name "completed batch overlay on initial review" -Fixture $fixture `
-    -ExpectedError $decisionMismatch -AllowCompletedBatchOverlay
+    -ExpectedError $decisionMismatch
 
 $completedReceiptMissing = "Scheduled governance review did not have a completed receipt."
 $cases = @(
@@ -511,6 +506,75 @@ finally {
     }
 }
 
+$coverageReview = (Get-ReceiptFixture -ReReview).Review
+$coverageReview | Add-Member -NotePropertyMembers @{
+    governanceRunId = $runId
+    countInvariant = [pscustomobject]@{
+        authorizedDurableMemoryCount = 2; coveredDurableMemoryCount = 2; scannedDurableMemoryCount = 2; totalDurableMemoryCount = 2
+        sharedScopeOccurrences = 1; userScopeOccurrences = 0; userScopeHandledSeparately = $true; satisfied = $true
+    }
+}
+if (-not (Get-ScheduledGovernanceReviewEvidence -Review $coverageReview -ExpectedRunId $runId -ExpectedReReview $true).countInvariantSatisfied) {
+    throw "A complete review with matching counts did not pass."
+}
+$invalidCoverage = @(
+    @{ field = "authorizedDurableMemoryCount"; value = $null }
+    @{ field = "coveredDurableMemoryCount"; value = 1 }
+    @{ field = "scannedDurableMemoryCount"; value = "2" }
+    @{ field = "totalDurableMemoryCount"; value = -1 }
+    @{ field = "sharedScopeOccurrences"; value = 2 }
+    @{ field = "userScopeOccurrences"; value = 1 }
+    @{ field = "userScopeHandledSeparately"; value = "true" }
+    @{ field = "satisfied"; value = $false }
+)
+foreach ($case in $invalidCoverage) {
+    $review = $coverageReview.PSObject.Copy()
+    $review.countInvariant = $coverageReview.countInvariant.PSObject.Copy()
+    $review.countInvariant.($case.field) = $case.value
+    $coverageRejected = $false
+    try { $null = Get-ScheduledGovernanceReviewEvidence -Review $review -ExpectedRunId $runId -ExpectedReReview $true }
+    catch { $coverageRejected = $_.Exception.Message -like "Complete review did not prove*" }
+    if (-not $coverageRejected) { throw "Invalid complete review field '$($case.field)' passed." }
+}
+
+$finalBatch = New-ReplayFixture
+$finalReceipt = $finalBatch.After.PSObject.Copy()
+$finalReceipt.receiptId = [Guid]::NewGuid().ToString("D")
+$continuityEvidence = @{
+    receipt = @{
+        initial = @{ receiptId = $finalBatch.Evidence.receipt.initial.receiptId }
+        afterReplay = @{
+            receiptId = $finalBatch.After.receiptId; requestIdentityHash = $finalBatch.After.requestIdentityHash
+            auditIds = $finalBatch.After.auditIds; counts = Get-ScheduledGovernanceBatchCounts $finalBatch.After
+        }
+        final = @{ receiptId = $finalReceipt.receiptId }
+    }
+}
+Assert-ScheduledGovernanceFinalBatchContinuity -Receipt $finalReceipt -Evidence $continuityEvidence
+$invalidContinuity = @(
+    @{ field = "latestBatchReceived"; value = $false }
+    @{ field = "latestBatchReceived"; value = "true" }
+    @{ field = "requestIdentityHash"; value = "b" * 64 }
+    @{ field = "auditIds"; value = @([Guid]::NewGuid().ToString("D")) }
+    @{ field = "applied"; value = 0 }
+    @{ field = "failed"; value = 1 }
+    @{ field = "quarantined"; value = 1 }
+    @{ field = "semanticAutoResolved"; value = 1 }
+)
+foreach ($case in $invalidContinuity) {
+    $changedReceipt = $finalReceipt.PSObject.Copy()
+    $changedReceipt.($case.field) = $case.value
+    $continuityRejected = $false
+    try { Assert-ScheduledGovernanceFinalBatchContinuity -Receipt $changedReceipt -Evidence $continuityEvidence }
+    catch { $continuityRejected = $_.Exception.Message -like "Final review receipt*" }
+    if (-not $continuityRejected) { throw "Invalid final batch field '$($case.field)' passed." }
+}
+$continuityEvidence.receipt.final.receiptId = $finalBatch.After.receiptId
+$duplicateReceiptRejected = $false
+try { Assert-ScheduledGovernanceFinalBatchContinuity -Receipt $finalReceipt -Evidence $continuityEvidence }
+catch { $duplicateReceiptRejected = $_.Exception.Message -like "Final review receipt*" }
+if (-not $duplicateReceiptRejected) { throw "The previously read batch receipt was accepted as the final review receipt." }
+
 $schemaFixture = '{"name":"fixture","inputSchema":{"type":"object","required":["item"],"properties":{"item":{"type":"string"}}},"outputSchema":{"z":[],"B":[true,null],"a":{"type":["string","null"],"description":"quote\" & punctuation"}}}'
 # Reference digest from the gateway's PublishedToolSchemaHash, including empty and singleton arrays.
 $referenceHash = 'ebefb540ae8551ea03d0684a89ee3bc03249e2d163e79969ae31901b87732e9a'
@@ -595,9 +659,9 @@ finally {
 
 [ordered]@{
     valid = $true
-    positiveCases = 15 + @($manifestCases | Where-Object expected -CEQ "verified").Count
+    positiveCases = 16 + @($manifestCases | Where-Object expected -CEQ "verified").Count
     negativeCases = $cases.Count + 12 + $invalidExecutions.Count + $preReplayCases.Count +
         $postReplayCases.Count + $baselineRejections.Count + $readbackPathRejections.Count +
-        @($manifestCases | Where-Object expected -CNE "verified").Count
+        @($manifestCases | Where-Object expected -CNE "verified").Count + $invalidCoverage.Count + $invalidContinuity.Count + 1
     result = "scheduled-governance-receipt-replay-and-protected-evidence"
 } | ConvertTo-Json -Compress

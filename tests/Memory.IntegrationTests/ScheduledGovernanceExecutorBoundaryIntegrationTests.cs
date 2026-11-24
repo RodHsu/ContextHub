@@ -243,6 +243,24 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             replayReceipt.AuditIds.Should().BeEquivalentTo(afterBatch.AuditIds);
             replayReceipt.Applied.Should().Be(afterBatch.Applied);
             replayReceipt.Quarantined.Should().Be(afterBatch.Quarantined);
+
+            actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [projectId] };
+            var verifiedReReview = await scheduled.ReviewAsync(new(runId, IsReReview: true), default);
+            verifiedReReview.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
+            verifiedReReview.CountInvariant.Satisfied.Should().BeTrue();
+            var finalReceipt = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: true);
+            finalReceipt.ReceiptId.Should().NotBe(initialReceipt.ReceiptId).And.NotBe(replayReceipt.ReceiptId);
+            finalReceipt.Terminal.Should().BeTrue();
+            finalReceipt.Decision.Should().Be(verifiedReReview.Decision);
+            finalReceipt.Outcome.Should().Be(verifiedReReview.Decision.ToString());
+            finalReceipt.FinalSnapshotToken.Should().Be(verifiedReReview.SnapshotToken);
+            finalReceipt.LatestBatchReceived.Should().BeTrue();
+            finalReceipt.RequestIdentityHash.Should().Be(replayReceipt.RequestIdentityHash);
+            finalReceipt.AuditIds.Should().BeEquivalentTo(replayReceipt.AuditIds);
+            finalReceipt.Applied.Should().Be(replayReceipt.Applied);
+            finalReceipt.Failed.Should().Be(replayReceipt.Failed);
+            finalReceipt.Quarantined.Should().Be(replayReceipt.Quarantined);
+            finalReceipt.SemanticAutoResolved.Should().Be(replayReceipt.SemanticAutoResolved);
             (await db.GovernanceBatchExecutions.AsNoTracking().CountAsync(x =>
                 x.Run!.GovernanceRunId == runId)).Should().Be(1);
             return;

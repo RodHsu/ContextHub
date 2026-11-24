@@ -476,19 +476,38 @@ function Get-ScheduledGovernanceReviewEvidence {
     }
 
     $invariant = Get-ScheduledGovernancePropertyValue $Review "countInvariant"
-    $coverageComplete = [bool](Get-ScheduledGovernancePropertyValue $Review "coverageComplete")
+    $coverageComplete = Get-ScheduledGovernancePropertyValue $Review "coverageComplete"
+    if ($coverageComplete -isnot [bool]) { throw "Review did not return a boolean coverageComplete." }
+    $authorized = Get-ScheduledGovernancePropertyValue $invariant "authorizedDurableMemoryCount"
+    $covered = Get-ScheduledGovernancePropertyValue $invariant "coveredDurableMemoryCount"
+    $scanned = Get-ScheduledGovernancePropertyValue $invariant "scannedDurableMemoryCount"
+    $total = Get-ScheduledGovernancePropertyValue $invariant "totalDurableMemoryCount"
+    $shared = Get-ScheduledGovernancePropertyValue $invariant "sharedScopeOccurrences"
+    $user = Get-ScheduledGovernancePropertyValue $invariant "userScopeOccurrences"
+    $separateUser = Get-ScheduledGovernancePropertyValue $invariant "userScopeHandledSeparately"
+    $satisfied = Get-ScheduledGovernancePropertyValue $invariant "satisfied"
+    if ($coverageComplete) {
+        $invalidCount = @($authorized, $covered, $scanned, $total, $shared, $user | Where-Object {
+                ($_ -isnot [int] -and $_ -isnot [long]) -or $_ -lt 0
+            })
+        if ($invalidCount.Count -gt 0 -or $authorized -ne $covered -or $covered -ne $scanned -or $scanned -ne $total -or
+            $shared -ne 1 -or $user -ne 0 -or $separateUser -isnot [bool] -or -not $separateUser -or
+            $satisfied -isnot [bool] -or -not $satisfied) {
+            throw "Complete review did not prove the authorized durable-memory count and scope invariant."
+        }
+    }
     [ordered]@{
         decision = $decision
         snapshotPresent = -not [string]::IsNullOrWhiteSpace([string](Get-ScheduledGovernancePropertyValue $Review "snapshotToken"))
         coverageComplete = $coverageComplete
-        authorized = [int](Get-ScheduledGovernancePropertyValue $invariant "authorizedDurableMemoryCount")
-        covered = [int](Get-ScheduledGovernancePropertyValue $invariant "coveredDurableMemoryCount")
-        scanned = [int](Get-ScheduledGovernancePropertyValue $invariant "scannedDurableMemoryCount")
-        total = [int](Get-ScheduledGovernancePropertyValue $invariant "totalDurableMemoryCount")
-        sharedOccurrences = [int](Get-ScheduledGovernancePropertyValue $invariant "sharedScopeOccurrences")
-        userOccurrences = [int](Get-ScheduledGovernancePropertyValue $invariant "userScopeOccurrences")
-        userScopeHandledSeparately = [bool](Get-ScheduledGovernancePropertyValue $invariant "userScopeHandledSeparately")
-        countInvariantSatisfied = [bool](Get-ScheduledGovernancePropertyValue $invariant "satisfied")
+        authorized = $authorized
+        covered = $covered
+        scanned = $scanned
+        total = $total
+        sharedOccurrences = $shared
+        userOccurrences = $user
+        userScopeHandledSeparately = $separateUser
+        countInvariantSatisfied = $satisfied
         candidateCount = [int](Get-ScheduledGovernancePropertyValue $Review "candidateCount")
         reversibleExecutionCount = [int](Get-ScheduledGovernancePropertyValue $Review "reversibleExecutionCount")
         humanDecisionCount = [int](Get-ScheduledGovernancePropertyValue $Review "humanDecisionCount")
@@ -540,8 +559,7 @@ function Get-ScheduledGovernanceReviewReceiptEvidence {
         [AllowNull()][object]$Receipt,
         [Parameter(Mandatory)][string]$ExpectedRunId,
         [Parameter(Mandatory)][object]$Review,
-        [Parameter(Mandatory)][System.Collections.IDictionary]$Contract,
-        [switch]$AllowCompletedBatchOverlay
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Contract
     )
 
     $evidence = Get-ScheduledGovernanceReceiptEvidence $Receipt -ExpectedRunId $ExpectedRunId
@@ -582,15 +600,7 @@ function Get-ScheduledGovernanceReviewReceiptEvidence {
 
     $decision = Get-ScheduledGovernancePropertyValue $Receipt "decision"
     $outcome = Get-ScheduledGovernancePropertyValue $Receipt "outcome"
-    # The service may retain the completed batch's outcome alongside a newer review projection.
-    $isReReview = Get-ScheduledGovernancePropertyValue $Review "isReReview"
-    $latestBatchReceived = Get-ScheduledGovernancePropertyValue $Receipt "latestBatchReceived"
-    $completedBatchOverlay = $AllowCompletedBatchOverlay -and
-        ($null -eq $decision) -and $outcome -ceq "ReReviewRequired" -and
-        $isReReview -is [bool] -and $isReReview -and
-        $latestBatchReceived -is [bool] -and $latestBatchReceived
-    if ($evidence.finalConvergenceStatus -cne $reviewDecision -or
-        (-not $completedBatchOverlay -and ($decision -cne $reviewDecision -or $outcome -cne $reviewDecision))) {
+    if ($evidence.finalConvergenceStatus -cne $reviewDecision -or $decision -cne $reviewDecision -or $outcome -cne $reviewDecision) {
         throw "Scheduled governance review receipt did not match the persisted review decision."
     }
 
@@ -709,7 +719,31 @@ function Get-ScheduledGovernanceBatchReceiptEvidence {
     $evidence.receiptId = $receiptId.ToString("D")
     $evidence.outcome = $expectedOutcome
     $evidence.counts = $counts
+    $evidence.requestIdentityHash = Get-ScheduledGovernancePropertyValue $Receipt "requestIdentityHash"
+    $evidence.auditIds = $receiptAudits
     return $evidence
+}
+
+function Assert-ScheduledGovernanceFinalBatchContinuity {
+    param([object]$Receipt, [System.Collections.IDictionary]$Evidence)
+
+    $prior = $Evidence.receipt.afterReplay
+    $final = $Evidence.receipt.final
+    $latestBatch = Get-ScheduledGovernancePropertyValue $Receipt "latestBatchReceived"
+    $requestIdentity = Get-ScheduledGovernancePropertyValue $Receipt "requestIdentityHash"
+    $auditIds = @(Get-ScheduledGovernanceBatchAuditIds $Receipt)
+    if ($latestBatch -isnot [bool] -or -not $latestBatch -or
+        $final.receiptId -in @($Evidence.receipt.initial.receiptId, $prior.receiptId) -or
+        $requestIdentity -cne $prior.requestIdentityHash -or
+        -not (Test-ScheduledGovernanceIdsEqual $auditIds $prior.auditIds)) {
+        throw "Final review receipt did not preserve the executed batch request and audit identity."
+    }
+    $counts = Get-ScheduledGovernanceBatchCounts $Receipt
+    foreach ($field in $counts.Keys) {
+        if ($counts[$field] -ne $prior.counts[$field]) {
+            throw "Final review receipt changed the executed batch $field count."
+        }
+    }
 }
 
 function Invoke-ScheduledGovernanceVerifiedReplay {
@@ -1472,8 +1506,8 @@ try {
                             $finalReceipt = Get-ScheduledGovernanceToolData `
                                 -Json $finalReceiptJson -Operation "scheduled_governance_run_get-after-execute"
                             $evidence.receipt.final = Get-ScheduledGovernanceReviewReceiptEvidence `
-                                -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract `
-                                -AllowCompletedBatchOverlay:$evidence.replay.exact
+                                -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract
+                            Assert-ScheduledGovernanceFinalBatchContinuity -Receipt $finalReceipt -Evidence $evidence
                             $evidence.protectedInvariants = Complete-ScheduledGovernanceProtectedReadback `
                                 -ManifestPath $ProtectedInvariantEvidencePath -RequestPath $ProtectedInvariantReadbackRequestPath `
                                 -TimeoutSec $ProtectedInvariantReadbackTimeoutSec -Binding ([ordered]@{
