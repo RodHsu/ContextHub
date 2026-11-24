@@ -51,11 +51,25 @@ public sealed class KnowledgeReviewService(
         // this review are executable in the same Review -> Execute cycle.
         var governanceSnapshot = await durableGovernance.GetOrCreateSnapshotAsync(ids, governanceRunId, request.IsReReview, cancellationToken);
         var fullGovernancePlan = await fullGovernance.BuildAsync(ids, governanceRunId, governanceSnapshot, cancellationToken);
-        foreach (var project in projects.Where(x => !ProjectContext.IsShared(x.ProjectId) && !ProjectContext.IsUser(x.ProjectId)))
+        foreach (var project in projects.Where(x => !ProjectContext.IsUser(x.ProjectId)))
         {
             var projectId = project.ProjectId;
-            insightResults.AddRange(await LoadAllAsync((pageOffset, pageLimit) => conversationService.ListInsightsAsync(
-                new ConversationInsightListRequest(projectId, Limit: pageLimit, Offset: pageOffset), cancellationToken)));
+            var isShared = ProjectContext.IsShared(projectId);
+            if (isShared && !project.CanRead)
+            {
+                continue;
+            }
+
+            var projectInsights = await LoadAllAsync((pageOffset, pageLimit) => conversationService.ListInsightsAsync(
+                new ConversationInsightListRequest(projectId, Limit: pageLimit, Offset: pageOffset), cancellationToken));
+            if (isShared)
+            {
+                // Shared contributes persisted exceptions when resolved in this review's readable scope.
+                insightResults.AddRange(projectInsights.Where(IsStoredInsightException));
+                continue;
+            }
+
+            insightResults.AddRange(projectInsights);
             foreach (var thread in await LoadAllAsync((pageOffset, pageLimit) => discussions.ListThreadsAsync(
                          new DiscussionThreadListRequest(ProjectId: projectId, Status: "Open", Limit: Math.Min(pageLimit, 100), Offset: pageOffset), cancellationToken), 100))
             {
@@ -155,8 +169,7 @@ public sealed class KnowledgeReviewService(
         var candidateCount = CountCandidates(fullGovernancePlan.Coverage);
         var exceptionStates = governanceSnapshot.ExceptionStates
             .Concat(insightResults
-                .Where(x => x.PromotionStatus is ConversationPromotionStatus.Deferred or
-                    ConversationPromotionStatus.RequiresUserDecision or ConversationPromotionStatus.HostBlocked)
+                .Where(IsStoredInsightException)
                 .Select(x => new GovernanceExceptionStateResult(
                     $"insight:{x.Id:D}",
                     "ConversationInsight",
@@ -216,7 +229,7 @@ public sealed class KnowledgeReviewService(
             DeleteCancelledCount = fullGovernancePlan.Retention.DeleteCancelledCount,
             TombstonedCount = 0,
             SemanticAutoResolvedCount = 0,
-            RemainingHumanDecisionCount = fullGovernancePlan.RemainingHumanDecisionCount,
+            RemainingHumanDecisionCount = userDecisionCount,
             UnresolvedHumanDecisionCount = userDecisionCount,
             ResolvedHumanDecisionCount = fullGovernancePlan.ResolvedHumanDecisionCount,
             NewlyResolvedHumanDecisionCount = fullGovernancePlan.NewlyResolvedHumanDecisionCount,
@@ -266,6 +279,10 @@ public sealed class KnowledgeReviewService(
         => offset + returnedCount < totalCount
             ? $"{snapshotToken}:{section}:{offset + returnedCount}"
             : null;
+
+    private static bool IsStoredInsightException(ConversationInsightResult insight)
+        => insight.PromotionStatus is ConversationPromotionStatus.Deferred or
+            ConversationPromotionStatus.RequiresUserDecision or ConversationPromotionStatus.HostBlocked;
 
     private static int CountCandidates(FullGovernanceCoverageResult coverage)
         => coverage.ProjectCoverage.CandidateCount + coverage.HierarchyCoverage.CandidateCount +

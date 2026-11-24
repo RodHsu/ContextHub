@@ -108,7 +108,10 @@ public sealed class FullGovernancePlanService(
         var projectInformation = scopedMemories
             .Where(x => Memory.Application.ProjectContext.IdentityKeys(projectSet).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && x.ExternalKey == ProjectInformationExternalKey)
             .ToArray();
-        foreach (var projectId in projects)
+        var projectInformationProjects = projects
+            .Where(projectId => !ProjectContext.IsShared(projectId) && !ProjectContext.IsUser(projectId))
+            .ToArray();
+        foreach (var projectId in projectInformationProjects)
         {
             var information = projectInformation.OrderByDescending(x => x.UpdatedAt)
                 .FirstOrDefault(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
@@ -364,7 +367,7 @@ public sealed class FullGovernancePlanService(
         var insightCount = insightStatusCounts.Values.Sum();
         var insightCoverage = Surface(insightCount, insightCount, ordered, GovernanceItemKind.ConversationInsight);
         var coverage = new FullGovernanceCoverageResult(
-            Surface(projects.Length, projects.Length, ordered, GovernanceItemKind.Project),
+            Surface(projectInformationProjects.Length, projectInformationProjects.Length, ordered, GovernanceItemKind.Project),
             Surface(hierarchyRows.Count, hierarchyRows.Count, ordered, GovernanceItemKind.ProjectHierarchy),
             Surface(memorySnapshot.Coverage.TotalCount, memorySnapshot.Coverage.ScannedCount, ordered, GovernanceItemKind.Memory,
                 memorySnapshot.Coverage.HasMore, memorySnapshot.Coverage.CoverageComplete),

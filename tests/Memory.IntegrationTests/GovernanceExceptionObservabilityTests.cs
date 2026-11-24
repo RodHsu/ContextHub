@@ -484,6 +484,62 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
     }
 
     [DockerRequiredFact]
+    public async Task Scheduled_review_counts_owned_shared_insight_exceptions_only_in_resolved_scope()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var (tenant, owner) = CreateOtherOwner();
+        db.AddRange(tenant, owner);
+        await db.SaveChangesAsync();
+
+        var shared = ProjectContext.SharedProjectId;
+        var actor = new ContextHubRequestActor(tenant.Id, owner.Id, owner.Username, owner.Role,
+            [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.PreferencesRead, SecurityScopes.ScheduledGovernance],
+            [], true);
+        accessor.Current = actor;
+        var manual = await SeedGovernanceInsightAsync(db, actor, shared);
+        manual.PromotionStatus = ConversationPromotionStatus.RequiresUserDecision;
+        var deferred = await SeedGovernanceInsightAsync(db, actor, shared);
+        var blocked = await SeedGovernanceInsightAsync(db, actor, shared);
+        blocked.PromotionStatus = ConversationPromotionStatus.HostBlocked;
+        await db.SaveChangesAsync();
+
+        var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var runId = $"shared-insight-exceptions-{Guid.NewGuid():N}";
+        var first = await scheduled.ReviewAsync(new ScheduledGovernanceReviewRequest(runId), default);
+        first.GovernedExceptionCount.Should().Be(3);
+        first.ReversibleExecutionCount.Should().Be(0);
+        first.Decision.Should().Be(ScheduledGovernanceDecision.HumanDecisionOnly);
+
+        var second = await scheduled.ReviewAsync(new ScheduledGovernanceReviewRequest(runId, IsReReview: true), default);
+        second.GovernedExceptionCount.Should().Be(3);
+        second.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
+        second.ExceptionDelta!.Unchanged.Should().Be(3);
+
+        var knowledge = scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>();
+        var review = await knowledge.ReviewAsync(new KnowledgeReviewRequest([shared]), default);
+        review.GovernanceCoverage!.ProjectCoverage.TotalCount.Should().Be(0);
+        review.GovernanceCoverage.InsightCoverage.TotalCount.Should().Be(3);
+        review.RemainingHumanDecisionCount.Should().Be(1);
+        review.GovernedExceptionStates.Select(x => x.Key).Should().BeEquivalentTo(new[]
+        {
+            $"insight:{manual.Id:D}", $"insight:{deferred.Id:D}", $"insight:{blocked.Id:D}"
+        });
+        review.GovernancePlan.Should().BeEmpty();
+        review.HighSignalConversationInsights.Should().BeEmpty();
+
+        const string restricted = "ordinary-only";
+        accessor.Current = actor with { AllowedProjectIds = [restricted] };
+        await scope.ServiceProvider.GetRequiredService<IProjectInformationService>()
+            .UpsertAsync(new ProjectInformationUpdateRequest(restricted, "Ordinary", string.Empty), default);
+        var other = await knowledge.ReviewAsync(new KnowledgeReviewRequest(), default);
+        other.DurableMemoryCoverage!.GovernanceProjectIds.Count(ProjectContext.IsShared).Should().Be(1);
+        other.GovernanceCoverage!.InsightCoverage.TotalCount.Should().Be(0);
+        other.GovernedExceptionStates.Should().BeEmpty();
+    }
+
+    [DockerRequiredFact]
     public async Task Full_governance_counts_insight_lifecycle_inventory_without_queuing_stored_exceptions()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
