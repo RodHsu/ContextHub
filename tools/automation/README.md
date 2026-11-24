@@ -59,3 +59,9 @@ An initial execution or exact replay timeout, JSON-RPC error, tool error or resp
 Use distinct Work Item IDs and record a valid status and JSON boolean before and after each item. Supply an empty array only when the independent readback found no business Work Items in scope.
 
 The runner does not call REST, database, admin, general MCP, or fallback surfaces, and it does not modify the live Automation configuration. Omit `-EvidencePath` to keep evidence on stdout; when used, it writes one compact JSON record to the caller-selected path.
+
+## Verify the live schedule owner
+
+Use the scheduler's own inventory to identify the existing automation, its owner, enabled state, effective schedule and timezone, configured resource, and most recent dispatch. Check all scheduler scopes authorized for the deployment for other enabled entries targeting the same governance scope. Record which scopes were checked. If the inventory is unavailable or incomplete, report the owner or singleton status as unknown.
+
+For each accepted natural slot, correlate the immutable scheduler dispatch record and signed slot identity with the initial review and exact ContextHub receipt. Verify that at most one owner dispatched that slot and account for any overlapping, manual or duplicate runs. The server's tenant/owner/run lock serializes requests for one run. The A1 checkpoint file also coordinates local attempts sharing one path. Cross-run, cross-host singleton acceptance needs scheduler evidence covering separate run IDs.
