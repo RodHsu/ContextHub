@@ -22,6 +22,8 @@ Reconciliation accepts an already archived target when a `memory_archive` or `me
 
 The apply transaction protects the bound memory and linked proposal rows until the receipt commits. If another operation changes those rows after preview, obtain a fresh preview before deciding again.
 
+Preview, apply and receipt lookup each own their transaction and require a clean DbContext. This keeps unrelated pending writes with their caller.
+
 An exact linked proposal with `Failed` status appears as `ProposalApplyFailed` when there is no independent proof for reconciliation. Approval can record a failure after releasing control to the target operation, so verify the target outcome before making a decision. An exact link to a `HostBlocked` proposal blocks adjudication of the referring exception, including explicit skip and reopen.
 
 HostBlocked, legal/security holds, and malformed protection metadata fail closed. Read and write require the corresponding memory scope, an actual Owner/Admin role, and the same tenant, owner, and authorized project. Service actors and scheduled-scoped actors are rejected. Existing skip, host, deletion, score and retention policies remain unchanged.

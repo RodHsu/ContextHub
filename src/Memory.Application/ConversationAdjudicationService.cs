@@ -34,7 +34,7 @@ public sealed class ConversationAdjudicationService(
 
         var receiptHash = receiptRequest is null ? null : ValidateAndHash(project, receiptRequest);
 
-        await using var transaction = await db.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        await using var transaction = await BeginOwnedTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
         await EnsureDurableProjectGrantAsync(project, write: false, cancellationToken);
         var query = Insights(project).AsNoTracking();
         var receipts = Receipts(project);
@@ -147,7 +147,7 @@ public sealed class ConversationAdjudicationService(
         var requestHash = ValidateAndHash(project, request);
         for (var attempt = 0; ; attempt++)
         {
-            await using var transaction = await db.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            await using var transaction = await BeginOwnedTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             ConversationAdjudication receipt;
             bool replay;
             try
@@ -156,8 +156,7 @@ public sealed class ConversationAdjudicationService(
                 (receipt, replay) = await ApplyAsync(project, request, requestHash, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
             }
-            catch (Exception error) when (attempt == 0 && transaction.OwnsTransaction &&
-                                         System.Transactions.Transaction.Current is null &&
+            catch (Exception error) when (attempt == 0 &&
                                          error.GetBaseException() is DbException { SqlState: "40001" })
             {
                 // PostgreSQL aborted this transaction. Dispose it before retrying with a fresh snapshot.
@@ -171,6 +170,22 @@ public sealed class ConversationAdjudicationService(
             var readBack = await Receipts(project).SingleAsync(x => x.Id == receipt.Id, cancellationToken);
             return Map(readBack, replay: false);
         }
+    }
+
+    private async Task<IApplicationTransaction> BeginOwnedTransactionAsync(
+        IsolationLevel isolationLevel, CancellationToken cancellationToken)
+    {
+        if (System.Transactions.Transaction.Current is not null)
+            throw new InvalidOperationException("Adjudication requires its own transaction.");
+        if (db is not DbContext context || context.ChangeTracker.HasChanges())
+            throw new InvalidOperationException("Adjudication requires a DbContext without pending changes.");
+
+        var transaction = await db.BeginTransactionAsync(isolationLevel, cancellationToken);
+        if (transaction.OwnsTransaction)
+            return transaction;
+
+        await transaction.DisposeAsync();
+        throw new InvalidOperationException("Adjudication requires its own transaction.");
     }
 
     private async Task<(ConversationAdjudication Receipt, bool Replay)> ApplyAsync(
@@ -308,7 +323,7 @@ public sealed class ConversationAdjudicationService(
     {
         var project = Authorize(request.ProjectId, write: false);
         var requestHash = ValidateAndHash(project, request);
-        await using var transaction = await db.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        await using var transaction = await BeginOwnedTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
         await EnsureDurableProjectGrantAsync(project, write: false, cancellationToken);
         var result = await FindCommittedReceiptAsync(project, request, requestHash, cancellationToken);
         await transaction.CommitAsync(cancellationToken);

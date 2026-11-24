@@ -1,3 +1,4 @@
+using System.Data;
 using System.Data.Common;
 using System.Text.Json;
 using FluentAssertions;
@@ -258,6 +259,68 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
 
             return ValueTask.FromResult(result);
         }
+    }
+
+    [DockerRequiredFact]
+    public async Task Adjudication_cannot_report_a_receipt_from_the_callers_uncommitted_transaction()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var insight = await SeedAsync(db, actor);
+        var request = Request(insight, (await Preview(service, insight)).Items.Single(), ConversationAdjudicationAction.ResolveSkipped);
+
+        await using (var caller = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable))
+        {
+            var applyFailure = await Record.ExceptionAsync(() => service.AdjudicateAsync(request, default));
+            var lookupFailure = await Record.ExceptionAsync(() => service.ReadReceiptAsync(request, default));
+            var previewFailure = await Record.ExceptionAsync(() => service.PreviewAsync(
+                new(insight.ProjectId) { ReceiptRequest = request }, default));
+            (await db.ConversationAdjudications.AnyAsync(row => row.Id == request.OperationId)).Should().BeFalse();
+            db.Database.CurrentTransaction.Should().BeSameAs(caller);
+            applyFailure.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("own transaction");
+            lookupFailure.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("own transaction");
+            previewFailure.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("own transaction");
+            await caller.RollbackAsync();
+        }
+
+        (await service.ReadReceiptAsync(request, default)).Found.Should().BeFalse();
+        (await service.AdjudicateAsync(request, default)).IsReplay.Should().BeFalse();
+        (await service.ReadReceiptAsync(request, default)).Found.Should().BeTrue();
+    }
+
+    [DockerRequiredFact]
+    public async Task Adjudication_cannot_flush_or_discard_pending_writes()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var insight = await SeedAsync(db, actor);
+        var request = Request(insight, (await Preview(service, insight)).Items.Single(), ConversationAdjudicationAction.ResolveSkipped);
+        var pending = new MemoryItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = insight.ProjectId,
+            Title = "Unrelated pending memory",
+            Content = "Owned by the caller",
+            CreatedAt = insight.CreatedAt,
+            UpdatedAt = insight.UpdatedAt
+        };
+        db.MemoryItems.Add(pending);
+
+        var failure = await Record.ExceptionAsync(() => service.AdjudicateAsync(request, default));
+        var previewFailure = await Record.ExceptionAsync(() => Preview(service, insight));
+        var lookupFailure = await Record.ExceptionAsync(() => service.ReadReceiptAsync(request, default));
+        using var readScope = CreateScope(out var readDb, out var readService, out _);
+        (await readDb.MemoryItems.AsNoTracking().AnyAsync(row => row.Id == pending.Id)).Should().BeFalse();
+        (await readService.ReadReceiptAsync(request, default)).Found.Should().BeFalse();
+        (await Preview(readService, insight)).Items.Single().Status.Should().Be(ConversationPromotionStatus.RequiresUserDecision);
+        db.Entry(pending).State.Should().Be(EntityState.Added);
+        failure.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("pending changes");
+        previewFailure.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("pending changes");
+        lookupFailure.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("pending changes");
+
+        db.Entry(pending).State = EntityState.Detached;
+        (await service.AdjudicateAsync(request, default)).IsReplay.Should().BeFalse();
+        (await readService.ReadReceiptAsync(request, default)).Found.Should().BeTrue();
+        (await readDb.MemoryItems.AsNoTracking().AnyAsync(row => row.Id == pending.Id)).Should().BeFalse();
     }
 
     [DockerRequiredFact]
