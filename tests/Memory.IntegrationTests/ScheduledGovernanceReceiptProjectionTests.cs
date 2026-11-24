@@ -297,6 +297,26 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         }
 
         var receiptId = await RecordCompletedRunAsync(runId);
+        var auditedRunId = $"history-audited-{Guid.NewGuid():N}";
+        var nonMatchingAuditsRunId = $"history-nonmatching-audits-{Guid.NewGuid():N}";
+        var auditedReceiptId = await RecordCompletedRunAsync(auditedRunId);
+        var nonMatchingAuditsReceiptId = await RecordCompletedRunAsync(nonMatchingAuditsRunId);
+        AddFixtureAudit(tenantId, new { governanceRunId = auditedRunId });
+        AddFixtureAudit(Guid.NewGuid(), new { governanceRunId = nonMatchingAuditsRunId });
+        AddFixtureAudit(tenantId, new { governanceRunId = new[] { nonMatchingAuditsRunId } });
+        AddFixtureAudit(tenantId, new[] { new { governanceRunId = nonMatchingAuditsRunId } });
+        AddFixtureAudit(tenantId, new { governanceRunId = nonMatchingAuditsRunId.ToUpperInvariant() });
+
+        void AddFixtureAudit(Guid auditTenant, object details)
+            => db.SecurityAuditEvents.Add(new SecurityAuditEvent
+            {
+                TenantId = auditTenant,
+                ActorUserId = otherOwner.Id,
+                EventType = SecurityAuditEventType.GovernanceBatchExecutionCompleted,
+                DetailsJson = System.Text.Json.JsonSerializer.Serialize(details),
+                CreatedAt = now
+            });
+
         var overLimitReceiptId = await RecordCompletedRunAsync(overLimitRunId);
         var overLimitSource = await db.GovernanceRunReceipts.AsNoTracking()
             .SingleAsync(row => row.Id == overLimitReceiptId, CancellationToken.None);
@@ -317,7 +337,10 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         var wrongRun = own with { GovernanceRunId = overLimitRunId };
         var missing = own with { ReceiptId = Guid.NewGuid() };
         var tooManyEvents = own with { GovernanceRunId = overLimitRunId, ReceiptId = latestOverLimit.Id };
-        ScheduledGovernanceServerSafetyEvidenceQuery[] queries = [tooManyEvents, own, wrongOwner, wrongRun, missing, foreign];
+        var audited = own with { GovernanceRunId = auditedRunId, ReceiptId = auditedReceiptId };
+        var nonMatchingAudits = own with { GovernanceRunId = nonMatchingAuditsRunId, ReceiptId = nonMatchingAuditsReceiptId };
+        ScheduledGovernanceServerSafetyEvidenceQuery[] queries =
+            [tooManyEvents, own, wrongOwner, wrongRun, missing, foreign, audited, nonMatchingAudits];
 
         var commandCount = 0;
         var options = new DbContextOptionsBuilder<MemoryDbContext>(
@@ -347,6 +370,8 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         actual[tooManyEvents]!.ReceiptEventSequence.Should().Be(latestOverLimit.EventSequence);
         actual[tooManyEvents]!.InitialReviewReceived.Should().BeNull();
         actual[tooManyEvents]!.DecisionObeyed.Should().BeNull();
+        actual[audited]!.NoDuplicateMutation.Should().BeNull();
+        actual[nonMatchingAudits]!.NoDuplicateMutation.Should().BeTrue();
     }
 
     [DockerRequiredFact]

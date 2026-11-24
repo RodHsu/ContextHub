@@ -110,15 +110,24 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider
 
     // Read the newer-event guard with the mutation facts so the guard covers the same database
     // snapshot. Batch and audit evidence retain the single-run reader's tenant-wide run binding.
+    // Join on the JSON value so an exact string is required, as in the single-run containment check.
     private const string ReadHistoryFactsSql = """
+        WITH requested AS MATERIALIZED (
+            SELECT * FROM unnest(@run_ids, @sequences, @check_mutation) AS input(run_id, seq, check_mutation)
+        ),
+        audit_matches AS MATERIALIZED (
+            SELECT DISTINCT r.run_id
+            FROM requested r
+            JOIN security_audit_events a ON a.details_json -> 'governanceRunId' = to_jsonb(r.run_id)
+            WHERE r.check_mutation AND a.tenant_id = @tenant
+        )
         SELECT requested.seq AS "EventSequence",
             CASE WHEN requested.check_mutation THEN
                 EXISTS (
                     SELECT 1 FROM governance_batch_runs b
                     WHERE b.tenant_id = @tenant AND b.governance_run_id = requested.run_id
                 ) OR EXISTS (
-                    SELECT 1 FROM security_audit_events a
-                    WHERE a.tenant_id = @tenant AND a.details_json @> jsonb_build_object('governanceRunId', requested.run_id)
+                    SELECT 1 FROM audit_matches matches WHERE matches.run_id = requested.run_id
                 )
                 ELSE FALSE END AS "HasMutationSignal",
             EXISTS (
@@ -126,6 +135,6 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider
                 WHERE r.tenant_id = @tenant AND r.owner_user_id = @owner AND r.governance_run_id = requested.run_id
                     AND r.event_sequence > requested.seq
             ) AS "HasNewerReceipt"
-        FROM unnest(@run_ids, @sequences, @check_mutation) AS requested(run_id, seq, check_mutation)
+        FROM requested
         """;
 }
