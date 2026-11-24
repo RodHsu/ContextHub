@@ -120,7 +120,8 @@ public static class DependencyInjection
         services.AddScoped<IMemoryDataRetentionService, MemoryDataRetentionService>();
         services.AddScoped<IAutonomousRetentionService, AutonomousRetentionService>();
         services.AddScoped<IGovernanceRunReceiptService, GovernanceRunReceiptService>();
-        services.AddScoped<INaturalOriginEvidenceStore, NaturalOriginEvidenceStore>();
+        services.AddScoped<NaturalOriginEvidenceStore>();
+        services.AddScoped<INaturalOriginEvidenceStore>(sp => sp.GetRequiredService<NaturalOriginEvidenceStore>());
         services.AddScoped<IScheduledGovernanceAuthorityEpochLedger, ScheduledGovernanceAuthorityEpochLedger>();
         services.AddScoped<IScheduledGovernanceReliabilityEvidenceProvider, ScheduledGovernanceReliabilityEvidenceProvider>();
         services.AddScoped<IScheduledGovernanceServerSafetyEvidenceProvider, ScheduledGovernanceServerSafetyEvidenceProvider>();

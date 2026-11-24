@@ -100,11 +100,18 @@ public interface INaturalOriginEvidenceStore
 {
     Task<NaturalOriginEvidenceAppendResult> AppendAsync(
         NaturalOriginEvidenceLedgerEntry entry,
+        string expectedAuthorityEpochDigest,
         CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<NaturalOriginEvidenceLedgerEntry>> ListForRunAsync(
         Guid tenantId,
         Guid ownerUserId,
         string governanceRunId,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<NaturalOriginEvidenceLedgerEntry>> ListForRunsAsync(
+        Guid tenantId,
+        Guid ownerUserId,
+        IReadOnlyList<string> governanceRunIds,
         CancellationToken cancellationToken = default);
 }

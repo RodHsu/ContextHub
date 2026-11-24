@@ -293,7 +293,11 @@ public sealed class GovernanceService(
             .Where(x => !DurableMemoryGovernancePolicy.IsSystemProjectMetadata(x))
             .ToArray();
 
-        foreach (var group in activeArtifacts.GroupBy(x => NormalizeKey(x.Title)).Where(group => group.Count() > 1))
+        foreach (var group in activeArtifacts
+                     .Select(x => (Item: x, Identity: ProjectArtifactExchangeService.GetDuplicateIdentity(x)))
+                     .Where(x => x.Identity.HasValue)
+                     .GroupBy(x => (Title: NormalizeKey(x.Item.Title), x.Identity), x => x.Item)
+                     .Where(group => group.Count() > 1))
         {
             var items = group.OrderBy(x => x.UpdatedAt).ToArray();
             for (var i = 0; i < items.Length; i++)
@@ -518,8 +522,10 @@ public sealed class GovernanceService(
 
         foreach (var group in memories
                      .Where(x => x.Status == MemoryStatus.Active)
-                     .GroupBy(x => NormalizeKey(x.Title))
-                     .Where(x => !string.IsNullOrWhiteSpace(x.Key) && x.Count() > 1))
+                     .Select(x => (Item: x, Identity: ProjectArtifactExchangeService.GetDuplicateIdentity(x)))
+                     .Where(x => x.Identity.HasValue)
+                     .GroupBy(x => (Title: NormalizeKey(x.Item.Title), x.Identity), x => x.Item)
+                     .Where(x => !string.IsNullOrWhiteSpace(x.Key.Title) && x.Count() > 1))
         {
             var ordered = group.OrderByDescending(AuthorityScore).ThenByDescending(x => x.UpdatedAt).ToArray();
             var authoritative = ordered[0];
@@ -1007,7 +1013,9 @@ public sealed class GovernanceService(
         {
             var left = memories.FirstOrDefault(x => x.Id == finding.PrimaryMemoryId!.Value);
             var right = memories.FirstOrDefault(x => x.Id == finding.SecondaryMemoryId!.Value);
-            if (left is null || right is null)
+            if (left is null || right is null ||
+                ProjectArtifactExchangeService.GetDuplicateIdentity(left) is not { } identity ||
+                identity != ProjectArtifactExchangeService.GetDuplicateIdentity(right))
             {
                 continue;
             }

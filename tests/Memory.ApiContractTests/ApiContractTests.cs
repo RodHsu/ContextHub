@@ -27,6 +27,34 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         preview.Should().NotBeNull();
         preview!.ProjectId.Should().Be(project);
         preview.TotalCount.Should().Be(0);
+        preview.InventoryToken.Should().BeNull();
+
+        var auditUrl = $"/api/conversations/adjudication-preview?projectId={project}&governanceRunId=preview-audit";
+        var tracked = await client.GetFromJsonAsync<ConversationAdjudicationPreviewResult>(
+            $"{auditUrl}&includeInventoryToken=true");
+        tracked!.InventoryToken.Should().MatchRegex("^[0-9a-f]{64}$");
+        var continued = await client.GetFromJsonAsync<ConversationAdjudicationPreviewResult>(
+            $"{auditUrl}&offset=200&expectedInventoryToken={tracked.InventoryToken}");
+        continued!.InventoryToken.Should().Be(tracked.InventoryToken);
+        using var stale = await client.GetAsync(
+            $"/api/conversations/adjudication-preview?projectId={project}&governanceRunId=different-audit&expectedInventoryToken={tracked.InventoryToken}");
+        stale.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
+        (await stale.Content.ReadAsStringAsync()).Should().Contain("Restart the preview from offset zero");
+
+        var original = new ConversationAdjudicationRequest(
+            project, Guid.NewGuid(), Guid.NewGuid(), ConversationAdjudicationAction.ResolveSkipped,
+            new string('a', 64), "Reviewed original evidence", "unknown-result");
+        using var lookup = await client.PostAsJsonAsync("/api/conversations/adjudications/receipt-lookup", original);
+        lookup.EnsureSuccessStatusCode();
+        lookup.Headers.CacheControl!.NoStore.Should().BeTrue();
+        var missing = await lookup.Content.ReadFromJsonAsync<ConversationAdjudicationReceiptLookupResult>();
+        missing!.OperationId.Should().Be(original.OperationId);
+        missing.Found.Should().BeFalse();
+        missing.Receipt.Should().BeNull();
+        using var invalidLookup = await client.PostAsJsonAsync("/api/conversations/adjudications/receipt-lookup",
+            original with { OperationId = Guid.Empty });
+        invalidLookup.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+
         var response = await client.PostAsJsonAsync("/api/conversations/adjudications", new ConversationAdjudicationRequest(
             project, Guid.NewGuid(), Guid.NewGuid(), ConversationAdjudicationAction.ResolveSkipped, "", "", ""));
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict);
@@ -37,6 +65,9 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     {
         Guid versionId;
         Guid fileId;
+        Guid otherVersionId;
+        Guid otherFileId;
+        Guid otherFileVersionId;
         string projectId;
         using (var scope = environment.GetFactory().Services.CreateScope())
         {
@@ -76,9 +107,21 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 CreatedAt = now,
                 UpdatedAt = now
             };
+            var otherFile = new FileAsset
+            {
+                TenantId = file.TenantId,
+                OwnerUserId = file.OwnerUserId,
+                ProjectId = projectId,
+                LogicalFileName = "other.txt",
+                NormalizedFileName = "other.txt",
+                State = FileAssetState.Active,
+                CreatedByActorId = file.CreatedByActorId,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
             db.ManagedObjects.Add(managedObject);
-            db.FileAssets.Add(file);
-            db.ProjectAuthorizationPolicies.Add(new ProjectAuthorizationPolicy
+            db.FileAssets.AddRange(file, otherFile);
+            db.ProjectAuthorizationPolicies.AddRange(new[] { file.Id, otherFile.Id }.Select(id => new ProjectAuthorizationPolicy
             {
                 TenantId = actor.TenantId,
                 OwnerUserId = actor.UserId,
@@ -87,30 +130,41 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 Right = "metadata",
                 Effect = AuthorizationEffect.Allow,
                 ResourceType = "File",
-                ResourceId = file.Id.ToString("D"),
+                ResourceId = id.ToString("D"),
                 EvidenceRef = "api-contract:file-metadata",
                 CreatedAt = now,
                 UpdatedAt = now
-            });
+            }));
             await db.SaveChangesAsync();
-            var version = new FileVersion
-            {
-                FileAssetId = file.Id,
-                ManagedObjectId = managedObject.Id,
-                VersionNumber = 1,
-                ContentSha256 = managedObject.PlaintextSha256,
-                ContentType = "text/plain",
-                DeduplicationScopeKey = Convert.ToHexString(SHA256.HashData(Guid.NewGuid().ToByteArray())).ToLowerInvariant(),
-                Lifecycle = FileVersionLifecycle.IntegrityVerified,
-                Classification = FileClassification.Restricted,
-                NeedsRescan = true,
-                CreatedAt = now,
-                UpdatedAt = now
-            };
-            db.FileVersions.Add(version);
+            var version = AddVersion(file.Id, 1);
+            var otherVersion = AddVersion(file.Id, 2);
+            var distinctFileVersion = AddVersion(otherFile.Id, 1);
             await db.SaveChangesAsync();
             versionId = version.Id;
             fileId = file.Id;
+            otherVersionId = otherVersion.Id;
+            otherFileId = otherFile.Id;
+            otherFileVersionId = distinctFileVersion.Id;
+
+            FileVersion AddVersion(Guid assetId, int number)
+            {
+                var row = new FileVersion
+                {
+                    FileAssetId = assetId,
+                    ManagedObjectId = managedObject.Id,
+                    VersionNumber = number,
+                    ContentSha256 = managedObject.PlaintextSha256,
+                    ContentType = "text/plain",
+                    DeduplicationScopeKey = Convert.ToHexString(SHA256.HashData(Guid.NewGuid().ToByteArray())).ToLowerInvariant(),
+                    Lifecycle = FileVersionLifecycle.IntegrityVerified,
+                    Classification = FileClassification.Restricted,
+                    NeedsRescan = true,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                };
+                db.FileVersions.Add(row);
+                return row;
+            }
         }
 
         using var client = environment.GetFactory().CreateClient();
@@ -133,8 +187,7 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         using var artifactScope = environment.GetFactory().Services.CreateScope();
         UseBootstrapActor(artifactScope.ServiceProvider);
         var artifacts = artifactScope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>();
-        var published = await artifacts.PublishAsync(
-            new ProjectArtifactPublishRequest(
+        var request = new ProjectArtifactPublishRequest(
                 projectId,
                 "Logical managed file reference",
                 "Only ContextHub logical identifiers may cross the artifact contract.",
@@ -142,8 +195,70 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
                 ProjectArtifactKind.FileReference,
                 FileId: fileId,
                 FileVersionId: versionId,
-                MetadataJson: "{\"safeLabel\":\"contract\"}"),
-            CancellationToken.None);
+                MetadataJson: "{\"safeLabel\":\"contract\"}");
+        var legacyHash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            string.Join("|", request.Title, request.Summary, request.Content))))[..16];
+        var legacySourceRef = $"codex:filereference:{legacyHash}";
+        var legacy = await artifacts.PublishAsync(request with
+        {
+            SourceRef = legacySourceRef
+        }, default);
+        var published = await artifacts.PublishAsync(request, default);
+        published.MemoryId.Should().Be(legacy.MemoryId);
+        published.ExternalKey.Should().Be(legacy.ExternalKey);
+        published.SourceRef.Should().Be(legacySourceRef);
+        var otherVersionReference = await artifacts.PublishAsync(request with { FileVersionId = otherVersionId }, default);
+        var otherFileReference = await artifacts.PublishAsync(request with { FileId = otherFileId, FileVersionId = otherFileVersionId }, default);
+        new[] { published.MemoryId, otherVersionReference.MemoryId, otherFileReference.MemoryId }.Should().OnlyHaveUniqueItems();
+        (await artifacts.PublishAsync(request with { ProjectId = projectId.ToUpperInvariant() }, default))
+            .MemoryId.Should().Be(legacy.MemoryId);
+        (await artifacts.PublishAsync(request with
+        {
+            ProjectId = projectId.ToUpperInvariant(),
+            FileVersionId = otherVersionId
+        }, default)).MemoryId.Should().Be(otherVersionReference.MemoryId);
+        var concurrent = request with { Title = "Concurrent default publication" };
+        var concurrentResults = await Task.WhenAll(
+            PublishInScopeAsync(concurrent),
+            PublishInScopeAsync(concurrent with { ProjectId = projectId.ToUpperInvariant() }));
+        concurrentResults.Select(x => x.MemoryId).Distinct().Should().ContainSingle();
+
+        var explicitSource = request with { SourceRef = "maintained-artifact-reference" };
+        var explicitSourceResult = await artifacts.PublishAsync(explicitSource, default);
+        (await artifacts.PublishAsync(explicitSource with { FileVersionId = otherVersionId }, default))
+            .MemoryId.Should().Be(explicitSourceResult.MemoryId);
+        var explicitKey = request with { ExternalKey = "maintained-artifact-key" };
+        var explicitKeyResult = await artifacts.PublishAsync(explicitKey, default);
+        (await artifacts.PublishAsync(explicitKey with { FileVersionId = otherVersionId }, default))
+            .MemoryId.Should().Be(explicitKeyResult.MemoryId);
+
+        var proposals = artifactScope.ServiceProvider.GetRequiredService<IChatGptProposalService>();
+        var firstApproval = await ApproveAsync(request with { Title = "Approved file reference" });
+        var secondApproval = await ApproveAsync(request with { Title = "Approved file reference", FileVersionId = otherVersionId });
+        new[] { firstApproval.AppliedResourceId, secondApproval.AppliedResourceId }.Should().OnlyHaveUniqueItems();
+        (await artifacts.GetAsync(firstApproval.AppliedResourceId!.Value, default))!.FileVersionId.Should().Be(versionId);
+        (await artifacts.GetAsync(secondApproval.AppliedResourceId!.Value, default))!.FileVersionId.Should().Be(otherVersionId);
+
+        async Task<ChatGptProposalResult> ApproveAsync(ProjectArtifactPublishRequest input)
+        {
+            var proposal = await proposals.CreateAsync(new ChatGptProposalCreateRequest(
+                "project_artifact_publish", projectId, JsonSerializer.Serialize(input, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                input.Title, input.Summary), default);
+            var result = await proposals.ApproveAsync(new ChatGptProposalDecisionRequest(proposal.Id), default);
+            result.Status.Should().Be(ChatGptProposalStatus.Applied, result.Error);
+            result.AppliedResourceId.Should().NotBeNull();
+            (await proposals.ApproveAsync(new ChatGptProposalDecisionRequest(proposal.Id), default))
+                .AppliedResourceId.Should().Be(result.AppliedResourceId);
+            return result;
+        }
+
+        async Task<ProjectArtifactResult> PublishInScopeAsync(ProjectArtifactPublishRequest input)
+        {
+            using var publisherScope = environment.GetFactory().Services.CreateScope();
+            UseBootstrapActor(publisherScope.ServiceProvider);
+            return await publisherScope.ServiceProvider.GetRequiredService<IProjectArtifactExchangeService>()
+                .PublishAsync(input, default);
+        }
         var artifactJson = JsonSerializer.Serialize(published);
         artifactJson.Should().Contain(fileId.ToString()).And.Contain(versionId.ToString());
         artifactJson.Should().NotContain("managedObjectId").And.NotContain("storageId").And.NotContain("provider")
@@ -3136,33 +3251,36 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using var frozenResponse = await client.PutAsJsonAsync(
             $"/api/work-items/{created.Id:D}",
-            new { definitionState = ProjectWorkItemDefinitionState.Frozen });
+            new { definitionState = ProjectWorkItemDefinitionState.Frozen, expectedRevision = created.Revision, requestId = Guid.NewGuid().ToString("N") });
         frozenResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
-        (await frozenResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!.DefinitionState
-            .Should().Be(ProjectWorkItemDefinitionState.Frozen);
+        var frozen = (await frozenResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
+        frozen.DefinitionState.Should().Be(ProjectWorkItemDefinitionState.Frozen);
 
         using var invalidDefinitionResponse = await client.PutAsJsonAsync(
             $"/api/work-items/{created.Id:D}",
-            new { definitionState = ProjectWorkItemDefinitionState.Discussing });
+            new { definitionState = ProjectWorkItemDefinitionState.Discussing, expectedRevision = frozen.Revision, requestId = Guid.NewGuid().ToString("N") });
         invalidDefinitionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
 
-        using var guardedCompletionResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed });
+        using var guardedCompletionResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed, expectedRevision = frozen.Revision, requestId = Guid.NewGuid().ToString("N") });
         guardedCompletionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
 
         using var checklistResponse = await client.PutAsJsonAsync(
             $"/api/work-items/{created.Id:D}/checklist/{created.ChecklistItems.Single().Id:D}",
-            new { isCompleted = true });
+            new { isCompleted = true, expectedRevision = frozen.Revision, requestId = Guid.NewGuid().ToString("N") });
         checklistResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var checkedItem = (await checklistResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
 
-        using var updateResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed });
+        using var updateResponse = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { status = ProjectWorkItemStatus.Completed, expectedRevision = checkedItem.Revision, requestId = Guid.NewGuid().ToString("N") });
         updateResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        var completed = (await updateResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
 
         var listed = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&status=Completed");
         listed.Should().ContainSingle(x => x.Id == created.Id);
         var definitionListed = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&definitionState=Frozen");
         definitionListed.Should().ContainSingle(x => x.Id == created.Id && x.Status == ProjectWorkItemStatus.Completed);
 
-        using var archiveResponse = await client.PostAsync($"/api/work-items/{created.Id:D}/archive", null);
+        using var archiveResponse = await client.PostAsJsonAsync($"/api/work-items/{created.Id:D}/archive",
+            new { expectedRevision = completed.Revision, requestId = Guid.NewGuid().ToString("N") });
         archiveResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         var archived = await archiveResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>();
         archived.Should().NotBeNull();
@@ -3174,10 +3292,11 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
         var archivedList = await client.GetFromJsonAsync<List<ProjectWorkItemResult>>($"/api/work-items?projectId={ProjectContext.DefaultProjectId}&includeArchived=true");
         archivedList.Should().ContainSingle(x => x.Id == created.Id && x.IsArchived);
 
-        using var rejectedMutation = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { priority = 99 });
+        using var rejectedMutation = await client.PutAsJsonAsync($"/api/work-items/{created.Id:D}", new { priority = 99, expectedRevision = archived.Revision, requestId = Guid.NewGuid().ToString("N") });
         rejectedMutation.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
 
-        using var restoreResponse = await client.PostAsync($"/api/work-items/{created.Id:D}/restore", null);
+        using var restoreResponse = await client.PostAsJsonAsync($"/api/work-items/{created.Id:D}/restore",
+            new { expectedRevision = archived.Revision, requestId = Guid.NewGuid().ToString("N") });
         restoreResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         var restored = await restoreResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>();
         restored.Should().NotBeNull();
@@ -3227,7 +3346,15 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
 
         using var exclusionResponse = await client.PutAsJsonAsync(
             $"/api/work-items/{tracker.Id:D}/governance-exclusion",
-            new { projectId, governanceRunId, reason = "Tracks this exact API governance acceptance run.", excluded = true });
+            new
+            {
+                projectId,
+                governanceRunId,
+                reason = "Tracks this exact API governance acceptance run.",
+                excluded = true,
+                expectedRevision = tracker.Revision,
+                requestId = Guid.NewGuid().ToString("N")
+            });
         exclusionResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
         var excluded = (await exclusionResponse.Content.ReadFromJsonAsync<ProjectWorkItemResult>())!;
         excluded.GovernanceExclusions.Should().ContainSingle(x => x.GovernanceRunId == governanceRunId && x.IsActive);

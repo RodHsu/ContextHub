@@ -1143,6 +1143,16 @@ public sealed record ConversationInsightGovernanceRequest(
     string? GovernanceRunId = null,
     string? Reason = null);
 
+public enum ConversationInsightSkipOutcome
+{
+    Applied,
+    AlreadyTerminal,
+    EvidenceChanged
+}
+
+public sealed record ConversationInsightSemanticEvidence(
+    Guid MemoryId, string ProjectId, DateTimeOffset InsightUpdatedAt, decimal MinimumConfidence);
+
 public sealed record ConversationInsightDispositionRequest(
     Guid InsightId,
     ConversationInsightDisposition Disposition,
@@ -1618,7 +1628,11 @@ public sealed record AutonomousRetentionCandidateResult(
     bool Matured,
     Guid? ReplacementResourceId,
     IReadOnlyList<string> ReasonCodes,
-    IReadOnlyList<string> BlockedReasons);
+    IReadOnlyList<string> BlockedReasons)
+{
+    public const string AlreadyQuarantined = "AlreadyQuarantined";
+    public const string QuarantineRequiresReview = "QuarantineRequiresReview";
+}
 
 public sealed record AutonomousRetentionReviewResult(
     IReadOnlyList<AutonomousRetentionCandidateResult> Candidates,
@@ -1700,6 +1714,12 @@ public sealed record GovernanceRunReceiptResult(
     string RequestIdentityHash,
     GovernanceBatchOutcomeResult? LatestBatch)
 {
+    [JsonIgnore]
+    public bool ScheduledDecisionProjectionPending { get; init; }
+
+    [JsonIgnore]
+    public bool ScheduledBatchReReviewed { get; init; }
+
     public GovernanceExceptionDeltaResult ExceptionDelta { get; init; } = new(0, 0, 0, 0);
     public IReadOnlyList<GovernanceExceptionStateResult> GovernedExceptionStates { get; init; } = [];
     public GovernanceSurfaceCoverageResult SkillCoverage { get; init; } = new(0, 0, 0, 0, 0, 0, 0, false, true);
@@ -2168,12 +2188,19 @@ public interface IApplicationDbContext
     Task<IApplicationTransaction> BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken = default);
     void ClearTrackedChanges();
     Task AcquireTransactionLockAsync(string lockKey, CancellationToken cancellationToken = default);
+    Task<bool> LockMemoryEvidenceAsync(Guid memoryId, Guid tenantId, Guid ownerUserId, string projectId,
+        CancellationToken cancellationToken) => throw new NotSupportedException("Transactional memory evidence locking is required.");
+    Task<bool> LockAdjudicationInsightEvidenceAsync(Guid insightId, Guid linkedInsightId, Guid tenantId, Guid ownerUserId,
+        string projectId, CancellationToken cancellationToken) => throw new NotSupportedException("Transactional insight evidence locking is required.");
+    Task<IReadOnlyList<MemoryItem>> LoadLockedArtifactPairAsync(Guid duplicateId, Guid authorityId, Guid tenantId,
+        Guid ownerUserId, string projectId, CancellationToken cancellationToken) => throw new NotSupportedException("Transactional artifact evidence locking is required.");
     Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default);
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
 
 public interface IApplicationTransaction : IAsyncDisposable
 {
+    bool OwnsTransaction => false;
     Task CommitAsync(CancellationToken cancellationToken = default);
 }
 
@@ -2442,7 +2469,8 @@ public interface IFullGovernancePlanService
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         DurableMemoryGovernanceSnapshotResult memorySnapshot,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool allowCancelledRetentionReactivation = true);
 }
 
 public interface IGovernanceBatchExecutor
@@ -2457,6 +2485,8 @@ public interface IGovernanceRunReceiptService
     Task RecordScheduledDecisionAsync(ScheduledGovernanceReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task<IAsyncDisposable> AcquireRunLockAsync(string governanceRunId, CancellationToken cancellationToken);
     Task<GovernanceRunLineageResult> GetScheduledLineageAsync(string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken);
+    Task<(GovernanceRunReceiptResult Receipt, GovernanceRunLineageResult Lineage)?> GetScheduledReceiptSnapshotAsync(
+        string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken);
     Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken, bool isReReview = false);
     Task RecordExecutionStartedAsync(GovernanceBatchExecuteRequest request, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task RecordExecutionAsync(GovernanceBatchExecuteRequest request, GovernanceBatchExecuteResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
@@ -2539,6 +2569,8 @@ public interface IConversationAutomationService
     Task<ConversationInsightResult?> GetInsightAsync(Guid insightId, CancellationToken cancellationToken);
     Task<ConversationInsightResult> RetryInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
     Task<ConversationInsightResult> SkipInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken);
+    Task<ConversationInsightSkipOutcome> SkipInsightWithEvidenceAsync(ConversationInsightGovernanceRequest request,
+        ConversationInsightSemanticEvidence evidence, CancellationToken cancellationToken);
     Task<ConversationInsightResult> SetInsightDispositionAsync(ConversationInsightDispositionRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ConversationCheckpointSearchResult>> SearchCheckpointsAsync(ConversationCheckpointSearchRequest request, CancellationToken cancellationToken);
     Task<ConversationPipelineStatusResult?> GetPipelineStatusAsync(Guid checkpointId, CancellationToken cancellationToken);
@@ -2611,7 +2643,8 @@ public interface IAutonomousRetentionService
     Task<AutonomousRetentionReviewResult> ReviewAsync(
         IReadOnlyList<string> projectIds,
         string governanceRunId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool allowCancelledReactivation = true);
     Task<AutonomousRetentionCandidateResult> QuarantineAsync(
         Guid resourceId,
         string projectId,

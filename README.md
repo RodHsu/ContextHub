@@ -325,7 +325,8 @@ Notes:
 
 - Unit tests use deterministic providers and do not require model downloads.
 - Container-backed tests skip when Docker is unavailable.
-- Compose smoke tests require `RUN_COMPOSE_SMOKE_TESTS=1`.
+- Set `RUN_COMPOSE_SMOKE_TESTS=1` to run the Compose smoke test with a local Docker engine. It builds an isolated project, uses dynamic loopback ports, and removes the project's containers, volumes, and locally built images on exit.
+- If the default Alpine package endpoint is unavailable, set `CONTEXTHUB_ALPINE_MIRROR` to an HTTPS root from the [Alpine mirror list](https://mirrors.alpinelinux.org/) when building the two Docker socket proxies or running the Compose smoke test. Use the root ending in `/alpine`, such as `https://mirror.twds.com.tw/alpine`. The build chooses the release from the pinned base image and verifies packages with Alpine's trusted signing keys.
 - Dashboard browser tests use Playwright and cover responsive routes.
 
 ## Documentation
@@ -355,7 +356,8 @@ Notes:
 - Treat Docker socket access as privileged, even when mounted read-only.
 - Compose routes Docker API access through isolated, repo-built policy proxies based on a digest-pinned Alpine image; do not publish their port or replace them with direct socket mounts.
 - PostgreSQL has no bundled usable password. Set the required `POSTGRES_PASSWORD` through protected runtime configuration before running Compose. Direct .NET service startup requires an injected `ConnectionStrings:Postgres`; the committed defaults are empty. Preserve the configured embedding profile when rotating database credentials.
+- Set `DASHBOARD_ADMIN_USERNAME` and a unique `DASHBOARD_ADMIN_PASSWORD_HASH` for Dashboard bootstrap. The historical seed account keeps its data ownership. Its original built-in password is cleared by migration, and credentials that were already rotated are preserved.
 - Never commit `.env`, tokens, password hashes, OAuth secrets, signing keys, or private keys.
-- .NET service images pin SDK 10.0.402 and ASP.NET Core runtime 10.0.13 by manifest digest. Security releases must update both application packages and shared frameworks, and rebuild the compatible rollback images from the same patched bases; a package audit alone does not verify the deployed runtime.
+- .NET service images pin SDK 10.0.404 and ASP.NET Core runtime 10.0.15 by manifest digest. Security releases must update both application packages and shared frameworks, and rebuild the compatible rollback images from the same patched bases; a package audit alone does not verify the deployed runtime.
 
 The current MCP requirement matrix and security review are documented in [MCP 2026-07-28 compliance](docs/mcp-2026-07-28-compliance.md).

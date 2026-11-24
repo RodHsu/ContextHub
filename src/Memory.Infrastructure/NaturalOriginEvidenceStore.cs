@@ -1,3 +1,4 @@
+using System.Data;
 using Memory.Application;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
@@ -22,6 +23,53 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
 
     public async Task<NaturalOriginEvidenceAppendResult> AppendAsync(
         NaturalOriginEvidenceLedgerEntry entry,
+        string expectedAuthorityEpochDigest,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        if (!ScheduledGovernanceAuthorityEpochContract.IsSha256Digest(expectedAuthorityEpochDigest))
+        {
+            throw new ArgumentException("Expected authority epoch must be a SHA-256 digest.", nameof(expectedAuthorityEpochDigest));
+        }
+
+        if (dbContext.Database.CurrentTransaction is not null || System.Transactions.Transaction.Current is not null)
+        {
+            throw new InvalidOperationException("Natural-origin evidence append cannot join an ambient transaction.");
+        }
+
+        var scope = new ScheduledGovernanceAuthorityEpochScope(entry.TenantId, entry.OwnerUserId, entry.Environment);
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted, cancellationToken);
+        var current = await ScheduledGovernanceAuthorityEpochLedger.ReadCurrentUnderLockAsync(
+            dbContext, scope, cancellationToken);
+        if (current is null ||
+            current.AuthorityEpochDigest != expectedAuthorityEpochDigest ||
+            entry.ConfigurationDigest != ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(
+                current.ConfigurationDigest, current.AuthorityEpochDigest))
+        {
+            throw new InvalidOperationException("Natural-origin evidence does not match the current authority epoch.");
+        }
+
+        var result = await AppendNormalizedAsync(entry, cancellationToken);
+        try
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            if (!result.IsReplay)
+            {
+                dbContext.Entry(entry).State = EntityState.Detached;
+            }
+
+            throw;
+        }
+
+        return result;
+    }
+
+    internal async Task<NaturalOriginEvidenceAppendResult> AppendNormalizedAsync(
+        NaturalOriginEvidenceLedgerEntry entry,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(entry);
@@ -35,6 +83,11 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
         {
             EnsureExactReplay(existing, entry);
             return new NaturalOriginEvidenceAppendResult(existing, IsReplay: true);
+        }
+
+        if (dbContext.ChangeTracker.HasChanges())
+        {
+            throw new InvalidOperationException("Natural-origin evidence cannot be appended while the DbContext has pending changes.");
         }
 
         entry.CreatedAtUtc = timeProvider.GetUtcNow();
@@ -59,6 +112,11 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
             EnsureExactReplay(raced, entry);
             return new NaturalOriginEvidenceAppendResult(raced, IsReplay: true);
         }
+        catch
+        {
+            dbContext.Entry(entry).State = EntityState.Detached;
+            throw;
+        }
     }
 
     public async Task<IReadOnlyList<NaturalOriginEvidenceLedgerEntry>> ListForRunAsync(
@@ -67,11 +125,7 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
         string governanceRunId,
         CancellationToken cancellationToken = default)
     {
-        if (tenantId == Guid.Empty || ownerUserId == Guid.Empty)
-        {
-            throw new ArgumentException("Tenant and owner identifiers are required.");
-        }
-
+        ValidateReadScope(tenantId, ownerUserId);
         if (string.IsNullOrWhiteSpace(governanceRunId))
         {
             throw new ArgumentException("GovernanceRunId is required.", nameof(governanceRunId));
@@ -79,15 +133,49 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
 
         var governanceRunIdHash = ScheduledGovernanceReliabilityEvidenceContract
             .ComputeOpaqueHash(governanceRunId);
-        return await dbContext.NaturalOriginEvidenceLedgerEntries
-            .AsNoTracking()
-            .Where(x => x.TenantId == tenantId &&
-                        x.OwnerUserId == ownerUserId &&
-                        x.GovernanceRunIdHash == governanceRunIdHash)
+        return await ReadScopedEvidence(tenantId, ownerUserId)
+            .Where(x => x.GovernanceRunIdHash == governanceRunIdHash)
+            .ToArrayAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<NaturalOriginEvidenceLedgerEntry>> ListForRunsAsync(
+        Guid tenantId,
+        Guid ownerUserId,
+        IReadOnlyList<string> governanceRunIds,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateReadScope(tenantId, ownerUserId);
+        if (governanceRunIds.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("GovernanceRunId is required.", nameof(governanceRunIds));
+        }
+
+        var hashes = governanceRunIds
+            .Select(ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        return hashes.Length == 0
+            ? []
+            : await ReadScopedEvidence(tenantId, ownerUserId)
+                .Where(x => hashes.Contains(x.GovernanceRunIdHash))
+                .ToArrayAsync(cancellationToken);
+    }
+
+    private IQueryable<NaturalOriginEvidenceLedgerEntry> ReadScopedEvidence(Guid tenantId, Guid ownerUserId)
+        => dbContext.NaturalOriginEvidenceLedgerEntries.AsNoTracking()
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId)
             .OrderBy(x => x.ExpectedAtUtc)
             .ThenBy(x => x.EvidenceKind)
             .ThenBy(x => x.CreatedAtUtc)
-            .ToArrayAsync(cancellationToken);
+            .ThenBy(x => x.Id);
+
+    private static void ValidateReadScope(Guid tenantId, Guid ownerUserId)
+    {
+        if (tenantId == Guid.Empty || ownerUserId == Guid.Empty)
+        {
+            throw new ArgumentException("Tenant and owner identifiers are required.");
+        }
     }
 
     private static void Validate(NaturalOriginEvidenceLedgerEntry entry, DateTimeOffset nowUtc)

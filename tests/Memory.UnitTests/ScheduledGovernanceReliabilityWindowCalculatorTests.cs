@@ -283,6 +283,23 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
         result.NonQualifyingRuns.Should().BeEmpty();
     }
 
+    [Theory]
+    [InlineData("Completed", "Converged")]
+    [InlineData("Completed", "0")]
+    [InlineData("Stopped", "NoOpConverged")]
+    public void Receipt_And_History_Reject_Unproven_Scheduled_Decisions(string status, string convergence)
+    {
+        var receipt = ReceiptFrom(QualifyingRun(0)) with
+        {
+            Status = status,
+            FinalConvergenceStatus = convergence
+        };
+        var observation = ScheduledGovernanceReliabilityReceiptProjection.FromReceipt(receipt);
+        observation.Decision.Should().BeNull();
+        var historical = observation with { Decision = ScheduledGovernanceDecision.NoOpConverged };
+        historical.ValidateStoredDecision(reviewAwaitingDecision: false).Decision.Should().BeNull();
+    }
+
     [Fact]
     public void Missing_Natural_Slot_Should_Reset_And_Allow_A_New_Streak_From_The_Next_Slot()
     {
@@ -299,6 +316,32 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
         result.LastResetEvent.Should().NotBeNull();
         result.LastResetEvent!.PreviousConsecutiveQualifyingRuns.Should().Be(1);
         result.LatestQualifyingGovernanceRunId.Should().Be("run-3");
+    }
+
+    [Fact]
+    public void Reused_Signed_Slot_Identity_Cannot_Close_The_Window_With_A_Different_Timestamp()
+    {
+        var runs = Enumerable.Range(0, 5).Select(index => QualifyingRun(index))
+            .Append(QualifyingRun(5, "slot-0"));
+        var result = Calculate(runs);
+
+        result.GatePassed.Should().BeFalse();
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.NonQualifyingRuns.Should().ContainSingle(run =>
+            run.GovernanceRunId == "run-5" && run.Reasons.Contains("duplicate-signed-schedule-slot-id"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void Missing_Signed_Slot_Identity_Cannot_Qualify(string slotId)
+    {
+        var result = Calculate([QualifyingRun(0, slotId)]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.Runs.Should().ContainSingle(run =>
+            run.IsIgnored && run.NaturalOriginStatus == "Unattested" &&
+            run.Reasons.Contains("natural-origin-slot-binding-mismatch"));
     }
 
     [Fact]
@@ -633,6 +676,9 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             }).Calculate(receipts);
 
     private static ScheduledGovernanceReliabilityReceiptProjection QualifyingRun(int index)
+        => QualifyingRun(index, $"slot-{index}");
+
+    private static ScheduledGovernanceReliabilityReceiptProjection QualifyingRun(int index, string slotId)
     {
         var governanceRunId = $"run-{index}";
         var receiptId = Guid.NewGuid();
@@ -651,7 +697,7 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             projectScopeHash,
             "production",
             expectedAt,
-            $"slot-{index}",
+            slotId,
             ScheduledGovernanceReliabilityEvidenceContract.NaturalScheduleTrigger,
             ScheduledGovernanceReliabilityEvidenceContract.ResourceAudience,
             requestIdentityHash,

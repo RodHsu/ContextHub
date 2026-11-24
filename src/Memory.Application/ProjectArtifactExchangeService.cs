@@ -33,31 +33,97 @@ public sealed class ProjectArtifactExchangeService(
         var sourceSystem = NormalizeRequired(request.SourceSystem, nameof(request.SourceSystem));
         var logicalReference = await ValidateLogicalReferenceAsync(request, projectId, cancellationToken);
         var content = NormalizeArtifactContent(request, logicalReference);
-        var sourceRef = string.IsNullOrWhiteSpace(request.SourceRef)
+        var defaultSource = string.IsNullOrWhiteSpace(request.SourceRef);
+        var sourceRef = defaultSource
             ? $"{sourceSystem}:{request.Kind.ToString().ToLowerInvariant()}:{Hash(title, summary, content)[..16]}"
             : request.SourceRef.Trim();
+        var metadata = BuildMetadataJson(request, sourceSystem, logicalReference);
+
+        if (logicalReference is not null && defaultSource && string.IsNullOrWhiteSpace(request.ExternalKey))
+        {
+            // Use a structured identity so separators in titles or content cannot alias a file version.
+            var pinHash = Hash(JsonSerializer.Serialize(new
+            {
+                title,
+                summary,
+                content,
+                logicalReference.FileId,
+                logicalReference.FileVersionId
+            }, JsonOptions));
+            var pinnedSourceRef = $"{sourceSystem}:filereference:v2:{pinHash[..32]}";
+            var pinnedKey = BuildExternalKey(ProjectContext.IdentityKey(projectId), sourceSystem, pinnedSourceRef, request.Kind);
+            return await dbContext.ExecuteInTransactionAsync(async token =>
+            {
+                await dbContext.AcquireTransactionLockAsync(
+                    $"artifact-file-reference:{actor.TenantId}:{actor.UserId}:{ProjectContext.IdentityKey(projectId)}:{Hash(sourceRef)}", token);
+                var identity = await ResolveGeneratedFileReferenceAsync(
+                    projectId, sourceSystem, sourceRef, pinnedSourceRef, pinnedKey, logicalReference, actor, token);
+                return await UpsertAsync(identity.ExternalKey, identity.SourceRef, token);
+            }, cancellationToken);
+        }
+
         var externalKey = string.IsNullOrWhiteSpace(request.ExternalKey)
             ? BuildExternalKey(projectId, sourceSystem, sourceRef, request.Kind)
             : request.ExternalKey.Trim();
+        return await UpsertAsync(externalKey, sourceRef, cancellationToken);
 
-        var document = await memoryService.UpsertAsync(
-            new MemoryUpsertRequest(
-                externalKey,
-                MemoryScope.Project,
-                MemoryType.Artifact,
-                title,
-                content,
-                summary,
-                SourceType,
-                sourceRef,
-                NormalizeTags(request.Tags, request.Kind, sourceSystem),
-                Importance: 0.76m,
-                Confidence: 0.88m,
-                MetadataJson: BuildMetadataJson(request, sourceSystem, logicalReference),
-                ProjectId: projectId),
-            cancellationToken);
+        async Task<ProjectArtifactResult> UpsertAsync(string key, string reference, CancellationToken token)
+        {
+            var document = await memoryService.UpsertAsync(
+                new MemoryUpsertRequest(
+                    key,
+                    MemoryScope.Project,
+                    MemoryType.Artifact,
+                    title,
+                    content,
+                    summary,
+                    SourceType,
+                    reference,
+                    NormalizeTags(request.Tags, request.Kind, sourceSystem),
+                    Importance: 0.76m,
+                    Confidence: 0.88m,
+                    MetadataJson: metadata,
+                    ProjectId: projectId),
+                token);
+            return ToResult(document, logicalReference);
+        }
+    }
 
-        return ToResult(document, logicalReference);
+    private async Task<(string ExternalKey, string SourceRef)> ResolveGeneratedFileReferenceAsync(
+        string projectId, string sourceSystem, string legacySourceRef, string pinnedSourceRef, string pinnedKey,
+        LogicalFileReference pin, ContextHubRequestActor actor, CancellationToken cancellationToken)
+    {
+        var rows = await dbContext.MemoryItems.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
+                        ProjectContext.Matches(x.ProjectId, projectId) &&
+                        (x.ExternalKey == pinnedKey ||
+                         (x.SourceType == SourceType && x.MemoryType == MemoryType.Artifact && x.SourceRef == legacySourceRef)))
+            .Select(x => new { x.ProjectId, x.ExternalKey, x.SourceType, x.MemoryType, x.MetadataJson })
+            .ToArrayAsync(cancellationToken);
+
+        var current = rows.SingleOrDefault(x => x.ExternalKey == pinnedKey);
+        if (current is not null)
+        {
+            if (current.SourceType != SourceType || current.MemoryType != MemoryType.Artifact || !HasPin(current.MetadataJson))
+                throw new InvalidOperationException("The generated artifact key belongs to a different record. Supply an explicit key for publication.");
+            return (pinnedKey, pinnedSourceRef);
+        }
+
+        var legacyKey = BuildExternalKey(projectId, sourceSystem, legacySourceRef, ProjectArtifactKind.FileReference);
+        var matchingLegacyKeys = rows
+            .Where(x => (x.ExternalKey == legacyKey ||
+                         x.ExternalKey == BuildExternalKey(x.ProjectId, sourceSystem, legacySourceRef, ProjectArtifactKind.FileReference)) &&
+                        HasPin(x.MetadataJson))
+            .Select(x => x.ExternalKey)
+            .ToArray();
+        if (matchingLegacyKeys.Contains(legacyKey, StringComparer.Ordinal))
+            return (legacyKey, legacySourceRef);
+        if (matchingLegacyKeys.Length > 1)
+            throw new InvalidOperationException("Multiple legacy artifacts match this file version. Supply the exact existing artifact key.");
+        return matchingLegacyKeys.Length == 1 ? (matchingLegacyKeys[0], legacySourceRef) : (pinnedKey, pinnedSourceRef);
+
+        bool HasPin(string json) => ReadMetadata(json) is { Kind: ProjectArtifactKind.FileReference } metadata &&
+                                    metadata.FileId == pin.FileId && metadata.FileVersionId == pin.FileVersionId;
     }
 
     public async Task<IReadOnlyList<ProjectArtifactResult>> ListAsync(ProjectArtifactListRequest request, CancellationToken cancellationToken)
@@ -268,22 +334,68 @@ public sealed class ProjectArtifactExchangeService(
         try
         {
             using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(metadataJson) ? "{}" : metadataJson);
-            var root = document.RootElement;
-            ValidateMetadataNode(root);
-            if (!root.TryGetProperty("kind", out var kindValue) ||
-                !Enum.TryParse<ProjectArtifactKind>(kindValue.GetString(), true, out var kind)) return null;
-            var sourceSystem = root.TryGetProperty("sourceSystem", out var sourceSystemValue) ? sourceSystemValue.GetString() ?? string.Empty : string.Empty;
-            var fileId = ReadGuid(root, "fileId");
-            var fileVersionId = ReadGuid(root, "fileVersionId");
-            if (kind == ProjectArtifactKind.FileReference && (!fileId.HasValue || !fileVersionId.HasValue)) return null;
-            if (kind != ProjectArtifactKind.FileReference && (fileId.HasValue || fileVersionId.HasValue)) return null;
-            return new ArtifactMetadata(kind, sourceSystem, fileId, fileVersionId);
+            return ReadMetadata(document.RootElement);
         }
         catch (Exception exception) when (exception is JsonException or InvalidOperationException)
         {
             return null;
         }
     }
+
+    private static ArtifactMetadata? ReadMetadata(JsonElement root)
+    {
+        ValidateMetadataNode(root);
+        if (!root.TryGetProperty("kind", out var kindValue) ||
+            !Enum.TryParse<ProjectArtifactKind>(kindValue.GetString(), true, out var kind) ||
+            !Enum.IsDefined(kind)) return null;
+        var sourceSystem = root.TryGetProperty("sourceSystem", out var sourceSystemValue) ? sourceSystemValue.GetString() ?? string.Empty : string.Empty;
+        var fileId = ReadGuid(root, "fileId");
+        var fileVersionId = ReadGuid(root, "fileVersionId");
+        if (kind == ProjectArtifactKind.FileReference &&
+            (!fileId.HasValue || fileId == Guid.Empty || !fileVersionId.HasValue || fileVersionId == Guid.Empty)) return null;
+        if (kind != ProjectArtifactKind.FileReference && (root.TryGetProperty("fileId", out _) || root.TryGetProperty("fileVersionId", out _))) return null;
+        return new ArtifactMetadata(kind, sourceSystem, fileId, fileVersionId);
+    }
+
+    internal static ArtifactDuplicateIdentity? GetDuplicateIdentity(MemoryItem item)
+        => GetDuplicateIdentity(item.MemoryType, item.SourceType, item.Tags, item.MetadataJson);
+
+    internal static ArtifactDuplicateIdentity? GetDuplicateIdentity(MemoryDocument item)
+        => GetDuplicateIdentity(item.MemoryType, item.SourceType, item.Tags, item.MetadataJson);
+
+    internal static ArtifactDuplicateIdentity? GetDuplicateIdentity(
+        MemoryType type, string sourceType, IReadOnlyList<string> tags, string metadataJson)
+    {
+        var ordinary = new ArtifactDuplicateIdentity();
+        if (type != MemoryType.Artifact) return ordinary;
+
+        var taggedReference = tags.Contains("artifact-kind:filereference", StringComparer.OrdinalIgnoreCase);
+        var exchangeSource = string.Equals(sourceType, SourceType, StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(metadataJson) ? "{}" : metadataJson);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return exchangeSource || taggedReference ? null : ordinary;
+            var declaresReference = root.TryGetProperty("kind", out var kind) &&
+                                    kind.ValueKind == JsonValueKind.String &&
+                                    Enum.TryParse<ProjectArtifactKind>(kind.GetString(), true, out var parsedKind) &&
+                                    parsedKind == ProjectArtifactKind.FileReference;
+            var hasPin = root.TryGetProperty("fileId", out _) || root.TryGetProperty("fileVersionId", out _);
+            var markedExchange = root.TryGetProperty("artifactExchange", out var mark) && mark.ValueKind == JsonValueKind.True;
+            if (!exchangeSource && !markedExchange && !taggedReference && !declaresReference && !hasPin) return ordinary;
+
+            var metadata = ReadMetadata(root);
+            if (metadata?.Kind == ProjectArtifactKind.FileReference)
+                return new ArtifactDuplicateIdentity(metadata.FileId, metadata.FileVersionId);
+            return metadata is null || taggedReference || declaresReference || hasPin ? null : ordinary;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    internal readonly record struct ArtifactDuplicateIdentity(Guid? FileId, Guid? FileVersionId);
 
     private static Guid? ReadGuid(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var parsed)

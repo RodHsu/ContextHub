@@ -110,6 +110,8 @@ services:
     build:
       context: deploy/docker-socket-proxy
       dockerfile: Dockerfile
+      args:
+        ALPINE_MIRROR: ${CONTEXTHUB_ALPINE_MIRROR:-}
     command: ["-f", "/usr/local/etc/haproxy/custom.cfg"]
     restart: always
     volumes:
@@ -135,6 +137,8 @@ services:
     build:
       context: deploy/docker-socket-proxy
       dockerfile: Dockerfile
+      args:
+        ALPINE_MIRROR: ${CONTEXTHUB_ALPINE_MIRROR:-}
     command: ["-f", "/usr/local/etc/haproxy/custom.cfg"]
     restart: always
     volumes:

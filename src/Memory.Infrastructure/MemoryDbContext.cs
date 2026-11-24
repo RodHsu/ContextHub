@@ -9,7 +9,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace Memory.Infrastructure;
 
-public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) : DbContext(options), IApplicationDbContext
+public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> options) : DbContext(options), IApplicationDbContext
 {
     private readonly HashSet<Guid> automaticallyCapturedOutboxIds = [];
 
@@ -264,6 +264,8 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     {
         private bool committed;
 
+        public bool OwnsTransaction => true;
+
         public async Task CommitAsync(CancellationToken cancellationToken = default)
         {
             await transaction.CommitAsync(cancellationToken);
@@ -294,12 +296,53 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
     public void ClearTrackedChanges()
         => ChangeTracker.Clear();
 
+    public async Task<bool> LockMemoryEvidenceAsync(Guid memoryId, Guid tenantId, Guid ownerUserId, string projectId,
+        CancellationToken cancellationToken)
+    {
+        if (!Database.IsNpgsql() || Database.CurrentTransaction?.GetDbTransaction().IsolationLevel != IsolationLevel.Serializable)
+        {
+            throw new InvalidOperationException("Memory evidence requires a serializable PostgreSQL transaction.");
+        }
+
+        return await MemoryItems.FromSqlInterpolated($"""
+            SELECT *
+            FROM memory_items
+            WHERE id = {memoryId}
+              AND tenant_id = {tenantId}
+              AND owner_user_id = {ownerUserId}
+              AND public.project_identity_equals(project_id, {projectId})
+            FOR SHARE
+            """).AsNoTracking().Select(memory => (Guid?)memory.Id).SingleOrDefaultAsync(cancellationToken) is not null;
+    }
+
     public async Task AcquireTransactionLockAsync(string lockKey, CancellationToken cancellationToken = default)
     {
         if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
         {
             await Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0))", cancellationToken);
         }
+    }
+
+    public async Task<bool> LockAdjudicationInsightEvidenceAsync(Guid insightId, Guid linkedInsightId, Guid tenantId,
+        Guid ownerUserId, string projectId, CancellationToken cancellationToken)
+    {
+        if (!Database.IsNpgsql() || Database.CurrentTransaction?.GetDbTransaction().IsolationLevel != IsolationLevel.Serializable)
+        {
+            throw new InvalidOperationException("Adjudication insight evidence requires a serializable PostgreSQL transaction.");
+        }
+
+        // Both rows are locked in the same order even when two insights reference one another.
+        var locked = await ConversationInsights.FromSqlInterpolated($"""
+            SELECT *
+            FROM conversation_insights
+            WHERE id IN ({insightId}, {linkedInsightId})
+              AND tenant_id = {tenantId}
+              AND owner_user_id = {ownerUserId}
+              AND public.project_identity_equals(project_id, {projectId})
+            ORDER BY id
+            FOR NO KEY UPDATE
+            """).AsNoTracking().Select(insight => insight.Id).ToListAsync(cancellationToken);
+        return locked.Count == 2;
     }
 
     public async Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default)
@@ -321,6 +364,24 @@ public sealed class MemoryDbContext(DbContextOptions<MemoryDbContext> options) :
             await transaction.RollbackAsync(CancellationToken.None);
             throw;
         }
+    }
+
+    public async Task<IReadOnlyList<MemoryItem>> LoadLockedArtifactPairAsync(Guid duplicateId, Guid authorityId,
+        Guid tenantId, Guid ownerUserId, string projectId, CancellationToken cancellationToken)
+    {
+        if (!Database.IsNpgsql() || Database.CurrentTransaction is null)
+            throw new InvalidOperationException("Artifact evidence requires a PostgreSQL transaction.");
+
+        return await MemoryItems.FromSqlInterpolated($"""
+            SELECT *
+            FROM memory_items
+            WHERE id IN ({duplicateId}, {authorityId})
+              AND tenant_id = {tenantId}
+              AND owner_user_id = {ownerUserId}
+              AND public.project_identity_equals(project_id, {projectId})
+            ORDER BY id
+            FOR NO KEY UPDATE
+            """).AsNoTracking().ToListAsync(cancellationToken);
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)

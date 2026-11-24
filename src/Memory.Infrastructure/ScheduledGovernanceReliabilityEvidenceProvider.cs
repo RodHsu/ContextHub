@@ -13,8 +13,9 @@ namespace Memory.Infrastructure;
 /// </summary>
 public sealed class ScheduledGovernanceReliabilityEvidenceProvider(
     MemoryDbContext dbContext,
-    INaturalOriginEvidenceStore evidenceStore) : IScheduledGovernanceReliabilityEvidenceProvider
+    INaturalOriginEvidenceStore evidenceStore) : IScheduledGovernanceReliabilityHistoryEvidenceProvider
 {
+    private const int HistoryChunkSize = 32;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<ScheduledGovernanceReliabilityEvidenceSnapshot?> GetAsync(
@@ -39,6 +40,67 @@ public sealed class ScheduledGovernanceReliabilityEvidenceProvider(
                        row.OwnerUserId == query.OwnerUserId &&
                        row.GovernanceRunId == query.GovernanceRunId,
                 cancellationToken);
+        return ProjectSnapshot(rows, query, receipt);
+    }
+
+    public async Task<IReadOnlyDictionary<ScheduledGovernanceReliabilityEvidenceQuery, ScheduledGovernanceReliabilityEvidenceSnapshot?>> GetHistoryAsync(
+        IReadOnlyList<ScheduledGovernanceReliabilityEvidenceQuery> queries,
+        CancellationToken cancellationToken)
+    {
+        var results = new Dictionary<ScheduledGovernanceReliabilityEvidenceQuery, ScheduledGovernanceReliabilityEvidenceSnapshot?>();
+        foreach (var actorQueries in queries.Distinct().GroupBy(q => (q.TenantId, q.OwnerUserId)))
+        {
+            var (tenantId, ownerUserId) = actorQueries.Key;
+            foreach (var chunk in actorQueries.Chunk(HistoryChunkSize))
+            {
+                var rows = await evidenceStore.ListForRunsAsync(
+                    tenantId, ownerUserId, chunk.Select(q => q.GovernanceRunId).ToArray(), cancellationToken);
+                var rowsByRun = rows.ToLookup(r => r.GovernanceRunIdHash, StringComparer.Ordinal);
+                var matchedQueries = new List<(ScheduledGovernanceReliabilityEvidenceQuery Query, IEnumerable<NaturalOriginEvidenceLedgerEntry> Rows)>();
+                foreach (var query in chunk)
+                {
+                    var runRows = rowsByRun[ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(query.GovernanceRunId)];
+                    if (runRows.Any())
+                    {
+                        matchedQueries.Add((query, runRows));
+                    }
+                    else
+                    {
+                        results.Add(query, null);
+                    }
+                }
+
+                if (matchedQueries.Count == 0)
+                {
+                    continue;
+                }
+
+                var receiptIds = matchedQueries.Select(match => match.Query.ReceiptId).Distinct().ToArray();
+                var receipts = await dbContext.GovernanceRunReceipts.AsNoTracking()
+                    .Where(r => r.TenantId == tenantId && r.OwnerUserId == ownerUserId && receiptIds.Contains(r.Id))
+                    .ToDictionaryAsync(r => r.Id, cancellationToken);
+
+                foreach (var (query, runRows) in matchedQueries)
+                {
+                    var receipt = receipts.GetValueOrDefault(query.ReceiptId);
+                    if (receipt is not null && !string.Equals(receipt.GovernanceRunId, query.GovernanceRunId, StringComparison.Ordinal))
+                    {
+                        receipt = null;
+                    }
+
+                    results.Add(query, ProjectSnapshot(runRows, query, receipt));
+                }
+            }
+        }
+
+        return results;
+    }
+
+    private static ScheduledGovernanceReliabilityEvidenceSnapshot ProjectSnapshot(
+        IEnumerable<NaturalOriginEvidenceLedgerEntry> rows,
+        ScheduledGovernanceReliabilityEvidenceQuery query,
+        GovernanceRunReceipt? receipt)
+    {
         var attestationRows = rows
             .Where(row => row.EvidenceKind == NaturalOriginEvidenceKind.PlatformAttestation)
             .ToArray();

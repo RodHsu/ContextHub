@@ -34,15 +34,21 @@ public sealed class GovernanceBatchExecutor(
         GovernanceBatchExecuteRequest request,
         CancellationToken cancellationToken)
     {
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch");
         var startedAt = clock.UtcNow;
         var receiptEligible = false;
         IAsyncDisposable? runLock = null;
         try
         {
+            var actor = actorAccessor.Current;
             ValidateExecutionMode(request.ExecutionMode);
-            EnsureExecutionActorAllowed(request, actorAccessor.Current);
+            EnsureExecutionActorAllowed(request, actor);
             ValidatePublishedContract(request);
             ValidateRequest(request);
+            var tenantId = actor.TenantId ?? throw new UnauthorizedAccessException("Governance execution requires a tenant actor.");
+            // Shared is implicit in a batch, so the ordinary project allowlist cannot enforce its durable grant.
+            await GovernanceProjectScopeResolver.EnsureDurableGrantsAsync(
+                dbContext, tenantId, [ProjectContext.SharedProjectId], requireWrite: true, cancellationToken);
             if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled)
             {
                 runLock = await runReceipts.AcquireRunLockAsync(
@@ -89,13 +95,16 @@ public sealed class GovernanceBatchExecutor(
                         request.GovernanceRunId.Trim(), request.SnapshotToken.Trim(), request.IsReReview,
                         requireWriteAuthorization: true, cancellationToken);
                 }
-                await runReceipts.RecordExecutionAsync(request, terminalReplay, startedAt, CancellationToken.None);
+                await RecordCompletionReceiptAsync(request, terminalReplay, startedAt);
                 return terminalReplay;
             }
 
-            await runReceipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
+            using (GovernanceDiagnostics.Activities.StartActivity("governance.batch.start-receipt"))
+            {
+                await runReceipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
+            }
             var result = await ExecuteCoreAsync(request, cancellationToken);
-            await runReceipts.RecordExecutionAsync(request, result, startedAt, CancellationToken.None);
+            await RecordCompletionReceiptAsync(request, result, startedAt);
             return result;
         }
         catch (GovernanceBatchException ex)
@@ -103,7 +112,7 @@ public sealed class GovernanceBatchExecutor(
             var failure = GovernanceBatchExecuteResult.Failure(request, ex);
             if (receiptEligible)
             {
-                await runReceipts.RecordExecutionAsync(request, failure, startedAt, CancellationToken.None);
+                await RecordCompletionReceiptAsync(request, failure, startedAt);
             }
             return failure;
         }
@@ -134,6 +143,15 @@ public sealed class GovernanceBatchExecutor(
         }
     }
 
+    private async Task RecordCompletionReceiptAsync(
+        GovernanceBatchExecuteRequest request,
+        GovernanceBatchExecuteResult result,
+        DateTimeOffset startedAt)
+    {
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch.completion-receipt");
+        await runReceipts.RecordExecutionAsync(request, result, startedAt, CancellationToken.None);
+    }
+
     private async Task<GovernanceBatchExecuteResult> ExecuteCoreAsync(
         GovernanceBatchExecuteRequest request,
         CancellationToken cancellationToken)
@@ -159,26 +177,29 @@ public sealed class GovernanceBatchExecutor(
         }
         DurableMemoryGovernanceSnapshotResult snapshot;
         IReadOnlyList<string> projectIds;
-        if (!string.IsNullOrWhiteSpace(request.SnapshotToken))
+        using (GovernanceDiagnostics.Activities.StartActivity("governance.batch.snapshot"))
         {
-            snapshot = await durableGovernance.GetSnapshotAsync(
-                request.GovernanceRunId.Trim(),
-                request.SnapshotToken.Trim(),
-                request.IsReReview,
-                requireWriteAuthorization: true,
-                cancellationToken);
-            projectIds = DurableMemoryGovernancePolicy.ToExecutionProjectIds(snapshot.Coverage.GovernanceProjectIds);
-            EnsureExplicitScopeMatchesSnapshot(request.ProjectIds, projectIds);
-            projectIds = await ResolveProjectIdsAsync(projectIds, actor, cancellationToken);
-        }
-        else
-        {
-            projectIds = await ResolveProjectIdsAsync(request.ProjectIds, actor, cancellationToken);
-            snapshot = await durableGovernance.GetOrCreateSnapshotAsync(
-                projectIds,
-                request.GovernanceRunId.Trim(),
-                request.IsReReview,
-                cancellationToken);
+            if (!string.IsNullOrWhiteSpace(request.SnapshotToken))
+            {
+                snapshot = await durableGovernance.GetSnapshotAsync(
+                    request.GovernanceRunId.Trim(),
+                    request.SnapshotToken.Trim(),
+                    request.IsReReview,
+                    requireWriteAuthorization: true,
+                    cancellationToken);
+                projectIds = DurableMemoryGovernancePolicy.ToExecutionProjectIds(snapshot.Coverage.GovernanceProjectIds);
+                EnsureExplicitScopeMatchesSnapshot(request.ProjectIds, projectIds);
+                projectIds = await ResolveProjectIdsAsync(projectIds, actor, cancellationToken);
+            }
+            else
+            {
+                projectIds = await ResolveProjectIdsAsync(request.ProjectIds, actor, cancellationToken);
+                snapshot = await durableGovernance.GetOrCreateSnapshotAsync(
+                    projectIds,
+                    request.GovernanceRunId.Trim(),
+                    request.IsReReview,
+                    cancellationToken);
+            }
         }
         var projectSetHash = Hash(string.Join('\n', projectIds.Append(ProjectContext.SharedProjectId)
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -367,11 +388,15 @@ public sealed class GovernanceBatchExecutor(
                 actor,
                 cancellationToken);
         }
-        var terminalItemKeys = await GetTerminalItemKeysAsync(
-            logicalRunIds,
-            run.Id,
-            planItems.Select(x => x.Key).ToHashSet(StringComparer.Ordinal),
-            cancellationToken);
+        HashSet<string> terminalItemKeys;
+        using (GovernanceDiagnostics.Activities.StartActivity("governance.batch.terminal-items"))
+        {
+            terminalItemKeys = await GetTerminalItemKeysAsync(
+                logicalRunIds,
+                run.Id,
+                planItems.Select(x => x.Key).ToHashSet(StringComparer.Ordinal),
+                cancellationToken);
+        }
         var executablePlanItems = planItems.Where(x => !terminalItemKeys.Contains(x.Key)).ToList();
         var index = 0;
         var lastItemKey = cursorPayload?.ItemKey ?? string.Empty;
@@ -535,7 +560,8 @@ public sealed class GovernanceBatchExecutor(
         execution.Status = "Completed";
         execution.CompletedAt = clock.UtcNow;
         execution.UpdatedAt = clock.UtcNow;
-        var retentionReview = await autonomousRetention.ReviewAsync(projectIds, request.GovernanceRunId.Trim(), CancellationToken.None);
+        var retentionReview = await autonomousRetention.ReviewAsync(projectIds, request.GovernanceRunId.Trim(), CancellationToken.None,
+            allowCancelledReactivation: false);
         accumulator.ApplyRetentionReview(retentionReview);
         var completionAudit = await AddAuditAsync(
             actor,
@@ -839,40 +865,54 @@ public sealed class GovernanceBatchExecutor(
             item.Classification == "DuplicateArtifact" &&
             allowed.Contains(GovernanceBatchActionType.ArtifactReconcile))
         {
-            var duplicate = await dbContext.MemoryItems.AsNoTracking().SingleOrDefaultAsync(x => x.Id == item.Id, cancellationToken);
+            await using var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
             var authorityId = item.RelatedResourceIds.FirstOrDefault();
-            var authority = authorityId == Guid.Empty
-                ? null
-                : await dbContext.MemoryItems.AsNoTracking().SingleOrDefaultAsync(x => x.Id == authorityId, cancellationToken);
-            if (duplicate is null || authority is null || duplicate.Status == MemoryStatus.Archived)
+            var rows = await dbContext.LoadLockedArtifactPairAsync(item.Id, authorityId, actor.TenantId!.Value,
+                actor.UserId!.Value, item.ProjectId, cancellationToken);
+            var duplicate = rows.SingleOrDefault(x => x.Id == item.Id);
+            var authority = rows.SingleOrDefault(x => x.Id == authorityId && x.Id != item.Id);
+            GovernanceBatchItemResult result;
+            if (duplicate is null || duplicate.Status == MemoryStatus.Archived)
             {
-                return await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
+                result = await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
                     GovernanceBatchItemDisposition.NoOp, "Artifact duplicate is already reconciled or no longer exists.", [],
                     authority is null ? [] : [authority.Id], actor, cancellationToken);
             }
-            if (!Memory.Application.ProjectContext.Matches(duplicate.ProjectId, authority.ProjectId) ||
-                duplicate.MemoryType != MemoryType.Artifact || authority.MemoryType != MemoryType.Artifact ||
-                !string.Equals(Normalize(duplicate.Title), Normalize(authority.Title), StringComparison.Ordinal) ||
-                !string.Equals(Normalize(duplicate.Summary), Normalize(authority.Summary), StringComparison.Ordinal) ||
-                !string.Equals(Normalize(duplicate.SourceType), Normalize(authority.SourceType), StringComparison.Ordinal))
+            else if (authority is null || duplicate.Status != MemoryStatus.Active || authority.Status != MemoryStatus.Active ||
+                     duplicate.MemoryType != MemoryType.Artifact || authority.MemoryType != MemoryType.Artifact ||
+                     ProjectArtifactExchangeService.GetDuplicateIdentity(duplicate) is not { } identity ||
+                     identity != ProjectArtifactExchangeService.GetDuplicateIdentity(authority) ||
+                     !string.Equals(Normalize(duplicate.Title), Normalize(authority.Title), StringComparison.Ordinal) ||
+                     !string.Equals(Normalize(duplicate.Summary), Normalize(authority.Summary), StringComparison.Ordinal) ||
+                     !string.Equals(Normalize(duplicate.SourceType), Normalize(authority.SourceType), StringComparison.Ordinal) ||
+                     (duplicate.Confidence, duplicate.Importance, duplicate.UpdatedAt)
+                     .CompareTo((authority.Confidence, authority.Importance, authority.UpdatedAt)) > 0)
             {
-                return await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
+                result = await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
                     GovernanceBatchItemDisposition.RequiresUserDecision,
                     "Artifact semantic evidence no longer establishes a deterministic authority winner.", [], [duplicate.Id], actor, cancellationToken);
             }
-            var proposal = await CreateAndApplyProposalAsync("memory_archive", duplicate.ProjectId,
-                "Archive deterministic duplicate artifact",
-                $"Archive duplicate artifact {duplicate.Id:D}; authority {authority.Id:D} remains active.",
-                new MemoryArchiveRequest(duplicate.Id, duplicate.ProjectId, true, "Autonomous semantic duplicate resolution."),
-                request.GovernanceRunId, cancellationToken);
-            var readBack = await memoryService.GetAsync(duplicate.Id, cancellationToken);
-            if (readBack?.Status != MemoryStatus.Archived)
-                throw new InvalidOperationException("Semantic artifact resolution failed resource read-back.");
-            var result = await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
-                GovernanceBatchItemDisposition.Applied,
-                "Deterministic duplicate artifact was autonomously archived with authority and resource read-back.",
-                [proposal.Id], [duplicate.Id, authority.Id], actor, cancellationToken);
-            return result with { SemanticAutoResolved = true };
+            else
+            {
+                var proposal = await CreateAndApplyProposalAsync("memory_archive", duplicate.ProjectId,
+                    "Archive deterministic duplicate artifact",
+                    $"Archive duplicate artifact {duplicate.Id:D}; authority {authority.Id:D} remains active.",
+                    new MemoryArchiveRequest(duplicate.Id, duplicate.ProjectId, true, "Autonomous semantic duplicate resolution."),
+                    request.GovernanceRunId, cancellationToken);
+                var readBack = await memoryService.GetAsync(duplicate.Id, cancellationToken);
+                if (readBack?.Status != MemoryStatus.Archived)
+                    throw new InvalidOperationException("Semantic artifact resolution failed resource read-back.");
+                result = (await AuditedResultAsync(item, GovernanceBatchActionType.ArtifactReconcile,
+                    GovernanceBatchItemDisposition.Applied,
+                    "Deterministic duplicate artifact was autonomously archived with authority and resource read-back.",
+                    [proposal.Id], [duplicate.Id, authority.Id], actor, cancellationToken)) with
+                {
+                    SemanticAutoResolved = true
+                };
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return result;
         }
 
         if (item.Kind == nameof(GovernanceItemKind.Discussion) &&
@@ -1036,6 +1076,18 @@ public sealed class GovernanceBatchExecutor(
                     [item.Id], actor, cancellationToken);
             }
             var candidate = await autonomousRetention.QuarantineAsync(item.Id, item.ProjectId, request.GovernanceRunId, cancellationToken);
+            if (candidate.RecommendedAction == AutonomousRetentionCandidateResult.QuarantineRequiresReview)
+            {
+                return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
+                    GovernanceBatchItemDisposition.Deferred, "Retention lifecycle changed after planning. A fresh review is required.",
+                    [], [item.Id], actor, cancellationToken);
+            }
+            if (candidate.RecommendedAction == AutonomousRetentionCandidateResult.AlreadyQuarantined)
+            {
+                return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
+                    GovernanceBatchItemDisposition.NoOp, "Resource is already archived and quarantined.",
+                    [], [item.Id], actor, cancellationToken);
+            }
             return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
                 GovernanceBatchItemDisposition.Applied,
                 $"Resource was archived and quarantined under typed policy {candidate.PolicyKind}; deleteEligibleAt={candidate.DeleteEligibleAt:O}.",
@@ -1569,34 +1621,44 @@ public sealed class GovernanceBatchExecutor(
         {
             return await AuditedResultAsync(item, null, GovernanceBatchItemDisposition.Deferred, "Conversation Insight disposition is not allowed by this execution payload.", [], [], actor, cancellationToken);
         }
-        var protectedInsight = insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact || insight.Importance >= 0.8m;
+        var protectedInsight = GovernanceEvidenceFingerprint.IsProtectedInsight(insight);
+        var scheduled = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled;
         if (!protectedInsight && insight.Confidence >= request.SemanticAutoResolutionConfidenceThreshold)
         {
-            var title = GovernanceEvidenceFingerprint.NormalizeExactText(insight.Title);
-            var summary = GovernanceEvidenceFingerprint.NormalizeExactText(insight.Summary);
-            var now = clock.UtcNow;
-            var durableEquivalents = await dbContext.MemoryItems.AsNoTracking().Where(x =>
-                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && Memory.Application.ProjectContext.Matches(x.ProjectId, insight.ProjectId) &&
-                x.Status == MemoryStatus.Active &&
-                x.AuthorityState == MemoryAuthorityState.Current &&
-                x.ValidFrom <= now &&
-                (!x.ValidUntil.HasValue || x.ValidUntil > now) &&
-                x.Title.Trim().ToLower() == title && x.Summary.Trim().ToLower() == summary)
-                .Take(2)
-                .ToArrayAsync(cancellationToken);
-            if (durableEquivalents.Length == 1)
+            var exactIds = await GovernanceEvidenceFingerprint.FindCurrentExactMemoryIdsAsync(
+                dbContext, actor, insight, clock.UtcNow, cancellationToken);
+            if (exactIds.Length == 1 && (!scheduled ||
+                (ProjectContext.Matches(insight.ProjectId, item.ProjectId) &&
+                 item.RelatedResourceIds.Count == 1 && item.RelatedResourceIds[0] == exactIds[0])))
             {
-                var durableEquivalent = durableEquivalents[0];
-                await conversationService.SkipInsightAsync(new ConversationInsightGovernanceRequest(
+                var evidenceId = exactIds[0];
+                var outcome = await conversationService.SkipInsightWithEvidenceAsync(new ConversationInsightGovernanceRequest(
                     insight.Id, request.GovernanceRunId,
-                    $"Autonomously resolved against durable evidence {durableEquivalent.Id:D}."), cancellationToken);
-                var semantic = await AuditedResultAsync(item, GovernanceBatchActionType.SemanticReevaluate,
-                    GovernanceBatchItemDisposition.Applied,
-                    "Reopened or pending insight was autonomously resolved against an exact durable evidence match.",
-                    [], [insight.Id, durableEquivalent.Id], actor, cancellationToken);
-                return semantic with { SemanticAutoResolved = true };
+                    $"Autonomously resolved against durable evidence {evidenceId:D}."),
+                    new(evidenceId, insight.ProjectId, insight.UpdatedAt, request.SemanticAutoResolutionConfidenceThreshold),
+                    cancellationToken);
+                if (outcome == ConversationInsightSkipOutcome.AlreadyTerminal)
+                {
+                    return await AuditedResultAsync(item, GovernanceBatchActionType.ConversationInsightDisposition,
+                        GovernanceBatchItemDisposition.NoOp, "The insight had already reached a terminal state.", [],
+                        [insight.Id], actor, cancellationToken);
+                }
+
+                if (outcome == ConversationInsightSkipOutcome.Applied)
+                {
+                    var semantic = await AuditedResultAsync(item, GovernanceBatchActionType.SemanticReevaluate,
+                        GovernanceBatchItemDisposition.Applied,
+                        "Reopened or pending insight was autonomously resolved against an exact durable evidence match.",
+                        [], [insight.Id, evidenceId], actor, cancellationToken);
+                    return semantic with { SemanticAutoResolved = true };
+                }
+
+                return await InsightEvidenceChangedAsync(item, actor, cancellationToken);
             }
         }
+        if (scheduled)
+            return await InsightEvidenceChangedAsync(item, actor, cancellationToken);
+
         var disposition = protectedInsight ? ConversationInsightDisposition.RequiresUserDecision : ConversationInsightDisposition.Deferred;
         var updated = await conversationService.SetInsightDispositionAsync(new ConversationInsightDispositionRequest(
             insight.Id,
@@ -1612,6 +1674,13 @@ public sealed class GovernanceBatchExecutor(
         return await AuditedResultAsync(item, GovernanceBatchActionType.ConversationInsightDisposition, resultDisposition,
             updated.GovernanceReason, [], [insight.Id], actor, cancellationToken);
     }
+
+    private Task<GovernanceBatchItemResult> InsightEvidenceChangedAsync(
+        BatchPlanItem item, ContextHubRequestActor actor, CancellationToken cancellationToken)
+        => AuditedResultAsync(item, GovernanceBatchActionType.ConversationInsightDisposition,
+            GovernanceBatchItemDisposition.RequiresUserDecision,
+            "The reviewed insight or its exact durable evidence changed. Obtain a fresh review.", [],
+            [item.Id], actor, cancellationToken);
 
     private async Task<GovernanceBatchItemResult> ProcessPendingProposalAsync(
         BatchPlanItem item,
@@ -1726,7 +1795,9 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
-        var fullPlan = await fullGovernance.BuildAsync(projectIds, governanceRunId, snapshot, cancellationToken);
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch.plan-build");
+        var fullPlan = await fullGovernance.BuildAsync(projectIds, governanceRunId, snapshot, cancellationToken,
+            allowCancelledRetentionReactivation: false);
         return fullPlan.Items.Select(x => new BatchPlanItem(
                 x.ItemKey,
                 DispatchKindFor(x.ItemKind),
@@ -1757,6 +1828,7 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch.plan-validation");
         if (persistedPlan.Count > MaximumPlanItems)
         {
             throw new GovernanceBatchException(
@@ -2176,6 +2248,8 @@ public sealed class GovernanceBatchExecutor(
     private static bool IsExactOrSameKeyDuplicate(MemoryDocument left, MemoryDocument right)
     {
         if (left.MemoryType != right.MemoryType || left.Status != MemoryStatus.Active || right.Status != MemoryStatus.Active) return false;
+        if (ProjectArtifactExchangeService.GetDuplicateIdentity(left) is not { } identity ||
+            identity != ProjectArtifactExchangeService.GetDuplicateIdentity(right)) return false;
         var exact = Normalize(left.Title) == Normalize(right.Title) && Normalize(left.Content) == Normalize(right.Content) && Normalize(left.Summary) == Normalize(right.Summary);
         var sameKey = !string.IsNullOrWhiteSpace(left.ExternalKey) && string.Equals(left.ExternalKey, right.ExternalKey, StringComparison.OrdinalIgnoreCase);
         var contained = Normalize(left.Content).Contains(Normalize(right.Content), StringComparison.Ordinal) || Normalize(right.Content).Contains(Normalize(left.Content), StringComparison.Ordinal);

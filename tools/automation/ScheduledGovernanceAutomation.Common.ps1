@@ -183,6 +183,27 @@ function Test-ScheduledGovernanceAutomationSpec {
         Add-ScheduledGovernanceSpecError $errors "Reliability window must be 24 hours."
     }
 
+    try {
+        $canonicalPath = Get-ScheduledGovernanceAutomationDefaultSpecPath
+        $canonicalSpec = Get-Content -LiteralPath $canonicalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $canonicalCatalog = Get-ScheduledGovernanceProperty $canonicalSpec "catalog"
+        $expectedCatalogVersion = [string](Get-ScheduledGovernanceProperty $canonicalCatalog "publishedCatalogVersion")
+        $expectedToolSchemasHash = [string](Get-ScheduledGovernanceProperty $canonicalCatalog "publishedToolSchemasHash")
+        if ([string]::IsNullOrWhiteSpace($expectedCatalogVersion) -or
+            $expectedToolSchemasHash -cnotmatch "^[a-f0-9]{64}$") {
+            throw "The checked-in catalog identity or schema digest is missing or invalid."
+        }
+    }
+    catch {
+        Add-ScheduledGovernanceSpecError $errors "Cannot load the checked-in catalog authority: $($_.Exception.Message)"
+        return [pscustomobject]@{
+            Valid = $false
+            Errors = @($errors)
+            Spec = $spec
+            Path = $Path
+        }
+    }
+
     $catalog = Get-ScheduledGovernanceProperty $spec "catalog"
     $catalogNames = @(ConvertTo-ScheduledGovernanceArray (Get-ScheduledGovernanceProperty $catalog "toolNames"))
     if ($catalogNames.Count -ne 4 -or
@@ -197,23 +218,24 @@ function Test-ScheduledGovernanceAutomationSpec {
         Add-ScheduledGovernanceSpecError $errors "publishedCatalogHash does not match the canonical four-tool set."
     }
     $publishedToolSchemasHash = [string](Get-ScheduledGovernanceProperty $catalog "publishedToolSchemasHash")
-    if ($publishedToolSchemasHash -cnotmatch "^[a-f0-9]{64}$") {
-        Add-ScheduledGovernanceSpecError $errors "publishedToolSchemasHash must identify the complete four-tool schemas."
+    if ($publishedToolSchemasHash -cne $expectedToolSchemasHash) {
+        Add-ScheduledGovernanceSpecError $errors "publishedToolSchemasHash does not match the checked-in four-tool schemas."
     }
-    if ((Get-ScheduledGovernanceProperty $catalog "publishedCatalogVersion") -cne "2026-09-28-automation-v8") {
-        Add-ScheduledGovernanceSpecError $errors "publishedCatalogVersion does not match the deployed automation contract."
+    if ((Get-ScheduledGovernanceProperty $catalog "publishedCatalogVersion") -cne $expectedCatalogVersion) {
+        Add-ScheduledGovernanceSpecError $errors "publishedCatalogVersion does not match the checked-in catalog."
     }
     $runtime = Get-ScheduledGovernanceProperty $catalog "runtimeIdentity"
     if ((Get-ScheduledGovernanceProperty $runtime "serverName") -cne "Memory.ScheduledGovernanceGateway") {
         Add-ScheduledGovernanceSpecError $errors "runtimeIdentity.serverName is not the scheduled gateway."
     }
-    if ((Get-ScheduledGovernanceProperty $runtime "serverVersion") -cne "2026-09-28-automation-v8+$($expectedCatalogHash.Substring(0, 12))") {
+    $expectedServerVersion = "$expectedCatalogVersion+$($expectedCatalogHash.Substring(0, 12))"
+    if ((Get-ScheduledGovernanceProperty $runtime "serverVersion") -cne $expectedServerVersion) {
         Add-ScheduledGovernanceSpecError $errors "runtimeIdentity.serverVersion does not match catalog identity."
     }
 
     $contract = Get-ScheduledGovernanceProperty $spec "contract"
     if ((Get-ScheduledGovernanceProperty $contract "toolContractVersion") -cne "1.5") {
-        Add-ScheduledGovernanceSpecError $errors "Scheduled tool contract version must be 1.4."
+        Add-ScheduledGovernanceSpecError $errors "Scheduled tool contract version must be 1.5."
     }
     if ((Get-ScheduledGovernanceProperty $contract "schemaHash") -cne "de1a67e9a2d6f5160d975fc3f4414c220ebbd7f68c6b66bc86e4e506b6244ee8") {
         Add-ScheduledGovernanceSpecError $errors "Scheduled execute schema hash does not match the canonical contract."
@@ -238,8 +260,9 @@ function Test-ScheduledGovernanceAutomationSpec {
     }
 
     $catalogTools = @(ConvertTo-ScheduledGovernanceArray (Get-ScheduledGovernanceProperty $spec "catalogTools"))
-    if ($catalogTools.Count -ne 4) {
-        Add-ScheduledGovernanceSpecError $errors "catalogTools must describe exactly four tools."
+    $catalogToolNames = @($catalogTools | ForEach-Object { Get-ScheduledGovernanceProperty $_ "name" })
+    if (-not (Test-ScheduledGovernanceSetEqual $catalogToolNames (Get-ScheduledGovernanceExpectedToolName))) {
+        Add-ScheduledGovernanceSpecError $errors "catalogTools must describe each of the four scheduled governance tools exactly once."
     }
     foreach ($tool in $catalogTools) {
         $name = [string](Get-ScheduledGovernanceProperty $tool "name")
@@ -247,6 +270,10 @@ function Test-ScheduledGovernanceAutomationSpec {
             Add-ScheduledGovernanceSpecError $errors "catalogTools contains an unapproved tool name."
         }
         $fields = @(ConvertTo-ScheduledGovernanceArray (Get-ScheduledGovernanceProperty $tool "inputFields"))
+        if ($name -ceq "scheduled_governance_run_get" -and
+            -not (Test-ScheduledGovernanceSetEqual $fields @("governanceRunId", "includeReliabilityHistory"))) {
+            Add-ScheduledGovernanceSpecError $errors "Receipt recovery must expose exactly governanceRunId and includeReliabilityHistory."
+        }
         foreach ($field in $fields) {
             if ([string]$field -in @("projectIds", "allowHardDelete", "allowMaturedDelete", "allowedActionTypes", "maxRiskLevel", "dryRun", "executionMode")) {
                 Add-ScheduledGovernanceSpecError $errors "catalogTools exposes a forbidden authority field."
@@ -263,6 +290,9 @@ function Test-ScheduledGovernanceAutomationSpec {
         if ($prompt.IndexOf($cue, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
             Add-ScheduledGovernanceSpecError $errors "The orchestration prompt is missing the '$cue' control cue."
         }
+    }
+    if ($prompt.IndexOf("includeReliabilityHistory to false", [StringComparison]::Ordinal) -lt 0) {
+        Add-ScheduledGovernanceSpecError $errors "The orchestration prompt must disable reliability history for intermediate receipt recovery."
     }
     if ((Get-ScheduledGovernanceProperty $orchestration "runIdPolicy") -cne "fresh-per-schedule" -or
         (Get-ScheduledGovernanceProperty $orchestration "scopePolicy") -cne "server-resolved-complete-authorized-scope" -or

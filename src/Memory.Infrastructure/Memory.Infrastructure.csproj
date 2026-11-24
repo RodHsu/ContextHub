@@ -8,6 +8,7 @@
   <ItemGroup>
     <EmbeddedResource Include="Sql\Migrations\*.sql" />
     <InternalsVisibleTo Include="Memory.UnitTests" />
+    <InternalsVisibleTo Include="Memory.IntegrationTests" />
   </ItemGroup>
 
   <ItemGroup>

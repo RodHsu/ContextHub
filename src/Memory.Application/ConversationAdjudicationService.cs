@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,11 +15,27 @@ public sealed class ConversationAdjudicationService(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const string Policy = "conversation-adjudication-v1";
+    private const int MaximumPreviewPageSize = 200;
 
     public async Task<ConversationAdjudicationPreviewResult> PreviewAsync(
         ConversationAdjudicationPreviewRequest request, CancellationToken cancellationToken)
     {
         var project = Authorize(request.ProjectId, write: false);
+        if (request.ExpectedInventoryToken is { } expected &&
+            (expected.Length != 64 || expected.Any(x => x is not (>= '0' and <= '9' or >= 'a' and <= 'f'))))
+        {
+            throw new ConversationAdjudicationInventoryException("ExpectedInventoryToken must be a lowercase SHA-256 digest.");
+        }
+        var receiptRequest = request.ReceiptRequest;
+        if (receiptRequest is not null && !ProjectContext.Matches(receiptRequest.ProjectId, project))
+        {
+            throw new InvalidConversationAdjudicationRequestException("The receipt request must name the preview project.");
+        }
+
+        var receiptHash = receiptRequest is null ? null : ValidateAndHash(project, receiptRequest);
+
+        await using var transaction = await BeginOwnedTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        await EnsureDurableProjectGrantAsync(project, write: false, cancellationToken);
         var query = Insights(project).AsNoTracking();
         var receipts = Receipts(project);
         var candidates = query.Where(x =>
@@ -34,21 +51,106 @@ public sealed class ConversationAdjudicationService(
             (x.PromotionStatus == ConversationPromotionStatus.Skipped || x.PromotionStatus == ConversationPromotionStatus.Promoted) &&
             receipts.Any(r => r.InsightId == x.Id), cancellationToken);
         var offset = Math.Max(0, request.Offset);
-        var rows = await candidates.OrderBy(x => x.Id).Skip(offset).Take(Math.Clamp(request.Limit, 1, 200))
-            .ToArrayAsync(cancellationToken);
-        var context = await LoadEvidenceAsync(project, rows, cancellationToken);
-        var results = rows.Select(row => Evaluate(row, context)).ToArray();
+        var limit = Math.Clamp(request.Limit, 1, MaximumPreviewPageSize);
         var counterRun = string.IsNullOrWhiteSpace(request.GovernanceRunId) ? null : request.GovernanceRunId.Trim();
         var transitions = receipts.Where(x => counterRun == null || x.GovernanceRunId == counterRun);
         var newlyResolved = await transitions.CountAsync(x => x.Action != nameof(ConversationAdjudicationAction.Reopen), cancellationToken);
         var reopened = await transitions.CountAsync(x => x.Action == nameof(ConversationAdjudicationAction.Reopen), cancellationToken);
         var unchanged = await candidates.CountAsync(x => !transitions.Any(r => r.InsightId == x.Id), cancellationToken);
-        return new(project, total, unresolved, resolved, offset, offset + rows.Length < total, results)
+        var preview = new ConversationAdjudicationPreviewResult(
+            project, total, unresolved, resolved, offset, false, [])
         {
             CounterGovernanceRunId = counterRun,
             NewlyResolvedCount = newlyResolved,
             ReopenedCount = reopened,
             UnchangedCount = unchanged
+        };
+
+        if (request.IncludeInventoryToken || request.ExpectedInventoryToken is not null)
+        {
+            preview = await ReadGuardedInventoryAsync(candidates, preview, limit, cancellationToken);
+        }
+        else
+        {
+            var rows = await candidates.OrderBy(x => x.Id).Skip(offset).Take(limit).ToArrayAsync(cancellationToken);
+            var evidence = await LoadEvidenceAsync(project, rows, cancellationToken);
+            preview = preview with { Items = rows.Select(row => Evaluate(row, evidence)).ToArray() };
+        }
+
+        preview = preview with { HasMore = offset + preview.Items.Count < total };
+        if (receiptRequest is not null && receiptHash is not null)
+        {
+            preview = preview with
+            {
+                ReceiptLookup = await FindCommittedReceiptAsync(project, receiptRequest, receiptHash, cancellationToken)
+            };
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        if (request.ExpectedInventoryToken is not null &&
+            !string.Equals(request.ExpectedInventoryToken, preview.InventoryToken, StringComparison.Ordinal))
+        {
+            throw new ConversationAdjudicationInventoryException("The adjudication inventory changed. Restart the preview from offset zero.");
+        }
+
+        return preview;
+    }
+
+    private async Task<ConversationAdjudicationPreviewResult> ReadGuardedInventoryAsync(
+        IQueryable<ConversationInsight> candidates,
+        ConversationAdjudicationPreviewResult preview,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var actor = actors.Current;
+        hash.AppendData(JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            Version = "conversation-adjudication-inventory-v1",
+            actor.TenantId,
+            actor.UserId,
+            Project = ProjectContext.IdentityKey(preview.ProjectId),
+            preview.CounterGovernanceRunId,
+            preview.TotalCount,
+            preview.UnresolvedHumanDecisionCount,
+            preview.ResolvedHumanDecisionCount,
+            preview.NewlyResolvedCount,
+            preview.ReopenedCount,
+            preview.UnchangedCount
+        }, JsonOptions));
+
+        // Use the same snapshot and ordering for the response page and the full inventory digest.
+        var page = new List<ConversationAdjudicationCandidate>(limit);
+        Guid? lastId = null;
+        var index = 0;
+        while (index < preview.TotalCount)
+        {
+            var remaining = lastId is { } after ? candidates.Where(x => x.Id.CompareTo(after) > 0) : candidates;
+            var rows = await remaining.OrderBy(x => x.Id).Take(MaximumPreviewPageSize).ToArrayAsync(cancellationToken);
+            var evidence = await LoadEvidenceAsync(preview.ProjectId, rows, cancellationToken);
+            foreach (var row in rows)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var item = Evaluate(row, evidence);
+                hash.AppendData(JsonSerializer.SerializeToUtf8Bytes(new
+                {
+                    item.InsightId,
+                    item.EvidenceToken,
+                    item.Classification,
+                    item.CanReconcile,
+                    item.CanReopen
+                }, JsonOptions));
+                if (index >= preview.Offset && page.Count < limit)
+                    page.Add(item);
+                index++;
+            }
+            lastId = rows[^1].Id;
+        }
+
+        return preview with
+        {
+            Items = page,
+            InventoryToken = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant()
         };
     }
 
@@ -56,21 +158,59 @@ public sealed class ConversationAdjudicationService(
         ConversationAdjudicationRequest request, CancellationToken cancellationToken)
     {
         var project = Authorize(request.ProjectId, write: true);
-        if (request.OperationId == Guid.Empty || request.InsightId == Guid.Empty || !Enum.IsDefined(request.Action) ||
-            string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Length > 2000 ||
-            string.IsNullOrWhiteSpace(request.GovernanceRunId) || request.GovernanceRunId.Length > 128 ||
-            string.IsNullOrWhiteSpace(request.ExpectedEvidenceToken) || request.ExpectedEvidenceToken.Length != 64)
-            throw new InvalidOperationException("A valid operation, insight, preview token, reason and GovernanceRunId are required.");
+        var requestHash = ValidateAndHash(project, request);
+        for (var attempt = 0; ; attempt++)
+        {
+            await using var transaction = await BeginOwnedTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            ConversationAdjudication receipt;
+            bool replay;
+            try
+            {
+                await EnsureDurableProjectGrantAsync(project, write: true, cancellationToken);
+                (receipt, replay) = await ApplyAsync(project, request, requestHash, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+            }
+            catch (Exception error) when (attempt == 0 &&
+                                         error.GetBaseException() is DbException { SqlState: "40001" })
+            {
+                // PostgreSQL aborted this transaction. Dispose it before retrying with a fresh snapshot.
+                continue;
+            }
 
-        var requestHash = Hash(JsonSerializer.Serialize(request with { ProjectId = ProjectContext.IdentityKey(project) }, JsonOptions));
-        await using var transaction = await db.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            if (replay)
+                return Map(receipt, replay: true);
+
+            // A failed read after commit leaves the outcome unknown to the caller.
+            var readBack = await Receipts(project).SingleAsync(x => x.Id == receipt.Id, cancellationToken);
+            return Map(readBack, replay: false);
+        }
+    }
+
+    private async Task<IApplicationTransaction> BeginOwnedTransactionAsync(
+        IsolationLevel isolationLevel, CancellationToken cancellationToken)
+    {
+        if (System.Transactions.Transaction.Current is not null)
+            throw new InvalidOperationException("Adjudication requires its own transaction.");
+        if (db is not DbContext context || context.ChangeTracker.HasChanges())
+            throw new InvalidOperationException("Adjudication requires a DbContext without pending changes.");
+
+        var transaction = await db.BeginTransactionAsync(isolationLevel, cancellationToken);
+        if (transaction.OwnsTransaction)
+            return transaction;
+
+        await transaction.DisposeAsync();
+        throw new InvalidOperationException("Adjudication requires its own transaction.");
+    }
+
+    private async Task<(ConversationAdjudication Receipt, bool Replay)> ApplyAsync(
+        string project, ConversationAdjudicationRequest request, string requestHash, CancellationToken cancellationToken)
+    {
         var previousReceipt = await Receipts(project).SingleOrDefaultAsync(x => x.Id == request.OperationId, cancellationToken);
         if (previousReceipt is not null)
         {
             if (previousReceipt.RequestHash != requestHash)
                 throw new InvalidOperationException("OperationId was already used with a different request.");
-            await transaction.CommitAsync(cancellationToken);
-            return Map(previousReceipt, replay: true);
+            return (previousReceipt, true);
         }
 
         var insight = await Insights(project).AsNoTracking().SingleOrDefaultAsync(x => x.Id == request.InsightId, cancellationToken)
@@ -117,14 +257,29 @@ public sealed class ConversationAdjudicationService(
         }
 
         var actor = actors.Current;
+        var tenantId = actor.TenantId!.Value;
+        var ownerId = actor.UserId!.Value;
+        if (EvidenceTargetId(insight, ReadMemoryDisposition(insight)) is { } memoryId &&
+            context.Memories.ContainsKey(memoryId) &&
+            !await db.LockMemoryEvidenceAsync(memoryId, tenantId, ownerId, project, cancellationToken))
+        {
+            throw new InvalidOperationException("Bound memory evidence changed. Obtain a new preview before adjudicating.");
+        }
+        if (LinkedProposalId(insight) is { } linkedId &&
+            context.Proposals.ContainsKey(linkedId) &&
+            !await db.LockAdjudicationInsightEvidenceAsync(insight.Id, linkedId, tenantId, ownerId, project, cancellationToken))
+        {
+            throw new InvalidOperationException("Bound insight evidence changed. Obtain a new preview before adjudicating.");
+        }
+
         var now = new DateTimeOffset(clock.UtcNow.UtcTicks / 10 * 10, TimeSpan.Zero);
         if (context.Receipts.TryGetValue(insight.Id, out var lastReceipt) && now <= lastReceipt.CreatedAt)
             now = lastReceipt.CreatedAt.AddTicks(10); // PostgreSQL timestamps have microsecond precision.
         var receipt = new ConversationAdjudication
         {
             Id = request.OperationId,
-            TenantId = actor.TenantId!.Value,
-            OwnerUserId = actor.UserId!.Value,
+            TenantId = tenantId,
+            OwnerUserId = ownerId,
             ProjectId = insight.ProjectId,
             InsightId = insight.Id,
             RequestHash = requestHash,
@@ -174,9 +329,41 @@ public sealed class ConversationAdjudicationService(
             CreatedAt = now
         });
         await db.SaveChangesAsync(cancellationToken);
+        return (receipt, false);
+    }
+
+    public async Task<ConversationAdjudicationReceiptLookupResult> ReadReceiptAsync(
+        ConversationAdjudicationRequest request, CancellationToken cancellationToken)
+    {
+        var project = Authorize(request.ProjectId, write: false);
+        var requestHash = ValidateAndHash(project, request);
+        await using var transaction = await BeginOwnedTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        await EnsureDurableProjectGrantAsync(project, write: false, cancellationToken);
+        var result = await FindCommittedReceiptAsync(project, request, requestHash, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        var readBack = await Receipts(project).SingleAsync(x => x.Id == receipt.Id, cancellationToken);
-        return Map(readBack, replay: false);
+        return result;
+    }
+
+    private async Task<ConversationAdjudicationReceiptLookupResult> FindCommittedReceiptAsync(
+        string project, ConversationAdjudicationRequest request, string requestHash, CancellationToken cancellationToken)
+    {
+        var row = await Receipts(project).SingleOrDefaultAsync(x => x.Id == request.OperationId &&
+            x.InsightId == request.InsightId && x.RequestHash == requestHash, cancellationToken);
+        return new(request.OperationId, row is null ? null : Map(row, replay: false));
+    }
+
+    private static string ValidateAndHash(string project, ConversationAdjudicationRequest request)
+    {
+        if (request.OperationId == Guid.Empty || request.InsightId == Guid.Empty || !Enum.IsDefined(request.Action) ||
+            string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Length > 2000 ||
+            string.IsNullOrWhiteSpace(request.GovernanceRunId) || request.GovernanceRunId.Length > 128 ||
+            string.IsNullOrWhiteSpace(request.ExpectedEvidenceToken) || request.ExpectedEvidenceToken.Length != 64)
+        {
+            throw new InvalidConversationAdjudicationRequestException(
+                "A valid operation, insight, preview token, reason and GovernanceRunId are required.");
+        }
+
+        return Hash(JsonSerializer.Serialize(request with { ProjectId = ProjectContext.IdentityKey(project) }, JsonOptions));
     }
 
     private string Authorize(string projectId, bool write)
@@ -187,11 +374,16 @@ public sealed class ConversationAdjudicationService(
         if (actor.Role is not (TenantUserRole.Owner or TenantUserRole.Admin) ||
             actor.IsServiceActor || actor.HasScope(SecurityScopes.ScheduledGovernance))
             throw new UnauthorizedAccessException("An Owner/Admin on the general interactive surface is required.");
-        if (string.IsNullOrWhiteSpace(projectId)) throw new InvalidOperationException("ProjectId is required.");
+        if (string.IsNullOrWhiteSpace(projectId))
+            throw new InvalidConversationAdjudicationRequestException("ProjectId is required.");
         var project = ProjectContext.Normalize(projectId);
         ActorAuthorization.EnsureProjectAllowed(actor, project, write);
         return project;
     }
+
+    private Task EnsureDurableProjectGrantAsync(string project, bool write, CancellationToken cancellationToken)
+        => GovernanceProjectScopeResolver.EnsureDurableGrantsAsync(
+            db, actors.Current.TenantId!.Value, [project], write, cancellationToken);
 
     private IQueryable<ConversationInsight> Insights(string project)
         => db.ConversationInsights.Where(x => x.TenantId == actors.Current.TenantId &&
@@ -204,7 +396,8 @@ public sealed class ConversationAdjudicationService(
     private async Task<EvidenceContext> LoadEvidenceAsync(string project, ConversationInsight[] rows, CancellationToken cancellationToken)
     {
         var ids = rows.Select(x => x.Id).ToArray();
-        var targetIds = rows.Select(TargetId).Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
+        var targetIds = rows.Select(row => EvidenceTargetId(row, ReadMemoryDisposition(row)))
+            .Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
         var proposalIds = rows.Select(LinkedProposalId).Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToArray();
         var memories = await db.MemoryItems.AsNoTracking().Where(x =>
             x.TenantId == actors.Current.TenantId && x.OwnerUserId == actors.Current.UserId &&
@@ -212,13 +405,16 @@ public sealed class ConversationAdjudicationService(
         var proposals = await Insights(project).AsNoTracking().Where(x => proposalIds.Contains(x.Id))
             .ToDictionaryAsync(x => x.Id, cancellationToken);
         var receipts = await Receipts(project).Where(x => ids.Contains(x.InsightId))
-            .OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Id).ToArrayAsync(cancellationToken);
-        return new(memories, proposals, receipts.GroupBy(x => x.InsightId).ToDictionary(x => x.Key, x => x.First()));
+            .GroupBy(x => x.InsightId)
+            .Select(group => group.OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Id).First())
+            .ToDictionaryAsync(x => x.InsightId, cancellationToken);
+        return new(memories, proposals, receipts);
     }
 
     private static ConversationAdjudicationCandidate Evaluate(ConversationInsight row, EvidenceContext context)
     {
-        context.Memories.TryGetValue(TargetId(row) ?? Guid.Empty, out var target);
+        var disposition = ReadMemoryDisposition(row);
+        context.Memories.TryGetValue(EvidenceTargetId(row, disposition) ?? Guid.Empty, out var target);
         context.Proposals.TryGetValue(LinkedProposalId(row) ?? Guid.Empty, out var linked);
         context.Receipts.TryGetValue(row.Id, out var receipt);
         var fingerprint = Hash(JsonSerializer.Serialize(new
@@ -257,33 +453,39 @@ public sealed class ConversationAdjudicationService(
         var classification = "RequiresManualDecision";
         var canReconcile = false;
         var terminal = row.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped;
-        if (row.PromotionStatus == ConversationPromotionStatus.HostBlocked)
+        var linkedProposal = linked is not null && ChatGptProposalService.IsProposal(linked) ? linked : null;
+        if (row.PromotionStatus == ConversationPromotionStatus.HostBlocked ||
+            linkedProposal?.PromotionStatus == ConversationPromotionStatus.HostBlocked)
             classification = "HostBlocked";
         else if (HasHold(row) || (linked is not null && HasHold(linked)) ||
                  (target is not null && HasProtectedMetadata(target.Tags, target.MetadataJson)))
             classification = "ProtectedHold";
         else if (terminal)
             classification = receipt is null ? "AlreadyTerminal" : "ResolvedHumanDecision";
-        else if (IsDeleteProposal(row) && target?.Status == MemoryStatus.Archived)
+        else if (disposition.TargetId.HasValue && target?.Status == MemoryStatus.Archived)
         {
-            classification = "ResolvedWithoutDelete";
+            classification = disposition.Tool == "memory_delete" ? "ResolvedWithoutDelete" : "ResolvedAlreadyArchived";
             canReconcile = true;
         }
-        else if (linked is not null && ChatGptProposalService.IsProposal(linked) &&
-                 linked.PromotionStatus == ConversationPromotionStatus.Skipped)
+        else if (linkedProposal?.PromotionStatus == ConversationPromotionStatus.Skipped)
         {
             classification = "ResolvedRejectedProposal";
             canReconcile = true;
         }
-        else if (linked is not null && ChatGptProposalService.IsProposal(linked) &&
-                 linked.PromotionStatus == ConversationPromotionStatus.Promoted &&
-                 target is not null && linked.PromotedMemoryId == target.Id)
+        else if (linkedProposal?.PromotionStatus == ConversationPromotionStatus.Promoted &&
+                 target is not null && linkedProposal.PromotedMemoryId == target.Id)
         {
             classification = "ResolvedAppliedProposal";
             canReconcile = true;
         }
+        else if (linkedProposal?.PromotionStatus == ConversationPromotionStatus.Failed ||
+                 (row.PromotionStatus == ConversationPromotionStatus.Failed && ChatGptProposalService.IsProposal(row)))
+        {
+            classification = "ProposalApplyFailed";
+        }
         return new(row.Id, row.ProjectId, row.Title, row.PromotionStatus, token, fingerprint, classification,
-            canReconcile, terminal && receipt is not null && classification != "ProtectedHold" &&
+            canReconcile && IsOpenException(row.PromotionStatus),
+            terminal && receipt is not null && classification is not ("ProtectedHold" or "HostBlocked") &&
             receipt.EvidenceFingerprint != fingerprint);
     }
 
@@ -296,30 +498,40 @@ public sealed class ConversationAdjudicationService(
             x.Equals("immutable-quarantine", StringComparison.OrdinalIgnoreCase)) ||
             Flag(json, "legalHold") || Flag(json, "securityHold");
 
-    private static bool IsDeleteProposal(ConversationInsight row)
-        => ChatGptProposalService.IsProposal(row) && StringProperty(row.MetadataJson, "toolName") == "memory_delete";
+    private static Guid? EvidenceTargetId(ConversationInsight row, (string? Tool, Guid? TargetId) disposition)
+        => disposition.Tool == "memory_delete" ? disposition.TargetId : disposition.TargetId ?? row.PromotedMemoryId;
 
-    private static Guid? TargetId(ConversationInsight row)
+    private static (string? Tool, Guid? TargetId) ReadMemoryDisposition(ConversationInsight row)
     {
-        if (!IsDeleteProposal(row)) return row.PromotedMemoryId;
+        if (!ChatGptProposalService.IsProposal(row)) return default;
         try
         {
             using var doc = JsonDocument.Parse(row.MetadataJson);
-            if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object &&
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("toolName", out var name) ||
+                name.ValueKind != JsonValueKind.String || name.GetString() is not ("memory_archive" or "memory_delete"))
+            {
+                return default;
+            }
+
+            var tool = name.GetString();
+            if (root.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object &&
+                (tool == "memory_delete" || !payload.TryGetProperty("archived", out var archived) || archived.ValueKind == JsonValueKind.True) &&
                 payload.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String && id.TryGetGuid(out var target) &&
                 payload.TryGetProperty("projectId", out var project) && project.ValueKind == JsonValueKind.String &&
                 ProjectContext.Matches(project.GetString(), row.ProjectId))
-                return target;
+                return (tool, target);
+            return (tool, null);
         }
         catch (JsonException) { }
-        return null;
+        return default;
     }
 
     // Legacy free text, titles, and fuzzy payload matches are never treated as evidence links.
     private static Guid? LinkedProposalId(ConversationInsight row)
     {
         var value = StringProperty(row.MetadataJson, "proposalId");
-        return Guid.TryParse(value, out var id) && row.SourceRef == $"chatgpt-proposal:{id:D}" ? id : null;
+        return Guid.TryParse(value, out var id) && id != row.Id && row.SourceRef == $"chatgpt-proposal:{id:D}" ? id : null;
     }
 
     private static string? StringProperty(string json, string name)
@@ -343,9 +555,12 @@ public sealed class ConversationAdjudicationService(
         catch (JsonException) { return true; }
     }
 
+    private static bool IsOpenException(ConversationPromotionStatus status)
+        => status is ConversationPromotionStatus.RequiresUserDecision or ConversationPromotionStatus.Deferred or ConversationPromotionStatus.Failed;
+
     private static void EnsureOpen(ConversationPromotionStatus status)
     {
-        if (status is not (ConversationPromotionStatus.RequiresUserDecision or ConversationPromotionStatus.Deferred or ConversationPromotionStatus.Failed))
+        if (!IsOpenException(status))
             throw new InvalidOperationException("Manual adjudication requires a non-terminal governance exception.");
     }
 

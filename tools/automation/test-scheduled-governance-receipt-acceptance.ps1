@@ -1,0 +1,826 @@
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "ScheduledGovernanceAutomation.Common.ps1")
+
+# Load only the receipt evidence functions. The runner's HTTP entry point is never invoked.
+$runnerPath = Join-Path (Split-Path $PSScriptRoot -Parent) "test-contexthub-scheduled-governance-acceptance.ps1"
+$tokens = $null
+$parseErrors = $null
+$runner = [System.Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) {
+    throw "Cannot parse the acceptance runner: $($parseErrors.Message -join ' ')"
+}
+foreach ($name in @(
+        "Get-ScheduledGovernancePropertyValue",
+        "Get-ScheduledGovernanceArrayProperty",
+        "Assert-ScheduledGovernanceRpcSuccess",
+        "Get-ScheduledGovernanceToolData",
+        "Assert-ScheduledGovernanceEqual",
+        "Write-ScheduledGovernanceCanonicalJson",
+        "Get-ScheduledGovernancePublishedSchemaHash",
+        "Assert-ScheduledGovernancePublishedToolAuthority",
+        "Test-ScheduledGovernanceIdsEqual",
+        "Test-ScheduledGovernanceExecutionResult",
+        "Get-ScheduledGovernanceReceiptEvidence",
+        "Get-ScheduledGovernanceReviewEvidence",
+        "Get-ScheduledGovernanceReviewReceiptEvidence",
+        "Get-ScheduledGovernanceBatchCounts",
+        "Get-ScheduledGovernanceBatchAuditIds",
+        "Assert-ScheduledGovernanceNoExecution",
+        "Get-ScheduledGovernanceBatchReceiptEvidence",
+        "Assert-ScheduledGovernanceFinalBatchContinuity",
+        "Invoke-ScheduledGovernanceVerifiedReplay",
+        "Read-ScheduledGovernanceProtectedInvariantEvidence",
+        "Assert-ScheduledGovernanceReadbackPaths",
+        "Write-ScheduledGovernanceA1Checkpoint",
+        "Invoke-ScheduledGovernanceA1Recovery",
+        "Read-ScheduledGovernanceUnknownOutcome",
+        "Invoke-ScheduledGovernanceInitialExecution",
+        "Complete-ScheduledGovernanceProtectedReadback")) {
+    $definition = $runner.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+        }, $false)
+    if ($null -eq $definition) {
+        throw "Cannot find $name in the acceptance runner."
+    }
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+
+$verifiedContract = [ordered]@{
+    toolContractVersion = "1.5"
+    schemaHash = "1" * 64
+    publishedCatalogVersion = "catalog-fixture"
+}
+$runId = "scheduled-fixture"
+function Get-ReceiptFixture {
+    param(
+        [string]$Decision = "NoOpConverged",
+        [switch]$ReReview
+    )
+
+    $coverageComplete = $Decision -cne "CoverageIncomplete"
+    $snapshot = if (-not $coverageComplete) {
+        ""
+    }
+    elseif ($ReReview) {
+        "kg:fixture:r1"
+    }
+    else {
+        "kg:fixture:i0"
+    }
+    return @{
+        Review = [pscustomobject]@{
+            decision = $Decision
+            coverageComplete = $coverageComplete
+            snapshotToken = $snapshot
+            isReReview = [bool]$ReReview
+        }
+        Receipt = [pscustomobject]@{
+            receiptId = "6d2aecbd-09eb-4a8a-ae32-55f23c349299"
+            governanceRunId = $runId
+            runExists = $true
+            received = $true
+            terminal = $true
+            status = "Completed"
+            finalConvergenceStatus = $Decision
+            decision = $Decision
+            outcome = $Decision
+            coverageComplete = $coverageComplete
+            finalSnapshotToken = $snapshot
+            toolContractVersion = $verifiedContract.toolContractVersion
+            schemaHash = $verifiedContract.schemaHash
+            publishedCatalogVersion = $verifiedContract.publishedCatalogVersion
+            latestBatchReceived = $false
+            applied = 0
+            failed = 0
+            quarantined = 0
+            semanticAutoResolved = 0
+            auditIds = @()
+        }
+    }
+}
+
+function Assert-RejectedReceiptFixture {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][hashtable]$Fixture,
+        [Parameter(Mandatory)][string]$ExpectedError
+    )
+
+    try {
+        $null = Get-ScheduledGovernanceReviewReceiptEvidence -Receipt $Fixture.Receipt -ExpectedRunId $runId `
+            -Review $Fixture.Review -Contract $verifiedContract
+    }
+    catch {
+        if ($_.Exception.Message -ceq $ExpectedError) {
+            return
+        }
+        throw "Fixture '$Name' failed for the wrong reason. $($_.Exception.Message)"
+    }
+
+    throw "Fixture '$Name' was unexpectedly accepted."
+}
+
+foreach ($decision in @("NoOpConverged", "ReversibleExecutionRequired", "HumanDecisionOnly", "CoverageIncomplete")) {
+    $fixture = Get-ReceiptFixture -Decision $decision
+    $evidence = Get-ScheduledGovernanceReviewReceiptEvidence -Receipt $fixture.Receipt -ExpectedRunId $runId `
+        -Review $fixture.Review -Contract $verifiedContract -RequireNoExecution
+    if ($evidence.decision -cne $decision -or $evidence.coverageComplete -ne $fixture.Review.coverageComplete -or
+        -not $evidence.noExecutionObserved -or $evidence.auditCount -ne 0) {
+        throw "Receipt fixture '$decision' did not preserve the review decision, coverage or empty audit count."
+    }
+}
+
+$fixture = Get-ReceiptFixture -ReReview
+$evidence = Get-ScheduledGovernanceReviewReceiptEvidence -Receipt $fixture.Receipt -ExpectedRunId $runId `
+    -Review $fixture.Review -Contract $verifiedContract -RequireNoExecution
+if ($evidence.decision -cne "NoOpConverged" -or -not $evidence.coverageComplete -or -not $evidence.noExecutionObserved) {
+    throw "The completed zero-execute re-review was not accepted."
+}
+
+$fixture = Get-ReceiptFixture -Decision HumanDecisionOnly -ReReview
+$fixture.Receipt.decision = $null
+$fixture.Receipt.outcome = "ReReviewRequired"
+$fixture.Receipt.latestBatchReceived = $true
+$fixture.Receipt.auditIds = @("e8b0fd25-2506-4dcc-b84c-b74ff1c6b379")
+$decisionMismatch = "Scheduled governance review receipt did not match the persisted review decision."
+Assert-RejectedReceiptFixture -Name "batch still requires a bound re-review" -Fixture $fixture -ExpectedError $decisionMismatch
+$fixture.Receipt.latestBatchReceived = "true"
+Assert-RejectedReceiptFixture -Name "completed batch overlay without boolean batch evidence" -Fixture $fixture `
+    -ExpectedError $decisionMismatch
+
+$fixture.Receipt.latestBatchReceived = $true
+$fixture.Review.isReReview = $false
+Assert-RejectedReceiptFixture -Name "completed batch overlay on initial review" -Fixture $fixture `
+    -ExpectedError $decisionMismatch
+
+$completedReceiptMissing = "Scheduled governance review did not have a completed receipt."
+$cases = @(
+    @{ field = "receiptId"; value = [Guid]::Empty.ToString(); error = $completedReceiptMissing }
+    @{ field = "governanceRunId"; value = "another-run"; error = "Scheduled governance receipt did not match the requested run." }
+    @{ field = "status"; value = "ContractMismatch"; error = $completedReceiptMissing }
+    @{ field = "status"; value = "ModeMismatch"; error = $completedReceiptMissing }
+    @{ field = "status"; value = "Running"; error = $completedReceiptMissing }
+    @{ field = "received"; value = "true"; error = "Scheduled governance review receipt did not confirm received." }
+    @{ field = "terminal"; value = $false; error = "Scheduled governance review receipt did not confirm terminal." }
+    @{ field = "runExists"; value = $false; error = "Scheduled governance review receipt did not confirm runExists." }
+    @{ field = "toolContractVersion"; value = "1.4"; error = "Scheduled governance review receipt did not match the verified toolContractVersion." }
+    @{ field = "schemaHash"; value = ("2" * 64); error = "Scheduled governance review receipt did not match the verified schemaHash." }
+    @{ field = "publishedCatalogVersion"; value = "old-catalog"; error = "Scheduled governance review receipt did not match the verified publishedCatalogVersion." }
+    @{ field = "coverageComplete"; value = $false; error = "Scheduled governance review receipt did not match the review coverage." }
+    @{ field = "finalSnapshotToken"; value = "kg:fixture:old"; error = "Scheduled governance review receipt did not match the review snapshot." }
+    @{ field = "finalConvergenceStatus"; value = "CoverageIncomplete"; error = $decisionMismatch }
+    @{ field = "decision"; value = "CoverageIncomplete"; error = $decisionMismatch }
+    @{ field = "outcome"; value = "ReReviewRequired"; error = $decisionMismatch }
+)
+foreach ($case in $cases) {
+    $fixture = Get-ReceiptFixture
+    $fixture.Receipt.($case.field) = $case.value
+    Assert-RejectedReceiptFixture -Name "$($case.field):$($case.value)" -Fixture $fixture -ExpectedError $case.error
+}
+
+$execution = [pscustomobject]@{
+    succeeded = $true
+    isReplay = $false
+    stoppedReason = "Completed"
+    governanceRunId = $runId
+    snapshotToken = "kg:fixture:i0"
+}
+foreach ($expectedReplay in @($false, $true)) {
+    $execution.isReplay = $expectedReplay
+    if (-not (Test-ScheduledGovernanceExecutionResult $execution $runId "kg:fixture:i0" $expectedReplay)) {
+        throw "A successful execution with the expected run, snapshot and replay flag was rejected."
+    }
+}
+$invalidExecutions = @(
+    @{ field = "succeeded"; value = $false }
+    @{ field = "succeeded"; value = "true" }
+    @{ field = "isReplay"; value = $false }
+    @{ field = "isReplay"; value = "true" }
+    @{ field = "stoppedReason"; value = "UnknownResult" }
+    @{ field = "stoppedReason"; value = $null }
+    @{ field = "governanceRunId"; value = "another-run" }
+    @{ field = "snapshotToken"; value = "kg:fixture:old" }
+)
+foreach ($case in $invalidExecutions) {
+    $invalid = $execution.PSObject.Copy()
+    $invalid.($case.field) = $case.value
+    if (Test-ScheduledGovernanceExecutionResult $invalid $runId "kg:fixture:i0" $true) {
+        throw "An invalid execution result was accepted for '$($case.field)'."
+    }
+}
+
+function New-ReplayFixture {
+    param([switch]$ZeroItems)
+
+    $before = (Get-ReceiptFixture -Decision ReversibleExecutionRequired).Receipt
+    $auditId = "e8b0fd25-2506-4dcc-b84c-b74ff1c6b379"
+    $firstBatch = $execution.PSObject.Copy()
+    $firstBatch.isReplay = $false
+    $firstBatch | Add-Member -NotePropertyMembers @{
+        requiresReReview = -not $ZeroItems
+        appliedCount = if ($ZeroItems) { 0 } else { 1 }
+        failedCount = 0
+        quarantinedCount = 0
+        semanticAutoResolvedCount = 0
+        auditIds = @($auditId)
+        nextCursor = "server-cursor-must-not-be-resubmitted"
+    }
+    $before.receiptId = [Guid]::NewGuid().ToString("D")
+    if (-not $ZeroItems) {
+        $before.decision = $null
+        $before.outcome = "ReReviewRequired"
+    }
+    $before.latestBatchReceived = $true
+    $before.auditIds = @($auditId)
+    $before.applied = $firstBatch.appliedCount
+    $before | Add-Member -NotePropertyMembers @{
+        initialSnapshotToken = $before.finalSnapshotToken
+        requestIdentityHash = "a" * 64
+        stoppedReason = "Completed"
+        isReplay = $false
+    }
+    $after = $before.PSObject.Copy()
+    $after.receiptId = [Guid]::NewGuid().ToString("D")
+    $after.isReplay = $true
+    $replay = $firstBatch.PSObject.Copy()
+    $replay.isReplay = $true
+    return @{
+        First = $firstBatch
+        Before = $before
+        After = $after
+        Replay = $replay
+        ReplayRpcError = $false
+        Arguments = @{ request = @{ governanceRunId = $runId; snapshotToken = "kg:fixture:i0"; maxMutations = 100 } }
+        Evidence = @{
+            receipt = @{ initial = @{ receiptId = "6d2aecbd-09eb-4a8a-ae32-55f23c349299" } }
+            outcome = @{ executorCalls = 1 }
+            replay = @{ exercised = $false; exact = $false }
+            errors = @()
+        }
+        Calls = [System.Collections.Generic.List[int]]::new()
+    }
+}
+
+function Invoke-ScheduledGovernanceTool {
+    param($Token, $ToolName, $Arguments, $RequestId)
+
+    $script:replayFixture.Calls.Add($RequestId)
+    switch ($RequestId) {
+        { $_ -in @(41, 42, 46) } {
+            if ($ToolName -cne "scheduled_governance_run_get" -or $Arguments.governanceRunId -cne $runId -or
+                $Arguments.includeReliabilityHistory -isnot [bool] -or $Arguments.includeReliabilityHistory) {
+                throw "Fixture received an unexpected receipt-read request."
+            }
+            $response = if ($RequestId -eq 42) { $script:replayFixture.Before } else { $script:replayFixture.After }
+            if ($null -eq $response) { throw "Fixture receipt temporarily unavailable." }
+        }
+        43 {
+            if ($ToolName -cne "scheduled_governance_execute" -or
+                -not [object]::ReferenceEquals($Arguments, $script:replayFixture.Arguments) -or
+                $Arguments.request.ContainsKey("cursor")) {
+                throw "Fixture received an altered execution replay."
+            }
+            if ($script:replayFixture.ReplayRpcError) {
+                return [pscustomobject]@{ error = [pscustomobject]@{ code = -32603 } }
+            }
+            $response = $script:replayFixture.Replay
+            if ($null -eq $response) { throw "Fixture replay timed out." }
+        }
+        default { throw "Fixture received an unexpected request ID." }
+    }
+    return [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = $response } }
+}
+
+function Invoke-ReplayFixture {
+    Invoke-ScheduledGovernanceVerifiedReplay "offline-test" $script:replayFixture.Arguments $script:replayFixture.First `
+        $verifiedContract $script:replayFixture.Evidence
+}
+
+foreach ($zeroItems in @($false, $true)) {
+    $script:replayFixture = New-ReplayFixture -ZeroItems:$zeroItems
+    Invoke-ReplayFixture
+    if (($script:replayFixture.Calls -join ",") -cne "42,43,46" -or
+        $script:replayFixture.Evidence.outcome.executorCalls -ne 2 -or
+        -not $script:replayFixture.Evidence.replay.exact) {
+        throw "Expected a completed batch receipt, exact replay and unchanged durable readback in that order."
+    }
+}
+
+$batchRejections = @(
+    @{ field = "governanceRunId"; value = "another-run" }
+    @{ field = "receiptId"; value = "6d2aecbd-09eb-4a8a-ae32-55f23c349299" }
+    @{ field = "receiptId"; value = [Guid]::Empty.ToString() }
+    @{ field = "status"; value = "Running" }
+    @{ field = "status"; value = "Stopped" }
+    @{ field = "received"; value = "true" }
+    @{ field = "terminal"; value = $false }
+    @{ field = "latestBatchReceived"; value = $false }
+    @{ field = "isReplay"; value = $true }
+    @{ field = "requestIdentityHash"; value = "" }
+    @{ field = "toolContractVersion"; value = "older" }
+    @{ field = "schemaHash"; value = "2" * 64 }
+    @{ field = "publishedCatalogVersion"; value = "older" }
+    @{ field = "initialSnapshotToken"; value = "kg:fixture:old" }
+    @{ field = "finalSnapshotToken"; value = "kg:fixture:old" }
+    @{ field = "outcome"; value = "UnknownResult" }
+    @{ field = "decision"; value = "ReversibleExecutionRequired" }
+    @{ field = "stoppedReason"; value = "ItemFailed" }
+    @{ field = "applied"; value = "1" }
+    @{ field = "quarantined"; value = 1 }
+    @{ field = "semanticAutoResolved"; value = 1 }
+    @{ field = "auditIds"; value = @("e9b0fd25-2506-4dcc-b84c-b74ff1c6b379") }
+    @{ field = "auditIds"; value = @("invalid") }
+    @{ field = "auditIds"; value = $null }
+)
+$preReplayCases = @($batchRejections | ForEach-Object {
+    $change = $_
+    { param($fixture) $fixture.Before.($change.field) = $change.value }.GetNewClosure()
+}) + @(
+    { param($fixture) $fixture.Before = $null }
+    { param($fixture) $fixture.Before.failed = 1; $fixture.First.failedCount = 1 }
+    { param($fixture) $fixture.Before.auditIds = @(); $fixture.First.auditIds = @() }
+)
+foreach ($mutate in $preReplayCases) {
+    $script:replayFixture = New-ReplayFixture
+    & $mutate $script:replayFixture
+    $rejected = $false
+    try { Invoke-ReplayFixture } catch { $rejected = $true }
+    if (-not $rejected -or ($script:replayFixture.Calls -join ",") -cne "42" -or
+        $script:replayFixture.Evidence.outcome.executorCalls -ne 1 -or $script:replayFixture.Evidence.replay.exercised) {
+        throw "The runner attempted replay after the initial batch receipt failed validation."
+    }
+}
+
+$postReplayCases = @(
+    { param($fixture) $fixture.After.applied = 2; $fixture.Replay.appliedCount = 2 }
+    { param($fixture) $fixture.After.requestIdentityHash = "b" * 64 }
+    { param($fixture) $fixture.After.receiptId = $fixture.Before.receiptId }
+    {
+        param($fixture)
+        $fixture.After.auditIds = @("e9b0fd25-2506-4dcc-b84c-b74ff1c6b379")
+        $fixture.Replay.auditIds = $fixture.After.auditIds
+    }
+)
+$unknownReplayCases = @(
+    @{ change = { param($fixture) $fixture.Replay = $null }; expected = "receipt-readback-insufficient-for-exact-replay" }
+    @{ change = { param($fixture) $fixture.ReplayRpcError = $true }; expected = "receipt-readback-insufficient-for-exact-replay" }
+    @{ change = { param($fixture) $fixture.Replay.governanceRunId = "wrong-run" }; expected = "receipt-readback-insufficient-for-exact-replay" }
+    @{ change = { param($fixture) $fixture.Replay = $null; $fixture.After = $null }; expected = "receipt-readback-unavailable" }
+    @{
+        change = { param($fixture) $fixture.Replay = $null; $fixture.After.governanceRunId = "wrong-run" }
+        expected = "receipt-readback-unavailable"
+    }
+)
+foreach ($case in $unknownReplayCases) {
+    $script:replayFixture = New-ReplayFixture
+    & $case.change $script:replayFixture
+    $rejected = $false
+    try { Invoke-ReplayFixture } catch { $rejected = $true }
+    $state = $script:replayFixture.Evidence
+    if (-not $rejected -or ($script:replayFixture.Calls -join ",") -cne "42,43,41" -or
+        $state.outcome.executorCalls -ne 2 -or $state.replay.exact -or
+        $state.replay.outcomeRecovery -cne $case.expected -or
+        ($case.expected -ceq "receipt-readback-unavailable" -and $null -ne $state.receipt.afterUnknownOutcome)) {
+        throw "An uncertain replay did not stop after one bound receipt read."
+    }
+}
+foreach ($mutate in $postReplayCases) {
+    $script:replayFixture = New-ReplayFixture
+    & $mutate $script:replayFixture
+    $rejected = $false
+    try { Invoke-ReplayFixture } catch { $rejected = $true }
+    if (-not $rejected -or ($script:replayFixture.Calls -join ",") -cne "42,43,46" -or
+        $script:replayFixture.Evidence.replay.exact) {
+        throw "The runner accepted replay despite conflicting durable evidence."
+    }
+}
+
+$noExecutionRejections = @(
+    @{ field = "latestBatchReceived"; value = $true }
+    @{ field = "latestBatchReceived"; value = "false" }
+    @{ field = "applied"; value = 1 }
+    @{ field = "failed"; value = 1 }
+    @{ field = "quarantined"; value = 1 }
+    @{ field = "semanticAutoResolved"; value = 1 }
+    @{ field = "applied"; value = $null }
+    @{ field = "auditIds"; value = @("e8b0fd25-2506-4dcc-b84c-b74ff1c6b379") }
+    @{ field = "auditIds"; value = $null }
+)
+foreach ($isReReview in @($false, $true)) {
+    foreach ($case in $noExecutionRejections) {
+        $fixture = Get-ReceiptFixture -ReReview:$isReReview
+        $fixture.Receipt.($case.field) = $case.value
+        $rejected = $false
+        try {
+            $null = Get-ScheduledGovernanceReviewReceiptEvidence -Receipt $fixture.Receipt -ExpectedRunId $runId `
+                -Review $fixture.Review -Contract $verifiedContract -RequireNoExecution
+        }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw "A zero-execute receipt accepted invalid $($case.field) with isReReview=$isReReview." }
+    }
+}
+
+$manifestCases = @(
+    @{ name = "complete observations"; expected = "verified"; change = {} }
+    @{ name = "explicit empty inventory"; expected = "verified"; change = { param($m) $m.businessWorkItems = @() } }
+    @{ name = "legacy unbound evidence"; expected = "binding-mismatch"; change = { param($m) $m.Remove("binding") } }
+    @{ name = "another governance run"; expected = "binding-mismatch"; change = { param($m) $m.binding.governanceRunId = "older-run" } }
+    @{ name = "another OAuth resource"; expected = "binding-mismatch"; change = { param($m) $m.binding.resource += "-other" } }
+    @{ name = "wrong initial receipt"; expected = "binding-mismatch"; change = { param($m) $m.binding.initialReceiptId = $m.binding.finalReceiptId } }
+    @{ name = "wrong final receipt"; expected = "binding-mismatch"; change = { param($m) $m.binding.finalReceiptId = $m.binding.initialReceiptId } }
+    @{ name = "missing final receipt"; expected = "binding-mismatch"; change = { param($m) $m.binding.Remove("finalReceiptId") } }
+    @{ name = "no Work Item inventory"; expected = "invalid"; change = { param($m) $m.Remove("businessWorkItems") } }
+    @{ name = "Work Item object instead of array"; expected = "invalid"; change = { param($m) $m.businessWorkItems = $m.businessWorkItems[0] } }
+    @{ name = "null Work Item inventory"; expected = "invalid"; change = { param($m) $m.businessWorkItems = $null } }
+    @{ name = "empty before and after objects"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].before = @{}; $m.businessWorkItems[0].after = @{} } }
+    @{ name = "missing post-run observation"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].after = $null } }
+    @{ name = "string archive flag"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].before.isArchived = "false"; $m.businessWorkItems[0].after.isArchived = "false" } }
+    @{ name = "unrecognized status"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].before.status = "Unknown"; $m.businessWorkItems[0].after.status = "Unknown" } }
+    @{ name = "invalid Work Item ID"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].id = "not-an-id" } }
+    @{ name = "duplicated Work Item"; expected = "invalid"; change = { param($m) $m.businessWorkItems += $m.businessWorkItems[0] } }
+    @{ name = "non-string DisplayName"; expected = "invalid"; change = { param($m) $m.displayName.before = 3; $m.displayName.after = 3 } }
+    @{ name = "DisplayName changed"; expected = "changed"; change = { param($m) $m.displayName.after = "Changed" } }
+    @{ name = "Work Item status changed"; expected = "changed"; change = { param($m) $m.businessWorkItems[0].after.status = "Completed" } }
+    @{ name = "Work Item was archived"; expected = "changed"; change = { param($m) $m.businessWorkItems[0].after.isArchived = $true } }
+)
+$localRoot = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) ".agent/local"
+[void][IO.Directory]::CreateDirectory($localRoot)
+$manifestPath = Join-Path $localRoot "a1-protected-manifest-$([Guid]::NewGuid().ToString('N')).json"
+$requestPath = "$manifestPath.request"
+$observerPath = "$manifestPath.staged"
+$binding = @{
+    governanceRunId = $runId
+    resource = "https://context-hub.example.test/mcp-automation"
+    initialReceiptId = "84758af4-6c9c-4e82-80bd-8a7b68858727"
+    finalReceiptId = "2a4335df-a9ca-456c-9091-17a928ad87ba"
+}
+try {
+    foreach ($case in $manifestCases) {
+        $manifest = @{
+            binding = $binding.Clone()
+            displayName = @{ before = "ContextHub"; after = "ContextHub" }
+            businessWorkItems = @(@{
+                    id = "6d2aecbd-09eb-4a8a-ae32-55f23c349299"
+                    before = @{ status = "InProgress"; isArchived = $false }
+                    after = @{ status = "InProgress"; isArchived = $false }
+                })
+        }
+        & $case.change $manifest
+        $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+        $protected = Read-ScheduledGovernanceProtectedInvariantEvidence $manifestPath $binding
+        if ($protected.status -cne $case.expected -or $protected.unchanged -ne ($case.expected -ceq "verified") -or
+            $protected.bindingMatched -ne ($case.expected -cne "binding-mismatch")) {
+            throw "Protected manifest case '$($case.name)' returned '$($protected.status)' or the wrong acceptance flag."
+        }
+    }
+
+    Remove-Item -LiteralPath $manifestPath
+    Assert-ScheduledGovernanceReadbackPaths $requestPath $manifestPath "$manifestPath.final"
+    $boundReadback = & {
+        # Simulate the observer after the runner has published its request but before it reads the manifest.
+        function Start-Sleep {
+            param([int]$Milliseconds)
+            $request = Get-Content -LiteralPath $requestPath -Raw | ConvertFrom-Json
+            $response = @{
+                binding = $request.binding
+                displayName = @{ before = "ContextHub"; after = "ContextHub" }
+                businessWorkItems = @()
+            }
+            $response | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $observerPath
+            [IO.File]::Move($observerPath, $manifestPath)
+        }
+
+        Complete-ScheduledGovernanceProtectedReadback $manifestPath $requestPath 2 $binding
+    }
+    if ($boundReadback.status -cne "verified" -or -not $boundReadback.bindingMatched) {
+        throw "The matching manifest was not accepted after the request was published."
+    }
+
+    $requestContent = Get-Content -LiteralPath $requestPath -Raw
+    $manifestContent = Get-Content -LiteralPath $manifestPath -Raw
+    $shellPath = (Get-Process -Id $PID).Path
+    $cliEvidence = & $shellPath -NoProfile -NonInteractive -File $runnerPath -Mode Readiness `
+        -ProtectedInvariantEvidencePath $manifestPath -EvidencePath $manifestPath
+    $cliExitCode = $LASTEXITCODE
+    $cliResult = $cliEvidence | ConvertFrom-Json
+    if ($cliExitCode -ne 1 -or $cliResult.outcome.accepted -or
+        (Get-Content -LiteralPath $manifestPath -Raw) -cne $manifestContent) {
+        throw "An aliased final evidence path was accepted or overwritten by the error path."
+    }
+
+    $readbackPathRejections = @(
+        { Assert-ScheduledGovernanceReadbackPaths $requestPath "" "" }
+        { Assert-ScheduledGovernanceReadbackPaths $requestPath $requestPath "" }
+        { Assert-ScheduledGovernanceReadbackPaths "" $manifestPath $manifestPath }
+        { Assert-ScheduledGovernanceReadbackPaths $requestPath "$manifestPath.new" "" }
+        { Complete-ScheduledGovernanceProtectedReadback $manifestPath $requestPath 0 $binding }
+        {
+            $sameReceipt = $binding.Clone()
+            $sameReceipt.finalReceiptId = $sameReceipt.initialReceiptId
+            Complete-ScheduledGovernanceProtectedReadback $manifestPath "" 0 $sameReceipt
+        }
+    )
+    foreach ($reject in $readbackPathRejections) {
+        $rejected = $false
+        try { & $reject } catch { $rejected = $true }
+        if (-not $rejected) { throw "Invalid protected readback coordination was accepted." }
+    }
+    if ((Get-Content -LiteralPath $requestPath -Raw) -cne $requestContent) {
+        throw "A repeated request overwrote the original readback request."
+    }
+
+    Remove-Item -LiteralPath $requestPath, $manifestPath
+    $missing = Complete-ScheduledGovernanceProtectedReadback $manifestPath $requestPath 0 $binding
+    if ($missing.status -cne "readback-timeout" -or $missing.unchanged) {
+        throw "An absent manifest must leave protected readback incomplete."
+    }
+}
+finally {
+    foreach ($path in @($requestPath, $manifestPath, $observerPath)) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Remove-Item -LiteralPath $path
+        }
+    }
+}
+
+$coverageReview = (Get-ReceiptFixture -ReReview).Review
+$coverageReview | Add-Member -NotePropertyMembers @{
+    governanceRunId = $runId
+    humanDecisionCount = 0
+    governedExceptionCount = 0
+    exceptionDelta = $null
+    countInvariant = [pscustomobject]@{
+        authorizedDurableMemoryCount = 2; coveredDurableMemoryCount = 2; scannedDurableMemoryCount = 2; totalDurableMemoryCount = 2
+        sharedScopeOccurrences = 1; userScopeOccurrences = 0; userScopeHandledSeparately = $true; satisfied = $true
+    }
+}
+if (-not (Get-ScheduledGovernanceReviewEvidence -Review $coverageReview -ExpectedRunId $runId -ExpectedReReview $true).countInvariantSatisfied) {
+    throw "A complete review with matching counts did not pass."
+}
+$invalidCoverage = @(
+    @{ field = "authorizedDurableMemoryCount"; value = $null }
+    @{ field = "coveredDurableMemoryCount"; value = 1 }
+    @{ field = "scannedDurableMemoryCount"; value = "2" }
+    @{ field = "totalDurableMemoryCount"; value = -1 }
+    @{ field = "sharedScopeOccurrences"; value = 2 }
+    @{ field = "userScopeOccurrences"; value = 1 }
+    @{ field = "userScopeHandledSeparately"; value = "true" }
+    @{ field = "satisfied"; value = $false }
+)
+foreach ($case in $invalidCoverage) {
+    $review = $coverageReview.PSObject.Copy()
+    $review.countInvariant = $coverageReview.countInvariant.PSObject.Copy()
+    $review.countInvariant.($case.field) = $case.value
+    $coverageRejected = $false
+    try { $null = Get-ScheduledGovernanceReviewEvidence -Review $review -ExpectedRunId $runId -ExpectedReReview $true }
+    catch { $coverageRejected = $_.Exception.Message -like "Complete review did not prove*" }
+    if (-not $coverageRejected) { throw "Invalid complete review field '$($case.field)' passed." }
+}
+
+$humanDecisionCases = @(
+    @{ human = 0; governed = 0; delta = [pscustomobject]@{ new = 1; escalated = 0 }; expected = $true }
+    @{ human = 0; governed = 0; delta = [pscustomobject]@{ new = 0; escalated = 1 }; expected = $true }
+    @{ human = 1; governed = 0; delta = $null; expected = $true }
+    @{ human = 0; governed = 1; delta = $null; expected = $true }
+    @{ human = 1; governed = 1; delta = [pscustomobject]@{ new = 0; escalated = 0 }; expected = $false }
+    @{ human = 0; governed = 0; delta = $null; expected = $false }
+)
+foreach ($case in $humanDecisionCases) {
+    $review = $coverageReview.PSObject.Copy()
+    $review.decision = "HumanDecisionOnly"
+    $review.humanDecisionCount = $case.human
+    $review.governedExceptionCount = $case.governed
+    $review.exceptionDelta = $case.delta
+    $observed = Get-ScheduledGovernanceReviewEvidence -Review $review -ExpectedRunId $runId -ExpectedReReview $true
+    if ($observed.humanDecisionEvidence -cne $case.expected -or
+        $observed.newExceptionCount -cne (Get-ScheduledGovernancePropertyValue $case.delta "new") -or
+        $observed.escalatedExceptionCount -cne (Get-ScheduledGovernancePropertyValue $case.delta "escalated")) {
+        throw "HumanDecisionOnly did not preserve and validate its supporting counts."
+    }
+}
+
+$invalidHumanDecisionCounts = @(
+    @{ field = "humanDecisionCount"; value = "1" }
+    @{ field = "governedExceptionCount"; value = -1 }
+    @{ field = "exceptionDelta"; value = [pscustomobject]@{ new = 1 } }
+    @{ field = "exceptionDelta"; value = [pscustomobject]@{ new = $true; escalated = 0 } }
+)
+foreach ($case in $invalidHumanDecisionCounts) {
+    $review = $coverageReview.PSObject.Copy()
+    $review.decision = "HumanDecisionOnly"
+    $review.($case.field) = $case.value
+    $rejected = $false
+    try { $null = Get-ScheduledGovernanceReviewEvidence -Review $review -ExpectedRunId $runId -ExpectedReReview $true }
+    catch { $rejected = $_.Exception.Message -ceq "Review returned an invalid human-decision or exception count." }
+    if (-not $rejected) { throw "Invalid human decision field '$($case.field)' passed." }
+}
+
+$finalBatch = New-ReplayFixture
+$finalReceipt = $finalBatch.After.PSObject.Copy()
+$finalReceipt.receiptId = [Guid]::NewGuid().ToString("D")
+$continuityEvidence = @{
+    receipt = @{
+        initial = @{ receiptId = $finalBatch.Evidence.receipt.initial.receiptId }
+        afterReplay = @{
+            receiptId = $finalBatch.After.receiptId; requestIdentityHash = $finalBatch.After.requestIdentityHash
+            auditIds = $finalBatch.After.auditIds; counts = Get-ScheduledGovernanceBatchCounts $finalBatch.After
+        }
+        final = @{ receiptId = $finalReceipt.receiptId }
+    }
+}
+Assert-ScheduledGovernanceFinalBatchContinuity -Receipt $finalReceipt -Evidence $continuityEvidence
+$invalidContinuity = @(
+    @{ field = "latestBatchReceived"; value = $false }
+    @{ field = "latestBatchReceived"; value = "true" }
+    @{ field = "requestIdentityHash"; value = "b" * 64 }
+    @{ field = "auditIds"; value = @([Guid]::NewGuid().ToString("D")) }
+    @{ field = "applied"; value = 0 }
+    @{ field = "failed"; value = 1 }
+    @{ field = "quarantined"; value = 1 }
+    @{ field = "semanticAutoResolved"; value = 1 }
+)
+foreach ($case in $invalidContinuity) {
+    $changedReceipt = $finalReceipt.PSObject.Copy()
+    $changedReceipt.($case.field) = $case.value
+    $continuityRejected = $false
+    try { Assert-ScheduledGovernanceFinalBatchContinuity -Receipt $changedReceipt -Evidence $continuityEvidence }
+    catch { $continuityRejected = $_.Exception.Message -like "Final review receipt*" }
+    if (-not $continuityRejected) { throw "Invalid final batch field '$($case.field)' passed." }
+}
+$continuityEvidence.receipt.final.receiptId = $finalBatch.After.receiptId
+$duplicateReceiptRejected = $false
+try { Assert-ScheduledGovernanceFinalBatchContinuity -Receipt $finalReceipt -Evidence $continuityEvidence }
+catch { $duplicateReceiptRejected = $_.Exception.Message -like "Final review receipt*" }
+if (-not $duplicateReceiptRejected) { throw "The previously read batch receipt was accepted as the final review receipt." }
+
+$schemaFixture = '{"name":"fixture","inputSchema":{"type":"object","required":["item"],"properties":{"item":{"type":"string"}}},"outputSchema":{"z":[],"B":[true,null],"a":{"type":["string","null"],"description":"quote\" & punctuation"}}}'
+# Reference digest from the gateway's PublishedToolSchemaHash, including empty and singleton arrays.
+$referenceHash = 'ebefb540ae8551ea03d0684a89ee3bc03249e2d163e79969ae31901b87732e9a'
+$actualHash = Get-ScheduledGovernancePublishedSchemaHash -Tool ($schemaFixture | ConvertFrom-Json)
+$alteredHash = Get-ScheduledGovernancePublishedSchemaHash -Tool ($schemaFixture.Replace('["item"]', '"item"') | ConvertFrom-Json)
+if ($actualHash -cne $referenceHash -or $alteredHash -ceq $referenceHash) {
+    throw "The runner schema hash does not match the gateway canonical JSON contract."
+}
+
+$toolAuthorityFixture = '{"description":"Read the governance receipt.","inputSchema":{"properties":{"governanceRunId":{}}},"outputSchema":{"properties":{"projectIds":{},"resolvedProjectIds":{},"errorCode":{"enum":["RestrictedActionUnavailable"]}}}}' | ConvertFrom-Json
+Assert-ScheduledGovernancePublishedToolAuthority -Tool $toolAuthorityFixture
+foreach ($invalidTool in @(
+        '{"description":"Read the receipt.","inputSchema":{"properties":{"request":{"properties":{"projectIds":{}}}}}}',
+        '{"description":"Use /mcp-chat for additional authority.","inputSchema":{"properties":{"governanceRunId":{}}}}')) {
+    $authorityRejected = $false
+    try { Assert-ScheduledGovernancePublishedToolAuthority -Tool ($invalidTool | ConvertFrom-Json) }
+    catch { $authorityRejected = $true }
+    if (-not $authorityRejected) { throw "A tool advertised forbidden invocation authority." }
+}
+
+$checkpointPath = Join-Path $localRoot "a1-checkpoint-$([Guid]::NewGuid().ToString('N')).json"
+$checkpointRun = "scheduled-acceptance-$([Guid]::NewGuid().ToString('N'))"
+$checkpointHash = Get-ScheduledGovernanceSha256Hex "test-binding"
+$checkpointSpec = @{ contract = $verifiedContract; catalog = $verifiedContract }
+$initialExecutionCalls = [System.Collections.Generic.List[int]]::new()
+& {
+    function Invoke-ScheduledGovernanceTool {
+        param($Token, $ToolName, $Arguments, $RequestId)
+        $initialExecutionCalls.Add($RequestId)
+        if ($Token -cne "offline-test" -or $ToolName -cne "scheduled_governance_execute" -or $RequestId -ne 40) {
+            throw "Unexpected dispatch."
+        }
+        return [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = [pscustomobject]@{
+            governanceRunId = $Arguments.request.governanceRunId
+            snapshotToken = $Arguments.request.snapshotToken
+            succeeded = $true
+            isReplay = $false
+            stoppedReason = "Completed"
+        } } }
+    }
+    $arguments = @{ request = @{ governanceRunId = $checkpointRun; snapshotToken = "kg:fixture:i0" } }
+    $state = @{ outcome = @{ executorCalls = 0 }; replay = @{}; receipt = @{}; errors = @() }
+    $execution = Invoke-ScheduledGovernanceInitialExecution -Token "offline-test" `
+        -ExecuteArguments $arguments -Contract $verifiedContract -Evidence $state
+    if ($null -eq $execution -or ($initialExecutionCalls -join ",") -cne "40" -or $state.outcome.executorCalls -ne 1) {
+        throw "A verified initial execution must continue to the normal pre-replay receipt check."
+    }
+}
+$uncertainExecutionCases = @(
+    @{ response = { throw "transport timed out" }; receipt = "valid" }
+    @{ response = { [pscustomobject]@{ error = @{ code = -32603 } } }; receipt = "valid" }
+    @{ response = { [pscustomobject]@{ result = [pscustomobject]@{ isError = $true } } }; receipt = "missing" }
+    @{ response = { [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = [pscustomobject]@{ stoppedReason = "UnknownResult" } } } }; receipt = "schema-drift" }
+    @{ response = { [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = "malformed" } } }; receipt = "malformed" }
+)
+foreach ($case in $uncertainExecutionCases) {
+    & {
+        $calls = [System.Collections.Generic.List[int]]::new()
+        $arguments = @{ request = @{ governanceRunId = $checkpointRun; snapshotToken = "kg:fixture:i0" } }
+        function Invoke-ScheduledGovernanceTool {
+            param($Token, $ToolName, $Arguments, $RequestId)
+            $calls.Add($RequestId)
+            if ($Token -cne "offline-test") { throw "Unexpected test token." }
+            if ($ToolName -ceq "scheduled_governance_execute" -and $RequestId -eq 40 -and
+                $Arguments.request.governanceRunId -ceq $checkpointRun -and $calls.Count -eq 1) {
+                return (& $case.response)
+            }
+            if ($ToolName -cne "scheduled_governance_run_get" -or $RequestId -ne 41 -or
+                $Arguments.governanceRunId -cne $checkpointRun -or
+                $Arguments.includeReliabilityHistory -isnot [bool] -or $Arguments.includeReliabilityHistory) {
+                throw "Unexpected recovery call."
+            }
+            $receipt = [pscustomobject]@{
+                governanceRunId = $checkpointRun
+                runExists = switch ($case.receipt) { "missing" { $false }; "malformed" { "true" }; default { $true } }
+                status = "Stopped"
+                toolContractVersion = $verifiedContract.toolContractVersion
+                schemaHash = if ($case.receipt -ceq "schema-drift") { "wrong" } else { $verifiedContract.schemaHash }
+                publishedCatalogVersion = $verifiedContract.publishedCatalogVersion
+            }
+            return [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = $receipt } }
+        }
+
+        $state = @{ outcome = @{ executorCalls = 0; accepted = $false }; replay = @{}; receipt = @{}; errors = @() }
+        $execution = Invoke-ScheduledGovernanceInitialExecution -Token "offline-test" `
+            -ExecuteArguments $arguments -Contract $verifiedContract -Evidence $state
+        $expectedRecovery = switch ($case.receipt) {
+            "valid" { "receipt-readback-insufficient-for-exact-replay" }
+            "missing" { "receipt-run-not-found" }
+            default { "receipt-readback-unavailable" }
+        }
+        if ($null -ne $execution -or ($calls -join ",") -cne "40,41" -or $state.outcome.executorCalls -ne 1 -or
+            $state.outcome.accepted -or $state.outcome.status -cne "outcome-unknown-no-retry" -or
+            $state.replay.outcomeRecovery -cne $expectedRecovery -or
+            ($expectedRecovery -ceq "receipt-readback-unavailable" -and $null -ne $state.receipt.afterUnknownOutcome)) {
+            throw "An ambiguous executor response did not stop after the bound recovery read."
+        }
+    }
+}
+try {
+    Write-ScheduledGovernanceA1Checkpoint $checkpointPath $checkpointHash $checkpointRun
+    $originalCheckpoint = [IO.File]::ReadAllText($checkpointPath)
+    $secondClaimRejected = $false
+    try { Write-ScheduledGovernanceA1Checkpoint $checkpointPath $checkpointHash "second-run" }
+    catch [IO.IOException] { $secondClaimRejected = $true }
+    if (-not $secondClaimRejected -or [IO.File]::ReadAllText($checkpointPath) -cne $originalCheckpoint) {
+        throw "Repeated A1 path ownership changed the original checkpoint."
+    }
+
+    & {
+        $calls = [System.Collections.Generic.List[string]]::new()
+        function Invoke-ScheduledGovernanceTool {
+            param($Token, $ToolName, $Arguments, $RequestId)
+            $calls.Add($ToolName)
+            if ($Token -cne "offline-test" -or $ToolName -cne "scheduled_governance_run_get" -or $RequestId -ne 41 -or
+                $Arguments.governanceRunId -cne $checkpointRun -or $Arguments.includeReliabilityHistory -isnot [bool] -or
+                $Arguments.includeReliabilityHistory) { throw "Unexpected recovery operation." }
+            return [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = [pscustomobject]$receipt } }
+        }
+
+        $receipt = @{
+            governanceRunId = $checkpointRun; runExists = $true; status = "Stopped"
+            toolContractVersion = $verifiedContract.toolContractVersion
+            schemaHash = $verifiedContract.schemaHash
+            publishedCatalogVersion = $verifiedContract.publishedCatalogVersion
+        }
+        $state = @{ outcome = @{ executorCalls = 0; accepted = $false }; replay = @{}; receipt = @{}; errors = @() }
+        Invoke-ScheduledGovernanceA1Recovery $checkpointPath $checkpointHash "offline-test" $checkpointSpec $state
+        if ($calls.Count -ne 1 -or $state.governanceRunId -cne $checkpointRun -or
+            $state.outcome.executorCalls -ne 0 -or $state.outcome.accepted -or
+            $state.receipt.afterUnknownOutcome.status -cne "Stopped" -or
+            $state.replay.outcomeRecovery -cne "receipt-readback-insufficient-for-exact-replay") {
+            throw "A1 did not recover the original run through a single read-only receipt call."
+        }
+
+        $receipt.runExists = $false
+        Invoke-ScheduledGovernanceA1Recovery $checkpointPath $checkpointHash "offline-test" $checkpointSpec $state
+        if ($calls.Count -ne 2 -or $state.replay.outcomeRecovery -cne "receipt-run-not-found") {
+            throw "A missing run did not stop read-only recovery."
+        }
+        $receipt.schemaHash = "mismatched"
+        Invoke-ScheduledGovernanceA1Recovery $checkpointPath $checkpointHash "offline-test" $checkpointSpec $state
+        if ($calls.Count -ne 3 -or $state.replay.outcomeRecovery -cne "receipt-readback-unavailable") {
+            throw "A different receipt contract was accepted."
+        }
+        $bindingRejected = $false
+        try { Invoke-ScheduledGovernanceA1Recovery $checkpointPath "wrong-binding" "offline-test" $checkpointSpec $state }
+        catch { $bindingRejected = $true }
+        if (-not $bindingRejected -or $calls.Count -ne 3) {
+            throw "A checkpoint for another endpoint reached the receipt tool."
+        }
+    }
+}
+finally {
+    if ([IO.File]::Exists($checkpointPath)) { [IO.File]::Delete($checkpointPath) }
+}
+
+[ordered]@{
+    valid = $true
+    positiveCases = 16 + @($manifestCases | Where-Object expected -CEQ "verified").Count +
+        @($humanDecisionCases | Where-Object expected).Count
+    negativeCases = $cases.Count + 12 + $invalidExecutions.Count + $preReplayCases.Count +
+        $postReplayCases.Count + $unknownReplayCases.Count + (2 * $noExecutionRejections.Count) + $readbackPathRejections.Count +
+        @($manifestCases | Where-Object expected -CNE "verified").Count + $invalidCoverage.Count + $invalidContinuity.Count + 1 +
+        @($humanDecisionCases | Where-Object { -not $_.expected }).Count + $invalidHumanDecisionCounts.Count + $uncertainExecutionCases.Count
+    result = "scheduled-governance-receipt-replay-and-protected-evidence"
+} | ConvertTo-Json -Compress
