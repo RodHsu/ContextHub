@@ -33,6 +33,8 @@ The manifest must match the exact run, validated OAuth resource, and initial and
 
 A complete review must prove that the authorized, covered, scanned and total memory counts agree, with Shared counted once and user scope handled separately. The initial receipt and the A0 final receipt must each confirm no batch, zero execution totals and an empty audit ID array. For A1 the final receipt must confirm the re-review decision and preserve the request identity, audit IDs and cumulative counts verified after replay. The verifier requests the protected manifest after those checks pass.
 
+An A1 final review can stop at `HumanDecisionOnly`. An available exception delta must report a new or escalated exception. With no delta, the review must report a human-decision candidate or governed exception. The verifier records these counts and makes no additional executor call after that decision.
+
 ```json
 {
   "binding": {

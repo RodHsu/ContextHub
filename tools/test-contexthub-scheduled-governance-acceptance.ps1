@@ -496,6 +496,26 @@ function Get-ScheduledGovernanceReviewEvidence {
             throw "Complete review did not prove the authorized durable-memory count and scope invariant."
         }
     }
+
+    $humanDecisionCount = Get-ScheduledGovernancePropertyValue $Review "humanDecisionCount"
+    $governedExceptionCount = Get-ScheduledGovernancePropertyValue $Review "governedExceptionCount"
+    $exceptionDelta = Get-ScheduledGovernancePropertyValue $Review "exceptionDelta"
+    $newExceptions = Get-ScheduledGovernancePropertyValue $exceptionDelta "new"
+    $escalatedExceptions = Get-ScheduledGovernancePropertyValue $exceptionDelta "escalated"
+    $decisionCounts = @($humanDecisionCount, $governedExceptionCount)
+    if ($null -ne $exceptionDelta) {
+        $decisionCounts += @($newExceptions, $escalatedExceptions)
+    }
+    if (@($decisionCounts | Where-Object { ($_ -isnot [int] -and $_ -isnot [long]) -or $_ -lt 0 }).Count -gt 0) {
+        throw "Review returned an invalid human-decision or exception count."
+    }
+    $humanDecisionEvidence = if ($null -eq $exceptionDelta) {
+        $humanDecisionCount -gt 0 -or $governedExceptionCount -gt 0
+    }
+    else {
+        $newExceptions -gt 0 -or $escalatedExceptions -gt 0
+    }
+
     [ordered]@{
         decision = $decision
         snapshotPresent = -not [string]::IsNullOrWhiteSpace([string](Get-ScheduledGovernancePropertyValue $Review "snapshotToken"))
@@ -510,8 +530,11 @@ function Get-ScheduledGovernanceReviewEvidence {
         countInvariantSatisfied = $satisfied
         candidateCount = [int](Get-ScheduledGovernancePropertyValue $Review "candidateCount")
         reversibleExecutionCount = [int](Get-ScheduledGovernancePropertyValue $Review "reversibleExecutionCount")
-        humanDecisionCount = [int](Get-ScheduledGovernancePropertyValue $Review "humanDecisionCount")
-        governedExceptionCount = [int](Get-ScheduledGovernancePropertyValue $Review "governedExceptionCount")
+        humanDecisionCount = $humanDecisionCount
+        governedExceptionCount = $governedExceptionCount
+        newExceptionCount = $newExceptions
+        escalatedExceptionCount = $escalatedExceptions
+        humanDecisionEvidence = $humanDecisionEvidence
         businessWorkItemActionableCount = [int](Get-ScheduledGovernancePropertyValue $Review "businessWorkItemActionableCount")
         resolvedProjectCount = @(Get-ScheduledGovernanceArrayProperty $Review "resolvedProjectIds").Count
     }
@@ -1521,8 +1544,7 @@ try {
                                     finalReceiptId = $evidence.receipt.final.receiptId
                                 })
                             $finalConverged = $finalReviewEvidence.decision -eq "NoOpConverged" -or
-                                ($finalReviewEvidence.decision -eq "HumanDecisionOnly" -and
-                                    ($finalReviewEvidence.governedExceptionCount -gt 0 -or $finalReviewEvidence.humanDecisionCount -gt 0))
+                                ($finalReviewEvidence.decision -eq "HumanDecisionOnly" -and $finalReviewEvidence.humanDecisionEvidence)
                             $evidence.outcome.status = if (
                                 $evidence.replay.exact -and $finalConverged -and $evidence.protectedInvariants.unchanged) {
                                 "A1-accepted"

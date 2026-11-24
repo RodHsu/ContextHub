@@ -519,6 +519,9 @@ finally {
 $coverageReview = (Get-ReceiptFixture -ReReview).Review
 $coverageReview | Add-Member -NotePropertyMembers @{
     governanceRunId = $runId
+    humanDecisionCount = 0
+    governedExceptionCount = 0
+    exceptionDelta = $null
     countInvariant = [pscustomobject]@{
         authorizedDurableMemoryCount = 2; coveredDurableMemoryCount = 2; scannedDurableMemoryCount = 2; totalDurableMemoryCount = 2
         sharedScopeOccurrences = 1; userScopeOccurrences = 0; userScopeHandledSeparately = $true; satisfied = $true
@@ -545,6 +548,44 @@ foreach ($case in $invalidCoverage) {
     try { $null = Get-ScheduledGovernanceReviewEvidence -Review $review -ExpectedRunId $runId -ExpectedReReview $true }
     catch { $coverageRejected = $_.Exception.Message -like "Complete review did not prove*" }
     if (-not $coverageRejected) { throw "Invalid complete review field '$($case.field)' passed." }
+}
+
+$humanDecisionCases = @(
+    @{ human = 0; governed = 0; delta = [pscustomobject]@{ new = 1; escalated = 0 }; expected = $true }
+    @{ human = 0; governed = 0; delta = [pscustomobject]@{ new = 0; escalated = 1 }; expected = $true }
+    @{ human = 1; governed = 0; delta = $null; expected = $true }
+    @{ human = 0; governed = 1; delta = $null; expected = $true }
+    @{ human = 1; governed = 1; delta = [pscustomobject]@{ new = 0; escalated = 0 }; expected = $false }
+    @{ human = 0; governed = 0; delta = $null; expected = $false }
+)
+foreach ($case in $humanDecisionCases) {
+    $review = $coverageReview.PSObject.Copy()
+    $review.decision = "HumanDecisionOnly"
+    $review.humanDecisionCount = $case.human
+    $review.governedExceptionCount = $case.governed
+    $review.exceptionDelta = $case.delta
+    $observed = Get-ScheduledGovernanceReviewEvidence -Review $review -ExpectedRunId $runId -ExpectedReReview $true
+    if ($observed.humanDecisionEvidence -cne $case.expected -or
+        $observed.newExceptionCount -cne (Get-ScheduledGovernancePropertyValue $case.delta "new") -or
+        $observed.escalatedExceptionCount -cne (Get-ScheduledGovernancePropertyValue $case.delta "escalated")) {
+        throw "HumanDecisionOnly did not preserve and validate its supporting counts."
+    }
+}
+
+$invalidHumanDecisionCounts = @(
+    @{ field = "humanDecisionCount"; value = "1" }
+    @{ field = "governedExceptionCount"; value = -1 }
+    @{ field = "exceptionDelta"; value = [pscustomobject]@{ new = 1 } }
+    @{ field = "exceptionDelta"; value = [pscustomobject]@{ new = $true; escalated = 0 } }
+)
+foreach ($case in $invalidHumanDecisionCounts) {
+    $review = $coverageReview.PSObject.Copy()
+    $review.decision = "HumanDecisionOnly"
+    $review.($case.field) = $case.value
+    $rejected = $false
+    try { $null = Get-ScheduledGovernanceReviewEvidence -Review $review -ExpectedRunId $runId -ExpectedReReview $true }
+    catch { $rejected = $_.Exception.Message -ceq "Review returned an invalid human-decision or exception count." }
+    if (-not $rejected) { throw "Invalid human decision field '$($case.field)' passed." }
 }
 
 $finalBatch = New-ReplayFixture
@@ -669,9 +710,11 @@ finally {
 
 [ordered]@{
     valid = $true
-    positiveCases = 15 + @($manifestCases | Where-Object expected -CEQ "verified").Count
+    positiveCases = 15 + @($manifestCases | Where-Object expected -CEQ "verified").Count +
+        @($humanDecisionCases | Where-Object expected).Count
     negativeCases = $cases.Count + 12 + $invalidExecutions.Count + $preReplayCases.Count +
         $postReplayCases.Count + (2 * $noExecutionRejections.Count) + $readbackPathRejections.Count +
-        @($manifestCases | Where-Object expected -CNE "verified").Count + $invalidCoverage.Count + $invalidContinuity.Count + 1
+        @($manifestCases | Where-Object expected -CNE "verified").Count + $invalidCoverage.Count + $invalidContinuity.Count + 1 +
+        @($humanDecisionCases | Where-Object { -not $_.expected }).Count + $invalidHumanDecisionCounts.Count
     result = "scheduled-governance-receipt-replay-and-protected-evidence"
 } | ConvertTo-Json -Compress
