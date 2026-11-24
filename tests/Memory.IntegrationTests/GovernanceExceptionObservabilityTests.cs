@@ -484,6 +484,57 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
     }
 
     [DockerRequiredFact]
+    public async Task Full_governance_counts_insight_lifecycle_inventory_without_queuing_stored_exceptions()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"insight-coverage-{Guid.NewGuid():N}";
+        var rows = new Dictionary<ConversationPromotionStatus, ConversationInsight>();
+        foreach (var status in Enum.GetValues<ConversationPromotionStatus>())
+        {
+            var row = await SeedGovernanceInsightAsync(db, actor, projectId);
+            row.PromotionStatus = status;
+            rows.Add(status, row);
+        }
+
+        var proposal = await SeedGovernanceInsightAsync(db, actor, projectId);
+        proposal.SourceSystem = ChatGptProposalService.SourceSystem;
+        proposal.Tags = ["chatgpt-proposal"];
+        proposal.PromotionStatus = ConversationPromotionStatus.Pending;
+        var outside = await SeedGovernanceInsightAsync(db, actor, projectId + "-outside");
+        outside.PromotionStatus = ConversationPromotionStatus.RequiresUserDecision;
+        await db.SaveChangesAsync();
+
+        var service = scope.ServiceProvider.GetRequiredService<IFullGovernancePlanService>();
+        var first = await service.BuildAsync([projectId], $"insight-coverage-{Guid.NewGuid():N}",
+            CreateEmptyGovernanceSnapshot(), default);
+        var coverage = first.Coverage.InsightCoverage;
+
+        coverage.TotalCount.Should().Be(rows.Count);
+        coverage.ScannedCount.Should().Be(rows.Count);
+        coverage.CoverageComplete.Should().BeTrue();
+        coverage.HasMore.Should().BeFalse();
+        coverage.CandidateCount.Should().Be(2);
+        coverage.ActionableCount.Should().Be(0);
+        coverage.DeferredCount.Should().Be(1);
+        coverage.RequiresUserDecisionCount.Should().Be(3);
+        coverage.HostBlockedCount.Should().Be(1);
+        first.Coverage.ProposalCoverage.TotalCount.Should().Be(1);
+        first.Items.Where(x => x.ItemKind == GovernanceItemKind.ConversationInsight)
+            .Select(x => x.AuthorityResourceId).Should().BeEquivalentTo(new[]
+            {
+                rows[ConversationPromotionStatus.Pending].Id,
+                rows[ConversationPromotionStatus.Failed].Id
+            });
+        foreach (var (status, insight) in rows)
+        {
+            (await db.ConversationInsights.AsNoTracking().Where(x => x.Id == insight.Id)
+                .Select(x => x.PromotionStatus).SingleAsync()).Should().Be(status);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Concurrent_FullGovernance_Reopen_Must_Not_Overwrite_HostBlocked_Insight()
     {
         using var seedScope = environment.GetFactory().Services.CreateScope();

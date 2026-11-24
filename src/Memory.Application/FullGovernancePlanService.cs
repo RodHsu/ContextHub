@@ -217,10 +217,22 @@ public sealed class FullGovernancePlanService(
         }
 
         await ReopenChangedInsightsAsync(projects, tenantId, ownerUserId, governanceRunId, cancellationToken);
-        var insights = await dbContext.ConversationInsights.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
-            .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending || x.PromotionStatus == ConversationPromotionStatus.Failed)
-            .ToListAsync(cancellationToken);
+        var insightScope = ChatGptProposalService.ExcludeProposals(dbContext.ConversationInsights.AsNoTracking()
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId))));
+        Dictionary<ConversationPromotionStatus, int> insightStatusCounts;
+        List<ConversationInsight> insights;
+        // Count the lifecycle inventory and read the execution candidates from the same snapshot.
+        await using (var insightSnapshot = await dbContext.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken))
+        {
+            insightStatusCounts = await insightScope
+                .GroupBy(x => x.PromotionStatus)
+                .Select(group => new { Status = group.Key, Count = group.Count() })
+                .ToDictionaryAsync(x => x.Status, x => x.Count, cancellationToken);
+            insights = await insightScope
+                .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending || x.PromotionStatus == ConversationPromotionStatus.Failed)
+                .ToListAsync(cancellationToken);
+            await insightSnapshot.CommitAsync(cancellationToken);
+        }
         var now = clock.UtcNow;
         var currentInsightEvidence = await dbContext.MemoryItems.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
@@ -242,7 +254,7 @@ public sealed class FullGovernancePlanService(
         var proposalInsights = await ChatGptProposalService.ApplyActorScope(
                 dbContext.ConversationInsights.AsNoTracking(), actor, proposalProjects, ChatGptProposalStatus.Pending)
             .ToListAsync(cancellationToken);
-        foreach (var insight in insights.Where(x => !ChatGptProposalService.IsProposal(x)))
+        foreach (var insight in insights)
         {
             var protectedInsight = IsProtectedInsight(insight);
             var evidenceKey = $"{insight.ProjectId}\n{GovernanceEvidenceFingerprint.NormalizeExactText(insight.Title)}\n{GovernanceEvidenceFingerprint.NormalizeExactText(insight.Summary)}";
@@ -349,6 +361,8 @@ public sealed class FullGovernancePlanService(
             x.Status is ProjectWorkItemStatus.Pending or ProjectWorkItemStatus.InProgress or ProjectWorkItemStatus.Blocked &&
             !HasActiveGovernanceExclusion(x.GovernanceExclusionsJson, governanceRunId));
         var governedExceptions = ordered.Count(GovernanceExceptionIdentity.RequiresHumanDecision) + skillGovernance.ExceptionCount;
+        var insightCount = insightStatusCounts.Values.Sum();
+        var insightCoverage = Surface(insightCount, insightCount, ordered, GovernanceItemKind.ConversationInsight);
         var coverage = new FullGovernanceCoverageResult(
             Surface(projects.Length, projects.Length, ordered, GovernanceItemKind.Project),
             Surface(hierarchyRows.Count, hierarchyRows.Count, ordered, GovernanceItemKind.ProjectHierarchy),
@@ -358,7 +372,13 @@ public sealed class FullGovernancePlanService(
             Surface(artifacts.Length, artifacts.Length, ordered, GovernanceItemKind.Artifact),
             Surface(discussions.Count, discussions.Count, ordered, GovernanceItemKind.Discussion),
             Surface(workItems.Count, workItems.Count, ordered, GovernanceItemKind.WorkItem),
-            Surface(insights.Count(x => !ChatGptProposalService.IsProposal(x)), insights.Count(x => !ChatGptProposalService.IsProposal(x)), ordered, GovernanceItemKind.ConversationInsight),
+            insightCoverage with
+            {
+                DeferredCount = insightStatusCounts.GetValueOrDefault(ConversationPromotionStatus.Deferred),
+                RequiresUserDecisionCount = insightCoverage.RequiresUserDecisionCount +
+                    insightStatusCounts.GetValueOrDefault(ConversationPromotionStatus.RequiresUserDecision),
+                HostBlockedCount = insightStatusCounts.GetValueOrDefault(ConversationPromotionStatus.HostBlocked)
+            },
             Surface(actions.Count, actions.Count, ordered, GovernanceItemKind.SuggestedAction),
             Surface(proposalInsights.Count, proposalInsights.Count, ordered, GovernanceItemKind.Proposal),
             Surface(checked((int)Math.Min(logTotal, int.MaxValue)), logPartitions.Take(MaximumLogPartitions).Sum(x => x.Count), ordered, GovernanceItemKind.LogPartition,
