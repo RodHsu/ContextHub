@@ -20,7 +20,8 @@ public sealed class FullGovernancePlanService(
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         DurableMemoryGovernanceSnapshotResult memorySnapshot,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowCancelledRetentionReactivation = true)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
@@ -30,7 +31,8 @@ public sealed class FullGovernancePlanService(
         ActorAuthorization.EnsureProjectsAllowed(actor, projects, write: false);
         var projectSet = projects.ToHashSet(ProjectContext.IdentityComparer);
         var items = new List<GovernanceReviewItem>();
-        var retention = await autonomousRetention.ReviewAsync(projects, governanceRunId, cancellationToken);
+        var retention = await autonomousRetention.ReviewAsync(projects, governanceRunId, cancellationToken,
+            allowCancelledReactivation: allowCancelledRetentionReactivation);
         foreach (var candidate in retention.Candidates)
         {
             items.Add(new GovernanceReviewItem(

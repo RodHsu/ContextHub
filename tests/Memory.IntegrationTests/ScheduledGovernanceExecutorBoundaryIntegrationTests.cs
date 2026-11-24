@@ -326,9 +326,11 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
     }
 
     [DockerRequiredTheory]
-    [InlineData(MemoryStatus.Active)]
-    [InlineData(MemoryStatus.Archived)]
-    public async Task Distinct_scheduled_runs_cannot_apply_quarantine_twice_from_frozen_reviews(MemoryStatus initialStatus)
+    [InlineData(MemoryStatus.Active, "unchanged")]
+    [InlineData(MemoryStatus.Archived, "unchanged")]
+    [InlineData(MemoryStatus.Active, "restored")]
+    [InlineData(MemoryStatus.Active, "cancelled")]
+    public async Task Distinct_scheduled_runs_respect_live_quarantine_state(MemoryStatus initialStatus, string interveningChange)
     {
         var factory = environment.GetFactory();
         using var firstScope = factory.Services.CreateScope();
@@ -362,6 +364,7 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
 
         var first = await FreezeAsync(firstScope.ServiceProvider);
         var second = await FreezeAsync(secondScope.ServiceProvider);
+        var afterCancellation = interveningChange == "cancelled" ? await FreezeAsync(firstScope.ServiceProvider) : null;
         var secondDb = secondScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         (await secondDb.MemoryItems.SingleAsync(row => row.Id == target.Id)).Status.Should().Be(initialStatus);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -389,6 +392,7 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
                 .ExecuteAsync(second, deadline.Token);
         });
         MemoryRetentionState applied;
+        int revisionCount;
         GovernanceBatchExecuteResult secondExecution;
         try
         {
@@ -396,7 +400,29 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             var firstExecution = await firstScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
                 .ExecuteAsync(first, deadline.Token);
             firstExecution.QuarantinedCount.Should().Be(1);
+            if (interveningChange == "restored")
+            {
+                firstScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = GenericAdminActor(user);
+                await firstScope.ServiceProvider.GetRequiredService<IMemoryService>().ArchiveAsync(
+                    new(target.Id, projectId, Archived: false), deadline.Token);
+                // Represent a settled restore after its background reindex has finished.
+                (await db.MemoryJobs.Where(job => job.TenantId == user.TenantId && job.OwnerUserId == user.Id &&
+                        job.ProjectId == projectId && job.Status == MemoryJobStatus.Pending)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.Status, MemoryJobStatus.Completed), deadline.Token))
+                    .Should().Be(1);
+            }
+            if (interveningChange == "cancelled")
+            {
+                var tags = target.Tags;
+                target.Tags = [.. tags, "legal-hold"];
+                await db.SaveChangesAsync(deadline.Token);
+                await firstScope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>()
+                    .ReviewAsync([projectId], $"cancel-{Guid.NewGuid():N}", deadline.Token);
+                target.Tags = tags;
+                await db.SaveChangesAsync(deadline.Token);
+            }
             applied = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id);
+            revisionCount = await db.MemoryItemRevisions.AsNoTracking().CountAsync(revision => revision.MemoryItemId == target.Id);
         }
         finally
         {
@@ -407,15 +433,34 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         secondExecution.ErrorCode.Should().Be(GovernanceBatchErrorCode.None);
         secondExecution.QuarantinedCount.Should().Be(0);
         var skipped = secondExecution.Items.Single(item => item.ResourceId == target.Id);
-        skipped.Disposition.Should().Be(GovernanceBatchItemDisposition.NoOp);
+        var expectedDisposition = interveningChange == "unchanged" ? GovernanceBatchItemDisposition.NoOp : GovernanceBatchItemDisposition.Deferred;
+        skipped.Disposition.Should().Be(expectedDisposition);
         (await db.SecurityAuditEvents.AsNoTracking().Where(row => skipped.AuditIds.Contains(row.Id))
-            .Select(row => row.Outcome).ToListAsync()).Should().Equal("NoOp");
+            .Select(row => row.Outcome).ToListAsync()).Should().Equal(expectedDisposition.ToString());
         var final = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id);
-        final.LifecycleStatus.Should().Be(applied.LifecycleStatus);
+        final.LifecycleStatus.Should().Be(interveningChange == "unchanged" ? "Eligible" : "Cancelled");
         final.QuarantinedAt.Should().Be(applied.QuarantinedAt);
-        final.DeleteEligibleAt.Should().Be(applied.DeleteEligibleAt);
+        final.DeleteEligibleAt.Should().Be(interveningChange == "unchanged" ? applied.DeleteEligibleAt : null);
+        var memory = await db.MemoryItems.AsNoTracking().SingleAsync(row => row.Id == target.Id);
+        memory.Status.Should().Be(interveningChange == "restored" ? MemoryStatus.Active : MemoryStatus.Archived);
         (await db.MemoryItemRevisions.AsNoTracking().CountAsync(revision => revision.MemoryItemId == target.Id))
-            .Should().Be(initialStatus == MemoryStatus.Active ? 1 : 0);
+            .Should().Be(revisionCount);
+
+        if (afterCancellation is not null)
+        {
+            var laterExecution = await firstScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+                .ExecuteAsync(afterCancellation, deadline.Token);
+            laterExecution.ErrorCode.Should().Be(GovernanceBatchErrorCode.None);
+            laterExecution.QuarantinedCount.Should().Be(0);
+            (await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id))
+                .Should().BeEquivalentTo(final);
+
+            await firstScope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>()
+                .ReviewAsync([projectId], $"fresh-{Guid.NewGuid():N}", deadline.Token);
+            var reviewed = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id);
+            reviewed.LifecycleStatus.Should().Be("Eligible");
+            reviewed.DeleteEligibleAt.Should().BeAfter(DateTimeOffset.UtcNow);
+        }
     }
 
     [DockerRequiredFact]

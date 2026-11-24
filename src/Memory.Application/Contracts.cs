@@ -1631,6 +1631,7 @@ public sealed record AutonomousRetentionCandidateResult(
     IReadOnlyList<string> BlockedReasons)
 {
     public const string AlreadyQuarantined = "AlreadyQuarantined";
+    public const string QuarantineRequiresReview = "QuarantineRequiresReview";
 }
 
 public sealed record AutonomousRetentionReviewResult(
@@ -2468,7 +2469,8 @@ public interface IFullGovernancePlanService
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         DurableMemoryGovernanceSnapshotResult memorySnapshot,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool allowCancelledRetentionReactivation = true);
 }
 
 public interface IGovernanceBatchExecutor
@@ -2641,7 +2643,8 @@ public interface IAutonomousRetentionService
     Task<AutonomousRetentionReviewResult> ReviewAsync(
         IReadOnlyList<string> projectIds,
         string governanceRunId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool allowCancelledReactivation = true);
     Task<AutonomousRetentionCandidateResult> QuarantineAsync(
         Guid resourceId,
         string projectId,

@@ -27,7 +27,8 @@ public sealed class AutonomousRetentionService(
     public async Task<AutonomousRetentionReviewResult> ReviewAsync(
         IReadOnlyList<string> projectIds,
         string governanceRunId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowCancelledReactivation = true)
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var tenantId = actor.TenantId!.Value;
@@ -67,7 +68,7 @@ public sealed class AutonomousRetentionService(
             {
                 var policyChanged = !string.Equals(state.PolicyVersion, _options.RetentionPolicyVersion, StringComparison.Ordinal);
                 var wasScheduled = state.DeleteEligibleAt.HasValue;
-                ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged);
+                ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged, allowCancelledReactivation);
                 if (wasScheduled && !state.DeleteEligibleAt.HasValue)
                 {
                     deleteCancelled++;
@@ -133,12 +134,18 @@ public sealed class AutonomousRetentionService(
         var evidence = await LoadEvidenceAsync([resourceId], actor.TenantId!.Value, actor.UserId!.Value, [projectId], cancellationToken);
         var now = timeProvider.GetUtcNow();
         var evaluation = Evaluate(memory, policy, evidence, now);
+        var alreadyQuarantined = memory.Status == MemoryStatus.Archived &&
+                                 state?.LifecycleStatus is QuarantinedStatus or EligibleStatus;
+        if (state is not null && !alreadyQuarantined)
+        {
+            return MapCandidate(memory, policy, evaluation, state, AutonomousRetentionCandidateResult.QuarantineRequiresReview);
+        }
         if (!policy.AutoDelete || evaluation.BlockedReasons.Count > 0)
         {
             throw new InvalidOperationException($"Memory is not quarantine eligible: {string.Join(',', evaluation.BlockedReasons)}");
         }
 
-        if (memory.Status == MemoryStatus.Archived && state?.LifecycleStatus is QuarantinedStatus or EligibleStatus)
+        if (alreadyQuarantined)
         {
             return MapCandidate(memory, policy, evaluation, state, AutonomousRetentionCandidateResult.AlreadyQuarantined);
         }
@@ -222,7 +229,7 @@ public sealed class AutonomousRetentionService(
         var evidence = await LoadEvidenceAsync([resourceId], actor.TenantId!.Value, actor.UserId!.Value, [projectId], cancellationToken);
         var now = timeProvider.GetUtcNow();
         var evaluation = Evaluate(memory, policy, evidence, now);
-        ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged);
+        ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged, allowCancelledReactivation: false);
         if (state.LifecycleStatus != EligibleStatus || !state.DeleteEligibleAt.HasValue || state.DeleteEligibleAt > now)
         {
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -524,9 +531,14 @@ public sealed class AutonomousRetentionService(
     }
 
     private void ApplyEvaluation(MemoryRetentionState state, MemoryItem memory, TypedPolicy policy,
-        EligibilityEvaluation evaluation, string governanceRunId, DateTimeOffset now, bool policyChanged)
+        EligibilityEvaluation evaluation, string governanceRunId, DateTimeOffset now, bool policyChanged,
+        bool allowCancelledReactivation)
     {
         var wasCancelled = state.LifecycleStatus == CancelledStatus;
+        if (wasCancelled && !allowCancelledReactivation)
+        {
+            return;
+        }
         state.ProjectId = memory.ProjectId;
         state.Classification = policy.Classification;
         state.PolicyKind = policy.Kind;

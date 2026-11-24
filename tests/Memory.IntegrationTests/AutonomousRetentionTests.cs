@@ -222,7 +222,16 @@ public sealed class AutonomousRetentionTests(ContainerTestEnvironment environmen
         db.MemoryItems.Update(held);
         await db.SaveChangesAsync();
         await service.ReviewAsync([projectId], "cancel-hold-r", CancellationToken.None);
-        (await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == held.Id)).BlockedReasonsJson.Should().Contain("legalHold");
+        var cancelledHold = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == held.Id);
+        cancelledHold.BlockedReasonsJson.Should().Contain("legalHold");
+        held.Tags = held.Tags.Where(tag => tag != "legal-hold").ToArray();
+        await db.SaveChangesAsync();
+        UseInternalRetentionActor(scope.ServiceProvider, actor);
+        await FluentActions.Awaiting(() => service.DeleteMaturedAsync(held.Id, projectId, "stale-hold-delete", CancellationToken.None))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*eligibility or grace maturity*");
+        (await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == held.Id))
+            .Should().BeEquivalentTo(cancelledHold);
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
 
         var replacement = CreateMemory(actor, projectId, MemoryType.Artifact, ["formal"]);
         var temporary = CreateMemory(actor, projectId, MemoryType.Artifact, ["temporary", "obsolete"]);

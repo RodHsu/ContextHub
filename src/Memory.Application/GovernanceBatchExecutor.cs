@@ -560,7 +560,8 @@ public sealed class GovernanceBatchExecutor(
         execution.Status = "Completed";
         execution.CompletedAt = clock.UtcNow;
         execution.UpdatedAt = clock.UtcNow;
-        var retentionReview = await autonomousRetention.ReviewAsync(projectIds, request.GovernanceRunId.Trim(), CancellationToken.None);
+        var retentionReview = await autonomousRetention.ReviewAsync(projectIds, request.GovernanceRunId.Trim(), CancellationToken.None,
+            allowCancelledReactivation: false);
         accumulator.ApplyRetentionReview(retentionReview);
         var completionAudit = await AddAuditAsync(
             actor,
@@ -1075,6 +1076,12 @@ public sealed class GovernanceBatchExecutor(
                     [item.Id], actor, cancellationToken);
             }
             var candidate = await autonomousRetention.QuarantineAsync(item.Id, item.ProjectId, request.GovernanceRunId, cancellationToken);
+            if (candidate.RecommendedAction == AutonomousRetentionCandidateResult.QuarantineRequiresReview)
+            {
+                return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
+                    GovernanceBatchItemDisposition.Deferred, "Retention lifecycle changed after planning. A fresh review is required.",
+                    [], [item.Id], actor, cancellationToken);
+            }
             if (candidate.RecommendedAction == AutonomousRetentionCandidateResult.AlreadyQuarantined)
             {
                 return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
@@ -1789,7 +1796,8 @@ public sealed class GovernanceBatchExecutor(
         CancellationToken cancellationToken)
     {
         using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch.plan-build");
-        var fullPlan = await fullGovernance.BuildAsync(projectIds, governanceRunId, snapshot, cancellationToken);
+        var fullPlan = await fullGovernance.BuildAsync(projectIds, governanceRunId, snapshot, cancellationToken,
+            allowCancelledRetentionReactivation: false);
         return fullPlan.Items.Select(x => new BatchPlanItem(
                 x.ItemKey,
                 DispatchKindFor(x.ItemKind),
