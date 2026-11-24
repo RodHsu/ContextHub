@@ -1628,7 +1628,10 @@ public sealed record AutonomousRetentionCandidateResult(
     bool Matured,
     Guid? ReplacementResourceId,
     IReadOnlyList<string> ReasonCodes,
-    IReadOnlyList<string> BlockedReasons);
+    IReadOnlyList<string> BlockedReasons)
+{
+    public const string AlreadyQuarantined = "AlreadyQuarantined";
+}
 
 public sealed record AutonomousRetentionReviewResult(
     IReadOnlyList<AutonomousRetentionCandidateResult> Candidates,

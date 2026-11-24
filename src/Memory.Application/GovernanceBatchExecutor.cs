@@ -1075,6 +1075,12 @@ public sealed class GovernanceBatchExecutor(
                     [item.Id], actor, cancellationToken);
             }
             var candidate = await autonomousRetention.QuarantineAsync(item.Id, item.ProjectId, request.GovernanceRunId, cancellationToken);
+            if (candidate.RecommendedAction == AutonomousRetentionCandidateResult.AlreadyQuarantined)
+            {
+                return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
+                    GovernanceBatchItemDisposition.NoOp, "Resource is already archived and quarantined.",
+                    [], [item.Id], actor, cancellationToken);
+            }
             return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
                 GovernanceBatchItemDisposition.Applied,
                 $"Resource was archived and quarantined under typed policy {candidate.PolicyKind}; deleteEligibleAt={candidate.DeleteEligibleAt:O}.",

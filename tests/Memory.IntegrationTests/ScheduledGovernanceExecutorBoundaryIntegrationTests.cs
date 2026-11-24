@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluentAssertions;
@@ -322,6 +323,99 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         afterReplay.RequestIdentityHash.Should().Be(afterBatch.RequestIdentityHash);
         afterReplay.AuditIds.Should().Contain(result.AuditIds);
         afterReplay.Applied.Should().Be(afterBatch.Applied);
+    }
+
+    [DockerRequiredTheory]
+    [InlineData(MemoryStatus.Active)]
+    [InlineData(MemoryStatus.Archived)]
+    public async Task Distinct_scheduled_runs_cannot_apply_quarantine_twice_from_frozen_reviews(MemoryStatus initialStatus)
+    {
+        var factory = environment.GetFactory();
+        using var firstScope = factory.Services.CreateScope();
+        using var secondScope = factory.Services.CreateScope();
+        var db = firstScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await db.TenantUsers.AsNoTracking().SingleAsync(row => row.Username == "contract-test-admin");
+        var actor = ScheduledActor(user);
+        firstScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        secondScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        var projectId = $"overlapping-quarantine-{Guid.NewGuid():N}";
+        var target = CreateRetentionCandidate(user, projectId);
+        target.Status = initialStatus;
+        db.MemoryItems.Add(target);
+        await db.SaveChangesAsync();
+
+        async Task<GovernanceBatchExecuteRequest> FreezeAsync(IServiceProvider services)
+        {
+            var runId = $"quarantine-overlap-{Guid.NewGuid():N}";
+            var review = await services.GetRequiredService<IKnowledgeReviewService>()
+                .ReviewAsync(ScheduledReviewRequest(projectId, runId), default);
+            await RecordReversibleDecisionAsync(services, review);
+            review.GovernancePlan.Should().Contain(item => item.AuthorityResourceId == target.Id &&
+                item.RecommendedAction == GovernanceBatchActionType.Quarantine.ToString());
+            return new(runId, [projectId], review.DurableMemoryCoverage!.SnapshotToken,
+                AllowedActionTypes: [GovernanceBatchActionType.Quarantine], MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+                ExecutionMode: GovernanceBatchExecutionMode.Scheduled)
+            {
+                ReceiptContractIdentity = CurrentScheduledReceiptIdentity()
+            };
+        }
+
+        var first = await FreezeAsync(firstScope.ServiceProvider);
+        var second = await FreezeAsync(secondScope.ServiceProvider);
+        var secondDb = secondScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        (await secondDb.MemoryItems.SingleAsync(row => row.Id == target.Id)).Status.Should().Be(initialStatus);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var pauseSecond = new AsyncLocal<bool>();
+        var planValidated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == "ContextHub.Governance",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.PropagationData,
+            ActivityStarted = activity =>
+            {
+                if (pauseSecond.Value && activity.OperationName == "governance.batch.terminal-items")
+                {
+                    planValidated.TrySetResult();
+                    release.Task.WaitAsync(deadline.Token).GetAwaiter().GetResult();
+                }
+            }
+        };
+        ActivitySource.AddActivityListener(listener);
+        var pending = Task.Run(async () =>
+        {
+            pauseSecond.Value = true;
+            return await secondScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+                .ExecuteAsync(second, deadline.Token);
+        });
+        MemoryRetentionState applied;
+        GovernanceBatchExecuteResult secondExecution;
+        try
+        {
+            await planValidated.Task.WaitAsync(deadline.Token);
+            var firstExecution = await firstScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+                .ExecuteAsync(first, deadline.Token);
+            firstExecution.QuarantinedCount.Should().Be(1);
+            applied = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id);
+        }
+        finally
+        {
+            release.TrySetResult();
+            secondExecution = await pending.WaitAsync(deadline.Token);
+        }
+
+        secondExecution.ErrorCode.Should().Be(GovernanceBatchErrorCode.None);
+        secondExecution.QuarantinedCount.Should().Be(0);
+        var skipped = secondExecution.Items.Single(item => item.ResourceId == target.Id);
+        skipped.Disposition.Should().Be(GovernanceBatchItemDisposition.NoOp);
+        (await db.SecurityAuditEvents.AsNoTracking().Where(row => skipped.AuditIds.Contains(row.Id))
+            .Select(row => row.Outcome).ToListAsync()).Should().Equal("NoOp");
+        var final = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id);
+        final.LifecycleStatus.Should().Be(applied.LifecycleStatus);
+        final.QuarantinedAt.Should().Be(applied.QuarantinedAt);
+        final.DeleteEligibleAt.Should().Be(applied.DeleteEligibleAt);
+        (await db.MemoryItemRevisions.AsNoTracking().CountAsync(revision => revision.MemoryItemId == target.Id))
+            .Should().Be(initialStatus == MemoryStatus.Active ? 1 : 0);
     }
 
     [DockerRequiredFact]
