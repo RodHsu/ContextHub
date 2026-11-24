@@ -123,9 +123,11 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
     }
 
     [DockerRequiredTheory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Scheduled_Executor_Allows_Only_Deterministic_Reversible_Retention_Quarantine(bool replayDuringReview)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Scheduled_Executor_Allows_Only_Deterministic_Reversible_Retention_Quarantine(
+        bool replayDuringReview, bool verifyImmediateReplay)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -182,6 +184,8 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         {
             ReceiptContractIdentity = CurrentScheduledReceiptIdentity()
         };
+        var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var initialReceipt = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
         var result = await scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
             .ExecuteAsync(request, CancellationToken.None);
 
@@ -198,7 +202,6 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .LifecycleStatus.Should().Be("Eligible");
 
         var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
-        var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
         var completed = (await receipts.GetAsync(runId, default))!;
         completed.LatestBatch.Should().NotBeNull();
         completed.LatestBatch!.Executed.Should().BeTrue();
@@ -206,6 +209,42 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         var afterBatch = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
         afterBatch.Decision.Should().BeNull();
         afterBatch.Outcome.Should().Be("ReReviewRequired");
+        if (verifyImmediateReplay)
+        {
+            // The A1 verifier must be able to bind the first batch, then read the durable replay before re-review.
+            initialReceipt.LatestBatchReceived.Should().BeFalse();
+            initialReceipt.Applied.Should().Be(0);
+            initialReceipt.AuditIds.Should().BeEmpty();
+            afterBatch.ReceiptId.Should().NotBe(initialReceipt.ReceiptId);
+            afterBatch.Status.Should().Be("Completed");
+            afterBatch.Terminal.Should().BeTrue();
+            afterBatch.LatestBatchReceived.Should().BeTrue();
+            afterBatch.IsReplay.Should().BeFalse();
+            afterBatch.InitialSnapshotToken.Should().Be(result.SnapshotToken);
+            afterBatch.FinalSnapshotToken.Should().Be(result.SnapshotToken);
+            afterBatch.StoppedReason.Should().Be(result.StoppedReason);
+            afterBatch.Applied.Should().Be(result.AppliedCount);
+            afterBatch.Failed.Should().Be(result.FailedCount);
+            afterBatch.Quarantined.Should().Be(result.QuarantinedCount);
+            afterBatch.SemanticAutoResolved.Should().Be(result.SemanticAutoResolvedCount);
+            afterBatch.AuditIds.Should().NotBeEmpty().And.BeEquivalentTo(result.AuditIds);
+
+            var replay = await scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+                .ExecuteAsync(request, default);
+            replay.Should().BeEquivalentTo(result with { IsReplay = true });
+            var replayReceipt = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+            replayReceipt.ReceiptId.Should().NotBe(afterBatch.ReceiptId);
+            replayReceipt.IsReplay.Should().BeTrue();
+            replayReceipt.Status.Should().Be("Completed");
+            replayReceipt.Outcome.Should().Be(afterBatch.Outcome);
+            replayReceipt.RequestIdentityHash.Should().Be(afterBatch.RequestIdentityHash);
+            replayReceipt.AuditIds.Should().BeEquivalentTo(afterBatch.AuditIds);
+            replayReceipt.Applied.Should().Be(afterBatch.Applied);
+            replayReceipt.Quarantined.Should().Be(afterBatch.Quarantined);
+            (await db.GovernanceBatchExecutions.AsNoTracking().CountAsync(x =>
+                x.Run!.GovernanceRunId == runId)).Should().Be(1);
+            return;
+        }
 
         actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [projectId] };
         var reviewRequest = new ScheduledGovernanceReviewRequest(runId, IsReReview: true);

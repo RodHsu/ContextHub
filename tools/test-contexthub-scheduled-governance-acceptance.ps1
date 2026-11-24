@@ -578,6 +578,167 @@ function Get-ScheduledGovernanceReviewReceiptEvidence {
     return $evidence
 }
 
+function Get-ScheduledGovernanceBatchCounts {
+    param([object]$Object, [string]$Suffix = "")
+
+    $counts = [ordered]@{}
+    foreach ($field in @("applied", "failed", "quarantined", "semanticAutoResolved")) {
+        $value = Get-ScheduledGovernancePropertyValue $Object "$field$Suffix"
+        if (($value -isnot [int] -and $value -isnot [long]) -or $value -lt 0) {
+            throw "Scheduled governance batch evidence has an invalid $field$Suffix count."
+        }
+        $counts[$field] = $value
+    }
+    return $counts
+}
+
+function Get-ScheduledGovernanceBatchAuditIds {
+    param([object]$Object)
+
+    $property = $Object.PSObject.Properties["auditIds"]
+    if ($null -eq $property -or $property.Value -isnot [array]) {
+        throw "Scheduled governance batch evidence is missing its audit ID array."
+    }
+    foreach ($value in $property.Value) {
+        $id = [Guid]::Empty
+        if ($value -isnot [string] -or -not [Guid]::TryParse($value, [ref]$id) -or $id -eq [Guid]::Empty) {
+            throw "Scheduled governance batch evidence contains an invalid audit ID."
+        }
+        $id.ToString("D")
+    }
+}
+
+function Assert-ScheduledGovernanceFirstBatchBaseline {
+    param([object]$Receipt)
+
+    $received = Get-ScheduledGovernancePropertyValue $Receipt "latestBatchReceived"
+    $counts = Get-ScheduledGovernanceBatchCounts $Receipt
+    $auditIds = @(Get-ScheduledGovernanceBatchAuditIds $Receipt)
+    if ($received -isnot [bool] -or $received -or $auditIds.Count -ne 0 -or
+        @($counts.Values | Where-Object { $_ -ne 0 }).Count -ne 0) {
+        throw "A1 requires an initial review receipt with no earlier batch or execution totals."
+    }
+}
+
+function Get-ScheduledGovernanceBatchReceiptEvidence {
+    param(
+        [AllowNull()][object]$Receipt,
+        [object]$Execution,
+        [string]$RunId,
+        [string]$Snapshot,
+        [System.Collections.IDictionary]$Contract,
+        [string]$InitialReceiptId,
+        [bool]$ExpectedReplay
+    )
+
+    $evidence = Get-ScheduledGovernanceReceiptEvidence $Receipt -ExpectedRunId $RunId
+    $receiptId = [Guid]::Empty
+    if (-not $evidence.present -or $evidence.status -cne "Completed" -or
+        -not [Guid]::TryParse((Get-ScheduledGovernancePropertyValue $Receipt "receiptId"), [ref]$receiptId) -or
+        $receiptId -eq [Guid]::Empty -or $receiptId.ToString("D") -eq $InitialReceiptId -or
+        -not $evidence.requestIdentityHashPresent) {
+        throw "A1 requires a distinct completed batch receipt with a request identity."
+    }
+
+    foreach ($field in @("runExists", "received", "terminal", "latestBatchReceived", "coverageComplete", "isReplay")) {
+        $value = Get-ScheduledGovernancePropertyValue $Receipt $field
+        $expected = $field -cne "isReplay" -or $ExpectedReplay
+        if ($value -isnot [bool] -or $value -ne $expected) {
+            throw "A1 batch receipt did not confirm $field."
+        }
+    }
+    foreach ($field in @("toolContractVersion", "schemaHash", "publishedCatalogVersion")) {
+        if ((Get-ScheduledGovernancePropertyValue $Receipt $field) -cne $Contract[$field]) {
+            throw "A1 batch receipt did not match the verified $field."
+        }
+    }
+
+    $requiresReReview = Get-ScheduledGovernancePropertyValue $Execution "requiresReReview"
+    $expectedOutcome = if ($requiresReReview) { "ReReviewRequired" } else { "ReversibleExecutionRequired" }
+    $expectedDecision = if (-not $requiresReReview) { $expectedOutcome }
+    if ($requiresReReview -isnot [bool] -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "decision") -cne $expectedDecision -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "outcome") -cne $expectedOutcome -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "finalConvergenceStatus") -cne "ReversibleExecutionRequired" -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "initialSnapshotToken") -cne $Snapshot -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "finalSnapshotToken") -cne $Snapshot -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "stoppedReason") -cne (Get-ScheduledGovernancePropertyValue $Execution "stoppedReason")) {
+        throw "A1 batch receipt did not match the execution snapshot and outcome."
+    }
+
+    # The runner checked that the initial receipt has no earlier batch. These
+    # run totals can therefore be compared directly with the first execution.
+    $counts = Get-ScheduledGovernanceBatchCounts $Receipt
+    $batchCounts = Get-ScheduledGovernanceBatchCounts $Execution -Suffix "Count"
+    foreach ($field in $counts.Keys) {
+        if ($counts[$field] -ne $batchCounts[$field]) {
+            throw "A1 batch receipt did not match the execution $field count."
+        }
+    }
+    $receiptAudits = @(Get-ScheduledGovernanceBatchAuditIds $Receipt)
+    $batchAudits = @(Get-ScheduledGovernanceBatchAuditIds $Execution)
+    if ($counts.failed -ne 0 -or $receiptAudits.Count -eq 0 -or
+        (Get-ScheduledGovernancePropertyValue $Execution "stoppedReason") -ceq "ItemFailed" -or
+        -not (Test-ScheduledGovernanceIdsEqual $receiptAudits $batchAudits)) {
+        throw "A1 batch receipt did not establish a failure-free execution and matching audit IDs."
+    }
+
+    $evidence.receiptId = $receiptId.ToString("D")
+    $evidence.outcome = $expectedOutcome
+    $evidence.counts = $counts
+    return $evidence
+}
+
+function Invoke-ScheduledGovernanceVerifiedReplay {
+    param(
+        [string]$Token,
+        [hashtable]$ExecuteArguments,
+        [object]$FirstExecution,
+        [System.Collections.IDictionary]$Contract,
+        [System.Collections.IDictionary]$Evidence
+    )
+
+    $runId = $ExecuteArguments.request.governanceRunId
+    $snapshot = $ExecuteArguments.request.snapshotToken
+    if (-not (Test-ScheduledGovernanceExecutionResult $FirstExecution $runId $snapshot $false)) {
+        throw "First execution did not return a successful result bound to this run and snapshot."
+    }
+
+    $receiptArguments = @{ governanceRunId = $runId; includeReliabilityHistory = $false }
+    $initialReceiptId = $Evidence.receipt.initial.receiptId
+    $beforeJson = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_run_get" -Arguments $receiptArguments -RequestId 42
+    $before = Get-ScheduledGovernanceToolData -Json $beforeJson -Operation "scheduled_governance_run_get-before-replay"
+    $Evidence.receipt.beforeReplay = Get-ScheduledGovernanceBatchReceiptEvidence `
+        $before $FirstExecution $runId $snapshot $Contract $initialReceiptId $false
+
+    $Evidence.outcome.executorCalls++
+    $Evidence.replay.exercised = $true
+    $replayJson = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_execute" -Arguments $ExecuteArguments -RequestId 43
+    $replay = Get-ScheduledGovernanceToolData -Json $replayJson -Operation "scheduled_governance_execute-exact-replay"
+    if (-not (Test-ScheduledGovernanceExecutionResult $replay $runId $snapshot $true) -or
+        (Get-ScheduledGovernancePropertyValue $replay "requiresReReview") -ne (Get-ScheduledGovernancePropertyValue $FirstExecution "requiresReReview") -or
+        (Get-ScheduledGovernancePropertyValue $replay "stoppedReason") -cne (Get-ScheduledGovernancePropertyValue $FirstExecution "stoppedReason")) {
+        throw "Exact execution replay did not preserve the original result identity."
+    }
+
+    $afterJson = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_run_get" -Arguments $receiptArguments -RequestId 46
+    $after = Get-ScheduledGovernanceToolData -Json $afterJson -Operation "scheduled_governance_run_get-after-replay"
+    $Evidence.receipt.afterReplay = Get-ScheduledGovernanceBatchReceiptEvidence `
+        $after $replay $runId $snapshot $Contract $initialReceiptId $true
+    $batchFields = $Evidence.receipt.beforeReplay.counts.Keys
+    foreach ($field in $batchFields) {
+        if ($Evidence.receipt.beforeReplay.counts[$field] -ne $Evidence.receipt.afterReplay.counts[$field]) {
+            throw "Exact execution replay changed the durable $field count."
+        }
+    }
+    if ($Evidence.receipt.beforeReplay.receiptId -eq $Evidence.receipt.afterReplay.receiptId -or
+        (Get-ScheduledGovernancePropertyValue $before "requestIdentityHash") -cne (Get-ScheduledGovernancePropertyValue $after "requestIdentityHash") -or
+        -not (Test-ScheduledGovernanceIdsEqual @(Get-ScheduledGovernanceBatchAuditIds $before) @(Get-ScheduledGovernanceBatchAuditIds $after))) {
+        throw "Exact execution replay changed the durable request or audit identity."
+    }
+    $Evidence.replay.exact = $true
+}
+
 function Read-ScheduledGovernanceProtectedInvariantEvidence {
     param([string]$Path)
 
@@ -1029,6 +1190,7 @@ try {
                         $exitCode = 2
                     }
                     else {
+                        Assert-ScheduledGovernanceFirstBatchBaseline $initialReceipt
                         $executeArguments = @{
                             request = @{
                                 governanceRunId = $runId
@@ -1089,32 +1251,8 @@ try {
                             }
                         }
 
-                        $replayExecution = $null
                         if ($null -ne $firstExecution) {
-                            $executionSnapshot = $executeArguments.request.snapshotToken
-                            if (-not (Test-ScheduledGovernanceExecutionResult $firstExecution $runId $executionSnapshot $false)) {
-                                throw "First execution did not return a successful result bound to this run and snapshot."
-                            }
-                            $evidence.outcome.executorCalls++
-                            $replayJson = Invoke-ScheduledGovernanceTool `
-                                -Token $token `
-                                -ToolName "scheduled_governance_execute" `
-                                -Arguments $executeArguments `
-                                -RequestId 43
-                            $replayExecution = Get-ScheduledGovernanceToolData `
-                                -Json $replayJson -Operation "scheduled_governance_execute-exact-replay"
-                            $auditMatches = Test-ScheduledGovernanceIdsEqual `
-                                (Get-ScheduledGovernancePropertyValue $firstExecution "auditIds") `
-                                (Get-ScheduledGovernancePropertyValue $replayExecution "auditIds")
-                            $appliedMatches = [int](Get-ScheduledGovernancePropertyValue $firstExecution "appliedCount") -eq
-                                [int](Get-ScheduledGovernancePropertyValue $replayExecution "appliedCount")
-                            $evidence.replay.exercised = $true
-                            $evidence.replay.exact =
-                                (Test-ScheduledGovernanceExecutionResult $replayExecution $runId $executionSnapshot $true) -and
-                                $auditMatches -and $appliedMatches
-                            if (-not $evidence.replay.exact) {
-                                throw "Exact execution replay did not preserve result and audit identity."
-                            }
+                            Invoke-ScheduledGovernanceVerifiedReplay $token $executeArguments $firstExecution $observedContract $evidence
                         }
 
                         if ($null -ne $firstExecution -and $exitCode -eq 0) {

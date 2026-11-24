@@ -15,9 +15,17 @@ if ($parseErrors.Count -ne 0) {
 foreach ($name in @(
         "Get-ScheduledGovernancePropertyValue",
         "Get-ScheduledGovernanceArrayProperty",
+        "Assert-ScheduledGovernanceRpcSuccess",
+        "Get-ScheduledGovernanceToolData",
+        "Test-ScheduledGovernanceIdsEqual",
         "Test-ScheduledGovernanceExecutionResult",
         "Get-ScheduledGovernanceReceiptEvidence",
-        "Get-ScheduledGovernanceReviewReceiptEvidence")) {
+        "Get-ScheduledGovernanceReviewReceiptEvidence",
+        "Get-ScheduledGovernanceBatchCounts",
+        "Get-ScheduledGovernanceBatchAuditIds",
+        "Assert-ScheduledGovernanceFirstBatchBaseline",
+        "Get-ScheduledGovernanceBatchReceiptEvidence",
+        "Invoke-ScheduledGovernanceVerifiedReplay")) {
     $definition = $runner.Find({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -195,9 +203,186 @@ foreach ($case in $invalidExecutions) {
     }
 }
 
+function New-ReplayFixture {
+    param([switch]$ZeroItems)
+
+    $before = (Get-ReceiptFixture -Decision ReversibleExecutionRequired).Receipt
+    $auditId = "e8b0fd25-2506-4dcc-b84c-b74ff1c6b379"
+    $firstBatch = $execution.PSObject.Copy()
+    $firstBatch.isReplay = $false
+    $firstBatch | Add-Member -NotePropertyMembers @{
+        requiresReReview = -not $ZeroItems
+        appliedCount = if ($ZeroItems) { 0 } else { 1 }
+        failedCount = 0
+        quarantinedCount = 0
+        semanticAutoResolvedCount = 0
+        auditIds = @($auditId)
+        nextCursor = "server-cursor-must-not-be-resubmitted"
+    }
+    $before.receiptId = [Guid]::NewGuid().ToString("D")
+    if (-not $ZeroItems) {
+        $before.decision = $null
+        $before.outcome = "ReReviewRequired"
+    }
+    $before.latestBatchReceived = $true
+    $before.auditIds = @($auditId)
+    $before | Add-Member -NotePropertyMembers @{
+        initialSnapshotToken = $before.finalSnapshotToken
+        requestIdentityHash = "a" * 64
+        stoppedReason = "Completed"
+        isReplay = $false
+        applied = $firstBatch.appliedCount
+        failed = 0
+        quarantined = 0
+        semanticAutoResolved = 0
+    }
+    $after = $before.PSObject.Copy()
+    $after.receiptId = [Guid]::NewGuid().ToString("D")
+    $after.isReplay = $true
+    $replay = $firstBatch.PSObject.Copy()
+    $replay.isReplay = $true
+    return @{
+        First = $firstBatch
+        Before = $before
+        After = $after
+        Replay = $replay
+        Arguments = @{ request = @{ governanceRunId = $runId; snapshotToken = "kg:fixture:i0"; maxMutations = 100 } }
+        Evidence = @{
+            receipt = @{ initial = @{ receiptId = "6d2aecbd-09eb-4a8a-ae32-55f23c349299" } }
+            outcome = @{ executorCalls = 1 }
+            replay = @{ exercised = $false; exact = $false }
+        }
+        Calls = [System.Collections.Generic.List[int]]::new()
+    }
+}
+
+function Invoke-ScheduledGovernanceTool {
+    param($Token, $ToolName, $Arguments, $RequestId)
+
+    $script:replayFixture.Calls.Add($RequestId)
+    switch ($RequestId) {
+        { $_ -in @(42, 46) } {
+            if ($ToolName -cne "scheduled_governance_run_get" -or $Arguments.governanceRunId -cne $runId -or
+                $Arguments.includeReliabilityHistory -isnot [bool] -or $Arguments.includeReliabilityHistory) {
+                throw "Fixture received an unexpected receipt-read request."
+            }
+            $response = if ($RequestId -eq 42) { $script:replayFixture.Before } else { $script:replayFixture.After }
+            if ($null -eq $response) { throw "Fixture receipt temporarily unavailable." }
+        }
+        43 {
+            if ($ToolName -cne "scheduled_governance_execute" -or
+                -not [object]::ReferenceEquals($Arguments, $script:replayFixture.Arguments) -or
+                $Arguments.request.ContainsKey("cursor")) {
+                throw "Fixture received an altered execution replay."
+            }
+            $response = $script:replayFixture.Replay
+        }
+        default { throw "Fixture received an unexpected request ID." }
+    }
+    return [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = $response } }
+}
+
+function Invoke-ReplayFixture {
+    Invoke-ScheduledGovernanceVerifiedReplay "offline-test" $script:replayFixture.Arguments $script:replayFixture.First `
+        $verifiedContract $script:replayFixture.Evidence
+}
+
+foreach ($zeroItems in @($false, $true)) {
+    $script:replayFixture = New-ReplayFixture -ZeroItems:$zeroItems
+    Invoke-ReplayFixture
+    if (($script:replayFixture.Calls -join ",") -cne "42,43,46" -or
+        $script:replayFixture.Evidence.outcome.executorCalls -ne 2 -or
+        -not $script:replayFixture.Evidence.replay.exact) {
+        throw "Expected a completed batch receipt, exact replay and unchanged durable readback in that order."
+    }
+}
+
+$batchRejections = @(
+    @{ field = "governanceRunId"; value = "another-run" }
+    @{ field = "receiptId"; value = "6d2aecbd-09eb-4a8a-ae32-55f23c349299" }
+    @{ field = "receiptId"; value = [Guid]::Empty.ToString() }
+    @{ field = "status"; value = "Running" }
+    @{ field = "status"; value = "Stopped" }
+    @{ field = "received"; value = "true" }
+    @{ field = "terminal"; value = $false }
+    @{ field = "latestBatchReceived"; value = $false }
+    @{ field = "isReplay"; value = $true }
+    @{ field = "requestIdentityHash"; value = "" }
+    @{ field = "toolContractVersion"; value = "older" }
+    @{ field = "schemaHash"; value = "2" * 64 }
+    @{ field = "publishedCatalogVersion"; value = "older" }
+    @{ field = "initialSnapshotToken"; value = "kg:fixture:old" }
+    @{ field = "finalSnapshotToken"; value = "kg:fixture:old" }
+    @{ field = "outcome"; value = "UnknownResult" }
+    @{ field = "decision"; value = "ReversibleExecutionRequired" }
+    @{ field = "stoppedReason"; value = "ItemFailed" }
+    @{ field = "applied"; value = "1" }
+    @{ field = "quarantined"; value = 1 }
+    @{ field = "semanticAutoResolved"; value = 1 }
+    @{ field = "auditIds"; value = @("e9b0fd25-2506-4dcc-b84c-b74ff1c6b379") }
+    @{ field = "auditIds"; value = @("invalid") }
+    @{ field = "auditIds"; value = $null }
+)
+$preReplayCases = @($batchRejections | ForEach-Object {
+    $change = $_
+    { param($fixture) $fixture.Before.($change.field) = $change.value }.GetNewClosure()
+}) + @(
+    { param($fixture) $fixture.Before = $null }
+    { param($fixture) $fixture.Before.failed = 1; $fixture.First.failedCount = 1 }
+    { param($fixture) $fixture.Before.auditIds = @(); $fixture.First.auditIds = @() }
+)
+foreach ($mutate in $preReplayCases) {
+    $script:replayFixture = New-ReplayFixture
+    & $mutate $script:replayFixture
+    $rejected = $false
+    try { Invoke-ReplayFixture } catch { $rejected = $true }
+    if (-not $rejected -or ($script:replayFixture.Calls -join ",") -cne "42" -or
+        $script:replayFixture.Evidence.outcome.executorCalls -ne 1 -or $script:replayFixture.Evidence.replay.exercised) {
+        throw "The runner attempted replay after the initial batch receipt failed validation."
+    }
+}
+
+$postReplayCases = @(
+    { param($fixture) $fixture.After.applied = 2; $fixture.Replay.appliedCount = 2 }
+    { param($fixture) $fixture.After.requestIdentityHash = "b" * 64 }
+    { param($fixture) $fixture.After.receiptId = $fixture.Before.receiptId }
+    {
+        param($fixture)
+        $fixture.After.auditIds = @("e9b0fd25-2506-4dcc-b84c-b74ff1c6b379")
+        $fixture.Replay.auditIds = $fixture.After.auditIds
+    }
+)
+foreach ($mutate in $postReplayCases) {
+    $script:replayFixture = New-ReplayFixture
+    & $mutate $script:replayFixture
+    $rejected = $false
+    try { Invoke-ReplayFixture } catch { $rejected = $true }
+    if (-not $rejected -or ($script:replayFixture.Calls -join ",") -cne "42,43,46" -or
+        $script:replayFixture.Evidence.replay.exact) {
+        throw "The runner accepted replay despite conflicting durable evidence."
+    }
+}
+
+$baseline = (Get-ReceiptFixture -Decision ReversibleExecutionRequired).Receipt
+$baseline | Add-Member -NotePropertyMembers @{ applied = 0; failed = 0; quarantined = 0; semanticAutoResolved = 0 }
+Assert-ScheduledGovernanceFirstBatchBaseline $baseline
+$baselineRejections = @(
+    @{ field = "latestBatchReceived"; value = $true }
+    @{ field = "applied"; value = 1 }
+    @{ field = "auditIds"; value = @("e8b0fd25-2506-4dcc-b84c-b74ff1c6b379") }
+)
+foreach ($case in $baselineRejections) {
+    $invalid = $baseline.PSObject.Copy()
+    $invalid.($case.field) = $case.value
+    $rejected = $false
+    try { Assert-ScheduledGovernanceFirstBatchBaseline $invalid } catch { $rejected = $true }
+    if (-not $rejected) { throw "An initial receipt with earlier batch evidence was accepted." }
+}
+
 [ordered]@{
     valid = $true
-    positiveCases = 8
-    negativeCases = $cases.Count + 3 + $invalidExecutions.Count
-    result = "scheduled-governance-receipt-bound-to-review"
+    positiveCases = 11
+    negativeCases = $cases.Count + 3 + $invalidExecutions.Count + $preReplayCases.Count +
+        $postReplayCases.Count + $baselineRejections.Count
+    result = "scheduled-governance-receipt-and-replay-bound"
 } | ConvertTo-Json -Compress
