@@ -489,6 +489,7 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
         var failedRuns = new List<ScheduledGovernanceReliabilityRunEvidence>();
         var resetEvents = new List<ScheduledGovernanceReliabilityResetEvent>();
         var currentStreak = new List<ScheduledGovernanceReliabilityRunEvidence>();
+        var observedSlots = new HashSet<(Guid? TenantId, Guid? OwnerUserId, string SlotId)>();
         string? previousBaselineIdentity = null;
         DateTimeOffset? previousExpectedAt = null;
         var maximumAbsoluteDrift = (TimeSpan?)null;
@@ -551,6 +552,12 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
                 runEvidence.Add(excluded);
                 nonQualifyingRuns.Add(excluded);
                 continue;
+            }
+
+            var signedSlot = projection.NaturalOriginEvidence!.PlatformAttestation!.Binding.ScheduleSlotId;
+            if (!observedSlots.Add((projection.TenantId, projection.OwnerUserId, signedSlot)))
+            {
+                reasons.Add("duplicate-signed-schedule-slot-id");
             }
 
             var expectedAt = ResolveExpectedAt(projection, observedAt, naturalOrigin.ExpectedAtUtc);
@@ -633,8 +640,7 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
                 EvidenceKind = "PlatformSignedAttestationAndImmutableControlPlaneAudit",
                 EvidenceReferenceHash = ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(
                     projection.NaturalOriginEvidence!.ControlPlaneAudit!.AuditEventHash),
-                NaturalScheduleSlotHash = ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(
-                    projection.NaturalOriginEvidence.PlatformAttestation!.Binding.ScheduleSlotId),
+                NaturalScheduleSlotHash = ScheduledGovernanceReliabilityEvidenceContract.ComputeOpaqueHash(signedSlot),
                 StreakBefore = currentStreak.Count,
                 StreakAfter = qualifies ? currentStreak.Count + 1 : 0,
                 ResetReason = qualifies ? null : ResolveResetReason(projection, baselineChanged, reasons),
@@ -1018,6 +1024,7 @@ internal sealed class ScheduledGovernanceReliabilityWindowCalculator :
         }
 
         if (attestation.ExpectedAtUtc is null || audit.ExpectedAtUtc is null ||
+            string.IsNullOrWhiteSpace(attestation.ScheduleSlotId) ||
             attestation.ExpectedAtUtc.Value.ToUniversalTime() != audit.ExpectedAtUtc.Value.ToUniversalTime() ||
             !string.Equals(attestation.ScheduleSlotId, audit.ScheduleSlotId, StringComparison.Ordinal))
         {

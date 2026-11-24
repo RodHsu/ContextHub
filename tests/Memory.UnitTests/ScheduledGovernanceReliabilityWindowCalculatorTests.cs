@@ -319,6 +319,32 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
     }
 
     [Fact]
+    public void Reused_Signed_Slot_Identity_Cannot_Close_The_Window_With_A_Different_Timestamp()
+    {
+        var runs = Enumerable.Range(0, 5).Select(index => QualifyingRun(index))
+            .Append(QualifyingRun(5, "slot-0"));
+        var result = Calculate(runs);
+
+        result.GatePassed.Should().BeFalse();
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.NonQualifyingRuns.Should().ContainSingle(run =>
+            run.GovernanceRunId == "run-5" && run.Reasons.Contains("duplicate-signed-schedule-slot-id"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void Missing_Signed_Slot_Identity_Cannot_Qualify(string slotId)
+    {
+        var result = Calculate([QualifyingRun(0, slotId)]);
+
+        result.ConsecutiveQualifyingRuns.Should().Be(0);
+        result.Runs.Should().ContainSingle(run =>
+            run.IsIgnored && run.NaturalOriginStatus == "Unattested" &&
+            run.Reasons.Contains("natural-origin-slot-binding-mismatch"));
+    }
+
+    [Fact]
     public void Two_Different_Runs_In_The_Same_Natural_Slot_Should_Fail_Closed()
     {
         var duplicateSlot = RebindRun(QualifyingRun(0), "different-run-same-slot") with
@@ -650,6 +676,9 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             }).Calculate(receipts);
 
     private static ScheduledGovernanceReliabilityReceiptProjection QualifyingRun(int index)
+        => QualifyingRun(index, $"slot-{index}");
+
+    private static ScheduledGovernanceReliabilityReceiptProjection QualifyingRun(int index, string slotId)
     {
         var governanceRunId = $"run-{index}";
         var receiptId = Guid.NewGuid();
@@ -668,7 +697,7 @@ public sealed class ScheduledGovernanceReliabilityWindowCalculatorTests
             projectScopeHash,
             "production",
             expectedAt,
-            $"slot-{index}",
+            slotId,
             ScheduledGovernanceReliabilityEvidenceContract.NaturalScheduleTrigger,
             ScheduledGovernanceReliabilityEvidenceContract.ResourceAudience,
             requestIdentityHash,
