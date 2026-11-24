@@ -13,6 +13,77 @@ namespace Memory.IntegrationTests;
 
 public sealed class ConversationAdjudicationTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Durable_adjudication_grants_are_checked_on_preview_receipt_apply_and_replay(bool canRead)
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var completed = await SeedAsync(db, actor);
+        var pending = new ConversationInsight
+        {
+            SessionId = completed.SessionId,
+            CheckpointId = completed.CheckpointId,
+            TenantId = completed.TenantId,
+            OwnerUserId = completed.OwnerUserId,
+            ProjectId = completed.ProjectId,
+            Title = "Still requires an adjudication",
+            Content = "Original evidence",
+            DedupKey = "pending-" + Guid.NewGuid().ToString("N"),
+            PromotionStatus = ConversationPromotionStatus.RequiresUserDecision,
+            CreatedAt = completed.CreatedAt,
+            UpdatedAt = completed.UpdatedAt
+        };
+        var grant = new TenantProjectGrant
+        {
+            TenantId = actor.TenantId!.Value,
+            ProjectId = completed.ProjectId.ToUpperInvariant(),
+            CanRead = true,
+            CanWrite = true
+        };
+        db.ConversationInsights.Add(pending);
+        db.TenantProjectGrants.Add(grant);
+        await db.SaveChangesAsync();
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current =
+            actor with { AllowedProjectIds = [completed.ProjectId] };
+
+        var initial = await Preview(service, completed);
+        var completedRequest = Request(completed, initial.Items.Single(x => x.InsightId == completed.Id),
+            ConversationAdjudicationAction.ResolveSkipped);
+        var pendingRequest = Request(pending, initial.Items.Single(x => x.InsightId == pending.Id),
+            ConversationAdjudicationAction.ResolveSkipped);
+        await service.AdjudicateAsync(completedRequest, default);
+        grant.CanRead = canRead;
+        grant.CanWrite = false;
+        await db.SaveChangesAsync();
+
+        var previewRequest = new ConversationAdjudicationPreviewRequest(completed.ProjectId, ReceiptRequest: completedRequest);
+        if (canRead)
+        {
+            (await service.PreviewAsync(previewRequest, default)).ReceiptLookup!.Found.Should().BeTrue();
+            (await service.ReadReceiptAsync(completedRequest, default)).Found.Should().BeTrue();
+        }
+        else
+        {
+            await FluentActions.Invoking(() => service.PreviewAsync(previewRequest, default))
+                .Should().ThrowAsync<UnauthorizedAccessException>();
+            await FluentActions.Invoking(() => service.ReadReceiptAsync(completedRequest, default))
+                .Should().ThrowAsync<UnauthorizedAccessException>();
+        }
+        await FluentActions.Invoking(() => service.AdjudicateAsync(pendingRequest, default))
+            .Should().ThrowAsync<UnauthorizedAccessException>();
+        await FluentActions.Invoking(() => service.AdjudicateAsync(completedRequest, default))
+            .Should().ThrowAsync<UnauthorizedAccessException>();
+
+        (await db.ConversationAdjudications.CountAsync(x => x.ProjectId == completed.ProjectId)).Should().Be(1);
+        (await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == pending.Id))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.RequiresUserDecision);
+        var operationBinding = JsonSerializer.Serialize(new { operationId = pendingRequest.OperationId });
+        (await db.SecurityAuditEvents.AnyAsync(x =>
+            x.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated &&
+            EF.Functions.JsonContains(x.DetailsJson, operationBinding))).Should().BeFalse();
+    }
+
     [DockerRequiredFact]
     public async Task Exact_receipt_read_should_recover_after_commit_when_the_response_is_lost()
     {

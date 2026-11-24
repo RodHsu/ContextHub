@@ -35,6 +35,7 @@ public sealed class ConversationAdjudicationService(
         var receiptHash = receiptRequest is null ? null : ValidateAndHash(project, receiptRequest);
 
         await using var transaction = await db.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        await EnsureDurableProjectGrantAsync(project, write: false, cancellationToken);
         var query = Insights(project).AsNoTracking();
         var receipts = Receipts(project);
         var candidates = query.Where(x =>
@@ -151,6 +152,7 @@ public sealed class ConversationAdjudicationService(
             bool replay;
             try
             {
+                await EnsureDurableProjectGrantAsync(project, write: true, cancellationToken);
                 (receipt, replay) = await ApplyAsync(project, request, requestHash, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
             }
@@ -301,11 +303,16 @@ public sealed class ConversationAdjudicationService(
         return (receipt, false);
     }
 
-    public Task<ConversationAdjudicationReceiptLookupResult> ReadReceiptAsync(
+    public async Task<ConversationAdjudicationReceiptLookupResult> ReadReceiptAsync(
         ConversationAdjudicationRequest request, CancellationToken cancellationToken)
     {
         var project = Authorize(request.ProjectId, write: false);
-        return FindCommittedReceiptAsync(project, request, ValidateAndHash(project, request), cancellationToken);
+        var requestHash = ValidateAndHash(project, request);
+        await using var transaction = await db.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        await EnsureDurableProjectGrantAsync(project, write: false, cancellationToken);
+        var result = await FindCommittedReceiptAsync(project, request, requestHash, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return result;
     }
 
     private async Task<ConversationAdjudicationReceiptLookupResult> FindCommittedReceiptAsync(
@@ -344,6 +351,10 @@ public sealed class ConversationAdjudicationService(
         ActorAuthorization.EnsureProjectAllowed(actor, project, write);
         return project;
     }
+
+    private Task EnsureDurableProjectGrantAsync(string project, bool write, CancellationToken cancellationToken)
+        => GovernanceProjectScopeResolver.EnsureDurableGrantsAsync(
+            db, actors.Current.TenantId!.Value, [project], write, cancellationToken);
 
     private IQueryable<ConversationInsight> Insights(string project)
         => db.ConversationInsights.Where(x => x.TenantId == actors.Current.TenantId &&

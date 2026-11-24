@@ -26,6 +26,8 @@ An exact linked proposal with `Failed` status appears as `ProposalApplyFailed` w
 
 HostBlocked, legal/security holds, and malformed protection metadata fail closed. Read and write require the corresponding memory scope, an actual Owner/Admin role, and the same tenant, owner, and authorized project. Service actors and scheduled-scoped actors are rejected. Existing skip, host, deletion, score and retention policies remain unchanged.
 
+Preview and receipt lookup check the current durable project read grant. Adjudication and exact replay check the current durable read and write grants, including when an existing token still lists the project.
+
 ## Evidence and accounting
 
 If the apply response is lost, look up the receipt using the original complete adjudication request. Send it as the body of `POST /api/conversations/adjudications/receipt-lookup` or as `receiptRequest` on `conversation_adjudication_preview` for the same project. The lookup uses Owner/Admin and `memory:read` permission. It checks the exact operation, insight and original request within the current tenant, owner and project. Use `receiptLookup.found` on MCP or `found` on REST to check for a matching committed receipt. Treat a missing result as an unresolved outcome. The receipt describes the disposition at the time of the decision. Use the current preview or insight status for the present disposition.
@@ -42,4 +44,4 @@ General `knowledge_review` also exposes current `unresolvedHumanDecisionCount` a
 
 Review exception identity uses the underlying finding/insight ID, excluding refresh timestamps. Legacy receipt keys are normalized during comparison without rewriting old receipts. Semantic changes appear as escalations, while timestamp-only refreshes remain unchanged. Execution cursors remain version-bound. Unknown actions such as `NeedsReview` count as human decisions, not executable actions. A general execution candidate still requires the executor's current policy checks; this count is not Scheduled execution authorization.
 
-The general catalog version is `2026-11-22-v13` with 88 tools. Deployment and fresh authenticated host acceptance are separate from local tests.
+This source publishes general catalog `2026-11-22-v13` with 89 tools. Deployment and fresh authenticated host acceptance are separate from local tests.
