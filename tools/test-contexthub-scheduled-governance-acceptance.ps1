@@ -959,18 +959,32 @@ function Invoke-ScheduledGovernanceA1Recovery {
     $runId = $journal.governanceRunId
     $Evidence.governanceRunId = $runId
     $Evidence.outcome.status = "a1-recovery-read-only"
+    $contract = @{
+        toolContractVersion = $Spec.contract.toolContractVersion
+        schemaHash = $Spec.contract.schemaHash
+        publishedCatalogVersion = $Spec.catalog.publishedCatalogVersion
+    }
+    Read-ScheduledGovernanceUnknownOutcome -Token $Token -RunId $runId -Contract $contract -Evidence $Evidence
+}
+
+function Read-ScheduledGovernanceUnknownOutcome {
+    param([string]$Token, [string]$RunId, [System.Collections.IDictionary]$Contract, [System.Collections.IDictionary]$Evidence)
+
     $Evidence.replay.outcomeRecovery = "receipt-readback-unavailable"
+    $Evidence.receipt.afterUnknownOutcome = $null
     try {
         $json = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_run_get" `
-            -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $false } -RequestId 41
+            -Arguments @{ governanceRunId = $RunId; includeReliabilityHistory = $false } -RequestId 41
         $receipt = Get-ScheduledGovernanceToolData -Json $json -Operation "scheduled_governance_run_get"
-        Assert-ScheduledGovernanceEqual -Actual (Get-ScheduledGovernancePropertyValue $receipt "toolContractVersion") `
-            -Expected $Spec.contract.toolContractVersion -Message "Recovery receipt contract changed."
-        Assert-ScheduledGovernanceEqual -Actual (Get-ScheduledGovernancePropertyValue $receipt "schemaHash") `
-            -Expected $Spec.contract.schemaHash -Message "Recovery receipt schema changed."
-        Assert-ScheduledGovernanceEqual -Actual (Get-ScheduledGovernancePropertyValue $receipt "publishedCatalogVersion") `
-            -Expected $Spec.catalog.publishedCatalogVersion -Message "Recovery receipt catalog changed."
-        $Evidence.receipt.afterUnknownOutcome = Get-ScheduledGovernanceReceiptEvidence $receipt -ExpectedRunId $runId
+        foreach ($field in @("toolContractVersion", "schemaHash", "publishedCatalogVersion")) {
+            if ((Get-ScheduledGovernancePropertyValue $receipt $field) -cne $Contract[$field]) {
+                throw "Recovery receipt did not match the verified $field."
+            }
+        }
+        if ((Get-ScheduledGovernancePropertyValue $receipt "runExists") -isnot [bool]) {
+            throw "Recovery receipt did not confirm whether the run exists."
+        }
+        $Evidence.receipt.afterUnknownOutcome = Get-ScheduledGovernanceReceiptEvidence $receipt -ExpectedRunId $RunId
         $Evidence.replay.outcomeRecovery = if ($Evidence.receipt.afterUnknownOutcome.runExists) {
             "receipt-readback-insufficient-for-exact-replay"
         }
@@ -979,6 +993,27 @@ function Invoke-ScheduledGovernanceA1Recovery {
     catch {
         $Evidence.errors += $_.Exception.Message
     }
+}
+
+function Invoke-ScheduledGovernanceInitialExecution {
+    param([string]$Token, [hashtable]$ExecuteArguments, [System.Collections.IDictionary]$Contract, [System.Collections.IDictionary]$Evidence)
+
+    $runId = $ExecuteArguments.request.governanceRunId
+    $snapshot = $ExecuteArguments.request.snapshotToken
+    try {
+        $Evidence.outcome.executorCalls++
+        $json = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_execute" -Arguments $ExecuteArguments -RequestId 40
+        $execution = Get-ScheduledGovernanceToolData -Json $json -Operation "scheduled_governance_execute"
+        if (Test-ScheduledGovernanceExecutionResult -Execution $execution -ExpectedRunId $runId -ExpectedSnapshot $snapshot -ExpectedReplay $false) {
+            return $execution
+        }
+    }
+    catch {
+        $Evidence.errors += $_.Exception.Message
+    }
+
+    $Evidence.outcome.status = "outcome-unknown-no-retry"
+    Read-ScheduledGovernanceUnknownOutcome -Token $Token -RunId $runId -Contract $Contract -Evidence $Evidence
 }
 
 function Complete-ScheduledGovernanceProtectedReadback {
@@ -1460,54 +1495,8 @@ try {
                                 schemaHash = [string](Get-ScheduledGovernancePropertyValue $expectedContract "schemaHash")
                             }
                         }
-                        $firstExecutionJson = $null
-                        $firstExecution = $null
-                        $unknownOutcome = $false
-                        try {
-                            $evidence.outcome.executorCalls++
-                            $firstExecutionJson = Invoke-ScheduledGovernanceTool `
-                                -Token $token `
-                                -ToolName "scheduled_governance_execute" `
-                                -Arguments $executeArguments `
-                                -RequestId 40
-                            if ($null -ne (Get-ScheduledGovernancePropertyValue $firstExecutionJson "error") -or
-                                (Get-ScheduledGovernancePropertyValue (Get-ScheduledGovernancePropertyValue $firstExecutionJson "result") "isError") -eq $true) {
-                                $evidence.outcome.status = "execute-rejected"
-                                $exitCode = 2
-                            }
-                            else {
-                                $firstExecution = Get-ScheduledGovernanceToolData `
-                                    -Json $firstExecutionJson -Operation "scheduled_governance_execute"
-                                if ((Get-ScheduledGovernancePropertyValue $firstExecution "stoppedReason") -ceq "UnknownResult") {
-                                    $unknownOutcome = $true
-                                    $firstExecution = $null
-                                }
-                            }
-                        }
-                        catch {
-                            $unknownOutcome = $true
-                            $evidence.replay.outcomeRecovery = "receipt-readback-required"
-                        }
-
-                        if ($unknownOutcome) {
-                            $evidence.outcome.status = "outcome-unknown-no-retry"
-                            $exitCode = 2
-                            try {
-                                $recoveryReceiptJson = Invoke-ScheduledGovernanceTool `
-                                    -Token $token `
-                                    -ToolName "scheduled_governance_run_get" `
-                                    -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $false } `
-                                    -RequestId 41
-                                $recoveryReceipt = Get-ScheduledGovernanceToolData -Json $recoveryReceiptJson -Operation "scheduled_governance_run_get"
-                                $evidence.receipt.afterUnknownOutcome = Get-ScheduledGovernanceReceiptEvidence $recoveryReceipt -ExpectedRunId $runId
-                                # This receipt lacks a batch result and proof that the batch matched the request.
-                                $evidence.replay.outcomeRecovery = "receipt-readback-insufficient-for-exact-replay"
-                            }
-                            catch {
-                                $evidence.replay.outcomeRecovery = "receipt-readback-unavailable"
-                                $evidence.errors += $_.Exception.Message
-                            }
-                        }
+                        $firstExecution = Invoke-ScheduledGovernanceInitialExecution -Token $token `
+                            -ExecuteArguments $executeArguments -Contract $observedContract -Evidence $evidence
 
                         if ($null -ne $firstExecution) {
                             Invoke-ScheduledGovernanceVerifiedReplay $token $executeArguments $firstExecution $observedContract $evidence
@@ -1556,7 +1545,6 @@ try {
                             if (-not $evidence.outcome.accepted) { $exitCode = 2 }
                         }
                         elseif ($exitCode -eq 0) {
-                            $evidence.outcome.status = "execute-outcome-not-accepted"
                             $exitCode = 2
                         }
                     }

@@ -35,6 +35,8 @@ A complete review must prove that the authorized, covered, scanned and total mem
 
 An A1 final review can stop at `HumanDecisionOnly`. An available exception delta must report a new or escalated exception. With no delta, the review must report a human-decision candidate or governed exception. The verifier records these counts and makes no additional executor call after that decision.
 
+An initial execution timeout, JSON-RPC error, tool error or response that cannot prove the expected run and snapshot triggers one receipt lookup for the same run with history disabled. The lookup must match the verified contract and identify whether the run exists. The verifier records the observation and stops without replaying the request.
+
 ```json
 {
   "binding": {

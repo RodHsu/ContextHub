@@ -36,6 +36,8 @@ foreach ($name in @(
         "Assert-ScheduledGovernanceReadbackPaths",
         "Write-ScheduledGovernanceA1Checkpoint",
         "Invoke-ScheduledGovernanceA1Recovery",
+        "Read-ScheduledGovernanceUnknownOutcome",
+        "Invoke-ScheduledGovernanceInitialExecution",
         "Complete-ScheduledGovernanceProtectedReadback")) {
     $definition = $runner.Find({
             param($node)
@@ -650,6 +652,81 @@ $checkpointPath = Join-Path $localRoot "a1-checkpoint-$([Guid]::NewGuid().ToStri
 $checkpointRun = "scheduled-acceptance-$([Guid]::NewGuid().ToString('N'))"
 $checkpointHash = Get-ScheduledGovernanceSha256Hex "test-binding"
 $checkpointSpec = @{ contract = $verifiedContract; catalog = $verifiedContract }
+$initialExecutionCalls = [System.Collections.Generic.List[int]]::new()
+& {
+    function Invoke-ScheduledGovernanceTool {
+        param($Token, $ToolName, $Arguments, $RequestId)
+        $initialExecutionCalls.Add($RequestId)
+        if ($Token -cne "offline-test" -or $ToolName -cne "scheduled_governance_execute" -or $RequestId -ne 40) {
+            throw "Unexpected dispatch."
+        }
+        return [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = [pscustomobject]@{
+            governanceRunId = $Arguments.request.governanceRunId
+            snapshotToken = $Arguments.request.snapshotToken
+            succeeded = $true
+            isReplay = $false
+            stoppedReason = "Completed"
+        } } }
+    }
+    $arguments = @{ request = @{ governanceRunId = $checkpointRun; snapshotToken = "kg:fixture:i0" } }
+    $state = @{ outcome = @{ executorCalls = 0 }; replay = @{}; receipt = @{}; errors = @() }
+    $execution = Invoke-ScheduledGovernanceInitialExecution -Token "offline-test" `
+        -ExecuteArguments $arguments -Contract $verifiedContract -Evidence $state
+    if ($null -eq $execution -or ($initialExecutionCalls -join ",") -cne "40" -or $state.outcome.executorCalls -ne 1) {
+        throw "A verified initial execution must continue to the normal pre-replay receipt check."
+    }
+}
+$uncertainExecutionCases = @(
+    @{ response = { throw "transport timed out" }; receipt = "valid" }
+    @{ response = { [pscustomobject]@{ error = @{ code = -32603 } } }; receipt = "valid" }
+    @{ response = { [pscustomobject]@{ result = [pscustomobject]@{ isError = $true } } }; receipt = "missing" }
+    @{ response = { [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = [pscustomobject]@{ stoppedReason = "UnknownResult" } } } }; receipt = "schema-drift" }
+    @{ response = { [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = "malformed" } } }; receipt = "malformed" }
+)
+foreach ($case in $uncertainExecutionCases) {
+    & {
+        $calls = [System.Collections.Generic.List[int]]::new()
+        $arguments = @{ request = @{ governanceRunId = $checkpointRun; snapshotToken = "kg:fixture:i0" } }
+        function Invoke-ScheduledGovernanceTool {
+            param($Token, $ToolName, $Arguments, $RequestId)
+            $calls.Add($RequestId)
+            if ($Token -cne "offline-test") { throw "Unexpected test token." }
+            if ($ToolName -ceq "scheduled_governance_execute" -and $RequestId -eq 40 -and
+                $Arguments.request.governanceRunId -ceq $checkpointRun -and $calls.Count -eq 1) {
+                return (& $case.response)
+            }
+            if ($ToolName -cne "scheduled_governance_run_get" -or $RequestId -ne 41 -or
+                $Arguments.governanceRunId -cne $checkpointRun -or
+                $Arguments.includeReliabilityHistory -isnot [bool] -or $Arguments.includeReliabilityHistory) {
+                throw "Unexpected recovery call."
+            }
+            $receipt = [pscustomobject]@{
+                governanceRunId = $checkpointRun
+                runExists = switch ($case.receipt) { "missing" { $false }; "malformed" { "true" }; default { $true } }
+                status = "Stopped"
+                toolContractVersion = $verifiedContract.toolContractVersion
+                schemaHash = if ($case.receipt -ceq "schema-drift") { "wrong" } else { $verifiedContract.schemaHash }
+                publishedCatalogVersion = $verifiedContract.publishedCatalogVersion
+            }
+            return [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = $receipt } }
+        }
+
+        $state = @{ outcome = @{ executorCalls = 0; accepted = $false }; replay = @{}; receipt = @{}; errors = @() }
+        $execution = Invoke-ScheduledGovernanceInitialExecution -Token "offline-test" `
+            -ExecuteArguments $arguments -Contract $verifiedContract -Evidence $state
+        $expectedRecovery = switch ($case.receipt) {
+            "valid" { "receipt-readback-insufficient-for-exact-replay" }
+            "missing" { "receipt-run-not-found" }
+            default { "receipt-readback-unavailable" }
+        }
+        if ($null -ne $execution -or ($calls -join ",") -cne "40,41" -or $state.outcome.executorCalls -ne 1 -or
+            $state.outcome.accepted -or $state.outcome.status -cne "outcome-unknown-no-retry" -or
+            $state.replay.outcomeRecovery -cne $expectedRecovery -or
+            ($expectedRecovery -ceq "receipt-readback-unavailable" -and $null -ne $state.receipt.afterUnknownOutcome)) {
+            throw "An ambiguous executor response did not stop after the bound recovery read."
+        }
+    }
+}
 try {
     Write-ScheduledGovernanceA1Checkpoint $checkpointPath $checkpointHash $checkpointRun
     $originalCheckpoint = [IO.File]::ReadAllText($checkpointPath)
@@ -710,11 +787,11 @@ finally {
 
 [ordered]@{
     valid = $true
-    positiveCases = 15 + @($manifestCases | Where-Object expected -CEQ "verified").Count +
+    positiveCases = 16 + @($manifestCases | Where-Object expected -CEQ "verified").Count +
         @($humanDecisionCases | Where-Object expected).Count
     negativeCases = $cases.Count + 12 + $invalidExecutions.Count + $preReplayCases.Count +
         $postReplayCases.Count + (2 * $noExecutionRejections.Count) + $readbackPathRejections.Count +
         @($manifestCases | Where-Object expected -CNE "verified").Count + $invalidCoverage.Count + $invalidContinuity.Count + 1 +
-        @($humanDecisionCases | Where-Object { -not $_.expected }).Count + $invalidHumanDecisionCounts.Count
+        @($humanDecisionCases | Where-Object { -not $_.expected }).Count + $invalidHumanDecisionCounts.Count + $uncertainExecutionCases.Count
     result = "scheduled-governance-receipt-replay-and-protected-evidence"
 } | ConvertTo-Json -Compress
