@@ -1,5 +1,9 @@
 using System.Data.Common;
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using Memory.Domain;
+using Microsoft.Extensions.Logging;
 
 namespace Memory.Application;
 
@@ -8,7 +12,8 @@ public sealed class ScheduledGovernanceService(
     IGovernanceBatchExecutor batchExecutor,
     IGovernanceRunReceiptService receipts,
     IRequestActorAccessor actorAccessor,
-    IScheduledGovernanceReliabilityService? reliability = null) : IScheduledGovernanceService
+    IScheduledGovernanceReliabilityService? reliability = null,
+    ILogger<ScheduledGovernanceService>? logger = null) : IScheduledGovernanceService
 {
     private static readonly GovernanceReceiptContractIdentity ReceiptContractIdentity = new(
         ScheduledGovernanceContract.ToolContractVersion,
@@ -228,11 +233,22 @@ public sealed class ScheduledGovernanceService(
     {
         EnsureScheduledAuthority();
         var normalizedRunId = NormalizeGovernanceRunId(governanceRunId);
-        var snapshot = await receipts.GetScheduledReceiptSnapshotAsync(
-            normalizedRunId, ReceiptContractIdentity, cancellationToken);
+        var started = Stopwatch.GetTimestamp();
+        (GovernanceRunReceiptResult Receipt, GovernanceRunLineageResult Lineage)? snapshot;
+        try
+        {
+            snapshot = await receipts.GetScheduledReceiptSnapshotAsync(
+                normalizedRunId, ReceiptContractIdentity, cancellationToken);
+        }
+        catch (Exception error)
+        {
+            LogReceiptReadProblem(normalizedRunId, "snapshot", started,
+                cancellationToken.IsCancellationRequested ? "caller-cancellation-requested" : "failed", error);
+            throw;
+        }
         // run_get is intentionally read-only. Projection persistence belongs to
         // review/execute mutation paths, never to receipt retrieval.
-        var reliabilitySummary = await ReadReceiptHistoryAsync(includeReliabilityHistory, cancellationToken);
+        var reliabilitySummary = await ReadReceiptHistoryAsync(normalizedRunId, includeReliabilityHistory, cancellationToken);
         if (snapshot is not { } receiptSnapshot)
             return MissingRun(normalizedRunId) with { Reliability = reliabilitySummary };
 
@@ -292,23 +308,43 @@ public sealed class ScheduledGovernanceService(
     }
 
     private async Task<ScheduledGovernanceReliabilitySummary?> ReadReceiptHistoryAsync(
+        string normalizedRunId,
         bool includeReliabilityHistory,
         CancellationToken cancellationToken)
     {
         if (!includeReliabilityHistory || reliability is null)
             return null;
 
+        var started = Stopwatch.GetTimestamp();
         try
         {
             return await reliability.GetAsync(cancellationToken);
         }
-        catch (Exception error) when (!cancellationToken.IsCancellationRequested &&
-                                      error is DbException or TimeoutException or OperationCanceledException or
-                                      InvalidOperationException { InnerException: DbException or TimeoutException or OperationCanceledException })
+        catch (Exception error)
         {
+            var callerCancelled = cancellationToken.IsCancellationRequested;
+            var historyUnavailable = !callerCancelled &&
+                error is DbException or TimeoutException or OperationCanceledException or
+                InvalidOperationException { InnerException: DbException or TimeoutException or OperationCanceledException };
+            LogReceiptReadProblem(normalizedRunId, "reliability-history", started,
+                callerCancelled ? "caller-cancellation-requested" : historyUnavailable ? "unavailable" : "failed", error);
+            if (!historyUnavailable)
+                throw;
+
             // Optional history cannot obscure the authoritative receipt or supply proof when unavailable.
             return null;
         }
+    }
+
+    private void LogReceiptReadProblem(string runId, string phase, long started, string outcome, Exception error)
+    {
+        if (logger?.IsEnabled(LogLevel.Warning) != true)
+            return;
+
+        var runHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runId)));
+        logger.LogWarning(
+            "Scheduled governance receipt read {Outcome} in {Phase} after {ElapsedMilliseconds} ms for run hash {RunHash} ({ErrorType})",
+            outcome, phase, Stopwatch.GetElapsedTime(started).TotalMilliseconds, runHash, error.GetType().Name);
     }
 
     private static void EnsureScheduledLineage(
