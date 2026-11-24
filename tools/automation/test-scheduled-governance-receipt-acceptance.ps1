@@ -28,7 +28,7 @@ foreach ($name in @(
         "Get-ScheduledGovernanceReviewReceiptEvidence",
         "Get-ScheduledGovernanceBatchCounts",
         "Get-ScheduledGovernanceBatchAuditIds",
-        "Assert-ScheduledGovernanceFirstBatchBaseline",
+        "Assert-ScheduledGovernanceNoExecution",
         "Get-ScheduledGovernanceBatchReceiptEvidence",
         "Assert-ScheduledGovernanceFinalBatchContinuity",
         "Invoke-ScheduledGovernanceVerifiedReplay",
@@ -92,6 +92,10 @@ function Get-ReceiptFixture {
             schemaHash = $verifiedContract.schemaHash
             publishedCatalogVersion = $verifiedContract.publishedCatalogVersion
             latestBatchReceived = $false
+            applied = 0
+            failed = 0
+            quarantined = 0
+            semanticAutoResolved = 0
             auditIds = @()
         }
     }
@@ -121,17 +125,17 @@ function Assert-RejectedReceiptFixture {
 foreach ($decision in @("NoOpConverged", "ReversibleExecutionRequired", "HumanDecisionOnly", "CoverageIncomplete")) {
     $fixture = Get-ReceiptFixture -Decision $decision
     $evidence = Get-ScheduledGovernanceReviewReceiptEvidence -Receipt $fixture.Receipt -ExpectedRunId $runId `
-        -Review $fixture.Review -Contract $verifiedContract
+        -Review $fixture.Review -Contract $verifiedContract -RequireNoExecution
     if ($evidence.decision -cne $decision -or $evidence.coverageComplete -ne $fixture.Review.coverageComplete -or
-        $evidence.auditCount -ne 0) {
+        -not $evidence.noExecutionObserved -or $evidence.auditCount -ne 0) {
         throw "Receipt fixture '$decision' did not preserve the review decision, coverage or empty audit count."
     }
 }
 
 $fixture = Get-ReceiptFixture -ReReview
 $evidence = Get-ScheduledGovernanceReviewReceiptEvidence -Receipt $fixture.Receipt -ExpectedRunId $runId `
-    -Review $fixture.Review -Contract $verifiedContract
-if ($evidence.decision -cne "NoOpConverged" -or -not $evidence.coverageComplete) {
+    -Review $fixture.Review -Contract $verifiedContract -RequireNoExecution
+if ($evidence.decision -cne "NoOpConverged" -or -not $evidence.coverageComplete -or -not $evidence.noExecutionObserved) {
     throw "The completed zero-execute re-review was not accepted."
 }
 
@@ -230,15 +234,12 @@ function New-ReplayFixture {
     }
     $before.latestBatchReceived = $true
     $before.auditIds = @($auditId)
+    $before.applied = $firstBatch.appliedCount
     $before | Add-Member -NotePropertyMembers @{
         initialSnapshotToken = $before.finalSnapshotToken
         requestIdentityHash = "a" * 64
         stoppedReason = "Completed"
         isReplay = $false
-        applied = $firstBatch.appliedCount
-        failed = 0
-        quarantined = 0
-        semanticAutoResolved = 0
     }
     $after = $before.PSObject.Copy()
     $after.receiptId = [Guid]::NewGuid().ToString("D")
@@ -367,20 +368,29 @@ foreach ($mutate in $postReplayCases) {
     }
 }
 
-$baseline = (Get-ReceiptFixture -Decision ReversibleExecutionRequired).Receipt
-$baseline | Add-Member -NotePropertyMembers @{ applied = 0; failed = 0; quarantined = 0; semanticAutoResolved = 0 }
-Assert-ScheduledGovernanceFirstBatchBaseline $baseline
-$baselineRejections = @(
+$noExecutionRejections = @(
     @{ field = "latestBatchReceived"; value = $true }
+    @{ field = "latestBatchReceived"; value = "false" }
     @{ field = "applied"; value = 1 }
+    @{ field = "failed"; value = 1 }
+    @{ field = "quarantined"; value = 1 }
+    @{ field = "semanticAutoResolved"; value = 1 }
+    @{ field = "applied"; value = $null }
     @{ field = "auditIds"; value = @("e8b0fd25-2506-4dcc-b84c-b74ff1c6b379") }
+    @{ field = "auditIds"; value = $null }
 )
-foreach ($case in $baselineRejections) {
-    $invalid = $baseline.PSObject.Copy()
-    $invalid.($case.field) = $case.value
-    $rejected = $false
-    try { Assert-ScheduledGovernanceFirstBatchBaseline $invalid } catch { $rejected = $true }
-    if (-not $rejected) { throw "An initial receipt with earlier batch evidence was accepted." }
+foreach ($isReReview in @($false, $true)) {
+    foreach ($case in $noExecutionRejections) {
+        $fixture = Get-ReceiptFixture -ReReview:$isReReview
+        $fixture.Receipt.($case.field) = $case.value
+        $rejected = $false
+        try {
+            $null = Get-ScheduledGovernanceReviewReceiptEvidence -Receipt $fixture.Receipt -ExpectedRunId $runId `
+                -Review $fixture.Review -Contract $verifiedContract -RequireNoExecution
+        }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw "A zero-execute receipt accepted invalid $($case.field) with isReReview=$isReReview." }
+    }
 }
 
 $manifestCases = @(
@@ -659,9 +669,9 @@ finally {
 
 [ordered]@{
     valid = $true
-    positiveCases = 16 + @($manifestCases | Where-Object expected -CEQ "verified").Count
+    positiveCases = 15 + @($manifestCases | Where-Object expected -CEQ "verified").Count
     negativeCases = $cases.Count + 12 + $invalidExecutions.Count + $preReplayCases.Count +
-        $postReplayCases.Count + $baselineRejections.Count + $readbackPathRejections.Count +
+        $postReplayCases.Count + (2 * $noExecutionRejections.Count) + $readbackPathRejections.Count +
         @($manifestCases | Where-Object expected -CNE "verified").Count + $invalidCoverage.Count + $invalidContinuity.Count + 1
     result = "scheduled-governance-receipt-replay-and-protected-evidence"
 } | ConvertTo-Json -Compress

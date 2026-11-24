@@ -31,7 +31,7 @@ The runner uses only the four published tools. It checks initialize identity, ca
 
 The manifest must match the exact run, validated OAuth resource, and initial and final review receipt IDs. A missing or unmatched manifest leaves acceptance incomplete. The binding correlates observations with a run. The observer remains responsible for collecting the values from the authorized scope.
 
-A complete review must prove that the authorized, covered, scanned and total memory counts agree, with Shared counted once and user scope handled separately. For A1 the final receipt must confirm the re-review decision and preserve the request identity, audit IDs and cumulative counts verified after replay. The verifier requests the protected manifest after those checks pass.
+A complete review must prove that the authorized, covered, scanned and total memory counts agree, with Shared counted once and user scope handled separately. The initial receipt and the A0 final receipt must each confirm no batch, zero execution totals and an empty audit ID array. For A1 the final receipt must confirm the re-review decision and preserve the request identity, audit IDs and cumulative counts verified after replay. The verifier requests the protected manifest after those checks pass.
 
 ```json
 {

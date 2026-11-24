@@ -559,7 +559,8 @@ function Get-ScheduledGovernanceReviewReceiptEvidence {
         [AllowNull()][object]$Receipt,
         [Parameter(Mandatory)][string]$ExpectedRunId,
         [Parameter(Mandatory)][object]$Review,
-        [Parameter(Mandatory)][System.Collections.IDictionary]$Contract
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Contract,
+        [switch]$RequireNoExecution
     )
 
     $evidence = Get-ScheduledGovernanceReceiptEvidence $Receipt -ExpectedRunId $ExpectedRunId
@@ -608,6 +609,10 @@ function Get-ScheduledGovernanceReviewReceiptEvidence {
     $evidence.decision = $decision
     $evidence.outcome = $outcome
     $evidence.coverageComplete = $receiptCoverage
+    if ($RequireNoExecution) {
+        Assert-ScheduledGovernanceNoExecution $Receipt
+        $evidence.noExecutionObserved = $true
+    }
     return $evidence
 }
 
@@ -641,7 +646,7 @@ function Get-ScheduledGovernanceBatchAuditIds {
     }
 }
 
-function Assert-ScheduledGovernanceFirstBatchBaseline {
+function Assert-ScheduledGovernanceNoExecution {
     param([object]$Receipt)
 
     $received = Get-ScheduledGovernancePropertyValue $Receipt "latestBatchReceived"
@@ -649,7 +654,7 @@ function Assert-ScheduledGovernanceFirstBatchBaseline {
     $auditIds = @(Get-ScheduledGovernanceBatchAuditIds $Receipt)
     if ($received -isnot [bool] -or $received -or $auditIds.Count -ne 0 -or
         @($counts.Values | Where-Object { $_ -ne 0 }).Count -ne 0) {
-        throw "A1 requires an initial review receipt with no earlier batch or execution totals."
+        throw "Scheduled governance review receipt must confirm no batch, execution totals or audit IDs."
     }
 }
 
@@ -1364,7 +1369,7 @@ try {
                     -RequestId 31
                 $initialReceipt = Get-ScheduledGovernanceToolData -Json $initialReceiptJson -Operation "scheduled_governance_run_get"
                 $evidence.receipt.initial = Get-ScheduledGovernanceReviewReceiptEvidence `
-                    -Receipt $initialReceipt -ExpectedRunId $runId -Review $review -Contract $observedContract
+                    -Receipt $initialReceipt -ExpectedRunId $runId -Review $review -Contract $observedContract -RequireNoExecution
 
                 if ($Mode -eq "A0") {
                     $evidence.outcome.executorCalls = 0
@@ -1391,7 +1396,7 @@ try {
                             -RequestId 33
                         $finalReceipt = Get-ScheduledGovernanceToolData -Json $finalReceiptJson -Operation "scheduled_governance_run_get"
                         $evidence.receipt.final = Get-ScheduledGovernanceReviewReceiptEvidence `
-                            -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract
+                            -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract -RequireNoExecution
                         $evidence.protectedInvariants = Complete-ScheduledGovernanceProtectedReadback `
                             -ManifestPath $ProtectedInvariantEvidencePath -RequestPath $ProtectedInvariantReadbackRequestPath `
                             -TimeoutSec $ProtectedInvariantReadbackTimeoutSec -Binding ([ordered]@{
@@ -1421,7 +1426,6 @@ try {
                         $exitCode = 2
                     }
                     else {
-                        Assert-ScheduledGovernanceFirstBatchBaseline $initialReceipt
                         $executeArguments = @{
                             request = @{
                                 governanceRunId = $runId
