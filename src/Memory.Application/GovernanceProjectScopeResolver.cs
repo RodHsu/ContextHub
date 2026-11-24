@@ -8,6 +8,21 @@ public sealed class GovernanceProjectScopeResolver(
     IAccessibleProjectService accessibleProjects,
     IRequestActorAccessor actorAccessor) : IGovernanceProjectScopeResolver
 {
+    internal static async Task EnsureDurableGrantsAsync(
+        IApplicationDbContext dbContext, Guid tenantId, IReadOnlyList<string> projectIds,
+        bool requireWrite, CancellationToken cancellationToken)
+    {
+        var projectKeys = ProjectContext.IdentityKeys(projectIds);
+        var denied = await dbContext.TenantProjectGrants.AsNoTracking().AnyAsync(grant =>
+            grant.TenantId == tenantId &&
+            projectKeys.Contains(ProjectContext.IdentityKey(grant.ProjectId)) &&
+            (!grant.CanRead || (requireWrite && !grant.CanWrite)), cancellationToken);
+        if (denied)
+        {
+            throw new UnauthorizedAccessException("A durable project grant no longer authorizes the governance scope.");
+        }
+    }
+
     public async Task<IReadOnlyList<AccessibleProjectResult>> ResolveAsync(
         IReadOnlyList<string>? requestedProjectIds,
         CancellationToken cancellationToken)

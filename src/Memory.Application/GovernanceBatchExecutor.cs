@@ -40,10 +40,15 @@ public sealed class GovernanceBatchExecutor(
         IAsyncDisposable? runLock = null;
         try
         {
+            var actor = actorAccessor.Current;
             ValidateExecutionMode(request.ExecutionMode);
-            EnsureExecutionActorAllowed(request, actorAccessor.Current);
+            EnsureExecutionActorAllowed(request, actor);
             ValidatePublishedContract(request);
             ValidateRequest(request);
+            var tenantId = actor.TenantId ?? throw new UnauthorizedAccessException("Governance execution requires a tenant actor.");
+            // Shared is implicit in a batch, so the ordinary project allowlist cannot enforce its durable grant.
+            await GovernanceProjectScopeResolver.EnsureDurableGrantsAsync(
+                dbContext, tenantId, [ProjectContext.SharedProjectId], requireWrite: true, cancellationToken);
             if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled)
             {
                 runLock = await runReceipts.AcquireRunLockAsync(

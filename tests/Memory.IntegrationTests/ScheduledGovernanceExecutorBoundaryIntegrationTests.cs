@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluentAssertions;
@@ -6,6 +7,7 @@ using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Memory.IntegrationTests;
@@ -564,6 +566,122 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         result.ResolvedProjectIds.Count(ProjectContext.IsShared).Should().Be(1);
         var receipt = await service.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
         receipt.ProjectIds.Should().Contain(allowed).And.NotContain(denied);
+    }
+
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Governance_snapshot_rechecks_revoked_read_grants_before_live_findings(bool revokeShared)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await CreateReviewGrantOwnerAsync(db);
+        var project = $"snapshot-grant-{Guid.NewGuid():N}";
+        var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actor.Current = GenericAdminActor(user) with { AllowedProjectIds = [project] };
+        db.MemoryItems.Add(CreateRetentionCandidate(user, project));
+        await db.SaveChangesAsync();
+
+        var runId = $"snapshot-grant-{Guid.NewGuid():N}";
+        var durable = scope.ServiceProvider.GetRequiredService<IDurableMemoryGovernanceService>();
+        var snapshot = await durable.GetOrCreateSnapshotAsync([project], runId, false, default);
+        snapshot.FindingIds.Should().NotBeEmpty("a successful read would query the live findings overlay");
+
+        db.TenantProjectGrants.Add(new TenantProjectGrant
+        {
+            TenantId = user.TenantId,
+            ProjectId = revokeShared ? ProjectContext.SharedProjectId : project.ToUpperInvariant(),
+            CanRead = false,
+            CanWrite = false
+        });
+        await db.SaveChangesAsync();
+
+        var counter = new LiveFindingReadCounter();
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+            scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>()).AddInterceptors(counter).Options;
+        await using var observerDb = new MemoryDbContext(options);
+        var observer = new DurableMemoryGovernanceService(observerDb, scope.ServiceProvider.GetRequiredService<IGovernanceService>(),
+            actor, scope.ServiceProvider.GetRequiredService<IClock>());
+
+        var read = () => observer.GetSnapshotAsync(runId, snapshot.Coverage.SnapshotToken, false, false, default);
+        await read.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*durable project grant*");
+        var reuse = () => observer.GetOrCreateSnapshotAsync([project], runId, false, default);
+        await reuse.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*durable project grant*");
+        counter.Reads.Should().Be(0);
+    }
+
+    private sealed class LiveFindingReadCounter : DbCommandInterceptor
+    {
+        public int Reads { get; private set; }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("governance_findings", StringComparison.OrdinalIgnoreCase))
+                Reads++;
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+    }
+
+    [DockerRequiredTheory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Governance_executor_rejects_shared_write_revocation_before_execution_or_replay(bool withSnapshot, bool replay)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await CreateReviewGrantOwnerAsync(db);
+        var project = $"shared-execution-grant-{Guid.NewGuid():N}";
+        var memory = CreateRetentionCandidate(user, project);
+        db.MemoryItems.Add(memory);
+        await db.SaveChangesAsync();
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current =
+            GenericAdminActor(user) with { AllowedProjectIds = [project] };
+
+        var runId = $"shared-execution-grant-{Guid.NewGuid():N}";
+        string? snapshotToken = null;
+        if (withSnapshot)
+        {
+            var review = await scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>()
+                .ReviewAsync(new KnowledgeReviewRequest([project], GovernanceRunId: runId), default);
+            snapshotToken = review.DurableMemoryCoverage!.SnapshotToken;
+        }
+
+        var request = new GovernanceBatchExecuteRequest(runId, [project], snapshotToken,
+            AllowedActionTypes: [GovernanceBatchActionType.Quarantine], ExecutionMode: GovernanceBatchExecutionMode.Interactive);
+        var executor = scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>();
+        if (replay)
+        {
+            var first = await executor.ExecuteAsync(request, default);
+            first.Succeeded.Should().BeTrue(first.StoppedReason);
+            (await executor.ExecuteAsync(request, default)).IsReplay.Should().BeTrue();
+        }
+
+        db.TenantProjectGrants.Add(new TenantProjectGrant
+        {
+            TenantId = user.TenantId,
+            ProjectId = ProjectContext.SharedProjectId.ToUpperInvariant(),
+            CanRead = true,
+            CanWrite = false
+        });
+        await db.SaveChangesAsync();
+
+        if (withSnapshot)
+        {
+            var readable = await scope.ServiceProvider.GetRequiredService<IDurableMemoryGovernanceService>()
+                .GetSnapshotAsync(runId, snapshotToken!, false, false, default);
+            readable.Coverage.SnapshotToken.Should().Be(snapshotToken);
+        }
+
+        var before = await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id);
+        var receiptCount = await db.GovernanceRunReceipts.CountAsync(x => x.GovernanceRunId == runId);
+        var invoke = () => executor.ExecuteAsync(request, default);
+        await invoke.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*durable project grant*");
+        (await db.GovernanceBatchExecutions.CountAsync(x => x.Run!.GovernanceRunId == runId)).Should().Be(replay ? 1 : 0);
+        (await db.GovernanceRunReceipts.CountAsync(x => x.GovernanceRunId == runId)).Should().Be(receiptCount);
+        (await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id)).Status.Should().Be(before.Status);
     }
 
     [DockerRequiredFact]
