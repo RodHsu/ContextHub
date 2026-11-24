@@ -421,6 +421,49 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
     }
 
     [DockerRequiredFact]
+    public async Task Evidence_append_does_not_flush_pending_memory_changes()
+    {
+        var factory = environment.GetFactory();
+        using var scope = factory.Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var (receipt, eventKey) = await CreatePersistedReceiptAsync(scope.ServiceProvider, actor, "natural-origin-isolated-append");
+        var now = DateTimeOffset.UtcNow;
+        var first = CreateEvidence(NaturalOriginEvidenceKind.PlatformAttestation, actor, receipt, eventKey, now, null);
+        var second = CreateEvidence(NaturalOriginEvidenceKind.ControlPlaneAudit, actor, receipt, eventKey, now, 1);
+        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        await store.AppendAsync(first);
+
+        var pending = new MemoryItem
+        {
+            TenantId = actor.TenantId!.Value,
+            OwnerUserId = actor.UserId!.Value,
+            ProjectId = receipt.ProjectIds.Single(),
+            ExternalKey = $"pending-{Guid.NewGuid():N}",
+            Title = "Unrelated pending memory",
+            Content = "This is outside the evidence append.",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.MemoryItems.Add(pending);
+
+        (await store.AppendAsync(Clone(first))).IsReplay.Should().BeTrue();
+        var failure = await Record.ExceptionAsync(() => store.AppendAsync(second));
+        using var readScope = factory.Services.CreateScope();
+        var readDb = readScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        (await readDb.MemoryItems.AsNoTracking().AnyAsync(item => item.Id == pending.Id)).Should().BeFalse();
+        (await readDb.NaturalOriginEvidenceLedgerEntries.AsNoTracking().AnyAsync(row => row.Id == second.Id)).Should().BeFalse();
+        failure.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("pending changes");
+        db.Entry(pending).State.Should().Be(EntityState.Added);
+        db.Entry(second).State.Should().Be(EntityState.Detached);
+
+        db.Entry(pending).State = EntityState.Detached;
+        (await store.AppendAsync(second)).IsReplay.Should().BeFalse();
+        (await readDb.NaturalOriginEvidenceLedgerEntries.AsNoTracking().CountAsync(row => row.Id == second.Id)).Should().Be(1);
+        (await readDb.MemoryItems.AsNoTracking().AnyAsync(item => item.Id == pending.Id)).Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
     public async Task Evidence_With_A_Nonmatching_Receipt_Must_Remain_Unattested()
     {
         var factory = environment.GetFactory();

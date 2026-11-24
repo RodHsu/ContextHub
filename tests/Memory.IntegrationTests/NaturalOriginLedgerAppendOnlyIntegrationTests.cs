@@ -45,13 +45,11 @@ public sealed class NaturalOriginLedgerAppendOnlyIntegrationTests(ContainerTestE
         orphan.SlotIdHash = Digest("orphan-slot");
         orphan.JtiHash = Digest("orphan-jti");
         orphan.SourceEventIdHash = Digest("orphan-event");
-        db.NaturalOriginEvidenceLedgerEntries.Add(orphan);
-
-        var orphanFailure = await Record.ExceptionAsync(() => db.SaveChangesAsync());
+        var orphanFailure = await Record.ExceptionAsync(() => store.AppendAsync(orphan));
         var orphanPostgres = GetPostgresException(orphanFailure);
         orphanPostgres.Should().NotBeNull();
         orphanPostgres!.SqlState.Should().Be(PostgresErrorCodes.ForeignKeyViolation);
-        db.ChangeTracker.Clear();
+        db.Entry(orphan).State.Should().Be(EntityState.Detached);
 
         var crossOwner = CreateEvidence(actor, receipt, receiptEventKey, "cross-owner");
         crossOwner.TenantId = Guid.NewGuid();

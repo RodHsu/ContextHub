@@ -37,6 +37,11 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
             return new NaturalOriginEvidenceAppendResult(existing, IsReplay: true);
         }
 
+        if (dbContext.ChangeTracker.HasChanges())
+        {
+            throw new InvalidOperationException("Natural-origin evidence cannot be appended while the DbContext has pending changes.");
+        }
+
         entry.CreatedAtUtc = timeProvider.GetUtcNow();
         dbContext.NaturalOriginEvidenceLedgerEntries.Add(entry);
 
@@ -58,6 +63,11 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
 
             EnsureExactReplay(raced, entry);
             return new NaturalOriginEvidenceAppendResult(raced, IsReplay: true);
+        }
+        catch
+        {
+            dbContext.Entry(entry).State = EntityState.Detached;
+            throw;
         }
     }
 
