@@ -53,6 +53,16 @@ compatible with the resulting schema. The controller can accept the source
 after the deployment owner configures a baseline with the approved migration
 set and confirms the rollback contract.
 
+The Scheduled Governance history query can use the optional audit run index.
+Create it on the database under the authorized maintenance procedure with
+`psql -X -f tools/deployment/create-governance-audit-run-index.sql`.
+Use autocommit mode and allow time for the concurrent PostgreSQL index build
+to complete. The script verifies the definition and validity, including on
+retry. An interrupted build can leave an invalid same-name index. Inspect
+the catalog before removing an invalid index and retrying. The application
+continues to read the same evidence without this index. An application
+rollback can leave the index in place.
+
 ## Failure handling
 
 The controller first builds locally tagged images and verifies the current running
