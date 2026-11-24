@@ -12,6 +12,7 @@ param(
     [ValidateRange(1, 120)]
     [int]$ProtectedInvariantReadbackTimeoutSec = 30,
     [string]$EvidencePath = "",
+    [string]$A1CheckpointPath = "",
     [ValidateSet("Production", "Isolated")]
     [string]$A1Environment = "Production",
     [switch]$AllowIsolatedSyntheticFixtures,
@@ -827,14 +828,14 @@ function Read-ScheduledGovernanceProtectedInvariantEvidence {
 }
 
 function Assert-ScheduledGovernanceReadbackPaths {
-    param([string]$RequestPath, [string]$ManifestPath, [string]$EvidencePath)
+    param([string]$RequestPath, [string]$ManifestPath, [string]$EvidencePath, [string]$CheckpointPath, [switch]$RecoveryOnly)
 
-    $paths = @($RequestPath, $ManifestPath, $EvidencePath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    $paths = @($RequestPath, $ManifestPath, $EvidencePath, $CheckpointPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
         ForEach-Object { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($_) })
     if (@($paths | Sort-Object -CaseSensitive:(!$IsWindows) -Unique).Count -ne $paths.Count) {
-        throw "The protected readback request, manifest and final evidence require distinct paths."
+        throw "The protected readback request, manifest, final evidence and A1 checkpoint require distinct paths."
     }
-    if (-not [string]::IsNullOrWhiteSpace($RequestPath)) {
+    if (-not $RecoveryOnly -and -not [string]::IsNullOrWhiteSpace($RequestPath)) {
         if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
             throw "A protected readback request requires a manifest path."
         }
@@ -847,6 +848,54 @@ function Assert-ScheduledGovernanceReadbackPaths {
             -not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($manifestFile))) {
             throw "The protected readback request and manifest parent directories must exist."
         }
+    }
+}
+
+function Write-ScheduledGovernanceA1Checkpoint {
+    param([string]$Path, [string]$BindingHash, [string]$RunId)
+
+    $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $journal = @{ version = 1; bindingHash = $BindingHash; governanceRunId = $RunId } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($temporary, $journal)
+        [IO.File]::Move($temporary, $Path)
+    }
+    finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
+}
+
+function Invoke-ScheduledGovernanceA1Recovery {
+    param([string]$Path, [string]$BindingHash, [string]$Token, [object]$Spec, [object]$Evidence)
+
+    $journal = [IO.File]::ReadAllText($Path) | ConvertFrom-Json -AsHashtable
+    if ($journal -isnot [System.Collections.IDictionary] -or $journal['version'] -ne 1 -or
+        $journal['bindingHash'] -cne $BindingHash -or
+        $journal['governanceRunId'] -cnotmatch '^scheduled-acceptance-[a-f0-9]{32}$') {
+        throw "A1 checkpoint is malformed or belongs to another endpoint, resource, environment or contract."
+    }
+    $runId = $journal.governanceRunId
+    $Evidence.governanceRunId = $runId
+    $Evidence.outcome.status = "a1-recovery-read-only"
+    $Evidence.replay.outcomeRecovery = "receipt-readback-unavailable"
+    try {
+        $json = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_run_get" `
+            -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $false } -RequestId 41
+        $receipt = Get-ScheduledGovernanceToolData -Json $json -Operation "scheduled_governance_run_get"
+        Assert-ScheduledGovernanceEqual -Actual (Get-ScheduledGovernancePropertyValue $receipt "toolContractVersion") `
+            -Expected $Spec.contract.toolContractVersion -Message "Recovery receipt contract changed."
+        Assert-ScheduledGovernanceEqual -Actual (Get-ScheduledGovernancePropertyValue $receipt "schemaHash") `
+            -Expected $Spec.contract.schemaHash -Message "Recovery receipt schema changed."
+        Assert-ScheduledGovernanceEqual -Actual (Get-ScheduledGovernancePropertyValue $receipt "publishedCatalogVersion") `
+            -Expected $Spec.catalog.publishedCatalogVersion -Message "Recovery receipt catalog changed."
+        $Evidence.receipt.afterUnknownOutcome = Get-ScheduledGovernanceReceiptEvidence $receipt -ExpectedRunId $runId
+        $Evidence.replay.outcomeRecovery = if ($Evidence.receipt.afterUnknownOutcome.runExists) {
+            "receipt-readback-insufficient-for-exact-replay"
+        }
+        else { "receipt-run-not-found" }
+    }
+    catch {
+        $Evidence.errors += $_.Exception.Message
     }
 }
 
@@ -975,8 +1024,17 @@ $evidence = $null
 $validatedEvidencePath = ""
 
 try {
-    Assert-ScheduledGovernanceReadbackPaths $ProtectedInvariantReadbackRequestPath $ProtectedInvariantEvidencePath $EvidencePath
-    $validatedEvidencePath = $EvidencePath
+    if ($Mode -eq "A1" -and [string]::IsNullOrWhiteSpace($A1CheckpointPath)) {
+        if ([string]::IsNullOrWhiteSpace($EvidencePath)) { throw "A1 requires A1CheckpointPath or EvidencePath." }
+        $A1CheckpointPath = "$EvidencePath.a1-checkpoint.json"
+    }
+    if ($Mode -eq "A1") {
+        $A1CheckpointPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($A1CheckpointPath)
+    }
+    $recoveringA1 = $Mode -eq "A1" -and [IO.File]::Exists($A1CheckpointPath)
+    Assert-ScheduledGovernanceReadbackPaths -RequestPath $ProtectedInvariantReadbackRequestPath `
+        -ManifestPath $ProtectedInvariantEvidencePath -EvidencePath $EvidencePath -CheckpointPath $A1CheckpointPath -RecoveryOnly:$recoveringA1
+    if ($Mode -ne "A1") { $validatedEvidencePath = $EvidencePath }
     if ([string]::IsNullOrWhiteSpace($SpecPath)) {
         $SpecPath = Get-ScheduledGovernanceAutomationDefaultSpecPath
     }
@@ -1012,6 +1070,20 @@ try {
     }
     else {
         $endpointUri = [Uri]$Endpoint
+        if ($Mode -eq "A1") {
+            if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($A1CheckpointPath)) -or [IO.Directory]::Exists($A1CheckpointPath)) {
+                throw "A1 checkpoint requires a file path in an existing directory."
+            }
+            $checkpointBinding = [ordered]@{
+                endpoint = $endpointUri.AbsoluteUri
+                resource = $OAuthResource
+                environment = $A1Environment
+                contract = $specValidation.Spec.contract.toolContractVersion
+                schema = $specValidation.Spec.contract.schemaHash
+                catalog = $specValidation.Spec.catalog.publishedCatalogVersion
+            }
+            $checkpointBindingHash = Get-ScheduledGovernanceSha256Hex ($checkpointBinding | ConvertTo-Json -Compress)
+        }
         $origin = "$($endpointUri.Scheme)://$($endpointUri.Authority)"
         $metadataUri = "$origin/.well-known/oauth-protected-resource/mcp-automation"
         $metadataResponse = Invoke-ScheduledGovernanceHttp -Uri $metadataUri -Method "Get"
@@ -1050,6 +1122,11 @@ try {
             }
             $evidence.outcome.status = if ($exitCode -eq 0) { "OAuthRequired" } else { "discovery-not-ready" }
             $evidence.outcome.accepted = $false
+        }
+        elseif ($exitCode -eq 0 -and $recoveringA1) {
+            Invoke-ScheduledGovernanceA1Recovery -Path $A1CheckpointPath -BindingHash $checkpointBindingHash `
+                -Token $token -Spec $specValidation.Spec -Evidence $evidence
+            $exitCode = 2
         }
         elseif ($exitCode -eq 0) {
             $initializeJson = Invoke-ScheduledGovernanceMcpJson `
@@ -1215,6 +1292,10 @@ try {
             }
             else {
                 $runId = "scheduled-acceptance-$([Guid]::NewGuid().ToString('N'))"
+                if ($Mode -eq "A1") {
+                    Write-ScheduledGovernanceA1Checkpoint -Path $A1CheckpointPath -BindingHash $checkpointBindingHash -RunId $runId
+                    $validatedEvidencePath = $EvidencePath
+                }
                 $evidence.governanceRunId = $runId
                 $reviewJson = Invoke-ScheduledGovernanceTool `
                     -Token $token `

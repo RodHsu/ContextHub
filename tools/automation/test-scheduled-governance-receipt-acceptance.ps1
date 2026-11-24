@@ -17,6 +17,7 @@ foreach ($name in @(
         "Get-ScheduledGovernanceArrayProperty",
         "Assert-ScheduledGovernanceRpcSuccess",
         "Get-ScheduledGovernanceToolData",
+        "Assert-ScheduledGovernanceEqual",
         "Test-ScheduledGovernanceIdsEqual",
         "Test-ScheduledGovernanceExecutionResult",
         "Get-ScheduledGovernanceReceiptEvidence",
@@ -28,6 +29,8 @@ foreach ($name in @(
         "Invoke-ScheduledGovernanceVerifiedReplay",
         "Read-ScheduledGovernanceProtectedInvariantEvidence",
         "Assert-ScheduledGovernanceReadbackPaths",
+        "Write-ScheduledGovernanceA1Checkpoint",
+        "Invoke-ScheduledGovernanceA1Recovery",
         "Complete-ScheduledGovernanceProtectedReadback")) {
     $definition = $runner.Find({
             param($node)
@@ -505,10 +508,72 @@ finally {
     }
 }
 
+$checkpointPath = Join-Path $localRoot "a1-checkpoint-$([Guid]::NewGuid().ToString('N')).json"
+$checkpointRun = "scheduled-acceptance-$([Guid]::NewGuid().ToString('N'))"
+$checkpointHash = Get-ScheduledGovernanceSha256Hex "test-binding"
+$checkpointSpec = @{ contract = $verifiedContract; catalog = $verifiedContract }
+try {
+    Write-ScheduledGovernanceA1Checkpoint $checkpointPath $checkpointHash $checkpointRun
+    $originalCheckpoint = [IO.File]::ReadAllText($checkpointPath)
+    $secondClaimRejected = $false
+    try { Write-ScheduledGovernanceA1Checkpoint $checkpointPath $checkpointHash "second-run" }
+    catch [IO.IOException] { $secondClaimRejected = $true }
+    if (-not $secondClaimRejected -or [IO.File]::ReadAllText($checkpointPath) -cne $originalCheckpoint) {
+        throw "Repeated A1 path ownership changed the original checkpoint."
+    }
+
+    & {
+        $calls = [System.Collections.Generic.List[string]]::new()
+        function Invoke-ScheduledGovernanceTool {
+            param($Token, $ToolName, $Arguments, $RequestId)
+            $calls.Add($ToolName)
+            if ($Token -cne "offline-test" -or $ToolName -cne "scheduled_governance_run_get" -or $RequestId -ne 41 -or
+                $Arguments.governanceRunId -cne $checkpointRun -or $Arguments.includeReliabilityHistory -isnot [bool] -or
+                $Arguments.includeReliabilityHistory) { throw "Unexpected recovery operation." }
+            return [pscustomobject]@{ result = [pscustomobject]@{ structuredContent = [pscustomobject]$receipt } }
+        }
+
+        $receipt = @{
+            governanceRunId = $checkpointRun; runExists = $true; status = "Stopped"
+            toolContractVersion = $verifiedContract.toolContractVersion
+            schemaHash = $verifiedContract.schemaHash
+            publishedCatalogVersion = $verifiedContract.publishedCatalogVersion
+        }
+        $state = @{ outcome = @{ executorCalls = 0; accepted = $false }; replay = @{}; receipt = @{}; errors = @() }
+        Invoke-ScheduledGovernanceA1Recovery $checkpointPath $checkpointHash "offline-test" $checkpointSpec $state
+        if ($calls.Count -ne 1 -or $state.governanceRunId -cne $checkpointRun -or
+            $state.outcome.executorCalls -ne 0 -or $state.outcome.accepted -or
+            $state.receipt.afterUnknownOutcome.status -cne "Stopped" -or
+            $state.replay.outcomeRecovery -cne "receipt-readback-insufficient-for-exact-replay") {
+            throw "A1 did not recover the original run through a single read-only receipt call."
+        }
+
+        $receipt.runExists = $false
+        Invoke-ScheduledGovernanceA1Recovery $checkpointPath $checkpointHash "offline-test" $checkpointSpec $state
+        if ($calls.Count -ne 2 -or $state.replay.outcomeRecovery -cne "receipt-run-not-found") {
+            throw "A missing run did not stop read-only recovery."
+        }
+        $receipt.schemaHash = "mismatched"
+        Invoke-ScheduledGovernanceA1Recovery $checkpointPath $checkpointHash "offline-test" $checkpointSpec $state
+        if ($calls.Count -ne 3 -or $state.replay.outcomeRecovery -cne "receipt-readback-unavailable") {
+            throw "A different receipt contract was accepted."
+        }
+        $bindingRejected = $false
+        try { Invoke-ScheduledGovernanceA1Recovery $checkpointPath "wrong-binding" "offline-test" $checkpointSpec $state }
+        catch { $bindingRejected = $true }
+        if (-not $bindingRejected -or $calls.Count -ne 3) {
+            throw "A checkpoint for another endpoint reached the receipt tool."
+        }
+    }
+}
+finally {
+    if ([IO.File]::Exists($checkpointPath)) { [IO.File]::Delete($checkpointPath) }
+}
+
 [ordered]@{
     valid = $true
-    positiveCases = 12 + @($manifestCases | Where-Object expected -CEQ "verified").Count
-    negativeCases = $cases.Count + 5 + $invalidExecutions.Count + $preReplayCases.Count +
+    positiveCases = 13 + @($manifestCases | Where-Object expected -CEQ "verified").Count
+    negativeCases = $cases.Count + 9 + $invalidExecutions.Count + $preReplayCases.Count +
         $postReplayCases.Count + $baselineRejections.Count + $readbackPathRejections.Count +
         @($manifestCases | Where-Object expected -CNE "verified").Count
     result = "scheduled-governance-receipt-replay-and-protected-evidence"
