@@ -841,6 +841,62 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
     }
 
     [DockerRequiredFact]
+    public async Task Cancelled_same_run_waiter_can_resume_while_other_runs_have_independent_admission()
+    {
+        var factory = environment.GetFactory();
+        using var holderScope = factory.Services.CreateScope();
+        using var waiterScope = factory.Services.CreateScope();
+        using var otherScope = factory.Services.CreateScope();
+        var holderDb = holderScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var waiterDb = waiterScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await holderDb.TenantUsers.AsNoTracking().SingleAsync(row => row.Username == "contract-test-admin");
+        var actor = ScheduledActor(user);
+        holderScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        waiterScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        otherScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        var heldRunId = $"scheduled-held-{Guid.NewGuid():N}";
+        var otherRunId = $"scheduled-other-{Guid.NewGuid():N}";
+        var receipts = holderScope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var waiter = waiterScope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var other = otherScope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        await waiterDb.Database.OpenConnectionAsync(deadline.Token);
+        var holder = await receipts.AcquireRunLockAsync(heldRunId, deadline.Token);
+        await using var barrier = await PostgresAdvisoryLockBarrier.CreateAsync(holder,
+            holderDb.Database.GetDbConnection(), waiterDb.Database.GetDbConnection(), environment.PostgresConnectionString!, deadline.Token);
+        await receipts.RecordReviewStartedAsync(heldRunId, DateTimeOffset.UtcNow, CurrentScheduledReceiptIdentity(), deadline.Token);
+
+        using var waiterCancellation = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+        var waiting = waiter.ReviewAsync(new(heldRunId), waiterCancellation.Token);
+        try
+        {
+            await barrier.WaitForWriterBlockedAsync(deadline.Token);
+            var independent = await other.ReviewAsync(new(otherRunId), deadline.Token);
+            var independentReceipt = await other.GetReceiptAsync(otherRunId, deadline.Token, includeReliabilityHistory: false);
+            independentReceipt.GovernanceRunId.Should().Be(otherRunId);
+            independentReceipt.Status.Should().Be("Completed");
+            independentReceipt.FinalSnapshotToken.Should().Be(independent.SnapshotToken);
+            (await receipts.GetAsync(heldRunId, deadline.Token))!.Status.Should().Be("Running");
+        }
+        finally
+        {
+            await waiterCancellation.CancelAsync();
+            await FluentActions.Awaiting(() => waiting.WaitAsync(TimeSpan.FromSeconds(10)))
+                .Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        (await holderDb.GovernanceRunReceipts.AsNoTracking().CountAsync(row => row.GovernanceRunId == heldRunId))
+            .Should().Be(1, "the cancelled waiter must not append a receipt");
+        await barrier.ReleaseHolderAsync(deadline.Token);
+        var resumed = await waiter.ReviewAsync(new(heldRunId), deadline.Token);
+        var resumedReceipt = await waiter.GetReceiptAsync(heldRunId, deadline.Token, includeReliabilityHistory: false);
+        resumedReceipt.GovernanceRunId.Should().Be(heldRunId);
+        resumedReceipt.Terminal.Should().BeTrue();
+        resumedReceipt.Status.Should().Be("Completed");
+        resumedReceipt.FinalSnapshotToken.Should().Be(resumed.SnapshotToken);
+    }
+
+    [DockerRequiredFact]
     public async Task Interactive_Executor_Must_Not_Broaden_Exact_Insight_Whitespace_Matching()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
