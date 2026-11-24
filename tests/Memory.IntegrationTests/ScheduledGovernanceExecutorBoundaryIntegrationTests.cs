@@ -504,6 +504,68 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .Should().Be(0);
     }
 
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Knowledge_review_checks_explicit_and_required_shared_read_grants_before_writing(bool denyShared)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await CreateReviewGrantOwnerAsync(db);
+        var allowed = $"read-grant-allowed-{Guid.NewGuid():N}";
+        var denied = denyShared ? ProjectContext.SharedProjectId : $"read-grant-denied-{Guid.NewGuid():N}";
+        var runId = $"read-grant-review-{Guid.NewGuid():N}";
+        db.MemoryItems.Add(CreateRetentionCandidate(user, allowed));
+        db.TenantProjectGrants.Add(new TenantProjectGrant
+        {
+            TenantId = user.TenantId,
+            ProjectId = denied,
+            CanRead = false,
+            CanWrite = false
+        });
+        await db.SaveChangesAsync();
+
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = GenericAdminActor(user);
+        var review = scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>();
+        var ids = denyShared ? new[] { allowed } : [allowed, denied];
+        var invoke = () => review.ReviewAsync(new KnowledgeReviewRequest(ids, GovernanceRunId: runId), default);
+
+        await invoke.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await db.KnowledgeGovernanceSnapshots.AsNoTracking().AnyAsync(x => x.GovernanceRunId == runId)).Should().BeFalse();
+        (await db.MaintenanceRuns.AsNoTracking().AnyAsync(x =>
+            x.TriggeredBy == $"knowledge-review:{runId}" || x.TriggeredBy == $"knowledge-review-shared:{runId}")).Should().BeFalse();
+        (await db.GovernanceRunReceipts.AsNoTracking().AnyAsync(x => x.GovernanceRunId == runId)).Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
+    public async Task Scheduled_review_filters_denied_regular_projects_from_discovery()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await CreateReviewGrantOwnerAsync(db);
+        var allowed = $"scheduled-read-allowed-{Guid.NewGuid():N}";
+        var denied = $"scheduled-read-denied-{Guid.NewGuid():N}";
+        db.MemoryItems.AddRange(CreateRetentionCandidate(user, allowed), CreateRetentionCandidate(user, denied));
+        db.TenantProjectGrants.Add(new TenantProjectGrant
+        {
+            TenantId = user.TenantId,
+            ProjectId = denied.ToUpperInvariant(),
+            CanRead = false,
+            CanWrite = false
+        });
+        await db.SaveChangesAsync();
+
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current =
+            ScheduledActor(user) with { AllowedProjectIds = [allowed, denied] };
+        var service = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var runId = $"scheduled-read-grant-{Guid.NewGuid():N}";
+        var result = await service.ReviewAsync(new ScheduledGovernanceReviewRequest(runId), default);
+        result.ResolvedProjectIds.Should().Contain(allowed).And.NotContain(denied);
+        result.ResolvedProjectIds.Count(ProjectContext.IsShared).Should().Be(1);
+        var receipt = await service.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        receipt.ProjectIds.Should().Contain(allowed).And.NotContain(denied);
+    }
+
     [DockerRequiredFact]
     public async Task Interactive_Executor_Rejects_Durable_ReadOnly_Project_Grant_Before_Mutation()
     {
@@ -746,6 +808,34 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         result.SemanticAutoResolvedCount.Should().Be(0);
         (await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
             .PromotionStatus.Should().Be(ConversationPromotionStatus.Deferred);
+    }
+
+    private static async Task<TenantUser> CreateReviewGrantOwnerAsync(MemoryDbContext db)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
+        var tenant = new Tenant
+        {
+            Id = id,
+            Slug = $"review-acl-{id:N}"[..28],
+            DisplayName = "Isolated governance review grants",
+            Status = TenantStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var user = new TenantUser
+        {
+            TenantId = tenant.Id,
+            Username = "review-grant-owner",
+            DisplayName = "Review grant owner",
+            Role = TenantUserRole.Admin,
+            Status = TenantUserStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.AddRange(tenant, user);
+        await db.SaveChangesAsync();
+        return user;
     }
 
     private static ContextHubRequestActor ScheduledActor(TenantUser user)

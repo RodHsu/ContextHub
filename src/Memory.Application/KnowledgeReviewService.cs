@@ -24,8 +24,7 @@ public sealed class KnowledgeReviewService(
         var startedAt = clock.UtcNow;
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
-        var projects = (await governanceScope.ResolveAsync(request.ProjectIds, cancellationToken)).ToArray();
-        if (projects.Length == 0) throw new InvalidOperationException("No readable ProjectId is available for the knowledge review.");
+        var projects = await ResolveReviewProjectsAsync(request.ProjectIds, cancellationToken);
 
         var tenantId = actor.TenantId ?? throw new InvalidOperationException("Knowledge review requires an authenticated tenant actor.");
         var limit = Math.Clamp(request.LimitPerSection, 1, 200);
@@ -251,6 +250,32 @@ public sealed class KnowledgeReviewService(
         };
         await runReceipts.RecordReviewAsync(result, startedAt, cancellationToken);
         return result;
+    }
+
+    private async Task<AccessibleProjectResult[]> ResolveReviewProjectsAsync(
+        IReadOnlyList<string>? requestedProjectIds, CancellationToken cancellationToken)
+    {
+        var resolved = await governanceScope.ResolveAsync(requestedProjectIds, cancellationToken);
+        if (requestedProjectIds?.Any(id => !string.IsNullOrWhiteSpace(id)) == true && resolved.Any(x => !x.CanRead))
+        {
+            throw new UnauthorizedAccessException("Knowledge review requires read grants for every requested project.");
+        }
+
+        var readable = resolved.Where(x => x.CanRead).ToArray();
+        if (readable.Length == 0)
+        {
+            throw new InvalidOperationException("No readable ProjectId is available for the knowledge review.");
+        }
+
+        // Durable coverage and retention both include Shared even when it was not selected.
+        var shared = resolved.SingleOrDefault(x => ProjectContext.IsShared(x.ProjectId)) ??
+            (await governanceScope.ResolveAsync([ProjectContext.SharedProjectId], cancellationToken)).Single();
+        if (!shared.CanRead)
+        {
+            throw new UnauthorizedAccessException("Knowledge review requires a read grant for the Shared project.");
+        }
+
+        return readable;
     }
 
     private static async Task<IReadOnlyList<T>> LoadAllAsync<T>(
