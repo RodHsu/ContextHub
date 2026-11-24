@@ -253,11 +253,13 @@ function New-ReplayFixture {
         Before = $before
         After = $after
         Replay = $replay
+        ReplayRpcError = $false
         Arguments = @{ request = @{ governanceRunId = $runId; snapshotToken = "kg:fixture:i0"; maxMutations = 100 } }
         Evidence = @{
             receipt = @{ initial = @{ receiptId = "6d2aecbd-09eb-4a8a-ae32-55f23c349299" } }
             outcome = @{ executorCalls = 1 }
             replay = @{ exercised = $false; exact = $false }
+            errors = @()
         }
         Calls = [System.Collections.Generic.List[int]]::new()
     }
@@ -268,7 +270,7 @@ function Invoke-ScheduledGovernanceTool {
 
     $script:replayFixture.Calls.Add($RequestId)
     switch ($RequestId) {
-        { $_ -in @(42, 46) } {
+        { $_ -in @(41, 42, 46) } {
             if ($ToolName -cne "scheduled_governance_run_get" -or $Arguments.governanceRunId -cne $runId -or
                 $Arguments.includeReliabilityHistory -isnot [bool] -or $Arguments.includeReliabilityHistory) {
                 throw "Fixture received an unexpected receipt-read request."
@@ -282,7 +284,11 @@ function Invoke-ScheduledGovernanceTool {
                 $Arguments.request.ContainsKey("cursor")) {
                 throw "Fixture received an altered execution replay."
             }
+            if ($script:replayFixture.ReplayRpcError) {
+                return [pscustomobject]@{ error = [pscustomobject]@{ code = -32603 } }
+            }
             $response = $script:replayFixture.Replay
+            if ($null -eq $response) { throw "Fixture replay timed out." }
         }
         default { throw "Fixture received an unexpected request ID." }
     }
@@ -359,6 +365,29 @@ $postReplayCases = @(
         $fixture.Replay.auditIds = $fixture.After.auditIds
     }
 )
+$unknownReplayCases = @(
+    @{ change = { param($fixture) $fixture.Replay = $null }; expected = "receipt-readback-insufficient-for-exact-replay" }
+    @{ change = { param($fixture) $fixture.ReplayRpcError = $true }; expected = "receipt-readback-insufficient-for-exact-replay" }
+    @{ change = { param($fixture) $fixture.Replay.governanceRunId = "wrong-run" }; expected = "receipt-readback-insufficient-for-exact-replay" }
+    @{ change = { param($fixture) $fixture.Replay = $null; $fixture.After = $null }; expected = "receipt-readback-unavailable" }
+    @{
+        change = { param($fixture) $fixture.Replay = $null; $fixture.After.governanceRunId = "wrong-run" }
+        expected = "receipt-readback-unavailable"
+    }
+)
+foreach ($case in $unknownReplayCases) {
+    $script:replayFixture = New-ReplayFixture
+    & $case.change $script:replayFixture
+    $rejected = $false
+    try { Invoke-ReplayFixture } catch { $rejected = $true }
+    $state = $script:replayFixture.Evidence
+    if (-not $rejected -or ($script:replayFixture.Calls -join ",") -cne "42,43,41" -or
+        $state.outcome.executorCalls -ne 2 -or $state.replay.exact -or
+        $state.replay.outcomeRecovery -cne $case.expected -or
+        ($case.expected -ceq "receipt-readback-unavailable" -and $null -ne $state.receipt.afterUnknownOutcome)) {
+        throw "An uncertain replay did not stop after one bound receipt read."
+    }
+}
 foreach ($mutate in $postReplayCases) {
     $script:replayFixture = New-ReplayFixture
     & $mutate $script:replayFixture
@@ -790,7 +819,7 @@ finally {
     positiveCases = 16 + @($manifestCases | Where-Object expected -CEQ "verified").Count +
         @($humanDecisionCases | Where-Object expected).Count
     negativeCases = $cases.Count + 12 + $invalidExecutions.Count + $preReplayCases.Count +
-        $postReplayCases.Count + (2 * $noExecutionRejections.Count) + $readbackPathRejections.Count +
+        $postReplayCases.Count + $unknownReplayCases.Count + (2 * $noExecutionRejections.Count) + $readbackPathRejections.Count +
         @($manifestCases | Where-Object expected -CNE "verified").Count + $invalidCoverage.Count + $invalidContinuity.Count + 1 +
         @($humanDecisionCases | Where-Object { -not $_.expected }).Count + $invalidHumanDecisionCounts.Count + $uncertainExecutionCases.Count
     result = "scheduled-governance-receipt-replay-and-protected-evidence"

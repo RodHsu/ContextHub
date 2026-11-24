@@ -798,12 +798,18 @@ function Invoke-ScheduledGovernanceVerifiedReplay {
 
     $Evidence.outcome.executorCalls++
     $Evidence.replay.exercised = $true
-    $replayJson = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_execute" -Arguments $ExecuteArguments -RequestId 43
-    $replay = Get-ScheduledGovernanceToolData -Json $replayJson -Operation "scheduled_governance_execute-exact-replay"
-    if (-not (Test-ScheduledGovernanceExecutionResult $replay $runId $snapshot $true) -or
-        (Get-ScheduledGovernancePropertyValue $replay "requiresReReview") -ne (Get-ScheduledGovernancePropertyValue $FirstExecution "requiresReReview") -or
-        (Get-ScheduledGovernancePropertyValue $replay "stoppedReason") -cne (Get-ScheduledGovernancePropertyValue $FirstExecution "stoppedReason")) {
-        throw "Exact execution replay did not preserve the original result identity."
+    try {
+        $replayJson = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_execute" -Arguments $ExecuteArguments -RequestId 43
+        $replay = Get-ScheduledGovernanceToolData -Json $replayJson -Operation "scheduled_governance_execute-exact-replay"
+        if (-not (Test-ScheduledGovernanceExecutionResult $replay $runId $snapshot $true) -or
+            (Get-ScheduledGovernancePropertyValue $replay "requiresReReview") -ne (Get-ScheduledGovernancePropertyValue $FirstExecution "requiresReReview") -or
+            (Get-ScheduledGovernancePropertyValue $replay "stoppedReason") -cne (Get-ScheduledGovernancePropertyValue $FirstExecution "stoppedReason")) {
+            throw "Exact execution replay did not preserve the original result identity."
+        }
+    }
+    catch {
+        Read-ScheduledGovernanceUnknownOutcome -Token $Token -RunId $runId -Contract $Contract -Evidence $Evidence
+        throw
     }
 
     $afterJson = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_run_get" -Arguments $receiptArguments -RequestId 46
