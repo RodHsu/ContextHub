@@ -431,6 +431,52 @@ public sealed class ScheduledGovernanceServiceTests
         reliability.ObserveCount.Should().Be(0);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Run_Get_Preserves_Core_Receipt_When_Optional_History_Times_Out(bool runExists)
+    {
+        const string runId = "run-history-unavailable";
+        var reliability = new CountingReliability { SummaryFailure = new TimeoutException("Reliability query timed out.") };
+        var receipt = runExists ? CreateReceipt(runId, "scheduled-1.3", "sha256:current", "catalog-current") : null;
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(),
+            new StubReceipts(receipt),
+            reliability);
+
+        var result = await service.GetReceiptAsync(runId, CancellationToken.None);
+        var receiptOnly = await service.GetReceiptAsync(runId, CancellationToken.None, includeReliabilityHistory: false);
+
+        result.Should().BeEquivalentTo(receiptOnly);
+        result.RunExists.Should().Be(runExists);
+        result.Received.Should().Be(runExists);
+        result.Reliability.Should().BeNull();
+        result.ServerInvariantProofs.Should().BeEmpty();
+        reliability.GetCount.Should().Be(1);
+        reliability.PersistCount.Should().Be(0);
+        reliability.ObserveCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Run_Get_Propagates_Caller_Cancellation_During_Optional_History()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var reliability = new CountingReliability
+        {
+            SummaryFailure = new OperationCanceledException(cancellation.Token)
+        };
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(),
+            new StubReceipts(),
+            reliability);
+        cancellation.Cancel();
+
+        await FluentActions.Invoking(() => service.GetReceiptAsync("run-cancelled", cancellation.Token))
+            .Should().ThrowAsync<OperationCanceledException>();
+    }
+
     [Fact]
     public async Task GetReceipt_Should_Return_Persisted_Contract_Identity_Not_Current_Constants()
     {
@@ -1074,6 +1120,7 @@ public sealed class ScheduledGovernanceServiceTests
     {
         public Func<GovernanceRunReceiptResult, CancellationToken, Task>? PersistOverride { get; init; }
         public bool RejectSummary { get; init; }
+        public Exception? SummaryFailure { get; init; }
         public ScheduledGovernanceReliabilitySummary? Summary { get; init; }
         public int PersistCount { get; private set; }
         public int ObserveCount { get; private set; }
@@ -1098,7 +1145,9 @@ public sealed class ScheduledGovernanceServiceTests
         {
             GetCount++;
             if (RejectSummary) throw new InvalidOperationException("summary must not be requested");
-            return Task.FromResult(Summary!);
+            return SummaryFailure is null
+                ? Task.FromResult(Summary!)
+                : Task.FromException<ScheduledGovernanceReliabilitySummary>(SummaryFailure);
         }
     }
 }

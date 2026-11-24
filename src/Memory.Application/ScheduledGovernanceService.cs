@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Memory.Domain;
 
 namespace Memory.Application;
@@ -229,21 +230,13 @@ public sealed class ScheduledGovernanceService(
         var normalizedRunId = NormalizeGovernanceRunId(governanceRunId);
         var snapshot = await receipts.GetScheduledReceiptSnapshotAsync(
             normalizedRunId, ReceiptContractIdentity, cancellationToken);
-        if (snapshot is not { } receiptSnapshot)
-        {
-            var missing = MissingRun(normalizedRunId);
-            return reliability is null || !includeReliabilityHistory
-                ? missing
-                : missing with { Reliability = await reliability.GetAsync(cancellationToken) };
-        }
-
-        var (receipt, lineage) = receiptSnapshot;
-
         // run_get is intentionally read-only. Projection persistence belongs to
         // review/execute mutation paths, never to receipt retrieval.
-        var reliabilitySummary = reliability is null || !includeReliabilityHistory
-            ? null
-            : await reliability.GetAsync(cancellationToken);
+        var reliabilitySummary = await ReadReceiptHistoryAsync(includeReliabilityHistory, cancellationToken);
+        if (snapshot is not { } receiptSnapshot)
+            return MissingRun(normalizedRunId) with { Reliability = reliabilitySummary };
+
+        var (receipt, lineage) = receiptSnapshot;
         if (!lineage.IsValid)
         {
             return InvalidLineage(receipt, lineage) with
@@ -296,6 +289,25 @@ public sealed class ScheduledGovernanceService(
             SkillCoverage = receipt.SkillCoverage,
             SkillSignalCounts = receipt.SkillSignalCounts
         };
+    }
+
+    private async Task<ScheduledGovernanceReliabilitySummary?> ReadReceiptHistoryAsync(
+        bool includeReliabilityHistory,
+        CancellationToken cancellationToken)
+    {
+        if (!includeReliabilityHistory || reliability is null)
+            return null;
+
+        try
+        {
+            return await reliability.GetAsync(cancellationToken);
+        }
+        catch (Exception error) when (!cancellationToken.IsCancellationRequested &&
+                                      error is DbException or TimeoutException or OperationCanceledException)
+        {
+            // Optional history cannot obscure the authoritative receipt or supply proof when unavailable.
+            return null;
+        }
     }
 
     private static void EnsureScheduledLineage(
