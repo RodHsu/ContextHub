@@ -513,20 +513,27 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
         await _fixture.EnsureDashboardRunningAsync();
         await using var context = await _fixture.CreateContextAsync(new DashboardViewport("discussions-read-cursor", 1366, 768));
         var page = await context.NewPageAsync();
+        const string threadId = "77000000-0000-0000-0000-000000000005";
+        var stream = page.Locator(".discussion-message-stream");
+        var messages = stream.Locator($".discussion-message[data-thread-id='{threadId}']");
+        var unreadMessages = messages.And(page.Locator(".unread"));
+        var unreadThread = page.GetByRole(AriaRole.Button, new() { Name = "API contract 5 對齊，24 則未讀", Exact = true });
 
         await LoginAndOpenAsync(page, "/discussions");
-        await page.GetByRole(AriaRole.Button, new() { Name = "API contract 5 對齊，24 則未讀" }).ClickAsync();
-        await page.WaitForFunctionAsync(
-            "() => document.querySelector('.discussion-message-stream')?.dataset.discussionScrollTarget === 'unread'");
+        await unreadThread.ClickAsync();
+        await Assertions.Expect(unreadMessages).ToHaveCountAsync(24);
+        await Assertions.Expect(unreadThread.And(page.Locator(".selected.unread"))).ToBeVisibleAsync();
+        var firstUnreadMessageId = await unreadMessages.First.GetAttributeAsync("data-message-id");
+        await Assertions.Expect(stream).ToHaveAttributeAsync("data-last-discussion-scroll", firstUnreadMessageId!);
+        (await stream.EvaluateAsync<double>("element => element.scrollHeight - element.clientHeight - element.scrollTop"))
+            .Should().BeGreaterThan(2);
 
-        await page.Locator(".discussion-list-item.selected.unread").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
-        (await page.Locator(".discussion-message.unread").CountAsync()).Should().Be(24);
-
-        await page.Locator(".discussion-message-stream").EvaluateAsync(
+        await stream.EvaluateAsync(
             "element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); }");
 
-        await page.Locator(".discussion-list-item.selected:not(.unread)").WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
-        (await page.Locator(".discussion-message.unread").CountAsync()).Should().Be(0);
+        await Assertions.Expect(page.Locator(".discussion-list-item.selected:not(.unread)")).ToBeVisibleAsync();
+        await Assertions.Expect(messages).ToHaveCountAsync(24);
+        await Assertions.Expect(unreadMessages).ToHaveCountAsync(0);
     }
 
     [Fact]
