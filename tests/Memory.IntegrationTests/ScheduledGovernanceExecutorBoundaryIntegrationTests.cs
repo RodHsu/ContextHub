@@ -17,6 +17,71 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
     : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Unexpected_receipt_failures_distinguish_pre_execution_from_uncertain_outcome()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var db = services.GetRequiredService<MemoryDbContext>();
+        var user = await db.TenantUsers.SingleAsync(x => x.Username == "contract-test-admin");
+        var actorAccessor = services.GetRequiredService<IRequestActorAccessor>();
+        actorAccessor.Current = ScheduledActor(user);
+        var projectId = $"scheduled-receipt-failure-{Guid.NewGuid():N}";
+
+        foreach (var failedEvent in new[] { "BatchReceived", "BatchCompleted" })
+        {
+            var runId = $"receipt-failure-{Guid.NewGuid():N}";
+            var review = await services.GetRequiredService<IKnowledgeReviewService>()
+                .ReviewAsync(ScheduledReviewRequest(projectId, runId), CancellationToken.None);
+            await RecordReversibleDecisionAsync(services, review);
+            var interceptor = new FailFirstReceiptSave(failedEvent);
+            var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                services.GetRequiredService<DbContextOptions<MemoryDbContext>>()).AddInterceptors(interceptor).Options;
+            await using var executionDb = new MemoryDbContext(options);
+            var receipts = new GovernanceRunReceiptService(
+                executionDb, actorAccessor, services.GetRequiredService<TimeProvider>());
+            var executor = ActivatorUtilities.CreateInstance<GovernanceBatchExecutor>(services, executionDb, receipts);
+            var request = new GovernanceBatchExecuteRequest(
+                runId, [projectId], review.DurableMemoryCoverage!.SnapshotToken, MaxMutations: 1,
+                MaxDurationSeconds: 60, DryRun: true, ExecutionMode: GovernanceBatchExecutionMode.Scheduled)
+            {
+                ReceiptContractIdentity = CurrentScheduledReceiptIdentity()
+            };
+
+            var execute = () => executor.ExecuteAsync(request, CancellationToken.None);
+            await execute.Should().ThrowAsync<InvalidOperationException>().WithMessage("Injected receipt save failure");
+
+            var receipt = await receipts.GetAsync(runId, CancellationToken.None);
+            var coreCompleted = failedEvent == "BatchCompleted";
+            receipt!.Status.Should().Be(coreCompleted ? "Stopped" : "Failed");
+            receipt.LatestBatch!.FailurePhase.Should().Be(coreCompleted ? "OutcomeUnknown" : "PreExecutionUnhandled");
+            receipt.LatestBatch.StoppedReason.Should().Be(coreCompleted ? "UnknownResult" : "UnhandledExecutionFailure");
+            receipt.LatestBatch.Executed.Should().BeFalse();
+            receipt.LatestBatch.RequiresReReview.Should().BeTrue();
+            (await db.GovernanceRunReceipts.AnyAsync(x => x.GovernanceRunId == runId && x.EventType == failedEvent))
+                .Should().BeFalse("the recovery save must not flush the failed receipt");
+            (await db.GovernanceBatchRuns.AnyAsync(x => x.GovernanceRunId == runId)).Should().Be(coreCompleted);
+        }
+    }
+
+    private sealed class FailFirstReceiptSave(string eventType) : SaveChangesInterceptor
+    {
+        private bool failed;
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (!failed && eventData.Context!.ChangeTracker.Entries<GovernanceRunReceipt>()
+                .Any(x => x.State == EntityState.Added && x.Entity.EventType == eventType))
+            {
+                failed = true;
+                throw new InvalidOperationException("Injected receipt save failure");
+            }
+
+            return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Scheduled_Executor_Rechecks_Canonical_WorkItem_Eligibility_Before_Mutation()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
