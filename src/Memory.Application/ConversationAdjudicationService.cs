@@ -484,7 +484,8 @@ public sealed class ConversationAdjudicationService(
             classification = "ProposalApplyFailed";
         }
         return new(row.Id, row.ProjectId, row.Title, row.PromotionStatus, token, fingerprint, classification,
-            canReconcile, terminal && receipt is not null && classification is not ("ProtectedHold" or "HostBlocked") &&
+            canReconcile && IsOpenException(row.PromotionStatus),
+            terminal && receipt is not null && classification is not ("ProtectedHold" or "HostBlocked") &&
             receipt.EvidenceFingerprint != fingerprint);
     }
 
@@ -554,9 +555,12 @@ public sealed class ConversationAdjudicationService(
         catch (JsonException) { return true; }
     }
 
+    private static bool IsOpenException(ConversationPromotionStatus status)
+        => status is ConversationPromotionStatus.RequiresUserDecision or ConversationPromotionStatus.Deferred or ConversationPromotionStatus.Failed;
+
     private static void EnsureOpen(ConversationPromotionStatus status)
     {
-        if (status is not (ConversationPromotionStatus.RequiresUserDecision or ConversationPromotionStatus.Deferred or ConversationPromotionStatus.Failed))
+        if (!IsOpenException(status))
             throw new InvalidOperationException("Manual adjudication requires a non-terminal governance exception.");
     }
 

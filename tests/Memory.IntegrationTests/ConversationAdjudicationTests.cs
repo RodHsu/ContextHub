@@ -424,7 +424,7 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
     }
 
     [DockerRequiredFact]
-    public async Task Rejected_proposal_reconciliation_should_require_an_exact_scoped_link()
+    public async Task Rejected_proposal_reconciliation_should_require_an_exact_scoped_link_and_open_exception()
     {
         using var scope = CreateScope(out var db, out var service, out var actor);
         var row = await SeedAsync(db, actor);
@@ -453,6 +453,27 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
         (await service.AdjudicateAsync(Request(row, candidate, ConversationAdjudicationAction.Reconcile), default)).Outcome
             .Should().Be("ResolvedRejectedProposal");
         proposal.PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
+
+        db.ChangeTracker.Clear();
+        row = await db.ConversationInsights.SingleAsync(item => item.Id == row.Id);
+        row.Content = "New evidence after manual reconciliation";
+        await db.SaveChangesAsync();
+        var terminal = (await Preview(service, row)).Items.Single();
+        (await service.AdjudicateAsync(Request(row, terminal, ConversationAdjudicationAction.Reopen), default))
+            .ResultStatus.Should().Be("RequiresUserDecision");
+
+        db.ChangeTracker.Clear();
+        var automation = scope.ServiceProvider.GetRequiredService<IConversationAutomationService>();
+        (await automation.RetryInsightAsync(new(row.Id, "retry-historical-exception", "Operator retried promotion."), default))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.Pending);
+
+        var pending = (await Preview(service, row)).Items.Single();
+        pending.Status.Should().Be(ConversationPromotionStatus.Pending);
+        pending.CanReconcile.Should().BeFalse();
+        await FluentActions.Invoking(() => service.AdjudicateAsync(
+                Request(row, pending, ConversationAdjudicationAction.Reconcile), default))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*non-terminal governance exception*");
+        (await db.ConversationAdjudications.CountAsync(item => item.InsightId == row.Id)).Should().Be(2);
     }
 
     [DockerRequiredFact]
