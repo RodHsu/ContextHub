@@ -60,7 +60,7 @@ If the generic review has committed and the Scheduled decision is still missing,
 
 The dedicated review and executor share a lock for each tenant, owner, and run. A second review waits for the current review or batch to release that lock. A review cancelled while waiting leaves the active run's receipts intact.
 
-The reliability history reports `decision-projection-pending` for an observed review that is still waiting for its Scheduled decision. It verifies the immutable receipt when reading historical observations and leaves their stored records intact.
+When the connected actor has no receipt for the requested run, `run_get` returns `NotReceived` without computing reliability history. This result describes the lookup at that moment. For a received run, the reliability history reports `decision-projection-pending` for an observed review that is still waiting for its Scheduled decision. It verifies the immutable receipt when reading historical observations and leaves their stored records intact.
 
 For a failed receipt read, check the Gateway service's warning logs for the normalized run ID's lowercase SHA-256 digest. The warning identifies the receipt snapshot or optional reliability history phase, elapsed time, and whether caller cancellation had been requested. The warning omits the raw run ID and exception details.
 

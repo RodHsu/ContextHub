@@ -432,15 +432,13 @@ public sealed class ScheduledGovernanceServiceTests
         reliability.ObserveCount.Should().Be(0);
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task Run_Get_Preserves_Core_Receipt_When_Optional_History_Times_Out(bool runExists)
+    [Fact]
+    public async Task Run_Get_Preserves_Core_Receipt_When_Optional_History_Times_Out()
     {
         const string runId = "run-history-unavailable";
         var logger = new ReceiptLogger();
         var reliability = new CountingReliability { SummaryFailure = new TimeoutException("Reliability query timed out.") };
-        var receipt = runExists ? CreateReceipt(runId, "scheduled-1.3", "sha256:current", "catalog-current") : null;
+        var receipt = CreateReceipt(runId, "scheduled-1.3", "sha256:current", "catalog-current");
         var service = CreateService(
             new StubKnowledgeReviewService(CreateReview([])),
             new CapturingExecutor(),
@@ -451,8 +449,8 @@ public sealed class ScheduledGovernanceServiceTests
         var receiptOnly = await service.GetReceiptAsync(runId, CancellationToken.None, includeReliabilityHistory: false);
 
         result.Should().BeEquivalentTo(receiptOnly);
-        result.RunExists.Should().Be(runExists);
-        result.Received.Should().Be(runExists);
+        result.RunExists.Should().BeTrue();
+        result.Received.Should().BeTrue();
         result.Reliability.Should().BeNull();
         result.ServerInvariantProofs.Should().BeEmpty();
         reliability.GetCount.Should().Be(1);
@@ -488,6 +486,7 @@ public sealed class ScheduledGovernanceServiceTests
     [Fact]
     public async Task Run_Get_Propagates_Caller_Cancellation_During_Optional_History()
     {
+        const string runId = "run-cancelled";
         using var cancellation = new CancellationTokenSource();
         var logger = new ReceiptLogger();
         var reliability = new CountingReliability
@@ -497,11 +496,11 @@ public sealed class ScheduledGovernanceServiceTests
         var service = CreateService(
             new StubKnowledgeReviewService(CreateReview([])),
             new CapturingExecutor(),
-            new StubReceipts(),
+            new StubReceipts(CreateReceipt(runId, "scheduled-1.3", "sha256:current", "catalog-current")),
             reliability, logger);
         cancellation.Cancel();
 
-        await FluentActions.Invoking(() => service.GetReceiptAsync("run-cancelled", cancellation.Token))
+        await FluentActions.Invoking(() => service.GetReceiptAsync(runId, cancellation.Token))
             .Should().ThrowAsync<OperationCanceledException>();
         logger.Entries.Should().ContainSingle().Subject.Message
             .Should().Contain("caller-cancellation-requested in reliability-history");
@@ -681,10 +680,11 @@ public sealed class ScheduledGovernanceServiceTests
     [Fact]
     public async Task GetReceipt_Should_Return_Structured_NotReceived_Result()
     {
+        var reliability = new CountingReliability { RejectSummary = true };
         var service = CreateService(
             new StubKnowledgeReviewService(CreateReview([])),
             new CapturingExecutor(),
-            new StubReceipts());
+            new StubReceipts(), reliability);
 
         var result = await service.GetReceiptAsync("missing-run", CancellationToken.None);
 
@@ -695,6 +695,8 @@ public sealed class ScheduledGovernanceServiceTests
         result.Status.Should().Be("NotReceived");
         result.Outcome.Should().Be("NotReceived");
         result.GovernanceRunId.Should().Be("missing-run");
+        result.Reliability.Should().BeNull();
+        reliability.GetCount.Should().Be(0);
     }
 
     [Fact]
