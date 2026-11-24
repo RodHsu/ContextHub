@@ -662,6 +662,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
         TenantUser actor,
         GovernanceRunReceiptResult receipt)
     {
+        var reviewEvidence = receipt.ExecutionMode == "Scheduled" && !receipt.IsReplay && !receipt.LatestBatchReceived;
         var db = services.GetRequiredService<MemoryDbContext>();
         db.GovernanceRunReceipts.Add(new GovernanceRunReceipt
         {
@@ -680,15 +681,15 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
             InitialSnapshotToken = receipt.InitialSnapshotToken,
             FinalSnapshotToken = receipt.FinalSnapshotToken,
             CoverageComplete = receipt.CoverageComplete,
-            AcceptanceEvidenceVersion = "1",
-            AuthorizedDurableMemoryCount = 0,
-            CoveredDurableMemoryCount = 0,
-            ScannedDurableMemoryCount = 0,
-            TotalDurableMemoryCount = 0,
-            SharedScopeOccurrences = 1,
-            UserScopeOccurrences = 0,
-            UserScopeHandledSeparately = true,
-            CountInvariantSatisfied = true,
+            AcceptanceEvidenceVersion = reviewEvidence ? "1" : string.Empty,
+            AuthorizedDurableMemoryCount = reviewEvidence ? 0 : null,
+            CoveredDurableMemoryCount = reviewEvidence ? 0 : null,
+            ScannedDurableMemoryCount = reviewEvidence ? 0 : null,
+            TotalDurableMemoryCount = reviewEvidence ? 0 : null,
+            SharedScopeOccurrences = reviewEvidence ? 1 : null,
+            UserScopeOccurrences = reviewEvidence ? 0 : null,
+            UserScopeHandledSeparately = reviewEvidence ? true : null,
+            CountInvariantSatisfied = reviewEvidence ? true : null,
             InitialGovernanceActionable = receipt.InitialGovernanceActionable,
             FinalGovernanceActionable = receipt.FinalGovernanceActionable,
             CandidateCount = receipt.CandidateCount,
@@ -709,7 +710,7 @@ public sealed class ScheduledGovernanceReliabilityPersistenceTests(ContainerTest
             BusinessWorkItemActionable = receipt.BusinessWorkItemActionable,
             FinalConvergenceStatus = receipt.FinalConvergenceStatus,
             StoppedReason = receipt.StoppedReason,
-            EventType = "ReviewCompleted",
+            EventType = receipt.IsReplay ? "BatchReplay" : receipt.LatestBatchReceived ? "BatchCompleted" : "ReviewCompleted",
             Status = receipt.Status,
             LatestBatchReceived = receipt.LatestBatchReceived,
             RequestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract

@@ -1,4 +1,9 @@
+using System.Data.Common;
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using Memory.Domain;
+using Microsoft.Extensions.Logging;
 
 namespace Memory.Application;
 
@@ -7,7 +12,8 @@ public sealed class ScheduledGovernanceService(
     IGovernanceBatchExecutor batchExecutor,
     IGovernanceRunReceiptService receipts,
     IRequestActorAccessor actorAccessor,
-    IScheduledGovernanceReliabilityService? reliability = null) : IScheduledGovernanceService
+    IScheduledGovernanceReliabilityService? reliability = null,
+    ILogger<ScheduledGovernanceService>? logger = null) : IScheduledGovernanceService
 {
     private static readonly GovernanceReceiptContractIdentity ReceiptContractIdentity = new(
         ScheduledGovernanceContract.ToolContractVersion,
@@ -20,6 +26,20 @@ public sealed class ScheduledGovernanceService(
     {
         EnsureScheduledAuthority();
         var governanceRunId = NormalizeGovernanceRunId(request.GovernanceRunId);
+        ScheduledGovernanceReviewResult result;
+        GovernanceRunReceiptResult? receipt;
+        await using (await receipts.AcquireRunLockAsync(governanceRunId, cancellationToken))
+        {
+            (result, receipt) = await ReviewUnderRunLockAsync(request, governanceRunId, cancellationToken);
+        }
+
+        await ObserveReceiptAsync(receipt, cancellationToken);
+        return result;
+    }
+
+    private async Task<(ScheduledGovernanceReviewResult Result, GovernanceRunReceiptResult? Receipt)> ReviewUnderRunLockAsync(
+        ScheduledGovernanceReviewRequest request, string governanceRunId, CancellationToken cancellationToken)
+    {
         var lineage = await receipts.GetScheduledLineageAsync(
             governanceRunId,
             ReceiptContractIdentity,
@@ -146,8 +166,7 @@ public sealed class ScheduledGovernanceService(
 
         await receipts.RecordScheduledDecisionAsync(scheduledResult, startedAt, cancellationToken);
         receipt = await receipts.GetAsync(reviewedRunId, cancellationToken);
-        await ObserveReceiptAsync(receipt, cancellationToken);
-        return scheduledResult;
+        return (scheduledResult, receipt);
     }
 
     public async Task<ScheduledGovernanceExecutionResult> ExecuteAsync(
@@ -214,25 +233,26 @@ public sealed class ScheduledGovernanceService(
     {
         EnsureScheduledAuthority();
         var normalizedRunId = NormalizeGovernanceRunId(governanceRunId);
-        var receipt = await receipts.GetAsync(normalizedRunId, cancellationToken);
-        if (receipt is null)
+        var started = Stopwatch.GetTimestamp();
+        (GovernanceRunReceiptResult Receipt, GovernanceRunLineageResult Lineage)? snapshot;
+        try
         {
-            var missing = MissingRun(normalizedRunId);
-            return reliability is null || !includeReliabilityHistory
-                ? missing
-                : missing with { Reliability = await reliability.GetAsync(cancellationToken) };
+            snapshot = await receipts.GetScheduledReceiptSnapshotAsync(
+                normalizedRunId, ReceiptContractIdentity, cancellationToken);
         }
-
-        var lineage = await receipts.GetScheduledLineageAsync(
-            normalizedRunId,
-            ReceiptContractIdentity,
-            cancellationToken);
-
+        catch (Exception error)
+        {
+            LogReceiptReadProblem(normalizedRunId, "snapshot", started,
+                cancellationToken.IsCancellationRequested ? "caller-cancellation-requested" : "failed", error);
+            throw;
+        }
         // run_get is intentionally read-only. Projection persistence belongs to
         // review/execute mutation paths, never to receipt retrieval.
-        var reliabilitySummary = reliability is null || !includeReliabilityHistory
-            ? null
-            : await reliability.GetAsync(cancellationToken);
+        if (snapshot is not { } receiptSnapshot)
+            return MissingRun(normalizedRunId);
+
+        var reliabilitySummary = await ReadReceiptHistoryAsync(normalizedRunId, includeReliabilityHistory, cancellationToken);
+        var (receipt, lineage) = receiptSnapshot;
         if (!lineage.IsValid)
         {
             return InvalidLineage(receipt, lineage) with
@@ -240,14 +260,7 @@ public sealed class ScheduledGovernanceService(
                 Reliability = reliabilitySummary
             };
         }
-        var requiresReReview = string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
-                               receipt.LatestBatch is { RequiresReReview: true, Status: "Completed" };
-        var decision = requiresReReview ? null : ResolveDecision(receipt);
-        var outcome = requiresReReview
-            ? "ReReviewRequired"
-            : string.IsNullOrWhiteSpace(receipt.FinalConvergenceStatus)
-                ? receipt.Status
-                : receipt.FinalConvergenceStatus;
+        var (status, convergence, decision, outcome) = ReadReceiptState(receipt);
 
         return new ScheduledGovernanceRunResult(
             receipt.ReceiptId,
@@ -272,26 +285,66 @@ public sealed class ScheduledGovernanceService(
             receipt.Quarantined,
             receipt.SemanticAutoResolved,
             receipt.BusinessWorkItemActionable,
-            receipt.FinalConvergenceStatus,
+            convergence,
             receipt.StoppedReason,
             receipt.AuditIds,
             receipt.ProjectIds,
             receipt.IsReplay,
             receipt.RunExists,
-            receipt.Status,
+            status,
             receipt.LatestBatchReceived,
             receipt.RequestIdentityHash,
             receipt.ExceptionDelta,
             ScheduledGovernanceContract.RuntimeIdentity)
         {
             Received = true,
-            Terminal = !string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase),
+            Terminal = !string.Equals(status, "Running", StringComparison.OrdinalIgnoreCase),
             Decision = decision,
             Outcome = outcome,
             Reliability = reliabilitySummary,
             SkillCoverage = receipt.SkillCoverage,
             SkillSignalCounts = receipt.SkillSignalCounts
         };
+    }
+
+    private async Task<ScheduledGovernanceReliabilitySummary?> ReadReceiptHistoryAsync(
+        string normalizedRunId,
+        bool includeReliabilityHistory,
+        CancellationToken cancellationToken)
+    {
+        if (!includeReliabilityHistory || reliability is null)
+            return null;
+
+        var started = Stopwatch.GetTimestamp();
+        try
+        {
+            return await reliability.GetAsync(cancellationToken);
+        }
+        catch (Exception error)
+        {
+            var callerCancelled = cancellationToken.IsCancellationRequested;
+            var historyUnavailable = !callerCancelled &&
+                error is DbException or TimeoutException or OperationCanceledException or
+                InvalidOperationException { InnerException: DbException or TimeoutException or OperationCanceledException };
+            LogReceiptReadProblem(normalizedRunId, "reliability-history", started,
+                callerCancelled ? "caller-cancellation-requested" : historyUnavailable ? "unavailable" : "failed", error);
+            if (!historyUnavailable)
+                throw;
+
+            // Optional history cannot obscure the authoritative receipt or supply proof when unavailable.
+            return null;
+        }
+    }
+
+    private void LogReceiptReadProblem(string runId, string phase, long started, string outcome, Exception error)
+    {
+        if (logger?.IsEnabled(LogLevel.Warning) != true)
+            return;
+
+        var runHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runId)));
+        logger.LogWarning(
+            "Scheduled governance receipt read {Outcome} in {Phase} after {ElapsedMilliseconds} ms for run hash {RunHash} ({ErrorType})",
+            outcome, phase, Stopwatch.GetElapsedTime(started).TotalMilliseconds, runHash, error.GetType().Name);
     }
 
     private static void EnsureScheduledLineage(
@@ -395,35 +448,34 @@ public sealed class ScheduledGovernanceService(
             Outcome = "NotReceived"
         };
 
-    private static ScheduledGovernanceDecision? ResolveDecision(GovernanceRunReceiptResult receipt)
+    internal const string DecisionProjectionPending = "DecisionProjectionPending";
+    private const string UnknownExecutionOutcome = "UnknownResult";
+
+    internal static (string Status, string Convergence, ScheduledGovernanceDecision? Decision, string Outcome)
+        ReadReceiptState(GovernanceRunReceiptResult receipt)
     {
-        if (string.Equals(receipt.Status, "Running", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
+        if (receipt.ScheduledDecisionProjectionPending)
+            return ("Running", DecisionProjectionPending, null, DecisionProjectionPending);
 
-        if (string.Equals(receipt.Status, "Failed", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(receipt.Status, "Stopped", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
+        if (receipt.ExecutionMode == "Scheduled" && receipt.StoppedReason == UnknownExecutionOutcome)
+            return ("Stopped", UnknownExecutionOutcome, null, UnknownExecutionOutcome);
 
-        if (string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
-            Enum.TryParse<ScheduledGovernanceDecision>(receipt.FinalConvergenceStatus, ignoreCase: false, out var persistedDecision))
-        {
-            return persistedDecision;
-        }
+        var status = receipt.Status;
+        var convergence = receipt.FinalConvergenceStatus;
+        var scheduledCompleted = receipt.ExecutionMode == "Scheduled" &&
+                                 string.Equals(status, "Completed", StringComparison.OrdinalIgnoreCase);
+        if (scheduledCompleted && !receipt.ScheduledBatchReReviewed &&
+            receipt.LatestBatch is { RequiresReReview: true, Status: "Completed" })
+            return (status, convergence, null, "ReReviewRequired");
 
-        var currentHumanDecision = Math.Max(
-            receipt.CandidateCount - receipt.ExecutionActionableCount,
-            receipt.RequiresUserDecision + receipt.Deferred + receipt.HostBlocked);
-        return ResolveDecision(
-            receipt.CoverageComplete,
-            receipt.ExecutionActionableCount,
-            currentHumanDecision,
-            receipt.GovernedExceptionCount,
-            receipt.ExceptionDelta);
+        var decision = scheduledCompleted ? ParsePersistedDecision(convergence) : null;
+        var outcome = status == "Running" || string.IsNullOrWhiteSpace(convergence) ? status : convergence;
+        return (status, convergence, decision, outcome);
     }
+
+    internal static ScheduledGovernanceDecision? ParsePersistedDecision(string convergence)
+        => Enum.TryParse<ScheduledGovernanceDecision>(convergence, ignoreCase: false, out var decision) &&
+           string.Equals(convergence, decision.ToString(), StringComparison.Ordinal) ? decision : null;
 
     private static ScheduledGovernanceDecision ResolveDecision(
         bool coverageComplete,
@@ -472,7 +524,7 @@ public sealed class ScheduledGovernanceService(
     public static ScheduledGovernanceExecutionResult ToScheduledResult(GovernanceBatchExecuteResult result)
         => new(
             result.GovernanceRunId,
-            result.Succeeded,
+            result.Succeeded && result.StoppedReason != UnknownExecutionOutcome,
             result.ScannedCount,
             result.AttemptedCount,
             result.AppliedCount,

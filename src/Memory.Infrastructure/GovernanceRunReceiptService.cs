@@ -333,7 +333,9 @@ public sealed class GovernanceRunReceiptService(
         var requestIdentity = RequestIdentity(request);
         var requestHash = RequestHash(request);
         var previous = await LatestAsync(runId, actor, cancellationToken);
-        var status = ResolveTerminalStatus(result);
+        var status = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled && result.StoppedReason == "UnknownResult"
+            ? "Stopped"
+            : ResolveTerminalStatus(result);
         var eventKind = result.IsReplay ? "BatchReplay" : "BatchCompleted";
         var eventKey = Hash($"{eventKind}\n{runId}\n{requestIdentity}\n{status}\n{result.StoppedReason}");
         var receipt = NewReceipt(actor, runId, eventKey, request.ExecutionMode.ToString(), eventKind, status, startedAt,
@@ -479,6 +481,21 @@ public sealed class GovernanceRunReceiptService(
 
         EnsureReceiptProjectsAllowed(actor, DeserializeStrings(entity.ProjectIdsJson));
         return await MapAsync(entity, actor, cancellationToken);
+    }
+
+    public async Task<(GovernanceRunReceiptResult Receipt, GovernanceRunLineageResult Lineage)?> GetScheduledReceiptSnapshotAsync(
+        string governanceRunId,
+        GovernanceReceiptContractIdentity expectedContractIdentity,
+        CancellationToken cancellationToken)
+    {
+        // Receipt enrichment and lineage must see the same committed events while writers remain free to append.
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        var receipt = await GetAsync(governanceRunId, cancellationToken);
+        var lineage = receipt is null
+            ? null
+            : await GetScheduledLineageAsync(governanceRunId, expectedContractIdentity, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return receipt is not null && lineage is not null ? (receipt, lineage) : null;
     }
 
     public async Task<GovernanceRunLineageResult> GetScheduledLineageAsync(
@@ -668,13 +685,36 @@ public sealed class GovernanceRunReceiptService(
             .ThenByDescending(x => x.Id)
             .Take(100)
             .ToListAsync(cancellationToken);
-        var batchReceipt = await dbContext.GovernanceRunReceipts.AsNoTracking()
+        var runReceipts = dbContext.GovernanceRunReceipts.AsNoTracking()
             .Where(x => x.TenantId == actor.TenantId &&
                         x.OwnerUserId == actor.UserId &&
-                        x.GovernanceRunId == receipt.GovernanceRunId &&
-                        x.LatestBatchReceived)
+                        x.GovernanceRunId == receipt.GovernanceRunId);
+        var scheduled = receipt.ExecutionMode == "Scheduled";
+        var stateEvent = receipt;
+        if (scheduled && receipt.EventType == "BatchReplay")
+        {
+            stateEvent = await runReceipts.Where(x => x.EventType != "BatchReplay")
+                .OrderByDescending(x => x.EventSequence)
+                .FirstOrDefaultAsync(cancellationToken) ?? receipt;
+        }
+        var batchReceipts = runReceipts.Where(x => x.LatestBatchReceived);
+        var batchReceipt = await batchReceipts
             .OrderByDescending(x => x.EventSequence)
             .FirstOrDefaultAsync(cancellationToken);
+        var originalBatch = batchReceipt;
+        if (scheduled && batchReceipt?.EventType == "BatchReplay")
+        {
+            originalBatch = await batchReceipts.Where(x => x.EventType != "BatchReplay")
+                .OrderByDescending(x => x.EventSequence)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (originalBatch is not null &&
+                (originalBatch.RequestIdentityHash != batchReceipt.RequestIdentityHash ||
+                 originalBatch.RequestHash != batchReceipt.RequestHash))
+            {
+                // A delayed replay cannot make an older batch the current batch.
+                batchReceipt = originalBatch;
+            }
+        }
         var receivedReceipt = batchReceipt is null ||
                               string.Equals(batchReceipt.EventType, "BatchReceived", StringComparison.Ordinal)
             ? batchReceipt
@@ -693,13 +733,15 @@ public sealed class GovernanceRunReceiptService(
               (receivedReceipt is null
                   ? null
                   : executions.FirstOrDefault(x => x.CreatedAt >= receivedReceipt.CreatedAt));
-        var latestBatch = BuildLatestBatch(batchReceipt, execution);
-        var readStatus = latestBatch?.Status ??
-            (string.IsNullOrWhiteSpace(receipt.Status) ? InferLegacyStatus(receipt) : receipt.Status);
-        var readStoppedReason = latestBatch is { Status: not "Running" } &&
+        var latestBatch = BuildLatestBatch(batchReceipt, execution, scheduled);
+        var latestReviewEvent = scheduled &&
+                                stateEvent.EventType is "ReviewReceived" or "ReviewCompleted" or "ReviewStopped" or "ScheduledDecisionProjected";
+        var readStatus = (!latestReviewEvent ? latestBatch?.Status : null) ??
+                         (string.IsNullOrWhiteSpace(stateEvent.Status) ? InferLegacyStatus(stateEvent) : stateEvent.Status);
+        var readStoppedReason = !latestReviewEvent && latestBatch is { Status: not "Running" } &&
                                 !string.IsNullOrWhiteSpace(latestBatch.StoppedReason)
             ? latestBatch.StoppedReason
-            : receipt.StoppedReason;
+            : stateEvent.StoppedReason;
         var scheduledProjection = await dbContext.GovernanceRunReceipts.AsNoTracking()
             .Where(x => x.TenantId == actor.TenantId &&
                         x.OwnerUserId == actor.UserId &&
@@ -717,17 +759,27 @@ public sealed class GovernanceRunReceiptService(
                             x.EventType == "ReviewCompleted")
                 .Select(x => (long?)x.EventSequence)
                 .MaxAsync(cancellationToken);
-        var successfulScheduledEvent = string.Equals(receipt.EventType, "ScheduledDecisionProjected", StringComparison.Ordinal) ||
-                                       (string.Equals(receipt.ExecutionMode, "Scheduled", StringComparison.Ordinal) &&
-                                        (string.Equals(receipt.EventType, "BatchReceived", StringComparison.Ordinal) ||
-                                         ((string.Equals(receipt.EventType, "BatchCompleted", StringComparison.Ordinal) ||
-                                           string.Equals(receipt.EventType, "BatchReplay", StringComparison.Ordinal)) &&
-                                          string.Equals(receipt.Status, "Completed", StringComparison.OrdinalIgnoreCase))));
+        var successfulScheduledEvent = stateEvent.EventType == "ScheduledDecisionProjected" ||
+                                       (scheduled && (stateEvent.EventType == "BatchReceived" ||
+                                                      (stateEvent.EventType == "BatchCompleted" && stateEvent.Status == "Completed")));
         var useScheduledProjection = scheduledProjection is not null &&
                                       successfulScheduledEvent &&
                                       (!latestReviewSequence.HasValue ||
                                        scheduledProjection.EventSequence > latestReviewSequence.Value);
-        var canonical = useScheduledProjection ? scheduledProjection! : receipt;
+        var canonical = useScheduledProjection ? scheduledProjection! : stateEvent;
+        var batchReReviewed = useScheduledProjection &&
+                              latestBatch is { Executed: true, Failed: 0, FailurePhase: "", StoppedReason: not "UnknownResult" } &&
+                              originalBatch is { EventType: "BatchCompleted", Status: "Completed" } &&
+                              !string.IsNullOrWhiteSpace(originalBatch.RequestIdentityHash) &&
+                              !string.IsNullOrWhiteSpace(originalBatch.RequestHash) &&
+                              originalBatch.FinalSnapshotToken == latestBatch.SnapshotToken &&
+                              originalBatch.EventSequence < canonical.EventSequence &&
+                              ProjectSetsEqual(
+                                  DurableMemoryGovernancePolicy.ToExecutionProjectIds(DeserializeStrings(originalBatch.ProjectIdsJson)),
+                                  DurableMemoryGovernancePolicy.ToExecutionProjectIds(DeserializeStrings(canonical.ProjectIdsJson))) &&
+                              canonical.RequestIdentityHash == ReviewRequestIdentityHash(receipt.GovernanceRunId, isReReview: true) &&
+                              ParseSnapshotIdentity(canonical.FinalSnapshotToken) is (var generation, true) &&
+                              generation > latestBatch.SnapshotGeneration;
 
         return new GovernanceRunReceiptResult(
             receipt.Id, receipt.GovernanceRunId, receipt.Actor, receipt.ExecutionMode,
@@ -746,6 +798,8 @@ public sealed class GovernanceRunReceiptService(
             RequestIdentityHash: batchReceipt?.RequestIdentityHash ?? string.Empty,
             LatestBatch: latestBatch)
         {
+            ScheduledDecisionProjectionPending = scheduled && stateEvent.EventType == "ReviewCompleted",
+            ScheduledBatchReReviewed = batchReReviewed,
             ExceptionDelta = new GovernanceExceptionDeltaResult(
                 canonical.ExceptionNew,
                 canonical.ExceptionResolved,
@@ -761,7 +815,8 @@ public sealed class GovernanceRunReceiptService(
 
     private static GovernanceBatchOutcomeResult? BuildLatestBatch(
         GovernanceRunReceipt? batchReceipt,
-        GovernanceBatchExecution? execution)
+        GovernanceBatchExecution? execution,
+        bool scheduled)
     {
         if (batchReceipt is null && execution is null)
         {
@@ -775,9 +830,13 @@ public sealed class GovernanceRunReceiptService(
             catch (JsonException) { }
         }
 
-        var executed = execution is not null && string.Equals(execution.Status, "Completed", StringComparison.Ordinal);
-        var status = executed
-            ? "Completed"
+        // Older receipts could say Completed while the execution was still stopped with only progress JSON.
+        var unknownOutcome = scheduled &&
+                             (HasUnknownScheduledBatchOutcome(batchReceipt) || result?.StoppedReason == "UnknownResult");
+        var executed = !unknownOutcome && execution is { Status: "Completed" };
+        var status = unknownOutcome
+            ? "Stopped"
+            : executed ? "Completed"
             : !string.IsNullOrWhiteSpace(batchReceipt?.Status) &&
               !string.Equals(batchReceipt.Status, "Running", StringComparison.OrdinalIgnoreCase)
                 ? batchReceipt.Status
@@ -802,7 +861,7 @@ public sealed class GovernanceRunReceiptService(
             NextCursor: result is null ? execution?.CursorAfter : result.NextCursor,
             HasMore: result?.HasMore ?? true,
             RequiresReReview: result?.RequiresReReview ?? !executed,
-            StoppedReason: result?.StoppedReason ?? batchReceipt?.StoppedReason ?? string.Empty,
+            StoppedReason: unknownOutcome ? "UnknownResult" : result?.StoppedReason ?? batchReceipt?.StoppedReason ?? string.Empty,
             Scanned: result?.ScannedCount ?? 0,
             Attempted: result?.AttemptedCount ?? 0,
             Applied: result?.AppliedCount ?? 0,
@@ -1559,6 +1618,14 @@ public sealed class GovernanceRunReceiptService(
         try { return JsonSerializer.Deserialize<T>(json, JsonOptions) ?? fallback; }
         catch (JsonException) { return fallback; }
     }
+
+    internal static bool HasUnknownScheduledBatchOutcome(GovernanceRunReceipt? receipt)
+        => receipt is
+        {
+            ExecutionMode: "Scheduled",
+            EventType: "BatchCompleted" or "BatchReplay" or "BatchStopped",
+            StoppedReason: "UnknownResult"
+        };
 
     private static string ResolveTerminalStatus(GovernanceBatchExecuteResult result)
         => result.ErrorCode == GovernanceBatchErrorCode.None

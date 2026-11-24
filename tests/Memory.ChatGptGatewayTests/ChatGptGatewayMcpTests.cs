@@ -1,5 +1,8 @@
 extern alias mcpserver;
 
+using System.Collections.Concurrent;
+using System.Data.Common;
+using System.Diagnostics;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -7,6 +10,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using DotNet.Testcontainers.Images;
 using FluentAssertions;
 using Memory.Application;
@@ -20,16 +24,20 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol;
 using ModelContextProtocol.Client;
+using Npgsql;
 using StackExchange.Redis;
 using Testcontainers.PostgreSql;
 using Testcontainers.Redis;
+using Xunit.Abstractions;
 
 namespace Memory.ChatGptGatewayTests;
 
-public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environment) : IClassFixture<ChatGptGatewayTestEnvironment>
+public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environment, ITestOutputHelper output) : IClassFixture<ChatGptGatewayTestEnvironment>
 {
     private const string ProjectId = ChatGptGatewayTestConstants.ProjectId;
     private const string TestToken = ChatGptGatewayTestConstants.TestToken;
@@ -80,6 +88,200 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             surface: ChatGptGatewaySurface.Automation);
         var automationServerInfo = await GetServerInfoAsync(automationFactory);
         AssertBrand(automationServerInfo, "ContextHub Governance");
+    }
+
+    [DockerRequiredFact]
+    public async Task General_Adjudication_Preview_Should_Publish_And_Enforce_Inventory_Token()
+    {
+        using var client = CreateAuthorizedClient(environment.GetFactory());
+        const string toolName = "conversation_adjudication_preview";
+        var listed = ExtractSseJson(await SendMcpAsync(client, null, 31, "tools/list", new { }));
+        var tool = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+            .Single(x => x.GetProperty("name").GetString() == toolName);
+        var requestSchema = tool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request")
+            .GetProperty("properties");
+        requestSchema.TryGetProperty("includeInventoryToken", out _).Should().BeTrue();
+        requestSchema.TryGetProperty("expectedInventoryToken", out _).Should().BeTrue();
+        requestSchema.TryGetProperty("receiptRequest", out _).Should().BeTrue();
+        var outputSchema = tool.GetProperty("outputSchema").GetProperty("properties");
+        outputSchema.TryGetProperty("inventoryToken", out _).Should().BeTrue();
+        outputSchema.TryGetProperty("receiptLookup", out _).Should().BeTrue();
+
+        async Task<JsonElement> PreviewAsync(int id, object request)
+        {
+            var response = await SendMcpAsync(client, null, id, "tools/call", new
+            {
+                name = toolName,
+                arguments = new { request }
+            });
+            return ExtractSseJson(response);
+        }
+
+        var first = await PreviewAsync(32, new { projectId = ProjectId, includeInventoryToken = true });
+        var token = first.GetProperty("result").GetProperty("structuredContent").GetProperty("inventoryToken").GetString();
+        token.Should().MatchRegex("^[0-9a-f]{64}$");
+        var continued = await PreviewAsync(33, new { projectId = ProjectId, offset = 200, expectedInventoryToken = token });
+        continued.GetProperty("result").GetProperty("structuredContent").GetProperty("inventoryToken").GetString()
+            .Should().Be(token);
+
+        var changed = await PreviewAsync(34, new { projectId = ProjectId, governanceRunId = "different-run", expectedInventoryToken = token });
+        var protocolError = changed.TryGetProperty("error", out _);
+        var toolError = changed.TryGetProperty("result", out var result) &&
+                        result.TryGetProperty("isError", out var isError) && isError.GetBoolean();
+        (protocolError || toolError).Should().BeTrue();
+        changed.GetRawText().Should().NotContain("inventoryToken");
+
+        var operationId = Guid.NewGuid();
+        var lookup = await PreviewAsync(35, new
+        {
+            projectId = ProjectId,
+            limit = 1,
+            receiptRequest = new
+            {
+                projectId = ProjectId,
+                insightId = Guid.NewGuid(),
+                operationId,
+                action = (int)ConversationAdjudicationAction.ResolveSkipped,
+                expectedEvidenceToken = new string('a', 64),
+                reason = "Reviewed original evidence",
+                governanceRunId = "unknown-result"
+            }
+        });
+        var receipt = lookup.GetProperty("result").GetProperty("structuredContent").GetProperty("receiptLookup");
+        receipt.GetProperty("operationId").GetGuid().Should().Be(operationId);
+        receipt.GetProperty("found").GetBoolean().Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
+    public async Task General_Kestrel_OAuth_Should_Reconcile_And_Replay_One_Adjudication()
+    {
+        const string previewTool = "conversation_adjudication_preview";
+        const string applyTool = "conversation_insight_adjudicate";
+        var project = $"adjudication-http-{Guid.NewGuid():N}";
+        var runId = $"adjudication-http-{Guid.NewGuid():N}";
+        await using var general = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString, environment.RedisConnectionString, selfHostedOAuth: true);
+        general.UseKestrel(0);
+        await ConfigureSelfHostedUserAsync(general);
+        await using var dedicated = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString, environment.RedisConnectionString,
+            surface: ChatGptGatewaySurface.Automation, selfHostedOAuth: true);
+        dedicated.UseKestrel(0);
+
+        var insightId = await SeedInsightOnlyProjectAsync(project, ConversationPromotionStatus.RequiresUserDecision);
+        var manualId = await SeedInsightOnlyProjectAsync(project, ConversationPromotionStatus.RequiresUserDecision);
+        var rejectedId = await SeedInsightOnlyProjectAsync(project, ConversationPromotionStatus.Skipped);
+        using var scope = general.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var insight = await db.ConversationInsights.SingleAsync(x => x.Id == insightId);
+        var linkedProposal = await db.ConversationInsights.SingleAsync(x => x.Id == rejectedId);
+        linkedProposal.SourceSystem = "chatgpt-mcp-gateway";
+        linkedProposal.Tags = ["chatgpt-proposal"];
+        insight.SourceRef = $"chatgpt-proposal:{rejectedId:D}";
+        insight.MetadataJson = JsonSerializer.Serialize(new { proposalId = rejectedId });
+        await db.SaveChangesAsync();
+
+        static HttpClient CreateKestrelClient(ChatGptGatewayApplicationFactory factory)
+        {
+            using var defaultClient = factory.CreateClient();
+            var address = defaultClient.BaseAddress!;
+            address.IsLoopback.Should().BeTrue();
+            address.IsDefaultPort.Should().BeFalse();
+            return new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false })
+            {
+                BaseAddress = address
+            };
+        }
+
+        using var client = CreateKestrelClient(general);
+        using var automation = CreateKestrelClient(dedicated);
+        var token = await CompleteSelfHostedOAuthCodeFlowAsync(client, SelfHostedClientId,
+            "https://chatgpt.com/connector/oauth/adjudication-general", PublicMcpUrl);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var automationToken = await CompleteSelfHostedOAuthCodeFlowAsync(automation, SelfHostedClientId,
+            "https://chatgpt.com/connector/oauth/adjudication-scheduled", AutomationPublicMcpUrl,
+            "openid profile email offline_access governance:scheduled");
+        automation.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", automationToken);
+
+        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            Converters = { new JsonStringEnumConverter<ConversationPromotionStatus>() }
+        };
+        var callId = 0;
+        async Task<JsonElement> CallAsync(HttpClient http, string tool, object request)
+            => ExtractSseJson(await SendMcpAsync(http, null, ++callId, "tools/call",
+                new { name = tool, arguments = new { request = JsonSerializer.SerializeToNode(request, json) } }));
+        static T Read<T>(JsonElement response, JsonSerializerOptions json)
+            => response.GetProperty("result").GetProperty("structuredContent").Deserialize<T>(json)!;
+        static bool IsError(JsonElement response)
+            => response.TryGetProperty("error", out _) ||
+               (response.TryGetProperty("result", out var result) &&
+                result.TryGetProperty("isError", out var isError) && isError.GetBoolean());
+
+        var previewRequest = new ConversationAdjudicationPreviewRequest(project, Limit: 1,
+            GovernanceRunId: runId, IncludeInventoryToken: true);
+        var before = Read<ConversationAdjudicationPreviewResult>(await CallAsync(client, previewTool, previewRequest), json);
+        before.TotalCount.Should().Be(2);
+        before.UnresolvedHumanDecisionCount.Should().Be(2);
+        before.ResolvedHumanDecisionCount.Should().Be(0);
+        before.HasMore.Should().BeTrue();
+        before.InventoryToken.Should().MatchRegex("^[0-9a-f]{64}$");
+        var continuation = previewRequest with { Offset = 1, IncludeInventoryToken = false, ExpectedInventoryToken = before.InventoryToken };
+        var last = Read<ConversationAdjudicationPreviewResult>(await CallAsync(client, previewTool, continuation), json);
+        last.HasMore.Should().BeFalse();
+        last.InventoryToken.Should().Be(before.InventoryToken);
+        var candidates = before.Items.Concat(last.Items).ToDictionary(item => item.InsightId);
+        candidates.Keys.Should().BeEquivalentTo([insightId, manualId]);
+        candidates[manualId].CanReconcile.Should().BeFalse();
+        candidates[insightId].CanReconcile.Should().BeTrue();
+        candidates[insightId].Classification.Should().Be("ResolvedRejectedProposal");
+
+        var apply = new ConversationAdjudicationRequest(project, insightId, Guid.NewGuid(),
+            ConversationAdjudicationAction.Reconcile, candidates[insightId].EvidenceToken, "Confirmed linked rejection.", runId);
+        var scheduledCatalog = ExtractSseJson(await SendMcpAsync(automation, null, ++callId, "tools/list", new { }));
+        scheduledCatalog.GetProperty("result").GetProperty("tools").EnumerateArray()
+            .Select(tool => tool.GetProperty("name").GetString()).Should().BeEquivalentTo(ScheduledGovernanceToolCatalog.PublishedToolNames);
+        IsError(await CallAsync(automation, previewTool, previewRequest)).Should().BeTrue();
+        IsError(await CallAsync(automation, applyTool, apply)).Should().BeTrue();
+        (await db.ConversationAdjudications.CountAsync(row => row.ProjectId == project)).Should().Be(0);
+
+        var applied = Read<ConversationAdjudicationReceipt>(await CallAsync(client, applyTool, apply), json);
+        applied.OperationId.Should().Be(apply.OperationId);
+        applied.InsightId.Should().Be(insightId);
+        applied.Outcome.Should().Be("ResolvedRejectedProposal");
+        applied.ResultStatus.Should().Be("Skipped");
+        applied.IsReplay.Should().BeFalse();
+        IsError(await CallAsync(client, previewTool, continuation)).Should().BeTrue();
+
+        var lookup = previewRequest with { ReceiptRequest = apply };
+        var after = Read<ConversationAdjudicationPreviewResult>(await CallAsync(client, previewTool, lookup), json);
+        after.InventoryToken.Should().NotBe(before.InventoryToken);
+        after.UnresolvedHumanDecisionCount.Should().Be(1);
+        after.ResolvedHumanDecisionCount.Should().Be(1);
+        after.NewlyResolvedCount.Should().Be(1);
+        after.ReopenedCount.Should().Be(0);
+        after.ReceiptLookup!.Found.Should().BeTrue();
+        after.ReceiptLookup.Receipt.Should().Be(applied);
+
+        var changed = apply with { Reason = "Different decision." };
+        var missing = Read<ConversationAdjudicationPreviewResult>(
+            await CallAsync(client, previewTool, lookup with { ReceiptRequest = changed }), json);
+        missing.ReceiptLookup!.Found.Should().BeFalse();
+        IsError(await CallAsync(client, applyTool, changed)).Should().BeTrue();
+        var replay = Read<ConversationAdjudicationReceipt>(await CallAsync(client, applyTool, apply), json);
+        replay.Should().Be(applied with { IsReplay = true });
+
+        var persisted = await db.ConversationInsights.AsNoTracking().Where(x => x.ProjectId == project)
+            .ToDictionaryAsync(x => x.Id);
+        persisted[insightId].PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
+        persisted[manualId].PromotionStatus.Should().Be(ConversationPromotionStatus.RequiresUserDecision);
+        persisted[rejectedId].PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
+        persisted[rejectedId].UpdatedAt.Should().Be(linkedProposal.UpdatedAt);
+        (await db.ConversationAdjudications.CountAsync(row => row.ProjectId == project)).Should().Be(1);
+        var audits = await db.SecurityAuditEvents.AsNoTracking()
+            .Where(row => row.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated)
+            .Select(row => row.DetailsJson).ToArrayAsync();
+        audits.Count(details => details.Contains(apply.OperationId.ToString("D"), StringComparison.Ordinal)).Should().Be(1);
     }
 
     [DockerRequiredFact]
@@ -281,6 +483,28 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         receipt.GetProperty("received").GetBoolean().Should().BeTrue();
         receipt.GetProperty("governanceRunId").GetString().Should().Be(governanceRunId);
         receipt.GetProperty("reliability").ValueKind.Should().Be(JsonValueKind.Object);
+        receipt.GetProperty("reliability").GetProperty("runs").EnumerateArray().Should()
+            .Contain(run => run.GetProperty("governanceRunId").GetString() == governanceRunId);
+
+        using (var anonymous = factory.CreateClient())
+        using (var unauthorizedRequest = CreateModernMcpRequest("tools/call"))
+        {
+            anonymous.DefaultRequestHeaders.Authorization = null;
+            unauthorizedRequest.Content = new StringContent(JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 24,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ScheduledGovernanceContract.ReceiptToolName,
+                    arguments = new { governanceRunId }
+                }
+            }), Encoding.UTF8, "application/json");
+            using var unauthorized = await anonymous.SendAsync(unauthorizedRequest);
+            unauthorized.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+            (await unauthorized.Content.ReadAsStringAsync()).Should().NotContain(governanceRunId);
+        }
 
         var compactPayload = await SendMcpAsync(client, null, 23, "tools/call", new
         {
@@ -2572,8 +2796,13 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         dbContext.ChangeTracker.Clear();
     }
 
-    [DockerRequiredFact]
-    public async Task Scheduled_Governance_Should_AutoResolve_Reversible_Semantic_Candidate_With_Exact_Durable_Evidence()
+    [DockerRequiredTheory]
+    [InlineData("single-run")]
+    [InlineData("competing-run")]
+    [InlineData("archived-authority")]
+    [InlineData("locked-authority")]
+    public async Task Scheduled_Governance_Should_AutoResolve_Reversible_Semantic_Candidate_With_Exact_Durable_Evidence(
+        string scenario)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         UseGatewayActor(scope.ServiceProvider);
@@ -2674,18 +2903,123 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             new ScheduledGovernanceReviewRequest(runId),
             CancellationToken.None);
         review.Decision.Should().Be(ScheduledGovernanceDecision.ReversibleExecutionRequired);
-        var result = await scheduled.ExecuteAsync(new ScheduledGovernanceExecuteRequest(
+        var request = new ScheduledGovernanceExecuteRequest(
             runId,
             review.SnapshotToken,
             MaxMutations: 20,
             MaxDurationSeconds: 60,
             ToolContractVersion: ScheduledGovernanceContract.ToolContractVersion,
-            SchemaHash: ScheduledGovernanceContract.SchemaHash), CancellationToken.None);
+            SchemaHash: ScheduledGovernanceContract.SchemaHash);
+        if (scenario != "single-run")
+        {
+            using var winnerScope = environment.GetFactory().Services.CreateScope();
+            var winnerServices = winnerScope.ServiceProvider;
+            winnerServices.GetRequiredService<IRequestActorAccessor>().Current = owner;
+            var winner = winnerServices.GetRequiredService<IScheduledGovernanceService>();
+            var winnerRunId = $"semantic-first-{Guid.NewGuid():N}";
+            var winnerReview = await winner.ReviewAsync(new ScheduledGovernanceReviewRequest(winnerRunId), default);
+            winnerReview.Decision.Should().Be(ScheduledGovernanceDecision.ReversibleExecutionRequired);
+
+            var intercept = new RunCompetingSemanticBatch(async cancellationToken =>
+            {
+                if (scenario == "locked-authority")
+                {
+                    var writerDb = winnerServices.GetRequiredService<MemoryDbContext>();
+                    await using var transaction = await writerDb.Database.BeginTransactionAsync(cancellationToken);
+                    await writerDb.Database.ExecuteSqlRawAsync("SET LOCAL lock_timeout = '250ms'", cancellationToken);
+                    var update = () => writerDb.Database.ExecuteSqlInterpolatedAsync(
+                        $"UPDATE memory_items SET updated_at = updated_at WHERE id = {durable.Id}", cancellationToken);
+                    var error = await update.Should().ThrowAsync<PostgresException>();
+                    error.Which.SqlState.Should().Be(PostgresErrorCodes.LockNotAvailable);
+                    return;
+                }
+
+                if (scenario == "archived-authority")
+                {
+                    await winnerServices.GetRequiredService<IMemoryService>().ArchiveAsync(
+                        new MemoryArchiveRequest(durable.Id, projectId, Reason: "Remove authority during batch execution."),
+                        cancellationToken);
+                    return;
+                }
+
+                var first = await winner.ExecuteAsync(request with
+                {
+                    GovernanceRunId = winnerRunId,
+                    SnapshotToken = winnerReview.SnapshotToken
+                }, cancellationToken);
+                first.Items.Should().ContainSingle(item => item.ResourceId == insight.Id && item.SemanticAutoResolved);
+            }, lockProbe: scenario == "locked-authority");
+            var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                    scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+                .AddInterceptors(intercept).Options;
+            await using var contenderDb = new MemoryDbContext(options);
+            var contender = scope.ServiceProvider;
+            var receipts = ActivatorUtilities.CreateInstance<GovernanceRunReceiptService>(contender, contenderDb);
+            var conversation = ActivatorUtilities.CreateInstance<ConversationAutomationService>(contender, contenderDb);
+            var executor = ActivatorUtilities.CreateInstance<GovernanceBatchExecutor>(contender, contenderDb, conversation, receipts);
+            var run = ActivatorUtilities.CreateInstance<ScheduledGovernanceService>(contender, executor, receipts);
+            var lateResult = await run.ExecuteAsync(request, default);
+
+            intercept.Completed.Should().BeTrue();
+            if (scenario == "locked-authority")
+            {
+                lateResult.SemanticAutoResolvedCount.Should().Be(1);
+                lateResult.Items.Should().ContainSingle(item => item.ResourceId == insight.Id && item.SemanticAutoResolved);
+                return;
+            }
+
+            lateResult.SemanticAutoResolvedCount.Should().Be(0);
+            var lateReceipt = await run.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+            lateReceipt.SemanticAutoResolved.Should().Be(0);
+            if (scenario == "archived-authority")
+            {
+                lateResult.Items.Should().ContainSingle(item => item.ResourceId == insight.Id &&
+                    item.Disposition == nameof(GovernanceBatchItemDisposition.RequiresUserDecision));
+                (await dbContext.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == durable.Id))
+                    .Status.Should().Be(MemoryStatus.Archived);
+                (await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
+                    .PromotionStatus.Should().Be(ConversationPromotionStatus.Pending);
+                return;
+            }
+            lateResult.Items.Should().ContainSingle(item => item.ResourceId == insight.Id &&
+                item.Disposition == nameof(GovernanceBatchItemDisposition.NoOp) && !item.SemanticAutoResolved);
+            var winningInsight = await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id);
+            winningInsight.GovernanceRunId.Should().Be(winnerRunId);
+            var audits = await dbContext.SecurityAuditEvents.AsNoTracking()
+                .Where(row => row.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated)
+                .Select(row => row.DetailsJson).ToArrayAsync();
+            audits.Count(details => details.Contains(insight.Id.ToString("D"), StringComparison.Ordinal)).Should().Be(1);
+            return;
+        }
+
+        var result = await scheduled.ExecuteAsync(request, default);
 
         result.SemanticAutoResolvedCount.Should().Be(1, JsonSerializer.Serialize(result));
         result.Items.Should().ContainSingle(x => x.ResourceId == insight.Id && x.SemanticAutoResolved);
         (await dbContext.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
             .PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
+    }
+
+    private sealed class RunCompetingSemanticBatch(Func<CancellationToken, Task> execute, bool lockProbe) : DbCommandInterceptor
+    {
+        public bool Completed { get; private set; }
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command, CommandExecutedEventData eventData, DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            if (!Completed && eventData.CommandSource == CommandSource.LinqQuery &&
+                command.CommandText.Contains("memory_items", StringComparison.OrdinalIgnoreCase) &&
+                (lockProbe
+                    ? command.CommandText.Contains("FOR SHARE", StringComparison.OrdinalIgnoreCase)
+                    : command.CommandText.Contains("lower(", StringComparison.OrdinalIgnoreCase) &&
+                      command.CommandText.Contains("valid_from", StringComparison.OrdinalIgnoreCase)))
+            {
+                await execute(cancellationToken);
+                Completed = true;
+            }
+
+            return result;
+        }
     }
 
     [DockerRequiredFact]
@@ -3075,7 +3409,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 SourceRef = "fixture-a",
                 Importance = .7m,
                 Confidence = .8m,
-                MetadataJson = "{}",
+                MetadataJson = """{"artifactExchange":true,"kind":"Summary","sourceSystem":"fixture"}""",
                 CreatedAt = now,
                 UpdatedAt = now
             },
@@ -3094,7 +3428,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
                 SourceRef = "fixture-b",
                 Importance = .65m,
                 Confidence = .75m,
-                MetadataJson = "{}",
+                MetadataJson = """{"artifactExchange":true,"kind":"Summary","sourceSystem":"fixture"}""",
                 CreatedAt = now,
                 UpdatedAt = now
             });
@@ -3121,10 +3455,15 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         await dbContext.SaveChangesAsync();
 
         var businessWorkItem = await workItemService.CreateAsync(new ProjectWorkItemCreateRequest(projectId, "Normal business work remains active"), CancellationToken.None);
-        businessWorkItem = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(businessWorkItem.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+        businessWorkItem = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(
+            businessWorkItem.Id, Status: ProjectWorkItemStatus.InProgress, ExpectedRevision: businessWorkItem.Revision, RequestId: Guid.NewGuid().ToString("N")),
+            CancellationToken.None);
         var historical = await workItemService.CreateAsync(new ProjectWorkItemCreateRequest(projectId, "Completed historical fixture"), CancellationToken.None);
-        historical = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(historical.Id, Status: ProjectWorkItemStatus.Completed), CancellationToken.None);
+        historical = await workItemService.UpdateAsync(new ProjectWorkItemUpdateRequest(
+            historical.Id, Status: ProjectWorkItemStatus.Completed, ExpectedRevision: historical.Revision, RequestId: Guid.NewGuid().ToString("N")),
+            CancellationToken.None);
         var historicalEntity = await dbContext.ProjectWorkItems.SingleAsync(x => x.Id == historical.Id);
+        await dbContext.Entry(historicalEntity).ReloadAsync(CancellationToken.None);
         historicalEntity.UpdatedAt = now.AddDays(-120);
         await dbContext.SaveChangesAsync();
 
@@ -3282,7 +3621,9 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "Business item must remain unchanged"), CancellationToken.None);
         businessWorkItem = await workItems.UpdateAsync(new ProjectWorkItemUpdateRequest(
             businessWorkItem.Id,
-            Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+            Status: ProjectWorkItemStatus.InProgress,
+            ExpectedRevision: businessWorkItem.Revision,
+            RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
 
         var review = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
             [projectId], LimitPerSection: 1, GovernanceRunId: governanceRunId), CancellationToken.None);
@@ -3370,18 +3711,75 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         reReview.GovernancePlan.Count.Should().BeLessThan(initialCandidateCount);
         reReview.ProjectKnowledgeGovernance!.Pagination.TotalCount.Should().Be(0);
         reReview.Pagination.HighSignalConversationInsights.TotalCount.Should().Be(1);
-        var catchUp = await gatewayTools.governance_batch_execute(new GovernanceBatchExecuteRequest(
-            governanceRunId,
-            [projectId],
-            reReview.DurableMemoryCoverage!.SnapshotToken,
-            MaxMutations: 10,
-            MaxDurationSeconds: 30,
-            AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition],
-            MaxRiskLevel: GovernanceBatchRiskLevel.Low,
-            DryRun: false,
-            AllowHardDelete: false,
-            IsReReview: true,
-            ExecutionMode: GovernanceBatchExecutionMode.Interactive), CancellationToken.None);
+        static bool IsWithinCatchUp(Activity? activity, Activity correlation)
+        {
+            for (; activity is not null; activity = activity.Parent)
+            {
+                if (ReferenceEquals(activity, correlation))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        var activities = new ConcurrentQueue<(string Name, ActivitySpanId SpanId, ActivitySpanId ParentSpanId, TimeSpan Duration)>();
+        GovernanceBatchExecuteResult catchUp;
+        ActivitySpanId correlationSpanId;
+        using (var correlation = new Activity("governance.phase-test").SetIdFormat(ActivityIdFormat.W3C).Start())
+        using (var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == "ContextHub.Governance",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => IsWithinCatchUp(Activity.Current, correlation)
+                ? ActivitySamplingResult.AllData
+                : ActivitySamplingResult.None,
+            ActivityStopped = activity =>
+            {
+                if (IsWithinCatchUp(activity, correlation))
+                {
+                    activities.Enqueue((activity.OperationName, activity.SpanId, activity.ParentSpanId, activity.Duration));
+                }
+            }
+        })
+        {
+            correlationSpanId = correlation.SpanId;
+            ActivitySource.AddActivityListener(listener);
+            catchUp = await gatewayTools.governance_batch_execute(new GovernanceBatchExecuteRequest(
+                governanceRunId,
+                [projectId],
+                reReview.DurableMemoryCoverage!.SnapshotToken,
+                MaxMutations: 10,
+                MaxDurationSeconds: 30,
+                AllowedActionTypes: [GovernanceBatchActionType.ConversationInsightDisposition],
+                MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+                DryRun: false,
+                AllowHardDelete: false,
+                IsReReview: true,
+                ExecutionMode: GovernanceBatchExecutionMode.Interactive), CancellationToken.None);
+        }
+
+        var requiredPhases = new (string Name, string? ParentName)[]
+        {
+            ("governance.batch", null),
+            ("governance.batch.start-receipt", "governance.batch"),
+            ("governance.batch.snapshot", "governance.batch"),
+            ("governance.batch.plan-build", "governance.batch"),
+            ("governance.plan.insight-reevaluation", "governance.batch.plan-build"),
+            ("governance.batch.terminal-items", "governance.batch"),
+            ("governance.batch.completion-receipt", "governance.batch")
+        };
+        var spanIds = new Dictionary<string, ActivitySpanId>(StringComparer.Ordinal);
+        foreach (var (name, parentName) in requiredPhases)
+        {
+            activities.Count(activity => activity.Name == name).Should().Be(1, "the catch-up should emit {0}", name);
+            var activity = activities.Single(activity => activity.Name == name);
+            var expectedParent = parentName is null ? correlationSpanId : spanIds[parentName];
+            (activity.ParentSpanId == expectedParent).Should().BeTrue("the catch-up should nest {0} under its expected parent", name);
+            spanIds.Add(name, activity.SpanId);
+            output.WriteLine(FormattableString.Invariant($"{name} {activity.Duration.TotalMilliseconds:F1} ms"));
+        }
+        activities.Count(activity => activity.Name == "governance.batch.plan-validation").Should().Be(0);
         catchUp.RequiresUserDecisionCount.Should().Be(1);
         var finalReview = await gatewayTools.knowledge_review(new KnowledgeReviewRequest(
             [projectId], LimitPerSection: 200, GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
@@ -4041,15 +4439,20 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         var cancelled = await gatewayTools.project_work_item_create(
             new ProjectWorkItemCreateRequest(projectId, "Cancelled work"), CancellationToken.None);
         ordinary = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(ordinary.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(ordinary.Id, Status: ProjectWorkItemStatus.InProgress,
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
         tracker = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(tracker.Id, Status: ProjectWorkItemStatus.InProgress), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(tracker.Id, Status: ProjectWorkItemStatus.InProgress,
+                ExpectedRevision: tracker.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
         blocked = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(blocked.Id, Status: ProjectWorkItemStatus.Blocked), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(blocked.Id, Status: ProjectWorkItemStatus.Blocked,
+                ExpectedRevision: blocked.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
         completed = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(completed.Id, Status: ProjectWorkItemStatus.Completed), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(completed.Id, Status: ProjectWorkItemStatus.Completed,
+                ExpectedRevision: completed.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
         cancelled = await gatewayTools.project_work_item_update(
-            new ProjectWorkItemUpdateRequest(cancelled.Id, Status: ProjectWorkItemStatus.Cancelled), CancellationToken.None);
+            new ProjectWorkItemUpdateRequest(cancelled.Id, Status: ProjectWorkItemStatus.Cancelled,
+                ExpectedRevision: cancelled.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
 
         var initial = await gatewayTools.knowledge_review(
             new KnowledgeReviewRequest([projectId], GovernanceRunId: governanceRunId, IsReReview: true), CancellationToken.None);
@@ -4064,7 +4467,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         initial.Convergence.ExcludedGovernanceTrackerCount.Should().Be(0);
 
         var exclusionRequest = new ProjectWorkItemGovernanceExclusionRequest(
-            tracker.Id, projectId, governanceRunId, "Tracks acceptance of this exact governance run.");
+            tracker.Id, projectId, governanceRunId, "Tracks acceptance of this exact governance run.",
+            ExpectedRevision: tracker.Revision, RequestId: Guid.NewGuid().ToString("N"));
         var excluded = await gatewayTools.project_work_item_set_governance_exclusion(exclusionRequest, CancellationToken.None);
         excluded.GovernanceExclusions.Should().ContainSingle(x => x.GovernanceRunId == governanceRunId && x.IsActive);
         (await gatewayTools.project_work_item_set_governance_exclusion(exclusionRequest, CancellationToken.None)).UpdatedAt.Should().Be(excluded.UpdatedAt);
@@ -4088,27 +4492,32 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             Scopes = adminActor.Scopes.Where(x => !string.Equals(x, SecurityScopes.GovernanceTrackerManage, StringComparison.OrdinalIgnoreCase)).ToArray()
         };
         var missingScope = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing dedicated scope."), CancellationToken.None);
-        await missingScope.Should().ThrowAsync<UnauthorizedAccessException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing dedicated scope.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await missingScope.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         actorAccessor.Current = adminActor with
         {
             Scopes = adminActor.Scopes.Where(x => !string.Equals(x, SecurityScopes.MemoryWrite, StringComparison.OrdinalIgnoreCase)).ToArray()
         };
         var missingWriteScope = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing memory write scope."), CancellationToken.None);
-        await missingWriteScope.Should().ThrowAsync<UnauthorizedAccessException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Missing memory write scope.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await missingWriteScope.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         actorAccessor.Current = adminActor with { Role = TenantUserRole.Member };
         var unauthorized = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Unauthorized escape."), CancellationToken.None);
-        await unauthorized.Should().ThrowAsync<UnauthorizedAccessException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, governanceRunId, "Unauthorized escape.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await unauthorized.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         actorAccessor.Current = adminActor;
 
         var wrongProject = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, $"wrong-{projectId}", governanceRunId, "Wrong project."), CancellationToken.None);
-        await wrongProject.Should().ThrowAsync<UnauthorizedAccessException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, $"wrong-{projectId}", governanceRunId, "Wrong project.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await wrongProject.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         var invalidRun = async () => await gatewayTools.project_work_item_set_governance_exclusion(
-            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, $"missing-{Guid.NewGuid():N}", "Missing relationship."), CancellationToken.None);
-        await invalidRun.Should().ThrowAsync<InvalidOperationException>();
+            new ProjectWorkItemGovernanceExclusionRequest(ordinary.Id, projectId, $"missing-{Guid.NewGuid():N}", "Missing relationship.",
+                ExpectedRevision: ordinary.Revision, RequestId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+        await invalidRun.Should().ThrowAsync<McpException>().WithMessage("Work item operation is unavailable.");
         (await dbContext.SecurityAuditEvents.AsNoTracking()
             .Where(x => x.EventType == SecurityAuditEventType.ProjectWorkItemGovernanceExclusionUpdated)
             .Select(x => x.DetailsJson)
@@ -4179,12 +4588,19 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         secondPage.WorkItems[0].Id.Should().NotBe(review.WorkItems[0].Id);
 
         var tracked = workItems[0];
-        tracked = await gatewayTools.project_work_item_checklist_update(tracked.Id, tracked.ChecklistItems[0].Id, true, CancellationToken.None);
-        tracked = await gatewayTools.project_work_item_update(new ProjectWorkItemUpdateRequest(tracked.Id, Status: ProjectWorkItemStatus.Completed), CancellationToken.None);
+        tracked = await gatewayTools.project_work_item_checklist_update(tracked.Id, tracked.ChecklistItems[0].Id, true,
+            CancellationToken.None, expectedRevision: tracked.Revision, requestId: Guid.NewGuid().ToString("N"));
+        tracked = await gatewayTools.project_work_item_update(new ProjectWorkItemUpdateRequest(
+            tracked.Id, Status: ProjectWorkItemStatus.Completed, ExpectedRevision: tracked.Revision, RequestId: Guid.NewGuid().ToString("N")),
+            CancellationToken.None);
         tracked.Status.Should().Be(ProjectWorkItemStatus.Completed);
-        (await gatewayTools.project_work_item_archive(tracked.Id, CancellationToken.None)).IsArchived.Should().BeTrue();
+        var archived = await gatewayTools.project_work_item_archive(
+            tracked.Id, CancellationToken.None, expectedRevision: tracked.Revision, requestId: Guid.NewGuid().ToString("N"));
+        archived.IsArchived.Should().BeTrue();
         (await gatewayTools.project_work_items_list(new ProjectWorkItemListRequest(projectId), CancellationToken.None)).Should().NotContain(x => x.Id == tracked.Id);
-        (await gatewayTools.project_work_item_restore(tracked.Id, CancellationToken.None)).Status.Should().Be(ProjectWorkItemStatus.Completed);
+        (await gatewayTools.project_work_item_restore(
+            tracked.Id, CancellationToken.None, expectedRevision: archived.Revision, requestId: Guid.NewGuid().ToString("N")))
+            .Status.Should().Be(ProjectWorkItemStatus.Completed);
 
         var payload = JsonSerializer.Serialize(new MemoryUpsertRequest(
             $"governance:{Guid.NewGuid():N}",
@@ -4391,6 +4807,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
         listedToolNames.Should().HaveCount(89);
+        listedToolNames.Count(name => name.StartsWith("agent_execution_", StringComparison.Ordinal)).Should().Be(10);
+        listedToolNames.Count(name => name.StartsWith("skill_", StringComparison.Ordinal) ||
+                                      name.StartsWith("skills_", StringComparison.Ordinal)).Should().Be(7);
+        listedToolNames.Should().NotContain(ScheduledGovernanceToolCatalog.PublishedToolNames);
         var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
         appFacingProjection.IsValid.Should().BeTrue();
         appFacingProjection.PublishedToolCount.Should().Be(89);
@@ -4919,7 +5339,8 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             CancellationToken.None);
     }
 
-    private async Task SeedInsightOnlyProjectAsync(string projectId)
+    private async Task<Guid> SeedInsightOnlyProjectAsync(
+        string projectId, ConversationPromotionStatus status = ConversationPromotionStatus.Pending)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -4956,7 +5377,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             DedupKey = $"scope-regression:{Guid.NewGuid():N}",
             CreatedAt = now
         };
-        dbContext.ConversationInsights.Add(new ConversationInsight
+        var insight = new ConversationInsight
         {
             Session = session,
             Checkpoint = checkpoint,
@@ -4977,11 +5398,14 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             Tags = ["scope-regression"],
             Importance = 0.9m,
             Confidence = 0.9m,
+            PromotionStatus = status,
             DedupKey = $"scope-regression:{Guid.NewGuid():N}",
             CreatedAt = now,
             UpdatedAt = now
-        });
+        };
+        dbContext.ConversationInsights.Add(insight);
         await dbContext.SaveChangesAsync();
+        return insight.Id;
     }
 
     private async Task DurableMemoryShouldExistAsync(string externalKey)

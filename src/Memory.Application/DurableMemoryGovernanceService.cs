@@ -28,6 +28,8 @@ public sealed class DurableMemoryGovernanceService(
         var ownerUserId = actor.UserId ?? throw new UnauthorizedAccessException("Knowledge governance requires a tenant user.");
         var normalizedProjects = DurableMemoryGovernancePolicy.NormalizeGovernanceProjectIds(projectIds);
         ActorAuthorization.EnsureProjectsAllowed(actor, normalizedProjects, write: false);
+        await GovernanceProjectScopeResolver.EnsureDurableGrantsAsync(
+            dbContext, tenantId, normalizedProjects, requireWrite: false, cancellationToken);
         var projectSetHash = Hash(string.Join('\n', normalizedProjects).ToLowerInvariant());
 
         var existing = await dbContext.KnowledgeGovernanceSnapshots
@@ -204,7 +206,8 @@ public sealed class DurableMemoryGovernanceService(
         }
 
         var projectIds = DeserializeProjects(match.ProjectIdsJson);
-        if (Deserialize(match.ResultJson).ReadManifest is not null)
+        var result = Deserialize(match.ResultJson);
+        if (result.ReadManifest is not null)
             throw new GovernanceBatchException(GovernanceBatchErrorCode.CursorSnapshotMismatch,
                 "Metadata manifests are not governance execution authority.");
         try
@@ -218,7 +221,9 @@ public sealed class DurableMemoryGovernanceService(
                 $"Authorization changed after the governance review snapshot was created: {ex.Message}");
         }
 
-        return await ApplyLiveLifecycleOverlayAsync(Deserialize(match.ResultJson), cancellationToken);
+        await GovernanceProjectScopeResolver.EnsureDurableGrantsAsync(
+            dbContext, tenantId, projectIds, requireWriteAuthorization, cancellationToken);
+        return await ApplyLiveLifecycleOverlayAsync(result, cancellationToken);
     }
 
     private Task<bool> HasCompletedExecutionAfterAsync(

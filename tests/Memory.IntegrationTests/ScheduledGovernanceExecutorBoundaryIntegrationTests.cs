@@ -1,3 +1,5 @@
+using System.Data.Common;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluentAssertions;
@@ -6,6 +8,7 @@ using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Memory.IntegrationTests;
@@ -122,8 +125,12 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .Should().BeGreaterThan(0);
     }
 
-    [DockerRequiredFact]
-    public async Task Scheduled_Executor_Allows_Only_Deterministic_Reversible_Retention_Quarantine()
+    [DockerRequiredTheory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Scheduled_Executor_Allows_Only_Deterministic_Reversible_Retention_Quarantine(
+        bool replayDuringReview, bool verifyImmediateReplay)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
@@ -180,6 +187,8 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         {
             ReceiptContractIdentity = CurrentScheduledReceiptIdentity()
         };
+        var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var initialReceipt = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
         var result = await scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
             .ExecuteAsync(request, CancellationToken.None);
 
@@ -194,6 +203,264 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .Should().Be(MemoryStatus.Archived);
         (await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == memory.Id))
             .LifecycleStatus.Should().Be("Eligible");
+
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var completed = (await receipts.GetAsync(runId, default))!;
+        completed.LatestBatch.Should().NotBeNull();
+        completed.LatestBatch!.Executed.Should().BeTrue();
+        completed.LatestBatch.RequiresReReview.Should().BeTrue();
+        var afterBatch = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        afterBatch.Decision.Should().BeNull();
+        afterBatch.Outcome.Should().Be("ReReviewRequired");
+        if (verifyImmediateReplay)
+        {
+            // The A1 verifier must be able to bind the first batch, then read the durable replay before re-review.
+            initialReceipt.LatestBatchReceived.Should().BeFalse();
+            initialReceipt.Applied.Should().Be(0);
+            initialReceipt.AuditIds.Should().BeEmpty();
+            afterBatch.ReceiptId.Should().NotBe(initialReceipt.ReceiptId);
+            afterBatch.Status.Should().Be("Completed");
+            afterBatch.Terminal.Should().BeTrue();
+            afterBatch.LatestBatchReceived.Should().BeTrue();
+            afterBatch.IsReplay.Should().BeFalse();
+            afterBatch.InitialSnapshotToken.Should().Be(result.SnapshotToken);
+            afterBatch.FinalSnapshotToken.Should().Be(result.SnapshotToken);
+            afterBatch.StoppedReason.Should().Be(result.StoppedReason);
+            afterBatch.Applied.Should().Be(result.AppliedCount);
+            afterBatch.Failed.Should().Be(result.FailedCount);
+            afterBatch.Quarantined.Should().Be(result.QuarantinedCount);
+            afterBatch.SemanticAutoResolved.Should().Be(result.SemanticAutoResolvedCount);
+            afterBatch.AuditIds.Should().NotBeEmpty().And.BeEquivalentTo(result.AuditIds);
+
+            var replay = await scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+                .ExecuteAsync(request, default);
+            replay.Should().BeEquivalentTo(result with { IsReplay = true });
+            var replayReceipt = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+            replayReceipt.ReceiptId.Should().NotBe(afterBatch.ReceiptId);
+            replayReceipt.IsReplay.Should().BeTrue();
+            replayReceipt.Status.Should().Be("Completed");
+            replayReceipt.Outcome.Should().Be(afterBatch.Outcome);
+            replayReceipt.RequestIdentityHash.Should().Be(afterBatch.RequestIdentityHash);
+            replayReceipt.AuditIds.Should().BeEquivalentTo(afterBatch.AuditIds);
+            replayReceipt.Applied.Should().Be(afterBatch.Applied);
+            replayReceipt.Quarantined.Should().Be(afterBatch.Quarantined);
+
+            actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [projectId] };
+            var verifiedReReview = await scheduled.ReviewAsync(new(runId, IsReReview: true), default);
+            verifiedReReview.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
+            verifiedReReview.CountInvariant.Satisfied.Should().BeTrue();
+            var finalReceipt = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: true);
+            finalReceipt.ReceiptId.Should().NotBe(initialReceipt.ReceiptId).And.NotBe(replayReceipt.ReceiptId);
+            finalReceipt.Terminal.Should().BeTrue();
+            finalReceipt.Decision.Should().Be(verifiedReReview.Decision);
+            finalReceipt.Outcome.Should().Be(verifiedReReview.Decision.ToString());
+            finalReceipt.FinalSnapshotToken.Should().Be(verifiedReReview.SnapshotToken);
+            finalReceipt.LatestBatchReceived.Should().BeTrue();
+            finalReceipt.RequestIdentityHash.Should().Be(replayReceipt.RequestIdentityHash);
+            finalReceipt.AuditIds.Should().BeEquivalentTo(replayReceipt.AuditIds);
+            finalReceipt.Applied.Should().Be(replayReceipt.Applied);
+            finalReceipt.Failed.Should().Be(replayReceipt.Failed);
+            finalReceipt.Quarantined.Should().Be(replayReceipt.Quarantined);
+            finalReceipt.SemanticAutoResolved.Should().Be(replayReceipt.SemanticAutoResolved);
+            (await db.GovernanceBatchExecutions.AsNoTracking().CountAsync(x =>
+                x.Run!.GovernanceRunId == runId)).Should().Be(1);
+            return;
+        }
+
+        actorAccessor.Current = actorAccessor.Current with { AllowedProjectIds = [projectId] };
+        var reviewRequest = new ScheduledGovernanceReviewRequest(runId, IsReReview: true);
+        var reReviewStartedAt = DateTimeOffset.UtcNow;
+        await receipts.RecordReviewStartedAsync(runId, reReviewStartedAt, CurrentScheduledReceiptIdentity(), default, isReReview: true);
+        var running = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        running.Status.Should().Be("Running");
+        running.Terminal.Should().BeFalse();
+        running.Decision.Should().BeNull();
+        if (replayDuringReview)
+        {
+            await receipts.RecordExecutionAsync(request, result with { IsReplay = true }, DateTimeOffset.UtcNow, default);
+            var replayWhileRunning = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+            replayWhileRunning.IsReplay.Should().BeTrue();
+            replayWhileRunning.Status.Should().Be("Running");
+            replayWhileRunning.Outcome.Should().Be("Running");
+            replayWhileRunning.Terminal.Should().BeFalse();
+            replayWhileRunning.Decision.Should().BeNull();
+        }
+        await receipts.RecordReviewStoppedAsync(runId, reReviewStartedAt, "Stopped", "OperationCanceled",
+            "KnowledgeReview", CurrentScheduledReceiptIdentity(), default, isReReview: true);
+        var stopped = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        stopped.Status.Should().Be("Stopped");
+        stopped.Outcome.Should().Be("Stopped");
+        stopped.StoppedReason.Should().Be("OperationCanceled");
+        stopped.Decision.Should().BeNull();
+        var reReview = await scheduled.ReviewAsync(reviewRequest, default);
+        reReview.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
+
+        var finalized = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        finalized.Decision.Should().Be(reReview.Decision);
+        finalized.Outcome.Should().Be(reReview.Decision.ToString());
+        finalized.Terminal.Should().BeTrue();
+        finalized.FinalSnapshotToken.Should().Be(reReview.SnapshotToken);
+        finalized.LatestBatchReceived.Should().BeTrue();
+        finalized.RequestIdentityHash.Should().Be(afterBatch.RequestIdentityHash);
+
+        var staleRequest = await scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+            .ExecuteAsync(request, default);
+        staleRequest.ErrorCode.Should().Be(GovernanceBatchErrorCode.ReReviewRequired);
+
+        (await db.GovernanceBatchExecutions.AsNoTracking().CountAsync(x =>
+            x.Run!.GovernanceRunId == runId)).Should().Be(1);
+        if (replayDuringReview)
+            return;
+
+        // Publish an already concluded batch replay after the new review, as can
+        // happen when receipt delivery arrives out of order.
+        await receipts.RecordExecutionAsync(request, result with { IsReplay = true }, DateTimeOffset.UtcNow, default);
+        var afterReplay = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        afterReplay.IsReplay.Should().BeTrue();
+        afterReplay.Decision.Should().Be(reReview.Decision);
+        afterReplay.Outcome.Should().Be(reReview.Decision.ToString());
+        afterReplay.FinalSnapshotToken.Should().Be(reReview.SnapshotToken);
+        afterReplay.RequestIdentityHash.Should().Be(afterBatch.RequestIdentityHash);
+        afterReplay.AuditIds.Should().Contain(result.AuditIds);
+        afterReplay.Applied.Should().Be(afterBatch.Applied);
+    }
+
+    [DockerRequiredTheory]
+    [InlineData(MemoryStatus.Active, "unchanged")]
+    [InlineData(MemoryStatus.Archived, "unchanged")]
+    [InlineData(MemoryStatus.Active, "restored")]
+    [InlineData(MemoryStatus.Active, "cancelled")]
+    public async Task Distinct_scheduled_runs_respect_live_quarantine_state(MemoryStatus initialStatus, string interveningChange)
+    {
+        var factory = environment.GetFactory();
+        using var firstScope = factory.Services.CreateScope();
+        using var secondScope = factory.Services.CreateScope();
+        var db = firstScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await db.TenantUsers.AsNoTracking().SingleAsync(row => row.Username == "contract-test-admin");
+        var actor = ScheduledActor(user);
+        firstScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        secondScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        var projectId = $"overlapping-quarantine-{Guid.NewGuid():N}";
+        var target = CreateRetentionCandidate(user, projectId);
+        target.Status = initialStatus;
+        db.MemoryItems.Add(target);
+        await db.SaveChangesAsync();
+
+        async Task<GovernanceBatchExecuteRequest> FreezeAsync(IServiceProvider services)
+        {
+            var runId = $"quarantine-overlap-{Guid.NewGuid():N}";
+            var review = await services.GetRequiredService<IKnowledgeReviewService>()
+                .ReviewAsync(ScheduledReviewRequest(projectId, runId), default);
+            await RecordReversibleDecisionAsync(services, review);
+            review.GovernancePlan.Should().Contain(item => item.AuthorityResourceId == target.Id &&
+                item.RecommendedAction == GovernanceBatchActionType.Quarantine.ToString());
+            return new(runId, [projectId], review.DurableMemoryCoverage!.SnapshotToken,
+                AllowedActionTypes: [GovernanceBatchActionType.Quarantine], MaxRiskLevel: GovernanceBatchRiskLevel.Low,
+                ExecutionMode: GovernanceBatchExecutionMode.Scheduled)
+            {
+                ReceiptContractIdentity = CurrentScheduledReceiptIdentity()
+            };
+        }
+
+        var first = await FreezeAsync(firstScope.ServiceProvider);
+        var second = await FreezeAsync(secondScope.ServiceProvider);
+        var afterCancellation = interveningChange == "cancelled" ? await FreezeAsync(firstScope.ServiceProvider) : null;
+        var secondDb = secondScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        (await secondDb.MemoryItems.SingleAsync(row => row.Id == target.Id)).Status.Should().Be(initialStatus);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var pauseSecond = new AsyncLocal<bool>();
+        var planValidated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == "ContextHub.Governance",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.PropagationData,
+            ActivityStarted = activity =>
+            {
+                if (pauseSecond.Value && activity.OperationName == "governance.batch.terminal-items")
+                {
+                    planValidated.TrySetResult();
+                    release.Task.WaitAsync(deadline.Token).GetAwaiter().GetResult();
+                }
+            }
+        };
+        ActivitySource.AddActivityListener(listener);
+        var pending = Task.Run(async () =>
+        {
+            pauseSecond.Value = true;
+            return await secondScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+                .ExecuteAsync(second, deadline.Token);
+        });
+        MemoryRetentionState applied;
+        int revisionCount;
+        GovernanceBatchExecuteResult secondExecution;
+        try
+        {
+            await planValidated.Task.WaitAsync(deadline.Token);
+            var firstExecution = await firstScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+                .ExecuteAsync(first, deadline.Token);
+            firstExecution.QuarantinedCount.Should().Be(1);
+            if (interveningChange == "restored")
+            {
+                firstScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = GenericAdminActor(user);
+                await firstScope.ServiceProvider.GetRequiredService<IMemoryService>().ArchiveAsync(
+                    new(target.Id, projectId, Archived: false), deadline.Token);
+                // Represent a settled restore after its background reindex has finished.
+                (await db.MemoryJobs.Where(job => job.TenantId == user.TenantId && job.OwnerUserId == user.Id &&
+                        job.ProjectId == projectId && job.Status == MemoryJobStatus.Pending)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.Status, MemoryJobStatus.Completed), deadline.Token))
+                    .Should().Be(1);
+            }
+            if (interveningChange == "cancelled")
+            {
+                var tags = target.Tags;
+                target.Tags = [.. tags, "legal-hold"];
+                await db.SaveChangesAsync(deadline.Token);
+                await firstScope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>()
+                    .ReviewAsync([projectId], $"cancel-{Guid.NewGuid():N}", deadline.Token);
+                target.Tags = tags;
+                await db.SaveChangesAsync(deadline.Token);
+            }
+            applied = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id);
+            revisionCount = await db.MemoryItemRevisions.AsNoTracking().CountAsync(revision => revision.MemoryItemId == target.Id);
+        }
+        finally
+        {
+            release.TrySetResult();
+            secondExecution = await pending.WaitAsync(deadline.Token);
+        }
+
+        secondExecution.ErrorCode.Should().Be(GovernanceBatchErrorCode.None);
+        secondExecution.QuarantinedCount.Should().Be(0);
+        var skipped = secondExecution.Items.Single(item => item.ResourceId == target.Id);
+        var expectedDisposition = interveningChange == "unchanged" ? GovernanceBatchItemDisposition.NoOp : GovernanceBatchItemDisposition.Deferred;
+        skipped.Disposition.Should().Be(expectedDisposition);
+        (await db.SecurityAuditEvents.AsNoTracking().Where(row => skipped.AuditIds.Contains(row.Id))
+            .Select(row => row.Outcome).ToListAsync()).Should().Equal(expectedDisposition.ToString());
+        var final = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id);
+        final.LifecycleStatus.Should().Be(interveningChange == "unchanged" ? "Eligible" : "Cancelled");
+        final.QuarantinedAt.Should().Be(applied.QuarantinedAt);
+        final.DeleteEligibleAt.Should().Be(interveningChange == "unchanged" ? applied.DeleteEligibleAt : null);
+        var memory = await db.MemoryItems.AsNoTracking().SingleAsync(row => row.Id == target.Id);
+        memory.Status.Should().Be(interveningChange == "restored" ? MemoryStatus.Active : MemoryStatus.Archived);
+        (await db.MemoryItemRevisions.AsNoTracking().CountAsync(revision => revision.MemoryItemId == target.Id))
+            .Should().Be(revisionCount);
+
+        if (afterCancellation is not null)
+        {
+            var laterExecution = await firstScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+                .ExecuteAsync(afterCancellation, deadline.Token);
+            laterExecution.ErrorCode.Should().Be(GovernanceBatchErrorCode.None);
+            laterExecution.QuarantinedCount.Should().Be(0);
+            (await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id))
+                .Should().BeEquivalentTo(final);
+
+            await firstScope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>()
+                .ReviewAsync([projectId], $"fresh-{Guid.NewGuid():N}", deadline.Token);
+            var reviewed = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(state => state.ResourceId == target.Id);
+            reviewed.LifecycleStatus.Should().Be("Eligible");
+            reviewed.DeleteEligibleAt.Should().BeAfter(DateTimeOffset.UtcNow);
+        }
     }
 
     [DockerRequiredFact]
@@ -396,6 +663,184 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .Should().Be(0);
     }
 
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Knowledge_review_checks_explicit_and_required_shared_read_grants_before_writing(bool denyShared)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await CreateReviewGrantOwnerAsync(db);
+        var allowed = $"read-grant-allowed-{Guid.NewGuid():N}";
+        var denied = denyShared ? ProjectContext.SharedProjectId : $"read-grant-denied-{Guid.NewGuid():N}";
+        var runId = $"read-grant-review-{Guid.NewGuid():N}";
+        db.MemoryItems.Add(CreateRetentionCandidate(user, allowed));
+        db.TenantProjectGrants.Add(new TenantProjectGrant
+        {
+            TenantId = user.TenantId,
+            ProjectId = denied,
+            CanRead = false,
+            CanWrite = false
+        });
+        await db.SaveChangesAsync();
+
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = GenericAdminActor(user);
+        var review = scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>();
+        var ids = denyShared ? new[] { allowed } : [allowed, denied];
+        var invoke = () => review.ReviewAsync(new KnowledgeReviewRequest(ids, GovernanceRunId: runId), default);
+
+        await invoke.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await db.KnowledgeGovernanceSnapshots.AsNoTracking().AnyAsync(x => x.GovernanceRunId == runId)).Should().BeFalse();
+        (await db.MaintenanceRuns.AsNoTracking().AnyAsync(x =>
+            x.TriggeredBy == $"knowledge-review:{runId}" || x.TriggeredBy == $"knowledge-review-shared:{runId}")).Should().BeFalse();
+        (await db.GovernanceRunReceipts.AsNoTracking().AnyAsync(x => x.GovernanceRunId == runId)).Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
+    public async Task Scheduled_review_filters_denied_regular_projects_from_discovery()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await CreateReviewGrantOwnerAsync(db);
+        var allowed = $"scheduled-read-allowed-{Guid.NewGuid():N}";
+        var denied = $"scheduled-read-denied-{Guid.NewGuid():N}";
+        db.MemoryItems.AddRange(CreateRetentionCandidate(user, allowed), CreateRetentionCandidate(user, denied));
+        db.TenantProjectGrants.Add(new TenantProjectGrant
+        {
+            TenantId = user.TenantId,
+            ProjectId = denied.ToUpperInvariant(),
+            CanRead = false,
+            CanWrite = false
+        });
+        await db.SaveChangesAsync();
+
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current =
+            ScheduledActor(user) with { AllowedProjectIds = [allowed, denied] };
+        var service = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var runId = $"scheduled-read-grant-{Guid.NewGuid():N}";
+        var result = await service.ReviewAsync(new ScheduledGovernanceReviewRequest(runId), default);
+        result.ResolvedProjectIds.Should().Contain(allowed).And.NotContain(denied);
+        result.ResolvedProjectIds.Count(ProjectContext.IsShared).Should().Be(1);
+        var receipt = await service.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        receipt.ProjectIds.Should().Contain(allowed).And.NotContain(denied);
+    }
+
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Governance_snapshot_rechecks_revoked_read_grants_before_live_findings(bool revokeShared)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await CreateReviewGrantOwnerAsync(db);
+        var project = $"snapshot-grant-{Guid.NewGuid():N}";
+        var actor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        actor.Current = GenericAdminActor(user) with { AllowedProjectIds = [project] };
+        db.MemoryItems.Add(CreateRetentionCandidate(user, project));
+        await db.SaveChangesAsync();
+
+        var runId = $"snapshot-grant-{Guid.NewGuid():N}";
+        var durable = scope.ServiceProvider.GetRequiredService<IDurableMemoryGovernanceService>();
+        var snapshot = await durable.GetOrCreateSnapshotAsync([project], runId, false, default);
+        snapshot.FindingIds.Should().NotBeEmpty("a successful read would query the live findings overlay");
+
+        db.TenantProjectGrants.Add(new TenantProjectGrant
+        {
+            TenantId = user.TenantId,
+            ProjectId = revokeShared ? ProjectContext.SharedProjectId : project.ToUpperInvariant(),
+            CanRead = false,
+            CanWrite = false
+        });
+        await db.SaveChangesAsync();
+
+        var counter = new LiveFindingReadCounter();
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+            scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>()).AddInterceptors(counter).Options;
+        await using var observerDb = new MemoryDbContext(options);
+        var observer = new DurableMemoryGovernanceService(observerDb, scope.ServiceProvider.GetRequiredService<IGovernanceService>(),
+            actor, scope.ServiceProvider.GetRequiredService<IClock>());
+
+        var read = () => observer.GetSnapshotAsync(runId, snapshot.Coverage.SnapshotToken, false, false, default);
+        await read.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*durable project grant*");
+        var reuse = () => observer.GetOrCreateSnapshotAsync([project], runId, false, default);
+        await reuse.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*durable project grant*");
+        counter.Reads.Should().Be(0);
+    }
+
+    private sealed class LiveFindingReadCounter : DbCommandInterceptor
+    {
+        public int Reads { get; private set; }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("governance_findings", StringComparison.OrdinalIgnoreCase))
+                Reads++;
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+    }
+
+    [DockerRequiredTheory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Governance_executor_rejects_shared_write_revocation_before_execution_or_replay(bool withSnapshot, bool replay)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await CreateReviewGrantOwnerAsync(db);
+        var project = $"shared-execution-grant-{Guid.NewGuid():N}";
+        var memory = CreateRetentionCandidate(user, project);
+        db.MemoryItems.Add(memory);
+        await db.SaveChangesAsync();
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current =
+            GenericAdminActor(user) with { AllowedProjectIds = [project] };
+
+        var runId = $"shared-execution-grant-{Guid.NewGuid():N}";
+        string? snapshotToken = null;
+        if (withSnapshot)
+        {
+            var review = await scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>()
+                .ReviewAsync(new KnowledgeReviewRequest([project], GovernanceRunId: runId), default);
+            snapshotToken = review.DurableMemoryCoverage!.SnapshotToken;
+        }
+
+        var request = new GovernanceBatchExecuteRequest(runId, [project], snapshotToken,
+            AllowedActionTypes: [GovernanceBatchActionType.Quarantine], ExecutionMode: GovernanceBatchExecutionMode.Interactive);
+        var executor = scope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>();
+        if (replay)
+        {
+            var first = await executor.ExecuteAsync(request, default);
+            first.Succeeded.Should().BeTrue(first.StoppedReason);
+            (await executor.ExecuteAsync(request, default)).IsReplay.Should().BeTrue();
+        }
+
+        db.TenantProjectGrants.Add(new TenantProjectGrant
+        {
+            TenantId = user.TenantId,
+            ProjectId = ProjectContext.SharedProjectId.ToUpperInvariant(),
+            CanRead = true,
+            CanWrite = false
+        });
+        await db.SaveChangesAsync();
+
+        if (withSnapshot)
+        {
+            var readable = await scope.ServiceProvider.GetRequiredService<IDurableMemoryGovernanceService>()
+                .GetSnapshotAsync(runId, snapshotToken!, false, false, default);
+            readable.Coverage.SnapshotToken.Should().Be(snapshotToken);
+        }
+
+        var before = await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id);
+        var receiptCount = await db.GovernanceRunReceipts.CountAsync(x => x.GovernanceRunId == runId);
+        var invoke = () => executor.ExecuteAsync(request, default);
+        await invoke.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*durable project grant*");
+        (await db.GovernanceBatchExecutions.CountAsync(x => x.Run!.GovernanceRunId == runId)).Should().Be(replay ? 1 : 0);
+        (await db.GovernanceRunReceipts.CountAsync(x => x.GovernanceRunId == runId)).Should().Be(receiptCount);
+        (await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id)).Status.Should().Be(before.Status);
+    }
+
     [DockerRequiredFact]
     public async Task Interactive_Executor_Rejects_Durable_ReadOnly_Project_Grant_Before_Mutation()
     {
@@ -535,6 +980,62 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
     }
 
     [DockerRequiredFact]
+    public async Task Cancelled_same_run_waiter_can_resume_while_other_runs_have_independent_admission()
+    {
+        var factory = environment.GetFactory();
+        using var holderScope = factory.Services.CreateScope();
+        using var waiterScope = factory.Services.CreateScope();
+        using var otherScope = factory.Services.CreateScope();
+        var holderDb = holderScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var waiterDb = waiterScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var user = await holderDb.TenantUsers.AsNoTracking().SingleAsync(row => row.Username == "contract-test-admin");
+        var actor = ScheduledActor(user);
+        holderScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        waiterScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        otherScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        var heldRunId = $"scheduled-held-{Guid.NewGuid():N}";
+        var otherRunId = $"scheduled-other-{Guid.NewGuid():N}";
+        var receipts = holderScope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var waiter = waiterScope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var other = otherScope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        await waiterDb.Database.OpenConnectionAsync(deadline.Token);
+        var holder = await receipts.AcquireRunLockAsync(heldRunId, deadline.Token);
+        await using var barrier = await PostgresAdvisoryLockBarrier.CreateAsync(holder,
+            holderDb.Database.GetDbConnection(), waiterDb.Database.GetDbConnection(), environment.PostgresConnectionString!, deadline.Token);
+        await receipts.RecordReviewStartedAsync(heldRunId, DateTimeOffset.UtcNow, CurrentScheduledReceiptIdentity(), deadline.Token);
+
+        using var waiterCancellation = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+        var waiting = waiter.ReviewAsync(new(heldRunId), waiterCancellation.Token);
+        try
+        {
+            await barrier.WaitForWriterBlockedAsync(deadline.Token);
+            var independent = await other.ReviewAsync(new(otherRunId), deadline.Token);
+            var independentReceipt = await other.GetReceiptAsync(otherRunId, deadline.Token, includeReliabilityHistory: false);
+            independentReceipt.GovernanceRunId.Should().Be(otherRunId);
+            independentReceipt.Status.Should().Be("Completed");
+            independentReceipt.FinalSnapshotToken.Should().Be(independent.SnapshotToken);
+            (await receipts.GetAsync(heldRunId, deadline.Token))!.Status.Should().Be("Running");
+        }
+        finally
+        {
+            await waiterCancellation.CancelAsync();
+            await FluentActions.Awaiting(() => waiting.WaitAsync(TimeSpan.FromSeconds(10)))
+                .Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        (await holderDb.GovernanceRunReceipts.AsNoTracking().CountAsync(row => row.GovernanceRunId == heldRunId))
+            .Should().Be(1, "the cancelled waiter must not append a receipt");
+        await barrier.ReleaseHolderAsync(deadline.Token);
+        var resumed = await waiter.ReviewAsync(new(heldRunId), deadline.Token);
+        var resumedReceipt = await waiter.GetReceiptAsync(heldRunId, deadline.Token, includeReliabilityHistory: false);
+        resumedReceipt.GovernanceRunId.Should().Be(heldRunId);
+        resumedReceipt.Terminal.Should().BeTrue();
+        resumedReceipt.Status.Should().Be("Completed");
+        resumedReceipt.FinalSnapshotToken.Should().Be(resumed.SnapshotToken);
+    }
+
+    [DockerRequiredFact]
     public async Task Interactive_Executor_Must_Not_Broaden_Exact_Insight_Whitespace_Matching()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -638,6 +1139,34 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
         result.SemanticAutoResolvedCount.Should().Be(0);
         (await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
             .PromotionStatus.Should().Be(ConversationPromotionStatus.Deferred);
+    }
+
+    private static async Task<TenantUser> CreateReviewGrantOwnerAsync(MemoryDbContext db)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
+        var tenant = new Tenant
+        {
+            Id = id,
+            Slug = $"review-acl-{id:N}"[..28],
+            DisplayName = "Isolated governance review grants",
+            Status = TenantStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var user = new TenantUser
+        {
+            TenantId = tenant.Id,
+            Username = "review-grant-owner",
+            DisplayName = "Review grant owner",
+            Role = TenantUserRole.Admin,
+            Status = TenantUserStatus.Active,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.AddRange(tenant, user);
+        await db.SaveChangesAsync();
+        return user;
     }
 
     private static ContextHubRequestActor ScheduledActor(TenantUser user)

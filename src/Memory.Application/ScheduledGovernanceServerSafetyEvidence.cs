@@ -31,6 +31,12 @@ public sealed record ScheduledGovernanceServerSafetyEvidenceSnapshot(
     bool? ImmutableSnapshotBound,
     bool? FixedReversibleExecutorUsed)
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool DecisionProjectionPending { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool UnknownExecutionOutcome { get; init; }
+
     public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> InvariantProofs { get; init; } =
         new Dictionary<string, ScheduledGovernanceInvariantProof>();
 }
@@ -70,5 +76,12 @@ public interface IScheduledGovernanceServerSafetyEvidenceProvider
 {
     Task<ScheduledGovernanceServerSafetyEvidenceSnapshot?> GetAsync(
         ScheduledGovernanceServerSafetyEvidenceQuery query,
+        CancellationToken cancellationToken);
+}
+
+public interface IScheduledGovernanceServerSafetyHistoryProvider : IScheduledGovernanceServerSafetyEvidenceProvider
+{
+    Task<IReadOnlyDictionary<ScheduledGovernanceServerSafetyEvidenceQuery, ScheduledGovernanceServerSafetyEvidenceSnapshot?>> GetHistoryAsync(
+        IReadOnlyList<ScheduledGovernanceServerSafetyEvidenceQuery> queries,
         CancellationToken cancellationToken);
 }

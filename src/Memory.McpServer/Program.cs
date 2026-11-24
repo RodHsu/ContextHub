@@ -1422,9 +1422,24 @@ conversations.MapGet("/insights/{insightId:guid}", async (Guid insightId, IConve
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
 conversations.MapGet("/adjudication-preview", async (string projectId, int? offset, int? limit, string? governanceRunId,
-    IConversationAdjudicationService service, CancellationToken cancellationToken) =>
-    Results.Ok(await service.PreviewAsync(new ConversationAdjudicationPreviewRequest(projectId, offset ?? 0, limit ?? 100, governanceRunId), cancellationToken)))
-    .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+    bool? includeInventoryToken, string? expectedInventoryToken, IConversationAdjudicationService service, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await service.PreviewAsync(new ConversationAdjudicationPreviewRequest(
+            projectId, offset ?? 0, limit ?? 100, governanceRunId, includeInventoryToken ?? false, expectedInventoryToken), cancellationToken));
+    }
+    catch (ConversationAdjudicationInventoryException ex) { return Results.Conflict(new { error = ex.Message }); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+
+conversations.MapPost("/adjudications/receipt-lookup", async (ConversationAdjudicationRequest request,
+    IConversationAdjudicationService service, HttpContext context, CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    try { return Results.Ok(await service.ReadReceiptAsync(request, cancellationToken)); }
+    catch (InvalidConversationAdjudicationRequestException ex) { return Results.BadRequest(new { error = ex.Message }); }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+}).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 
 conversations.MapPost("/adjudications", async (ConversationAdjudicationRequest request,
     IConversationAdjudicationService service, CancellationToken cancellationToken) =>

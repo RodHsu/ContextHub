@@ -13,6 +13,8 @@
   <ItemGroup>
     <PackageReference Include="Fido2" Version="4.1.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.4" />
+    <!-- Override the transitive CBOR dependency from Fido2. -->
+    <PackageReference Include="System.Formats.Cbor" Version="10.0.15" />
   </ItemGroup>
 
   <PropertyGroup>

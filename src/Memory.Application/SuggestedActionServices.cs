@@ -226,6 +226,12 @@ public sealed class SuggestedActionService(
             return;
         }
 
+        if (ProjectArtifactExchangeService.GetDuplicateIdentity(memories[0]) is not { } identity ||
+            identity != ProjectArtifactExchangeService.GetDuplicateIdentity(memories[1]))
+        {
+            throw new InvalidOperationException("The current evidence does not support merging these file references. Review the artifacts separately.");
+        }
+
         var authoritative = memories
             .OrderByDescending(AuthorityScore)
             .ThenByDescending(x => x.UpdatedAt)

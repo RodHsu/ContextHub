@@ -37,6 +37,22 @@ the target revision, status, and stage. Persist this limited status output for
 operations. Keep host configuration, health credentials, and detailed runtime logs
 in authorized storage.
 
+## Schema changes
+
+Before recording a promotion, compare the proposed source with the deployment
+controller's configured schema baseline.
+
+```powershell
+git diff --name-status $SchemaBaselineSha $SourceSha -- src/Memory.Infrastructure/Sql/Migrations
+```
+
+If this lists changes, keep the promotion off the automated target branch while
+the schema rollout is reviewed. Capture the migration ledger before and after
+the upgrade, and verify that the retained rollback application remains
+compatible with the resulting schema. The controller can accept the source
+after the deployment owner configures a baseline with the approved migration
+set and confirms the rollback contract.
+
 ## Failure handling
 
 The controller first builds locally tagged images and verifies the current running

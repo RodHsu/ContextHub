@@ -81,7 +81,7 @@
     }
   ],
   "orchestration": {
-    "prompt": "At each scheduled run, obtain the published contract, create a new run identifier, review the complete server scope, and obey only the server decision. Use the reversible operation only when the decision authorizes it; then read the receipt, replay the identical request only after outcome recovery requires it, and perform a same-run review. For intermediate receipt recovery set includeReliabilityHistory to false. Request full history for final reliability qualification. Stop and report on a human-decision or incomplete-coverage decision. Never invent scope, endpoint, authority, or operation controls.",
+    "prompt": "At each scheduled run, obtain the published contract, create a new run identifier, review the complete server scope, and obey only the server decision. Use the reversible operation only when the decision authorizes it; then read the receipt, replay the identical request only after outcome recovery requires it, and perform a same-run review. For intermediate receipt recovery set includeReliabilityHistory to false. If the same-run receipt is unavailable or cannot establish the original batch outcome, stop and report the unknown outcome without resubmitting. Request full history for final reliability qualification. Stop and report on a human-decision or incomplete-coverage decision. Never invent scope, endpoint, authority, or operation controls.",
     "runIdPolicy": "fresh-per-schedule",
     "scopePolicy": "server-resolved-complete-authorized-scope",
     "projectSelection": "server-only",

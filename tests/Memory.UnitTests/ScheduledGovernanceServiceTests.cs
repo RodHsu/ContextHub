@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
+using Microsoft.Extensions.Logging;
 
 namespace Memory.UnitTests;
 
@@ -121,6 +122,25 @@ public sealed class ScheduledGovernanceServiceTests
         service = CreateService(new StubKnowledgeReviewService(CreateReview([], countInvariant: false)), new CapturingExecutor());
         (await service.ReviewAsync(new("run-incomplete"), CancellationToken.None)).Decision
             .Should().Be(ScheduledGovernanceDecision.CoverageIncomplete);
+    }
+
+    [Fact]
+    public async Task Execute_reports_an_unknown_item_outcome_as_unsuccessful()
+    {
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor("UnknownResult"),
+            new StubReceipts(CreateDecisionReceipt("run-unknown", ScheduledGovernanceDecision.ReversibleExecutionRequired)));
+
+        var result = await service.ExecuteAsync(
+            new ScheduledGovernanceExecuteRequest("run-unknown", "snapshot-1",
+                ToolContractVersion: ScheduledGovernanceContract.ToolContractVersion,
+                SchemaHash: ScheduledGovernanceContract.SchemaHash),
+            default);
+
+        result.Succeeded.Should().BeFalse();
+        result.StoppedReason.Should().Be("UnknownResult");
+        result.RequiresReReview.Should().BeTrue();
     }
 
     [Fact]
@@ -413,6 +433,80 @@ public sealed class ScheduledGovernanceServiceTests
     }
 
     [Fact]
+    public async Task Run_Get_Preserves_Core_Receipt_When_Optional_History_Times_Out()
+    {
+        const string runId = "run-history-unavailable";
+        var logger = new ReceiptLogger();
+        var reliability = new CountingReliability { SummaryFailure = new TimeoutException("Reliability query timed out.") };
+        var receipt = CreateReceipt(runId, "scheduled-1.3", "sha256:current", "catalog-current");
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(),
+            new StubReceipts(receipt),
+            reliability, logger);
+
+        var result = await service.GetReceiptAsync(runId, CancellationToken.None);
+        var receiptOnly = await service.GetReceiptAsync(runId, CancellationToken.None, includeReliabilityHistory: false);
+
+        result.Should().BeEquivalentTo(receiptOnly);
+        result.RunExists.Should().BeTrue();
+        result.Received.Should().BeTrue();
+        result.Reliability.Should().BeNull();
+        result.ServerInvariantProofs.Should().BeEmpty();
+        reliability.GetCount.Should().Be(1);
+        reliability.PersistCount.Should().Be(0);
+        reliability.ObserveCount.Should().Be(0);
+        var log = logger.Entries.Should().ContainSingle().Subject;
+        log.Level.Should().Be(LogLevel.Warning);
+        log.Exception.Should().BeNull();
+        log.Message.Should().Contain("unavailable in reliability-history").And.Contain("TimeoutException")
+            .And.NotContain(runId).And.NotContain("Reliability query timed out.");
+    }
+
+    [Fact]
+    public async Task Run_Get_Logs_Snapshot_Failure_Without_Reading_History()
+    {
+        const string runId = "run-snapshot-error";
+        var logger = new ReceiptLogger();
+        var reliability = new CountingReliability();
+        var receipts = new StubReceipts { SnapshotFailure = new TimeoutException("snapshot details") };
+        var service = CreateService(new StubKnowledgeReviewService(CreateReview([])), new CapturingExecutor(),
+            receipts, reliability, logger);
+
+        await FluentActions.Invoking(() => service.GetReceiptAsync(runId, CancellationToken.None))
+            .Should().ThrowAsync<TimeoutException>();
+        reliability.GetCount.Should().Be(0);
+        var log = logger.Entries.Should().ContainSingle().Subject;
+        log.Level.Should().Be(LogLevel.Warning);
+        log.Exception.Should().BeNull();
+        log.Message.Should().Contain("failed in snapshot").And.Contain("TimeoutException")
+            .And.NotContain(runId).And.NotContain("snapshot details");
+    }
+
+    [Fact]
+    public async Task Run_Get_Propagates_Caller_Cancellation_During_Optional_History()
+    {
+        const string runId = "run-cancelled";
+        using var cancellation = new CancellationTokenSource();
+        var logger = new ReceiptLogger();
+        var reliability = new CountingReliability
+        {
+            SummaryFailure = new OperationCanceledException(cancellation.Token)
+        };
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor(),
+            new StubReceipts(CreateReceipt(runId, "scheduled-1.3", "sha256:current", "catalog-current")),
+            reliability, logger);
+        cancellation.Cancel();
+
+        await FluentActions.Invoking(() => service.GetReceiptAsync(runId, cancellation.Token))
+            .Should().ThrowAsync<OperationCanceledException>();
+        logger.Entries.Should().ContainSingle().Subject.Message
+            .Should().Contain("caller-cancellation-requested in reliability-history");
+    }
+
+    [Fact]
     public async Task GetReceipt_Should_Return_Persisted_Contract_Identity_Not_Current_Constants()
     {
         var persisted = CreateReceipt("run-old", "scheduled-0.9", "sha256:old", "catalog-old");
@@ -586,10 +680,11 @@ public sealed class ScheduledGovernanceServiceTests
     [Fact]
     public async Task GetReceipt_Should_Return_Structured_NotReceived_Result()
     {
+        var reliability = new CountingReliability { RejectSummary = true };
         var service = CreateService(
             new StubKnowledgeReviewService(CreateReview([])),
             new CapturingExecutor(),
-            new StubReceipts());
+            new StubReceipts(), reliability);
 
         var result = await service.GetReceiptAsync("missing-run", CancellationToken.None);
 
@@ -600,6 +695,8 @@ public sealed class ScheduledGovernanceServiceTests
         result.Status.Should().Be("NotReceived");
         result.Outcome.Should().Be("NotReceived");
         result.GovernanceRunId.Should().Be("missing-run");
+        result.Reliability.Should().BeNull();
+        reliability.GetCount.Should().Be(0);
     }
 
     [Fact]
@@ -756,7 +853,8 @@ public sealed class ScheduledGovernanceServiceTests
         IKnowledgeReviewService knowledge,
         IGovernanceBatchExecutor executor,
         IGovernanceRunReceiptService? receipts = null,
-        IScheduledGovernanceReliabilityService? reliability = null)
+        IScheduledGovernanceReliabilityService? reliability = null,
+        ILogger<ScheduledGovernanceService>? logger = null)
     {
         var actor = new RequestActorAccessor
         {
@@ -768,7 +866,8 @@ public sealed class ScheduledGovernanceServiceTests
             executor,
             receipts ?? new StubReceipts(),
             actor,
-            reliability);
+            reliability,
+            logger);
     }
 
     private static GovernanceRunReceiptResult CreateReceipt(
@@ -961,7 +1060,7 @@ public sealed class ScheduledGovernanceServiceTests
             => Task.FromCanceled<KnowledgeReviewResult>(cancellationToken);
     }
 
-    private sealed class CapturingExecutor : IGovernanceBatchExecutor
+    private sealed class CapturingExecutor(string stoppedReason = "Completed") : IGovernanceBatchExecutor
     {
         public int CallCount { get; private set; }
         public GovernanceBatchExecuteRequest? Request { get; private set; }
@@ -971,7 +1070,7 @@ public sealed class ScheduledGovernanceServiceTests
             Request = request;
             return Task.FromResult(new GovernanceBatchExecuteResult(
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                null, false, true, [], [], request.SnapshotToken!, "Completed"));
+                null, false, true, [], [], request.SnapshotToken!, stoppedReason));
         }
     }
 
@@ -1028,6 +1127,13 @@ public sealed class ScheduledGovernanceServiceTests
             => Task.FromResult<IAsyncDisposable>(new NoopAsyncDisposable());
         public Task<GovernanceRunLineageResult> GetScheduledLineageAsync(string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken)
             => Task.FromResult(Lineage);
+        public Task<(GovernanceRunReceiptResult Receipt, GovernanceRunLineageResult Lineage)?> GetScheduledReceiptSnapshotAsync(
+            string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken)
+            => SnapshotFailure is { } failure
+                ? Task.FromException<(GovernanceRunReceiptResult, GovernanceRunLineageResult)?>(failure)
+                : Task.FromResult<(GovernanceRunReceiptResult, GovernanceRunLineageResult)?>(receipt is null ? null : (receipt, Lineage));
+
+        public Exception? SnapshotFailure { get; init; }
         public Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken, bool isReReview = false)
         {
             ReviewStoppedCount++;
@@ -1048,10 +1154,22 @@ public sealed class ScheduledGovernanceServiceTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
+    private sealed class ReceiptLogger : ILogger<ScheduledGovernanceService>
+    {
+        public List<(LogLevel Level, Exception? Exception, string Message)> Entries { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Entries.Add((logLevel, exception, formatter(state, exception)));
+    }
+
     private sealed class CountingReliability : IScheduledGovernanceReliabilityService
     {
         public Func<GovernanceRunReceiptResult, CancellationToken, Task>? PersistOverride { get; init; }
         public bool RejectSummary { get; init; }
+        public Exception? SummaryFailure { get; init; }
         public ScheduledGovernanceReliabilitySummary? Summary { get; init; }
         public int PersistCount { get; private set; }
         public int ObserveCount { get; private set; }
@@ -1076,7 +1194,9 @@ public sealed class ScheduledGovernanceServiceTests
         {
             GetCount++;
             if (RejectSummary) throw new InvalidOperationException("summary must not be requested");
-            return Task.FromResult(Summary!);
+            return SummaryFailure is null
+                ? Task.FromResult(Summary!)
+                : Task.FromException<ScheduledGovernanceReliabilitySummary>(SummaryFailure);
         }
     }
 }

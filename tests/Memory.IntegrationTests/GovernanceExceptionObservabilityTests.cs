@@ -6,6 +6,7 @@ using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
@@ -249,6 +250,344 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
         var readBack = await seedDb.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
         readBack.Status.Should().Be(GovernanceFindingStatus.HostBlocked);
         readBack.GovernanceReasonClass.Should().Be("HostCapabilityUnavailable");
+    }
+
+    [DockerRequiredFact]
+    public async Task Governance_fingerprint_should_preserve_scoped_evidence_watermarks_and_the_no_reference_hash()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var tenantId = actor.TenantId!.Value;
+        var ownerId = actor.UserId!.Value;
+        var projectId = $"fingerprint-parity-{Guid.NewGuid():N}";
+        var alias = projectId.ToUpperInvariant();
+        var unrelatedProjectId = $"{projectId}-other";
+        var insight = await SeedGovernanceInsightAsync(db, actor, projectId);
+        var related = await SeedGovernanceInsightAsync(db, actor, alias);
+        var needle = insight.Id.ToString("D");
+        var stamp = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        var firstOverlappingId = Guid.Parse("deadbeef-1111-2222-3333-aaaaaaaaaaaa");
+        var secondOverlappingId = Guid.Parse("aaaabbbb-4444-5555-6666-777777777777");
+        var secondNeedle = secondOverlappingId.ToString("D");
+        var overlappingReferences = $"{firstOverlappingId:D}{secondNeedle[4..]}";
+        insight.Content = needle;
+        insight.UpdatedAt = stamp.AddMinutes(20);
+        related.Summary = needle;
+        related.UpdatedAt = stamp.AddMinutes(6);
+
+        var checklistEntry = new ProjectWorkItemChecklistItem
+        {
+            Content = needle,
+            CreatedAt = stamp,
+            UpdatedAt = stamp.AddMinutes(3)
+        };
+        var message = new DiscussionMessage
+        {
+            SenderProjectId = unrelatedProjectId,
+            Content = needle,
+            CreatedAt = stamp.AddMinutes(5)
+        };
+        var workItem = new ProjectWorkItem
+        {
+            TenantId = tenantId,
+            OwnerUserId = ownerId,
+            ProjectId = alias,
+            Title = needle,
+            CreatedAt = stamp,
+            UpdatedAt = stamp.AddMinutes(2),
+            ChecklistItems = [checklistEntry]
+        };
+        var thread = new DiscussionThread
+        {
+            TenantId = tenantId,
+            OwnerUserId = ownerId,
+            HostProjectId = alias,
+            Title = needle,
+            CreatedAt = stamp,
+            UpdatedAt = stamp.AddMinutes(4),
+            Messages = [message]
+        };
+        var alternateOwner = new TenantUser
+        {
+            TenantId = tenantId,
+            Username = $"fingerprint-owner-{Guid.NewGuid():N}",
+            DisplayName = "Fingerprint parity control",
+            Role = TenantUserRole.Member,
+            Status = TenantUserStatus.Active,
+            CreatedAt = stamp,
+            UpdatedAt = stamp
+        };
+        db.TenantUsers.Add(alternateOwner);
+        await db.SaveChangesAsync(CancellationToken.None);
+        var otherOwnerInsight = await SeedGovernanceInsightAsync(db, actor with { UserId = alternateOwner.Id }, projectId);
+
+        ConversationInsight CreateSubject(Guid id) => new()
+        {
+            Id = id,
+            SessionId = insight.SessionId,
+            CheckpointId = insight.CheckpointId,
+            TenantId = tenantId,
+            OwnerUserId = ownerId,
+            ProjectId = projectId,
+            DedupKey = $"fingerprint-parity:{id:N}",
+            CreatedAt = stamp,
+            UpdatedAt = stamp
+        };
+        var additionalSubjects = Enumerable.Range(0, 125)
+            .Select(_ => CreateSubject(Guid.NewGuid()))
+            .Append(CreateSubject(firstOverlappingId))
+            .Append(CreateSubject(secondOverlappingId))
+            .ToArray();
+        db.ConversationInsights.AddRange(additionalSubjects);
+        db.AddRange(
+            new MemoryItem
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                ExternalKey = "system:project-information",
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(1)
+            },
+            workItem,
+            thread,
+            new ProjectWorkItem
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                Title = secondNeedle[..18],
+                Description = secondNeedle[18..],
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(23)
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                DedupKey = needle,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(7)
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = unrelatedProjectId,
+                DedupKey = needle,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(21)
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = alternateOwner.Id,
+                ProjectId = alias,
+                DedupKey = needle,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(22)
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                DedupKey = overlappingReferences,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(9)
+            },
+            new SuggestedAction
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ProjectId = alias,
+                DedupKey = secondNeedle.ToUpperInvariant(),
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(24)
+            },
+            new ProjectHierarchy
+            {
+                TenantId = tenantId,
+                OwnerUserId = ownerId,
+                ParentProjectId = unrelatedProjectId,
+                ChildProjectId = alias,
+                CreatedAt = stamp,
+                UpdatedAt = stamp.AddMinutes(8)
+            });
+        await db.SaveChangesAsync(CancellationToken.None);
+
+        const string semanticPayload = "deterministic parity payload";
+        string ExpectedHash(params int?[] watermarks)
+        {
+            var canonical = string.Join('\n', new[]
+            {
+                "autonomous-semantic-2026-09-01-v2", projectId, semanticPayload,
+                string.Empty, string.Empty, string.Empty, string.Empty
+            }.Concat(watermarks.Select(value =>
+                value is int offset ? stamp.AddMinutes(offset).UtcTicks.ToString() : string.Empty)));
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+        }
+
+        var executedCommands = 0;
+        var readOptions = new DbContextOptionsBuilder<MemoryDbContext>(
+                scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .LogTo(_ => executedCommands++, [RelationalEventId.CommandExecuted])
+            .Options;
+        await using var readDb = new MemoryDbContext(readOptions);
+        Task<string> BuildAsync(Guid? excludedInsightId, GovernanceInsightReferenceWatermarks? referenceWatermarks = null)
+            => GovernanceEvidenceFingerprint.BuildAsync(
+                readDb, projectId, tenantId, ownerId, null, null, excludedInsightId, semanticPayload,
+                CancellationToken.None, referenceWatermarks: referenceWatermarks);
+
+        var originalHash = await BuildAsync(insight.Id);
+        originalHash.Should().Be(ExpectedHash(1, 2, 3, 4, 5, 7, 6, 8));
+        executedCommands.Should().Be(1);
+        (await BuildAsync(null)).Should().Be(ExpectedHash(1, null, null, null, null, null, null, 8));
+        executedCommands.Should().Be(2);
+
+        var eligibleIds = additionalSubjects.Select(subject => subject.Id).Append(insight.Id).Append(related.Id).ToArray();
+        var batch = await readDb.ReadInsightReferenceWatermarksAsync(
+            tenantId, ownerId, [.. eligibleIds, otherOwnerInsight.Id, insight.Id], CancellationToken.None);
+        batch.Keys.Should().BeEquivalentTo(eligibleIds);
+        executedCommands.Should().Be(3, "all 129 eligible insights use one scoped SQL query");
+        (await BuildAsync(insight.Id, batch[insight.Id])).Should().Be(originalHash);
+        foreach (var overlappingId in new[] { firstOverlappingId, secondOverlappingId })
+        {
+            (await BuildAsync(overlappingId, batch[overlappingId])).Should()
+                .Be(ExpectedHash(1, null, null, null, null, 9, null, 8));
+        }
+        executedCommands.Should().Be(3, "using the preloaded watermarks adds no SQL query");
+        foreach (var overlappingId in new[] { firstOverlappingId, secondOverlappingId })
+        {
+            (await BuildAsync(overlappingId)).Should().Be(await BuildAsync(overlappingId, batch[overlappingId]));
+        }
+        executedCommands.Should().Be(5);
+
+        workItem.Title = "No title reference.";
+        thread.Title = "No title reference.";
+        await db.SaveChangesAsync(CancellationToken.None);
+        var childOnly = await readDb.ReadInsightReferenceWatermarksAsync(tenantId, ownerId, [insight.Id], CancellationToken.None);
+        (await BuildAsync(insight.Id, childOnly[insight.Id])).Should().Be(originalHash);
+
+        checklistEntry.Content = "No checklist reference.";
+        message.Content = "No message reference.";
+        await db.SaveChangesAsync(CancellationToken.None);
+        var removedReferences = await readDb.ReadInsightReferenceWatermarksAsync(
+            tenantId, ownerId, [insight.Id], CancellationToken.None);
+        var updatedHash = await BuildAsync(insight.Id);
+        updatedHash.Should().Be(ExpectedHash(1, null, null, null, null, 7, 6, 8));
+        (await BuildAsync(insight.Id, removedReferences[insight.Id])).Should().Be(updatedHash);
+        executedCommands.Should().Be(8);
+    }
+
+    [DockerRequiredFact]
+    public async Task Scheduled_review_counts_owned_shared_insight_exceptions_only_in_resolved_scope()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var (tenant, owner) = CreateOtherOwner();
+        db.AddRange(tenant, owner);
+        await db.SaveChangesAsync();
+
+        var shared = ProjectContext.SharedProjectId;
+        var actor = new ContextHubRequestActor(tenant.Id, owner.Id, owner.Username, owner.Role,
+            [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.PreferencesRead, SecurityScopes.ScheduledGovernance],
+            [], true);
+        accessor.Current = actor;
+        var manual = await SeedGovernanceInsightAsync(db, actor, shared);
+        manual.PromotionStatus = ConversationPromotionStatus.RequiresUserDecision;
+        var deferred = await SeedGovernanceInsightAsync(db, actor, shared);
+        var blocked = await SeedGovernanceInsightAsync(db, actor, shared);
+        blocked.PromotionStatus = ConversationPromotionStatus.HostBlocked;
+        await db.SaveChangesAsync();
+
+        var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var runId = $"shared-insight-exceptions-{Guid.NewGuid():N}";
+        var first = await scheduled.ReviewAsync(new ScheduledGovernanceReviewRequest(runId), default);
+        first.GovernedExceptionCount.Should().Be(3);
+        first.ReversibleExecutionCount.Should().Be(0);
+        first.Decision.Should().Be(ScheduledGovernanceDecision.HumanDecisionOnly);
+
+        var second = await scheduled.ReviewAsync(new ScheduledGovernanceReviewRequest(runId, IsReReview: true), default);
+        second.GovernedExceptionCount.Should().Be(3);
+        second.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
+        second.ExceptionDelta!.Unchanged.Should().Be(3);
+
+        var knowledge = scope.ServiceProvider.GetRequiredService<IKnowledgeReviewService>();
+        var review = await knowledge.ReviewAsync(new KnowledgeReviewRequest([shared]), default);
+        review.GovernanceCoverage!.ProjectCoverage.TotalCount.Should().Be(0);
+        review.GovernanceCoverage.InsightCoverage.TotalCount.Should().Be(3);
+        review.RemainingHumanDecisionCount.Should().Be(1);
+        review.GovernedExceptionStates.Select(x => x.Key).Should().BeEquivalentTo(new[]
+        {
+            $"insight:{manual.Id:D}", $"insight:{deferred.Id:D}", $"insight:{blocked.Id:D}"
+        });
+        review.GovernancePlan.Should().BeEmpty();
+        review.HighSignalConversationInsights.Should().BeEmpty();
+
+        const string restricted = "ordinary-only";
+        accessor.Current = actor with { AllowedProjectIds = [restricted] };
+        await scope.ServiceProvider.GetRequiredService<IProjectInformationService>()
+            .UpsertAsync(new ProjectInformationUpdateRequest(restricted, "Ordinary", string.Empty), default);
+        var other = await knowledge.ReviewAsync(new KnowledgeReviewRequest(), default);
+        other.DurableMemoryCoverage!.GovernanceProjectIds.Count(ProjectContext.IsShared).Should().Be(1);
+        other.GovernanceCoverage!.InsightCoverage.TotalCount.Should().Be(0);
+        other.GovernedExceptionStates.Should().BeEmpty();
+    }
+
+    [DockerRequiredFact]
+    public async Task Full_governance_counts_insight_lifecycle_inventory_without_queuing_stored_exceptions()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var projectId = $"insight-coverage-{Guid.NewGuid():N}";
+        var rows = new Dictionary<ConversationPromotionStatus, ConversationInsight>();
+        foreach (var status in Enum.GetValues<ConversationPromotionStatus>())
+        {
+            var row = await SeedGovernanceInsightAsync(db, actor, projectId);
+            row.PromotionStatus = status;
+            rows.Add(status, row);
+        }
+
+        var proposal = await SeedGovernanceInsightAsync(db, actor, projectId);
+        proposal.SourceSystem = ChatGptProposalService.SourceSystem;
+        proposal.Tags = ["chatgpt-proposal"];
+        proposal.PromotionStatus = ConversationPromotionStatus.Pending;
+        var outside = await SeedGovernanceInsightAsync(db, actor, projectId + "-outside");
+        outside.PromotionStatus = ConversationPromotionStatus.RequiresUserDecision;
+        await db.SaveChangesAsync();
+
+        var service = scope.ServiceProvider.GetRequiredService<IFullGovernancePlanService>();
+        var first = await service.BuildAsync([projectId], $"insight-coverage-{Guid.NewGuid():N}",
+            CreateEmptyGovernanceSnapshot(), default);
+        var coverage = first.Coverage.InsightCoverage;
+
+        coverage.TotalCount.Should().Be(rows.Count);
+        coverage.ScannedCount.Should().Be(rows.Count);
+        coverage.CoverageComplete.Should().BeTrue();
+        coverage.HasMore.Should().BeFalse();
+        coverage.CandidateCount.Should().Be(2);
+        coverage.ActionableCount.Should().Be(0);
+        coverage.DeferredCount.Should().Be(1);
+        coverage.RequiresUserDecisionCount.Should().Be(3);
+        coverage.HostBlockedCount.Should().Be(1);
+        first.Coverage.ProposalCoverage.TotalCount.Should().Be(1);
+        first.Items.Where(x => x.ItemKind == GovernanceItemKind.ConversationInsight)
+            .Select(x => x.AuthorityResourceId).Should().BeEquivalentTo(new[]
+            {
+                rows[ConversationPromotionStatus.Pending].Id,
+                rows[ConversationPromotionStatus.Failed].Id
+            });
+        foreach (var (status, insight) in rows)
+        {
+            (await db.ConversationInsights.AsNoTracking().Where(x => x.Id == insight.Id)
+                .Select(x => x.PromotionStatus).SingleAsync()).Should().Be(status);
+        }
     }
 
     [DockerRequiredFact]

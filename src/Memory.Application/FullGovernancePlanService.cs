@@ -20,7 +20,8 @@ public sealed class FullGovernancePlanService(
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         DurableMemoryGovernanceSnapshotResult memorySnapshot,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowCancelledRetentionReactivation = true)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
@@ -30,7 +31,8 @@ public sealed class FullGovernancePlanService(
         ActorAuthorization.EnsureProjectsAllowed(actor, projects, write: false);
         var projectSet = projects.ToHashSet(ProjectContext.IdentityComparer);
         var items = new List<GovernanceReviewItem>();
-        var retention = await autonomousRetention.ReviewAsync(projects, governanceRunId, cancellationToken);
+        var retention = await autonomousRetention.ReviewAsync(projects, governanceRunId, cancellationToken,
+            allowCancelledReactivation: allowCancelledRetentionReactivation);
         foreach (var candidate in retention.Candidates)
         {
             items.Add(new GovernanceReviewItem(
@@ -108,7 +110,10 @@ public sealed class FullGovernancePlanService(
         var projectInformation = scopedMemories
             .Where(x => Memory.Application.ProjectContext.IdentityKeys(projectSet).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && x.ExternalKey == ProjectInformationExternalKey)
             .ToArray();
-        foreach (var projectId in projects)
+        var projectInformationProjects = projects
+            .Where(projectId => !ProjectContext.IsShared(projectId) && !ProjectContext.IsUser(projectId))
+            .ToArray();
+        foreach (var projectId in projectInformationProjects)
         {
             var information = projectInformation.OrderByDescending(x => x.UpdatedAt)
                 .FirstOrDefault(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
@@ -156,7 +161,17 @@ public sealed class FullGovernancePlanService(
         var artifacts = scopedMemories.Where(x => Memory.Application.ProjectContext.IdentityKeys(projectSet).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && x.MemoryType == MemoryType.Artifact &&
                                                    x.ExternalKey != ProjectInformationExternalKey).ToArray();
         foreach (var group in artifacts.Where(x => x.Status == MemoryStatus.Active)
-                     .GroupBy(x => $"{x.ProjectId}\nvalue:{NormalizeText(x.Title)}\n{NormalizeText(x.Summary)}\n{NormalizeText(x.SourceType)}", StringComparer.OrdinalIgnoreCase)
+                     .Select(x => (Item: x, Identity: ProjectArtifactExchangeService.GetDuplicateIdentity(
+                         x.MemoryType, x.SourceType, x.Tags, x.MetadataJson)))
+                     .Where(x => x.Identity.HasValue)
+                     .GroupBy(x => new
+                     {
+                         Project = Memory.Application.ProjectContext.IdentityKey(x.Item.ProjectId),
+                         Title = NormalizeText(x.Item.Title),
+                         Summary = NormalizeText(x.Item.Summary),
+                         Source = NormalizeText(x.Item.SourceType),
+                         x.Identity
+                     }, x => x.Item)
                      .Where(x => x.Count() > 1))
         {
             var authority = group.OrderByDescending(x => x.Confidence).ThenByDescending(x => x.Importance).ThenByDescending(x => x.UpdatedAt).First();
@@ -207,10 +222,22 @@ public sealed class FullGovernancePlanService(
         }
 
         await ReopenChangedInsightsAsync(projects, tenantId, ownerUserId, governanceRunId, cancellationToken);
-        var insights = await dbContext.ConversationInsights.AsNoTracking()
-            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
-            .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending || x.PromotionStatus == ConversationPromotionStatus.Failed)
-            .ToListAsync(cancellationToken);
+        var insightScope = ChatGptProposalService.ExcludeProposals(dbContext.ConversationInsights.AsNoTracking()
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId))));
+        Dictionary<ConversationPromotionStatus, int> insightStatusCounts;
+        List<ConversationInsight> insights;
+        // Count the lifecycle inventory and read the execution candidates from the same snapshot.
+        await using (var insightSnapshot = await dbContext.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken))
+        {
+            insightStatusCounts = await insightScope
+                .GroupBy(x => x.PromotionStatus)
+                .Select(group => new { Status = group.Key, Count = group.Count() })
+                .ToDictionaryAsync(x => x.Status, x => x.Count, cancellationToken);
+            insights = await insightScope
+                .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending || x.PromotionStatus == ConversationPromotionStatus.Failed)
+                .ToListAsync(cancellationToken);
+            await insightSnapshot.CommitAsync(cancellationToken);
+        }
         var now = clock.UtcNow;
         var currentInsightEvidence = await dbContext.MemoryItems.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
@@ -232,7 +259,7 @@ public sealed class FullGovernancePlanService(
         var proposalInsights = await ChatGptProposalService.ApplyActorScope(
                 dbContext.ConversationInsights.AsNoTracking(), actor, proposalProjects, ChatGptProposalStatus.Pending)
             .ToListAsync(cancellationToken);
-        foreach (var insight in insights.Where(x => !ChatGptProposalService.IsProposal(x)))
+        foreach (var insight in insights)
         {
             var protectedInsight = IsProtectedInsight(insight);
             var evidenceKey = $"{insight.ProjectId}\n{GovernanceEvidenceFingerprint.NormalizeExactText(insight.Title)}\n{GovernanceEvidenceFingerprint.NormalizeExactText(insight.Summary)}";
@@ -339,8 +366,10 @@ public sealed class FullGovernancePlanService(
             x.Status is ProjectWorkItemStatus.Pending or ProjectWorkItemStatus.InProgress or ProjectWorkItemStatus.Blocked &&
             !HasActiveGovernanceExclusion(x.GovernanceExclusionsJson, governanceRunId));
         var governedExceptions = ordered.Count(GovernanceExceptionIdentity.RequiresHumanDecision) + skillGovernance.ExceptionCount;
+        var insightCount = insightStatusCounts.Values.Sum();
+        var insightCoverage = Surface(insightCount, insightCount, ordered, GovernanceItemKind.ConversationInsight);
         var coverage = new FullGovernanceCoverageResult(
-            Surface(projects.Length, projects.Length, ordered, GovernanceItemKind.Project),
+            Surface(projectInformationProjects.Length, projectInformationProjects.Length, ordered, GovernanceItemKind.Project),
             Surface(hierarchyRows.Count, hierarchyRows.Count, ordered, GovernanceItemKind.ProjectHierarchy),
             Surface(memorySnapshot.Coverage.TotalCount, memorySnapshot.Coverage.ScannedCount, ordered, GovernanceItemKind.Memory,
                 memorySnapshot.Coverage.HasMore, memorySnapshot.Coverage.CoverageComplete),
@@ -348,7 +377,13 @@ public sealed class FullGovernancePlanService(
             Surface(artifacts.Length, artifacts.Length, ordered, GovernanceItemKind.Artifact),
             Surface(discussions.Count, discussions.Count, ordered, GovernanceItemKind.Discussion),
             Surface(workItems.Count, workItems.Count, ordered, GovernanceItemKind.WorkItem),
-            Surface(insights.Count(x => !ChatGptProposalService.IsProposal(x)), insights.Count(x => !ChatGptProposalService.IsProposal(x)), ordered, GovernanceItemKind.ConversationInsight),
+            insightCoverage with
+            {
+                DeferredCount = insightStatusCounts.GetValueOrDefault(ConversationPromotionStatus.Deferred),
+                RequiresUserDecisionCount = insightCoverage.RequiresUserDecisionCount +
+                    insightStatusCounts.GetValueOrDefault(ConversationPromotionStatus.RequiresUserDecision),
+                HostBlockedCount = insightStatusCounts.GetValueOrDefault(ConversationPromotionStatus.HostBlocked)
+            },
             Surface(actions.Count, actions.Count, ordered, GovernanceItemKind.SuggestedAction),
             Surface(proposalInsights.Count, proposalInsights.Count, ordered, GovernanceItemKind.Proposal),
             Surface(checked((int)Math.Min(logTotal, int.MaxValue)), logPartitions.Take(MaximumLogPartitions).Sum(x => x.Count), ordered, GovernanceItemKind.LogPartition,
@@ -410,6 +445,7 @@ public sealed class FullGovernancePlanService(
         string governanceRunId,
         CancellationToken cancellationToken)
     {
+        using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.plan.insight-reevaluation");
         // Re-evaluation reads the current exception state and writes both the
         // lifecycle transition and its audit event. Keep that read/write set in
         // one serializable transaction so a concurrent HostBlocked disposition
@@ -424,6 +460,10 @@ public sealed class FullGovernancePlanService(
                          x.PromotionStatus == ConversationPromotionStatus.RequiresUserDecision ||
                          x.PromotionStatus == ConversationPromotionStatus.HostBlocked))
             .ToListAsync(cancellationToken);
+        var referenceWatermarks = exceptions.Count > 0 && dbContext is IGovernanceInsightReferenceReader referenceReader
+            ? await referenceReader.ReadInsightReferenceWatermarksAsync(
+                tenantId, ownerUserId, exceptions.Select(x => x.Id).ToArray(), cancellationToken)
+            : null;
         var reevaluated = false;
         foreach (var insight in exceptions)
         {
@@ -433,7 +473,8 @@ public sealed class FullGovernancePlanService(
                 GovernanceEvidenceFingerprint.InsightPayload(insight), cancellationToken,
                 [insight.Id.ToString("D"), insight.Title],
                 insight.Title,
-                insight.Summary);
+                insight.Summary,
+                referenceWatermarks?[insight.Id]);
             var now = clock.UtcNow;
             var hasBaseline = !string.IsNullOrWhiteSpace(insight.GovernanceEvidenceFingerprint);
             var evidenceChanged = hasBaseline && (

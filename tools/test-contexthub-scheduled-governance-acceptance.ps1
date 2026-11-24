@@ -1,5 +1,4 @@
 [CmdletBinding()]
-[Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "EvidencePath", Justification = "Consumed by the nested evidence writer through script scope.")]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "TimeoutSec", Justification = "Consumed by the nested HTTP helper through script scope.")]
 param(
     [ValidateSet("Readiness", "A0", "A1")]
@@ -9,7 +8,11 @@ param(
     [string]$TokenEnvironmentVariable = "CONTEXTHUB_MCP_AUTOMATION_TOKEN",
     [string]$SpecPath = "",
     [string]$ProtectedInvariantEvidencePath = "",
+    [string]$ProtectedInvariantReadbackRequestPath = "",
+    [ValidateRange(1, 120)]
+    [int]$ProtectedInvariantReadbackTimeoutSec = 30,
     [string]$EvidencePath = "",
+    [string]$A1CheckpointPath = "",
     [ValidateSet("Production", "Isolated")]
     [string]$A1Environment = "Production",
     [switch]$AllowIsolatedSyntheticFixtures,
@@ -363,49 +366,69 @@ function Get-ScheduledGovernanceArrayProperty {
     return @(ConvertTo-ScheduledGovernanceArray (Get-ScheduledGovernancePropertyValue $Object $Name))
 }
 
-function ConvertTo-ScheduledGovernanceCanonicalObject {
-    param([AllowNull()][object]$Value)
+function Write-ScheduledGovernanceCanonicalJson {
+    param([System.Text.Json.Utf8JsonWriter]$Writer, [System.Text.Json.JsonElement]$Value)
 
-    if ($null -eq $Value) {
-        return $null
-    }
-    if ($Value -is [string] -or $Value -is [bool] -or $Value -is [ValueType]) {
-        return $Value
-    }
-    if ($Value -is [System.Collections.IDictionary]) {
-        $ordered = [ordered]@{}
-        foreach ($key in @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
-            $ordered[$key] = ConvertTo-ScheduledGovernanceCanonicalObject $Value[$key]
+    # Match PublishedToolSchemaHash, including ordinal key order and singleton arrays.
+    switch ($Value.ValueKind) {
+        'Object' {
+            $Writer.WriteStartObject()
+            [string[]]$names = @(foreach ($property in $Value.EnumerateObject()) { $property.Name })
+            [Array]::Sort($names, [StringComparer]::Ordinal)
+            foreach ($name in $names) {
+                $Writer.WritePropertyName($name)
+                Write-ScheduledGovernanceCanonicalJson -Writer $Writer -Value $Value.GetProperty($name)
+            }
+            $Writer.WriteEndObject()
         }
-        return $ordered
-    }
-    if ($Value -is [System.Collections.IEnumerable]) {
-        return @($Value | ForEach-Object { ConvertTo-ScheduledGovernanceCanonicalObject $_ })
-    }
-
-    $properties = @($Value.PSObject.Properties | Where-Object { $_.MemberType -eq "NoteProperty" } |
-        Sort-Object Name)
-    if ($properties.Count -gt 0) {
-        $ordered = [ordered]@{}
-        foreach ($property in $properties) {
-            $ordered[$property.Name] = ConvertTo-ScheduledGovernanceCanonicalObject $property.Value
+        'Array' {
+            $Writer.WriteStartArray()
+            foreach ($item in $Value.EnumerateArray()) {
+                Write-ScheduledGovernanceCanonicalJson -Writer $Writer -Value $item
+            }
+            $Writer.WriteEndArray()
         }
-        return $ordered
+        default { $Value.WriteTo($Writer) }
     }
-
-    return $Value
 }
 
 function Get-ScheduledGovernancePublishedSchemaHash {
     param([Parameter(Mandatory)][object]$Tool)
 
-    $canonical = [ordered]@{
-        name = [string](Get-ScheduledGovernancePropertyValue $Tool "name")
-        inputSchema = ConvertTo-ScheduledGovernanceCanonicalObject (Get-ScheduledGovernancePropertyValue $Tool "inputSchema")
-        outputSchema = ConvertTo-ScheduledGovernanceCanonicalObject (Get-ScheduledGovernancePropertyValue $Tool "outputSchema")
+    $document = [System.Text.Json.JsonDocument]::Parse((ConvertTo-Json -InputObject $Tool -Depth 100 -Compress))
+    $buffer = [System.IO.MemoryStream]::new()
+    $writer = [System.Text.Json.Utf8JsonWriter]::new($buffer)
+    try {
+        $writer.WriteStartObject()
+        $writer.WriteString('name', $document.RootElement.GetProperty('name').GetString())
+        foreach ($schema in @('inputSchema', 'outputSchema')) {
+            $writer.WritePropertyName($schema)
+            Write-ScheduledGovernanceCanonicalJson -Writer $writer -Value $document.RootElement.GetProperty($schema)
+        }
+        $writer.WriteEndObject()
+        $writer.Flush()
+        return Get-ScheduledGovernanceSha256Hex -Text ([Text.Encoding]::UTF8.GetString($buffer.ToArray()))
     }
-    $json = $canonical | ConvertTo-Json -Depth 100 -Compress
-    return Get-ScheduledGovernanceSha256Hex -Text $json
+    finally {
+        $writer.Dispose()
+        $buffer.Dispose()
+        $document.Dispose()
+    }
+}
+
+function Assert-ScheduledGovernancePublishedToolAuthority {
+    param([Parameter(Mandatory)][object]$Tool)
+
+    # The output schema reports facts such as resolved project IDs and restricted-action errors.
+    $invocation = @{
+        description = Get-ScheduledGovernancePropertyValue $Tool "description"
+        inputSchema = Get-ScheduledGovernancePropertyValue $Tool "inputSchema"
+    } | ConvertTo-Json -Depth 100 -Compress
+    foreach ($forbidden in Get-ScheduledGovernanceForbiddenToken) {
+        if ($invocation.IndexOf($forbidden, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw "Automation catalog exposed a forbidden authority token in a tool input or description."
+        }
+    }
 }
 
 function Test-ScheduledGovernanceIdsEqual {
@@ -417,6 +440,25 @@ function Test-ScheduledGovernanceIdsEqual {
     $leftValues = @(ConvertTo-ScheduledGovernanceArray $Left | ForEach-Object { [string]$_ } | Sort-Object)
     $rightValues = @(ConvertTo-ScheduledGovernanceArray $Right | ForEach-Object { [string]$_ } | Sort-Object)
     return $leftValues.Count -eq $rightValues.Count -and (($leftValues -join "`n") -ceq ($rightValues -join "`n"))
+}
+
+function Test-ScheduledGovernanceExecutionResult {
+    param(
+        [AllowNull()][object]$Execution,
+        [Parameter(Mandatory)][string]$ExpectedRunId,
+        [Parameter(Mandatory)][string]$ExpectedSnapshot,
+        [Parameter(Mandatory)][bool]$ExpectedReplay
+    )
+
+    $succeeded = Get-ScheduledGovernancePropertyValue $Execution "succeeded"
+    $isReplay = Get-ScheduledGovernancePropertyValue $Execution "isReplay"
+    $stoppedReason = Get-ScheduledGovernancePropertyValue $Execution "stoppedReason"
+    return $succeeded -is [bool] -and $succeeded -and
+        $isReplay -is [bool] -and $isReplay -eq $ExpectedReplay -and
+        $stoppedReason -is [string] -and -not [string]::IsNullOrWhiteSpace($stoppedReason) -and
+        $stoppedReason -cne "UnknownResult" -and
+        (Get-ScheduledGovernancePropertyValue $Execution "governanceRunId") -ceq $ExpectedRunId -and
+        (Get-ScheduledGovernancePropertyValue $Execution "snapshotToken") -ceq $ExpectedSnapshot
 }
 
 function Get-ScheduledGovernanceReviewEvidence {
@@ -434,116 +476,589 @@ function Get-ScheduledGovernanceReviewEvidence {
     }
 
     $invariant = Get-ScheduledGovernancePropertyValue $Review "countInvariant"
-    $coverageComplete = [bool](Get-ScheduledGovernancePropertyValue $Review "coverageComplete")
+    $coverageComplete = Get-ScheduledGovernancePropertyValue $Review "coverageComplete"
+    if ($coverageComplete -isnot [bool]) { throw "Review did not return a boolean coverageComplete." }
+    $authorized = Get-ScheduledGovernancePropertyValue $invariant "authorizedDurableMemoryCount"
+    $covered = Get-ScheduledGovernancePropertyValue $invariant "coveredDurableMemoryCount"
+    $scanned = Get-ScheduledGovernancePropertyValue $invariant "scannedDurableMemoryCount"
+    $total = Get-ScheduledGovernancePropertyValue $invariant "totalDurableMemoryCount"
+    $shared = Get-ScheduledGovernancePropertyValue $invariant "sharedScopeOccurrences"
+    $user = Get-ScheduledGovernancePropertyValue $invariant "userScopeOccurrences"
+    $separateUser = Get-ScheduledGovernancePropertyValue $invariant "userScopeHandledSeparately"
+    $satisfied = Get-ScheduledGovernancePropertyValue $invariant "satisfied"
+    if ($coverageComplete) {
+        $invalidCount = @($authorized, $covered, $scanned, $total, $shared, $user | Where-Object {
+                ($_ -isnot [int] -and $_ -isnot [long]) -or $_ -lt 0
+            })
+        if ($invalidCount.Count -gt 0 -or $authorized -ne $covered -or $covered -ne $scanned -or $scanned -ne $total -or
+            $shared -ne 1 -or $user -ne 0 -or $separateUser -isnot [bool] -or -not $separateUser -or
+            $satisfied -isnot [bool] -or -not $satisfied) {
+            throw "Complete review did not prove the authorized durable-memory count and scope invariant."
+        }
+    }
+
+    $humanDecisionCount = Get-ScheduledGovernancePropertyValue $Review "humanDecisionCount"
+    $governedExceptionCount = Get-ScheduledGovernancePropertyValue $Review "governedExceptionCount"
+    $exceptionDelta = Get-ScheduledGovernancePropertyValue $Review "exceptionDelta"
+    $newExceptions = Get-ScheduledGovernancePropertyValue $exceptionDelta "new"
+    $escalatedExceptions = Get-ScheduledGovernancePropertyValue $exceptionDelta "escalated"
+    $decisionCounts = @($humanDecisionCount, $governedExceptionCount)
+    if ($null -ne $exceptionDelta) {
+        $decisionCounts += @($newExceptions, $escalatedExceptions)
+    }
+    if (@($decisionCounts | Where-Object { ($_ -isnot [int] -and $_ -isnot [long]) -or $_ -lt 0 }).Count -gt 0) {
+        throw "Review returned an invalid human-decision or exception count."
+    }
+    $humanDecisionEvidence = if ($null -eq $exceptionDelta) {
+        $humanDecisionCount -gt 0 -or $governedExceptionCount -gt 0
+    }
+    else {
+        $newExceptions -gt 0 -or $escalatedExceptions -gt 0
+    }
+
     [ordered]@{
         decision = $decision
         snapshotPresent = -not [string]::IsNullOrWhiteSpace([string](Get-ScheduledGovernancePropertyValue $Review "snapshotToken"))
         coverageComplete = $coverageComplete
-        authorized = [int](Get-ScheduledGovernancePropertyValue $invariant "authorizedDurableMemoryCount")
-        covered = [int](Get-ScheduledGovernancePropertyValue $invariant "coveredDurableMemoryCount")
-        scanned = [int](Get-ScheduledGovernancePropertyValue $invariant "scannedDurableMemoryCount")
-        total = [int](Get-ScheduledGovernancePropertyValue $invariant "totalDurableMemoryCount")
-        sharedOccurrences = [int](Get-ScheduledGovernancePropertyValue $invariant "sharedScopeOccurrences")
-        userOccurrences = [int](Get-ScheduledGovernancePropertyValue $invariant "userScopeOccurrences")
-        userScopeHandledSeparately = [bool](Get-ScheduledGovernancePropertyValue $invariant "userScopeHandledSeparately")
-        countInvariantSatisfied = [bool](Get-ScheduledGovernancePropertyValue $invariant "satisfied")
+        authorized = $authorized
+        covered = $covered
+        scanned = $scanned
+        total = $total
+        sharedOccurrences = $shared
+        userOccurrences = $user
+        userScopeHandledSeparately = $separateUser
+        countInvariantSatisfied = $satisfied
         candidateCount = [int](Get-ScheduledGovernancePropertyValue $Review "candidateCount")
         reversibleExecutionCount = [int](Get-ScheduledGovernancePropertyValue $Review "reversibleExecutionCount")
-        humanDecisionCount = [int](Get-ScheduledGovernancePropertyValue $Review "humanDecisionCount")
-        governedExceptionCount = [int](Get-ScheduledGovernancePropertyValue $Review "governedExceptionCount")
+        humanDecisionCount = $humanDecisionCount
+        governedExceptionCount = $governedExceptionCount
+        newExceptionCount = $newExceptions
+        escalatedExceptionCount = $escalatedExceptions
+        humanDecisionEvidence = $humanDecisionEvidence
         businessWorkItemActionableCount = [int](Get-ScheduledGovernancePropertyValue $Review "businessWorkItemActionableCount")
-        resolvedProjectCount = (Get-ScheduledGovernanceArrayProperty $Review "resolvedProjectIds").Count
+        resolvedProjectCount = @(Get-ScheduledGovernanceArrayProperty $Review "resolvedProjectIds").Count
     }
 }
 
 function Get-ScheduledGovernanceReceiptEvidence {
-    param([AllowNull()][object]$Receipt)
+    param(
+        [AllowNull()][object]$Receipt,
+        [Parameter(Mandatory)][string]$ExpectedRunId
+    )
 
     if ($null -eq $Receipt) {
         return [ordered]@{
             present = $false
             runExists = $false
-            latestBatchExecuted = $false
-            latestBatchStatus = ""
+            latestBatchExecuted = $null
+            latestBatchStatus = $null
         }
     }
 
-    $latestBatch = Get-ScheduledGovernancePropertyValue $Receipt "latestBatch"
+    if ((Get-ScheduledGovernancePropertyValue $Receipt "governanceRunId") -cne $ExpectedRunId) {
+        throw "Scheduled governance receipt did not match the requested run."
+    }
+
     [ordered]@{
         present = $true
         runExists = [bool](Get-ScheduledGovernancePropertyValue $Receipt "runExists")
         status = [string](Get-ScheduledGovernancePropertyValue $Receipt "status")
         latestBatchReceived = [bool](Get-ScheduledGovernancePropertyValue $Receipt "latestBatchReceived")
-        latestBatchExecuted = [bool](Get-ScheduledGovernancePropertyValue $latestBatch "executed")
-        latestBatchStatus = [string](Get-ScheduledGovernancePropertyValue $latestBatch "status")
-        latestBatchRequiresReReview = [bool](Get-ScheduledGovernancePropertyValue $latestBatch "requiresReReview")
+        latestBatchExecuted = $null
+        latestBatchStatus = $null
+        latestBatchRequiresReReview = $null
         isReplay = [bool](Get-ScheduledGovernancePropertyValue $Receipt "isReplay")
         initialGovernanceActionable = [int](Get-ScheduledGovernancePropertyValue $Receipt "initialGovernanceActionable")
         finalGovernanceActionable = [int](Get-ScheduledGovernancePropertyValue $Receipt "finalGovernanceActionable")
         finalConvergenceStatus = [string](Get-ScheduledGovernancePropertyValue $Receipt "finalConvergenceStatus")
         finalSnapshotPresent = -not [string]::IsNullOrWhiteSpace([string](Get-ScheduledGovernancePropertyValue $Receipt "finalSnapshotToken"))
         requestIdentityHashPresent = [string](Get-ScheduledGovernancePropertyValue $Receipt "requestIdentityHash") -match "^[a-f0-9]{64}$"
-        auditCount = (Get-ScheduledGovernanceArrayProperty $Receipt "auditIds").Count
+        auditCount = @(Get-ScheduledGovernanceArrayProperty $Receipt "auditIds").Count
     }
 }
 
-function Read-ScheduledGovernanceProtectedInvariantEvidence {
-    param([string]$Path)
+function Get-ScheduledGovernanceReviewReceiptEvidence {
+    param(
+        [AllowNull()][object]$Receipt,
+        [Parameter(Mandatory)][string]$ExpectedRunId,
+        [Parameter(Mandatory)][object]$Review,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Contract,
+        [switch]$RequireNoExecution
+    )
 
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return [ordered]@{
-            status = "required-missing"
-            unchanged = $false
-            source = "external-read-only-manifest"
-            displayNameUnchanged = $false
-            businessWorkItemsUnchanged = $false
-            businessWorkItemCount = 0
+    $evidence = Get-ScheduledGovernanceReceiptEvidence $Receipt -ExpectedRunId $ExpectedRunId
+    $receiptId = [Guid]::Empty
+    if (-not $evidence.present -or $evidence.status -cne "Completed" -or
+        -not [Guid]::TryParse((Get-ScheduledGovernancePropertyValue $Receipt "receiptId"), [ref]$receiptId) -or
+        $receiptId -eq [Guid]::Empty) {
+        throw "Scheduled governance review did not have a completed receipt."
+    }
+
+    foreach ($field in @("runExists", "received", "terminal")) {
+        $value = Get-ScheduledGovernancePropertyValue $Receipt $field
+        if ($value -isnot [bool] -or -not $value) {
+            throw "Scheduled governance review receipt did not confirm $field."
         }
+    }
+    foreach ($field in @("toolContractVersion", "schemaHash", "publishedCatalogVersion")) {
+        if ((Get-ScheduledGovernancePropertyValue $Receipt $field) -cne $Contract[$field]) {
+            throw "Scheduled governance review receipt did not match the verified $field."
+        }
+    }
+
+    $reviewDecision = Get-ScheduledGovernancePropertyValue $Review "decision"
+    $reviewCoverage = Get-ScheduledGovernancePropertyValue $Review "coverageComplete"
+    $receiptCoverage = Get-ScheduledGovernancePropertyValue $Receipt "coverageComplete"
+    if ($reviewCoverage -isnot [bool] -or $receiptCoverage -isnot [bool] -or
+        $reviewCoverage -ne ($reviewDecision -cne "CoverageIncomplete") -or
+        $receiptCoverage -ne $reviewCoverage) {
+        throw "Scheduled governance review receipt did not match the review coverage."
+    }
+
+    $reviewSnapshot = Get-ScheduledGovernancePropertyValue $Review "snapshotToken"
+    $receiptSnapshot = Get-ScheduledGovernancePropertyValue $Receipt "finalSnapshotToken"
+    if ($reviewSnapshot -isnot [string] -or ($reviewCoverage -and [string]::IsNullOrWhiteSpace($reviewSnapshot)) -or
+        $receiptSnapshot -cne $reviewSnapshot) {
+        throw "Scheduled governance review receipt did not match the review snapshot."
+    }
+
+    $decision = Get-ScheduledGovernancePropertyValue $Receipt "decision"
+    $outcome = Get-ScheduledGovernancePropertyValue $Receipt "outcome"
+    if ($evidence.finalConvergenceStatus -cne $reviewDecision -or $decision -cne $reviewDecision -or $outcome -cne $reviewDecision) {
+        throw "Scheduled governance review receipt did not match the persisted review decision."
+    }
+
+    $evidence.receiptId = $receiptId.ToString("D")
+    $evidence.decision = $decision
+    $evidence.outcome = $outcome
+    $evidence.coverageComplete = $receiptCoverage
+    if ($RequireNoExecution) {
+        Assert-ScheduledGovernanceNoExecution $Receipt
+        $evidence.noExecutionObserved = $true
+    }
+    return $evidence
+}
+
+function Get-ScheduledGovernanceBatchCounts {
+    param([object]$Object, [string]$Suffix = "")
+
+    $counts = [ordered]@{}
+    foreach ($field in @("applied", "failed", "quarantined", "semanticAutoResolved")) {
+        $value = Get-ScheduledGovernancePropertyValue $Object "$field$Suffix"
+        if (($value -isnot [int] -and $value -isnot [long]) -or $value -lt 0) {
+            throw "Scheduled governance batch evidence has an invalid $field$Suffix count."
+        }
+        $counts[$field] = $value
+    }
+    return $counts
+}
+
+function Get-ScheduledGovernanceBatchAuditIds {
+    param([object]$Object)
+
+    $property = $Object.PSObject.Properties["auditIds"]
+    if ($null -eq $property -or $property.Value -isnot [array]) {
+        throw "Scheduled governance batch evidence is missing its audit ID array."
+    }
+    foreach ($value in $property.Value) {
+        $id = [Guid]::Empty
+        if ($value -isnot [string] -or -not [Guid]::TryParse($value, [ref]$id) -or $id -eq [Guid]::Empty) {
+            throw "Scheduled governance batch evidence contains an invalid audit ID."
+        }
+        $id.ToString("D")
+    }
+}
+
+function Assert-ScheduledGovernanceNoExecution {
+    param([object]$Receipt)
+
+    $received = Get-ScheduledGovernancePropertyValue $Receipt "latestBatchReceived"
+    $counts = Get-ScheduledGovernanceBatchCounts $Receipt
+    $auditIds = @(Get-ScheduledGovernanceBatchAuditIds $Receipt)
+    if ($received -isnot [bool] -or $received -or $auditIds.Count -ne 0 -or
+        @($counts.Values | Where-Object { $_ -ne 0 }).Count -ne 0) {
+        throw "Scheduled governance review receipt must confirm no batch, execution totals or audit IDs."
+    }
+}
+
+function Get-ScheduledGovernanceBatchReceiptEvidence {
+    param(
+        [AllowNull()][object]$Receipt,
+        [object]$Execution,
+        [string]$RunId,
+        [string]$Snapshot,
+        [System.Collections.IDictionary]$Contract,
+        [string]$InitialReceiptId,
+        [bool]$ExpectedReplay
+    )
+
+    $evidence = Get-ScheduledGovernanceReceiptEvidence $Receipt -ExpectedRunId $RunId
+    $receiptId = [Guid]::Empty
+    if (-not $evidence.present -or $evidence.status -cne "Completed" -or
+        -not [Guid]::TryParse((Get-ScheduledGovernancePropertyValue $Receipt "receiptId"), [ref]$receiptId) -or
+        $receiptId -eq [Guid]::Empty -or $receiptId.ToString("D") -eq $InitialReceiptId -or
+        -not $evidence.requestIdentityHashPresent) {
+        throw "A1 requires a distinct completed batch receipt with a request identity."
+    }
+
+    foreach ($field in @("runExists", "received", "terminal", "latestBatchReceived", "coverageComplete", "isReplay")) {
+        $value = Get-ScheduledGovernancePropertyValue $Receipt $field
+        $expected = $field -cne "isReplay" -or $ExpectedReplay
+        if ($value -isnot [bool] -or $value -ne $expected) {
+            throw "A1 batch receipt did not confirm $field."
+        }
+    }
+    foreach ($field in @("toolContractVersion", "schemaHash", "publishedCatalogVersion")) {
+        if ((Get-ScheduledGovernancePropertyValue $Receipt $field) -cne $Contract[$field]) {
+            throw "A1 batch receipt did not match the verified $field."
+        }
+    }
+
+    $requiresReReview = Get-ScheduledGovernancePropertyValue $Execution "requiresReReview"
+    $expectedOutcome = if ($requiresReReview) { "ReReviewRequired" } else { "ReversibleExecutionRequired" }
+    $expectedDecision = if (-not $requiresReReview) { $expectedOutcome }
+    if ($requiresReReview -isnot [bool] -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "decision") -cne $expectedDecision -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "outcome") -cne $expectedOutcome -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "finalConvergenceStatus") -cne "ReversibleExecutionRequired" -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "initialSnapshotToken") -cne $Snapshot -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "finalSnapshotToken") -cne $Snapshot -or
+        (Get-ScheduledGovernancePropertyValue $Receipt "stoppedReason") -cne (Get-ScheduledGovernancePropertyValue $Execution "stoppedReason")) {
+        throw "A1 batch receipt did not match the execution snapshot and outcome."
+    }
+
+    # The runner checked that the initial receipt has no earlier batch. These
+    # run totals can therefore be compared directly with the first execution.
+    $counts = Get-ScheduledGovernanceBatchCounts $Receipt
+    $batchCounts = Get-ScheduledGovernanceBatchCounts $Execution -Suffix "Count"
+    foreach ($field in $counts.Keys) {
+        if ($counts[$field] -ne $batchCounts[$field]) {
+            throw "A1 batch receipt did not match the execution $field count."
+        }
+    }
+    $receiptAudits = @(Get-ScheduledGovernanceBatchAuditIds $Receipt)
+    $batchAudits = @(Get-ScheduledGovernanceBatchAuditIds $Execution)
+    if ($counts.failed -ne 0 -or $receiptAudits.Count -eq 0 -or
+        (Get-ScheduledGovernancePropertyValue $Execution "stoppedReason") -ceq "ItemFailed" -or
+        -not (Test-ScheduledGovernanceIdsEqual $receiptAudits $batchAudits)) {
+        throw "A1 batch receipt did not establish a failure-free execution and matching audit IDs."
+    }
+
+    $evidence.receiptId = $receiptId.ToString("D")
+    $evidence.outcome = $expectedOutcome
+    $evidence.counts = $counts
+    $evidence.requestIdentityHash = Get-ScheduledGovernancePropertyValue $Receipt "requestIdentityHash"
+    $evidence.auditIds = $receiptAudits
+    return $evidence
+}
+
+function Assert-ScheduledGovernanceFinalBatchContinuity {
+    param([object]$Receipt, [System.Collections.IDictionary]$Evidence)
+
+    $prior = $Evidence.receipt.afterReplay
+    $final = $Evidence.receipt.final
+    $latestBatch = Get-ScheduledGovernancePropertyValue $Receipt "latestBatchReceived"
+    $requestIdentity = Get-ScheduledGovernancePropertyValue $Receipt "requestIdentityHash"
+    $auditIds = @(Get-ScheduledGovernanceBatchAuditIds $Receipt)
+    if ($latestBatch -isnot [bool] -or -not $latestBatch -or
+        $final.receiptId -in @($Evidence.receipt.initial.receiptId, $prior.receiptId) -or
+        $requestIdentity -cne $prior.requestIdentityHash -or
+        -not (Test-ScheduledGovernanceIdsEqual $auditIds $prior.auditIds)) {
+        throw "Final review receipt did not preserve the executed batch request and audit identity."
+    }
+    $counts = Get-ScheduledGovernanceBatchCounts $Receipt
+    foreach ($field in $counts.Keys) {
+        if ($counts[$field] -ne $prior.counts[$field]) {
+            throw "Final review receipt changed the executed batch $field count."
+        }
+    }
+}
+
+function Invoke-ScheduledGovernanceVerifiedReplay {
+    param(
+        [string]$Token,
+        [hashtable]$ExecuteArguments,
+        [object]$FirstExecution,
+        [System.Collections.IDictionary]$Contract,
+        [System.Collections.IDictionary]$Evidence
+    )
+
+    $runId = $ExecuteArguments.request.governanceRunId
+    $snapshot = $ExecuteArguments.request.snapshotToken
+    if (-not (Test-ScheduledGovernanceExecutionResult $FirstExecution $runId $snapshot $false)) {
+        throw "First execution did not return a successful result bound to this run and snapshot."
+    }
+
+    $receiptArguments = @{ governanceRunId = $runId; includeReliabilityHistory = $false }
+    $initialReceiptId = $Evidence.receipt.initial.receiptId
+    $beforeJson = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_run_get" -Arguments $receiptArguments -RequestId 42
+    $before = Get-ScheduledGovernanceToolData -Json $beforeJson -Operation "scheduled_governance_run_get-before-replay"
+    $Evidence.receipt.beforeReplay = Get-ScheduledGovernanceBatchReceiptEvidence `
+        $before $FirstExecution $runId $snapshot $Contract $initialReceiptId $false
+
+    $Evidence.outcome.executorCalls++
+    $Evidence.replay.exercised = $true
+    try {
+        $replayJson = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_execute" -Arguments $ExecuteArguments -RequestId 43
+        $replay = Get-ScheduledGovernanceToolData -Json $replayJson -Operation "scheduled_governance_execute-exact-replay"
+        if (-not (Test-ScheduledGovernanceExecutionResult $replay $runId $snapshot $true) -or
+            (Get-ScheduledGovernancePropertyValue $replay "requiresReReview") -ne (Get-ScheduledGovernancePropertyValue $FirstExecution "requiresReReview") -or
+            (Get-ScheduledGovernancePropertyValue $replay "stoppedReason") -cne (Get-ScheduledGovernancePropertyValue $FirstExecution "stoppedReason")) {
+            throw "Exact execution replay did not preserve the original result identity."
+        }
+    }
+    catch {
+        Read-ScheduledGovernanceUnknownOutcome -Token $Token -RunId $runId -Contract $Contract -Evidence $Evidence
+        throw
+    }
+
+    $afterJson = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_run_get" -Arguments $receiptArguments -RequestId 46
+    $after = Get-ScheduledGovernanceToolData -Json $afterJson -Operation "scheduled_governance_run_get-after-replay"
+    $Evidence.receipt.afterReplay = Get-ScheduledGovernanceBatchReceiptEvidence `
+        $after $replay $runId $snapshot $Contract $initialReceiptId $true
+    $batchFields = $Evidence.receipt.beforeReplay.counts.Keys
+    foreach ($field in $batchFields) {
+        if ($Evidence.receipt.beforeReplay.counts[$field] -ne $Evidence.receipt.afterReplay.counts[$field]) {
+            throw "Exact execution replay changed the durable $field count."
+        }
+    }
+    if ($Evidence.receipt.beforeReplay.receiptId -eq $Evidence.receipt.afterReplay.receiptId -or
+        (Get-ScheduledGovernancePropertyValue $before "requestIdentityHash") -cne (Get-ScheduledGovernancePropertyValue $after "requestIdentityHash") -or
+        -not (Test-ScheduledGovernanceIdsEqual @(Get-ScheduledGovernanceBatchAuditIds $before) @(Get-ScheduledGovernanceBatchAuditIds $after))) {
+        throw "Exact execution replay changed the durable request or audit identity."
+    }
+    $Evidence.replay.exact = $true
+}
+
+function Read-ScheduledGovernanceProtectedInvariantEvidence {
+    param(
+        [string]$Path,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Binding
+    )
+
+    $result = [ordered]@{
+        status = "required-missing"
+        unchanged = $false
+        source = "external-read-only-manifest"
+        bindingMatched = $false
+        displayNameUnchanged = $false
+        businessWorkItemsUnchanged = $false
+        businessWorkItemCount = 0
+    }
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $result
     }
 
     try {
         $manifest = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-        $displayName = Get-ScheduledGovernancePropertyValue $manifest "displayName"
-        $displayNameBefore = [string](Get-ScheduledGovernancePropertyValue $displayName "before")
-        $displayNameAfter = [string](Get-ScheduledGovernancePropertyValue $displayName "after")
-        if ([string]::IsNullOrWhiteSpace($displayNameBefore) -or $displayNameBefore -cne $displayNameAfter) {
-            throw "displayName before/after values are missing or changed."
+        $observedBinding = Get-ScheduledGovernancePropertyValue $manifest "binding"
+        foreach ($field in @("governanceRunId", "resource", "initialReceiptId", "finalReceiptId")) {
+            $value = Get-ScheduledGovernancePropertyValue $observedBinding $field
+            if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value) -or $value -cne $Binding[$field]) {
+                $result.status = "binding-mismatch"
+                return $result
+            }
         }
 
-        $workItems = @(ConvertTo-ScheduledGovernanceArray (Get-ScheduledGovernancePropertyValue $manifest "businessWorkItems"))
+        $result.bindingMatched = $true
+        $displayName = Get-ScheduledGovernancePropertyValue $manifest "displayName"
+        $displayNameBefore = Get-ScheduledGovernancePropertyValue $displayName "before"
+        $displayNameAfter = Get-ScheduledGovernancePropertyValue $displayName "after"
+        if ($displayNameBefore -isnot [string] -or [string]::IsNullOrWhiteSpace($displayNameBefore) -or
+            $displayNameAfter -isnot [string] -or [string]::IsNullOrWhiteSpace($displayNameAfter)) {
+            throw "displayName requires nonempty before and after strings."
+        }
+
+        $workItems = $manifest.PSObject.Properties["businessWorkItems"].Value
+        if ($workItems -isnot [array]) {
+            throw "businessWorkItems must be an explicit array."
+        }
+
+        $displayNameUnchanged = $displayNameBefore -ceq $displayNameAfter
         $workItemsUnchanged = $true
+        $observedIds = [System.Collections.Generic.HashSet[Guid]]::new()
+        $validStatuses = @("Pending", "InProgress", "Blocked", "Completed", "Cancelled")
         foreach ($item in $workItems) {
-            if ([string]::IsNullOrWhiteSpace([string](Get-ScheduledGovernancePropertyValue $item "id"))) {
-                throw "businessWorkItems entry has no id."
+            $id = [Guid]::Empty
+            $rawId = Get-ScheduledGovernancePropertyValue $item "id"
+            if ($rawId -isnot [string] -or -not [Guid]::TryParse($rawId, [ref]$id) -or
+                $id -eq [Guid]::Empty -or -not $observedIds.Add($id)) {
+                throw "businessWorkItems requires distinct nonempty Work Item IDs."
             }
+
             $before = Get-ScheduledGovernancePropertyValue $item "before"
             $after = Get-ScheduledGovernancePropertyValue $item "after"
-            foreach ($field in @("status", "isArchived")) {
-                if ([string](Get-ScheduledGovernancePropertyValue $before $field) -cne [string](Get-ScheduledGovernancePropertyValue $after $field)) {
-                    $workItemsUnchanged = $false
-                }
+            $beforeStatus = Get-ScheduledGovernancePropertyValue $before "status"
+            $afterStatus = Get-ScheduledGovernancePropertyValue $after "status"
+            $beforeArchived = Get-ScheduledGovernancePropertyValue $before "isArchived"
+            $afterArchived = Get-ScheduledGovernancePropertyValue $after "isArchived"
+            if ($beforeStatus -isnot [string] -or $beforeStatus -cnotin $validStatuses -or
+                $afterStatus -isnot [string] -or $afterStatus -cnotin $validStatuses -or
+                $beforeArchived -isnot [bool] -or $afterArchived -isnot [bool]) {
+                throw "businessWorkItems requires an observed status and boolean isArchived before and after."
+            }
+            if ($beforeStatus -cne $afterStatus -or $beforeArchived -ne $afterArchived) {
+                $workItemsUnchanged = $false
             }
         }
 
-        return [ordered]@{
-            status = if ($workItemsUnchanged) { "verified" } else { "changed" }
-            unchanged = $workItemsUnchanged
-            source = "external-read-only-manifest"
-            displayNameUnchanged = $true
-            businessWorkItemsUnchanged = $workItemsUnchanged
-            businessWorkItemCount = $workItems.Count
+        $unchanged = $displayNameUnchanged -and $workItemsUnchanged
+        $result.status = if ($unchanged) { "verified" } else { "changed" }
+        $result.unchanged = $unchanged
+        $result.displayNameUnchanged = $displayNameUnchanged
+        $result.businessWorkItemsUnchanged = $workItemsUnchanged
+        $result.businessWorkItemCount = $workItems.Count
+    }
+    catch {
+        $result.status = "invalid"
+    }
+    return $result
+}
+
+function Assert-ScheduledGovernanceReadbackPaths {
+    param([string]$RequestPath, [string]$ManifestPath, [string]$EvidencePath, [string]$CheckpointPath, [switch]$RecoveryOnly)
+
+    $paths = @($RequestPath, $ManifestPath, $EvidencePath, $CheckpointPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($_) })
+    if (@($paths | Sort-Object -CaseSensitive:(!$IsWindows) -Unique).Count -ne $paths.Count) {
+        throw "The protected readback request, manifest, final evidence and A1 checkpoint require distinct paths."
+    }
+    if (-not $RecoveryOnly -and -not [string]::IsNullOrWhiteSpace($RequestPath)) {
+        if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+            throw "A protected readback request requires a manifest path."
+        }
+        if ((Test-Path -LiteralPath $RequestPath) -or (Test-Path -LiteralPath $ManifestPath)) {
+            throw "Use fresh paths for the protected readback request and manifest."
+        }
+        $requestFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RequestPath)
+        $manifestFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ManifestPath)
+        if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($requestFile)) -or
+            -not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($manifestFile))) {
+            throw "The protected readback request and manifest parent directories must exist."
+        }
+    }
+}
+
+function Write-ScheduledGovernanceA1Checkpoint {
+    param([string]$Path, [string]$BindingHash, [string]$RunId)
+
+    $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $journal = @{ version = 1; bindingHash = $BindingHash; governanceRunId = $RunId } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($temporary, $journal)
+        [IO.File]::Move($temporary, $Path)
+    }
+    finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
+}
+
+function Invoke-ScheduledGovernanceA1Recovery {
+    param([string]$Path, [string]$BindingHash, [string]$Token, [object]$Spec, [object]$Evidence)
+
+    $journal = [IO.File]::ReadAllText($Path) | ConvertFrom-Json -AsHashtable
+    if ($journal -isnot [System.Collections.IDictionary] -or $journal['version'] -ne 1 -or
+        $journal['bindingHash'] -cne $BindingHash -or
+        $journal['governanceRunId'] -cnotmatch '^scheduled-acceptance-[a-f0-9]{32}$') {
+        throw "A1 checkpoint is malformed or belongs to another endpoint, resource, environment or contract."
+    }
+    $runId = $journal.governanceRunId
+    $Evidence.governanceRunId = $runId
+    $Evidence.outcome.status = "a1-recovery-read-only"
+    $contract = @{
+        toolContractVersion = $Spec.contract.toolContractVersion
+        schemaHash = $Spec.contract.schemaHash
+        publishedCatalogVersion = $Spec.catalog.publishedCatalogVersion
+    }
+    Read-ScheduledGovernanceUnknownOutcome -Token $Token -RunId $runId -Contract $contract -Evidence $Evidence
+}
+
+function Read-ScheduledGovernanceUnknownOutcome {
+    param([string]$Token, [string]$RunId, [System.Collections.IDictionary]$Contract, [System.Collections.IDictionary]$Evidence)
+
+    $Evidence.replay.outcomeRecovery = "receipt-readback-unavailable"
+    $Evidence.receipt.afterUnknownOutcome = $null
+    try {
+        $json = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_run_get" `
+            -Arguments @{ governanceRunId = $RunId; includeReliabilityHistory = $false } -RequestId 41
+        $receipt = Get-ScheduledGovernanceToolData -Json $json -Operation "scheduled_governance_run_get"
+        foreach ($field in @("toolContractVersion", "schemaHash", "publishedCatalogVersion")) {
+            if ((Get-ScheduledGovernancePropertyValue $receipt $field) -cne $Contract[$field]) {
+                throw "Recovery receipt did not match the verified $field."
+            }
+        }
+        if ((Get-ScheduledGovernancePropertyValue $receipt "runExists") -isnot [bool]) {
+            throw "Recovery receipt did not confirm whether the run exists."
+        }
+        $Evidence.receipt.afterUnknownOutcome = Get-ScheduledGovernanceReceiptEvidence $receipt -ExpectedRunId $RunId
+        $Evidence.replay.outcomeRecovery = if ($Evidence.receipt.afterUnknownOutcome.runExists) {
+            "receipt-readback-insufficient-for-exact-replay"
+        }
+        else { "receipt-run-not-found" }
+    }
+    catch {
+        $Evidence.errors += $_.Exception.Message
+    }
+}
+
+function Invoke-ScheduledGovernanceInitialExecution {
+    param([string]$Token, [hashtable]$ExecuteArguments, [System.Collections.IDictionary]$Contract, [System.Collections.IDictionary]$Evidence)
+
+    $runId = $ExecuteArguments.request.governanceRunId
+    $snapshot = $ExecuteArguments.request.snapshotToken
+    try {
+        $Evidence.outcome.executorCalls++
+        $json = Invoke-ScheduledGovernanceTool -Token $Token -ToolName "scheduled_governance_execute" -Arguments $ExecuteArguments -RequestId 40
+        $execution = Get-ScheduledGovernanceToolData -Json $json -Operation "scheduled_governance_execute"
+        if (Test-ScheduledGovernanceExecutionResult -Execution $execution -ExpectedRunId $runId -ExpectedSnapshot $snapshot -ExpectedReplay $false) {
+            return $execution
         }
     }
     catch {
-        return [ordered]@{
-            status = "invalid"
-            unchanged = $false
-            source = "external-read-only-manifest"
-            displayNameUnchanged = $false
-            businessWorkItemsUnchanged = $false
-            businessWorkItemCount = 0
+        $Evidence.errors += $_.Exception.Message
+    }
+
+    $Evidence.outcome.status = "outcome-unknown-no-retry"
+    Read-ScheduledGovernanceUnknownOutcome -Token $Token -RunId $runId -Contract $Contract -Evidence $Evidence
+}
+
+function Complete-ScheduledGovernanceProtectedReadback {
+    param(
+        [string]$ManifestPath,
+        [string]$RequestPath,
+        [int]$TimeoutSec,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Binding
+    )
+
+    if ($Binding.initialReceiptId -ceq $Binding.finalReceiptId) {
+        throw "The initial and final review receipts must be distinct for protected readback."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RequestPath)) {
+        $target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RequestPath)
+        $temporary = "$target.$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
+            @{ binding = $Binding } | ConvertTo-Json -Depth 5 -Compress |
+                Set-Content -LiteralPath $temporary -Encoding UTF8 -NoNewline
+            [IO.File]::Move($temporary, $target)
+        }
+        finally {
+            if ([IO.File]::Exists($temporary)) {
+                [IO.File]::Delete($temporary)
+            }
+        }
+
+        $elapsed = [Diagnostics.Stopwatch]::StartNew()
+        while ($elapsed.Elapsed.TotalSeconds -lt $TimeoutSec -and
+            -not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+            Start-Sleep -Milliseconds 100
         }
     }
+
+    $readback = Read-ScheduledGovernanceProtectedInvariantEvidence -Path $ManifestPath -Binding $Binding
+    if (-not [string]::IsNullOrWhiteSpace($RequestPath) -and $readback.status -ceq "required-missing") {
+        $readback.status = "readback-timeout"
+    }
+    return $readback
 }
 
 function Get-ScheduledGovernanceBaseEvidence {
@@ -619,8 +1134,8 @@ function Write-ScheduledGovernanceEvidence {
     )
 
     $json = $Evidence | ConvertTo-Json -Depth 30 -Compress
-    if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
-        Set-Content -LiteralPath $EvidencePath -Value $json -Encoding UTF8 -NoNewline
+    if (-not [string]::IsNullOrWhiteSpace($validatedEvidencePath)) {
+        Set-Content -LiteralPath $validatedEvidencePath -Value $json -Encoding UTF8 -NoNewline
     }
     Write-Output $json
     exit $ExitCode
@@ -629,8 +1144,20 @@ function Write-ScheduledGovernanceEvidence {
 $exitCode = 0
 $specValidation = $null
 $evidence = $null
+$validatedEvidencePath = ""
 
 try {
+    if ($Mode -eq "A1" -and [string]::IsNullOrWhiteSpace($A1CheckpointPath)) {
+        if ([string]::IsNullOrWhiteSpace($EvidencePath)) { throw "A1 requires A1CheckpointPath or EvidencePath." }
+        $A1CheckpointPath = "$EvidencePath.a1-checkpoint.json"
+    }
+    if ($Mode -eq "A1") {
+        $A1CheckpointPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($A1CheckpointPath)
+    }
+    $recoveringA1 = $Mode -eq "A1" -and [IO.File]::Exists($A1CheckpointPath)
+    Assert-ScheduledGovernanceReadbackPaths -RequestPath $ProtectedInvariantReadbackRequestPath `
+        -ManifestPath $ProtectedInvariantEvidencePath -EvidencePath $EvidencePath -CheckpointPath $A1CheckpointPath -RecoveryOnly:$recoveringA1
+    if ($Mode -ne "A1") { $validatedEvidencePath = $EvidencePath }
     if ([string]::IsNullOrWhiteSpace($SpecPath)) {
         $SpecPath = Get-ScheduledGovernanceAutomationDefaultSpecPath
     }
@@ -666,6 +1193,20 @@ try {
     }
     else {
         $endpointUri = [Uri]$Endpoint
+        if ($Mode -eq "A1") {
+            if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($A1CheckpointPath)) -or [IO.Directory]::Exists($A1CheckpointPath)) {
+                throw "A1 checkpoint requires a file path in an existing directory."
+            }
+            $checkpointBinding = [ordered]@{
+                endpoint = $endpointUri.AbsoluteUri
+                resource = $OAuthResource
+                environment = $A1Environment
+                contract = $specValidation.Spec.contract.toolContractVersion
+                schema = $specValidation.Spec.contract.schemaHash
+                catalog = $specValidation.Spec.catalog.publishedCatalogVersion
+            }
+            $checkpointBindingHash = Get-ScheduledGovernanceSha256Hex ($checkpointBinding | ConvertTo-Json -Compress)
+        }
         $origin = "$($endpointUri.Scheme)://$($endpointUri.Authority)"
         $metadataUri = "$origin/.well-known/oauth-protected-resource/mcp-automation"
         $metadataResponse = Invoke-ScheduledGovernanceHttp -Uri $metadataUri -Method "Get"
@@ -704,6 +1245,11 @@ try {
             }
             $evidence.outcome.status = if ($exitCode -eq 0) { "OAuthRequired" } else { "discovery-not-ready" }
             $evidence.outcome.accepted = $false
+        }
+        elseif ($exitCode -eq 0 -and $recoveringA1) {
+            Invoke-ScheduledGovernanceA1Recovery -Path $A1CheckpointPath -BindingHash $checkpointBindingHash `
+                -Token $token -Spec $specValidation.Spec -Evidence $evidence
+            $exitCode = 2
         }
         elseif ($exitCode -eq 0) {
             $initializeJson = Invoke-ScheduledGovernanceMcpJson `
@@ -746,6 +1292,17 @@ try {
                 throw "Automation tools/list did not expose exactly the four canonical tools."
             }
 
+            $receiptTool = @($publishedTools | Where-Object {
+                    [string](Get-ScheduledGovernancePropertyValue $_ "name") -ceq "scheduled_governance_run_get"
+                })[0]
+            $receiptInput = Get-ScheduledGovernancePropertyValue $receiptTool "inputSchema"
+            $receiptProperties = Get-ScheduledGovernancePropertyValue $receiptInput "properties"
+            $historySchema = Get-ScheduledGovernancePropertyValue $receiptProperties "includeReliabilityHistory"
+            if ((Get-ScheduledGovernancePropertyValue $historySchema "type") -cne "boolean" -or
+                (Get-ScheduledGovernanceArrayProperty $receiptInput "required") -ccontains "includeReliabilityHistory") {
+                throw "Scheduled receipt discovery did not expose optional boolean includeReliabilityHistory."
+            }
+
             foreach ($tool in $publishedTools) {
                 $annotations = Get-ScheduledGovernancePropertyValue $tool "annotations"
                 foreach ($annotation in @("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")) {
@@ -758,12 +1315,7 @@ try {
                     (Get-ScheduledGovernancePropertyValue $annotations "openWorldHint") -ne $false) {
                     throw "Automation tool annotations violate the least-privilege contract."
                 }
-                $toolJson = $tool | ConvertTo-Json -Depth 30 -Compress
-                foreach ($forbidden in Get-ScheduledGovernanceForbiddenToken) {
-                    if ($toolJson.IndexOf($forbidden, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                        throw "Automation catalog exposed a forbidden authority token."
-                    }
-                }
+                Assert-ScheduledGovernancePublishedToolAuthority -Tool $tool
             }
             $evidence.catalog.forbiddenAbsent = $true
 
@@ -858,6 +1410,10 @@ try {
             }
             else {
                 $runId = "scheduled-acceptance-$([Guid]::NewGuid().ToString('N'))"
+                if ($Mode -eq "A1") {
+                    Write-ScheduledGovernanceA1Checkpoint -Path $A1CheckpointPath -BindingHash $checkpointBindingHash -RunId $runId
+                    $validatedEvidencePath = $EvidencePath
+                }
                 $evidence.governanceRunId = $runId
                 $reviewJson = Invoke-ScheduledGovernanceTool `
                     -Token $token `
@@ -873,13 +1429,11 @@ try {
                 $initialReceiptJson = Invoke-ScheduledGovernanceTool `
                     -Token $token `
                     -ToolName "scheduled_governance_run_get" `
-                    -Arguments @{ governanceRunId = $runId } `
+                    -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $false } `
                     -RequestId 31
                 $initialReceipt = Get-ScheduledGovernanceToolData -Json $initialReceiptJson -Operation "scheduled_governance_run_get"
-                $evidence.receipt.initial = Get-ScheduledGovernanceReceiptEvidence $initialReceipt
-                if (-not $evidence.receipt.initial.present -or -not $evidence.receipt.initial.runExists) {
-                    throw "Initial scheduled governance review receipt was not readable."
-                }
+                $evidence.receipt.initial = Get-ScheduledGovernanceReviewReceiptEvidence `
+                    -Receipt $initialReceipt -ExpectedRunId $runId -Review $review -Contract $observedContract -RequireNoExecution
 
                 if ($Mode -eq "A0") {
                     $evidence.outcome.executorCalls = 0
@@ -902,14 +1456,19 @@ try {
                         $finalReceiptJson = Invoke-ScheduledGovernanceTool `
                             -Token $token `
                             -ToolName "scheduled_governance_run_get" `
-                            -Arguments @{ governanceRunId = $runId } `
+                            -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $true } `
                             -RequestId 33
                         $finalReceipt = Get-ScheduledGovernanceToolData -Json $finalReceiptJson -Operation "scheduled_governance_run_get"
-                        $evidence.receipt.final = Get-ScheduledGovernanceReceiptEvidence $finalReceipt
-                        if (-not $evidence.receipt.final.present -or -not $evidence.receipt.final.runExists) {
-                            throw "Final A0 scheduled governance receipt was not readable."
-                        }
-                        $evidence.protectedInvariants = Read-ScheduledGovernanceProtectedInvariantEvidence -Path $ProtectedInvariantEvidencePath
+                        $evidence.receipt.final = Get-ScheduledGovernanceReviewReceiptEvidence `
+                            -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract -RequireNoExecution
+                        $evidence.protectedInvariants = Complete-ScheduledGovernanceProtectedReadback `
+                            -ManifestPath $ProtectedInvariantEvidencePath -RequestPath $ProtectedInvariantReadbackRequestPath `
+                            -TimeoutSec $ProtectedInvariantReadbackTimeoutSec -Binding ([ordered]@{
+                                governanceRunId = $runId
+                                resource = $OAuthResource
+                                initialReceiptId = $evidence.receipt.initial.receiptId
+                                finalReceiptId = $evidence.receipt.final.receiptId
+                            })
                         $evidence.outcome.status = if (
                             $finalReviewEvidence.decision -eq "NoOpConverged" -and
                             $evidence.protectedInvariants.unchanged) {
@@ -942,88 +1501,11 @@ try {
                                 schemaHash = [string](Get-ScheduledGovernancePropertyValue $expectedContract "schemaHash")
                             }
                         }
-                        $firstExecutionJson = $null
-                        $firstExecution = $null
-                        $unknownOutcome = $false
-                        try {
-                            $evidence.outcome.executorCalls++
-                            $firstExecutionJson = Invoke-ScheduledGovernanceTool `
-                                -Token $token `
-                                -ToolName "scheduled_governance_execute" `
-                                -Arguments $executeArguments `
-                                -RequestId 40
-                            if ($null -ne (Get-ScheduledGovernancePropertyValue $firstExecutionJson "error") -or
-                                (Get-ScheduledGovernancePropertyValue (Get-ScheduledGovernancePropertyValue $firstExecutionJson "result") "isError") -eq $true) {
-                                $evidence.outcome.status = "execute-rejected"
-                                $exitCode = 2
-                            }
-                            else {
-                                $firstExecution = Get-ScheduledGovernanceToolData `
-                                    -Json $firstExecutionJson -Operation "scheduled_governance_execute"
-                            }
-                        }
-                        catch {
-                            $unknownOutcome = $true
-                            $evidence.replay.outcomeRecovery = "receipt-readback-required"
-                        }
+                        $firstExecution = Invoke-ScheduledGovernanceInitialExecution -Token $token `
+                            -ExecuteArguments $executeArguments -Contract $observedContract -Evidence $evidence
 
-                        if ($unknownOutcome) {
-                            $recoveryReceiptJson = Invoke-ScheduledGovernanceTool `
-                                -Token $token `
-                                -ToolName "scheduled_governance_run_get" `
-                                -Arguments @{ governanceRunId = $runId } `
-                                -RequestId 41
-                            $recoveryReceipt = Get-ScheduledGovernanceToolData `
-                                -Json $recoveryReceiptJson -Operation "scheduled_governance_run_get"
-                            $recoveryEvidence = Get-ScheduledGovernanceReceiptEvidence $recoveryReceipt
-                            $evidence.receipt.afterUnknownOutcome = $recoveryEvidence
-                            $latestBatch = Get-ScheduledGovernancePropertyValue $recoveryReceipt "latestBatch"
-                            if ([bool](Get-ScheduledGovernancePropertyValue $latestBatch "executed")) {
-                                $unknownOutcome = $false
-                                $evidence.replay.outcomeRecovery = "recovered-from-receipt-no-retry"
-                                $firstExecution = $null
-                            }
-                            elseif ([string](Get-ScheduledGovernancePropertyValue $latestBatch "status") -ne "Running" -and
-                                [bool](Get-ScheduledGovernancePropertyValue $latestBatch "received")) {
-                                $evidence.outcome.executorCalls++
-                                $firstExecutionJson = Invoke-ScheduledGovernanceTool `
-                                    -Token $token `
-                                    -ToolName "scheduled_governance_execute" `
-                                    -Arguments $executeArguments `
-                                    -RequestId 42
-                                $firstExecution = Get-ScheduledGovernanceToolData `
-                                    -Json $firstExecutionJson -Operation "scheduled_governance_execute-replay-after-recovery"
-                                $evidence.replay.outcomeRecovery = "exact-replay-after-receipt-confirmed-no-execution"
-                            }
-                            else {
-                                $evidence.outcome.status = "outcome-unknown-no-retry"
-                                $exitCode = 2
-                            }
-                        }
-
-                        $replayExecution = $null
-                        if ($null -ne $firstExecution -and
-                            [bool](Get-ScheduledGovernancePropertyValue $firstExecution "succeeded")) {
-                            $evidence.outcome.executorCalls++
-                            $replayJson = Invoke-ScheduledGovernanceTool `
-                                -Token $token `
-                                -ToolName "scheduled_governance_execute" `
-                                -Arguments $executeArguments `
-                                -RequestId 43
-                            $replayExecution = Get-ScheduledGovernanceToolData `
-                                -Json $replayJson -Operation "scheduled_governance_execute-exact-replay"
-                            $auditMatches = Test-ScheduledGovernanceIdsEqual `
-                                (Get-ScheduledGovernancePropertyValue $firstExecution "auditIds") `
-                                (Get-ScheduledGovernancePropertyValue $replayExecution "auditIds")
-                            $appliedMatches = [int](Get-ScheduledGovernancePropertyValue $firstExecution "appliedCount") -eq
-                                [int](Get-ScheduledGovernancePropertyValue $replayExecution "appliedCount")
-                            $evidence.replay.exercised = $true
-                            $evidence.replay.exact =
-                                [bool](Get-ScheduledGovernancePropertyValue $replayExecution "isReplay") -and
-                                $auditMatches -and $appliedMatches
-                            if (-not $evidence.replay.exact) {
-                                throw "Exact execution replay did not preserve result and audit identity."
-                            }
+                        if ($null -ne $firstExecution) {
+                            Invoke-ScheduledGovernanceVerifiedReplay $token $executeArguments $firstExecution $observedContract $evidence
                         }
 
                         if ($null -ne $firstExecution -and $exitCode -eq 0) {
@@ -1041,18 +1523,23 @@ try {
                             $finalReceiptJson = Invoke-ScheduledGovernanceTool `
                                 -Token $token `
                                 -ToolName "scheduled_governance_run_get" `
-                                -Arguments @{ governanceRunId = $runId } `
+                                -Arguments @{ governanceRunId = $runId; includeReliabilityHistory = $true } `
                                 -RequestId 45
                             $finalReceipt = Get-ScheduledGovernanceToolData `
                                 -Json $finalReceiptJson -Operation "scheduled_governance_run_get-after-execute"
-                            $evidence.receipt.final = Get-ScheduledGovernanceReceiptEvidence $finalReceipt
-                            if (-not $evidence.receipt.final.present -or -not $evidence.receipt.final.runExists) {
-                                throw "Final A1 scheduled governance receipt was not readable."
-                            }
-                            $evidence.protectedInvariants = Read-ScheduledGovernanceProtectedInvariantEvidence -Path $ProtectedInvariantEvidencePath
+                            $evidence.receipt.final = Get-ScheduledGovernanceReviewReceiptEvidence `
+                                -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract
+                            Assert-ScheduledGovernanceFinalBatchContinuity -Receipt $finalReceipt -Evidence $evidence
+                            $evidence.protectedInvariants = Complete-ScheduledGovernanceProtectedReadback `
+                                -ManifestPath $ProtectedInvariantEvidencePath -RequestPath $ProtectedInvariantReadbackRequestPath `
+                                -TimeoutSec $ProtectedInvariantReadbackTimeoutSec -Binding ([ordered]@{
+                                    governanceRunId = $runId
+                                    resource = $OAuthResource
+                                    initialReceiptId = $evidence.receipt.initial.receiptId
+                                    finalReceiptId = $evidence.receipt.final.receiptId
+                                })
                             $finalConverged = $finalReviewEvidence.decision -eq "NoOpConverged" -or
-                                ($finalReviewEvidence.decision -eq "HumanDecisionOnly" -and
-                                    ($finalReviewEvidence.governedExceptionCount -gt 0 -or $finalReviewEvidence.humanDecisionCount -gt 0))
+                                ($finalReviewEvidence.decision -eq "HumanDecisionOnly" -and $finalReviewEvidence.humanDecisionEvidence)
                             $evidence.outcome.status = if (
                                 $evidence.replay.exact -and $finalConverged -and $evidence.protectedInvariants.unchanged) {
                                 "A1-accepted"
@@ -1064,7 +1551,6 @@ try {
                             if (-not $evidence.outcome.accepted) { $exitCode = 2 }
                         }
                         elseif ($exitCode -eq 0) {
-                            $evidence.outcome.status = "execute-outcome-not-accepted"
                             $exitCode = 2
                         }
                     }

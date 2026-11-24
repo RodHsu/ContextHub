@@ -10,8 +10,8 @@ namespace Memory.Infrastructure;
 /// server-side receipt events. Missing or conflicting evidence is represented
 /// as unknown/false; this provider never treats a scheduled label as proof.
 /// </summary>
-public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbContext dbContext)
-    : IScheduledGovernanceServerSafetyEvidenceProvider
+public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbContext dbContext)
+    : IScheduledGovernanceServerSafetyHistoryProvider
 {
     private static readonly HashSet<string> AllowedReceiptEventTypes =
     [
@@ -30,10 +30,7 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
         ScheduledGovernanceServerSafetyEvidenceQuery query,
         CancellationToken cancellationToken)
     {
-        if (query.TenantId == Guid.Empty ||
-            query.OwnerUserId == Guid.Empty ||
-            query.ReceiptId == Guid.Empty ||
-            string.IsNullOrWhiteSpace(query.GovernanceRunId))
+        if (!CanRead(query))
         {
             return null;
         }
@@ -59,12 +56,56 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
                 row.OwnerUserId == query.OwnerUserId &&
                 row.GovernanceRunId == runId)
             .OrderBy(row => row.EventSequence)
-            .Take(1_001)
+            .Take(EventReadLimit)
             .ToArrayAsync(cancellationToken);
-        if (events.Length == 0)
+
+        return await EvaluateAsync(
+            observedReceipt, events, runId,
+            async () =>
+            {
+                var auditRunBinding = JsonSerializer.Serialize(new { governanceRunId = runId });
+                return await dbContext.GovernanceBatchRuns.AsNoTracking().AnyAsync(
+                           run => run.TenantId == query.TenantId &&
+                                  run.GovernanceRunId == runId, cancellationToken) ||
+                       await dbContext.SecurityAuditEvents.AsNoTracking().AnyAsync(
+                           audit => audit.TenantId == query.TenantId &&
+                                    EF.Functions.JsonContains(audit.DetailsJson, auditRunBinding), cancellationToken);
+            },
+            observedThrough => dbContext.GovernanceRunReceipts.AsNoTracking().AnyAsync(row =>
+                row.TenantId == query.TenantId && row.OwnerUserId == query.OwnerUserId &&
+                row.GovernanceRunId == runId && row.EventSequence > observedThrough,
+                cancellationToken));
+    }
+
+    private const int EventReadLimit = 1_001;
+
+    private static bool CanRead(ScheduledGovernanceServerSafetyEvidenceQuery query)
+        => query.TenantId != Guid.Empty && query.OwnerUserId != Guid.Empty && query.ReceiptId != Guid.Empty &&
+           !string.IsNullOrWhiteSpace(query.GovernanceRunId);
+
+    private static bool HasNoReceiptMutationSignals(IReadOnlyList<GovernanceRunReceipt> events)
+        => events.All(row =>
+            row.EventType is not ("BatchReceived" or "BatchCompleted" or "BatchReplay" or "BatchStopped" or
+                "InternalRetentionCompleted") &&
+            !row.LatestBatchReceived && row.Applied == 0 && row.Failed == 0 && EmptyAuditIds(row.AuditIdsJson));
+
+    private static async Task<ScheduledGovernanceServerSafetyEvidenceSnapshot?> EvaluateAsync(
+        GovernanceRunReceipt observedReceipt,
+        IReadOnlyList<GovernanceRunReceipt> events,
+        string runId,
+        Func<Task<bool>> hasExternalMutationSignals,
+        Func<long, Task<bool>> hasNewerReceipt)
+    {
+        if (events.Count == 0)
         {
             return null;
         }
+
+        if (observedReceipt.ExecutionMode == "Scheduled" && observedReceipt.EventType == "ReviewCompleted")
+            return Unknown(observedReceipt.EventSequence) with { DecisionProjectionPending = true };
+
+        if (ObservedBatchOutcomeUnknown(observedReceipt, events))
+            return Unknown(observedReceipt.EventSequence) with { UnknownExecutionOutcome = true };
 
         var allEventTypesAllowed = events.All(row => AllowedReceiptEventTypes.Contains(row.EventType));
         var contractLineageConsistent = events.All(row =>
@@ -72,9 +113,9 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             row.SchemaHash == observedReceipt.SchemaHash &&
             row.PublishedCatalogVersion == observedReceipt.PublishedCatalogVersion &&
             row.ExecutionMode == "Scheduled");
-        var observedReceiptIsLatest = events[^1].EventSequence == observedReceipt.EventSequence;
-        if (events.Length > 1_000 ||
-            !observedReceiptIsLatest || !contractLineageConsistent ||
+        var observedThrough = ReadObservationWatermark(observedReceipt, events);
+        if (events.Count == EventReadLimit ||
+            observedThrough is null || !contractLineageConsistent ||
             !IsCurrentCompletedScheduledReceipt(observedReceipt))
         {
             return Unknown(observedReceipt.EventSequence);
@@ -112,6 +153,9 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
                 DecisionObeyed: false);
         }
 
+        var initialRequestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeReviewRequestIdentityHash(runId);
+        var isInitialReview = string.Equals(reviewRequestIdentityHash, initialRequestIdentityHash, StringComparison.Ordinal);
         var reviewReceipt = events
             .Where(row =>
                 row.EventSequence < decisionReceipt.EventSequence &&
@@ -122,7 +166,7 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
         {
             return SnapshotWithUnknownSafety(
                 observedReceipt.EventSequence,
-                reviewRequestIdentityHash,
+                isInitialReview ? initialRequestIdentityHash : null,
                 InitialReviewReceived: false,
                 CountInvariantSatisfied: EvaluateCountInvariant(decisionReceipt),
                 DecisionObeyed: false);
@@ -136,11 +180,11 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             .FirstOrDefault();
         var reviewRequestMatches = IsCanonicalReviewRequest(reviewReceipt, reviewRequestIdentityHash);
         var decisionRequestMatches = IsCanonicalReviewRequest(decisionReceipt, reviewRequestIdentityHash);
-        var initialReviewReceived = receivedReceipt is not null &&
-                                    reviewRequestMatches &&
-                                    decisionRequestMatches &&
-                                    IsCurrentReviewReceived(receivedReceipt, reviewRequestIdentityHash);
-        var reviewLifecycleValid = initialReviewReceived &&
+        var reviewReceived = receivedReceipt is not null &&
+                             reviewRequestMatches &&
+                             decisionRequestMatches &&
+                             IsCurrentReviewReceived(receivedReceipt, reviewRequestIdentityHash);
+        var reviewLifecycleValid = reviewReceived &&
                                    HasValidReviewLifecycle(
                                        events,
                                        receivedReceipt!,
@@ -150,8 +194,8 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             ? TryGetCapturedRuntimeIdentity(receivedReceipt!, reviewReceipt, decisionReceipt)
             : null;
         reviewLifecycleValid = reviewLifecycleValid && capturedRuntimeIdentity is not null;
-        var receiptRequestIdentityHash = reviewRequestMatches && decisionRequestMatches
-            ? reviewRequestIdentityHash
+        var receiptRequestIdentityHash = reviewRequestMatches && decisionRequestMatches && isInitialReview
+            ? initialRequestIdentityHash
             : null;
         var countInvariantSatisfied = EvaluateCountInvariant(decisionReceipt);
         var reviewBindsDecision =
@@ -163,33 +207,27 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             return SnapshotWithUnknownSafety(
                 observedReceipt.EventSequence,
                 receiptRequestIdentityHash,
-                reviewLifecycleValid,
+                isInitialReview && reviewLifecycleValid,
                 countInvariantSatisfied,
                 DecisionObeyed: false);
         }
+
+        var initialReviewReceived = capturedRuntimeIdentity is not null &&
+            (isInitialReview || HasMatchingInitialReview(
+                events, decisionReceipt, initialRequestIdentityHash, capturedRuntimeIdentity));
+        if (initialReviewReceived)
+            receiptRequestIdentityHash = initialRequestIdentityHash;
 
         // Scope these facts to this governance run. A complete known receipt
         // history with no executor/retention event and zero mutation outcomes
         // proves this run did not mutate, without claiming host provenance or
         // that another actor did not change resources concurrently.
-        var auditRunBinding = JsonSerializer.Serialize(new { governanceRunId = runId });
         var zeroMutationRun = reviewLifecycleValid && allEventTypesAllowed &&
-                              events.All(row =>
-                                  row.EventType is not ("BatchReceived" or "BatchCompleted" or
-                                      "BatchReplay" or "BatchStopped" or "InternalRetentionCompleted") &&
-                                  !row.LatestBatchReceived && row.Applied == 0 && row.Failed == 0 &&
-                                  EmptyAuditIds(row.AuditIdsJson)) &&
-                              !await dbContext.GovernanceBatchRuns.AsNoTracking().AnyAsync(
-                                  run => run.TenantId == query.TenantId &&
-                                         run.GovernanceRunId == runId,
-                                  cancellationToken) &&
-                              !await dbContext.SecurityAuditEvents.AsNoTracking().AnyAsync(
-                                  audit => audit.TenantId == query.TenantId &&
-                                           EF.Functions.JsonContains(audit.DetailsJson, auditRunBinding),
-                                  cancellationToken);
+                              HasNoReceiptMutationSignals(events) &&
+                              !await hasExternalMutationSignals();
 
         var decisionObeyed = EvaluateDecisionObedience(
-            events, decisionReceipt, observedReceipt.EventSequence,
+            events, decisionReceipt, observedThrough.Value,
             reviewLifecycleValid, allEventTypesAllowed, zeroMutationRun);
         var proofs = new Dictionary<string, ScheduledGovernanceInvariantProof>
         {
@@ -220,10 +258,7 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
 
         // Do not publish a zero-execute proof against an observation that
         // became stale while its ledger/audit evidence was read.
-        if (await dbContext.GovernanceRunReceipts.AsNoTracking().AnyAsync(row =>
-                row.TenantId == query.TenantId && row.OwnerUserId == query.OwnerUserId &&
-                row.GovernanceRunId == runId && row.EventSequence > observedReceipt.EventSequence,
-                cancellationToken))
+        if (await hasNewerReceipt(observedThrough.Value))
         {
             return Unknown(observedReceipt.EventSequence);
         }
@@ -232,7 +267,7 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             observedReceipt.EventSequence,
             receiptRequestIdentityHash,
             capturedRuntimeIdentity,
-            reviewLifecycleValid,
+            initialReviewReceived,
             countInvariantSatisfied,
             decisionObeyed,
             NoGeneralConnectorFallback: null,
@@ -282,6 +317,27 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
         => receipt.ExecutionMode == "Scheduled" &&
            receipt.Status == "Completed" &&
            IsCurrentContract(receipt);
+
+    private static bool HasMatchingInitialReview(
+        IReadOnlyList<GovernanceRunReceipt> events,
+        GovernanceRunReceipt finalDecision,
+        string initialRequestIdentityHash,
+        ScheduledGovernanceRuntimeIdentity runtimeIdentity)
+    {
+        if (events.Count < 3 || events[2].EventSequence >= finalDecision.EventSequence)
+            return false;
+
+        var received = events[0];
+        var review = events[1];
+        var decision = events[2];
+        return IsCurrentReviewReceived(received, initialRequestIdentityHash) &&
+               IsCanonicalReviewRequest(review, initialRequestIdentityHash) &&
+               IsCanonicalReviewRequest(decision, initialRequestIdentityHash) &&
+               HasValidReviewLifecycle(events, received, review, decision) &&
+               ReviewBindsDecision(review, decision) &&
+               ProjectSetsEqual(decision.ProjectIdsJson, finalDecision.ProjectIdsJson) &&
+               TryGetCapturedRuntimeIdentity(received, review, decision) == runtimeIdentity;
+    }
 
     private static bool IsCurrentReviewReceived(
         GovernanceRunReceipt receipt,
@@ -405,6 +461,22 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
            review.UserScopeHandledSeparately == decision.UserScopeHandledSeparately &&
            review.CountInvariantSatisfied == decision.CountInvariantSatisfied;
 
+    private static bool ObservedBatchOutcomeUnknown(
+        GovernanceRunReceipt observedReceipt,
+        IReadOnlyList<GovernanceRunReceipt> events)
+    {
+        if (observedReceipt.EventType != "BatchReplay")
+            return GovernanceRunReceiptService.HasUnknownScheduledBatchOutcome(observedReceipt);
+
+        var stateEvent = events.LastOrDefault(row =>
+            row.EventSequence < observedReceipt.EventSequence && row.EventType != "BatchReplay");
+        return GovernanceRunReceiptService.HasUnknownScheduledBatchOutcome(stateEvent) ||
+               (GovernanceRunReceiptService.HasUnknownScheduledBatchOutcome(observedReceipt) &&
+                stateEvent is { EventType: "BatchReceived" or "BatchCompleted" or "BatchStopped" } &&
+                stateEvent.RequestIdentityHash == observedReceipt.RequestIdentityHash &&
+                stateEvent.RequestHash == observedReceipt.RequestHash);
+    }
+
     private static bool HasValidReviewLifecycle(
         IReadOnlyList<GovernanceRunReceipt> events,
         GovernanceRunReceipt received,
@@ -413,7 +485,8 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
     {
         if (events.Any(row =>
                 row.EventType is "ReviewStopped" or "BatchStopped" ||
-                row.Status is "Failed" or "Stopped"))
+                row.Status is "Failed" or "Stopped" ||
+                GovernanceRunReceiptService.HasUnknownScheduledBatchOutcome(row)))
         {
             return false;
         }
@@ -495,6 +568,45 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
         catch (JsonException) { return false; }
     }
 
+    private static long? ReadObservationWatermark(
+        GovernanceRunReceipt observedReceipt,
+        IReadOnlyList<GovernanceRunReceipt> events)
+    {
+        for (var index = events.Count - 1; index >= 0; index--)
+        {
+            if (events[index].Id == observedReceipt.Id)
+                return events[^1].EventSequence;
+
+            if (!IsExactCompletedBatchReplay(events, index))
+                return null;
+        }
+
+        return null;
+    }
+
+    private static bool IsExactCompletedBatchReplay(IReadOnlyList<GovernanceRunReceipt> events, int index)
+    {
+        var replay = events[index];
+        if (index == 0 || replay.EventType != "BatchReplay" || !replay.IsReplay || replay.Status != "Completed" ||
+            string.IsNullOrWhiteSpace(replay.RequestIdentityHash) || string.IsNullOrWhiteSpace(replay.RequestHash))
+        {
+            return false;
+        }
+
+        var previous = events[index - 1];
+        return replay.Applied == previous.Applied &&
+               replay.Failed == previous.Failed &&
+               replay.Quarantined == previous.Quarantined &&
+               replay.AutoDeleted == previous.AutoDeleted &&
+               replay.Tombstoned == previous.Tombstoned &&
+               replay.SemanticAutoResolved == previous.SemanticAutoResolved &&
+               string.Equals(replay.AuditIdsJson, previous.AuditIdsJson, StringComparison.Ordinal) &&
+               events.Take(index).Any(original =>
+                   original.EventType == "BatchCompleted" && !original.IsReplay && original.Status == "Completed" &&
+                   original.RequestIdentityHash == replay.RequestIdentityHash && original.RequestHash == replay.RequestHash &&
+                   original.StoppedReason == replay.StoppedReason);
+    }
+
     private static bool? EvaluateDecisionObedience(
         IReadOnlyList<GovernanceRunReceipt> events,
         GovernanceRunReceipt decisionReceipt,
@@ -523,19 +635,25 @@ public sealed class ScheduledGovernanceServerSafetyEvidenceProvider(MemoryDbCont
             return zeroMutationRun ? false : null;
         }
 
-        // The decision is obedient only while no later receipt event exists.
-        // In particular, a later unknown event cannot be treated as harmless
-        // just because it is absent from the known batch-event list.
-        var laterEventExists = events.Any(row =>
-            row.EventSequence > decisionReceipt.EventSequence &&
-            row.EventSequence <= observedEventSequence);
-        if (laterEventExists) return false;
+        // Late delivery of an exact, settled replay preserves the final decision.
+        // Every other later event, including an unbound replay, invalidates it.
+        for (var index = 0; index < events.Count; index++)
+        {
+            var row = events[index];
+            if (row.EventSequence > observedEventSequence)
+                break;
+
+            if ((row.EventSequence > decisionReceipt.EventSequence || row.EventType == "BatchReplay") &&
+                !IsExactCompletedBatchReplay(events, index))
+                return false;
+        }
+
         if (zeroMutationRun) return true;
 
         // A final no-execute decision may follow a previously authorized
         // reversible batch and re-review. This proves decision compliance,
         // not the write-set or executor safety of that earlier execution.
-        var batchEvents = events.Where(row => row.EventType is "BatchReceived" or "BatchCompleted" or "BatchReplay").ToArray();
+        var batchEvents = events.Where(row => row.EventType is "BatchReceived" or "BatchCompleted").ToArray();
         return batchEvents.Length > 0 && batchEvents.All(batch =>
             events.LastOrDefault(row => row.EventSequence < batch.EventSequence &&
                                         row.EventType == "ScheduledDecisionProjected")?.FinalConvergenceStatus ==

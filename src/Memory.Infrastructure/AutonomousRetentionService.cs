@@ -5,6 +5,7 @@ using System.Text.Json;
 using Memory.Application;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.Extensions.Options;
 
 namespace Memory.Infrastructure;
@@ -26,7 +27,8 @@ public sealed class AutonomousRetentionService(
     public async Task<AutonomousRetentionReviewResult> ReviewAsync(
         IReadOnlyList<string> projectIds,
         string governanceRunId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowCancelledReactivation = true)
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var tenantId = actor.TenantId!.Value;
@@ -66,7 +68,7 @@ public sealed class AutonomousRetentionService(
             {
                 var policyChanged = !string.Equals(state.PolicyVersion, _options.RetentionPolicyVersion, StringComparison.Ordinal);
                 var wasScheduled = state.DeleteEligibleAt.HasValue;
-                ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged);
+                ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged, allowCancelledReactivation);
                 if (wasScheduled && !state.DeleteEligibleAt.HasValue)
                 {
                     deleteCancelled++;
@@ -117,19 +119,30 @@ public sealed class AutonomousRetentionService(
         var actor = RequireActor(SecurityScopes.MemoryWrite);
         projectId = ProjectContext.Normalize(projectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
-        var memory = await dbContext.MemoryItems.SingleOrDefaultAsync(x =>
-            x.Id == resourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
-            cancellationToken) ?? throw new KeyNotFoundException($"Memory '{resourceId}' was not found.");
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        var memory = await LoadMemoryForUpdateAsync(resourceId, projectId, actor, cancellationToken)
+            ?? throw new KeyNotFoundException($"Memory '{resourceId}' was not found.");
+        var state = await LoadRetentionStateForUpdateAsync(resourceId, actor, cancellationToken);
         var policy = ResolvePolicy(memory);
         var evidence = await LoadEvidenceAsync([resourceId], actor.TenantId!.Value, actor.UserId!.Value, [projectId], cancellationToken);
         var now = timeProvider.GetUtcNow();
         var evaluation = Evaluate(memory, policy, evidence, now);
+        var alreadyQuarantined = memory.Status == MemoryStatus.Archived &&
+                                 state?.LifecycleStatus is QuarantinedStatus or EligibleStatus;
+        if (state is not null && !alreadyQuarantined)
+        {
+            return MapCandidate(memory, policy, evaluation, state, AutonomousRetentionCandidateResult.QuarantineRequiresReview);
+        }
         if (!policy.AutoDelete || evaluation.BlockedReasons.Count > 0)
         {
             throw new InvalidOperationException($"Memory is not quarantine eligible: {string.Join(',', evaluation.BlockedReasons)}");
         }
 
-        var state = await dbContext.MemoryRetentionStates.SingleOrDefaultAsync(x => x.ResourceId == resourceId, cancellationToken);
+        if (alreadyQuarantined)
+        {
+            return MapCandidate(memory, policy, evaluation, state, AutonomousRetentionCandidateResult.AlreadyQuarantined);
+        }
+
         if (state is null)
         {
             state = new MemoryRetentionState
@@ -163,8 +176,22 @@ public sealed class AutonomousRetentionService(
 
         InitializeQuarantine(state, memory, policy, evaluation, governanceRunId, now);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         await cacheStore.IncrementProjectAsync(projectId, cancellationToken);
         return MapCandidate(memory, policy, evaluation, state, "Quarantine");
+    }
+
+    private static async Task RefreshLockedRetentionEntityAsync(EntityEntry? tracked, CancellationToken cancellationToken)
+    {
+        if (tracked is null)
+        {
+            return;
+        }
+        if (tracked.State != EntityState.Unchanged)
+        {
+            throw new InvalidOperationException("Retention operations cannot refresh a resource with pending local changes.");
+        }
+        await tracked.ReloadAsync(cancellationToken);
     }
 
     public async Task<MaturedDeleteResult> DeleteMaturedAsync(
@@ -186,16 +213,16 @@ public sealed class AutonomousRetentionService(
             return MapReplay(existing);
         }
 
-        var memory = await LoadMemoryForDeleteAsync(resourceId, projectId, actor, cancellationToken)
+        var memory = await LoadMemoryForUpdateAsync(resourceId, projectId, actor, cancellationToken)
             ?? throw new InvalidOperationException("Matured delete cannot proceed without the original resource or its tombstone.");
-        var state = await LoadRetentionStateForDeleteAsync(resourceId, actor, cancellationToken)
+        var state = await LoadRetentionStateForUpdateAsync(resourceId, actor, cancellationToken)
             ?? throw new InvalidOperationException("Matured delete requires a persisted quarantine lifecycle.");
         var policy = ResolvePolicy(memory);
         var policyChanged = !string.Equals(state.PolicyVersion, _options.RetentionPolicyVersion, StringComparison.Ordinal);
         var evidence = await LoadEvidenceAsync([resourceId], actor.TenantId!.Value, actor.UserId!.Value, [projectId], cancellationToken);
         var now = timeProvider.GetUtcNow();
         var evaluation = Evaluate(memory, policy, evidence, now);
-        ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged);
+        ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged, allowCancelledReactivation: false);
         if (state.LifecycleStatus != EligibleStatus || !state.DeleteEligibleAt.HasValue || state.DeleteEligibleAt > now)
         {
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -497,9 +524,14 @@ public sealed class AutonomousRetentionService(
     }
 
     private void ApplyEvaluation(MemoryRetentionState state, MemoryItem memory, TypedPolicy policy,
-        EligibilityEvaluation evaluation, string governanceRunId, DateTimeOffset now, bool policyChanged)
+        EligibilityEvaluation evaluation, string governanceRunId, DateTimeOffset now, bool policyChanged,
+        bool allowCancelledReactivation)
     {
         var wasCancelled = state.LifecycleStatus == CancelledStatus;
+        if (wasCancelled && !allowCancelledReactivation)
+        {
+            return;
+        }
         state.ProjectId = memory.ProjectId;
         state.Classification = policy.Classification;
         state.PolicyKind = policy.Kind;
@@ -612,24 +644,18 @@ public sealed class AutonomousRetentionService(
             cancellationToken);
     }
 
-    private Task<MemoryItem?> LoadMemoryForDeleteAsync(
+    private async Task<MemoryItem?> LoadMemoryForUpdateAsync(
         Guid resourceId,
         string projectId,
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
-        if (!string.Equals(
+        var tracked = dbContext.ChangeTracker.Entries<MemoryItem>().SingleOrDefault(entry => entry.Entity.Id == resourceId);
+        var query = string.Equals(
                 dbContext.Database.ProviderName,
                 "Npgsql.EntityFrameworkCore.PostgreSQL",
-                StringComparison.Ordinal))
-        {
-            return dbContext.MemoryItems.SingleOrDefaultAsync(x =>
-                x.Id == resourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
-                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
-                cancellationToken);
-        }
-
-        return dbContext.MemoryItems.FromSqlInterpolated($"""
+                StringComparison.Ordinal)
+            ? dbContext.MemoryItems.FromSqlInterpolated($"""
                 SELECT *
                 FROM memory_items
                 WHERE id = {resourceId}
@@ -638,25 +664,28 @@ public sealed class AutonomousRetentionService(
                   AND owner_user_id = {actor.UserId}
                 FOR UPDATE
                 """)
-            .SingleOrDefaultAsync(cancellationToken);
+            : dbContext.MemoryItems.Where(x =>
+                x.Id == resourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
+                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        var memory = await query.SingleOrDefaultAsync(cancellationToken);
+        if (memory is not null)
+        {
+            await RefreshLockedRetentionEntityAsync(tracked, cancellationToken);
+        }
+        return memory;
     }
 
-    private Task<MemoryRetentionState?> LoadRetentionStateForDeleteAsync(
+    private async Task<MemoryRetentionState?> LoadRetentionStateForUpdateAsync(
         Guid resourceId,
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
-        if (!string.Equals(
+        var tracked = dbContext.ChangeTracker.Entries<MemoryRetentionState>().SingleOrDefault(entry => entry.Entity.ResourceId == resourceId);
+        var query = string.Equals(
                 dbContext.Database.ProviderName,
                 "Npgsql.EntityFrameworkCore.PostgreSQL",
-                StringComparison.Ordinal))
-        {
-            return dbContext.MemoryRetentionStates.SingleOrDefaultAsync(x =>
-                x.ResourceId == resourceId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
-                cancellationToken);
-        }
-
-        return dbContext.MemoryRetentionStates.FromSqlInterpolated($"""
+                StringComparison.Ordinal)
+            ? dbContext.MemoryRetentionStates.FromSqlInterpolated($"""
                 SELECT *
                 FROM memory_retention_states
                 WHERE resource_id = {resourceId}
@@ -664,7 +693,14 @@ public sealed class AutonomousRetentionService(
                   AND owner_user_id = {actor.UserId}
                 FOR UPDATE
                 """)
-            .SingleOrDefaultAsync(cancellationToken);
+            : dbContext.MemoryRetentionStates.Where(x =>
+                x.ResourceId == resourceId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        var state = await query.SingleOrDefaultAsync(cancellationToken);
+        if (state is not null)
+        {
+            await RefreshLockedRetentionEntityAsync(tracked, cancellationToken);
+        }
+        return state;
     }
 
     private static MaturedDeleteResult MapReplay(ResourceTombstone tombstone)

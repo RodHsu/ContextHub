@@ -422,6 +422,15 @@ public sealed class ConversationAutomationService(
     }
 
     public async Task<ConversationInsightResult> SkipInsightAsync(ConversationInsightGovernanceRequest request, CancellationToken cancellationToken)
+        => (await SkipInsightCoreAsync(request, null, cancellationToken)).Insight;
+
+    public async Task<ConversationInsightSkipOutcome> SkipInsightWithEvidenceAsync(ConversationInsightGovernanceRequest request,
+        ConversationInsightSemanticEvidence evidence, CancellationToken cancellationToken)
+        => (await SkipInsightCoreAsync(request, evidence, cancellationToken)).Outcome;
+
+    private async Task<(ConversationInsightResult Insight, ConversationInsightSkipOutcome Outcome)> SkipInsightCoreAsync(
+        ConversationInsightGovernanceRequest request, ConversationInsightSemanticEvidence? evidence,
+        CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
@@ -429,13 +438,21 @@ public sealed class ConversationAutomationService(
         await using var transaction = await dbContext.BeginTransactionAsync(
             IsolationLevel.Serializable,
             cancellationToken);
-        var insight = await LoadGovernableInsightAsync(request.InsightId, actor, cancellationToken);
+        var insight = await LoadGovernableInsightAsync(request.InsightId, actor, cancellationToken, track: evidence is null);
         ActorAuthorization.EnsureProjectAllowed(actor, insight.ProjectId, write: true);
         if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
         {
             await transaction.CommitAsync(cancellationToken);
-            return MapInsight(insight);
+            return (MapInsight(insight), ConversationInsightSkipOutcome.AlreadyTerminal);
         }
+        var initialStatus = insight.PromotionStatus;
+        var initialUpdatedAt = insight.UpdatedAt;
+        if (evidence is not null && !await HasCurrentSkipEvidenceAsync(actor, insight, evidence, cancellationToken))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return (MapInsight(insight), ConversationInsightSkipOutcome.EvidenceChanged);
+        }
+
         if (insight.PromotionStatus is not (ConversationPromotionStatus.Pending or ConversationPromotionStatus.Failed))
         {
             throw new InvalidOperationException(
@@ -448,10 +465,44 @@ public sealed class ConversationAutomationService(
         insight.GovernanceUpdatedAt = clock.UtcNow;
         insight.Error = insight.GovernanceReason;
         insight.UpdatedAt = clock.UtcNow;
+        if (evidence is not null)
+        {
+            // The validated insight is untracked, so stale tracked state cannot substitute for the locked evidence.
+            var changed = await ApplyInsightActorScope(dbContext.ConversationInsights, actor)
+                .Where(row => row.Id == insight.Id && row.UpdatedAt == initialUpdatedAt &&
+                    row.PromotionStatus == initialStatus && ProjectContext.Matches(row.ProjectId, insight.ProjectId))
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(row => row.PromotionStatus, insight.PromotionStatus)
+                    .SetProperty(row => row.GovernanceReason, insight.GovernanceReason)
+                    .SetProperty(row => row.GovernanceRunId, insight.GovernanceRunId)
+                    .SetProperty(row => row.GovernanceUpdatedAt, insight.GovernanceUpdatedAt)
+                    .SetProperty(row => row.Error, insight.Error)
+                    .SetProperty(row => row.UpdatedAt, insight.UpdatedAt), cancellationToken);
+            if (changed != 1)
+                throw new InvalidOperationException("The insight changed before the guarded skip was committed.");
+        }
+
         await AddInsightGovernanceAuditAsync(insight, "Skip", cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return MapInsight(insight);
+        return (MapInsight(insight), ConversationInsightSkipOutcome.Applied);
+    }
+
+    private async Task<bool> HasCurrentSkipEvidenceAsync(ContextHubRequestActor actor, ConversationInsight insight,
+        ConversationInsightSemanticEvidence evidence, CancellationToken cancellationToken)
+    {
+        if (actor.TenantId is not { } tenantId || actor.UserId is not { } userId ||
+            !ProjectContext.Matches(insight.ProjectId, evidence.ProjectId) || insight.UpdatedAt != evidence.InsightUpdatedAt ||
+            insight.PromotionStatus is not (ConversationPromotionStatus.Pending or ConversationPromotionStatus.Failed) ||
+            GovernanceEvidenceFingerprint.IsProtectedInsight(insight) || insight.Confidence < evidence.MinimumConfidence ||
+            !await dbContext.LockMemoryEvidenceAsync(evidence.MemoryId, tenantId, userId, insight.ProjectId, cancellationToken))
+        {
+            return false;
+        }
+
+        var exactIds = await GovernanceEvidenceFingerprint.FindCurrentExactMemoryIdsAsync(
+            dbContext, actor, insight, clock.UtcNow, cancellationToken);
+        return exactIds.Length == 1 && exactIds[0] == evidence.MemoryId;
     }
 
     public async Task<ConversationInsightResult> SetInsightDispositionAsync(ConversationInsightDispositionRequest request, CancellationToken cancellationToken)
@@ -1055,7 +1106,8 @@ public sealed class ConversationAutomationService(
             "D");
     }
 
-    private async Task<ConversationInsight> LoadGovernableInsightAsync(Guid insightId, ContextHubRequestActor actor, CancellationToken cancellationToken)
+    private async Task<ConversationInsight> LoadGovernableInsightAsync(Guid insightId, ContextHubRequestActor actor,
+        CancellationToken cancellationToken, bool track = true)
     {
         var query = ApplyInsightActorScope(dbContext.ConversationInsights, actor);
         if (actor.AllowedProjectIds.Count > 0)
@@ -1063,7 +1115,7 @@ public sealed class ConversationAutomationService(
             query = query.Where(x => Memory.Application.ProjectContext.IdentityKeys(actor.AllowedProjectIds).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)));
         }
 
-        var insight = await query
+        var insight = await (track ? query : query.AsNoTracking())
             .FirstOrDefaultAsync(x => x.Id == insightId, cancellationToken)
             ?? throw new InvalidOperationException($"Conversation insight '{insightId}' was not found.");
         if (insight.Tags.Contains("chatgpt-proposal", StringComparer.OrdinalIgnoreCase))
