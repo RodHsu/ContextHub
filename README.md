@@ -326,6 +326,7 @@ Notes:
 - Unit tests use deterministic providers and do not require model downloads.
 - Container-backed tests skip when Docker is unavailable.
 - Set `RUN_COMPOSE_SMOKE_TESTS=1` to run the Compose smoke test with a local Docker engine. It builds an isolated project, uses dynamic loopback ports, and removes the project's containers, volumes, and locally built images on exit.
+- If the default Alpine package endpoint is unavailable, set `CONTEXTHUB_ALPINE_MIRROR` to an HTTPS root from the [Alpine mirror list](https://mirrors.alpinelinux.org/) when building the two Docker socket proxies or running the Compose smoke test. Use the root ending in `/alpine`, such as `https://mirror.twds.com.tw/alpine`. The build chooses the release from the pinned base image and verifies packages with Alpine's trusted signing keys.
 - Dashboard browser tests use Playwright and cover responsive routes.
 
 ## Documentation

@@ -69,6 +69,7 @@ public sealed class ComposeSmokeTests
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         var environment = new Dictionary<string, string>
         {
+            ["CONTEXTHUB_ALPINE_MIRROR"] = Environment.GetEnvironmentVariable("CONTEXTHUB_ALPINE_MIRROR") ?? string.Empty,
             ["POSTGRES_PASSWORD"] = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)),
             ["CONTEXTHUB_SECRET_KEY"] = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),
             ["CONTEXTHUB_SECURITY_BOOTSTRAP_TOKEN"] = token,
