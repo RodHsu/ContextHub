@@ -443,7 +443,9 @@ public sealed class ScheduledGovernanceReliabilityService(
             }
             catch
             {
-                // Recover unaffected runs through the original exact reader if the batch failed.
+                // A failed batch makes this source unknown. Retrying every historical run
+                // can turn one backend timeout into an unbounded series of timeouts.
+                return results;
             }
         }
 

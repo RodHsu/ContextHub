@@ -104,6 +104,36 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         commandCount.Should().Be(10, "one actor history read, six safety reads, two ledger reads and one bound receipt read");
         commandCount.Should().BeLessThan(exactCommands);
         historyDb.ChangeTracker.HasChanges().Should().BeFalse();
+
+        var unavailable = new UnavailableSafetyHistoryReader(safety);
+        var degradedReader = new ScheduledGovernanceReliabilityService(
+            historyDb, accessor, TimeProvider.System, natural, unavailable);
+        var degraded = await degradedReader.GetAsync(CancellationToken.None);
+
+        unavailable.SingleReadCount.Should().Be(0);
+        degraded.Runs.Should().HaveCount(recorded.Count);
+        degraded.Runs.Should().OnlyContain(run => run.NaturalOriginStatus == "Unattested");
+        degraded.GatePassed.Should().BeFalse();
+        historyDb.ChangeTracker.HasChanges().Should().BeFalse();
+    }
+
+    private sealed class UnavailableSafetyHistoryReader(IScheduledGovernanceServerSafetyEvidenceProvider provider)
+        : IScheduledGovernanceServerSafetyHistoryProvider
+    {
+        public int SingleReadCount { get; private set; }
+
+        public Task<ScheduledGovernanceServerSafetyEvidenceSnapshot?> GetAsync(
+            ScheduledGovernanceServerSafetyEvidenceQuery query,
+            CancellationToken cancellationToken)
+        {
+            SingleReadCount++;
+            return provider.GetAsync(query, cancellationToken);
+        }
+
+        public Task<IReadOnlyDictionary<ScheduledGovernanceServerSafetyEvidenceQuery, ScheduledGovernanceServerSafetyEvidenceSnapshot?>> GetHistoryAsync(
+            IReadOnlyList<ScheduledGovernanceServerSafetyEvidenceQuery> queries,
+            CancellationToken cancellationToken)
+            => throw new TimeoutException("The historical safety evidence read timed out.");
     }
 
     private sealed class ExactNaturalReader(IScheduledGovernanceReliabilityEvidenceProvider provider)
