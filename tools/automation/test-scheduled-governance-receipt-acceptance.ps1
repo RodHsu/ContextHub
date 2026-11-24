@@ -26,7 +26,9 @@ foreach ($name in @(
         "Assert-ScheduledGovernanceFirstBatchBaseline",
         "Get-ScheduledGovernanceBatchReceiptEvidence",
         "Invoke-ScheduledGovernanceVerifiedReplay",
-        "Read-ScheduledGovernanceProtectedInvariantEvidence")) {
+        "Read-ScheduledGovernanceProtectedInvariantEvidence",
+        "Assert-ScheduledGovernanceReadbackPaths",
+        "Complete-ScheduledGovernanceProtectedReadback")) {
     $definition = $runner.Find({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -383,6 +385,12 @@ foreach ($case in $baselineRejections) {
 $manifestCases = @(
     @{ name = "complete observations"; expected = "verified"; change = {} }
     @{ name = "explicit empty inventory"; expected = "verified"; change = { param($m) $m.businessWorkItems = @() } }
+    @{ name = "legacy unbound evidence"; expected = "binding-mismatch"; change = { param($m) $m.Remove("binding") } }
+    @{ name = "another governance run"; expected = "binding-mismatch"; change = { param($m) $m.binding.governanceRunId = "older-run" } }
+    @{ name = "another OAuth resource"; expected = "binding-mismatch"; change = { param($m) $m.binding.resource += "-other" } }
+    @{ name = "wrong initial receipt"; expected = "binding-mismatch"; change = { param($m) $m.binding.initialReceiptId = $m.binding.finalReceiptId } }
+    @{ name = "wrong final receipt"; expected = "binding-mismatch"; change = { param($m) $m.binding.finalReceiptId = $m.binding.initialReceiptId } }
+    @{ name = "missing final receipt"; expected = "binding-mismatch"; change = { param($m) $m.binding.Remove("finalReceiptId") } }
     @{ name = "no Work Item inventory"; expected = "invalid"; change = { param($m) $m.Remove("businessWorkItems") } }
     @{ name = "Work Item object instead of array"; expected = "invalid"; change = { param($m) $m.businessWorkItems = $m.businessWorkItems[0] } }
     @{ name = "null Work Item inventory"; expected = "invalid"; change = { param($m) $m.businessWorkItems = $null } }
@@ -400,9 +408,18 @@ $manifestCases = @(
 $localRoot = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) ".agent/local"
 [void][IO.Directory]::CreateDirectory($localRoot)
 $manifestPath = Join-Path $localRoot "a1-protected-manifest-$([Guid]::NewGuid().ToString('N')).json"
+$requestPath = "$manifestPath.request"
+$observerPath = "$manifestPath.staged"
+$binding = @{
+    governanceRunId = $runId
+    resource = "https://context-hub.example.test/mcp-automation"
+    initialReceiptId = "84758af4-6c9c-4e82-80bd-8a7b68858727"
+    finalReceiptId = "2a4335df-a9ca-456c-9091-17a928ad87ba"
+}
 try {
     foreach ($case in $manifestCases) {
         $manifest = @{
+            binding = $binding.Clone()
             displayName = @{ before = "ContextHub"; after = "ContextHub" }
             businessWorkItems = @(@{
                     id = "6d2aecbd-09eb-4a8a-ae32-55f23c349299"
@@ -412,20 +429,87 @@ try {
         }
         & $case.change $manifest
         $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
-        $protected = Read-ScheduledGovernanceProtectedInvariantEvidence $manifestPath
-        if ($protected.status -cne $case.expected -or $protected.unchanged -ne ($case.expected -ceq "verified")) {
+        $protected = Read-ScheduledGovernanceProtectedInvariantEvidence $manifestPath $binding
+        if ($protected.status -cne $case.expected -or $protected.unchanged -ne ($case.expected -ceq "verified") -or
+            $protected.bindingMatched -ne ($case.expected -cne "binding-mismatch")) {
             throw "Protected manifest case '$($case.name)' returned '$($protected.status)' or the wrong acceptance flag."
         }
     }
+
+    Remove-Item -LiteralPath $manifestPath
+    Assert-ScheduledGovernanceReadbackPaths $requestPath $manifestPath "$manifestPath.final"
+    $boundReadback = & {
+        # Simulate the observer after the runner has published its request but before it reads the manifest.
+        function Start-Sleep {
+            param([int]$Milliseconds)
+            $request = Get-Content -LiteralPath $requestPath -Raw | ConvertFrom-Json
+            $response = @{
+                binding = $request.binding
+                displayName = @{ before = "ContextHub"; after = "ContextHub" }
+                businessWorkItems = @()
+            }
+            $response | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $observerPath
+            [IO.File]::Move($observerPath, $manifestPath)
+        }
+
+        Complete-ScheduledGovernanceProtectedReadback $manifestPath $requestPath 2 $binding
+    }
+    if ($boundReadback.status -cne "verified" -or -not $boundReadback.bindingMatched) {
+        throw "The matching manifest was not accepted after the request was published."
+    }
+
+    $requestContent = Get-Content -LiteralPath $requestPath -Raw
+    $manifestContent = Get-Content -LiteralPath $manifestPath -Raw
+    $shellPath = (Get-Process -Id $PID).Path
+    $cliEvidence = & $shellPath -NoProfile -NonInteractive -File $runnerPath -Mode Readiness `
+        -ProtectedInvariantEvidencePath $manifestPath -EvidencePath $manifestPath
+    $cliExitCode = $LASTEXITCODE
+    $cliResult = $cliEvidence | ConvertFrom-Json
+    if ($cliExitCode -ne 1 -or $cliResult.outcome.accepted -or
+        (Get-Content -LiteralPath $manifestPath -Raw) -cne $manifestContent) {
+        throw "An aliased final evidence path was accepted or overwritten by the error path."
+    }
+
+    $readbackPathRejections = @(
+        { Assert-ScheduledGovernanceReadbackPaths $requestPath "" "" }
+        { Assert-ScheduledGovernanceReadbackPaths $requestPath $requestPath "" }
+        { Assert-ScheduledGovernanceReadbackPaths "" $manifestPath $manifestPath }
+        { Assert-ScheduledGovernanceReadbackPaths $requestPath "$manifestPath.new" "" }
+        { Complete-ScheduledGovernanceProtectedReadback $manifestPath $requestPath 0 $binding }
+        {
+            $sameReceipt = $binding.Clone()
+            $sameReceipt.finalReceiptId = $sameReceipt.initialReceiptId
+            Complete-ScheduledGovernanceProtectedReadback $manifestPath "" 0 $sameReceipt
+        }
+    )
+    foreach ($reject in $readbackPathRejections) {
+        $rejected = $false
+        try { & $reject } catch { $rejected = $true }
+        if (-not $rejected) { throw "Invalid protected readback coordination was accepted." }
+    }
+    if ((Get-Content -LiteralPath $requestPath -Raw) -cne $requestContent) {
+        throw "A repeated request overwrote the original readback request."
+    }
+
+    Remove-Item -LiteralPath $requestPath, $manifestPath
+    $missing = Complete-ScheduledGovernanceProtectedReadback $manifestPath $requestPath 0 $binding
+    if ($missing.status -cne "readback-timeout" -or $missing.unchanged) {
+        throw "An absent manifest must leave protected readback incomplete."
+    }
 }
 finally {
-    Remove-Item -LiteralPath $manifestPath
+    foreach ($path in @($requestPath, $manifestPath, $observerPath)) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Remove-Item -LiteralPath $path
+        }
+    }
 }
 
 [ordered]@{
     valid = $true
-    positiveCases = 11 + @($manifestCases | Where-Object expected -CEQ "verified").Count
-    negativeCases = $cases.Count + 3 + $invalidExecutions.Count + $preReplayCases.Count +
-        $postReplayCases.Count + $baselineRejections.Count + @($manifestCases | Where-Object expected -CNE "verified").Count
+    positiveCases = 12 + @($manifestCases | Where-Object expected -CEQ "verified").Count
+    negativeCases = $cases.Count + 5 + $invalidExecutions.Count + $preReplayCases.Count +
+        $postReplayCases.Count + $baselineRejections.Count + $readbackPathRejections.Count +
+        @($manifestCases | Where-Object expected -CNE "verified").Count
     result = "scheduled-governance-receipt-replay-and-protected-evidence"
 } | ConvertTo-Json -Compress

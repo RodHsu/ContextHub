@@ -1,5 +1,4 @@
 [CmdletBinding()]
-[Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "EvidencePath", Justification = "Consumed by the nested evidence writer through script scope.")]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSReviewUnusedParameter", "TimeoutSec", Justification = "Consumed by the nested HTTP helper through script scope.")]
 param(
     [ValidateSet("Readiness", "A0", "A1")]
@@ -9,6 +8,9 @@ param(
     [string]$TokenEnvironmentVariable = "CONTEXTHUB_MCP_AUTOMATION_TOKEN",
     [string]$SpecPath = "",
     [string]$ProtectedInvariantEvidencePath = "",
+    [string]$ProtectedInvariantReadbackRequestPath = "",
+    [ValidateRange(1, 120)]
+    [int]$ProtectedInvariantReadbackTimeoutSec = 30,
     [string]$EvidencePath = "",
     [ValidateSet("Production", "Isolated")]
     [string]$A1Environment = "Production",
@@ -740,21 +742,36 @@ function Invoke-ScheduledGovernanceVerifiedReplay {
 }
 
 function Read-ScheduledGovernanceProtectedInvariantEvidence {
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Binding
+    )
 
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return [ordered]@{
-            status = "required-missing"
-            unchanged = $false
-            source = "external-read-only-manifest"
-            displayNameUnchanged = $false
-            businessWorkItemsUnchanged = $false
-            businessWorkItemCount = 0
-        }
+    $result = [ordered]@{
+        status = "required-missing"
+        unchanged = $false
+        source = "external-read-only-manifest"
+        bindingMatched = $false
+        displayNameUnchanged = $false
+        businessWorkItemsUnchanged = $false
+        businessWorkItemCount = 0
+    }
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $result
     }
 
     try {
         $manifest = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $observedBinding = Get-ScheduledGovernancePropertyValue $manifest "binding"
+        foreach ($field in @("governanceRunId", "resource", "initialReceiptId", "finalReceiptId")) {
+            $value = Get-ScheduledGovernancePropertyValue $observedBinding $field
+            if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value) -or $value -cne $Binding[$field]) {
+                $result.status = "binding-mismatch"
+                return $result
+            }
+        }
+
+        $result.bindingMatched = $true
         $displayName = Get-ScheduledGovernancePropertyValue $manifest "displayName"
         $displayNameBefore = Get-ScheduledGovernancePropertyValue $displayName "before"
         $displayNameAfter = Get-ScheduledGovernancePropertyValue $displayName "after"
@@ -797,25 +814,79 @@ function Read-ScheduledGovernanceProtectedInvariantEvidence {
         }
 
         $unchanged = $displayNameUnchanged -and $workItemsUnchanged
-        return [ordered]@{
-            status = if ($unchanged) { "verified" } else { "changed" }
-            unchanged = $unchanged
-            source = "external-read-only-manifest"
-            displayNameUnchanged = $displayNameUnchanged
-            businessWorkItemsUnchanged = $workItemsUnchanged
-            businessWorkItemCount = $workItems.Count
-        }
+        $result.status = if ($unchanged) { "verified" } else { "changed" }
+        $result.unchanged = $unchanged
+        $result.displayNameUnchanged = $displayNameUnchanged
+        $result.businessWorkItemsUnchanged = $workItemsUnchanged
+        $result.businessWorkItemCount = $workItems.Count
     }
     catch {
-        return [ordered]@{
-            status = "invalid"
-            unchanged = $false
-            source = "external-read-only-manifest"
-            displayNameUnchanged = $false
-            businessWorkItemsUnchanged = $false
-            businessWorkItemCount = 0
+        $result.status = "invalid"
+    }
+    return $result
+}
+
+function Assert-ScheduledGovernanceReadbackPaths {
+    param([string]$RequestPath, [string]$ManifestPath, [string]$EvidencePath)
+
+    $paths = @($RequestPath, $ManifestPath, $EvidencePath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($_) })
+    if (@($paths | Sort-Object -CaseSensitive:(!$IsWindows) -Unique).Count -ne $paths.Count) {
+        throw "The protected readback request, manifest and final evidence require distinct paths."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RequestPath)) {
+        if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+            throw "A protected readback request requires a manifest path."
+        }
+        if ((Test-Path -LiteralPath $RequestPath) -or (Test-Path -LiteralPath $ManifestPath)) {
+            throw "Use fresh paths for the protected readback request and manifest."
+        }
+        $requestFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RequestPath)
+        $manifestFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ManifestPath)
+        if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($requestFile)) -or
+            -not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($manifestFile))) {
+            throw "The protected readback request and manifest parent directories must exist."
         }
     }
+}
+
+function Complete-ScheduledGovernanceProtectedReadback {
+    param(
+        [string]$ManifestPath,
+        [string]$RequestPath,
+        [int]$TimeoutSec,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Binding
+    )
+
+    if ($Binding.initialReceiptId -ceq $Binding.finalReceiptId) {
+        throw "The initial and final review receipts must be distinct for protected readback."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RequestPath)) {
+        $target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RequestPath)
+        $temporary = "$target.$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
+            @{ binding = $Binding } | ConvertTo-Json -Depth 5 -Compress |
+                Set-Content -LiteralPath $temporary -Encoding UTF8 -NoNewline
+            [IO.File]::Move($temporary, $target)
+        }
+        finally {
+            if ([IO.File]::Exists($temporary)) {
+                [IO.File]::Delete($temporary)
+            }
+        }
+
+        $elapsed = [Diagnostics.Stopwatch]::StartNew()
+        while ($elapsed.Elapsed.TotalSeconds -lt $TimeoutSec -and
+            -not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+
+    $readback = Read-ScheduledGovernanceProtectedInvariantEvidence -Path $ManifestPath -Binding $Binding
+    if (-not [string]::IsNullOrWhiteSpace($RequestPath) -and $readback.status -ceq "required-missing") {
+        $readback.status = "readback-timeout"
+    }
+    return $readback
 }
 
 function Get-ScheduledGovernanceBaseEvidence {
@@ -891,8 +962,8 @@ function Write-ScheduledGovernanceEvidence {
     )
 
     $json = $Evidence | ConvertTo-Json -Depth 30 -Compress
-    if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
-        Set-Content -LiteralPath $EvidencePath -Value $json -Encoding UTF8 -NoNewline
+    if (-not [string]::IsNullOrWhiteSpace($validatedEvidencePath)) {
+        Set-Content -LiteralPath $validatedEvidencePath -Value $json -Encoding UTF8 -NoNewline
     }
     Write-Output $json
     exit $ExitCode
@@ -901,8 +972,11 @@ function Write-ScheduledGovernanceEvidence {
 $exitCode = 0
 $specValidation = $null
 $evidence = $null
+$validatedEvidencePath = ""
 
 try {
+    Assert-ScheduledGovernanceReadbackPaths $ProtectedInvariantReadbackRequestPath $ProtectedInvariantEvidencePath $EvidencePath
+    $validatedEvidencePath = $EvidencePath
     if ([string]::IsNullOrWhiteSpace($SpecPath)) {
         $SpecPath = Get-ScheduledGovernanceAutomationDefaultSpecPath
     }
@@ -1188,7 +1262,14 @@ try {
                         $finalReceipt = Get-ScheduledGovernanceToolData -Json $finalReceiptJson -Operation "scheduled_governance_run_get"
                         $evidence.receipt.final = Get-ScheduledGovernanceReviewReceiptEvidence `
                             -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract
-                        $evidence.protectedInvariants = Read-ScheduledGovernanceProtectedInvariantEvidence -Path $ProtectedInvariantEvidencePath
+                        $evidence.protectedInvariants = Complete-ScheduledGovernanceProtectedReadback `
+                            -ManifestPath $ProtectedInvariantEvidencePath -RequestPath $ProtectedInvariantReadbackRequestPath `
+                            -TimeoutSec $ProtectedInvariantReadbackTimeoutSec -Binding ([ordered]@{
+                                governanceRunId = $runId
+                                resource = $OAuthResource
+                                initialReceiptId = $evidence.receipt.initial.receiptId
+                                finalReceiptId = $evidence.receipt.final.receiptId
+                            })
                         $evidence.outcome.status = if (
                             $finalReviewEvidence.decision -eq "NoOpConverged" -and
                             $evidence.protectedInvariants.unchanged) {
@@ -1297,7 +1378,14 @@ try {
                             $evidence.receipt.final = Get-ScheduledGovernanceReviewReceiptEvidence `
                                 -Receipt $finalReceipt -ExpectedRunId $runId -Review $finalReview -Contract $observedContract `
                                 -AllowCompletedBatchOverlay:$evidence.replay.exact
-                            $evidence.protectedInvariants = Read-ScheduledGovernanceProtectedInvariantEvidence -Path $ProtectedInvariantEvidencePath
+                            $evidence.protectedInvariants = Complete-ScheduledGovernanceProtectedReadback `
+                                -ManifestPath $ProtectedInvariantEvidencePath -RequestPath $ProtectedInvariantReadbackRequestPath `
+                                -TimeoutSec $ProtectedInvariantReadbackTimeoutSec -Binding ([ordered]@{
+                                    governanceRunId = $runId
+                                    resource = $OAuthResource
+                                    initialReceiptId = $evidence.receipt.initial.receiptId
+                                    finalReceiptId = $evidence.receipt.final.receiptId
+                                })
                             $finalConverged = $finalReviewEvidence.decision -eq "NoOpConverged" -or
                                 ($finalReviewEvidence.decision -eq "HumanDecisionOnly" -and
                                     ($finalReviewEvidence.governedExceptionCount -gt 0 -or $finalReviewEvidence.humanDecisionCount -gt 0))
