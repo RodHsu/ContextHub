@@ -119,17 +119,10 @@ public sealed class AutonomousRetentionService(
         var actor = RequireActor(SecurityScopes.MemoryWrite);
         projectId = ProjectContext.Normalize(projectId);
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
-        var trackedMemory = dbContext.ChangeTracker.Entries<MemoryItem>().SingleOrDefault(entry => entry.Entity.Id == resourceId);
-        var trackedState = dbContext.ChangeTracker.Entries<MemoryRetentionState>().SingleOrDefault(entry => entry.Entity.ResourceId == resourceId);
         await using var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
         var memory = await LoadMemoryForUpdateAsync(resourceId, projectId, actor, cancellationToken)
             ?? throw new KeyNotFoundException($"Memory '{resourceId}' was not found.");
-        await RefreshQuarantineEntityAsync(trackedMemory, cancellationToken);
         var state = await LoadRetentionStateForUpdateAsync(resourceId, actor, cancellationToken);
-        if (state is not null)
-        {
-            await RefreshQuarantineEntityAsync(trackedState, cancellationToken);
-        }
         var policy = ResolvePolicy(memory);
         var evidence = await LoadEvidenceAsync([resourceId], actor.TenantId!.Value, actor.UserId!.Value, [projectId], cancellationToken);
         var now = timeProvider.GetUtcNow();
@@ -188,7 +181,7 @@ public sealed class AutonomousRetentionService(
         return MapCandidate(memory, policy, evaluation, state, "Quarantine");
     }
 
-    private static async Task RefreshQuarantineEntityAsync(EntityEntry? tracked, CancellationToken cancellationToken)
+    private static async Task RefreshLockedRetentionEntityAsync(EntityEntry? tracked, CancellationToken cancellationToken)
     {
         if (tracked is null)
         {
@@ -196,7 +189,7 @@ public sealed class AutonomousRetentionService(
         }
         if (tracked.State != EntityState.Unchanged)
         {
-            throw new InvalidOperationException("Quarantine cannot refresh a resource with pending local changes.");
+            throw new InvalidOperationException("Retention operations cannot refresh a resource with pending local changes.");
         }
         await tracked.ReloadAsync(cancellationToken);
     }
@@ -651,24 +644,18 @@ public sealed class AutonomousRetentionService(
             cancellationToken);
     }
 
-    private Task<MemoryItem?> LoadMemoryForUpdateAsync(
+    private async Task<MemoryItem?> LoadMemoryForUpdateAsync(
         Guid resourceId,
         string projectId,
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
-        if (!string.Equals(
+        var tracked = dbContext.ChangeTracker.Entries<MemoryItem>().SingleOrDefault(entry => entry.Entity.Id == resourceId);
+        var query = string.Equals(
                 dbContext.Database.ProviderName,
                 "Npgsql.EntityFrameworkCore.PostgreSQL",
-                StringComparison.Ordinal))
-        {
-            return dbContext.MemoryItems.SingleOrDefaultAsync(x =>
-                x.Id == resourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
-                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
-                cancellationToken);
-        }
-
-        return dbContext.MemoryItems.FromSqlInterpolated($"""
+                StringComparison.Ordinal)
+            ? dbContext.MemoryItems.FromSqlInterpolated($"""
                 SELECT *
                 FROM memory_items
                 WHERE id = {resourceId}
@@ -677,25 +664,28 @@ public sealed class AutonomousRetentionService(
                   AND owner_user_id = {actor.UserId}
                 FOR UPDATE
                 """)
-            .SingleOrDefaultAsync(cancellationToken);
+            : dbContext.MemoryItems.Where(x =>
+                x.Id == resourceId && Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) &&
+                x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        var memory = await query.SingleOrDefaultAsync(cancellationToken);
+        if (memory is not null)
+        {
+            await RefreshLockedRetentionEntityAsync(tracked, cancellationToken);
+        }
+        return memory;
     }
 
-    private Task<MemoryRetentionState?> LoadRetentionStateForUpdateAsync(
+    private async Task<MemoryRetentionState?> LoadRetentionStateForUpdateAsync(
         Guid resourceId,
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
-        if (!string.Equals(
+        var tracked = dbContext.ChangeTracker.Entries<MemoryRetentionState>().SingleOrDefault(entry => entry.Entity.ResourceId == resourceId);
+        var query = string.Equals(
                 dbContext.Database.ProviderName,
                 "Npgsql.EntityFrameworkCore.PostgreSQL",
-                StringComparison.Ordinal))
-        {
-            return dbContext.MemoryRetentionStates.SingleOrDefaultAsync(x =>
-                x.ResourceId == resourceId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId,
-                cancellationToken);
-        }
-
-        return dbContext.MemoryRetentionStates.FromSqlInterpolated($"""
+                StringComparison.Ordinal)
+            ? dbContext.MemoryRetentionStates.FromSqlInterpolated($"""
                 SELECT *
                 FROM memory_retention_states
                 WHERE resource_id = {resourceId}
@@ -703,7 +693,14 @@ public sealed class AutonomousRetentionService(
                   AND owner_user_id = {actor.UserId}
                 FOR UPDATE
                 """)
-            .SingleOrDefaultAsync(cancellationToken);
+            : dbContext.MemoryRetentionStates.Where(x =>
+                x.ResourceId == resourceId && x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId);
+        var state = await query.SingleOrDefaultAsync(cancellationToken);
+        if (state is not null)
+        {
+            await RefreshLockedRetentionEntityAsync(tracked, cancellationToken);
+        }
+        return state;
     }
 
     private static MaturedDeleteResult MapReplay(ResourceTombstone tombstone)

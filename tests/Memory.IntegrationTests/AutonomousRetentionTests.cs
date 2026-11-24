@@ -101,6 +101,64 @@ public sealed class AutonomousRetentionTests(ContainerTestEnvironment environmen
         (await db.ResourceTombstones.CountAsync(x => x.ResourceId == memory.Id)).Should().Be(1);
     }
 
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Matured_delete_must_reload_the_locked_memory_and_retention_state(bool restored)
+    {
+        var factory = environment.GetFactory();
+        using var executionScope = factory.Services.CreateScope();
+        using var changeScope = factory.Services.CreateScope();
+        var actor = UseBootstrapActor(executionScope.ServiceProvider);
+        UseBootstrapActor(changeScope.ServiceProvider);
+        var db = executionScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var changeDb = changeScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var retention = executionScope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>();
+        var projectId = $"RetentionStale_{Guid.NewGuid():N}";
+        var memory = CreateMemory(actor, projectId, MemoryType.Episode, ["synthetic-disposable"]);
+        db.MemoryItems.Add(memory);
+        await db.SaveChangesAsync();
+        await retention.QuarantineAsync(memory.Id, projectId, $"quarantine-{Guid.NewGuid():N}", default);
+        var tracked = await db.MemoryRetentionStates.SingleAsync(row => row.ResourceId == memory.Id);
+        tracked.LifecycleStatus = "Eligible";
+        tracked.QuarantinedAt = DateTimeOffset.UtcNow.AddDays(-8);
+        tracked.DeleteEligibleAt = DateTimeOffset.UtcNow.AddDays(-1);
+        await db.SaveChangesAsync();
+
+        if (restored)
+        {
+            await changeScope.ServiceProvider.GetRequiredService<IMemoryService>()
+                .ArchiveAsync(new(memory.Id, projectId, Archived: false), default);
+            // The restore remains authoritative after its reindex work has completed.
+            (await changeDb.MemoryJobs.Where(job => job.ProjectId == projectId && job.TenantId == actor.TenantId &&
+                    job.OwnerUserId == actor.UserId && job.Status == MemoryJobStatus.Pending)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.Status, MemoryJobStatus.Completed)))
+                .Should().Be(1);
+        }
+        else
+        {
+            (await changeDb.MemoryRetentionStates.Where(row => row.ResourceId == memory.Id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(row => row.LifecycleStatus, "Cancelled")
+                    .SetProperty(row => row.DeleteEligibleAt, (DateTimeOffset?)null)))
+                .Should().Be(1);
+        }
+        memory.Status.Should().Be(MemoryStatus.Archived);
+        tracked.LifecycleStatus.Should().Be("Eligible");
+
+        UseInternalRetentionActor(executionScope.ServiceProvider, actor);
+        var failure = await Record.ExceptionAsync(() => retention.DeleteMaturedAsync(memory.Id, projectId,
+            $"stale-delete-{Guid.NewGuid():N}", default));
+        var current = await changeDb.MemoryItems.AsNoTracking().SingleOrDefaultAsync(row => row.Id == memory.Id);
+        current.Should().NotBeNull("the authoritative cancellation or restore must prevent deletion");
+        current!.Status.Should().Be(restored ? MemoryStatus.Active : MemoryStatus.Archived);
+        (await changeDb.ResourceTombstones.AnyAsync(row => row.ResourceId == memory.Id)).Should().BeFalse();
+        var state = await changeDb.MemoryRetentionStates.AsNoTracking().SingleAsync(row => row.ResourceId == memory.Id);
+        state.LifecycleStatus.Should().Be("Cancelled");
+        state.DeleteEligibleAt.Should().BeNull();
+        failure.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("eligibility or grace maturity");
+        executionScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+    }
+
     [DockerRequiredFact]
     public async Task Replacement_Target_From_Another_Owner_Should_Fail_Closed()
     {
