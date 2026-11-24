@@ -1,3 +1,4 @@
+using System.Data;
 using Memory.Application;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
@@ -21,6 +22,53 @@ public sealed class NaturalOriginEvidenceStore(MemoryDbContext dbContext, TimePr
     private static readonly TimeSpan MaximumClockSkew = TimeSpan.FromMinutes(2);
 
     public async Task<NaturalOriginEvidenceAppendResult> AppendAsync(
+        NaturalOriginEvidenceLedgerEntry entry,
+        string expectedAuthorityEpochDigest,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        if (!ScheduledGovernanceAuthorityEpochContract.IsSha256Digest(expectedAuthorityEpochDigest))
+        {
+            throw new ArgumentException("Expected authority epoch must be a SHA-256 digest.", nameof(expectedAuthorityEpochDigest));
+        }
+
+        if (dbContext.Database.CurrentTransaction is not null || System.Transactions.Transaction.Current is not null)
+        {
+            throw new InvalidOperationException("Natural-origin evidence append cannot join an ambient transaction.");
+        }
+
+        var scope = new ScheduledGovernanceAuthorityEpochScope(entry.TenantId, entry.OwnerUserId, entry.Environment);
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted, cancellationToken);
+        var current = await ScheduledGovernanceAuthorityEpochLedger.ReadCurrentUnderLockAsync(
+            dbContext, scope, cancellationToken);
+        if (current is null ||
+            current.AuthorityEpochDigest != expectedAuthorityEpochDigest ||
+            entry.ConfigurationDigest != ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(
+                current.ConfigurationDigest, current.AuthorityEpochDigest))
+        {
+            throw new InvalidOperationException("Natural-origin evidence does not match the current authority epoch.");
+        }
+
+        var result = await AppendNormalizedAsync(entry, cancellationToken);
+        try
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            if (!result.IsReplay)
+            {
+                dbContext.Entry(entry).State = EntityState.Detached;
+            }
+
+            throw;
+        }
+
+        return result;
+    }
+
+    internal async Task<NaturalOriginEvidenceAppendResult> AppendNormalizedAsync(
         NaturalOriginEvidenceLedgerEntry entry,
         CancellationToken cancellationToken = default)
     {

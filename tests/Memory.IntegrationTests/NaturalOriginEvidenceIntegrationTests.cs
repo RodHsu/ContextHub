@@ -40,7 +40,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
 
         var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
         var reliability = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityService>();
-        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var store = scope.ServiceProvider.GetRequiredService<NaturalOriginEvidenceStore>();
         var recorded = new List<GovernanceRunReceiptResult>();
         for (var index = 0; index < 34; index++)
         {
@@ -61,13 +61,13 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             {
                 var eventKey = await db.GovernanceRunReceipts.AsNoTracking().Where(row => row.Id == receipt.ReceiptId)
                     .Select(row => row.EventKey).SingleAsync(CancellationToken.None);
-                await store.AppendAsync(CreateEvidence(
+                await store.AppendNormalizedAsync(CreateEvidence(
                     NaturalOriginEvidenceKind.PlatformAttestation, actor, receipt, eventKey, startedAt, null));
                 if (index == 0 || index == 2)
                 {
                     var secondKind = index == 0 ? NaturalOriginEvidenceKind.ControlPlaneAudit : NaturalOriginEvidenceKind.PlatformAttestation;
                     var secondSlot = index == 0 ? startedAt : startedAt.AddMinutes(-1);
-                    await store.AppendAsync(CreateEvidence(
+                    await store.AppendNormalizedAsync(CreateEvidence(
                         secondKind, actor, receipt, eventKey, secondSlot, index == 0 ? 0 : null));
                 }
             }
@@ -167,7 +167,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             .ComputeRuntimeIdentityHash(serverSafety.CapturedRuntimeIdentity)
             .Should().Be(receiptRow.RuntimeIdentityHash);
         var expectedAt = startedAt.ToUniversalTime();
-        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var store = scope.ServiceProvider.GetRequiredService<NaturalOriginEvidenceStore>();
         var reliabilityService = scope.ServiceProvider
             .GetRequiredService<IScheduledGovernanceReliabilityService>();
         var initialReliability = await reliabilityService.ObserveAsync(receipt, CancellationToken.None);
@@ -177,14 +177,14 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             .AsNoTracking()
             .SingleAsync(row => row.GovernanceRunId == runId);
 
-        await store.AppendAsync(CreateEvidence(
+        await store.AppendNormalizedAsync(CreateEvidence(
             NaturalOriginEvidenceKind.PlatformAttestation,
             actor,
             receipt,
             receiptRow.EventKey,
             expectedAt,
             sourceSequence: null));
-        await store.AppendAsync(CreateEvidence(
+        await store.AppendNormalizedAsync(CreateEvidence(
             NaturalOriginEvidenceKind.ControlPlaneAudit,
             actor,
             receipt,
@@ -253,7 +253,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
 
         var ledger = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceAuthorityEpochLedger>();
         var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
-        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var store = scope.ServiceProvider.GetRequiredService<NaturalOriginEvidenceStore>();
         var safety = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>();
         var evidence = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityEvidenceProvider>();
         var configured = new ScheduledGovernanceNaturalOriginAuthoritySnapshot(
@@ -324,7 +324,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             entry.ScheduleDigest = configured.ScheduleDigest;
             entry.ConfigurationDigest = ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(
                 configured.ConfigurationDigest, configured.AuthorityEpochDigest);
-            await store.AppendAsync(entry);
+            await store.AppendAsync(entry, configured.AuthorityEpochDigest);
         }
 
         await reader.PersistObservationAsync(receipt, CancellationToken.None);
@@ -405,19 +405,117 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             receiptEventKey,
             DateTimeOffset.UtcNow,
             sourceSequence: null);
-        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var store = scope.ServiceProvider.GetRequiredService<NaturalOriginEvidenceStore>();
 
-        var created = await store.AppendAsync(entry);
-        var replay = await store.AppendAsync(Clone(entry));
+        var created = await store.AppendNormalizedAsync(entry);
+        var replay = await store.AppendNormalizedAsync(Clone(entry));
         var conflicting = Clone(entry);
         conflicting.GovernanceRunIdHash = Digest($"different-{Guid.NewGuid():N}");
-        var conflict = () => store.AppendAsync(conflicting);
+        var conflict = () => store.AppendNormalizedAsync(conflicting);
 
         created.IsReplay.Should().BeFalse();
         replay.IsReplay.Should().BeTrue();
         replay.Entry.Id.Should().Be(created.Entry.Id);
         await conflict.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*replay binding mismatch*");
+    }
+
+    [DockerRequiredFact]
+    public async Task Evidence_append_holds_the_current_epoch_through_commit()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var (receipt, eventKey) = await CreatePersistedReceiptAsync(scope.ServiceProvider, actor, "epoch-bound-append");
+        var entry = CreateEvidence(NaturalOriginEvidenceKind.PlatformAttestation, actor, receipt, eventKey, DateTimeOffset.UtcNow, null);
+        entry.Environment = $"epoch-append-{Guid.NewGuid():N}";
+        var first = new ScheduledGovernanceAuthorityEpochAdvanceRequest(
+            entry.TenantId, entry.OwnerUserId, entry.Environment, Digest("same-config"), Digest("epoch-a"));
+        var second = first with
+        {
+            AuthorityEpochDigest = Digest("epoch-b"),
+            ExpectedPreviousAuthorityEpochDigest = first.AuthorityEpochDigest,
+            ExpectedPreviousGeneration = 1
+        };
+        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var ledger = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceAuthorityEpochLedger>();
+        Func<Task> appendWithoutHead = () => store.AppendAsync(entry, first.AuthorityEpochDigest);
+        await appendWithoutHead.Should().ThrowAsync<InvalidOperationException>().WithMessage("*current authority epoch*");
+        (await ledger.AdvanceAsync(first)).Accepted.Should().BeTrue();
+        Func<Task> appendUnbound = () => store.AppendAsync(entry, first.AuthorityEpochDigest);
+        await appendUnbound.Should().ThrowAsync<InvalidOperationException>().WithMessage("*current authority epoch*");
+        entry.ConfigurationDigest = ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(
+            first.ConfigurationDigest, first.AuthorityEpochDigest);
+
+        var barrier = new EvidenceSaveBarrier();
+        var options = scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>();
+        await using var writerDb = new MemoryDbContext(
+            new DbContextOptionsBuilder<MemoryDbContext>(options).AddInterceptors(barrier).Options);
+        await using var rotationDb = new MemoryDbContext(options);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = deadline.Token;
+        await writerDb.Database.OpenConnectionAsync(token);
+        await rotationDb.Database.OpenConnectionAsync(token);
+        var writerPid = ((NpgsqlConnection)writerDb.Database.GetDbConnection()).ProcessID;
+        var rotationPid = ((NpgsqlConnection)rotationDb.Database.GetDbConnection()).ProcessID;
+        var writer = new NaturalOriginEvidenceStore(writerDb, TimeProvider.System);
+        var rotator = new ScheduledGovernanceAuthorityEpochLedger(rotationDb, TimeProvider.System);
+        var append = writer.AppendAsync(entry, first.AuthorityEpochDigest, token);
+        Task<ScheduledGovernanceAuthorityEpochAdvanceResult>? rotate = null;
+        try
+        {
+            await barrier.Entered.Task.WaitAsync(token);
+            rotate = rotator.AdvanceAsync(second, token);
+            await using var monitor = new NpgsqlConnection(environment.PostgresConnectionString);
+            await monitor.OpenAsync(token);
+            await using var waiting = new NpgsqlCommand("SELECT @writer = ANY(pg_blocking_pids(@rotator))", monitor);
+            waiting.Parameters.AddWithValue("writer", writerPid);
+            waiting.Parameters.AddWithValue("rotator", rotationPid);
+            while (!rotate.IsCompleted && !(bool)(await waiting.ExecuteScalarAsync(token))!)
+            {
+                await Task.Delay(25, token);
+            }
+            rotate.IsCompleted.Should().BeFalse("PostgreSQL must hold epoch advancement while the evidence commit is pending");
+            await using var visible = new NpgsqlCommand(
+                "SELECT EXISTS (SELECT 1 FROM natural_origin_evidence_ledger WHERE id = @id)", monitor);
+            visible.Parameters.AddWithValue("id", entry.Id);
+            ((bool)(await visible.ExecuteScalarAsync(token))!).Should().BeFalse("the inserted evidence has not committed");
+        }
+        finally
+        {
+            barrier.Release.TrySetResult();
+            await append;
+            if (rotate is not null)
+            {
+                await rotate;
+            }
+        }
+
+        (await append).IsReplay.Should().BeFalse();
+        (await rotate!).Epoch!.Generation.Should().Be(2);
+        Func<Task> replayOldEpoch = () => store.AppendAsync(Clone(entry), first.AuthorityEpochDigest);
+        await replayOldEpoch.Should().ThrowAsync<InvalidOperationException>().WithMessage("*current authority epoch*");
+        var newer = CreateEvidence(NaturalOriginEvidenceKind.ControlPlaneAudit, actor, receipt, eventKey, DateTimeOffset.UtcNow, 1);
+        newer.Environment = entry.Environment;
+        newer.ConfigurationDigest = ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(
+            second.ConfigurationDigest, second.AuthorityEpochDigest);
+        (await store.AppendAsync(newer, second.AuthorityEpochDigest)).IsReplay.Should().BeFalse();
+        (await store.AppendAsync(Clone(newer), second.AuthorityEpochDigest)).IsReplay.Should().BeTrue();
+        (await store.ListForRunAsync(entry.TenantId, entry.OwnerUserId, receipt.GovernanceRunId))
+            .Select(row => row.Id).Should().BeEquivalentTo(new[] { entry.Id, newer.Id });
+    }
+
+    private sealed class EvidenceSaveBarrier : SaveChangesInterceptor
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
+        {
+            Entered.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return result;
+        }
     }
 
     [DockerRequiredFact]
@@ -430,9 +528,9 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         var now = DateTimeOffset.UtcNow;
         var first = CreateEvidence(NaturalOriginEvidenceKind.PlatformAttestation, actor, receipt, eventKey, now, null);
         var second = CreateEvidence(NaturalOriginEvidenceKind.ControlPlaneAudit, actor, receipt, eventKey, now, 1);
-        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var store = scope.ServiceProvider.GetRequiredService<NaturalOriginEvidenceStore>();
         var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
-        await store.AppendAsync(first);
+        await store.AppendNormalizedAsync(first);
 
         var pending = new MemoryItem
         {
@@ -447,8 +545,8 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         };
         db.MemoryItems.Add(pending);
 
-        (await store.AppendAsync(Clone(first))).IsReplay.Should().BeTrue();
-        var failure = await Record.ExceptionAsync(() => store.AppendAsync(second));
+        (await store.AppendNormalizedAsync(Clone(first))).IsReplay.Should().BeTrue();
+        var failure = await Record.ExceptionAsync(() => store.AppendNormalizedAsync(second));
         using var readScope = factory.Services.CreateScope();
         var readDb = readScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         (await readDb.MemoryItems.AsNoTracking().AnyAsync(item => item.Id == pending.Id)).Should().BeFalse();
@@ -458,7 +556,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         db.Entry(second).State.Should().Be(EntityState.Detached);
 
         db.Entry(pending).State = EntityState.Detached;
-        (await store.AppendAsync(second)).IsReplay.Should().BeFalse();
+        (await store.AppendNormalizedAsync(second)).IsReplay.Should().BeFalse();
         (await readDb.NaturalOriginEvidenceLedgerEntries.AsNoTracking().CountAsync(row => row.Id == second.Id)).Should().Be(1);
         (await readDb.MemoryItems.AsNoTracking().AnyAsync(item => item.Id == pending.Id)).Should().BeFalse();
     }
@@ -484,9 +582,9 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         var receiptRow = await db.GovernanceRunReceipts.AsNoTracking()
             .SingleAsync(row => row.Id == receipt.ReceiptId);
         var mismatchedReceipt = receipt with { ReceiptId = Guid.NewGuid() };
-        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var store = scope.ServiceProvider.GetRequiredService<NaturalOriginEvidenceStore>();
 
-        var orphanAppend = () => store.AppendAsync(CreateEvidence(
+        var orphanAppend = () => store.AppendNormalizedAsync(CreateEvidence(
             NaturalOriginEvidenceKind.PlatformAttestation,
             actor,
             mismatchedReceipt,
@@ -525,8 +623,8 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             DateTimeOffset.UtcNow,
             sourceSequence: null);
         evidence.DispatchIdentityHash = Digest("wrong-dispatch");
-        await scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>()
-            .AppendAsync(evidence);
+        await scope.ServiceProvider.GetRequiredService<NaturalOriginEvidenceStore>()
+            .AppendNormalizedAsync(evidence);
 
         var query = new ScheduledGovernanceReliabilityEvidenceQuery(
             actor.TenantId!.Value,
@@ -555,7 +653,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             scope.ServiceProvider,
             actor,
             "natural-origin-ledger");
-        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var store = scope.ServiceProvider.GetRequiredService<NaturalOriginEvidenceStore>();
         var invalid = CreateEvidence(
             NaturalOriginEvidenceKind.PlatformAttestation,
             actor,
@@ -565,7 +663,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             sourceSequence: null);
         invalid.Issuer = "https://scheduler.example.test\nnoncanonical";
 
-        var invalidAppend = () => store.AppendAsync(invalid);
+        var invalidAppend = () => store.AppendNormalizedAsync(invalid);
         await invalidAppend.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*invalid identifier*");
 
@@ -576,7 +674,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             receiptEventKey,
             DateTimeOffset.UtcNow,
             sourceSequence: null);
-        await store.AppendAsync(valid);
+        await store.AppendNormalizedAsync(valid);
         var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var replacementEnvironment = "staging";
 

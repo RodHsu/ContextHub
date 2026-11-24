@@ -21,10 +21,10 @@ public sealed class NaturalOriginLedgerAppendOnlyIntegrationTests(ContainerTestE
             scope.ServiceProvider,
             actor,
             "natural-origin-append-only");
-        var store = scope.ServiceProvider.GetRequiredService<INaturalOriginEvidenceStore>();
+        var store = scope.ServiceProvider.GetRequiredService<NaturalOriginEvidenceStore>();
         var valid = CreateEvidence(actor, receipt, receiptEventKey, "valid");
 
-        await store.AppendAsync(valid);
+        await store.AppendNormalizedAsync(valid);
 
         var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
         var connection = db.Database.GetDbConnection();
@@ -45,7 +45,7 @@ public sealed class NaturalOriginLedgerAppendOnlyIntegrationTests(ContainerTestE
         orphan.SlotIdHash = Digest("orphan-slot");
         orphan.JtiHash = Digest("orphan-jti");
         orphan.SourceEventIdHash = Digest("orphan-event");
-        var orphanFailure = await Record.ExceptionAsync(() => store.AppendAsync(orphan));
+        var orphanFailure = await Record.ExceptionAsync(() => store.AppendNormalizedAsync(orphan));
         var orphanPostgres = GetPostgresException(orphanFailure);
         orphanPostgres.Should().NotBeNull();
         orphanPostgres!.SqlState.Should().Be(PostgresErrorCodes.ForeignKeyViolation);

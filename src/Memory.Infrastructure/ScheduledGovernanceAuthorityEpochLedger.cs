@@ -253,50 +253,47 @@ public sealed class ScheduledGovernanceAuthorityEpochLedger(
                 "Authority epoch reads cannot join an ambient transaction.");
         }
 
-        var ownsTransaction = dbContext.Database.CurrentTransaction is null;
-        IDbContextTransaction? transaction = null;
-        try
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted, cancellationToken);
+        var current = await ReadCurrentUnderLockAsync(dbContext, normalizedScope, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return current;
+    }
+
+    internal static async Task<ScheduledGovernanceAuthorityEpoch?> ReadCurrentUnderLockAsync(
+        MemoryDbContext dbContext,
+        ScheduledGovernanceAuthorityEpochScope scope,
+        CancellationToken cancellationToken)
+    {
+        if (dbContext.Database.CurrentTransaction?.GetDbTransaction().IsolationLevel != IsolationLevel.ReadCommitted)
         {
-            if (ownsTransaction)
-            {
-                transaction = await dbContext.Database.BeginTransactionAsync(
-                    IsolationLevel.ReadCommitted,
-                    cancellationToken);
-            }
-
-            await dbContext.Database.ExecuteSqlRawAsync(
-                "SELECT pg_advisory_xact_lock({0});",
-                [ComputeAdvisoryLockKey(normalizedScope)],
-                cancellationToken);
-
-            var chain = await dbContext.ScheduledGovernanceAuthorityEpochs
-                .AsNoTracking()
-                .Where(row => row.TenantId == normalizedScope.TenantId &&
-                              row.OwnerUserId == normalizedScope.OwnerUserId &&
-                              row.Environment == normalizedScope.Environment)
-                .OrderBy(row => row.Generation)
-                .Take(MaximumChainLength + 1)
-                .ToArrayAsync(cancellationToken);
-            if (!IsValidChain(chain, normalizedScope))
-            {
-                throw new InvalidOperationException(
-                    "The authority epoch ledger is inconsistent; current authority is unavailable.");
-            }
-
-            if (transaction is not null)
-            {
-                await transaction.CommitAsync(cancellationToken);
-            }
-
-            return chain.Length == 0 ? null : chain[^1];
+            throw new InvalidOperationException("Current authority must be read inside an owned read-committed transaction.");
         }
-        finally
+
+        if (!TryNormalizeScope(scope, out var normalizedScope, out var invalidReason))
         {
-            if (transaction is not null)
-            {
-                await transaction.DisposeAsync();
-            }
+            throw new ArgumentException(invalidReason, nameof(scope));
         }
+
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "SELECT pg_advisory_xact_lock({0});",
+            [ComputeAdvisoryLockKey(normalizedScope)],
+            cancellationToken);
+
+        var chain = await dbContext.ScheduledGovernanceAuthorityEpochs.AsNoTracking()
+            .Where(row => row.TenantId == normalizedScope.TenantId &&
+                          row.OwnerUserId == normalizedScope.OwnerUserId &&
+                          row.Environment == normalizedScope.Environment)
+            .OrderBy(row => row.Generation)
+            .Take(MaximumChainLength + 1)
+            .ToArrayAsync(cancellationToken);
+        if (!IsValidChain(chain, normalizedScope))
+        {
+            throw new InvalidOperationException(
+                "The authority epoch ledger is inconsistent; current authority is unavailable.");
+        }
+
+        return chain.Length == 0 ? null : chain[^1];
     }
 
     private static async Task<ScheduledGovernanceAuthorityEpochAdvanceResult> FinishAsync(

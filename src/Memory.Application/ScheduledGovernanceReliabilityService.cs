@@ -885,7 +885,7 @@ public sealed class ScheduledGovernanceReliabilityService(
     internal const string ConfigurationDigestBindingVersion =
         "scheduled-governance-configuration-v1";
 
-    internal static string ComputeConfigurationDigest(
+    public static string ComputeConfigurationDigest(
         string? baseConfigurationDigest,
         string? authorityEpochDigest)
     {
