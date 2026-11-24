@@ -124,6 +124,25 @@ public sealed class ScheduledGovernanceServiceTests
     }
 
     [Fact]
+    public async Task Execute_reports_an_unknown_item_outcome_as_unsuccessful()
+    {
+        var service = CreateService(
+            new StubKnowledgeReviewService(CreateReview([])),
+            new CapturingExecutor("UnknownResult"),
+            new StubReceipts(CreateDecisionReceipt("run-unknown", ScheduledGovernanceDecision.ReversibleExecutionRequired)));
+
+        var result = await service.ExecuteAsync(
+            new ScheduledGovernanceExecuteRequest("run-unknown", "snapshot-1",
+                ToolContractVersion: ScheduledGovernanceContract.ToolContractVersion,
+                SchemaHash: ScheduledGovernanceContract.SchemaHash),
+            default);
+
+        result.Succeeded.Should().BeFalse();
+        result.StoppedReason.Should().Be("UnknownResult");
+        result.RequiresReReview.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Execute_Should_Map_Only_Fixed_Reversible_Policy()
     {
         var executor = new CapturingExecutor();
@@ -961,7 +980,7 @@ public sealed class ScheduledGovernanceServiceTests
             => Task.FromCanceled<KnowledgeReviewResult>(cancellationToken);
     }
 
-    private sealed class CapturingExecutor : IGovernanceBatchExecutor
+    private sealed class CapturingExecutor(string stoppedReason = "Completed") : IGovernanceBatchExecutor
     {
         public int CallCount { get; private set; }
         public GovernanceBatchExecuteRequest? Request { get; private set; }
@@ -971,7 +990,7 @@ public sealed class ScheduledGovernanceServiceTests
             Request = request;
             return Task.FromResult(new GovernanceBatchExecuteResult(
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                null, false, true, [], [], request.SnapshotToken!, "Completed"));
+                null, false, true, [], [], request.SnapshotToken!, stoppedReason));
         }
     }
 

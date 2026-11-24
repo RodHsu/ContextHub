@@ -15,6 +15,7 @@ if ($parseErrors.Count -ne 0) {
 foreach ($name in @(
         "Get-ScheduledGovernancePropertyValue",
         "Get-ScheduledGovernanceArrayProperty",
+        "Test-ScheduledGovernanceExecutionResult",
         "Get-ScheduledGovernanceReceiptEvidence",
         "Get-ScheduledGovernanceReviewReceiptEvidence")) {
     $definition = $runner.Find({
@@ -163,9 +164,40 @@ foreach ($case in $cases) {
     Assert-RejectedReceiptFixture -Name "$($case.field):$($case.value)" -Fixture $fixture -ExpectedError $case.error
 }
 
+$execution = [pscustomobject]@{
+    succeeded = $true
+    isReplay = $false
+    stoppedReason = "Completed"
+    governanceRunId = $runId
+    snapshotToken = "kg:fixture:i0"
+}
+foreach ($expectedReplay in @($false, $true)) {
+    $execution.isReplay = $expectedReplay
+    if (-not (Test-ScheduledGovernanceExecutionResult $execution $runId "kg:fixture:i0" $expectedReplay)) {
+        throw "A successful execution with the expected run, snapshot and replay flag was rejected."
+    }
+}
+$invalidExecutions = @(
+    @{ field = "succeeded"; value = $false }
+    @{ field = "succeeded"; value = "true" }
+    @{ field = "isReplay"; value = $false }
+    @{ field = "isReplay"; value = "true" }
+    @{ field = "stoppedReason"; value = "UnknownResult" }
+    @{ field = "stoppedReason"; value = $null }
+    @{ field = "governanceRunId"; value = "another-run" }
+    @{ field = "snapshotToken"; value = "kg:fixture:old" }
+)
+foreach ($case in $invalidExecutions) {
+    $invalid = $execution.PSObject.Copy()
+    $invalid.($case.field) = $case.value
+    if (Test-ScheduledGovernanceExecutionResult $invalid $runId "kg:fixture:i0" $true) {
+        throw "An invalid execution result was accepted for '$($case.field)'."
+    }
+}
+
 [ordered]@{
     valid = $true
-    positiveCases = 6
-    negativeCases = $cases.Count + 3
+    positiveCases = 8
+    negativeCases = $cases.Count + 3 + $invalidExecutions.Count
     result = "scheduled-governance-receipt-bound-to-review"
 } | ConvertTo-Json -Compress

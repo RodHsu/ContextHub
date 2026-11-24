@@ -218,7 +218,8 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
             run.RuntimeIdentity?.BuildVersion ?? string.Empty,
             run.RuntimeIdentity?.DerivedIdentity ?? string.Empty);
 
-    internal ScheduledGovernanceReliabilityReceiptProjection ValidateStoredDecision(bool reviewAwaitingDecision)
+    internal ScheduledGovernanceReliabilityReceiptProjection ValidateStoredDecision(
+        bool reviewAwaitingDecision, bool unknownExecutionOutcome = false)
     {
         if (reviewAwaitingDecision ||
             FinalConvergenceStatus == ScheduledGovernanceService.DecisionProjectionPending)
@@ -229,6 +230,18 @@ internal sealed record ScheduledGovernanceReliabilityReceiptProjection
                 Terminal = false,
                 Decision = null,
                 FinalConvergenceStatus = ScheduledGovernanceService.DecisionProjectionPending
+            };
+        }
+
+        if (ExecutionMode == "Scheduled" && (unknownExecutionOutcome || StoppedReason == "UnknownResult"))
+        {
+            return this with
+            {
+                Status = "Stopped",
+                Terminal = true,
+                Decision = null,
+                FinalConvergenceStatus = "UnknownResult",
+                StoppedReason = "UnknownResult"
             };
         }
 

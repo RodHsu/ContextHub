@@ -400,12 +400,16 @@ public sealed class ScheduledGovernanceService(
         };
 
     internal const string DecisionProjectionPending = "DecisionProjectionPending";
+    private const string UnknownExecutionOutcome = "UnknownResult";
 
     internal static (string Status, string Convergence, ScheduledGovernanceDecision? Decision, string Outcome)
         ReadReceiptState(GovernanceRunReceiptResult receipt)
     {
         if (receipt.ScheduledDecisionProjectionPending)
             return ("Running", DecisionProjectionPending, null, DecisionProjectionPending);
+
+        if (receipt.ExecutionMode == "Scheduled" && receipt.StoppedReason == UnknownExecutionOutcome)
+            return ("Stopped", UnknownExecutionOutcome, null, UnknownExecutionOutcome);
 
         var status = receipt.Status;
         var convergence = receipt.FinalConvergenceStatus;
@@ -471,7 +475,7 @@ public sealed class ScheduledGovernanceService(
     public static ScheduledGovernanceExecutionResult ToScheduledResult(GovernanceBatchExecuteResult result)
         => new(
             result.GovernanceRunId,
-            result.Succeeded,
+            result.Succeeded && result.StoppedReason != UnknownExecutionOutcome,
             result.ScannedCount,
             result.AttemptedCount,
             result.AppliedCount,

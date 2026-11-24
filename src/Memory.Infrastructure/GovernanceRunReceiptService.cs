@@ -333,7 +333,9 @@ public sealed class GovernanceRunReceiptService(
         var requestIdentity = RequestIdentity(request);
         var requestHash = RequestHash(request);
         var previous = await LatestAsync(runId, actor, cancellationToken);
-        var status = ResolveTerminalStatus(result);
+        var status = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled && result.StoppedReason == "UnknownResult"
+            ? "Stopped"
+            : ResolveTerminalStatus(result);
         var eventKind = result.IsReplay ? "BatchReplay" : "BatchCompleted";
         var eventKey = Hash($"{eventKind}\n{runId}\n{requestIdentity}\n{status}\n{result.StoppedReason}");
         var receipt = NewReceipt(actor, runId, eventKey, request.ExecutionMode.ToString(), eventKind, status, startedAt,
@@ -731,7 +733,7 @@ public sealed class GovernanceRunReceiptService(
               (receivedReceipt is null
                   ? null
                   : executions.FirstOrDefault(x => x.CreatedAt >= receivedReceipt.CreatedAt));
-        var latestBatch = BuildLatestBatch(batchReceipt, execution);
+        var latestBatch = BuildLatestBatch(batchReceipt, execution, scheduled);
         var latestReviewEvent = scheduled &&
                                 stateEvent.EventType is "ReviewReceived" or "ReviewCompleted" or "ReviewStopped" or "ScheduledDecisionProjected";
         var readStatus = (!latestReviewEvent ? latestBatch?.Status : null) ??
@@ -813,7 +815,8 @@ public sealed class GovernanceRunReceiptService(
 
     private static GovernanceBatchOutcomeResult? BuildLatestBatch(
         GovernanceRunReceipt? batchReceipt,
-        GovernanceBatchExecution? execution)
+        GovernanceBatchExecution? execution,
+        bool scheduled)
     {
         if (batchReceipt is null && execution is null)
         {
@@ -827,9 +830,13 @@ public sealed class GovernanceRunReceiptService(
             catch (JsonException) { }
         }
 
-        var executed = execution is not null && string.Equals(execution.Status, "Completed", StringComparison.Ordinal);
-        var status = executed
-            ? "Completed"
+        // Older receipts could say Completed while the execution was still stopped with only progress JSON.
+        var unknownOutcome = scheduled &&
+                             (HasUnknownScheduledBatchOutcome(batchReceipt) || result?.StoppedReason == "UnknownResult");
+        var executed = !unknownOutcome && execution is { Status: "Completed" };
+        var status = unknownOutcome
+            ? "Stopped"
+            : executed ? "Completed"
             : !string.IsNullOrWhiteSpace(batchReceipt?.Status) &&
               !string.Equals(batchReceipt.Status, "Running", StringComparison.OrdinalIgnoreCase)
                 ? batchReceipt.Status
@@ -854,7 +861,7 @@ public sealed class GovernanceRunReceiptService(
             NextCursor: result is null ? execution?.CursorAfter : result.NextCursor,
             HasMore: result?.HasMore ?? true,
             RequiresReReview: result?.RequiresReReview ?? !executed,
-            StoppedReason: result?.StoppedReason ?? batchReceipt?.StoppedReason ?? string.Empty,
+            StoppedReason: unknownOutcome ? "UnknownResult" : result?.StoppedReason ?? batchReceipt?.StoppedReason ?? string.Empty,
             Scanned: result?.ScannedCount ?? 0,
             Attempted: result?.AttemptedCount ?? 0,
             Applied: result?.AppliedCount ?? 0,
@@ -1611,6 +1618,14 @@ public sealed class GovernanceRunReceiptService(
         try { return JsonSerializer.Deserialize<T>(json, JsonOptions) ?? fallback; }
         catch (JsonException) { return fallback; }
     }
+
+    internal static bool HasUnknownScheduledBatchOutcome(GovernanceRunReceipt? receipt)
+        => receipt is
+        {
+            ExecutionMode: "Scheduled",
+            EventType: "BatchCompleted" or "BatchReplay" or "BatchStopped",
+            StoppedReason: "UnknownResult"
+        };
 
     private static string ResolveTerminalStatus(GovernanceBatchExecuteResult result)
         => result.ErrorCode == GovernanceBatchErrorCode.None

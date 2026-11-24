@@ -34,6 +34,9 @@ public sealed record ScheduledGovernanceServerSafetyEvidenceSnapshot(
     [System.Text.Json.Serialization.JsonIgnore]
     public bool DecisionProjectionPending { get; init; }
 
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool UnknownExecutionOutcome { get; init; }
+
     public IReadOnlyDictionary<string, ScheduledGovernanceInvariantProof> InvariantProofs { get; init; } =
         new Dictionary<string, ScheduledGovernanceInvariantProof>();
 }

@@ -104,6 +104,9 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
         if (observedReceipt.ExecutionMode == "Scheduled" && observedReceipt.EventType == "ReviewCompleted")
             return Unknown(observedReceipt.EventSequence) with { DecisionProjectionPending = true };
 
+        if (ObservedBatchOutcomeUnknown(observedReceipt, events))
+            return Unknown(observedReceipt.EventSequence) with { UnknownExecutionOutcome = true };
+
         var allEventTypesAllowed = events.All(row => AllowedReceiptEventTypes.Contains(row.EventType));
         var contractLineageConsistent = events.All(row =>
             row.ToolContractVersion == observedReceipt.ToolContractVersion &&
@@ -428,6 +431,22 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
            review.UserScopeHandledSeparately == decision.UserScopeHandledSeparately &&
            review.CountInvariantSatisfied == decision.CountInvariantSatisfied;
 
+    private static bool ObservedBatchOutcomeUnknown(
+        GovernanceRunReceipt observedReceipt,
+        IReadOnlyList<GovernanceRunReceipt> events)
+    {
+        if (observedReceipt.EventType != "BatchReplay")
+            return GovernanceRunReceiptService.HasUnknownScheduledBatchOutcome(observedReceipt);
+
+        var stateEvent = events.LastOrDefault(row =>
+            row.EventSequence < observedReceipt.EventSequence && row.EventType != "BatchReplay");
+        return GovernanceRunReceiptService.HasUnknownScheduledBatchOutcome(stateEvent) ||
+               (GovernanceRunReceiptService.HasUnknownScheduledBatchOutcome(observedReceipt) &&
+                stateEvent is { EventType: "BatchReceived" or "BatchCompleted" or "BatchStopped" } &&
+                stateEvent.RequestIdentityHash == observedReceipt.RequestIdentityHash &&
+                stateEvent.RequestHash == observedReceipt.RequestHash);
+    }
+
     private static bool HasValidReviewLifecycle(
         IReadOnlyList<GovernanceRunReceipt> events,
         GovernanceRunReceipt received,
@@ -436,7 +455,8 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
     {
         if (events.Any(row =>
                 row.EventType is "ReviewStopped" or "BatchStopped" ||
-                row.Status is "Failed" or "Stopped"))
+                row.Status is "Failed" or "Stopped" ||
+                GovernanceRunReceiptService.HasUnknownScheduledBatchOutcome(row)))
         {
             return false;
         }

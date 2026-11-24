@@ -419,6 +419,25 @@ function Test-ScheduledGovernanceIdsEqual {
     return $leftValues.Count -eq $rightValues.Count -and (($leftValues -join "`n") -ceq ($rightValues -join "`n"))
 }
 
+function Test-ScheduledGovernanceExecutionResult {
+    param(
+        [AllowNull()][object]$Execution,
+        [Parameter(Mandatory)][string]$ExpectedRunId,
+        [Parameter(Mandatory)][string]$ExpectedSnapshot,
+        [Parameter(Mandatory)][bool]$ExpectedReplay
+    )
+
+    $succeeded = Get-ScheduledGovernancePropertyValue $Execution "succeeded"
+    $isReplay = Get-ScheduledGovernancePropertyValue $Execution "isReplay"
+    $stoppedReason = Get-ScheduledGovernancePropertyValue $Execution "stoppedReason"
+    return $succeeded -is [bool] -and $succeeded -and
+        $isReplay -is [bool] -and $isReplay -eq $ExpectedReplay -and
+        $stoppedReason -is [string] -and -not [string]::IsNullOrWhiteSpace($stoppedReason) -and
+        $stoppedReason -cne "UnknownResult" -and
+        (Get-ScheduledGovernancePropertyValue $Execution "governanceRunId") -ceq $ExpectedRunId -and
+        (Get-ScheduledGovernancePropertyValue $Execution "snapshotToken") -ceq $ExpectedSnapshot
+}
+
 function Get-ScheduledGovernanceReviewEvidence {
     param(
         [Parameter(Mandatory)][object]$Review,
@@ -1039,6 +1058,10 @@ try {
                             else {
                                 $firstExecution = Get-ScheduledGovernanceToolData `
                                     -Json $firstExecutionJson -Operation "scheduled_governance_execute"
+                                if ((Get-ScheduledGovernancePropertyValue $firstExecution "stoppedReason") -ceq "UnknownResult") {
+                                    $unknownOutcome = $true
+                                    $firstExecution = $null
+                                }
                             }
                         }
                         catch {
@@ -1067,8 +1090,11 @@ try {
                         }
 
                         $replayExecution = $null
-                        if ($null -ne $firstExecution -and
-                            [bool](Get-ScheduledGovernancePropertyValue $firstExecution "succeeded")) {
+                        if ($null -ne $firstExecution) {
+                            $executionSnapshot = $executeArguments.request.snapshotToken
+                            if (-not (Test-ScheduledGovernanceExecutionResult $firstExecution $runId $executionSnapshot $false)) {
+                                throw "First execution did not return a successful result bound to this run and snapshot."
+                            }
                             $evidence.outcome.executorCalls++
                             $replayJson = Invoke-ScheduledGovernanceTool `
                                 -Token $token `
@@ -1084,7 +1110,7 @@ try {
                                 [int](Get-ScheduledGovernancePropertyValue $replayExecution "appliedCount")
                             $evidence.replay.exercised = $true
                             $evidence.replay.exact =
-                                [bool](Get-ScheduledGovernancePropertyValue $replayExecution "isReplay") -and
+                                (Test-ScheduledGovernanceExecutionResult $replayExecution $runId $executionSnapshot $true) -and
                                 $auditMatches -and $appliedMatches
                             if (-not $evidence.replay.exact) {
                                 throw "Exact execution replay did not preserve result and audit identity."

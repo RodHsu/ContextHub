@@ -504,6 +504,114 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             .Where(x => x.Code == GovernanceBatchErrorCode.ReReviewRequired);
     }
 
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Unknown_execution_remains_stopped_on_scheduled_receipt_readback(bool legacyCompletedReceipt)
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var runId = $"scheduled-unknown-{Guid.NewGuid():N}";
+        var identity = CurrentScheduledIdentity();
+        var snapshot = $"kg:snapshot:{runId}:i0";
+        var startedAt = DateTimeOffset.UtcNow;
+        await receipts.RecordReviewStartedAsync(runId, startedAt, identity, default);
+        await receipts.RecordReviewAsync(CreateGenericReview(runId, identity, snapshot, actionable: 1), startedAt, default);
+        await receipts.RecordScheduledDecisionAsync(CreateScheduledDecision(runId, snapshot, false, 1), startedAt, default);
+
+        var request = new GovernanceBatchExecuteRequest(runId, [ProjectContext.SharedProjectId], snapshot,
+            ExecutionMode: GovernanceBatchExecutionMode.Scheduled,
+            ToolContractVersion: GovernanceToolContract.ToolContractVersion, SchemaHash: GovernanceToolContract.SchemaHash)
+        { ReceiptContractIdentity = identity };
+        await receipts.RecordExecutionStartedAsync(request, startedAt, default);
+        var execution = CreateNoOpExecution(runId, snapshot) with
+        {
+            StoppedReason = "UnknownResult",
+            RequiresReReview = true,
+            FailedCount = 1
+        };
+        if (legacyCompletedReceipt)
+        {
+            var received = await db.GovernanceRunReceipts.AsNoTracking()
+                .SingleAsync(x => x.GovernanceRunId == runId && x.EventType == "BatchReceived");
+            received.Id = Guid.NewGuid();
+            received.EventSequence = 0;
+            received.EventKey = Guid.NewGuid().ToString("N");
+            received.EventType = "BatchCompleted";
+            received.Status = "Completed";
+            received.StoppedReason = "UnknownResult";
+            received.Failed = 1;
+            received.FailurePhase = "ItemExecution";
+            db.GovernanceRunReceipts.Add(received);
+            await db.SaveChangesAsync();
+        }
+        else
+        {
+            await receipts.RecordExecutionAsync(request, execution, startedAt, default);
+        }
+
+        var batch = db.GovernanceRunReceipts.Where(x => x.GovernanceRunId == runId && x.EventType == "BatchCompleted");
+        var rawStatus = await batch.Select(x => x.Status).SingleAsync();
+        var readback = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+
+        readback.Received.Should().BeTrue();
+        readback.Terminal.Should().BeTrue();
+        readback.Status.Should().Be("Stopped");
+        readback.Outcome.Should().Be("UnknownResult");
+        readback.StoppedReason.Should().Be("UnknownResult");
+        readback.Decision.Should().BeNull();
+        readback.Failed.Should().Be(1);
+        rawStatus.Should().Be(legacyCompletedReceipt ? "Completed" : "Stopped");
+        (await batch.Select(x => x.Status).SingleAsync()).Should().Be(rawStatus);
+
+        var stored = (await receipts.GetAsync(runId, default))!;
+        var reliability = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceReliabilityService>();
+        await reliability.PersistObservationAsync(stored, default);
+        var historyRows = db.ScheduledGovernanceReliabilityRuns.Where(x => x.GovernanceRunId == runId);
+        var projectionJson = await historyRows.Select(x => x.ProjectionJson).SingleAsync();
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var projection = JsonSerializer.Deserialize<ScheduledGovernanceReliabilityReceiptProjection>(projectionJson, jsonOptions)!;
+        projection.Status.Should().Be("Stopped");
+        projection.Decision.Should().BeNull();
+        if (legacyCompletedReceipt)
+        {
+            // A legacy view could source its reason from the unfinished execution's progress JSON.
+            projectionJson = JsonSerializer.Serialize(projection with
+            {
+                Status = "Completed",
+                StoppedReason = "Running",
+                FinalConvergenceStatus = nameof(ScheduledGovernanceDecision.ReversibleExecutionRequired),
+                Decision = ScheduledGovernanceDecision.ReversibleExecutionRequired
+            }, jsonOptions);
+            await historyRows.ExecuteUpdateAsync(set => set.SetProperty(x => x.ProjectionJson, projectionJson));
+            projectionJson = await historyRows.Select(x => x.ProjectionJson).SingleAsync();
+        }
+
+        var run = (await reliability.GetAsync(default)).Runs.Single(x => x.GovernanceRunId == runId);
+        run.IsFailed.Should().BeTrue();
+        run.CountedTowardGate.Should().BeFalse();
+        (await historyRows.Select(x => x.ProjectionJson).SingleAsync()).Should().Be(projectionJson);
+
+        var reviewAgainAt = DateTimeOffset.UtcNow;
+        var reviewAgainSnapshot = $"kg:snapshot:{runId}:r1";
+        await receipts.RecordReviewStartedAsync(runId, reviewAgainAt, identity, default, isReReview: true);
+        await receipts.RecordReviewAsync(CreateGenericReview(runId, identity, reviewAgainSnapshot, isReReview: true), reviewAgainAt, default);
+        await receipts.RecordScheduledDecisionAsync(CreateScheduledDecision(runId, reviewAgainSnapshot, true, 0), reviewAgainAt, default);
+        var afterReview = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        afterReview.Outcome.Should().Be("NoOpConverged");
+        afterReview.FinalSnapshotToken.Should().Be(reviewAgainSnapshot);
+        afterReview.Failed.Should().Be(1);
+
+        await receipts.RecordExecutionAsync(request, execution with { IsReplay = true }, DateTimeOffset.UtcNow, default);
+        var afterReplay = await scheduled.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        afterReplay.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
+        afterReplay.FinalSnapshotToken.Should().Be(reviewAgainSnapshot);
+        afterReplay.Failed.Should().Be(1);
+    }
+
     [DockerRequiredFact]
     public async Task Authorized_reversible_execution_then_re_review_is_not_misclassified_as_zero_execute()
     {
