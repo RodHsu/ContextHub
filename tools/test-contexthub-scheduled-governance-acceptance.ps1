@@ -756,32 +756,52 @@ function Read-ScheduledGovernanceProtectedInvariantEvidence {
     try {
         $manifest = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
         $displayName = Get-ScheduledGovernancePropertyValue $manifest "displayName"
-        $displayNameBefore = [string](Get-ScheduledGovernancePropertyValue $displayName "before")
-        $displayNameAfter = [string](Get-ScheduledGovernancePropertyValue $displayName "after")
-        if ([string]::IsNullOrWhiteSpace($displayNameBefore) -or $displayNameBefore -cne $displayNameAfter) {
-            throw "displayName before/after values are missing or changed."
+        $displayNameBefore = Get-ScheduledGovernancePropertyValue $displayName "before"
+        $displayNameAfter = Get-ScheduledGovernancePropertyValue $displayName "after"
+        if ($displayNameBefore -isnot [string] -or [string]::IsNullOrWhiteSpace($displayNameBefore) -or
+            $displayNameAfter -isnot [string] -or [string]::IsNullOrWhiteSpace($displayNameAfter)) {
+            throw "displayName requires nonempty before and after strings."
         }
 
-        $workItems = @(ConvertTo-ScheduledGovernanceArray (Get-ScheduledGovernancePropertyValue $manifest "businessWorkItems"))
+        $workItems = $manifest.PSObject.Properties["businessWorkItems"].Value
+        if ($workItems -isnot [array]) {
+            throw "businessWorkItems must be an explicit array."
+        }
+
+        $displayNameUnchanged = $displayNameBefore -ceq $displayNameAfter
         $workItemsUnchanged = $true
+        $observedIds = [System.Collections.Generic.HashSet[Guid]]::new()
+        $validStatuses = @("Pending", "InProgress", "Blocked", "Completed", "Cancelled")
         foreach ($item in $workItems) {
-            if ([string]::IsNullOrWhiteSpace([string](Get-ScheduledGovernancePropertyValue $item "id"))) {
-                throw "businessWorkItems entry has no id."
+            $id = [Guid]::Empty
+            $rawId = Get-ScheduledGovernancePropertyValue $item "id"
+            if ($rawId -isnot [string] -or -not [Guid]::TryParse($rawId, [ref]$id) -or
+                $id -eq [Guid]::Empty -or -not $observedIds.Add($id)) {
+                throw "businessWorkItems requires distinct nonempty Work Item IDs."
             }
+
             $before = Get-ScheduledGovernancePropertyValue $item "before"
             $after = Get-ScheduledGovernancePropertyValue $item "after"
-            foreach ($field in @("status", "isArchived")) {
-                if ([string](Get-ScheduledGovernancePropertyValue $before $field) -cne [string](Get-ScheduledGovernancePropertyValue $after $field)) {
-                    $workItemsUnchanged = $false
-                }
+            $beforeStatus = Get-ScheduledGovernancePropertyValue $before "status"
+            $afterStatus = Get-ScheduledGovernancePropertyValue $after "status"
+            $beforeArchived = Get-ScheduledGovernancePropertyValue $before "isArchived"
+            $afterArchived = Get-ScheduledGovernancePropertyValue $after "isArchived"
+            if ($beforeStatus -isnot [string] -or $beforeStatus -cnotin $validStatuses -or
+                $afterStatus -isnot [string] -or $afterStatus -cnotin $validStatuses -or
+                $beforeArchived -isnot [bool] -or $afterArchived -isnot [bool]) {
+                throw "businessWorkItems requires an observed status and boolean isArchived before and after."
+            }
+            if ($beforeStatus -cne $afterStatus -or $beforeArchived -ne $afterArchived) {
+                $workItemsUnchanged = $false
             }
         }
 
+        $unchanged = $displayNameUnchanged -and $workItemsUnchanged
         return [ordered]@{
-            status = if ($workItemsUnchanged) { "verified" } else { "changed" }
-            unchanged = $workItemsUnchanged
+            status = if ($unchanged) { "verified" } else { "changed" }
+            unchanged = $unchanged
             source = "external-read-only-manifest"
-            displayNameUnchanged = $true
+            displayNameUnchanged = $displayNameUnchanged
             businessWorkItemsUnchanged = $workItemsUnchanged
             businessWorkItemCount = $workItems.Count
         }

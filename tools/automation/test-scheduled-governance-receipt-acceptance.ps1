@@ -25,7 +25,8 @@ foreach ($name in @(
         "Get-ScheduledGovernanceBatchAuditIds",
         "Assert-ScheduledGovernanceFirstBatchBaseline",
         "Get-ScheduledGovernanceBatchReceiptEvidence",
-        "Invoke-ScheduledGovernanceVerifiedReplay")) {
+        "Invoke-ScheduledGovernanceVerifiedReplay",
+        "Read-ScheduledGovernanceProtectedInvariantEvidence")) {
     $definition = $runner.Find({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -379,10 +380,52 @@ foreach ($case in $baselineRejections) {
     if (-not $rejected) { throw "An initial receipt with earlier batch evidence was accepted." }
 }
 
+$manifestCases = @(
+    @{ name = "complete observations"; expected = "verified"; change = {} }
+    @{ name = "explicit empty inventory"; expected = "verified"; change = { param($m) $m.businessWorkItems = @() } }
+    @{ name = "no Work Item inventory"; expected = "invalid"; change = { param($m) $m.Remove("businessWorkItems") } }
+    @{ name = "Work Item object instead of array"; expected = "invalid"; change = { param($m) $m.businessWorkItems = $m.businessWorkItems[0] } }
+    @{ name = "null Work Item inventory"; expected = "invalid"; change = { param($m) $m.businessWorkItems = $null } }
+    @{ name = "empty before and after objects"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].before = @{}; $m.businessWorkItems[0].after = @{} } }
+    @{ name = "missing post-run observation"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].after = $null } }
+    @{ name = "string archive flag"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].before.isArchived = "false"; $m.businessWorkItems[0].after.isArchived = "false" } }
+    @{ name = "unrecognized status"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].before.status = "Unknown"; $m.businessWorkItems[0].after.status = "Unknown" } }
+    @{ name = "invalid Work Item ID"; expected = "invalid"; change = { param($m) $m.businessWorkItems[0].id = "not-an-id" } }
+    @{ name = "duplicated Work Item"; expected = "invalid"; change = { param($m) $m.businessWorkItems += $m.businessWorkItems[0] } }
+    @{ name = "non-string DisplayName"; expected = "invalid"; change = { param($m) $m.displayName.before = 3; $m.displayName.after = 3 } }
+    @{ name = "DisplayName changed"; expected = "changed"; change = { param($m) $m.displayName.after = "Changed" } }
+    @{ name = "Work Item status changed"; expected = "changed"; change = { param($m) $m.businessWorkItems[0].after.status = "Completed" } }
+    @{ name = "Work Item was archived"; expected = "changed"; change = { param($m) $m.businessWorkItems[0].after.isArchived = $true } }
+)
+$localRoot = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) ".agent/local"
+[void][IO.Directory]::CreateDirectory($localRoot)
+$manifestPath = Join-Path $localRoot "a1-protected-manifest-$([Guid]::NewGuid().ToString('N')).json"
+try {
+    foreach ($case in $manifestCases) {
+        $manifest = @{
+            displayName = @{ before = "ContextHub"; after = "ContextHub" }
+            businessWorkItems = @(@{
+                    id = "6d2aecbd-09eb-4a8a-ae32-55f23c349299"
+                    before = @{ status = "InProgress"; isArchived = $false }
+                    after = @{ status = "InProgress"; isArchived = $false }
+                })
+        }
+        & $case.change $manifest
+        $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+        $protected = Read-ScheduledGovernanceProtectedInvariantEvidence $manifestPath
+        if ($protected.status -cne $case.expected -or $protected.unchanged -ne ($case.expected -ceq "verified")) {
+            throw "Protected manifest case '$($case.name)' returned '$($protected.status)' or the wrong acceptance flag."
+        }
+    }
+}
+finally {
+    Remove-Item -LiteralPath $manifestPath
+}
+
 [ordered]@{
     valid = $true
-    positiveCases = 11
+    positiveCases = 11 + @($manifestCases | Where-Object expected -CEQ "verified").Count
     negativeCases = $cases.Count + 3 + $invalidExecutions.Count + $preReplayCases.Count +
-        $postReplayCases.Count + $baselineRejections.Count
-    result = "scheduled-governance-receipt-and-replay-bound"
+        $postReplayCases.Count + $baselineRejections.Count + @($manifestCases | Where-Object expected -CNE "verified").Count
+    result = "scheduled-governance-receipt-replay-and-protected-evidence"
 } | ConvertTo-Json -Compress

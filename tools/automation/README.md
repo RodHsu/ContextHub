@@ -32,12 +32,14 @@ The runner uses only the four published tools. It checks initialize identity, ca
   "displayName": { "before": "ContextHub", "after": "ContextHub" },
   "businessWorkItems": [
     {
-      "id": "readback-id",
+      "id": "6d2aecbd-09eb-4a8a-ae32-55f23c349299",
       "before": { "status": "InProgress", "isArchived": false },
       "after": { "status": "InProgress", "isArchived": false }
     }
   ]
 }
 ```
+
+Use distinct Work Item IDs and record a valid status and JSON boolean before and after each item. Supply an empty array only when the independent readback found no business Work Items in scope.
 
 The runner does not call REST, database, admin, general MCP, or fallback surfaces, and it does not modify the live Automation configuration. Omit `-EvidencePath` to keep evidence on stdout; when used, it writes one compact JSON record to the caller-selected path.

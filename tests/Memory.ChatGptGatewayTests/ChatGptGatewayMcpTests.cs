@@ -4807,6 +4807,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
         listedToolNames.Should().HaveCount(89);
+        listedToolNames.Count(name => name.StartsWith("agent_execution_", StringComparison.Ordinal)).Should().Be(10);
+        listedToolNames.Count(name => name.StartsWith("skill_", StringComparison.Ordinal) ||
+                                      name.StartsWith("skills_", StringComparison.Ordinal)).Should().Be(7);
+        listedToolNames.Should().NotContain(ScheduledGovernanceToolCatalog.PublishedToolNames);
         var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
         appFacingProjection.IsValid.Should().BeTrue();
         appFacingProjection.PublishedToolCount.Should().Be(89);
