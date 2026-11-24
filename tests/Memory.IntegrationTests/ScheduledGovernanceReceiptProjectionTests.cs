@@ -68,6 +68,13 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             .Should().ThrowAsync<InvalidOperationException>();
         failure.Which.InnerException.Should().BeOfType<PostgresException>().Which.SqlState
             .Should().Be(PostgresErrorCodes.LockNotAvailable);
+        var missing = await service.GetReceiptAsync($"{runId}-absent", cancellationToken);
+        missing.RunExists.Should().BeFalse();
+        missing.Received.Should().BeFalse();
+        missing.Status.Should().Be("NotReceived");
+        missing.Reliability.Should().BeNull();
+        queue.TryRead(out _).Should().BeFalse();
+
         var degraded = await service.GetReceiptAsync(runId, cancellationToken);
         degraded.Should().BeEquivalentTo(receiptOnly);
         degraded.ReceiptId.Should().Be(receipt.ReceiptId);
