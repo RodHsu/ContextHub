@@ -723,7 +723,7 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
     }
 
     [DockerRequiredFact]
-    public async Task Guarded_dry_run_should_page_the_1492_exception_baseline_without_mutation()
+    public async Task Guarded_baseline_should_reconcile_only_eligible_evidence_among_1492_exceptions()
     {
         using var scope = CreateScope(out var db, out var service, out var actor);
         var seed = await SeedAsync(db, actor);
@@ -743,10 +743,55 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
             CreatedAt = seed.CreatedAt,
             UpdatedAt = seed.UpdatedAt
         }).ToArray();
+        var rejectedProposal = new ConversationInsight
+        {
+            SessionId = seed.SessionId,
+            CheckpointId = seed.CheckpointId,
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = seed.ProjectId,
+            SourceSystem = ChatGptProposalService.SourceSystem,
+            Tags = ["chatgpt-proposal"],
+            DedupKey = Guid.NewGuid().ToString("N"),
+            PromotionStatus = ConversationPromotionStatus.Skipped,
+            CreatedAt = seed.CreatedAt,
+            UpdatedAt = seed.UpdatedAt
+        };
+        var archivedTarget = new MemoryItem
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = seed.ProjectId,
+            Title = "Archived historical evidence",
+            Content = "Retain this evidence",
+            Status = MemoryStatus.Archived,
+            CreatedAt = seed.CreatedAt,
+            UpdatedAt = seed.UpdatedAt
+        };
+        var rejected = rows[0];
+        var protectedRow = rows[1];
+        foreach (var bound in new[] { rejected, protectedRow })
+        {
+            bound.SourceRef = $"chatgpt-proposal:{rejectedProposal.Id:D}";
+            bound.MetadataJson = JsonSerializer.Serialize(new { proposalId = rejectedProposal.Id });
+        }
+        protectedRow.Tags = ["legal-hold"];
+        rows[2].PromotionStatus = ConversationPromotionStatus.HostBlocked;
+        rows[3].PromotionStatus = ConversationPromotionStatus.Deferred;
+        var archived = rows[4];
+        archived.SourceSystem = ChatGptProposalService.SourceSystem;
+        archived.Tags = ["chatgpt-proposal"];
+        archived.MetadataJson = JsonSerializer.Serialize(new
+        {
+            proposal = true,
+            toolName = "memory_delete",
+            payload = new { id = archivedTarget.Id, projectId = seed.ProjectId }
+        });
         db.ConversationInsights.AddRange(rows);
+        db.ConversationInsights.Add(rejectedProposal);
+        db.MemoryItems.Add(archivedTarget);
         await db.SaveChangesAsync();
-        var ids = new HashSet<Guid>();
-        ConversationAdjudicationCandidate? first = null;
+        var candidates = new Dictionary<Guid, ConversationAdjudicationCandidate>();
         string? inventoryToken = null;
         var offset = 0;
         while (true)
@@ -757,30 +802,50 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
             {
                 inventoryToken = page.InventoryToken;
                 inventoryToken.Should().NotBeNullOrWhiteSpace();
-                first = page.Items.First();
             }
             page.InventoryToken.Should().Be(inventoryToken);
             page.TotalCount.Should().Be(baselineCount);
-            page.UnresolvedHumanDecisionCount.Should().Be(baselineCount);
+            page.UnresolvedHumanDecisionCount.Should().Be(baselineCount - 2);
             page.UnchangedCount.Should().Be(baselineCount);
-            foreach (var item in page.Items) ids.Add(item.InsightId).Should().BeTrue();
+            foreach (var item in page.Items) candidates.TryAdd(item.InsightId, item).Should().BeTrue();
             if (!page.HasMore) break;
             offset += page.Items.Count;
         }
-        ids.Should().BeEquivalentTo(rows.Select(row => row.Id).Append(seed.Id));
+        candidates.Keys.Should().BeEquivalentTo(rows.Select(row => row.Id).Append(seed.Id));
+        candidates.Values.Where(candidate => candidate.CanReconcile).Select(candidate => candidate.InsightId)
+            .Should().BeEquivalentTo(new[] { rejected.Id, archived.Id });
+        candidates[protectedRow.Id].Classification.Should().Be("ProtectedHold");
+        candidates[rows[2].Id].Classification.Should().Be("HostBlocked");
+        candidates[rows[3].Id].Status.Should().Be(ConversationPromotionStatus.Deferred);
         (await db.ConversationAdjudications.CountAsync(x => x.ProjectId == seed.ProjectId)).Should().Be(0);
-        await service.AdjudicateAsync(new(seed.ProjectId, first!.InsightId, Guid.NewGuid(),
-            ConversationAdjudicationAction.ResolveSkipped, first.EvidenceToken, "Explicit historical adjudication", runId), default);
+
+        foreach (var (row, expectedOutcome) in new[] { (rejected, "ResolvedRejectedProposal"), (archived, "ResolvedWithoutDelete") })
+        {
+            var request = new ConversationAdjudicationRequest(seed.ProjectId, row.Id, Guid.NewGuid(),
+                ConversationAdjudicationAction.Reconcile, candidates[row.Id].EvidenceToken, "Reconcile bound terminal evidence", runId);
+            var receipt = await service.AdjudicateAsync(request, default);
+            receipt.Outcome.Should().Be(expectedOutcome);
+            receipt.IsReplay.Should().BeFalse();
+            var replay = await service.AdjudicateAsync(request, default);
+            replay.Should().Be(receipt with { IsReplay = true });
+        }
         await FluentActions.Invoking(() => service.PreviewAsync(new(seed.ProjectId, GovernanceRunId: runId,
                 ExpectedInventoryToken: inventoryToken), default))
             .Should().ThrowAsync<InvalidOperationException>().WithMessage("*preview*");
         var readBack = await service.PreviewAsync(new(seed.ProjectId, GovernanceRunId: runId), default);
         readBack.InventoryToken.Should().BeNull();
         readBack.TotalCount.Should().Be(baselineCount);
-        readBack.UnresolvedHumanDecisionCount.Should().Be(baselineCount - 1);
-        readBack.ResolvedHumanDecisionCount.Should().Be(1);
-        readBack.NewlyResolvedCount.Should().Be(1);
-        readBack.UnchangedCount.Should().Be(baselineCount - 1);
+        readBack.UnresolvedHumanDecisionCount.Should().Be(baselineCount - 4);
+        readBack.ResolvedHumanDecisionCount.Should().Be(2);
+        readBack.NewlyResolvedCount.Should().Be(2);
+        readBack.UnchangedCount.Should().Be(baselineCount - 2);
+        (await db.ConversationAdjudications.Where(row => row.ProjectId == seed.ProjectId).Select(row => row.InsightId).ToListAsync())
+            .Should().BeEquivalentTo(new[] { rejected.Id, archived.Id });
+        var retainedTarget = await db.MemoryItems.AsNoTracking().SingleAsync(row => row.Id == archivedTarget.Id);
+        retainedTarget.Status.Should().Be(MemoryStatus.Archived);
+        retainedTarget.Content.Should().Be(archivedTarget.Content);
+        (await db.ConversationInsights.AsNoTracking().SingleAsync(row => row.Id == rejectedProposal.Id))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
         (await db.ConversationInsights.CountAsync(x => x.ProjectId == seed.ProjectId && x.PromotionStatus == ConversationPromotionStatus.Promoted)).Should().Be(0);
     }
 
