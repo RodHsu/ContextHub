@@ -1,4 +1,6 @@
 using System.Data.Common;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using Memory.Application;
@@ -8,6 +10,8 @@ using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace Memory.IntegrationTests;
@@ -41,9 +45,13 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         await historyDb.Database.OpenConnectionAsync(cancellationToken);
         await historyDb.Database.ExecuteSqlRawAsync("SET lock_timeout = '250ms';", cancellationToken);
         var history = new ScheduledGovernanceReliabilityService(historyDb, accessor, TimeProvider.System);
+        var queue = new DatabaseLogQueue();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddProvider(
+            new DatabaseLoggerProvider(queue, Options.Create(new DatabaseLoggingOptions { MinimumLevel = LogLevel.Warning }))));
         var service = new ScheduledGovernanceService(
             provider.GetRequiredService<IKnowledgeReviewService>(),
-            provider.GetRequiredService<IGovernanceBatchExecutor>(), receipts, accessor, history);
+            provider.GetRequiredService<IGovernanceBatchExecutor>(), receipts, accessor, history,
+            loggerFactory.CreateLogger<ScheduledGovernanceService>());
         var receiptOnly = await service.GetReceiptAsync(runId, cancellationToken, includeReliabilityHistory: false);
 
         var rowQuery = historyDb.ScheduledGovernanceReliabilityRuns.AsNoTracking()
@@ -65,10 +73,18 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         degraded.ReceiptId.Should().Be(receipt.ReceiptId);
         degraded.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
         degraded.Reliability.Should().BeNull();
+        queue.TryRead(out var warning).Should().BeTrue();
+        warning.Level.Should().Be(nameof(LogLevel.Warning));
+        warning.ProjectId.Should().Be(ProjectContext.DefaultProjectId);
+        warning.Message.Should().Contain("unavailable in reliability-history")
+            .And.Contain(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runId))))
+            .And.NotContain(runId);
+        warning.Exception.Should().BeEmpty();
 
         await transaction.RollbackAsync(cancellationToken);
         var recovered = await service.GetReceiptAsync(runId, cancellationToken);
         recovered.Reliability!.Runs.Should().Contain(run => run.GovernanceRunId == runId);
+        queue.TryRead(out _).Should().BeFalse();
         var after = await rowQuery.SingleAsync(cancellationToken);
         after.ProjectionJson.Should().Be(stored.ProjectionJson);
         after.UpdatedAt.Should().Be(stored.UpdatedAt);
