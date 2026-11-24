@@ -276,7 +276,7 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
                 db, accessor, TimeProvider.System, naturalEvidence ?? evidence, safety,
                 new FixedAuthorityProvider(snapshot), authorityEpochLedger: ledger);
 
-        async Task<GovernanceRunReceiptResult> RecordDecisionAsync()
+        async Task<GovernanceRunReceiptResult> RecordDecisionAsync(bool reReview = false)
         {
             var runId = $"authority-epoch-{Guid.NewGuid():N}";
             var startedAt = DateTimeOffset.UtcNow;
@@ -287,6 +287,16 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             await receipts.RecordReviewAsync(review, startedAt, CancellationToken.None);
             await receipts.RecordScheduledDecisionAsync(CreateScheduledDecision(
                 runId, projectId, review.DurableMemoryCoverage!.SnapshotToken), startedAt, CancellationToken.None);
+            if (reReview)
+            {
+                var repeatedAt = startedAt.AddSeconds(1);
+                var repeated = CreateReview(runId, projectId, identity) with { IsReReview = true };
+                await receipts.RecordReviewStartedAsync(runId, repeatedAt, identity, CancellationToken.None, isReReview: true);
+                await receipts.RecordReviewAsync(repeated, repeatedAt, CancellationToken.None);
+                var repeatedDecision = CreateScheduledDecision(runId, projectId, repeated.DurableMemoryCoverage!.SnapshotToken);
+                await receipts.RecordScheduledDecisionAsync(repeatedDecision with { IsReReview = true }, repeatedAt, CancellationToken.None);
+            }
+
             return (await receipts.GetAsync(runId, CancellationToken.None))!;
         }
 
@@ -311,15 +321,18 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             .PersistObservationAsync(wrongConfiguration, CancellationToken.None);
         HasEpoch(await ReadProjectionAsync(wrongConfiguration.GovernanceRunId), configured.AuthorityEpochDigest).Should().BeFalse();
 
-        var receipt = await RecordDecisionAsync();
-        var eventKey = await db.GovernanceRunReceipts.AsNoTracking().Where(row => row.Id == receipt.ReceiptId)
-            .Select(row => row.EventKey).SingleAsync();
+        var receipt = await RecordDecisionAsync(reReview: true);
+        var finalEvent = await db.GovernanceRunReceipts.AsNoTracking().Where(row => row.Id == receipt.ReceiptId)
+            .Select(row => new { row.EventKey, row.RequestIdentityHash }).SingleAsync();
+        finalEvent.RequestIdentityHash.Should().Be(ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeReviewRequestIdentityHash(receipt.GovernanceRunId, isReReview: true));
         var expectedAt = receipt.StartedAt;
         foreach (var kind in new[] { NaturalOriginEvidenceKind.PlatformAttestation, NaturalOriginEvidenceKind.ControlPlaneAudit })
         {
             var entry = CreateEvidence(
-                kind, actor, receipt, eventKey, expectedAt,
+                kind, actor, receipt, finalEvent.EventKey, expectedAt,
                 sourceSequence: kind == NaturalOriginEvidenceKind.ControlPlaneAudit ? 0 : null);
+            entry.RequestIdentityHash.Should().NotBe(finalEvent.RequestIdentityHash);
             entry.Environment = configured.Environment;
             entry.ScheduleDigest = configured.ScheduleDigest;
             entry.ConfigurationDigest = ScheduledGovernanceReliabilityService.ComputeConfigurationDigest(
@@ -327,12 +340,20 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
             await store.AppendAsync(entry, configured.AuthorityEpochDigest);
         }
 
-        await reader.PersistObservationAsync(receipt, CancellationToken.None);
+        var observed = await reader.ObserveAsync(receipt, CancellationToken.None);
         var capture = await ReadProjectionAsync(receipt.GovernanceRunId);
         HasEpoch(capture, configured.AuthorityEpochDigest).Should().BeTrue();
+        var projection = JsonSerializer.Deserialize<ScheduledGovernanceReliabilityReceiptProjection>(
+            capture.ProjectionJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        projection.RequestIdentityHash.Should().Be(ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeReviewRequestIdentityHash(receipt.GovernanceRunId));
+
         var current = await reader.GetAsync(CancellationToken.None);
-        current.Runs.Single(run => run.GovernanceRunId == receipt.GovernanceRunId)
-            .NaturalOriginStatus.Should().Be("Verified");
+        var run = current.Runs.Single(item => item.GovernanceRunId == receipt.GovernanceRunId);
+        run.Should().BeEquivalentTo(observed.Runs.Single(item => item.GovernanceRunId == receipt.GovernanceRunId));
+        run.NaturalOriginStatus.Should().Be("Verified");
+        run.ProvenanceTrusted.Should().BeTrue();
+        run.Qualifies.Should().BeFalse("fixture evidence does not establish the trusted host safety checks");
 
         using var rotationScope = factory.Services.CreateScope();
         var rotationLedger = rotationScope.ServiceProvider.GetRequiredService<IScheduledGovernanceAuthorityEpochLedger>();
