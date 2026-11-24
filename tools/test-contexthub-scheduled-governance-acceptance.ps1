@@ -366,49 +366,69 @@ function Get-ScheduledGovernanceArrayProperty {
     return @(ConvertTo-ScheduledGovernanceArray (Get-ScheduledGovernancePropertyValue $Object $Name))
 }
 
-function ConvertTo-ScheduledGovernanceCanonicalObject {
-    param([AllowNull()][object]$Value)
+function Write-ScheduledGovernanceCanonicalJson {
+    param([System.Text.Json.Utf8JsonWriter]$Writer, [System.Text.Json.JsonElement]$Value)
 
-    if ($null -eq $Value) {
-        return $null
-    }
-    if ($Value -is [string] -or $Value -is [bool] -or $Value -is [ValueType]) {
-        return $Value
-    }
-    if ($Value -is [System.Collections.IDictionary]) {
-        $ordered = [ordered]@{}
-        foreach ($key in @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
-            $ordered[$key] = ConvertTo-ScheduledGovernanceCanonicalObject $Value[$key]
+    # Match PublishedToolSchemaHash, including ordinal key order and singleton arrays.
+    switch ($Value.ValueKind) {
+        'Object' {
+            $Writer.WriteStartObject()
+            [string[]]$names = @(foreach ($property in $Value.EnumerateObject()) { $property.Name })
+            [Array]::Sort($names, [StringComparer]::Ordinal)
+            foreach ($name in $names) {
+                $Writer.WritePropertyName($name)
+                Write-ScheduledGovernanceCanonicalJson -Writer $Writer -Value $Value.GetProperty($name)
+            }
+            $Writer.WriteEndObject()
         }
-        return $ordered
-    }
-    if ($Value -is [System.Collections.IEnumerable]) {
-        return @($Value | ForEach-Object { ConvertTo-ScheduledGovernanceCanonicalObject $_ })
-    }
-
-    $properties = @($Value.PSObject.Properties | Where-Object { $_.MemberType -eq "NoteProperty" } |
-        Sort-Object Name)
-    if ($properties.Count -gt 0) {
-        $ordered = [ordered]@{}
-        foreach ($property in $properties) {
-            $ordered[$property.Name] = ConvertTo-ScheduledGovernanceCanonicalObject $property.Value
+        'Array' {
+            $Writer.WriteStartArray()
+            foreach ($item in $Value.EnumerateArray()) {
+                Write-ScheduledGovernanceCanonicalJson -Writer $Writer -Value $item
+            }
+            $Writer.WriteEndArray()
         }
-        return $ordered
+        default { $Value.WriteTo($Writer) }
     }
-
-    return $Value
 }
 
 function Get-ScheduledGovernancePublishedSchemaHash {
     param([Parameter(Mandatory)][object]$Tool)
 
-    $canonical = [ordered]@{
-        name = [string](Get-ScheduledGovernancePropertyValue $Tool "name")
-        inputSchema = ConvertTo-ScheduledGovernanceCanonicalObject (Get-ScheduledGovernancePropertyValue $Tool "inputSchema")
-        outputSchema = ConvertTo-ScheduledGovernanceCanonicalObject (Get-ScheduledGovernancePropertyValue $Tool "outputSchema")
+    $document = [System.Text.Json.JsonDocument]::Parse((ConvertTo-Json -InputObject $Tool -Depth 100 -Compress))
+    $buffer = [System.IO.MemoryStream]::new()
+    $writer = [System.Text.Json.Utf8JsonWriter]::new($buffer)
+    try {
+        $writer.WriteStartObject()
+        $writer.WriteString('name', $document.RootElement.GetProperty('name').GetString())
+        foreach ($schema in @('inputSchema', 'outputSchema')) {
+            $writer.WritePropertyName($schema)
+            Write-ScheduledGovernanceCanonicalJson -Writer $writer -Value $document.RootElement.GetProperty($schema)
+        }
+        $writer.WriteEndObject()
+        $writer.Flush()
+        return Get-ScheduledGovernanceSha256Hex -Text ([Text.Encoding]::UTF8.GetString($buffer.ToArray()))
     }
-    $json = $canonical | ConvertTo-Json -Depth 100 -Compress
-    return Get-ScheduledGovernanceSha256Hex -Text $json
+    finally {
+        $writer.Dispose()
+        $buffer.Dispose()
+        $document.Dispose()
+    }
+}
+
+function Assert-ScheduledGovernancePublishedToolAuthority {
+    param([Parameter(Mandatory)][object]$Tool)
+
+    # The output schema reports facts such as resolved project IDs and restricted-action errors.
+    $invocation = @{
+        description = Get-ScheduledGovernancePropertyValue $Tool "description"
+        inputSchema = Get-ScheduledGovernancePropertyValue $Tool "inputSchema"
+    } | ConvertTo-Json -Depth 100 -Compress
+    foreach ($forbidden in Get-ScheduledGovernanceForbiddenToken) {
+        if ($invocation.IndexOf($forbidden, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw "Automation catalog exposed a forbidden authority token in a tool input or description."
+        }
+    }
 }
 
 function Test-ScheduledGovernanceIdsEqual {
@@ -1192,12 +1212,7 @@ try {
                     (Get-ScheduledGovernancePropertyValue $annotations "openWorldHint") -ne $false) {
                     throw "Automation tool annotations violate the least-privilege contract."
                 }
-                $toolJson = $tool | ConvertTo-Json -Depth 30 -Compress
-                foreach ($forbidden in Get-ScheduledGovernanceForbiddenToken) {
-                    if ($toolJson.IndexOf($forbidden, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                        throw "Automation catalog exposed a forbidden authority token."
-                    }
-                }
+                Assert-ScheduledGovernancePublishedToolAuthority -Tool $tool
             }
             $evidence.catalog.forbiddenAbsent = $true
 

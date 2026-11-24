@@ -18,6 +18,9 @@ foreach ($name in @(
         "Assert-ScheduledGovernanceRpcSuccess",
         "Get-ScheduledGovernanceToolData",
         "Assert-ScheduledGovernanceEqual",
+        "Write-ScheduledGovernanceCanonicalJson",
+        "Get-ScheduledGovernancePublishedSchemaHash",
+        "Assert-ScheduledGovernancePublishedToolAuthority",
         "Test-ScheduledGovernanceIdsEqual",
         "Test-ScheduledGovernanceExecutionResult",
         "Get-ScheduledGovernanceReceiptEvidence",
@@ -508,6 +511,26 @@ finally {
     }
 }
 
+$schemaFixture = '{"name":"fixture","inputSchema":{"type":"object","required":["item"],"properties":{"item":{"type":"string"}}},"outputSchema":{"z":[],"B":[true,null],"a":{"type":["string","null"],"description":"quote\" & punctuation"}}}'
+# Reference digest from the gateway's PublishedToolSchemaHash, including empty and singleton arrays.
+$referenceHash = 'ebefb540ae8551ea03d0684a89ee3bc03249e2d163e79969ae31901b87732e9a'
+$actualHash = Get-ScheduledGovernancePublishedSchemaHash -Tool ($schemaFixture | ConvertFrom-Json)
+$alteredHash = Get-ScheduledGovernancePublishedSchemaHash -Tool ($schemaFixture.Replace('["item"]', '"item"') | ConvertFrom-Json)
+if ($actualHash -cne $referenceHash -or $alteredHash -ceq $referenceHash) {
+    throw "The runner schema hash does not match the gateway canonical JSON contract."
+}
+
+$toolAuthorityFixture = '{"description":"Read the governance receipt.","inputSchema":{"properties":{"governanceRunId":{}}},"outputSchema":{"properties":{"projectIds":{},"resolvedProjectIds":{},"errorCode":{"enum":["RestrictedActionUnavailable"]}}}}' | ConvertFrom-Json
+Assert-ScheduledGovernancePublishedToolAuthority -Tool $toolAuthorityFixture
+foreach ($invalidTool in @(
+        '{"description":"Read the receipt.","inputSchema":{"properties":{"request":{"properties":{"projectIds":{}}}}}}',
+        '{"description":"Use /mcp-chat for additional authority.","inputSchema":{"properties":{"governanceRunId":{}}}}')) {
+    $authorityRejected = $false
+    try { Assert-ScheduledGovernancePublishedToolAuthority -Tool ($invalidTool | ConvertFrom-Json) }
+    catch { $authorityRejected = $true }
+    if (-not $authorityRejected) { throw "A tool advertised forbidden invocation authority." }
+}
+
 $checkpointPath = Join-Path $localRoot "a1-checkpoint-$([Guid]::NewGuid().ToString('N')).json"
 $checkpointRun = "scheduled-acceptance-$([Guid]::NewGuid().ToString('N'))"
 $checkpointHash = Get-ScheduledGovernanceSha256Hex "test-binding"
@@ -572,8 +595,8 @@ finally {
 
 [ordered]@{
     valid = $true
-    positiveCases = 13 + @($manifestCases | Where-Object expected -CEQ "verified").Count
-    negativeCases = $cases.Count + 9 + $invalidExecutions.Count + $preReplayCases.Count +
+    positiveCases = 15 + @($manifestCases | Where-Object expected -CEQ "verified").Count
+    negativeCases = $cases.Count + 12 + $invalidExecutions.Count + $preReplayCases.Count +
         $postReplayCases.Count + $baselineRejections.Count + $readbackPathRejections.Count +
         @($manifestCases | Where-Object expected -CNE "verified").Count
     result = "scheduled-governance-receipt-replay-and-protected-evidence"
