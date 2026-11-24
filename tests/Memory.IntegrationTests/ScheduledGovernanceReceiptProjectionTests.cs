@@ -684,6 +684,32 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         // receipt must fail closed until its Decision lineage becomes usable.
         flat.Decision.Should().BeNull();
         flat.ServerInvariantProofs.Should().BeEmpty();
+
+        var safety = (IScheduledGovernanceServerSafetyHistoryProvider)scope.ServiceProvider
+            .GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>();
+        var finalQuery = new ScheduledGovernanceServerSafetyEvidenceQuery(
+            actor.TenantId.Value, actor.UserId.Value, receipt.ReceiptId, runId);
+        var replay = CreateNoOpExecution(runId, snapshot) with { IsReplay = true };
+        await receipts.RecordExecutionAsync(request, replay, DateTimeOffset.UtcNow, default);
+        var replayReceipt = (await receipts.GetAsync(runId, default))!;
+        replayReceipt.ReceiptId.Should().NotBe(receipt.ReceiptId);
+        var replayQuery = finalQuery with { ReceiptId = replayReceipt.ReceiptId };
+
+        (await safety.GetAsync(replayQuery, default))!.DecisionObeyed.Should().BeTrue();
+        (await safety.GetAsync(finalQuery, default))!.DecisionObeyed.Should().BeTrue();
+        var history = await safety.GetHistoryAsync([finalQuery, replayQuery], default);
+        history[finalQuery]!.DecisionObeyed.Should().BeTrue();
+        history[replayQuery]!.DecisionObeyed.Should().BeTrue();
+        history[finalQuery]!.NoUnauthorizedMutation.Should().BeNull();
+
+        await receipts.RecordExecutionAsync(request with { Cursor = "unmatched-replay" }, replay, DateTimeOffset.UtcNow, default);
+        var unmatched = (await receipts.GetAsync(runId, default))!;
+        var unmatchedQuery = finalQuery with { ReceiptId = unmatched.ReceiptId };
+        (await safety.GetAsync(unmatchedQuery, default))!.DecisionObeyed.Should().BeFalse();
+        (await safety.GetAsync(finalQuery, default))!.DecisionObeyed.Should().BeNull();
+        var invalidHistory = await safety.GetHistoryAsync([finalQuery, unmatchedQuery], default);
+        invalidHistory[finalQuery]!.DecisionObeyed.Should().BeNull();
+        invalidHistory[unmatchedQuery]!.DecisionObeyed.Should().BeFalse();
     }
 
     [DockerRequiredFact]

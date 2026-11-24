@@ -55,9 +55,10 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider
             string.Equals(row.GovernanceRunId, x.GovernanceRunId.Trim(), StringComparison.Ordinal)).ToArray();
         var needsFacts = observed.Select(x => receipts[x.ReceiptId])
             .DistinctBy(row => row.Id)
-            .Where(row => histories[row.GovernanceRunId] is { Length: < EventReadLimit } events &&
-                          events[^1].EventSequence == row.EventSequence &&
+            .Where(row => histories[row.GovernanceRunId].Length < EventReadLimit &&
                           IsCurrentCompletedScheduledReceipt(row))
+            .Select(row => (Receipt: row, ObservedThrough: ReadObservationWatermark(row, histories[row.GovernanceRunId])))
+            .Where(row => row.ObservedThrough.HasValue)
             .ToArray();
 
         Dictionary<long, HistoryFacts> facts = needsFacts.Length == 0
@@ -66,10 +67,11 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider
                     ReadHistoryFactsSql,
                     new NpgsqlParameter<Guid>("tenant", tenantId),
                     new NpgsqlParameter<Guid>("owner", ownerUserId),
-                    new NpgsqlParameter<string[]>("run_ids", needsFacts.Select(row => row.GovernanceRunId).ToArray()),
-                    new NpgsqlParameter<long[]>("sequences", needsFacts.Select(row => row.EventSequence).ToArray()),
+                    new NpgsqlParameter<string[]>("run_ids", needsFacts.Select(row => row.Receipt.GovernanceRunId).ToArray()),
+                    new NpgsqlParameter<long[]>("sequences", needsFacts.Select(row => row.Receipt.EventSequence).ToArray()),
+                    new NpgsqlParameter<long[]>("observed_through", needsFacts.Select(row => row.ObservedThrough!.Value).ToArray()),
                     new NpgsqlParameter<bool[]>("check_mutation", needsFacts.Select(row =>
-                        HasNoReceiptMutationSignals(histories[row.GovernanceRunId])).ToArray()))
+                        HasNoReceiptMutationSignals(histories[row.Receipt.GovernanceRunId])).ToArray()))
                 .ToDictionaryAsync(row => row.EventSequence, cancellationToken);
 
         foreach (var query in observed)
@@ -79,7 +81,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider
             results[query] = await EvaluateAsync(
                 row, histories[row.GovernanceRunId], row.GovernanceRunId,
                 () => Task.FromResult(current?.HasMutationSignal ?? true),
-                () => Task.FromResult(current?.HasNewerReceipt ?? true));
+                _ => Task.FromResult(current?.HasNewerReceipt ?? true));
         }
     }
 
@@ -113,7 +115,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider
     // Join on the JSON value so an exact string is required, as in the single-run containment check.
     private const string ReadHistoryFactsSql = """
         WITH requested AS MATERIALIZED (
-            SELECT * FROM unnest(@run_ids, @sequences, @check_mutation) AS input(run_id, seq, check_mutation)
+            SELECT * FROM unnest(@run_ids, @sequences, @observed_through, @check_mutation) AS input(run_id, seq, observed_through, check_mutation)
         ),
         audit_matches AS MATERIALIZED (
             SELECT DISTINCT r.run_id
@@ -133,7 +135,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider
             EXISTS (
                 SELECT 1 FROM governance_run_receipts r
                 WHERE r.tenant_id = @tenant AND r.owner_user_id = @owner AND r.governance_run_id = requested.run_id
-                    AND r.event_sequence > requested.seq
+                    AND r.event_sequence > requested.observed_through
             ) AS "HasNewerReceipt"
         FROM requested
         """;

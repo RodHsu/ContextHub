@@ -71,9 +71,9 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
                            audit => audit.TenantId == query.TenantId &&
                                     EF.Functions.JsonContains(audit.DetailsJson, auditRunBinding), cancellationToken);
             },
-            () => dbContext.GovernanceRunReceipts.AsNoTracking().AnyAsync(row =>
+            observedThrough => dbContext.GovernanceRunReceipts.AsNoTracking().AnyAsync(row =>
                 row.TenantId == query.TenantId && row.OwnerUserId == query.OwnerUserId &&
-                row.GovernanceRunId == runId && row.EventSequence > observedReceipt.EventSequence,
+                row.GovernanceRunId == runId && row.EventSequence > observedThrough,
                 cancellationToken));
     }
 
@@ -94,7 +94,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
         IReadOnlyList<GovernanceRunReceipt> events,
         string runId,
         Func<Task<bool>> hasExternalMutationSignals,
-        Func<Task<bool>> hasNewerReceipt)
+        Func<long, Task<bool>> hasNewerReceipt)
     {
         if (events.Count == 0)
         {
@@ -113,9 +113,9 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
             row.SchemaHash == observedReceipt.SchemaHash &&
             row.PublishedCatalogVersion == observedReceipt.PublishedCatalogVersion &&
             row.ExecutionMode == "Scheduled");
-        var observedReceiptIsLatest = events[^1].EventSequence == observedReceipt.EventSequence;
+        var observedThrough = ReadObservationWatermark(observedReceipt, events);
         if (events.Count == EventReadLimit ||
-            !observedReceiptIsLatest || !contractLineageConsistent ||
+            observedThrough is null || !contractLineageConsistent ||
             !IsCurrentCompletedScheduledReceipt(observedReceipt))
         {
             return Unknown(observedReceipt.EventSequence);
@@ -227,7 +227,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
                               !await hasExternalMutationSignals();
 
         var decisionObeyed = EvaluateDecisionObedience(
-            events, decisionReceipt, observedReceipt.EventSequence,
+            events, decisionReceipt, observedThrough.Value,
             reviewLifecycleValid, allEventTypesAllowed, zeroMutationRun);
         var proofs = new Dictionary<string, ScheduledGovernanceInvariantProof>
         {
@@ -258,7 +258,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
 
         // Do not publish a zero-execute proof against an observation that
         // became stale while its ledger/audit evidence was read.
-        if (await hasNewerReceipt())
+        if (await hasNewerReceipt(observedThrough.Value))
         {
             return Unknown(observedReceipt.EventSequence);
         }
@@ -568,6 +568,45 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
         catch (JsonException) { return false; }
     }
 
+    private static long? ReadObservationWatermark(
+        GovernanceRunReceipt observedReceipt,
+        IReadOnlyList<GovernanceRunReceipt> events)
+    {
+        for (var index = events.Count - 1; index >= 0; index--)
+        {
+            if (events[index].Id == observedReceipt.Id)
+                return events[^1].EventSequence;
+
+            if (!IsExactCompletedBatchReplay(events, index))
+                return null;
+        }
+
+        return null;
+    }
+
+    private static bool IsExactCompletedBatchReplay(IReadOnlyList<GovernanceRunReceipt> events, int index)
+    {
+        var replay = events[index];
+        if (index == 0 || replay.EventType != "BatchReplay" || !replay.IsReplay || replay.Status != "Completed" ||
+            string.IsNullOrWhiteSpace(replay.RequestIdentityHash) || string.IsNullOrWhiteSpace(replay.RequestHash))
+        {
+            return false;
+        }
+
+        var previous = events[index - 1];
+        return replay.Applied == previous.Applied &&
+               replay.Failed == previous.Failed &&
+               replay.Quarantined == previous.Quarantined &&
+               replay.AutoDeleted == previous.AutoDeleted &&
+               replay.Tombstoned == previous.Tombstoned &&
+               replay.SemanticAutoResolved == previous.SemanticAutoResolved &&
+               string.Equals(replay.AuditIdsJson, previous.AuditIdsJson, StringComparison.Ordinal) &&
+               events.Take(index).Any(original =>
+                   original.EventType == "BatchCompleted" && !original.IsReplay && original.Status == "Completed" &&
+                   original.RequestIdentityHash == replay.RequestIdentityHash && original.RequestHash == replay.RequestHash &&
+                   original.StoppedReason == replay.StoppedReason);
+    }
+
     private static bool? EvaluateDecisionObedience(
         IReadOnlyList<GovernanceRunReceipt> events,
         GovernanceRunReceipt decisionReceipt,
@@ -596,19 +635,25 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
             return zeroMutationRun ? false : null;
         }
 
-        // The decision is obedient only while no later receipt event exists.
-        // In particular, a later unknown event cannot be treated as harmless
-        // just because it is absent from the known batch-event list.
-        var laterEventExists = events.Any(row =>
-            row.EventSequence > decisionReceipt.EventSequence &&
-            row.EventSequence <= observedEventSequence);
-        if (laterEventExists) return false;
+        // Late delivery of an exact, settled replay preserves the final decision.
+        // Every other later event, including an unbound replay, invalidates it.
+        for (var index = 0; index < events.Count; index++)
+        {
+            var row = events[index];
+            if (row.EventSequence > observedEventSequence)
+                break;
+
+            if ((row.EventSequence > decisionReceipt.EventSequence || row.EventType == "BatchReplay") &&
+                !IsExactCompletedBatchReplay(events, index))
+                return false;
+        }
+
         if (zeroMutationRun) return true;
 
         // A final no-execute decision may follow a previously authorized
         // reversible batch and re-review. This proves decision compliance,
         // not the write-set or executor safety of that earlier execution.
-        var batchEvents = events.Where(row => row.EventType is "BatchReceived" or "BatchCompleted" or "BatchReplay").ToArray();
+        var batchEvents = events.Where(row => row.EventType is "BatchReceived" or "BatchCompleted").ToArray();
         return batchEvents.Length > 0 && batchEvents.All(batch =>
             events.LastOrDefault(row => row.EventSequence < batch.EventSequence &&
                                         row.EventType == "ScheduledDecisionProjected")?.FinalConvergenceStatus ==
