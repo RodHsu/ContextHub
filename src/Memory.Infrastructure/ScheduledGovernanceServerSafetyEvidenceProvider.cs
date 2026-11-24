@@ -153,6 +153,9 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
                 DecisionObeyed: false);
         }
 
+        var initialRequestIdentityHash = ScheduledGovernanceReliabilityEvidenceContract
+            .ComputeReviewRequestIdentityHash(runId);
+        var isInitialReview = string.Equals(reviewRequestIdentityHash, initialRequestIdentityHash, StringComparison.Ordinal);
         var reviewReceipt = events
             .Where(row =>
                 row.EventSequence < decisionReceipt.EventSequence &&
@@ -163,7 +166,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
         {
             return SnapshotWithUnknownSafety(
                 observedReceipt.EventSequence,
-                reviewRequestIdentityHash,
+                isInitialReview ? initialRequestIdentityHash : null,
                 InitialReviewReceived: false,
                 CountInvariantSatisfied: EvaluateCountInvariant(decisionReceipt),
                 DecisionObeyed: false);
@@ -177,11 +180,11 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
             .FirstOrDefault();
         var reviewRequestMatches = IsCanonicalReviewRequest(reviewReceipt, reviewRequestIdentityHash);
         var decisionRequestMatches = IsCanonicalReviewRequest(decisionReceipt, reviewRequestIdentityHash);
-        var initialReviewReceived = receivedReceipt is not null &&
-                                    reviewRequestMatches &&
-                                    decisionRequestMatches &&
-                                    IsCurrentReviewReceived(receivedReceipt, reviewRequestIdentityHash);
-        var reviewLifecycleValid = initialReviewReceived &&
+        var reviewReceived = receivedReceipt is not null &&
+                             reviewRequestMatches &&
+                             decisionRequestMatches &&
+                             IsCurrentReviewReceived(receivedReceipt, reviewRequestIdentityHash);
+        var reviewLifecycleValid = reviewReceived &&
                                    HasValidReviewLifecycle(
                                        events,
                                        receivedReceipt!,
@@ -191,8 +194,8 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
             ? TryGetCapturedRuntimeIdentity(receivedReceipt!, reviewReceipt, decisionReceipt)
             : null;
         reviewLifecycleValid = reviewLifecycleValid && capturedRuntimeIdentity is not null;
-        var receiptRequestIdentityHash = reviewRequestMatches && decisionRequestMatches
-            ? reviewRequestIdentityHash
+        var receiptRequestIdentityHash = reviewRequestMatches && decisionRequestMatches && isInitialReview
+            ? initialRequestIdentityHash
             : null;
         var countInvariantSatisfied = EvaluateCountInvariant(decisionReceipt);
         var reviewBindsDecision =
@@ -204,10 +207,16 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
             return SnapshotWithUnknownSafety(
                 observedReceipt.EventSequence,
                 receiptRequestIdentityHash,
-                reviewLifecycleValid,
+                isInitialReview && reviewLifecycleValid,
                 countInvariantSatisfied,
                 DecisionObeyed: false);
         }
+
+        var initialReviewReceived = capturedRuntimeIdentity is not null &&
+            (isInitialReview || HasMatchingInitialReview(
+                events, decisionReceipt, initialRequestIdentityHash, capturedRuntimeIdentity));
+        if (initialReviewReceived)
+            receiptRequestIdentityHash = initialRequestIdentityHash;
 
         // Scope these facts to this governance run. A complete known receipt
         // history with no executor/retention event and zero mutation outcomes
@@ -258,7 +267,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
             observedReceipt.EventSequence,
             receiptRequestIdentityHash,
             capturedRuntimeIdentity,
-            reviewLifecycleValid,
+            initialReviewReceived,
             countInvariantSatisfied,
             decisionObeyed,
             NoGeneralConnectorFallback: null,
@@ -308,6 +317,27 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
         => receipt.ExecutionMode == "Scheduled" &&
            receipt.Status == "Completed" &&
            IsCurrentContract(receipt);
+
+    private static bool HasMatchingInitialReview(
+        IReadOnlyList<GovernanceRunReceipt> events,
+        GovernanceRunReceipt finalDecision,
+        string initialRequestIdentityHash,
+        ScheduledGovernanceRuntimeIdentity runtimeIdentity)
+    {
+        if (events.Count < 3 || events[2].EventSequence >= finalDecision.EventSequence)
+            return false;
+
+        var received = events[0];
+        var review = events[1];
+        var decision = events[2];
+        return IsCurrentReviewReceived(received, initialRequestIdentityHash) &&
+               IsCanonicalReviewRequest(review, initialRequestIdentityHash) &&
+               IsCanonicalReviewRequest(decision, initialRequestIdentityHash) &&
+               HasValidReviewLifecycle(events, received, review, decision) &&
+               ReviewBindsDecision(review, decision) &&
+               ProjectSetsEqual(decision.ProjectIdsJson, finalDecision.ProjectIdsJson) &&
+               TryGetCapturedRuntimeIdentity(received, review, decision) == runtimeIdentity;
+    }
 
     private static bool IsCurrentReviewReceived(
         GovernanceRunReceipt receipt,

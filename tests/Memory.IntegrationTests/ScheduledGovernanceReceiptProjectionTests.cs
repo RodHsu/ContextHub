@@ -662,6 +662,9 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         var receipt = (await receipts.GetAsync(runId, CancellationToken.None))!;
         var evidence = (await scope.ServiceProvider.GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>()
             .GetAsync(new(actor.TenantId!.Value, actor.UserId!.Value, receipt.ReceiptId, runId), CancellationToken.None))!;
+        evidence.InitialReviewReceived.Should().BeTrue();
+        evidence.ReviewRequestIdentityHash.Should().Be(
+            ScheduledGovernanceReliabilityEvidenceContract.ComputeReviewRequestIdentityHash(runId));
         evidence.DecisionObeyed.Should().BeTrue();
         evidence.ImmutableSnapshotBound.Should().BeTrue();
         evidence.NoUnauthorizedMutation.Should().BeNull("executor write-set safety is not proven by a later no-op decision");
@@ -681,6 +684,30 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         // receipt must fail closed until its Decision lineage becomes usable.
         flat.Decision.Should().BeNull();
         flat.ServerInvariantProofs.Should().BeEmpty();
+    }
+
+    [DockerRequiredFact]
+    public async Task Scheduled_re_review_without_an_initial_lifecycle_cannot_bind_natural_dispatch()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var receipts = scope.ServiceProvider.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"scheduled-re-review-only-{Guid.NewGuid():N}";
+        var identity = CurrentScheduledIdentity();
+        const string snapshot = "kg:snapshot:re-review-only";
+        var now = DateTimeOffset.UtcNow;
+
+        await receipts.RecordReviewStartedAsync(runId, now, identity, default, isReReview: true);
+        await receipts.RecordReviewAsync(CreateGenericReview(runId, identity, snapshot, isReReview: true), now, default);
+        await receipts.RecordScheduledDecisionAsync(CreateScheduledDecision(runId, snapshot, true, 0), now, default);
+
+        var receipt = (await receipts.GetAsync(runId, default))!;
+        var evidence = await scope.ServiceProvider.GetRequiredService<IScheduledGovernanceServerSafetyEvidenceProvider>()
+            .GetAsync(new(actor.TenantId!.Value, actor.UserId!.Value, receipt.ReceiptId, runId), default);
+
+        evidence.Should().NotBeNull();
+        evidence!.InitialReviewReceived.Should().BeFalse();
+        evidence.ReviewRequestIdentityHash.Should().BeNull();
     }
 
     [DockerRequiredFact]
