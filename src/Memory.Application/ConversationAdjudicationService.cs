@@ -51,17 +51,14 @@ public sealed class ConversationAdjudicationService(
             (x.PromotionStatus == ConversationPromotionStatus.Skipped || x.PromotionStatus == ConversationPromotionStatus.Promoted) &&
             receipts.Any(r => r.InsightId == x.Id), cancellationToken);
         var offset = Math.Max(0, request.Offset);
-        var rows = await candidates.OrderBy(x => x.Id).Skip(offset).Take(Math.Clamp(request.Limit, 1, MaximumPreviewPageSize))
-            .ToArrayAsync(cancellationToken);
-        var context = await LoadEvidenceAsync(project, rows, cancellationToken);
-        var results = rows.Select(row => Evaluate(row, context)).ToArray();
+        var limit = Math.Clamp(request.Limit, 1, MaximumPreviewPageSize);
         var counterRun = string.IsNullOrWhiteSpace(request.GovernanceRunId) ? null : request.GovernanceRunId.Trim();
         var transitions = receipts.Where(x => counterRun == null || x.GovernanceRunId == counterRun);
         var newlyResolved = await transitions.CountAsync(x => x.Action != nameof(ConversationAdjudicationAction.Reopen), cancellationToken);
         var reopened = await transitions.CountAsync(x => x.Action == nameof(ConversationAdjudicationAction.Reopen), cancellationToken);
         var unchanged = await candidates.CountAsync(x => !transitions.Any(r => r.InsightId == x.Id), cancellationToken);
         var preview = new ConversationAdjudicationPreviewResult(
-            project, total, unresolved, resolved, offset, offset + rows.Length < total, results)
+            project, total, unresolved, resolved, offset, false, [])
         {
             CounterGovernanceRunId = counterRun,
             NewlyResolvedCount = newlyResolved,
@@ -71,8 +68,16 @@ public sealed class ConversationAdjudicationService(
 
         if (request.IncludeInventoryToken || request.ExpectedInventoryToken is not null)
         {
-            preview = preview with { InventoryToken = await BuildInventoryTokenAsync(project, candidates, preview, cancellationToken) };
+            preview = await ReadGuardedInventoryAsync(candidates, preview, limit, cancellationToken);
         }
+        else
+        {
+            var rows = await candidates.OrderBy(x => x.Id).Skip(offset).Take(limit).ToArrayAsync(cancellationToken);
+            var evidence = await LoadEvidenceAsync(project, rows, cancellationToken);
+            preview = preview with { Items = rows.Select(row => Evaluate(row, evidence)).ToArray() };
+        }
+
+        preview = preview with { HasMore = offset + preview.Items.Count < total };
         if (receiptRequest is not null && receiptHash is not null)
         {
             preview = preview with
@@ -91,10 +96,10 @@ public sealed class ConversationAdjudicationService(
         return preview;
     }
 
-    private async Task<string> BuildInventoryTokenAsync(
-        string project,
+    private async Task<ConversationAdjudicationPreviewResult> ReadGuardedInventoryAsync(
         IQueryable<ConversationInsight> candidates,
         ConversationAdjudicationPreviewResult preview,
+        int limit,
         CancellationToken cancellationToken)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -104,7 +109,7 @@ public sealed class ConversationAdjudicationService(
             Version = "conversation-adjudication-inventory-v1",
             actor.TenantId,
             actor.UserId,
-            Project = ProjectContext.IdentityKey(project),
+            Project = ProjectContext.IdentityKey(preview.ProjectId),
             preview.CounterGovernanceRunId,
             preview.TotalCount,
             preview.UnresolvedHumanDecisionCount,
@@ -114,14 +119,15 @@ public sealed class ConversationAdjudicationService(
             preview.UnchangedCount
         }, JsonOptions));
 
-        // Keep materialized evidence bounded while hashing the entire ordered inventory,
-        // including linked evidence behind candidates outside this response page.
-        var ids = await candidates.OrderBy(x => x.Id).Select(x => x.Id).ToArrayAsync(cancellationToken);
-        foreach (var batch in ids.Chunk(MaximumPreviewPageSize))
+        // Use the same snapshot and ordering for the response page and the full inventory digest.
+        var page = new List<ConversationAdjudicationCandidate>(limit);
+        Guid? lastId = null;
+        var index = 0;
+        while (index < preview.TotalCount)
         {
-            var rows = await candidates.Where(x => batch.Contains(x.Id)).OrderBy(x => x.Id)
-                .ToArrayAsync(cancellationToken);
-            var evidence = await LoadEvidenceAsync(project, rows, cancellationToken);
+            var remaining = lastId is { } after ? candidates.Where(x => x.Id.CompareTo(after) > 0) : candidates;
+            var rows = await remaining.OrderBy(x => x.Id).Take(MaximumPreviewPageSize).ToArrayAsync(cancellationToken);
+            var evidence = await LoadEvidenceAsync(preview.ProjectId, rows, cancellationToken);
             foreach (var row in rows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -134,10 +140,18 @@ public sealed class ConversationAdjudicationService(
                     item.CanReconcile,
                     item.CanReopen
                 }, JsonOptions));
+                if (index >= preview.Offset && page.Count < limit)
+                    page.Add(item);
+                index++;
             }
+            lastId = rows[^1].Id;
         }
 
-        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        return preview with
+        {
+            Items = page,
+            InventoryToken = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant()
+        };
     }
 
     public async Task<ConversationAdjudicationReceipt> AdjudicateAsync(

@@ -854,6 +854,24 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
         db.ConversationInsights.Add(rejectedProposal);
         db.MemoryItems.Add(archivedTarget);
         await db.SaveChangesAsync();
+        var interceptor = new CaptureOrderedCandidateQueries();
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .AddInterceptors(interceptor)
+            .Options;
+        await using var reader = new MemoryDbContext(options);
+        var guardedService = new ConversationAdjudicationService(
+            reader,
+            scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>(),
+            scope.ServiceProvider.GetRequiredService<IClock>());
+        var crossBoundaryRequest = new ConversationAdjudicationPreviewRequest(seed.ProjectId, 190, 30, runId);
+        var ordinaryPage = await service.PreviewAsync(crossBoundaryRequest, default);
+        var guardedPage = await guardedService.PreviewAsync(crossBoundaryRequest with { IncludeInventoryToken = true }, default);
+        guardedPage.Should().BeEquivalentTo(ordinaryPage with { InventoryToken = guardedPage.InventoryToken },
+            comparison => comparison.WithStrictOrdering());
+        interceptor.Commands.Should().HaveCount(8);
+        interceptor.Commands.Should().OnlyContain(sql => sql.Contains("LIMIT ", StringComparison.Ordinal));
+
         var candidates = new Dictionary<Guid, ConversationAdjudicationCandidate>();
         string? inventoryToken = null;
         var offset = 0;
@@ -864,6 +882,7 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
             if (offset == 0)
             {
                 inventoryToken = page.InventoryToken;
+                inventoryToken.Should().Be(guardedPage.InventoryToken);
                 inventoryToken.Should().NotBeNullOrWhiteSpace();
             }
             page.InventoryToken.Should().Be(inventoryToken);
@@ -1166,6 +1185,22 @@ public sealed class ConversationAdjudicationTests(ContainerTestEnvironment envir
             }
 
             return result;
+        }
+    }
+
+    private sealed class CaptureOrderedCandidateQueries : DbCommandInterceptor
+    {
+        public List<string> Commands { get; } = [];
+
+        public override ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command, CommandExecutedEventData eventData, DbDataReader result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("FROM conversation_insights", StringComparison.Ordinal) &&
+                command.CommandText.Contains("ORDER BY", StringComparison.Ordinal))
+                Commands.Add(command.CommandText);
+
+            return ValueTask.FromResult(result);
         }
     }
 
