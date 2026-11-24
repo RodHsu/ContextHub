@@ -16,6 +16,66 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
     : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Run_get_preserves_the_receipt_during_a_PostgreSQL_history_lock_timeout()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var provider = scope.ServiceProvider;
+        var actor = UseBootstrapActor(provider);
+        var accessor = provider.GetRequiredService<IRequestActorAccessor>();
+        var receipts = provider.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"scheduled-history-lock-{Guid.NewGuid():N}";
+        var snapshot = $"kg:snapshot:{runId}";
+        var identity = CurrentScheduledIdentity();
+        var startedAt = DateTimeOffset.UtcNow;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var cancellationToken = deadline.Token;
+        await receipts.RecordReviewStartedAsync(runId, startedAt, identity, cancellationToken);
+        await receipts.RecordReviewAsync(CreateGenericReview(runId, identity, snapshot), startedAt, cancellationToken);
+        await receipts.RecordScheduledDecisionAsync(
+            CreateScheduledDecision(runId, snapshot, isReReview: false, actionable: 0), startedAt, cancellationToken);
+        var receipt = (await receipts.GetAsync(runId, cancellationToken))!;
+        await provider.GetRequiredService<IScheduledGovernanceReliabilityService>()
+            .PersistObservationAsync(receipt, cancellationToken);
+
+        await using var historyDb = new MemoryDbContext(provider.GetRequiredService<DbContextOptions<MemoryDbContext>>());
+        await historyDb.Database.OpenConnectionAsync(cancellationToken);
+        await historyDb.Database.ExecuteSqlRawAsync("SET lock_timeout = '250ms';", cancellationToken);
+        var history = new ScheduledGovernanceReliabilityService(historyDb, accessor, TimeProvider.System);
+        var service = new ScheduledGovernanceService(
+            provider.GetRequiredService<IKnowledgeReviewService>(),
+            provider.GetRequiredService<IGovernanceBatchExecutor>(), receipts, accessor, history);
+        var receiptOnly = await service.GetReceiptAsync(runId, cancellationToken, includeReliabilityHistory: false);
+
+        var rowQuery = historyDb.ScheduledGovernanceReliabilityRuns.AsNoTracking()
+            .Where(row => row.TenantId == actor.TenantId && row.OwnerUserId == actor.UserId && row.GovernanceRunId == runId);
+        var stored = await rowQuery.SingleAsync(cancellationToken);
+        await using var blocker = new NpgsqlConnection(environment.PostgresConnectionString);
+        await blocker.OpenAsync(cancellationToken);
+        await using var transaction = await blocker.BeginTransactionAsync(cancellationToken);
+        await using var lockTable = new NpgsqlCommand(
+            "LOCK TABLE scheduled_governance_reliability_runs IN ACCESS EXCLUSIVE MODE;", blocker, transaction);
+        await lockTable.ExecuteNonQueryAsync(cancellationToken);
+
+        var failure = await FluentActions.Invoking(() => history.GetAsync(cancellationToken))
+            .Should().ThrowAsync<InvalidOperationException>();
+        failure.Which.InnerException.Should().BeOfType<PostgresException>().Which.SqlState
+            .Should().Be(PostgresErrorCodes.LockNotAvailable);
+        var degraded = await service.GetReceiptAsync(runId, cancellationToken);
+        degraded.Should().BeEquivalentTo(receiptOnly);
+        degraded.ReceiptId.Should().Be(receipt.ReceiptId);
+        degraded.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
+        degraded.Reliability.Should().BeNull();
+
+        await transaction.RollbackAsync(cancellationToken);
+        var recovered = await service.GetReceiptAsync(runId, cancellationToken);
+        recovered.Reliability!.Runs.Should().Contain(run => run.GovernanceRunId == runId);
+        var after = await rowQuery.SingleAsync(cancellationToken);
+        after.ProjectionJson.Should().Be(stored.ProjectionJson);
+        after.UpdatedAt.Should().Be(stored.UpdatedAt);
+        await historyDb.Database.ExecuteSqlRawAsync("RESET lock_timeout;", cancellationToken);
+    }
+
+    [DockerRequiredFact]
     public async Task Same_run_review_waits_for_the_active_cycle_and_cancellation_does_not_append_a_receipt()
     {
         var services = environment.GetFactory().Services;

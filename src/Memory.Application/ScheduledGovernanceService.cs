@@ -303,7 +303,8 @@ public sealed class ScheduledGovernanceService(
             return await reliability.GetAsync(cancellationToken);
         }
         catch (Exception error) when (!cancellationToken.IsCancellationRequested &&
-                                      error is DbException or TimeoutException or OperationCanceledException)
+                                      error is DbException or TimeoutException or OperationCanceledException or
+                                      InvalidOperationException { InnerException: DbException or TimeoutException or OperationCanceledException })
         {
             // Optional history cannot obscure the authoritative receipt or supply proof when unavailable.
             return null;
