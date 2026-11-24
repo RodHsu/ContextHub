@@ -13,6 +13,72 @@ namespace Memory.IntegrationTests;
 
 public sealed class ConversationAdjudicationTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Preview_uses_latest_scoped_adjudication_evidence_and_counts_the_complete_ledger()
+    {
+        using var scope = CreateScope(out var db, out var service, out var actor);
+        var insight = await SeedAsync(db, actor);
+        var initial = (await Preview(service, insight)).Items.Single();
+        var resolved = await service.AdjudicateAsync(Request(insight, initial, ConversationAdjudicationAction.ResolveSkipped), default);
+        var tiedAt = resolved.CreatedAt.AddSeconds(1);
+        const int olderReceiptCount = 512;
+
+        ConversationAdjudication FixtureReceipt(Guid id, DateTimeOffset createdAt, string fingerprint, Guid ownerId)
+            => new()
+            {
+                Id = id,
+                TenantId = actor.TenantId!.Value,
+                OwnerUserId = ownerId,
+                ProjectId = insight.ProjectId,
+                InsightId = insight.Id,
+                RequestHash = id.ToString("N"),
+                EvidenceFingerprint = fingerprint,
+                Action = nameof(ConversationAdjudicationAction.ResolveSkipped),
+                Outcome = "ResolvedSkipped",
+                PreviousStatus = nameof(ConversationPromotionStatus.RequiresUserDecision),
+                ResultStatus = nameof(ConversationPromotionStatus.Skipped),
+                Reason = "Retained history fixture",
+                GovernanceRunId = "retained-history",
+                Actor = "fixture",
+                CreatedAt = createdAt
+            };
+
+        var olderFingerprint = new string('0', 64);
+        var ownerId = actor.UserId!.Value;
+        db.ConversationAdjudications.AddRange(Enumerable.Range(1, olderReceiptCount).Select(index =>
+            FixtureReceipt(Guid.NewGuid(), tiedAt.AddSeconds(-index - 1), olderFingerprint, ownerId)));
+        db.ConversationAdjudications.AddRange(
+            FixtureReceipt(Guid.Parse("00000000-0000-0000-0000-000000000001"), tiedAt, olderFingerprint, ownerId),
+            FixtureReceipt(Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff"), tiedAt, initial.EvidenceFingerprint, ownerId),
+            FixtureReceipt(Guid.NewGuid(), tiedAt.AddSeconds(1), olderFingerprint, Guid.NewGuid()));
+        await db.SaveChangesAsync();
+
+        var commands = new List<string>();
+        var options = new DbContextOptionsBuilder<MemoryDbContext>(
+                scope.ServiceProvider.GetRequiredService<DbContextOptions<MemoryDbContext>>())
+            .LogTo(commands.Add, [RelationalEventId.CommandExecuted])
+            .Options;
+        await using var readDb = new MemoryDbContext(options);
+        var previewReader = new ConversationAdjudicationService(
+            readDb, scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>(),
+            scope.ServiceProvider.GetRequiredService<IClock>());
+        var preview = await previewReader.PreviewAsync(new(insight.ProjectId, IncludeInventoryToken: true), default);
+        commands.Should().Contain(command =>
+            command.Contains("ROW_NUMBER() OVER(PARTITION BY", StringComparison.Ordinal) &&
+            command.Contains("<= 1", StringComparison.Ordinal),
+            "the query must select one receipt per insight in PostgreSQL");
+        preview.Items.Single().CanReopen.Should().BeFalse();
+        preview.ResolvedHumanDecisionCount.Should().Be(1);
+        preview.NewlyResolvedCount.Should().Be(olderReceiptCount + 3);
+        var reread = await service.PreviewAsync(new(insight.ProjectId, ExpectedInventoryToken: preview.InventoryToken), default);
+        reread.InventoryToken.Should().Be(preview.InventoryToken);
+        reread.Items.Should().BeEquivalentTo(preview.Items);
+
+        await db.ConversationInsights.Where(x => x.Id == insight.Id)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.Content, "Changed decision evidence"));
+        (await Preview(service, insight)).Items.Single().CanReopen.Should().BeTrue();
+    }
+
     [DockerRequiredTheory]
     [InlineData(false)]
     [InlineData(true)]

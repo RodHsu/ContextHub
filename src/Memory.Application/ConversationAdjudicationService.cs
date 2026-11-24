@@ -376,8 +376,10 @@ public sealed class ConversationAdjudicationService(
         var proposals = await Insights(project).AsNoTracking().Where(x => proposalIds.Contains(x.Id))
             .ToDictionaryAsync(x => x.Id, cancellationToken);
         var receipts = await Receipts(project).Where(x => ids.Contains(x.InsightId))
-            .OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Id).ToArrayAsync(cancellationToken);
-        return new(memories, proposals, receipts.GroupBy(x => x.InsightId).ToDictionary(x => x.Key, x => x.First()));
+            .GroupBy(x => x.InsightId)
+            .Select(group => group.OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Id).First())
+            .ToDictionaryAsync(x => x.InsightId, cancellationToken);
+        return new(memories, proposals, receipts);
     }
 
     private static ConversationAdjudicationCandidate Evaluate(ConversationInsight row, EvidenceContext context)
