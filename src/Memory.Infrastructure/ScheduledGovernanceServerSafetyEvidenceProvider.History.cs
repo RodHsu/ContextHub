@@ -112,7 +112,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider
 
     // Read the newer-event guard with the mutation facts so the guard covers the same database
     // snapshot. Batch and audit evidence retain the single-run reader's tenant-wide run binding.
-    // Join on the JSON value so an exact string is required, as in the single-run containment check.
+    // Use a fixed-size index key and verify the exact JSON value independently of the digest.
     private const string ReadHistoryFactsSql = """
         WITH requested AS MATERIALIZED (
             SELECT * FROM unnest(@run_ids, @sequences, @observed_through, @check_mutation) AS input(run_id, seq, observed_through, check_mutation)
@@ -120,8 +120,10 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider
         audit_matches AS MATERIALIZED (
             SELECT DISTINCT r.run_id
             FROM requested r
-            JOIN security_audit_events a ON a.details_json -> 'governanceRunId' = to_jsonb(r.run_id)
-            WHERE r.check_mutation AND a.tenant_id = @tenant
+            JOIN security_audit_events a
+                ON md5((a.details_json -> 'governanceRunId')::text) = md5(to_jsonb(r.run_id)::text)
+                AND a.details_json -> 'governanceRunId' = to_jsonb(r.run_id)
+            WHERE r.check_mutation AND a.tenant_id = @tenant AND a.details_json ? 'governanceRunId'
         )
         SELECT requested.seq AS "EventSequence",
             CASE WHEN requested.check_mutation THEN
