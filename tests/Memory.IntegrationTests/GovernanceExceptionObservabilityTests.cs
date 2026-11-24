@@ -1,5 +1,6 @@
 using System.Data;
 using System.Diagnostics;
+using System.Text.Json;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
@@ -591,7 +592,7 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
     }
 
     [DockerRequiredFact]
-    public async Task Concurrent_FullGovernance_Reopen_Must_Not_Overwrite_HostBlocked_Insight()
+    public async Task Concurrent_FullGovernance_Reopen_Retries_Without_Overwriting_HostBlocked_Insight()
     {
         using var seedScope = environment.GetFactory().Services.CreateScope();
         var actor = UseBootstrapActor(seedScope.ServiceProvider);
@@ -633,21 +634,31 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
             CreatedAt = blockedAt
         });
         await blockerDb.SaveChangesAsync();
+        var reevaluationRunId = $"insight-reopen-race-{Guid.NewGuid():N}";
         var buildException = await CommitAfterWriterBlockedAsync(
             blockerDb,
             blockerTransaction,
             "conversation_insights",
             (services, cancellationToken) => services.GetRequiredService<IFullGovernancePlanService>()
                 .BuildAsync(
-                    [projectId], $"insight-reopen-race-{Guid.NewGuid():N}",
+                    [projectId], reevaluationRunId,
                     CreateEmptyGovernanceSnapshot(), cancellationToken));
-        buildException.Should().NotBeNull(
-            "a stale automatic insight reopen must fail closed after the HostBlocked write commits");
+        buildException.Should().BeNull(
+            "the fresh transaction must read the committed HostBlocked disposition");
 
         seedDb.ChangeTracker.Clear();
         var readBack = await seedDb.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id);
         readBack.PromotionStatus.Should().Be(ConversationPromotionStatus.HostBlocked);
         readBack.GovernanceReasonClass.Should().Be("HostCapabilityUnavailable");
+        readBack.GovernanceEvidenceChangedSinceBlock.Should().BeTrue();
+        readBack.GovernanceRetryCount.Should().Be(0);
+        var binding = JsonSerializer.Serialize(new { governanceRunId = reevaluationRunId, insightId = insight.Id });
+        var reevaluationAudits = await seedDb.SecurityAuditEvents.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId && x.ActorUserId == actor.UserId &&
+                        x.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated &&
+                        EF.Functions.JsonContains(x.DetailsJson, binding))
+            .ToArrayAsync();
+        reevaluationAudits.Should().ContainSingle().Which.Outcome.Should().Be(nameof(ConversationPromotionStatus.HostBlocked));
     }
 
     [DockerRequiredFact]
