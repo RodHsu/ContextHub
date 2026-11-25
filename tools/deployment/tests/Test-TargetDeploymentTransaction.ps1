@@ -173,6 +173,27 @@ try {
     Assert-Equal -Actual (Invoke-TargetDeploymentTransaction @callbacks).Stage -Expected 'RollbackLatched' -Case 'latch blocks new targets'
     Assert-TestCallbackOrder $latched.Fixture ''
 
+    foreach ($fails in @($false, $true)) {
+        $guarded = Get-TestTarget (Join-Path $fixtureRoot "guarded-$fails.json") 'Apply'
+        $callbacks = $guarded.Callbacks
+        $callbacks.PrepareRollback = {
+            param($pending)
+            $guarded.Fixture.Events.Add("Prepare:$($pending.previous.Version)")
+            if ($fails) { throw 'rollback preparation failed' }
+        }.GetNewClosure()
+        $result = Invoke-TargetDeploymentTransaction @callbacks
+        if ($fails) {
+            Assert-Equal $result.Status 'RollbackFailed' 'preparation failure keeps the rollback latched'
+            Assert-Equal $result.Stage 'RollbackPrepare' 'preparation failure is classified'
+            Assert-TestCallbackOrder $guarded.Fixture 'Get:,Build:target-one,Capture:new,Verify:old,Apply:new,Prepare:old'
+            Assert-Equal (Get-TargetDeploymentState $callbacks.StatePath).pending.rollbackStage 'RollbackPrepare' 'preparation failure is durable'
+            Assert-Equal (Invoke-TargetDeploymentTransaction @callbacks).Stage 'RollbackLatched' 'failed preparation prevents later apply'
+        } else {
+            Assert-Equal $result.Status 'RolledBack' 'prepared rollback settles'
+            Assert-TestCallbackOrder $guarded.Fixture 'Get:,Build:target-one,Capture:new,Verify:old,Apply:new,Prepare:old,Apply:old,Verify:old'
+        }
+    }
+
     $crashPath = Join-Path $fixtureRoot 'crash.json'
     $prior = Get-TargetDeploymentStateTemplate -TargetRevision 'prior-target' -Outcome 'Applied' `
         -LastGood @{ Version = 'old' } -PreviousGood @{ Version = 'older'; Images = @{ main = 'older-id' } }
@@ -194,10 +215,14 @@ try {
     $restarted = Get-TestTarget $crashPath
     $restarted.Fixture.Live = [IO.File]::ReadAllText("$crashPath.live")
     $callbacks = $restarted.Callbacks
+    $callbacks.PrepareRollback = {
+        param($pending)
+        $restarted.Fixture.Events.Add("Prepare:$($pending.previous.Version)")
+    }.GetNewClosure()
     $result = Invoke-TargetDeploymentTransaction @callbacks
     Assert-Equal -Actual $result.Status -Expected 'Recovered' -Case 'restart recovered previous'
     Assert-Equal -Actual $result.TargetRevision -Expected 'crash-target' -Case 'restart consumed interrupted revision'
-    Assert-TestCallbackOrder $restarted.Fixture 'Apply:old,Verify:old'
+    Assert-TestCallbackOrder $restarted.Fixture 'Prepare:old,Apply:old,Verify:old'
     $state = Get-TargetDeploymentState $crashPath
     Assert-Equal -Actual $state.lastProcessedTargetRevision -Expected 'crash-target' -Case 'restart recorded on disk'
     Assert-Equal -Actual ($state.lastGood.Values -join ',') -Expected 'three,four' -Case 'verified restart rollback descriptor is retained'
