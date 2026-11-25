@@ -2855,6 +2855,80 @@ public sealed class ApiContractTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Conversation_Disposition_Should_Reject_Stale_State_And_Same_State_Versions()
+    {
+        var conversationId = $"api-disposition-{Guid.NewGuid():N}";
+        using var client = environment.GetFactory().CreateClient();
+        using var ingestResponse = await client.PostAsJsonAsync("/api/conversations/ingest", new ConversationIngestRequest(
+            ConversationId: conversationId,
+            TurnId: "turn-1",
+            EventType: ConversationEventType.SessionCheckpoint,
+            SourceKind: ConversationSourceKind.HostEvent,
+            SourceSystem: "codex",
+            SourceRef: "api-tests",
+            ProjectName: "ContextHub",
+            UserMessageSummary: "使用者偏好回覆預設使用繁體中文。",
+            AgentMessageSummary: "系統決定採用 shared summary layer。"));
+        ingestResponse.EnsureSuccessStatusCode();
+        var ingest = (await ingestResponse.Content.ReadFromJsonAsync<ConversationIngestResult>())!;
+        using var processResponse = await client.PostAsync($"/api/conversations/checkpoints/{ingest.CheckpointId}/process", null);
+        processResponse.EnsureSuccessStatusCode();
+        var pipeline = (await processResponse.Content.ReadFromJsonAsync<ConversationPipelineStatusResult>())!;
+        var insightPath = $"/api/conversations/insights/{pipeline.Insights.First().Id}";
+        var dispositionPath = $"{insightPath}/disposition";
+        var disposition = ConversationInsightDisposition.Deferred;
+        using var initial = await client.PostAsJsonAsync(dispositionPath, new { disposition, reason = "Awaiting review." });
+        initial.EnsureSuccessStatusCode();
+        var before = (await client.GetFromJsonAsync<ConversationInsightResult>(insightPath))!;
+
+        using var competing = await client.PostAsJsonAsync(dispositionPath, new
+        {
+            disposition,
+            reason = "Additional evidence arrived.",
+            expectedPromotionStatus = before.PromotionStatus,
+            expectedUpdatedAt = before.UpdatedAt
+        });
+        competing.EnsureSuccessStatusCode();
+        var current = (await client.GetFromJsonAsync<ConversationInsightResult>(insightPath))!;
+        current.PromotionStatus.Should().Be(before.PromotionStatus);
+        current.UpdatedAt.Should().BeAfter(before.UpdatedAt);
+
+        var update = new
+        {
+            disposition = ConversationInsightDisposition.RequiresUserDecision,
+            reason = "The evidence requires a decision.",
+            governanceRunId = $"{conversationId}-review",
+            expectedPromotionStatus = current.PromotionStatus,
+            expectedUpdatedAt = before.UpdatedAt
+        };
+        using var stale = await client.PostAsJsonAsync(dispositionPath, update);
+        stale.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        (await stale.Content.ReadAsStringAsync()).Should().Contain("Re-review");
+        using var wrongState = await client.PostAsJsonAsync(dispositionPath, update with
+        {
+            expectedPromotionStatus = ConversationPromotionStatus.Pending,
+            expectedUpdatedAt = current.UpdatedAt
+        });
+        wrongState.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+        var afterRejections = (await client.GetFromJsonAsync<ConversationInsightResult>(insightPath))!;
+        afterRejections.UpdatedAt.Should().Be(current.UpdatedAt);
+        afterRejections.GovernanceReason.Should().Be("Additional evidence arrived.");
+        using var accepted = await client.PostAsJsonAsync(dispositionPath, update with { expectedUpdatedAt = current.UpdatedAt });
+        accepted.EnsureSuccessStatusCode();
+        var applied = (await client.GetFromJsonAsync<ConversationInsightResult>(insightPath))!;
+        applied.PromotionStatus.Should().Be(ConversationPromotionStatus.RequiresUserDecision);
+        applied.GovernanceRunId.Should().Be(update.governanceRunId);
+
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var auditDetails = await dbContext.SecurityAuditEvents
+            .Where(x => x.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated)
+            .Select(x => x.DetailsJson)
+            .ToListAsync();
+        auditDetails.Should().ContainSingle(details => details.Contains(update.governanceRunId, StringComparison.Ordinal));
+    }
+
+    [DockerRequiredFact]
     public async Task Conversation_Ingest_Endpoints_Should_Create_Checkpoints_Insights_And_List_Them()
     {
         var conversationId = $"api-conversation-{Guid.NewGuid():N}";

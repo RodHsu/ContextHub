@@ -1164,7 +1164,8 @@ public sealed record ConversationInsightDispositionRequest(
     string? BlockingLayer = null,
     string? ReasonClass = null,
     string? RelatedTool = null,
-    [property: JsonIgnore] ConversationPromotionStatus? ExpectedPromotionStatus = null);
+    ConversationPromotionStatus? ExpectedPromotionStatus = null,
+    DateTimeOffset? ExpectedUpdatedAt = null);
 
 public sealed record AccessibleProjectResult(
     string ProjectId,
