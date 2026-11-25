@@ -88,6 +88,17 @@ The script runs on every rollback attempt, including recovery after an
 interruption. Keep it idempotent and provision it only in the controller's
 restricted directory. Allow up to 30 additional seconds for the script in
 the scheduled task's time budget.
+
+For a rollback limited to one promotion and one Docker PostgreSQL container,
+use `Prepare-WorkItemRollback.ps1` as the preparation script. Install it
+beside the controller and the SQL guard. Create a protected
+`work-item-rollback-preparation.json` in that directory with
+`retainedSourceSha`, `candidateSourceSha`, `targetRevision`,
+`postgresContainerId`, `database`, and `databaseUser`. Use the full container
+ID and a database account already authorized for the guard. The script
+requires a matching promotion and running container and uses existing local
+PostgreSQL authentication without prompting for credentials. Review the
+configuration when preparing another promotion or after container replacement.
 Keep the guard enabled until compatible writers are healthy and the operator
 has verified the Work Item revision and proposal evidence. Then run the same
 script with `work_item_rollback_mode=disable`. The guard applies to Work Item
