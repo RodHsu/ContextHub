@@ -46,6 +46,12 @@ public sealed class ScheduledGovernanceService(
             cancellationToken);
         EnsureScheduledLineage(lineage, requireExistingRun: false);
 
+        if (lineage.RunExists && !request.IsReReview &&
+            await receipts.GetScheduledInitialReviewReplayAsync(governanceRunId, cancellationToken) is { } replay)
+        {
+            return (replay, null);
+        }
+
         var startedAt = DateTimeOffset.UtcNow;
         await receipts.RecordReviewStartedAsync(
             governanceRunId,

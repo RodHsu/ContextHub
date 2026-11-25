@@ -2492,6 +2492,8 @@ public interface IGovernanceRunReceiptService
     Task RecordScheduledDecisionAsync(ScheduledGovernanceReviewResult result, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task<IAsyncDisposable> AcquireRunLockAsync(string governanceRunId, CancellationToken cancellationToken);
     Task<GovernanceRunLineageResult> GetScheduledLineageAsync(string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken);
+    Task<ScheduledGovernanceReviewResult?> GetScheduledInitialReviewReplayAsync(
+        string governanceRunId, CancellationToken cancellationToken);
     Task<(GovernanceRunReceiptResult Receipt, GovernanceRunLineageResult Lineage)?> GetScheduledReceiptSnapshotAsync(
         string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken);
     Task RecordReviewStoppedAsync(string governanceRunId, DateTimeOffset startedAt, string status, string stoppedReason, string failurePhase, GovernanceReceiptContractIdentity contractIdentity, CancellationToken cancellationToken, bool isReReview = false);

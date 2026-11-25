@@ -166,12 +166,64 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         var finalized = await holder.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
         finalized.Decision.Should().Be(ScheduledGovernanceDecision.NoOpConverged);
         finalized.FinalSnapshotToken.Should().Be(snapshot);
-
-        static ScheduledGovernanceService CreateService(IServiceProvider provider,
-            Func<KnowledgeReviewRequest, CancellationToken, Task<KnowledgeReviewResult>> review) => new(
-            new CallbackKnowledgeReview(review), provider.GetRequiredService<IGovernanceBatchExecutor>(),
-            provider.GetRequiredService<IGovernanceRunReceiptService>(), provider.GetRequiredService<IRequestActorAccessor>());
     }
+
+    [DockerRequiredFact]
+    public async Task Initial_review_replay_preserves_the_first_human_decision_delta_and_receipt()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var provider = scope.ServiceProvider;
+        UseBootstrapActor(provider);
+        var db = provider.GetRequiredService<MemoryDbContext>();
+        var receipts = provider.GetRequiredService<IGovernanceRunReceiptService>();
+        var runId = $"scheduled-decision-replay-{Guid.NewGuid():N}";
+        var snapshot = $"kg:snapshot:{runId}:i0";
+        var request = new ScheduledGovernanceReviewRequest(runId);
+        var underlyingReview = CreateGenericReview(runId, CurrentScheduledIdentity(), snapshot);
+        var needsHumanDecision = new GovernanceReviewItem(
+            $"finding:{runId}", GovernanceItemKind.Memory, ProjectContext.SharedProjectId, "Ambiguous", "Merge",
+            GovernanceBatchRiskLevel.High, true, Guid.NewGuid(), [], ["HUMAN"], runId);
+        var review = underlyingReview with
+        {
+            CandidateCount = 1,
+            GovernancePlan = [needsHumanDecision],
+            GovernedExceptionCount = 1,
+            Convergence = underlyingReview.Convergence with { GovernedExceptionCount = 1, RequiresUserDecisionCount = 1 },
+            GovernedExceptionStates = [new(needsHumanDecision.ItemKey, "Finding", "RequiresUserDecision", 3)]
+        };
+        var service = CreateService(provider, async (_, token) =>
+        {
+            await receipts.RecordReviewAsync(review, DateTimeOffset.UtcNow, token);
+            return review;
+        });
+
+        var first = await service.ReviewAsync(request, CancellationToken.None);
+        first.Decision.Should().Be(ScheduledGovernanceDecision.HumanDecisionOnly);
+        first.ExceptionDelta!.New.Should().Be(1);
+        var originalReceipt = await service.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+
+        using var replayScope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(replayScope.ServiceProvider);
+        var replayService = CreateService(replayScope.ServiceProvider, (_, _) =>
+            throw new InvalidOperationException("A completed initial review must be read from the receipts."));
+        var replay = await replayService.ReviewAsync(request, CancellationToken.None);
+
+        replay.Should().BeEquivalentTo(first);
+        var receipt = await replayService.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+        receipt.ReceiptId.Should().Be(originalReceipt.ReceiptId);
+        receipt.Decision.Should().Be(ScheduledGovernanceDecision.HumanDecisionOnly);
+        var events = await db.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.GovernanceRunId == runId)
+            .OrderBy(x => x.EventSequence)
+            .Select(x => x.EventType)
+            .ToArrayAsync();
+        events.Should().Equal("ReviewReceived", "ReviewCompleted", "ScheduledDecisionProjected");
+    }
+
+    private static ScheduledGovernanceService CreateService(IServiceProvider provider,
+        Func<KnowledgeReviewRequest, CancellationToken, Task<KnowledgeReviewResult>> review) => new(
+        new CallbackKnowledgeReview(review), provider.GetRequiredService<IGovernanceBatchExecutor>(),
+        provider.GetRequiredService<IGovernanceRunReceiptService>(), provider.GetRequiredService<IRequestActorAccessor>());
 
     private sealed class CallbackKnowledgeReview(
         Func<KnowledgeReviewRequest, CancellationToken, Task<KnowledgeReviewResult>> review) : IKnowledgeReviewService
