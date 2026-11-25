@@ -1127,6 +1127,9 @@ public sealed class ScheduledGovernanceServiceTests
             => Task.FromResult<IAsyncDisposable>(new NoopAsyncDisposable());
         public Task<GovernanceRunLineageResult> GetScheduledLineageAsync(string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken)
             => Task.FromResult(Lineage);
+        public Task<ScheduledGovernanceReviewResult?> GetScheduledInitialReviewReplayAsync(
+            string governanceRunId, CancellationToken cancellationToken)
+            => Task.FromResult<ScheduledGovernanceReviewResult?>(null);
         public Task<(GovernanceRunReceiptResult Receipt, GovernanceRunLineageResult Lineage)?> GetScheduledReceiptSnapshotAsync(
             string governanceRunId, GovernanceReceiptContractIdentity expectedContractIdentity, CancellationToken cancellationToken)
             => SnapshotFailure is { } failure

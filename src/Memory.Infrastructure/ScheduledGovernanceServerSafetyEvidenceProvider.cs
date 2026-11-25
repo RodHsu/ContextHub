@@ -335,7 +335,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
                IsCanonicalReviewRequest(decision, initialRequestIdentityHash) &&
                HasValidReviewLifecycle(events, received, review, decision) &&
                ReviewBindsDecision(review, decision) &&
-               ProjectSetsEqual(decision.ProjectIdsJson, finalDecision.ProjectIdsJson) &&
+               ScheduledProjectScopesMatch(decision.ProjectIdsJson, finalDecision.ProjectIdsJson) &&
                TryGetCapturedRuntimeIdentity(received, review, decision) == runtimeIdentity;
     }
 
@@ -441,7 +441,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
            review.CoverageComplete == decision.CoverageComplete &&
            !string.IsNullOrWhiteSpace(review.FinalSnapshotToken) &&
            string.Equals(review.FinalSnapshotToken, decision.FinalSnapshotToken, StringComparison.Ordinal) &&
-           ProjectSetsEqual(review.ProjectIdsJson, decision.ProjectIdsJson) &&
+           ScheduledProjectScopesMatch(review.ProjectIdsJson, decision.ProjectIdsJson) &&
            review.UserScopeOccurrences == 0 && decision.UserScopeOccurrences == 0 &&
            review.UserScopeHandledSeparately == true && decision.UserScopeHandledSeparately == true &&
            string.Equals(
@@ -508,7 +508,7 @@ public sealed partial class ScheduledGovernanceServerSafetyEvidenceProvider(Memo
                IsCurrentContract(cycle[2]);
     }
 
-    private static bool ProjectSetsEqual(string leftJson, string rightJson)
+    internal static bool ScheduledProjectScopesMatch(string leftJson, string rightJson)
     {
         try
         {

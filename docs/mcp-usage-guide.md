@@ -60,6 +60,8 @@ When an item outcome is unknown, execute returns `succeeded=false` and `stoppedR
 
 If the generic review has committed and the Scheduled decision is still missing, `scheduled_governance_run_get` returns `status=Running`, `terminal=false`, `decision=null`, and `outcome=DecisionProjectionPending`. Read back the same run before retrying. If the prior call ended before committing a decision, retry the same review request with its original `governanceRunId` and `isReReview` value. Wait for the persisted Scheduled decision before interpreting convergence or calling execute.
 
+Once the initial Scheduled decision has committed, repeating its Review request on the bound runtime returns the original decision, snapshot, and exception delta from the receipt. The original decision remains tied to its snapshot. Use `scheduled_governance_run_get` to read current execution or re-review status. A new runtime requires a fresh run ID.
+
 The dedicated review and executor share a lock for each tenant, owner, and run. A second review waits for the current review or batch to release that lock. A review cancelled while waiting leaves the active run's receipts intact.
 
 When the connected actor has no receipt for the requested run, `run_get` returns `NotReceived` without computing reliability history. This result describes the lookup at that moment. For a received run, the reliability history reports `decision-projection-pending` for an observed review that is still waiting for its Scheduled decision. It verifies the immutable receipt when reading historical observations and leaves their stored records intact.
