@@ -4920,6 +4920,13 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             .Should().Contain(["projectId", "repositoryId", "agentId", "idempotencyKey"]);
         var batchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
+        var dispositionRequest = listedTools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "conversation_insight_set_disposition")
+            .GetProperty("inputSchema").GetProperty("properties").GetProperty("request");
+        dispositionRequest.GetProperty("properties").EnumerateObject().Select(property => property.Name)
+            .Should().Contain(["expectedPromotionStatus", "expectedUpdatedAt"]);
+        dispositionRequest.GetProperty("required").EnumerateArray().Select(property => property.GetString())
+            .Should().NotContain(["expectedPromotionStatus", "expectedUpdatedAt"]);
         var reviewTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "knowledge_review");
         reviewTool.GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).Should().Contain([

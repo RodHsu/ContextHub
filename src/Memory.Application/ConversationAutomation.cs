@@ -541,6 +541,11 @@ public sealed class ConversationAutomationService(
             throw new InvalidOperationException(
                 $"Conversation insight '{insight.Id}' changed from expected governance state '{request.ExpectedPromotionStatus.Value}' to '{insight.PromotionStatus}'. Re-review before applying a disposition.");
         }
+        if (request.ExpectedUpdatedAt is { } expectedUpdatedAt && insight.UpdatedAt != expectedUpdatedAt)
+        {
+            throw new InvalidOperationException(
+                $"Conversation insight '{insight.Id}' was updated after the expected version. Re-review before applying a disposition.");
+        }
         if (insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped)
         {
             await transaction.CommitAsync(cancellationToken);
