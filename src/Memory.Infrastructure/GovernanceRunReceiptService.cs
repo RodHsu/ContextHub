@@ -992,8 +992,8 @@ public sealed class GovernanceRunReceiptService(
             receipt.GovernanceRunId,
             cancellationToken);
         await MergeLockedCumulativeEvidenceAsync(receipt, cumulativeDelta, cancellationToken);
-        await ApplyLockedReviewExceptionDeltaAsync(receipt, cancellationToken);
         await ApplyInitialReviewBaselineAsync(receipt, cancellationToken);
+        await ApplyLockedReviewExceptionDeltaAsync(receipt, cancellationToken);
         await EnsureScheduledDecisionBindsLatestReviewAsync(receipt, cancellationToken);
         SetCanonicalReviewEventKey(receipt);
         await EnsureScheduledRunBindingAsync(receipt, cancellationToken);
@@ -1455,9 +1455,30 @@ public sealed class GovernanceRunReceiptService(
             projectIds,
             contractIdentity,
             cancellationToken);
-        var exceptionDelta = ComputeExceptionDelta(
+        if (receipt.ExecutionMode == "Scheduled" && exceptionBaseline is { Status: "Completed" } &&
+            exceptionBaseline.GovernanceRunId == receipt.GovernanceRunId &&
+            receipt.RequestIdentityHash == ReviewRequestIdentityHash(receipt.GovernanceRunId, isReReview: false) &&
+            receipt.RequestIdentityHash == exceptionBaseline.RequestIdentityHash &&
+            receipt.FinalSnapshotToken == exceptionBaseline.FinalSnapshotToken)
+        {
+            // A retry after ReviewCompleted must retain its own original delta
+            // so projection recovery does not compare the review to itself.
+            ApplyExceptionDelta(receipt, new GovernanceExceptionDeltaResult(
+                exceptionBaseline.ExceptionNew, exceptionBaseline.ExceptionResolved,
+                exceptionBaseline.ExceptionUnchanged, exceptionBaseline.ExceptionEscalated));
+            if (CanonicalReceiptPayloadMatches(exceptionBaseline, receipt))
+            {
+                return;
+            }
+        }
+
+        ApplyExceptionDelta(receipt, ComputeExceptionDelta(
             DeserializeExceptionStates(exceptionBaseline?.GovernedExceptionStatesJson),
-            currentExceptionStates);
+            currentExceptionStates));
+    }
+
+    private static void ApplyExceptionDelta(GovernanceRunReceipt receipt, GovernanceExceptionDeltaResult exceptionDelta)
+    {
         receipt.ExceptionNew = exceptionDelta.New;
         receipt.ExceptionResolved = exceptionDelta.Resolved;
         receipt.ExceptionUnchanged = exceptionDelta.Unchanged;

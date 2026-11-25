@@ -168,8 +168,10 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         finalized.FinalSnapshotToken.Should().Be(snapshot);
     }
 
-    [DockerRequiredFact]
-    public async Task Initial_review_replay_preserves_the_first_human_decision_delta_and_receipt()
+    [DockerRequiredTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Initial_review_replay_preserves_the_first_human_decision_delta_and_receipt(bool projectionWasInterrupted)
     {
         using var scope = environment.GetFactory().Services.CreateScope();
         var provider = scope.ServiceProvider;
@@ -196,6 +198,15 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             await receipts.RecordReviewAsync(review, DateTimeOffset.UtcNow, token);
             return review;
         });
+
+        if (projectionWasInterrupted)
+        {
+            var startedAt = DateTimeOffset.UtcNow;
+            await receipts.RecordReviewStartedAsync(runId, startedAt, CurrentScheduledIdentity(), CancellationToken.None);
+            await receipts.RecordReviewAsync(review, startedAt, CancellationToken.None);
+            var pending = await service.GetReceiptAsync(runId, default, includeReliabilityHistory: false);
+            pending.Outcome.Should().Be("DecisionProjectionPending");
+        }
 
         var first = await service.ReviewAsync(request, CancellationToken.None);
         first.Decision.Should().Be(ScheduledGovernanceDecision.HumanDecisionOnly);
