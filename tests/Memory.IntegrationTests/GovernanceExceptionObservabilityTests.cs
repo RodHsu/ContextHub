@@ -541,6 +541,115 @@ public sealed class GovernanceExceptionObservabilityTests(ContainerTestEnvironme
     }
 
     [DockerRequiredFact]
+    public async Task Read_only_analysis_detects_duplicates_without_linking_queueing_or_reopening_a_finding()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var governance = scope.ServiceProvider.GetRequiredService<IGovernanceService>();
+        var projectId = $"read-only-analysis-{Guid.NewGuid():N}";
+        var left = CreateLowValueMemory(actor, projectId);
+        var right = CreateLowValueMemory(actor, projectId);
+        left.ExternalKey = "observed-artifact-left";
+        right.ExternalKey = "observed-artifact-right";
+        left.MemoryType = right.MemoryType = MemoryType.Artifact;
+        db.MemoryItems.AddRange(left, right);
+        await db.SaveChangesAsync();
+
+        await governance.AnalyzeAsync(projectId, default, persistResourceChanges: false);
+        var finding = await db.GovernanceFindings.SingleAsync(x => x.ProjectId == projectId &&
+            x.Type == GovernanceFindingType.DuplicateMemoryCandidate);
+        finding.Status.Should().Be(GovernanceFindingStatus.Open);
+        finding.Status = GovernanceFindingStatus.RequiresUserDecision;
+        finding.GovernancePolicyVersion = "previous-policy";
+        finding.GovernanceEvidenceFingerprint = new string('a', 64);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var baseline = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+
+        await governance.AnalyzeAsync(projectId, default, persistResourceChanges: false);
+        var observed = await db.GovernanceFindings.AsNoTracking().SingleAsync(x => x.Id == finding.Id);
+        observed.Should().BeEquivalentTo(baseline);
+        var memoryIds = new[] { left.Id, right.Id };
+        (await db.MemoryLinks.AsNoTracking().AnyAsync(x => memoryIds.Contains(x.FromId) && memoryIds.Contains(x.ToId)))
+            .Should().BeFalse();
+        (await db.SuggestedActions.AsNoTracking().AnyAsync(x => x.ProjectId == projectId)).Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
+    public async Task Scheduled_review_preserves_changed_insight_exceptions_and_proves_zero_execute()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var (tenant, owner) = CreateOtherOwner();
+        db.AddRange(tenant, owner);
+        await db.SaveChangesAsync();
+        var actor = new ContextHubRequestActor(tenant.Id, owner.Id, owner.Username, owner.Role,
+            [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite, SecurityScopes.PreferencesRead, SecurityScopes.ScheduledGovernance],
+            [], true);
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        var statuses = new[]
+        {
+            ConversationPromotionStatus.Deferred,
+            ConversationPromotionStatus.RequiresUserDecision,
+            ConversationPromotionStatus.HostBlocked
+        };
+        var insights = new List<ConversationInsight>();
+        foreach (var status in statuses)
+        {
+            var insight = await SeedGovernanceInsightAsync(db, actor, ProjectContext.SharedProjectId);
+            insight.PromotionStatus = status;
+            insight.GovernancePolicyVersion = "previous-policy";
+            insight.GovernanceEvidenceFingerprint = new string('a', 64);
+            insights.Add(insight);
+        }
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var ids = insights.Select(x => x.Id).ToArray();
+        var baseline = await db.ConversationInsights.AsNoTracking().Where(x => ids.Contains(x.Id)).ToArrayAsync();
+
+        var scheduled = scope.ServiceProvider.GetRequiredService<IScheduledGovernanceService>();
+        var runId = $"read-only-governance-{Guid.NewGuid():N}";
+        var result = await scheduled.ReviewAsync(new ScheduledGovernanceReviewRequest(runId), default);
+        result.Decision.Should().Be(ScheduledGovernanceDecision.HumanDecisionOnly);
+        result.GovernedExceptionCount.Should().Be(3);
+        result.ReversibleExecutionCount.Should().Be(0);
+        var receipt = await scheduled.GetReceiptAsync(runId, default);
+        receipt.DecisionObeyedStatus.Should().Be(ScheduledGovernanceInvariantProofStatus.ProvenTrue);
+        receipt.Applied.Should().Be(0);
+
+        var observed = await db.ConversationInsights.AsNoTracking().Where(x => ids.Contains(x.Id)).ToArrayAsync();
+        observed.Should().BeEquivalentTo(baseline);
+        var runBinding = JsonSerializer.Serialize(new { governanceRunId = runId });
+        (await db.SecurityAuditEvents.AsNoTracking().AnyAsync(x => x.TenantId == tenant.Id &&
+            x.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated &&
+            EF.Functions.JsonContains(x.DetailsJson, runBinding))).Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
+    public async Task Read_only_retention_review_does_not_advance_or_refresh_lifecycle()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var retention = scope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>();
+        var projectId = $"read-only-retention-{Guid.NewGuid():N}";
+        var memory = CreateLowValueMemory(actor, projectId);
+        memory.Tags = ["machine-generated", "execution-evidence", "synthetic-disposable"];
+        db.MemoryItems.Add(memory);
+        await db.SaveChangesAsync();
+        await retention.QuarantineAsync(memory.Id, projectId, "read-only-retention-seed", default);
+        db.ChangeTracker.Clear();
+        var baseline = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == memory.Id);
+
+        var projection = await retention.ReviewAsync([projectId], "read-only-retention-review", default,
+            allowCancelledReactivation: false, persistStateChanges: false);
+        projection.DeleteCancelledCount.Should().Be(0);
+        var observed = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == memory.Id);
+        observed.Should().BeEquivalentTo(baseline);
+    }
+
+    [DockerRequiredFact]
     public async Task Full_governance_counts_insight_lifecycle_inventory_without_queuing_stored_exceptions()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

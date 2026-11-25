@@ -50,6 +50,7 @@ public sealed class GovernanceBatchExecutor(
             // Shared is implicit in a batch, so the ordinary project allowlist cannot enforce its durable grant.
             await GovernanceProjectScopeResolver.EnsureDurableGrantsAsync(
                 dbContext, tenantId, [ProjectContext.SharedProjectId], requireWrite: true, cancellationToken);
+            GovernanceRunReceiptResult? scheduledReceipt = null;
             if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled)
             {
                 runLock = await runReceipts.AcquireRunLockAsync(
@@ -71,7 +72,7 @@ public sealed class GovernanceBatchExecutor(
                 // caller failure, but the mutation boundary must re-read the
                 // latest server-owned ScheduledDecision under this executor's
                 // run lock so a decision change cannot race into execution.
-                var scheduledReceipt = await runReceipts.GetAsync(
+                scheduledReceipt = await runReceipts.GetAsync(
                     request.GovernanceRunId,
                     cancellationToken);
                 ScheduledGovernanceExecutionDecisionGate.EnsureReversible(
@@ -105,7 +106,7 @@ public sealed class GovernanceBatchExecutor(
                 await runReceipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
             }
             executionEntered = true;
-            var result = await ExecuteCoreAsync(request, cancellationToken);
+            var result = await ExecuteCoreAsync(request, scheduledReceipt, cancellationToken);
             await RecordCompletionReceiptAsync(request, result, startedAt);
             return result;
         }
@@ -163,6 +164,7 @@ public sealed class GovernanceBatchExecutor(
 
     private async Task<GovernanceBatchExecuteResult> ExecuteCoreAsync(
         GovernanceBatchExecuteRequest request,
+        GovernanceRunReceiptResult? scheduledReceipt,
         CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
@@ -286,7 +288,8 @@ public sealed class GovernanceBatchExecutor(
 
         if (run is null)
         {
-            var plan = await BuildPlanAsync(snapshot, projectIds, request.GovernanceRunId.Trim(), actor, cancellationToken);
+            var plan = await BuildPlanAsync(snapshot, projectIds, request.GovernanceRunId.Trim(), actor, cancellationToken,
+                persistResourceChanges: request.ExecutionMode != GovernanceBatchExecutionMode.Scheduled);
             if (plan.Count > MaximumPlanItems)
             {
                 throw new InvalidOperationException($"Governance batch plan exceeds the {MaximumPlanItems} item safety limit.");
@@ -447,6 +450,10 @@ public sealed class GovernanceBatchExecutor(
         var allowed = (request.AllowedActionTypes is { Count: > 0 }
             ? request.AllowedActionTypes
             : Enum.GetValues<GovernanceBatchActionType>()).ToHashSet();
+        var reviewedDeferredEvidence = scheduledReceipt?.GovernedExceptionStates
+            .Where(state => state.Kind == nameof(GovernanceItemKind.ConversationInsight) &&
+                state.Disposition == nameof(ConversationPromotionStatus.Deferred))
+            .ToDictionary(state => state.Key, state => state.EvidenceFingerprint, StringComparer.Ordinal);
         var stoppedReason = "Completed";
 
         while (index < executablePlanItems.Count)
@@ -473,6 +480,9 @@ public sealed class GovernanceBatchExecutor(
             }
 
             var item = executablePlanItems[index];
+            var reviewedDeferredHash = item.CanonicalKind == GovernanceItemKind.ConversationInsight
+                ? reviewedDeferredEvidence?.GetValueOrDefault($"insight:{item.Id:D}")
+                : null;
             accumulator.ScannedCount++;
             GovernanceBatchItemResult itemResult;
             if (scheduledPlanRejections is not null &&
@@ -487,6 +497,11 @@ public sealed class GovernanceBatchExecutor(
                     item.RelatedResourceIds,
                     actor,
                     cancellationToken);
+            }
+            else if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled &&
+                !string.Equals(item.DeferredInsightEvidenceHash, reviewedDeferredHash, StringComparison.Ordinal))
+            {
+                itemResult = await InsightEvidenceChangedAsync(item, actor, cancellationToken);
             }
             else if (request.DryRun)
             {
@@ -570,7 +585,8 @@ public sealed class GovernanceBatchExecutor(
         execution.CompletedAt = clock.UtcNow;
         execution.UpdatedAt = clock.UtcNow;
         var retentionReview = await autonomousRetention.ReviewAsync(projectIds, request.GovernanceRunId.Trim(), CancellationToken.None,
-            allowCancelledReactivation: false);
+            allowCancelledReactivation: false,
+            persistStateChanges: request.ExecutionMode != GovernanceBatchExecutionMode.Scheduled);
         accumulator.ApplyRetentionReview(retentionReview);
         var completionAudit = await AddAuditAsync(
             actor,
@@ -1084,7 +1100,8 @@ public sealed class GovernanceBatchExecutor(
                     GovernanceBatchItemDisposition.Deferred, "Quarantine is not allowed by this execution payload.", [],
                     [item.Id], actor, cancellationToken);
             }
-            var candidate = await autonomousRetention.QuarantineAsync(item.Id, item.ProjectId, request.GovernanceRunId, cancellationToken);
+            var candidate = await autonomousRetention.QuarantineAsync(item.Id, item.ProjectId, request.GovernanceRunId,
+                cancellationToken, markEligible: request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled);
             if (candidate.RecommendedAction == AutonomousRetentionCandidateResult.QuarantineRequiresReview)
             {
                 return await AuditedResultAsync(item, GovernanceBatchActionType.Quarantine,
@@ -1621,8 +1638,13 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
+        var scheduled = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled;
+        var deferredSkip = scheduled && item.DeferredInsightEvidenceHash is not null;
         var insight = await dbContext.ConversationInsights.AsNoTracking().FirstOrDefaultAsync(x => x.Id == item.Id, cancellationToken);
-        if (insight is null || insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped or ConversationPromotionStatus.Deferred or ConversationPromotionStatus.RequiresUserDecision or ConversationPromotionStatus.HostBlocked)
+        if (insight is null ||
+            insight.PromotionStatus is ConversationPromotionStatus.Promoted or ConversationPromotionStatus.Skipped or
+                ConversationPromotionStatus.RequiresUserDecision or ConversationPromotionStatus.HostBlocked ||
+            (insight.PromotionStatus == ConversationPromotionStatus.Deferred && !deferredSkip))
         {
             return await AuditedResultAsync(item, GovernanceBatchActionType.ConversationInsightDisposition, GovernanceBatchItemDisposition.NoOp, "Conversation Insight is already terminal.", [], [], actor, cancellationToken);
         }
@@ -1631,7 +1653,6 @@ public sealed class GovernanceBatchExecutor(
             return await AuditedResultAsync(item, null, GovernanceBatchItemDisposition.Deferred, "Conversation Insight disposition is not allowed by this execution payload.", [], [], actor, cancellationToken);
         }
         var protectedInsight = GovernanceEvidenceFingerprint.IsProtectedInsight(insight);
-        var scheduled = request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled;
         if (!protectedInsight && insight.Confidence >= request.SemanticAutoResolutionConfidenceThreshold)
         {
             var exactIds = await GovernanceEvidenceFingerprint.FindCurrentExactMemoryIdsAsync(
@@ -1641,11 +1662,17 @@ public sealed class GovernanceBatchExecutor(
                  item.RelatedResourceIds.Count == 1 && item.RelatedResourceIds[0] == exactIds[0])))
             {
                 var evidenceId = exactIds[0];
+                var evidence = new ConversationInsightSemanticEvidence(
+                    evidenceId, insight.ProjectId, insight.UpdatedAt, request.SemanticAutoResolutionConfidenceThreshold)
+                {
+                    DeferredEvidenceHash = deferredSkip ? item.DeferredInsightEvidenceHash : null
+                };
                 var outcome = await conversationService.SkipInsightWithEvidenceAsync(new ConversationInsightGovernanceRequest(
                     insight.Id, request.GovernanceRunId,
-                    $"Autonomously resolved against durable evidence {evidenceId:D}."),
-                    new(evidenceId, insight.ProjectId, insight.UpdatedAt, request.SemanticAutoResolutionConfidenceThreshold),
-                    cancellationToken);
+                    deferredSkip
+                        ? $"Deferred insight skipped after revalidation of changed evidence {evidenceId:D}."
+                        : $"Autonomously resolved against durable evidence {evidenceId:D}."),
+                    evidence, cancellationToken);
                 if (outcome == ConversationInsightSkipOutcome.AlreadyTerminal)
                 {
                     return await AuditedResultAsync(item, GovernanceBatchActionType.ConversationInsightDisposition,
@@ -1657,7 +1684,9 @@ public sealed class GovernanceBatchExecutor(
                 {
                     var semantic = await AuditedResultAsync(item, GovernanceBatchActionType.SemanticReevaluate,
                         GovernanceBatchItemDisposition.Applied,
-                        "Reopened or pending insight was autonomously resolved against an exact durable evidence match.",
+                        deferredSkip
+                            ? "Deferred insight was skipped after revalidation of changed exact durable evidence."
+                            : "Reopened or pending insight was autonomously resolved against an exact durable evidence match.",
                         [], [insight.Id, evidenceId], actor, cancellationToken);
                     return semantic with { SemanticAutoResolved = true };
                 }
@@ -1802,11 +1831,13 @@ public sealed class GovernanceBatchExecutor(
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         ContextHubRequestActor actor,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool persistResourceChanges)
     {
         using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch.plan-build");
         var fullPlan = await fullGovernance.BuildAsync(projectIds, governanceRunId, snapshot, cancellationToken,
-            allowCancelledRetentionReactivation: false);
+            allowCancelledRetentionReactivation: false,
+            persistResourceChanges: persistResourceChanges);
         return fullPlan.Items.Select(x => new BatchPlanItem(
                 x.ItemKey,
                 DispatchKindFor(x.ItemKind),
@@ -1825,7 +1856,10 @@ public sealed class GovernanceBatchExecutor(
                 x.DeleteEligibleAt,
                 x.ItemKind,
                 x.AuthorityResourceId,
-                x.ReasonCodes))
+                x.ReasonCodes,
+                x.ItemKind == GovernanceItemKind.ConversationInsight && x.SemanticEvidenceHash.Length > 0
+                    ? x.SemanticEvidenceHash
+                    : null))
              .OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Key, StringComparer.Ordinal).ToList();
     }
 
@@ -1865,7 +1899,8 @@ public sealed class GovernanceBatchExecutor(
             projectIds,
             governanceRunId,
             actor,
-            cancellationToken);
+            cancellationToken,
+            persistResourceChanges: false);
         var rebuiltByKey = rebuiltPlan.ToDictionary(x => x.Key, StringComparer.Ordinal);
         if (rebuiltByKey.Count != persistedPlan.Count ||
             persistedPlan.Any(item => !rebuiltByKey.ContainsKey(item.Key)))
@@ -1932,6 +1967,7 @@ public sealed class GovernanceBatchExecutor(
            persisted.DeleteEligibleAt == rebuilt.DeleteEligibleAt &&
            persisted.CanonicalKind == rebuilt.CanonicalKind &&
            persisted.AuthorityResourceId == rebuilt.AuthorityResourceId &&
+           string.Equals(persisted.DeferredInsightEvidenceHash, rebuilt.DeferredInsightEvidenceHash, StringComparison.Ordinal) &&
            persisted.RelatedResourceIds.OrderBy(x => x).SequenceEqual(rebuilt.RelatedResourceIds.OrderBy(x => x)) &&
            persisted.ReasonCodes!.OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(
                rebuilt.ReasonCodes!.OrderBy(x => x, StringComparer.Ordinal), StringComparer.Ordinal);
@@ -2388,7 +2424,8 @@ public sealed class GovernanceBatchExecutor(
         DateTimeOffset? DeleteEligibleAt = null,
         GovernanceItemKind? CanonicalKind = null,
         Guid? AuthorityResourceId = null,
-        IReadOnlyList<string>? ReasonCodes = null)
+        IReadOnlyList<string>? ReasonCodes = null,
+        string? DeferredInsightEvidenceHash = null)
     {
         public IReadOnlyList<Guid> RelatedResourceIds => RelatedIds ?? [];
     }

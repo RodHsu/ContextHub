@@ -447,13 +447,14 @@ public sealed class ConversationAutomationService(
         }
         var initialStatus = insight.PromotionStatus;
         var initialUpdatedAt = insight.UpdatedAt;
+        var deferredSkip = evidence?.DeferredEvidenceHash is not null;
         if (evidence is not null && !await HasCurrentSkipEvidenceAsync(actor, insight, evidence, cancellationToken))
         {
             await transaction.CommitAsync(cancellationToken);
             return (MapInsight(insight), ConversationInsightSkipOutcome.EvidenceChanged);
         }
 
-        if (insight.PromotionStatus is not (ConversationPromotionStatus.Pending or ConversationPromotionStatus.Failed))
+        if (!deferredSkip && insight.PromotionStatus is not (ConversationPromotionStatus.Pending or ConversationPromotionStatus.Failed))
         {
             throw new InvalidOperationException(
                 $"Conversation insight '{insight.Id}' cannot be skipped from governance state '{insight.PromotionStatus}'. Use the explicit retry or disposition workflow.");
@@ -491,19 +492,33 @@ public sealed class ConversationAutomationService(
     private async Task<bool> HasCurrentSkipEvidenceAsync(ContextHubRequestActor actor, ConversationInsight insight,
         ConversationInsightSemanticEvidence evidence, CancellationToken cancellationToken)
     {
+        var deferredSkip = evidence.DeferredEvidenceHash is not null;
         if (actor.TenantId is not { } tenantId || actor.UserId is not { } userId ||
             !ProjectContext.Matches(insight.ProjectId, evidence.ProjectId) || insight.UpdatedAt != evidence.InsightUpdatedAt ||
-            insight.PromotionStatus is not (ConversationPromotionStatus.Pending or ConversationPromotionStatus.Failed) ||
+            !CanSkipFromStatus(actor, insight.PromotionStatus, deferredSkip) ||
             GovernanceEvidenceFingerprint.IsProtectedInsight(insight) || insight.Confidence < evidence.MinimumConfidence ||
             !await dbContext.LockMemoryEvidenceAsync(evidence.MemoryId, tenantId, userId, insight.ProjectId, cancellationToken))
         {
             return false;
         }
 
+        if (deferredSkip)
+        {
+            var current = await GovernanceEvidenceFingerprint.ReadChangedDeferredInsightEvidenceAsync(
+                dbContext, actor, insight, clock.UtcNow, cancellationToken);
+            return current is { } match && match.MemoryId == evidence.MemoryId &&
+                string.Equals(match.Hash, evidence.DeferredEvidenceHash, StringComparison.Ordinal);
+        }
+
         var exactIds = await GovernanceEvidenceFingerprint.FindCurrentExactMemoryIdsAsync(
             dbContext, actor, insight, clock.UtcNow, cancellationToken);
         return exactIds.Length == 1 && exactIds[0] == evidence.MemoryId;
     }
+
+    private static bool CanSkipFromStatus(ContextHubRequestActor actor, ConversationPromotionStatus status, bool deferredSkip)
+        => deferredSkip
+            ? status == ConversationPromotionStatus.Deferred && actor.IsAdmin && actor.HasScope(SecurityScopes.ScheduledGovernance)
+            : status is ConversationPromotionStatus.Pending or ConversationPromotionStatus.Failed;
 
     public async Task<ConversationInsightResult> SetInsightDispositionAsync(ConversationInsightDispositionRequest request, CancellationToken cancellationToken)
     {

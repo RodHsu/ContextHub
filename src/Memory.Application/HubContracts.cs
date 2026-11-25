@@ -242,7 +242,7 @@ public interface IGovernanceService
     Task<GovernanceFindingResult> DismissAsync(Guid id, CancellationToken cancellationToken);
     Task<GovernanceFindingResult> SetDispositionAsync(GovernanceFindingDispositionRequest request, CancellationToken cancellationToken);
     Task<GovernanceFindingResult> ReopenAsync(GovernanceFindingReopenRequest request, CancellationToken cancellationToken);
-    Task AnalyzeAsync(string projectId, CancellationToken cancellationToken);
+    Task AnalyzeAsync(string projectId, CancellationToken cancellationToken, bool persistResourceChanges = true);
 }
 
 public interface IEvaluationService

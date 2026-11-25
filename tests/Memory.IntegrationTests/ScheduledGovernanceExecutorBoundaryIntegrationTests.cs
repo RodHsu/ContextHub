@@ -1206,6 +1206,135 @@ public sealed class ScheduledGovernanceExecutorBoundaryIntegrationTests(Containe
             .PromotionStatus.Should().Be(ConversationPromotionStatus.Deferred);
     }
 
+    [DockerRequiredFact]
+    public async Task Scheduled_deferred_insight_skips_only_the_evidence_bound_to_its_read_only_plan()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var db = services.GetRequiredService<MemoryDbContext>();
+        var user = await CreateReviewGrantOwnerAsync(db);
+        var projectId = $"scheduled-deferred-{Guid.NewGuid():N}";
+        services.GetRequiredService<IRequestActorAccessor>().Current =
+            ScheduledActor(user) with { AllowedProjectIds = [projectId] };
+
+        var now = DateTimeOffset.UtcNow;
+        var session = new ConversationSession
+        {
+            TenantId = user.TenantId,
+            OwnerUserId = user.Id,
+            ProjectId = projectId,
+            ProjectName = projectId,
+            ConversationId = projectId,
+            SourceSystem = "integration-test",
+            LastTurnId = "turn-1",
+            StartedAt = now,
+            LastCheckpointAt = now,
+            UpdatedAt = now
+        };
+        var checkpoint = new ConversationCheckpoint
+        {
+            Session = session,
+            TenantId = user.TenantId,
+            OwnerUserId = user.Id,
+            ConversationId = session.ConversationId,
+            TurnId = session.LastTurnId,
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = "integration://deferred",
+            DedupKey = projectId,
+            CreatedAt = now
+        };
+        var insight = new ConversationInsight
+        {
+            Session = session,
+            Checkpoint = checkpoint,
+            TenantId = user.TenantId,
+            OwnerUserId = user.Id,
+            ConversationId = session.ConversationId,
+            TurnId = session.LastTurnId,
+            ProjectId = projectId,
+            ProjectName = projectId,
+            SourceSystem = session.SourceSystem,
+            SourceRef = checkpoint.SourceRef,
+            SourceKind = ConversationSourceKind.AgentSupplemental,
+            InsightType = ConversationInsightType.Episode,
+            Title = "Deferred insight with exact evidence",
+            Content = "Synthetic proof for a deferred insight.",
+            Summary = "Synthetic proof for a deferred insight.",
+            Importance = .5m,
+            Confidence = .99m,
+            DedupKey = projectId,
+            PromotionStatus = ConversationPromotionStatus.Pending,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.ConversationInsights.Add(insight);
+        await db.SaveChangesAsync();
+        var conversation = services.GetRequiredService<IConversationAutomationService>();
+        await conversation.SetInsightDispositionAsync(
+            new ConversationInsightDispositionRequest(insight.Id, ConversationInsightDisposition.Deferred, "Waiting for durable evidence."),
+            CancellationToken.None);
+        var before = await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id);
+        before.GovernanceEvidenceFingerprint.Should().NotBeNullOrWhiteSpace();
+
+        var exact = CreateRetentionCandidate(user, projectId);
+        exact.Title = insight.Title;
+        exact.Content = insight.Content;
+        exact.Summary = insight.Summary;
+        exact.Importance = .5m;
+        exact.Confidence = .99m;
+        exact.AuthorityState = MemoryAuthorityState.Current;
+        exact.ValidFrom = now;
+        db.MemoryItems.Add(exact);
+        await db.SaveChangesAsync();
+
+        var knowledgeReview = services.GetRequiredService<IKnowledgeReviewService>();
+        var oldRun = $"deferred-old-{Guid.NewGuid():N}";
+        var review = await knowledgeReview.ReviewAsync(
+            ScheduledReviewRequest(projectId, oldRun) with { ReadOnlyPlan = true }, CancellationToken.None);
+        var candidate = review.GovernancePlan.Single(x => x.AuthorityResourceId == insight.Id);
+        candidate.RelatedResourceIds.Should().Equal(exact.Id);
+        candidate.SemanticEvidenceHash.Should().NotBeNullOrWhiteSpace();
+        await RecordReversibleDecisionAsync(services, review);
+        var afterReview = await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id);
+        afterReview.PromotionStatus.Should().Be(ConversationPromotionStatus.Deferred);
+        afterReview.GovernanceRetryCount.Should().Be(before.GovernanceRetryCount);
+        afterReview.UpdatedAt.Should().Be(before.UpdatedAt);
+        afterReview.GovernanceEvidenceFingerprint.Should().Be(before.GovernanceEvidenceFingerprint);
+
+        exact.MetadataJson = """{"review":"evidence changed after planning"}""";
+        await db.SaveChangesAsync();
+        var executor = services.GetRequiredService<IGovernanceBatchExecutor>();
+        var staleBatch = await executor.ExecuteAsync(
+            ScheduledRequest(oldRun, projectId, review.DurableMemoryCoverage!.SnapshotToken,
+                [GovernanceBatchActionType.ConversationInsightDisposition]), CancellationToken.None);
+        staleBatch.Items.Should().Contain(x => x.ResourceId == insight.Id &&
+            x.Disposition == GovernanceBatchItemDisposition.RequiresUserDecision &&
+            x.Summary.Contains("exact durable evidence changed", StringComparison.Ordinal));
+        var stale = await conversation.SkipInsightWithEvidenceAsync(new(insight.Id, oldRun, "Stale plan proof."),
+            new(exact.Id, projectId, before.UpdatedAt, .90m) { DeferredEvidenceHash = candidate.SemanticEvidenceHash },
+            CancellationToken.None);
+        stale.Should().Be(ConversationInsightSkipOutcome.EvidenceChanged);
+        (await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id))
+            .PromotionStatus.Should().Be(ConversationPromotionStatus.Deferred);
+
+        var newRun = $"deferred-current-{Guid.NewGuid():N}";
+        var fresh = await knowledgeReview.ReviewAsync(
+            ScheduledReviewRequest(projectId, newRun) with { ReadOnlyPlan = true }, CancellationToken.None);
+        await RecordReversibleDecisionAsync(services, fresh);
+        var result = await executor.ExecuteAsync(
+            ScheduledRequest(newRun, projectId, fresh.DurableMemoryCoverage!.SnapshotToken,
+                [GovernanceBatchActionType.ConversationInsightDisposition]), CancellationToken.None);
+        result.ErrorCode.Should().Be(GovernanceBatchErrorCode.None, result.StoppedReason);
+        result.Items.Should().Contain(x => x.ResourceId == insight.Id && x.Disposition == GovernanceBatchItemDisposition.Applied &&
+            x.SemanticAutoResolved);
+        var afterExecute = await db.ConversationInsights.AsNoTracking().SingleAsync(x => x.Id == insight.Id);
+        afterExecute.PromotionStatus.Should().Be(ConversationPromotionStatus.Skipped);
+        afterExecute.GovernanceRetryCount.Should().Be(before.GovernanceRetryCount);
+        afterExecute.GovernanceRunId.Should().Be(newRun);
+    }
+
     private static async Task<TenantUser> CreateReviewGrantOwnerAsync(MemoryDbContext db)
     {
         var now = DateTimeOffset.UtcNow;
