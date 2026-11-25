@@ -19,6 +19,30 @@ $statePath = Join-Path $root 'transaction.json'
 $activePath = Join-Path $root 'apply-process.json'
 $git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
 $docker = (Get-Command docker -CommandType Application | Select-Object -First 1).Source
+$prepareRollback = $null
+if ($config.Contains('beforeRollbackScript')) {
+    if ($config.beforeRollbackScript -isnot [string] -or
+        $config.beforeRollbackScript -cnotmatch '^[a-zA-Z0-9_-]+[.]ps1$') {
+        throw 'The rollback preparation script must be a PowerShell file beside the controller.'
+    }
+    $rollbackScript = Get-Item -LiteralPath (Join-Path $PSScriptRoot $config.beforeRollbackScript)
+    if ($rollbackScript.PSIsContainer -or ($rollbackScript.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'The rollback preparation script must be a regular file.'
+    }
+    $pwsh = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+    $prepareRollback = {
+        param($pending)
+        $retained = $pending.previous['sourceSha']
+        $candidate = $pending.candidate['sourceSha']
+        if ($retained -cnotmatch '^[0-9a-f]{40}$' -or $candidate -cnotmatch '^[0-9a-f]{40}$' -or
+            $pending.targetRevision -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Rollback preparation requires pinned retained and candidate sources.'
+        }
+        [void](Invoke-Tool $pwsh @('-NoProfile', '-NonInteractive', '-File', $rollbackScript.FullName,
+                '-RetainedSourceSha', $retained, '-CandidateSourceSha', $candidate,
+                '-TargetRevision', $pending.targetRevision) 30)
+    }
+}
 
 foreach ($group in $config.groups) {
     if ($group.project -cnotmatch '^[a-z0-9][a-z0-9_-]+$' -or ![IO.Path]::IsPathFullyQualified($group.directory) -or
@@ -353,7 +377,8 @@ function Invoke-ReleaseRetention {
     finally { $lock.Dispose() }
 }
 
-$result = Invoke-TargetDeploymentTransaction -StatePath $statePath -GetCandidate $getCandidate -Build $build -Capture $capture -Apply $apply -Verify $verify
+$result = Invoke-TargetDeploymentTransaction -StatePath $statePath -GetCandidate $getCandidate -Build $build `
+    -Capture $capture -Apply $apply -Verify $verify -PrepareRollback $prepareRollback
 if ($result.Status -cin @('Applied', 'Recovered', 'RolledBack', 'Rejected')) {
     try { Invoke-ReleaseRetention }
     catch { Write-Verbose 'Deployment is settled, but some generated files or tags were retained.' }
