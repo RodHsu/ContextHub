@@ -498,6 +498,92 @@ public sealed class GovernanceRunReceiptService(
         return receipt is not null && lineage is not null ? (receipt, lineage) : null;
     }
 
+    public async Task<ScheduledGovernanceReviewResult?> GetScheduledInitialReviewReplayAsync(
+        string governanceRunId,
+        CancellationToken cancellationToken)
+    {
+        var actor = RequireActor(SecurityScopes.MemoryRead);
+        var runId = RequireGovernanceRunId(governanceRunId);
+        var requestHash = ReviewRequestIdentityHash(runId, isReReview: false);
+        var initialEvents = dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
+                        x.GovernanceRunId == runId && x.RequestIdentityHash == requestHash && x.Status == "Completed");
+        var decision = await initialEvents.Where(x => x.EventType == "ScheduledDecisionProjected")
+            .OrderBy(x => x.EventSequence)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (decision is null)
+        {
+            return null;
+        }
+
+        var projectIds = DeserializeStrings(decision.ProjectIdsJson);
+        EnsureReceiptProjectsAllowed(actor, projectIds);
+        var runtime = ScheduledGovernanceContract.RuntimeIdentity;
+        if (!ReceiptIdentityMatches(decision, CurrentScheduledContractIdentity) ||
+            !string.Equals(decision.RuntimeEvidenceVersion, ScheduledRuntimeEvidenceVersion, StringComparison.Ordinal) ||
+            !string.Equals(decision.RuntimeIdentityHash,
+                ScheduledGovernanceReliabilityEvidenceContract.ComputeRuntimeIdentityHash(runtime), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.SchemaCapabilityMismatch,
+                "The initial review is bound to a different scheduled catalog or runtime.");
+        }
+        await EnsureScheduledRunBindingAsync(decision, cancellationToken);
+
+        var review = await initialEvents.Where(x => x.EventType == "ReviewCompleted" && x.EventSequence < decision.EventSequence)
+            .OrderByDescending(x => x.EventSequence)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (review is null || !ScheduledCountInvariantMatches(review, decision) ||
+            string.IsNullOrWhiteSpace(decision.FinalSnapshotToken) || review.FinalSnapshotToken != decision.FinalSnapshotToken ||
+            !ScheduledGovernanceServerSafetyEvidenceProvider.ScheduledProjectScopesMatch(review.ProjectIdsJson, decision.ProjectIdsJson) ||
+            !Enum.TryParse<ScheduledGovernanceDecision>(decision.FinalConvergenceStatus, out var outcome) ||
+            outcome.ToString() != decision.FinalConvergenceStatus ||
+            decision.AuthorizedDurableMemoryCount is not { } authorized ||
+            decision.CoveredDurableMemoryCount is not { } covered ||
+            decision.ScannedDurableMemoryCount is not { } scanned ||
+            decision.TotalDurableMemoryCount is not { } total ||
+            decision.SharedScopeOccurrences is not { } sharedOccurrences ||
+            decision.UserScopeOccurrences is not { } userOccurrences ||
+            decision.UserScopeHandledSeparately is not { } userHandledSeparately ||
+            decision.CountInvariantSatisfied is not { } satisfied)
+        {
+            throw new GovernanceBatchException(GovernanceBatchErrorCode.ReReviewRequired,
+                "The initial scheduled decision has incomplete or inconsistent review evidence.");
+        }
+
+        var replay = new ScheduledGovernanceReviewResult(
+            runId,
+            IsReReview: false,
+            outcome,
+            decision.FinalSnapshotToken,
+            new ScheduledGovernanceCountInvariant(authorized, covered, scanned, total,
+                sharedOccurrences, userOccurrences, userHandledSeparately, satisfied),
+            decision.CoverageComplete,
+            decision.CandidateCount,
+            decision.ExecutionActionableCount,
+            decision.RequiresUserDecision,
+            decision.GovernedExceptionCount,
+            decision.BusinessWorkItemActionable,
+            projectIds,
+            decision.ToolContractVersion,
+            decision.SchemaHash,
+            decision.PublishedCatalogVersion,
+            decision.RequiresUserDecision,
+            review.RequiresUserDecision,
+            decision.HostBlocked,
+            decision.Deferred,
+            new GovernanceExceptionDeltaResult(
+                decision.ExceptionNew, decision.ExceptionResolved, decision.ExceptionUnchanged, decision.ExceptionEscalated),
+            runtime)
+        {
+            SkillCoverage = DeserializeOrDefault(decision.SkillCoverageJson,
+                new GovernanceSurfaceCoverageResult(0, 0, 0, 0, 0, 0, 0, false, true)),
+            SkillSignalCounts = DeserializeOrDefault<IReadOnlyDictionary<string, int>>(
+                decision.SkillSignalCountsJson, new Dictionary<string, int>())
+        };
+        ValidateScheduledCountInvariant(replay);
+        return replay;
+    }
+
     public async Task<GovernanceRunLineageResult> GetScheduledLineageAsync(
         string governanceRunId,
         GovernanceReceiptContractIdentity expectedContractIdentity,
