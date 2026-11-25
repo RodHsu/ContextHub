@@ -1463,7 +1463,16 @@ conversations.MapPost("/insights/{insightId:guid}/skip", async (Guid insightId, 
 
 conversations.MapPost("/insights/{insightId:guid}/disposition", async (Guid insightId, ConversationInsightDispositionBody body, IConversationAutomationService service, CancellationToken cancellationToken) =>
 {
-    try { return Results.Ok(await service.SetInsightDispositionAsync(new ConversationInsightDispositionRequest(insightId, body.Disposition, body.Reason, body.GovernanceRunId), cancellationToken)); }
+    try
+    {
+        return Results.Ok(await service.SetInsightDispositionAsync(new ConversationInsightDispositionRequest(
+            insightId,
+            body.Disposition,
+            body.Reason,
+            body.GovernanceRunId,
+            ExpectedPromotionStatus: body.ExpectedPromotionStatus,
+            ExpectedUpdatedAt: body.ExpectedUpdatedAt), cancellationToken));
+    }
     catch (InvalidOperationException ex) { return Results.ValidationProblem(new Dictionary<string, string[]> { ["insight"] = [ex.Message] }); }
 }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 
@@ -2844,7 +2853,12 @@ internal sealed record TenantUserUpdateBody(
 internal sealed record DiscussionMessageCreateBody(string SenderProjectId, string Content);
 internal sealed record DiscussionThreadReadBody(string ReaderProjectId, Guid LastReadMessageId);
 internal sealed record ConversationInsightGovernanceBody(string? GovernanceRunId = null, string? Reason = null);
-internal sealed record ConversationInsightDispositionBody(ConversationInsightDisposition Disposition, string Reason, string? GovernanceRunId = null);
+internal sealed record ConversationInsightDispositionBody(
+    ConversationInsightDisposition Disposition,
+    string Reason,
+    string? GovernanceRunId = null,
+    ConversationPromotionStatus? ExpectedPromotionStatus = null,
+    DateTimeOffset? ExpectedUpdatedAt = null);
 internal sealed record ProjectHierarchySetChildrenBody(IReadOnlyList<string>? ChildProjectIds);
 internal sealed record FileOperationBody(FileOperation Operation, string Purpose);
 internal sealed record CreateFileRepresentationBody(FileRepresentationKind Kind, string ContentHash, FileClassification Classification);
