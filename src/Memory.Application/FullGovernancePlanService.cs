@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.Common;
 using System.Text.Json;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
@@ -450,9 +451,32 @@ public sealed class FullGovernancePlanService(
         // lifecycle transition and its audit event. Keep that read/write set in
         // one serializable transaction so a concurrent HostBlocked disposition
         // cannot be lost by a stale automatic reopen.
-        await using var transaction = await dbContext.BeginTransactionAsync(
-            IsolationLevel.Serializable,
-            cancellationToken);
+        for (var attempt = 0; ; attempt++)
+        {
+            await using var transaction = await dbContext.BeginTransactionAsync(
+                IsolationLevel.Serializable, cancellationToken);
+            try
+            {
+                await ReevaluateInsightExceptionsAsync(projects, tenantId, ownerUserId, governanceRunId, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return;
+            }
+            catch (Exception error) when (attempt == 0 && transaction.OwnsTransaction &&
+                                         error.GetBaseException() is DbException { SqlState: "40001" })
+            {
+                // Disposal rolls back the rejected transaction and discards its tracked changes.
+                // The next attempt reads the committed disposition and evidence again.
+            }
+        }
+    }
+
+    private async Task ReevaluateInsightExceptionsAsync(
+        IReadOnlyList<string> projects,
+        Guid tenantId,
+        Guid ownerUserId,
+        string governanceRunId,
+        CancellationToken cancellationToken)
+    {
         var exceptions = await dbContext.ConversationInsights
             .Where(x => !dbContext.ConversationAdjudications.Any(r => r.InsightId == x.Id))
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) &&
@@ -547,7 +571,6 @@ public sealed class FullGovernancePlanService(
         {
             await dbContext.SaveChangesAsync(cancellationToken);
         }
-        await transaction.CommitAsync(cancellationToken);
     }
 
     private static bool IsValidJson(string value)

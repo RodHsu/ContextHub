@@ -37,6 +37,7 @@ public sealed class GovernanceBatchExecutor(
         using var activity = GovernanceDiagnostics.Activities.StartActivity("governance.batch");
         var startedAt = clock.UtcNow;
         var receiptEligible = false;
+        var executionEntered = false;
         IAsyncDisposable? runLock = null;
         try
         {
@@ -103,6 +104,7 @@ public sealed class GovernanceBatchExecutor(
             {
                 await runReceipts.RecordExecutionStartedAsync(request, startedAt, CancellationToken.None);
             }
+            executionEntered = true;
             var result = await ExecuteCoreAsync(request, cancellationToken);
             await RecordCompletionReceiptAsync(request, result, startedAt);
             return result;
@@ -129,8 +131,15 @@ public sealed class GovernanceBatchExecutor(
         {
             if (receiptEligible)
             {
+                // The recovery receipt shares this context. Do not flush unfinished work with it.
+                dbContext.ClearTrackedChanges();
                 await runReceipts.RecordExecutionStoppedAsync(
-                    request, startedAt, "Failed", "UnhandledExecutionFailure", "PreExecutionUnhandled", CancellationToken.None);
+                    request,
+                    startedAt,
+                    executionEntered ? "Stopped" : "Failed",
+                    executionEntered ? "UnknownResult" : "UnhandledExecutionFailure",
+                    executionEntered ? "OutcomeUnknown" : "PreExecutionUnhandled",
+                    CancellationToken.None);
             }
             throw;
         }
