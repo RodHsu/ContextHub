@@ -22,7 +22,8 @@ public sealed class FullGovernancePlanService(
         string governanceRunId,
         DurableMemoryGovernanceSnapshotResult memorySnapshot,
         CancellationToken cancellationToken,
-        bool allowCancelledRetentionReactivation = true)
+        bool allowCancelledRetentionReactivation = true,
+        bool persistResourceChanges = true)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
@@ -33,7 +34,8 @@ public sealed class FullGovernancePlanService(
         var projectSet = projects.ToHashSet(ProjectContext.IdentityComparer);
         var items = new List<GovernanceReviewItem>();
         var retention = await autonomousRetention.ReviewAsync(projects, governanceRunId, cancellationToken,
-            allowCancelledReactivation: allowCancelledRetentionReactivation);
+            allowCancelledReactivation: allowCancelledRetentionReactivation && persistResourceChanges,
+            persistStateChanges: persistResourceChanges);
         foreach (var candidate in retention.Candidates)
         {
             items.Add(new GovernanceReviewItem(
@@ -222,7 +224,10 @@ public sealed class FullGovernancePlanService(
             }
         }
 
-        await ReopenChangedInsightsAsync(projects, tenantId, ownerUserId, governanceRunId, cancellationToken);
+        if (persistResourceChanges)
+        {
+            await ReopenChangedInsightsAsync(projects, tenantId, ownerUserId, governanceRunId, cancellationToken);
+        }
         var insightScope = ChatGptProposalService.ExcludeProposals(dbContext.ConversationInsights.AsNoTracking()
             .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && Memory.Application.ProjectContext.IdentityKeys(projects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId))));
         Dictionary<ConversationPromotionStatus, int> insightStatusCounts;
@@ -237,6 +242,10 @@ public sealed class FullGovernancePlanService(
             insights = await insightScope
                 .Where(x => x.PromotionStatus == ConversationPromotionStatus.Pending || x.PromotionStatus == ConversationPromotionStatus.Failed)
                 .ToListAsync(cancellationToken);
+            if (!persistResourceChanges)
+            {
+                await AddChangedDeferredInsightCandidatesAsync(insightScope, items, actor, governanceRunId, cancellationToken);
+            }
             await insightSnapshot.CommitAsync(cancellationToken);
         }
         var now = clock.UtcNow;
@@ -262,7 +271,7 @@ public sealed class FullGovernancePlanService(
             .ToListAsync(cancellationToken);
         foreach (var insight in insights)
         {
-            var protectedInsight = IsProtectedInsight(insight);
+            var protectedInsight = GovernanceEvidenceFingerprint.IsProtectedInsight(insight);
             var evidenceKey = $"{insight.ProjectId}\n{GovernanceEvidenceFingerprint.NormalizeExactText(insight.Title)}\n{GovernanceEvidenceFingerprint.NormalizeExactText(insight.Summary)}";
             var evidence = exactInsightEvidence.GetValueOrDefault(evidenceKey);
             var hasExactCurrentEvidence = !protectedInsight &&
@@ -435,9 +444,45 @@ public sealed class FullGovernancePlanService(
             candidates.Count(GovernanceExceptionIdentity.RequiresHumanDecision), 0, hasMore, complete);
     }
 
-    private static bool IsProtectedInsight(ConversationInsight insight)
-        => insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact ||
-           insight.Importance >= .8m;
+    private async Task AddChangedDeferredInsightCandidatesAsync(
+        IQueryable<ConversationInsight> insightScope, List<GovernanceReviewItem> items,
+        ContextHubRequestActor actor, string governanceRunId, CancellationToken cancellationToken)
+    {
+        var deferred = await insightScope
+            .Where(insight => insight.PromotionStatus == ConversationPromotionStatus.Deferred &&
+                insight.Confidence >= GovernanceEvidenceFingerprint.DeferredInsightMinimumConfidence &&
+                insight.InsightType != ConversationInsightType.Decision && insight.InsightType != ConversationInsightType.Fact &&
+                insight.Importance < 0.8m && insight.GovernanceEvidenceFingerprint != "")
+            .ToListAsync(cancellationToken);
+        var now = clock.UtcNow;
+        foreach (var insight in deferred)
+        {
+            var evidence = await GovernanceEvidenceFingerprint.ReadChangedDeferredInsightEvidenceAsync(
+                dbContext, actor, insight, now, cancellationToken);
+            if (evidence is not { } match)
+            {
+                continue;
+            }
+
+            items.Add(new GovernanceReviewItem(
+                $"insight:{insight.Id:N}:{insight.UpdatedAt.UtcTicks}",
+                GovernanceItemKind.ConversationInsight,
+                insight.ProjectId,
+                "DuplicateConversationInsight",
+                nameof(GovernanceBatchActionType.ConversationInsightDisposition),
+                GovernanceBatchRiskLevel.Low,
+                false,
+                insight.Id,
+                [match.MemoryId],
+                ["INSIGHT_EXACT_DUPLICATE", "CURRENT_AUTHORITY_READBACK", "INSIGHT_DEFERRED_EVIDENCE_CHANGED"],
+                governanceRunId)
+            {
+                IsReversible = true,
+                SemanticConfidence = insight.Confidence,
+                SemanticEvidenceHash = match.Hash
+            });
+        }
+    }
 
     private async Task ReopenChangedInsightsAsync(
         IReadOnlyList<string> projects,

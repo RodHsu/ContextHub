@@ -1151,7 +1151,10 @@ public enum ConversationInsightSkipOutcome
 }
 
 public sealed record ConversationInsightSemanticEvidence(
-    Guid MemoryId, string ProjectId, DateTimeOffset InsightUpdatedAt, decimal MinimumConfidence);
+    Guid MemoryId, string ProjectId, DateTimeOffset InsightUpdatedAt, decimal MinimumConfidence)
+{
+    internal string? DeferredEvidenceHash { get; init; }
+}
 
 public sealed record ConversationInsightDispositionRequest(
     Guid InsightId,
@@ -1185,6 +1188,8 @@ public sealed record KnowledgeReviewRequest(
 {
     [JsonIgnore]
     public GovernanceReceiptContractIdentity? ReceiptContractIdentity { get; init; }
+
+    internal bool ReadOnlyPlan { get; init; }
 }
 
 public sealed record KnowledgeReviewPageResult(
@@ -2470,7 +2475,8 @@ public interface IFullGovernancePlanService
         string governanceRunId,
         DurableMemoryGovernanceSnapshotResult memorySnapshot,
         CancellationToken cancellationToken,
-        bool allowCancelledRetentionReactivation = true);
+        bool allowCancelledRetentionReactivation = true,
+        bool persistResourceChanges = true);
 }
 
 public interface IGovernanceBatchExecutor
@@ -2503,7 +2509,8 @@ public interface IDurableMemoryGovernanceService
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         bool isReReview,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool persistResourceChanges = true);
     Task<DurableMemoryGovernanceSnapshotResult> GetSnapshotAsync(
         string governanceRunId,
         string snapshotToken,
@@ -2644,12 +2651,14 @@ public interface IAutonomousRetentionService
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         CancellationToken cancellationToken,
-        bool allowCancelledReactivation = true);
+        bool allowCancelledReactivation = true,
+        bool persistStateChanges = true);
     Task<AutonomousRetentionCandidateResult> QuarantineAsync(
         Guid resourceId,
         string projectId,
         string governanceRunId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool markEligible = false);
     Task<MaturedDeleteResult> DeleteMaturedAsync(
         Guid resourceId,
         string projectId,

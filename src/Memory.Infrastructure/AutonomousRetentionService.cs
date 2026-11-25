@@ -28,7 +28,8 @@ public sealed class AutonomousRetentionService(
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         CancellationToken cancellationToken,
-        bool allowCancelledReactivation = true)
+        bool allowCancelledReactivation = true,
+        bool persistStateChanges = true)
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var tenantId = actor.TenantId!.Value;
@@ -42,10 +43,11 @@ public sealed class AutonomousRetentionService(
             .OrderBy(x => x.ProjectId).ThenBy(x => x.Id)
             .ToListAsync(cancellationToken);
         var ids = memories.Select(x => x.Id).ToArray();
+        var stateQuery = dbContext.MemoryRetentionStates
+            .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && ids.Contains(x.ResourceId));
         var states = ids.Length == 0
             ? new Dictionary<Guid, MemoryRetentionState>()
-            : await dbContext.MemoryRetentionStates
-                .Where(x => x.TenantId == tenantId && x.OwnerUserId == ownerUserId && ids.Contains(x.ResourceId))
+            : await (persistStateChanges ? stateQuery : stateQuery.AsNoTracking())
                 .ToDictionaryAsync(x => x.ResourceId, cancellationToken);
         var evidence = await LoadEvidenceAsync(ids, tenantId, ownerUserId, projects, cancellationToken);
         var now = timeProvider.GetUtcNow();
@@ -64,14 +66,18 @@ public sealed class AutonomousRetentionService(
                 protectedRetention++;
             }
 
-            if (state is not null)
+            if (state is not null && (persistStateChanges ||
+                (state.DeleteEligibleAt.HasValue && HasDeletionBlocker(memory, policy, evaluation))))
             {
                 var policyChanged = !string.Equals(state.PolicyVersion, _options.RetentionPolicyVersion, StringComparison.Ordinal);
-                var wasScheduled = state.DeleteEligibleAt.HasValue;
+                var originalDeadline = state.DeleteEligibleAt;
+                var originalQuarantine = state.QuarantinedAt;
                 ApplyEvaluation(state, memory, policy, evaluation, governanceRunId, now, policyChanged, allowCancelledReactivation);
-                if (wasScheduled && !state.DeleteEligibleAt.HasValue)
+                if (originalDeadline.HasValue && !state.DeleteEligibleAt.HasValue)
                 {
-                    deleteCancelled++;
+                    deleteCancelled += persistStateChanges
+                        ? 1
+                        : await CancelObservedEligibilityAsync(state, originalDeadline.Value, originalQuarantine, cancellationToken);
                 }
             }
 
@@ -96,7 +102,7 @@ public sealed class AutonomousRetentionService(
             }
         }
 
-        if (dbContext.ChangeTracker.HasChanges())
+        if (persistStateChanges && dbContext.ChangeTracker.HasChanges())
         {
             await dbContext.SaveChangesAsync(cancellationToken);
         }
@@ -110,11 +116,34 @@ public sealed class AutonomousRetentionService(
             protectedRetention);
     }
 
+    private Task<int> CancelObservedEligibilityAsync(
+        MemoryRetentionState observation,
+        DateTimeOffset expectedDeadline,
+        DateTimeOffset? expectedQuarantine,
+        CancellationToken cancellationToken)
+    {
+        // A review cannot advance retention. An observed blocker must still
+        // revoke the old deadline before it can disappear from later reads.
+        return dbContext.MemoryRetentionStates
+            .Where(x => x.TenantId == observation.TenantId && x.OwnerUserId == observation.OwnerUserId &&
+                        x.ResourceId == observation.ResourceId && x.DeleteEligibleAt == expectedDeadline &&
+                        x.QuarantinedAt == expectedQuarantine)
+            .ExecuteUpdateAsync(update => update
+                .SetProperty(x => x.LifecycleStatus, CancelledStatus)
+                .SetProperty(x => x.DeleteEligibleAt, (DateTimeOffset?)null)
+                .SetProperty(x => x.BlockedReasonsJson, observation.BlockedReasonsJson)
+                .SetProperty(x => x.EvidenceFingerprint, observation.EvidenceFingerprint)
+                .SetProperty(x => x.LastRevalidatedAt, observation.LastRevalidatedAt)
+                .SetProperty(x => x.GovernanceRunId, observation.GovernanceRunId)
+                .SetProperty(x => x.UpdatedAt, observation.UpdatedAt), cancellationToken);
+    }
+
     public async Task<AutonomousRetentionCandidateResult> QuarantineAsync(
         Guid resourceId,
         string projectId,
         string governanceRunId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool markEligible = false)
     {
         var actor = RequireActor(SecurityScopes.MemoryWrite);
         projectId = ProjectContext.Normalize(projectId);
@@ -175,6 +204,11 @@ public sealed class AutonomousRetentionService(
         }
 
         InitializeQuarantine(state, memory, policy, evaluation, governanceRunId, now);
+        if (markEligible)
+        {
+            ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.ScheduledGovernance);
+            state.LifecycleStatus = EligibleStatus;
+        }
         await dbContext.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         await cacheStore.IncrementProjectAsync(projectId, cancellationToken);
@@ -545,7 +579,7 @@ public sealed class AutonomousRetentionService(
         state.GovernanceRunId = governanceRunId;
         state.UpdatedAt = now;
 
-        if (!policy.AutoDelete || evaluation.BlockedReasons.Count > 0 || memory.Status != MemoryStatus.Archived)
+        if (HasDeletionBlocker(memory, policy, evaluation))
         {
             state.LifecycleStatus = CancelledStatus;
             state.DeleteEligibleAt = null;
@@ -558,6 +592,9 @@ public sealed class AutonomousRetentionService(
         }
         state.LifecycleStatus = EligibleStatus;
     }
+
+    private static bool HasDeletionBlocker(MemoryItem memory, TypedPolicy policy, EligibilityEvaluation evaluation)
+        => !policy.AutoDelete || evaluation.BlockedReasons.Count > 0 || memory.Status != MemoryStatus.Archived;
 
     private void InitializeQuarantine(MemoryRetentionState state, MemoryItem memory, TypedPolicy policy,
         EligibilityEvaluation evaluation, string governanceRunId, DateTimeOffset now)

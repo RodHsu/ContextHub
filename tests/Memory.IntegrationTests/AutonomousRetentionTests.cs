@@ -11,6 +11,51 @@ namespace Memory.IntegrationTests;
 public sealed class AutonomousRetentionTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Read_only_review_cancels_mature_deadline_when_it_observes_transient_hold()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var actor = UseBootstrapActor(scope.ServiceProvider);
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var service = scope.ServiceProvider.GetRequiredService<IAutonomousRetentionService>();
+        var projectId = $"retention-read-observation-{Guid.NewGuid():N}";
+        var memory = CreateMemory(actor, projectId, MemoryType.Episode, ["machine-generated", "execution-evidence"]);
+        db.MemoryItems.Add(memory);
+        await db.SaveChangesAsync();
+        await service.QuarantineAsync(memory.Id, projectId, "transient-hold-quarantine", default);
+        var state = await db.MemoryRetentionStates.SingleAsync(x => x.ResourceId == memory.Id);
+        state.LifecycleStatus = "Eligible";
+        state.QuarantinedAt = DateTimeOffset.UtcNow.AddDays(-30);
+        state.DeleteEligibleAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        memory.Tags = [.. memory.Tags, "legal-hold"];
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var before = await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id);
+
+        var review = await service.ReviewAsync([projectId], "transient-hold-review", default,
+            allowCancelledReactivation: false, persistStateChanges: false);
+        review.DeleteCancelledCount.Should().Be(1);
+        var cancelled = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == memory.Id);
+        cancelled.LifecycleStatus.Should().Be("Cancelled");
+        cancelled.DeleteEligibleAt.Should().BeNull();
+        cancelled.BlockedReasonsJson.Should().Contain("legalHold");
+        (await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id)).Should().BeEquivalentTo(before);
+
+        memory = await db.MemoryItems.SingleAsync(x => x.Id == memory.Id);
+        memory.Tags = memory.Tags.Where(x => x != "legal-hold").ToArray();
+        await db.SaveChangesAsync();
+        UseInternalRetentionActor(scope.ServiceProvider, actor);
+        await FluentActions.Awaiting(() => service.DeleteMaturedAsync(memory.Id, projectId, "transient-hold-delete", default))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("*eligibility or grace maturity*");
+        (await db.ResourceTombstones.AsNoTracking().AnyAsync(x => x.ResourceId == memory.Id)).Should().BeFalse();
+
+        scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+        await service.ReviewAsync([projectId], "transient-hold-authorized-revalidation", default);
+        var renewed = await db.MemoryRetentionStates.AsNoTracking().SingleAsync(x => x.ResourceId == memory.Id);
+        renewed.QuarantinedAt.Should().BeAfter(cancelled.QuarantinedAt!.Value);
+        renewed.DeleteEligibleAt.Should().BeAfter(DateTimeOffset.UtcNow);
+    }
+
+    [DockerRequiredFact]
     public async Task Quarantine_Grace_MaturedDelete_Tombstone_And_Replay_Should_Be_ExactlyOnce()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
