@@ -65,6 +65,25 @@ rollback can leave the index in place.
 
 ## Failure handling
 
+For a release that introduces versioned Work Item editing, verify how the
+controller will protect Work Item and checklist data if it must restore an
+older writer. When the retained writer needs read-only editing, the operator
+can enable and verify the PostgreSQL guard with these commands against the
+approved maintenance database.
+
+```text
+psql -X -v work_item_rollback_mode=enable -f tools/deployment/work-item-rollback-read-only.sql
+psql -X -v work_item_rollback_mode=verify -f tools/deployment/work-item-rollback-read-only.sql
+```
+
+For automatic rollback, wire both calls into the deployment procedure before
+it starts any retained writers. Stop that rollback if either command fails.
+Keep the guard enabled until compatible writers are healthy and the operator
+has verified the Work Item revision and proposal evidence. Then run the same
+script with `work_item_rollback_mode=disable`. The guard applies to Work Item
+and checklist writes, including cascades. It preserves reads and unrelated
+table writes. See the [Work Item editing rollout contract](work-item-editing-core.md#rollout-and-rollback).
+
 The controller first builds locally tagged images and verifies the current running
 image identities and health. It saves a recovery journal before applying changes. It
 starts only the listed Compose services. If apply fails, health is missing, or the
