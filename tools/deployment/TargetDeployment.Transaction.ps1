@@ -113,6 +113,7 @@ function Restore-TargetDeploymentRelease {
         [Collections.IDictionary]$State,
         [scriptblock]$Apply,
         [scriptblock]$Verify,
+        [scriptblock]$PrepareRollback,
         [string]$Stage,
         [AllowNull()][object]$FailureKind,
         [switch]$Recovering
@@ -120,11 +121,18 @@ function Restore-TargetDeploymentRelease {
 
     $pending = $State.pending
     $rollbackStage = $null
-    try { & $Apply $pending.previous *> $null }
-    catch { $rollbackStage = 'RollbackApply' }
+    if ($null -ne $PrepareRollback) {
+        try { & $PrepareRollback $pending *> $null }
+        catch { $rollbackStage = 'RollbackPrepare' }
+    }
 
-    try { & $Verify $pending.previous *> $null }
-    catch { if ($null -eq $rollbackStage) { $rollbackStage = 'RollbackVerify' } }
+    if ($null -eq $rollbackStage) {
+        try { & $Apply $pending.previous *> $null }
+        catch { $rollbackStage = 'RollbackApply' }
+
+        try { & $Verify $pending.previous *> $null }
+        catch { if ($null -eq $rollbackStage) { $rollbackStage = 'RollbackVerify' } }
+    }
 
     if ($null -eq $rollbackStage) {
         $status = if ($Recovering) { 'Recovered' } else { 'RolledBack' }
@@ -159,7 +167,8 @@ function Invoke-TargetDeploymentTransaction {
         [Parameter(Mandatory)][scriptblock]$Build,
         [Parameter(Mandatory)][scriptblock]$Capture,
         [Parameter(Mandatory)][scriptblock]$Apply,
-        [Parameter(Mandatory)][scriptblock]$Verify
+        [Parameter(Mandatory)][scriptblock]$Verify,
+        [scriptblock]$PrepareRollback
     )
 
     $ErrorActionPreference = 'Stop'
@@ -186,7 +195,8 @@ function Invoke-TargetDeploymentTransaction {
                 return Get-TargetDeploymentResult -Status 'RollbackFailed' -TargetRevision $state.pending.targetRevision `
                     -Stage 'RollbackLatched' -FailureKind $state.pending['failureKind']
             }
-            return Restore-TargetDeploymentRelease -StatePath $path -State $state -Apply $Apply -Verify $Verify -Stage 'Recovery' -Recovering
+            return Restore-TargetDeploymentRelease -StatePath $path -State $state -Apply $Apply -Verify $Verify `
+                -PrepareRollback $PrepareRollback -Stage 'Recovery' -Recovering
         }
 
         try { $candidate = Invoke-TargetDeploymentRecordCallback $GetCandidate $state.lastProcessedTargetRevision -AllowEmpty }
@@ -243,7 +253,7 @@ function Invoke-TargetDeploymentTransaction {
         } catch {
             $failureKind = if ($stage -cin @('Apply', 'Verify')) { Get-TargetDeploymentFailureKind -Exception $_.Exception }
             return Restore-TargetDeploymentRelease -StatePath $path -State $state -Apply $Apply -Verify $Verify `
-                -Stage $stage -FailureKind $failureKind
+                -PrepareRollback $PrepareRollback -Stage $stage -FailureKind $failureKind
         }
     } finally {
         $lock.Dispose()

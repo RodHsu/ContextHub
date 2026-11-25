@@ -8,7 +8,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$runner = Join-Path (Split-Path -Parent $PSScriptRoot) 'Invoke-TargetDeployment.ps1'
+$runnerSource = Split-Path -Parent $PSScriptRoot
 $rootFull = [IO.Path]::GetFullPath($Root)
 $parent = (Resolve-Path -LiteralPath (Split-Path -Parent $rootFull)).Path
 if (Test-Path -LiteralPath $rootFull) { throw 'Fixture work directory already exists.' }
@@ -40,6 +40,8 @@ $state = Join-Path $rootFull 'state'
 $project = 'ctx-target-test-' + [guid]::NewGuid().ToString('N').Substring(0, 10)
 $compose = Join-Path $rootFull 'compose.yml'
 $config = Join-Path $rootFull 'runner.json'
+$runner = Join-Path $rootFull 'Invoke-TargetDeployment.ps1'
+$preparationLog = Join-Path $rootFull 'rollback-preparations.jsonl'
 [void][IO.Directory]::CreateDirectory($rootFull)
 
 function Get-FixtureLiveImage {
@@ -72,6 +74,20 @@ function Push-FixtureTarget {
 }
 
 try {
+    foreach ($file in @('Invoke-TargetDeployment.ps1', 'TargetDeployment.Transaction.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $runnerSource $file) -Destination $rootFull
+    }
+    @'
+param(
+    [Parameter(Mandatory)][string]$RetainedSourceSha,
+    [Parameter(Mandatory)][string]$CandidateSourceSha,
+    [Parameter(Mandatory)][string]$TargetRevision
+)
+$ErrorActionPreference = 'Stop'
+@{retained=$RetainedSourceSha; candidate=$CandidateSourceSha; target=$TargetRevision} |
+    ConvertTo-Json -Compress |
+    Add-Content -LiteralPath (Join-Path $PSScriptRoot 'rollback-preparations.jsonl')
+'@ | Set-Content -LiteralPath (Join-Path $rootFull 'PrepareRollback.ps1')
     [void](Invoke-FixtureNative docker @('image', 'inspect', '--format', '{{.Id}}', $FixtureImage))
     [void](Invoke-FixtureNative git @('init', '--bare', $remote))
     [void](Invoke-FixtureNative git @('init', '--initial-branch=main', $source))
@@ -91,6 +107,7 @@ services:
     @{
         repository = $remote; targetBranch = $Branch; stateDirectory = $state; schemaBaselineSha = $approved;
         rollbackContract = 'fixture-v1'; buildSeconds = 120; applySeconds = 20; rollbackSeconds = 50;
+        beforeRollbackScript = 'PrepareRollback.ps1';
         groups = @(@{ project = $project; directory = $rootFull; files = @($compose);
             services = @(@{ name = 'canary'; dockerfile = 'Dockerfile' }) })
     } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $config
@@ -102,6 +119,7 @@ services:
     $good = & $runner -ConfigPath $config
     Assert-FixtureEqual $good.Status 'Applied' "Healthy push stage $($good.Stage)"
     Assert-FixtureEqual $good.TargetRevision $goodRevision 'Healthy target revision'
+    Assert-FixtureEqual (Test-Path -LiteralPath $preparationLog) $false 'Healthy deploy did not invoke rollback preparation'
     $goodImage = Get-FixtureLiveImage
     if ($goodImage -eq $bootstrap) { throw 'The healthy push did not replace the image.' }
 
@@ -120,6 +138,11 @@ services:
     Assert-FixtureEqual $timeout.FailureKind 'Timeout' 'Apply timeout classification'
     Assert-FixtureEqual $timeout.TargetRevision $timeoutRevision 'Timed-out target revision'
     Assert-FixtureEqual (Get-FixtureLiveImage) $goodImage 'Timeout recovery image'
+    $preparations = @(Get-Content -LiteralPath $preparationLog | ForEach-Object { ConvertFrom-Json -InputObject $_ })
+    Assert-FixtureEqual $preparations.Count 2 'Preparation invoked once per rollback'
+    Assert-FixtureEqual ($preparations.retained -join ',') "$approved,$approved" 'Preparation retained source identities'
+    Assert-FixtureEqual ($preparations.candidate -join ',') "$failedSource,$timeoutSource" 'Preparation candidate identities'
+    Assert-FixtureEqual ($preparations.target -join ',') "$failureRevision,$timeoutRevision" 'Preparation target revision identities'
 
     $overlays = @(Get-ChildItem -LiteralPath $state -Filter 'images-*.json' -File)
     Assert-FixtureEqual $overlays.Count 1 'Only the active generated overlay is retained'
@@ -135,7 +158,7 @@ services:
     $evidence = [ordered]@{
         branch = $Branch; isolatedCompose = $project;
         applied = $good; failedAndRolledBack = $failure; timedOutAndRolledBack = $timeout;
-        replay = $same.Status; recoveredImageAndHealth = $goodImage
+        replay = $same.Status; recoveredImageAndHealth = $goodImage; rollbackPreparations = $preparations
     }
     if ($EvidencePath) { $evidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $EvidencePath }
     $evidence | ConvertTo-Json -Depth 8

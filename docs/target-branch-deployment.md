@@ -76,8 +76,18 @@ psql -X -v work_item_rollback_mode=enable -f tools/deployment/work-item-rollback
 psql -X -v work_item_rollback_mode=verify -f tools/deployment/work-item-rollback-read-only.sql
 ```
 
-For automatic rollback, wire both calls into the deployment procedure before
-it starts any retained writers. Stop that rollback if either command fails.
+For automatic rollback, provision a trusted PowerShell script beside the
+controller and set `beforeRollbackScript` to its filename. The controller
+passes `RetainedSourceSha`, `CandidateSourceSha`, and `TargetRevision` to the
+script, and requires pinned identities for all three. Use those identities to
+decide whether the retained release needs the guard. Run both calls before
+returning success for an older writer. Return a nonzero exit status if
+preparation or verification fails. The controller latches
+`RollbackPrepare` without starting the retained writers on failure.
+The script runs on every rollback attempt, including recovery after an
+interruption. Keep it idempotent and provision it only in the controller's
+restricted directory. Allow up to 30 additional seconds for the script in
+the scheduled task's time budget.
 Keep the guard enabled until compatible writers are healthy and the operator
 has verified the Work Item revision and proposal evidence. Then run the same
 script with `work_item_rollback_mode=disable`. The guard applies to Work Item
