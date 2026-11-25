@@ -1,6 +1,6 @@
 {
-  "sourceSha": "54f73d221be99cda984eeba6296a2a580b69937f",
+  "sourceSha": "72773de8235df570c259f0b717f9afaeb76b7669",
   "target": "targets/developer02",
-  "version": "1.1.118",
+  "version": "1.1.119",
   "rollbackContract": "developer02-dashboard-canary-v1"
 }
