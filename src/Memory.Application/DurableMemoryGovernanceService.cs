@@ -18,7 +18,8 @@ public sealed class DurableMemoryGovernanceService(
         IReadOnlyList<string> projectIds,
         string governanceRunId,
         bool isReReview,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool persistResourceChanges = true)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
@@ -60,7 +61,7 @@ public sealed class DurableMemoryGovernanceService(
 
         foreach (var projectId in normalizedProjects)
         {
-            await governanceService.AnalyzeAsync(projectId, cancellationToken);
+            await governanceService.AnalyzeAsync(projectId, cancellationToken, persistResourceChanges);
         }
 
         // One materializing query is the coverage snapshot boundary. Inserts committed after this

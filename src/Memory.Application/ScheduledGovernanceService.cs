@@ -65,7 +65,8 @@ public sealed class ScheduledGovernanceService(
                     GovernanceRunId: governanceRunId,
                     IsReReview: request.IsReReview)
                 {
-                    ReceiptContractIdentity = ReceiptContractIdentity
+                    ReceiptContractIdentity = ReceiptContractIdentity,
+                    ReadOnlyPlan = true
                 },
                 cancellationToken);
         }

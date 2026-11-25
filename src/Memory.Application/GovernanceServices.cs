@@ -213,7 +213,7 @@ public sealed class GovernanceService(
         return Map(entity);
     }
 
-    public async Task AnalyzeAsync(string projectId, CancellationToken cancellationToken)
+    public async Task AnalyzeAsync(string projectId, CancellationToken cancellationToken, bool persistResourceChanges = true)
     {
         var normalizedProjectId = ProjectContext.Normalize(projectId);
         var actor = actorAccessor.Current;
@@ -250,7 +250,8 @@ public sealed class GovernanceService(
                 .ToListAsync(cancellationToken))
                 .Select(x => CanonicalPairKey(x.FromId, x.ToId))
                 .ToHashSet(StringComparer.Ordinal);
-        await MaterializeExecutedMergeRelationshipsAsync(normalizedProjectId, memories, replacementPairs, cancellationToken);
+        await RecoverExecutedMergeRelationshipsAsync(normalizedProjectId, memories, replacementPairs, cancellationToken,
+            persistResourceChanges);
 
         foreach (var source in sources.Where(static source => source.Enabled))
         {
@@ -619,6 +620,10 @@ public sealed class GovernanceService(
         {
             currentKeys.Add(draft.DedupKey);
             var entity = existing.FirstOrDefault(x => string.Equals(x.DedupKey, draft.DedupKey, StringComparison.OrdinalIgnoreCase));
+            if (!persistResourceChanges && entity is not null && entity.Status != GovernanceFindingStatus.Open)
+            {
+                continue;
+            }
             if (entity is null)
             {
                 entity = new GovernanceFinding
@@ -646,6 +651,13 @@ public sealed class GovernanceService(
             entity.DetailsJson = draft.DetailsJson;
             entity.DedupKey = draft.DedupKey;
             entity.UpdatedAt = clock.UtcNow;
+
+            // Review still records derived observations for its immutable plan.
+            // Dispositions, resource links, and action queues belong to execution.
+            if (!persistResourceChanges)
+            {
+                continue;
+            }
 
             if (entity.Status is GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision or GovernanceFindingStatus.HostBlocked)
             {
@@ -703,21 +715,29 @@ public sealed class GovernanceService(
         }
 
         foreach (var entity in existing.Where(x => !currentKeys.Contains(x.DedupKey) &&
-                                                    x.Status is GovernanceFindingStatus.Open or
-                                                        GovernanceFindingStatus.Accepted or
-                                                        GovernanceFindingStatus.Deferred or
-                                                        GovernanceFindingStatus.RequiresUserDecision))
+            (x.Status == GovernanceFindingStatus.Open ||
+             persistResourceChanges && (x.Status is GovernanceFindingStatus.Accepted or
+                 GovernanceFindingStatus.Deferred or GovernanceFindingStatus.RequiresUserDecision))))
         {
             entity.Status = GovernanceFindingStatus.Resolved;
             entity.UpdatedAt = clock.UtcNow;
-            await SupersedePendingActionsForFindingAsync(normalizedProjectId, entity.DedupKey, cancellationToken);
+            if (persistResourceChanges)
+            {
+                await SupersedePendingActionsForFindingAsync(normalizedProjectId, entity.DedupKey, cancellationToken);
+            }
         }
 
-        await SupersedePendingActionsWithTerminalEquivalentAsync(normalizedProjectId, cancellationToken);
+        if (persistResourceChanges)
+        {
+            await SupersedePendingActionsWithTerminalEquivalentAsync(normalizedProjectId, cancellationToken);
+        }
 
         await dbContext.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
+        if (persistResourceChanges)
+        {
+            await cacheStore.IncrementProjectAsync(normalizedProjectId, cancellationToken);
+        }
     }
 
     private async Task EnsureLinkAsync(GovernanceDraft draft, CancellationToken cancellationToken)
@@ -973,11 +993,12 @@ public sealed class GovernanceService(
         return $"action:{actionType}:{draft.DedupKey}";
     }
 
-    private async Task MaterializeExecutedMergeRelationshipsAsync(
+    private async Task RecoverExecutedMergeRelationshipsAsync(
         string projectId,
         IReadOnlyList<MemoryItem> memories,
         ISet<string> replacementPairs,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool persistResourceChanges)
     {
         if (memories.Count < 2)
         {
@@ -1021,7 +1042,7 @@ public sealed class GovernanceService(
             }
 
             var pairKey = CanonicalPairKey(left.Id, right.Id);
-            if (!replacementPairs.Add(pairKey))
+            if (!replacementPairs.Add(pairKey) || !persistResourceChanges)
             {
                 continue;
             }

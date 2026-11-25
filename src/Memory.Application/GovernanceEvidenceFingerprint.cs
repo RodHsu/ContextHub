@@ -242,6 +242,58 @@ internal static class GovernanceEvidenceFingerprint
     internal static bool IsProtectedInsight(ConversationInsight insight)
         => insight.InsightType is ConversationInsightType.Decision or ConversationInsightType.Fact || insight.Importance >= 0.8m;
 
+    internal const decimal DeferredInsightMinimumConfidence = 0.90m;
+
+    internal static async Task<(Guid MemoryId, string Hash)?> ReadChangedDeferredInsightEvidenceAsync(
+        IApplicationDbContext dbContext, ContextHubRequestActor actor, ConversationInsight insight,
+        DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (actor.TenantId is not { } tenantId || actor.UserId is not { } ownerUserId ||
+            insight.TenantId != tenantId || insight.OwnerUserId != ownerUserId ||
+            (actor.AllowedProjectIds.Count > 0 && !actor.AllowedProjectIds.Contains(insight.ProjectId, ProjectContext.IdentityComparer)) ||
+            insight.PromotionStatus != ConversationPromotionStatus.Deferred || IsProtectedInsight(insight) ||
+            insight.Confidence < DeferredInsightMinimumConfidence || insight.GovernanceBlockedAt.HasValue ||
+            !string.IsNullOrWhiteSpace(insight.GovernanceBlockingLayer) ||
+            string.IsNullOrWhiteSpace(insight.GovernanceEvidenceFingerprint) ||
+            string.IsNullOrWhiteSpace(insight.GovernancePolicyVersion) ||
+            string.IsNullOrWhiteSpace(insight.Title) || string.IsNullOrWhiteSpace(insight.Summary) ||
+            insight.Tags.Contains("chatgpt-proposal", StringComparer.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var exactIds = await FindCurrentExactMemoryIdsAsync(dbContext, actor, insight, now, cancellationToken);
+        if (exactIds.Length != 1 || await dbContext.ConversationAdjudications.AsNoTracking()
+                .AnyAsync(receipt => receipt.InsightId == insight.Id, cancellationToken))
+        {
+            return null;
+        }
+
+        var currentFingerprint = await BuildAsync(
+            dbContext, insight.ProjectId, tenantId, ownerUserId, insight.PromotedMemoryId, null, insight.Id,
+            InsightPayload(insight), cancellationToken, [insight.Id.ToString("D"), insight.Title], insight.Title, insight.Summary);
+        if (string.Equals(insight.GovernancePolicyVersion, PolicyVersion, StringComparison.Ordinal) &&
+            string.Equals(insight.GovernanceEvidenceFingerprint, currentFingerprint, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var evidenceHash = GovernanceExceptionIdentity.Hash(new
+        {
+            insight.Id,
+            tenantId,
+            ownerUserId,
+            Project = ProjectContext.IdentityKey(insight.ProjectId),
+            insight.UpdatedAt.UtcTicks,
+            insight.GovernancePolicyVersion,
+            insight.GovernanceEvidenceFingerprint,
+            PolicyVersion,
+            currentFingerprint,
+            MemoryId = exactIds[0]
+        });
+        return (exactIds[0], evidenceHash);
+    }
+
     internal static string NormalizeExactText(string? value)
         => value?.Trim().ToLowerInvariant() ?? string.Empty;
 }

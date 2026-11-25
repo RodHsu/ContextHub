@@ -48,8 +48,10 @@ public sealed class KnowledgeReviewService(
         var workItemResults = new List<ProjectWorkItemResult>();
         // Materialize semantic findings before reading execution queues so findings produced by
         // this review are executable in the same Review -> Execute cycle.
-        var governanceSnapshot = await durableGovernance.GetOrCreateSnapshotAsync(ids, governanceRunId, request.IsReReview, cancellationToken);
-        var fullGovernancePlan = await fullGovernance.BuildAsync(ids, governanceRunId, governanceSnapshot, cancellationToken);
+        var governanceSnapshot = await durableGovernance.GetOrCreateSnapshotAsync(ids, governanceRunId, request.IsReReview, cancellationToken,
+            persistResourceChanges: !request.ReadOnlyPlan);
+        var fullGovernancePlan = await fullGovernance.BuildAsync(ids, governanceRunId, governanceSnapshot, cancellationToken,
+            persistResourceChanges: !request.ReadOnlyPlan);
         foreach (var project in projects.Where(x => !ProjectContext.IsUser(x.ProjectId)))
         {
             var projectId = project.ProjectId;
@@ -166,6 +168,12 @@ public sealed class KnowledgeReviewService(
             excludedGovernanceTrackers.Length);
 
         var candidateCount = CountCandidates(fullGovernancePlan.Coverage);
+        // The completed review receipt retains this evidence fingerprint. The first
+        // scheduled batch builds its plan later and must match the reviewed proof.
+        var deferredInsightEvidence = fullGovernancePlan.Items
+            .Where(item => item.ItemKind == GovernanceItemKind.ConversationInsight && item.AuthorityResourceId.HasValue &&
+                item.SemanticEvidenceHash.Length > 0)
+            .ToDictionary(item => item.AuthorityResourceId!.Value, item => item.SemanticEvidenceHash);
         var exceptionStates = governanceSnapshot.ExceptionStates
             .Concat(insightResults
                 .Where(IsStoredInsightException)
@@ -180,7 +188,7 @@ public sealed class KnowledgeReviewService(
                         _ => 1
                     })
                 {
-                    EvidenceFingerprint = GovernanceExceptionIdentity.Hash(new
+                    EvidenceFingerprint = deferredInsightEvidence.GetValueOrDefault(x.Id) ?? GovernanceExceptionIdentity.Hash(new
                     {
                         x.ProjectId,
                         x.Title,
