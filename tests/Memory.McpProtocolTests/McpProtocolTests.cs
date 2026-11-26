@@ -138,6 +138,84 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Streamable_http_work_item_definition_and_status_remain_independent_through_legacy_creation_and_edit_replay()
+    {
+        var projectId = $"work-item-definition-{Guid.NewGuid():N}";
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
+
+        var created = await CallToolAsync(30, "project_work_item_create", new
+        {
+            projectId,
+            title = "Verify status and definition independently"
+        });
+        var workItemId = created.GetProperty("id").GetGuid();
+        workItemId.Should().NotBeEmpty();
+        created.GetProperty("status").GetString().Should().Be(nameof(ProjectWorkItemStatus.Pending));
+        created.GetProperty("definitionState").GetString().Should().Be(nameof(ProjectWorkItemDefinitionState.Draft));
+        var createdRevision = created.GetProperty("revision").GetInt64();
+
+        var definitionEdit = new WorkItemEditCommand(
+            projectId, workItemId, createdRevision, Guid.NewGuid().ToString("N"), WorkItemEditOperation.Update,
+            new WorkItemEditPatch(DefinitionState: ProjectWorkItemDefinitionState.ReadyForDevelopment));
+        var editPath = $"/api/work-items/{workItemId:D}/edits";
+        using var definitionResponse = await client.PostAsJsonAsync(editPath, definitionEdit);
+        definitionResponse.EnsureSuccessStatusCode();
+        var firstReceipt = (await definitionResponse.Content.ReadFromJsonAsync<WorkItemEditReceipt>())!;
+        firstReceipt.ReceiptId.Should().NotBeEmpty();
+        firstReceipt.HistoryId.Should().NotBeNull();
+        firstReceipt.Changed.Should().BeTrue();
+        firstReceipt.Replayed.Should().BeFalse();
+        firstReceipt.PreviousRevision.Should().Be(createdRevision);
+        firstReceipt.Revision.Should().Be(createdRevision + 1);
+        firstReceipt.Result.Status.Should().Be(ProjectWorkItemStatus.Pending);
+        firstReceipt.Result.DefinitionState.Should().Be(ProjectWorkItemDefinitionState.ReadyForDevelopment);
+
+        var started = await CallToolAsync(31, "project_work_item_update", new
+        {
+            id = workItemId,
+            status = nameof(ProjectWorkItemStatus.InProgress),
+            expectedRevision = firstReceipt.Revision,
+            requestId = Guid.NewGuid().ToString("N")
+        });
+        started.GetProperty("id").GetGuid().Should().Be(workItemId);
+        started.GetProperty("status").GetString().Should().Be(nameof(ProjectWorkItemStatus.InProgress));
+        started.GetProperty("definitionState").GetString().Should().Be(nameof(ProjectWorkItemDefinitionState.ReadyForDevelopment));
+        var currentRevision = started.GetProperty("revision").GetInt64();
+        currentRevision.Should().Be(firstReceipt.Revision + 1);
+
+        using var replayResponse = await client.PostAsJsonAsync(editPath, definitionEdit);
+        replayResponse.EnsureSuccessStatusCode();
+        var replay = (await replayResponse.Content.ReadFromJsonAsync<WorkItemEditReceipt>())!;
+        replay.Should().BeEquivalentTo(firstReceipt with { Replayed = true });
+
+        var current = (await client.GetFromJsonAsync<ProjectWorkItemResult>(
+            $"/api/work-items/{workItemId:D}?projectId={projectId}"))!;
+        current.Id.Should().Be(workItemId);
+        current.Status.Should().Be(ProjectWorkItemStatus.InProgress);
+        current.DefinitionState.Should().Be(ProjectWorkItemDefinitionState.ReadyForDevelopment);
+        current.Revision.Should().Be(currentRevision);
+
+        var listed = await CallToolAsync(32, "project_work_items_list", new
+        {
+            projectId,
+            status = nameof(ProjectWorkItemStatus.InProgress),
+            definitionState = nameof(ProjectWorkItemDefinitionState.ReadyForDevelopment)
+        });
+        var listedItem = listed.EnumerateArray().Should()
+            .ContainSingle(item => item.GetProperty("id").GetGuid() == workItemId).Subject;
+        listedItem.GetProperty("status").GetString().Should().Be(nameof(ProjectWorkItemStatus.InProgress));
+        listedItem.GetProperty("definitionState").GetString().Should().Be(nameof(ProjectWorkItemDefinitionState.ReadyForDevelopment));
+        listedItem.GetProperty("revision").GetInt64().Should().Be(currentRevision);
+
+        async Task<JsonElement> CallToolAsync(int id, string name, object request)
+        {
+            var payload = await SendMcpAsync(client, null, id, "tools/call", new { name, arguments = new { request } });
+            return ExtractToolJson(payload);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Streamable_http_project_aliases_update_one_record_and_preserve_its_original_spelling()
     {
         var factory = environment.GetFactory();
