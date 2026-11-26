@@ -7,6 +7,7 @@ using System.Text.Json;
 using Memory.Application;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace Memory.Infrastructure;
 
@@ -473,14 +474,19 @@ public sealed class GovernanceRunReceiptService(
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(governanceRunId);
+        await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
         var entity = await LatestAsync(runId, actor, cancellationToken);
         if (entity is null)
         {
             return null;
         }
 
-        EnsureReceiptProjectsAllowed(actor, DeserializeStrings(entity.ProjectIdsJson));
-        return await MapAsync(entity, actor, cancellationToken);
+        var projects = await GovernanceProjectScopeResolver.ReadRecordedRunScopesAsync(dbContext, actor, [runId], cancellationToken);
+        await EnsureReceiptProjectsAllowedAsync(actor, projects[runId].ToArray(), cancellationToken);
+        var result = await MapAsync(entity, actor, cancellationToken);
+        if (transaction is not null)
+            await transaction.CommitAsync(cancellationToken);
+        return result;
     }
 
     public async Task<(GovernanceRunReceiptResult Receipt, GovernanceRunLineageResult Lineage)?> GetScheduledReceiptSnapshotAsync(
@@ -493,7 +499,7 @@ public sealed class GovernanceRunReceiptService(
         var receipt = await GetAsync(governanceRunId, cancellationToken);
         var lineage = receipt is null
             ? null
-            : await GetScheduledLineageAsync(governanceRunId, expectedContractIdentity, cancellationToken);
+            : await GetScheduledLineageCoreAsync(governanceRunId, expectedContractIdentity, cancellationToken, scopeAlreadyChecked: true);
         await transaction.CommitAsync(cancellationToken);
         return receipt is not null && lineage is not null ? (receipt, lineage) : null;
     }
@@ -517,7 +523,7 @@ public sealed class GovernanceRunReceiptService(
         }
 
         var projectIds = DeserializeStrings(decision.ProjectIdsJson);
-        EnsureReceiptProjectsAllowed(actor, projectIds);
+        await EnsureReceiptProjectsAllowedAsync(actor, projectIds, cancellationToken);
         var runtime = ScheduledGovernanceContract.RuntimeIdentity;
         if (!ReceiptIdentityMatches(decision, CurrentScheduledContractIdentity) ||
             !string.Equals(decision.RuntimeEvidenceVersion, ScheduledRuntimeEvidenceVersion, StringComparison.Ordinal) ||
@@ -584,10 +590,17 @@ public sealed class GovernanceRunReceiptService(
         return replay;
     }
 
-    public async Task<GovernanceRunLineageResult> GetScheduledLineageAsync(
+    public Task<GovernanceRunLineageResult> GetScheduledLineageAsync(
         string governanceRunId,
         GovernanceReceiptContractIdentity expectedContractIdentity,
         CancellationToken cancellationToken)
+        => GetScheduledLineageCoreAsync(governanceRunId, expectedContractIdentity, cancellationToken);
+
+    private async Task<GovernanceRunLineageResult> GetScheduledLineageCoreAsync(
+        string governanceRunId,
+        GovernanceReceiptContractIdentity expectedContractIdentity,
+        CancellationToken cancellationToken,
+        bool scopeAlreadyChecked = false)
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(governanceRunId);
@@ -609,6 +622,13 @@ public sealed class GovernanceRunReceiptService(
                 ContractMatches: false,
                 Status: "NotReceived",
                 Reason: "No receipt event exists for this governance run and actor.");
+        }
+
+        if (!scopeAlreadyChecked)
+        {
+            var projects = await GovernanceProjectScopeResolver.ReadRecordedRunScopesAsync(
+                dbContext, actor, [runId], cancellationToken);
+            await EnsureReceiptProjectsAllowedAsync(actor, projects[runId].ToArray(), cancellationToken);
         }
 
         if (events.Length > 1_000)
@@ -676,14 +696,14 @@ public sealed class GovernanceRunReceiptService(
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var limit = Math.Clamp(request.Limit, 1, 100);
         var offset = Math.Max(0, request.Offset);
+        await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
         var recent = await dbContext.GovernanceRunReceipts.AsNoTracking()
             .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
             .OrderByDescending(x => x.EventSequence)
             .Take(1_000)
             .ToListAsync(cancellationToken);
         var latest = recent.GroupBy(x => x.GovernanceRunId, StringComparer.Ordinal)
-            .Select(x => x.OrderByDescending(v => v.EventSequence).First())
-            .Where(x => CanReadReceiptProjects(actor, DeserializeStrings(x.ProjectIdsJson)));
+            .Select(x => x.OrderByDescending(v => v.EventSequence).First());
         if (!string.IsNullOrWhiteSpace(request.ProjectId))
         {
             var projectId = ProjectContext.Normalize(request.ProjectId);
@@ -692,14 +712,29 @@ public sealed class GovernanceRunReceiptService(
                 .Contains(projectId, Memory.Application.ProjectContext.IdentityComparer));
         }
 
-        var page = latest.OrderByDescending(x => x.EventSequence).Skip(offset).Take(limit).ToArray();
+        var candidates = latest.ToArray();
+        if (candidates.Length == 0)
+            return [];
+        var projects = await GovernanceProjectScopeResolver.ReadRecordedRunScopesAsync(
+            dbContext, actor, candidates.Select(x => x.GovernanceRunId).ToArray(), cancellationToken);
+        var denied = await GovernanceProjectScopeResolver.ReadDeniedProjectsAsync(dbContext, actor.TenantId!.Value, cancellationToken);
+        var page = candidates.Where(x => GovernanceProjectScopeResolver.CanReadRecordedScope(
+                actor, projects[x.GovernanceRunId].ToArray(), denied))
+            .OrderByDescending(x => x.EventSequence).Skip(offset).Take(limit).ToArray();
         var results = new List<GovernanceRunReceiptResult>(page.Length);
         foreach (var entity in page)
         {
             results.Add(await MapAsync(entity, actor, cancellationToken));
         }
+        if (transaction is not null)
+            await transaction.CommitAsync(cancellationToken);
         return results;
     }
+
+    private async Task<IDbContextTransaction?> BeginReadSnapshotAsync(CancellationToken cancellationToken)
+        => dbContext.Database.CurrentTransaction is null
+            ? await dbContext.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken)
+            : null;
 
     private GovernanceRunReceipt NewReceipt(
         ContextHubRequestActor actor,
@@ -1657,22 +1692,14 @@ public sealed class GovernanceRunReceiptService(
         receipt.ProjectIdsJson = previous.ProjectIdsJson;
     }
 
-    private static bool CanReadReceiptProjects(ContextHubRequestActor actor, IReadOnlyList<string> projectIds)
+    private async Task EnsureReceiptProjectsAllowedAsync(
+        ContextHubRequestActor actor, IReadOnlyList<string> projectIds, CancellationToken cancellationToken)
     {
-        if (actor.AllowedProjectIds.Count == 0) return true;
-        if (projectIds.Count == 0) return false;
-        return projectIds.All(projectId =>
-            ProjectContext.IsShared(projectId) || ProjectContext.IsUser(projectId) ||
-            actor.AllowedProjectIds.Contains(projectId, Memory.Application.ProjectContext.IdentityComparer));
-    }
-
-    private static void EnsureReceiptProjectsAllowed(ContextHubRequestActor actor, IReadOnlyList<string> projectIds)
-    {
-        if (!CanReadReceiptProjects(actor, projectIds))
+        var denied = await GovernanceProjectScopeResolver.ReadDeniedProjectsAsync(dbContext, actor.TenantId!.Value, cancellationToken);
+        if (!GovernanceProjectScopeResolver.CanReadRecordedScope(actor, projectIds, denied))
         {
             throw new UnauthorizedAccessException("The governance run receipt is outside the current project authorization boundary.");
         }
-        ActorAuthorization.EnsureProjectsAllowed(actor, projectIds, write: false);
     }
 
     private static GovernanceExceptionDeltaResult ComputeExceptionDelta(

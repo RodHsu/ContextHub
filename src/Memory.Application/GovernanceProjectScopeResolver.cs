@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
 
@@ -13,14 +14,48 @@ public sealed class GovernanceProjectScopeResolver(
         bool requireWrite, CancellationToken cancellationToken)
     {
         var projectKeys = ProjectContext.IdentityKeys(projectIds);
-        var denied = await dbContext.TenantProjectGrants.AsNoTracking().AnyAsync(grant =>
-            grant.TenantId == tenantId &&
-            projectKeys.Contains(ProjectContext.IdentityKey(grant.ProjectId)) &&
-            (!grant.CanRead || (requireWrite && !grant.CanWrite)), cancellationToken);
+        var denied = await DeniedGrants(dbContext, tenantId, requireWrite)
+            .AnyAsync(grant => projectKeys.Contains(ProjectContext.IdentityKey(grant.ProjectId)), cancellationToken);
         if (denied)
         {
             throw new UnauthorizedAccessException("A durable project grant no longer authorizes the governance scope.");
         }
+    }
+
+    private static IQueryable<TenantProjectGrant> DeniedGrants(
+        IApplicationDbContext dbContext, Guid tenantId, bool requireWrite)
+        => dbContext.TenantProjectGrants.AsNoTracking()
+            .Where(grant => grant.TenantId == tenantId && (!grant.CanRead || (requireWrite && !grant.CanWrite)));
+
+    public static async Task<HashSet<string>> ReadDeniedProjectsAsync(
+        IApplicationDbContext dbContext, Guid tenantId, CancellationToken cancellationToken)
+    {
+        var projects = await DeniedGrants(dbContext, tenantId, requireWrite: false)
+            .Select(grant => grant.ProjectId)
+            .ToArrayAsync(cancellationToken);
+        return projects.ToHashSet(ProjectContext.IdentityComparer);
+    }
+
+    public static bool CanReadRecordedScope(
+        ContextHubRequestActor actor, IReadOnlyCollection<string> projects, IReadOnlySet<string> denied)
+        => (actor.AllowedProjectIds.Count == 0 || projects.Count != 0) &&
+            projects.All(project => !denied.Contains(project) &&
+                (actor.AllowedProjectIds.Count == 0 || ProjectContext.IsShared(project) || ProjectContext.IsUser(project) ||
+                 actor.AllowedProjectIds.Contains(project, ProjectContext.IdentityComparer)));
+
+    public static async Task<ILookup<string, string>> ReadRecordedRunScopesAsync(
+        IApplicationDbContext dbContext, ContextHubRequestActor actor, string[] runIds, CancellationToken cancellationToken)
+    {
+        var receiptScopes = dbContext.GovernanceRunReceipts.AsNoTracking()
+            .Where(row => row.TenantId == actor.TenantId && row.OwnerUserId == actor.UserId && runIds.Contains(row.GovernanceRunId))
+            .Select(row => new { row.GovernanceRunId, row.ProjectIdsJson });
+        var batchScopes = dbContext.GovernanceBatchRuns.AsNoTracking()
+            .Where(row => row.TenantId == actor.TenantId && row.OwnerUserId == actor.UserId && runIds.Contains(row.GovernanceRunId))
+            .Select(row => new { row.GovernanceRunId, row.ProjectIdsJson });
+        var scopes = await receiptScopes.Union(batchScopes).ToArrayAsync(cancellationToken);
+        return scopes.SelectMany(scope => (JsonSerializer.Deserialize<string[]>(scope.ProjectIdsJson) ?? [])
+                .Select(projectId => (scope.GovernanceRunId, ProjectId: projectId)))
+            .ToLookup(scope => scope.GovernanceRunId, scope => scope.ProjectId, StringComparer.Ordinal);
     }
 
     public async Task<IReadOnlyList<AccessibleProjectResult>> ResolveAsync(

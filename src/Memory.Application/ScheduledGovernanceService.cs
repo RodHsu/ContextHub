@@ -327,6 +327,11 @@ public sealed class ScheduledGovernanceService(
         {
             return await reliability.GetAsync(cancellationToken);
         }
+        catch (UnauthorizedAccessException)
+        {
+            // Keep the authorized receipt without disclosing or recalculating a partial history.
+            return null;
+        }
         catch (Exception error)
         {
             var callerCancelled = cancellationToken.IsCancellationRequested;

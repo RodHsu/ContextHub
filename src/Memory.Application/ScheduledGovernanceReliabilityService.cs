@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text.Json;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
@@ -42,8 +43,7 @@ public sealed class ScheduledGovernanceReliabilityService(
         CancellationToken cancellationToken)
     {
         var actor = await PersistObservationCoreAsync(receipt, cancellationToken);
-        var rows = await ReadRowsAsync(actor, cancellationToken);
-        return await BuildSummaryAsync(actor, rows, cancellationToken);
+        return await ReadSummaryAsync(actor, cancellationToken);
     }
 
     public async Task PersistObservationAsync(
@@ -100,12 +100,27 @@ public sealed class ScheduledGovernanceReliabilityService(
         return actor;
     }
 
-    public async Task<ScheduledGovernanceReliabilitySummary> GetAsync(
+    public Task<ScheduledGovernanceReliabilitySummary> GetAsync(
         CancellationToken cancellationToken)
+        => ReadSummaryAsync(RequireReadActor(), cancellationToken);
+
+    private async Task<ScheduledGovernanceReliabilitySummary> ReadSummaryAsync(
+        ContextHubRequestActor actor, CancellationToken cancellationToken)
     {
-        var actor = RequireReadActor();
-        var rows = await ReadRowsAsync(actor, cancellationToken);
-        return await BuildSummaryAsync(actor, rows, cancellationToken);
+        // Epoch readers require their own read-committed transaction. Check the current head
+        // on both sides of the consistent history snapshot instead of reading it inside that snapshot.
+        var observedAuthority = await ReadCommittedAuthorityAsync(actor, cancellationToken);
+        IReadOnlyList<ScheduledGovernanceReliabilityReceiptProjection>? projections;
+        await using (var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken))
+        {
+            var rows = await ReadRowsAsync(actor, cancellationToken);
+            projections = await BuildHistoryProjectionsAsync(actor, rows, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        if (projections is null)
+            throw new UnauthorizedAccessException("The scheduled governance history is outside the current project authorization boundary.");
+        var authority = await ConfirmAuthorityAsync(actor, observedAuthority, cancellationToken);
+        return ToSummary(CreateCalculator(authority).Calculate(projections));
     }
 
     private async Task<(ScheduledGovernanceReliabilityReceiptProjection Projection, ScheduledGovernanceReliabilityWindowCalculator Calculator)> BuildProjectionAsync(
@@ -317,7 +332,7 @@ public sealed class ScheduledGovernanceReliabilityService(
             .ThenBy(x => x.GovernanceRunId)
             .ToArrayAsync(cancellationToken);
 
-    private async Task<ScheduledGovernanceReliabilitySummary> BuildSummaryAsync(
+    private async Task<IReadOnlyList<ScheduledGovernanceReliabilityReceiptProjection>?> BuildHistoryProjectionsAsync(
         ContextHubRequestActor actor,
         IReadOnlyList<ScheduledGovernanceReliabilityRun> rows,
         CancellationToken cancellationToken)
@@ -333,11 +348,21 @@ public sealed class ScheduledGovernanceReliabilityService(
                 ReceiptEventSequence = row.ReceiptEventSequence,
                 IsReplay = row.IsReplay
             })).ToArray();
+        if (canonical.Length > 0)
+        {
+            var scopes = await GovernanceProjectScopeResolver.ReadRecordedRunScopesAsync(
+                dbContext, actor, canonical.Select(entry => entry.Row.GovernanceRunId).ToArray(), cancellationToken);
+            var denied = await GovernanceProjectScopeResolver.ReadDeniedProjectsAsync(dbContext, actor.TenantId!.Value, cancellationToken);
+            if (canonical.Any(entry => !GovernanceProjectScopeResolver.CanReadRecordedScope(actor,
+                    entry.Projection.ProjectIds.Concat(scopes[entry.Row.GovernanceRunId]).ToArray(), denied)))
+            {
+                // The reliability gate uses the whole history. A filtered streak would have a different meaning.
+                return null;
+            }
+        }
+
         var scheduled = canonical.Where(x => IsScheduled(x.Projection.ExecutionMode))
             .Select(x => x.Projection).ToArray();
-        var observedAuthority = scheduled.Length == 0
-            ? null
-            : await ReadCommittedAuthorityAsync(actor, cancellationToken);
         ScheduledGovernanceServerSafetyEvidenceQuery SafetyQuery(ScheduledGovernanceReliabilityReceiptProjection projection)
             => new(actor.TenantId!.Value, actor.UserId!.Value, projection.ReceiptId, projection.GovernanceRunId);
 
@@ -412,9 +437,7 @@ public sealed class ScheduledGovernanceReliabilityService(
             }
         }
 
-        var authority = await ConfirmAuthorityAsync(actor, observedAuthority, cancellationToken);
-        var result = CreateCalculator(authority).Calculate(projections);
-        return ToSummary(result);
+        return projections;
     }
 
     private static async Task<IReadOnlyDictionary<TQuery, TEvidence?>> ReadEvidenceHistoryAsync<TQuery, TEvidence>(

@@ -3,8 +3,11 @@ using Memory.Application;
 using Memory.Domain;
 using Memory.Infrastructure;
 using Memory.Tests.Shared;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace Memory.IntegrationTests;
 
@@ -138,30 +141,22 @@ public sealed class SuccessorAwareStaleBlockerIntegrationTests(ContainerTestEnvi
             AllowHardDelete: false,
             ExecutionMode: GovernanceBatchExecutionMode.Interactive);
 
-        using var resourceLockScope = environment.GetFactory().Services.CreateScope();
-        SetActor(resourceLockScope.ServiceProvider, user);
-        var resourceLockDb = resourceLockScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
-        await using var resourceLockTransaction = await resourceLockDb.Database.BeginTransactionAsync();
-        _ = await resourceLockDb.MemoryItems
-            .FromSqlInterpolated($"SELECT * FROM memory_items WHERE id = {predecessor.Id} FOR UPDATE")
-            .SingleAsync();
+        var barrier = new ArchiveSaveBarrier(predecessor.Id);
+        await using var executorFactory = environment.GetFactory().WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services => services.ConfigureDbContext<MemoryDbContext>(
+                options => options.AddInterceptors(barrier))));
+        using var executionScope = executorFactory.Services.CreateScope();
+        SetActor(executionScope.ServiceProvider, user);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var executionTask = executionScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
+            .ExecuteAsync(request, timeout.Token);
 
-        var executionEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var executionTask = Task.Run(async () =>
+        try
         {
-            using var executionScope = environment.GetFactory().Services.CreateScope();
-            SetActor(executionScope.ServiceProvider, user);
-            executionEntered.SetResult();
-            return await executionScope.ServiceProvider.GetRequiredService<IGovernanceBatchExecutor>()
-                .ExecuteAsync(request, CancellationToken.None);
-        });
-
-        await executionEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await WaitForWriterBlockedByResourceLockAsync(resourceLockDb);
-        executionTask.IsCompleted.Should().BeFalse("the archive must wait at the locked resource after reading the open finding");
-
-        using (var blockerScope = environment.GetFactory().Services.CreateScope())
-        {
+            // Pause before archive SQL can take a cache revision lock needed by the concurrent disposition.
+            var first = await Task.WhenAny(barrier.Reached, executionTask).WaitAsync(timeout.Token);
+            first.Should().BeSameAs(barrier.Reached, "the archive should reach the save before completing");
+            using var blockerScope = environment.GetFactory().Services.CreateScope();
             SetActor(blockerScope.ServiceProvider, user);
             await blockerScope.ServiceProvider.GetRequiredService<IGovernanceService>()
                 .SetDispositionAsync(
@@ -172,14 +167,19 @@ public sealed class SuccessorAwareStaleBlockerIntegrationTests(ContainerTestEnvi
                         $"successor-race-block-{Guid.NewGuid():N}",
                         BlockingLayer: "Host",
                         ReasonClass: "HostCapabilityUnavailable"),
-                    CancellationToken.None);
+                    timeout.Token);
         }
-
-        await resourceLockTransaction.CommitAsync();
-        var result = await executionTask.WaitAsync(TimeSpan.FromSeconds(15));
+        finally
+        {
+            barrier.Release();
+        }
+        var result = await executionTask.WaitAsync(timeout.Token);
 
         result.StoppedReason.Should().Be("ItemFailed");
-        result.Items.Should().Contain(x => x.Disposition == GovernanceBatchItemDisposition.Failed);
+        result.Items.Should().ContainSingle(x => x.ResourceId == finding.Id &&
+            x.Disposition == GovernanceBatchItemDisposition.Failed &&
+            x.CursorDisposition == "NotAdvancedRetryable");
+        barrier.FailureSqlState.Should().Be(PostgresErrorCodes.SerializationFailure);
         seedDb.ChangeTracker.Clear();
         (await seedDb.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == predecessor.Id)).Status
             .Should().Be(MemoryStatus.Active);
@@ -191,31 +191,37 @@ public sealed class SuccessorAwareStaleBlockerIntegrationTests(ContainerTestEnvi
             .Should().Be(proposalCountBefore);
     }
 
-    private static async Task WaitForWriterBlockedByResourceLockAsync(
-        MemoryDbContext holderDb,
-        CancellationToken cancellationToken = default)
+    private sealed class ArchiveSaveBarrier(Guid predecessorId) : SaveChangesInterceptor
     {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            var writerIsBlocked = await holderDb.Database.SqlQueryRaw<bool>("""
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_stat_activity AS waiter
-                        WHERE waiter.pid <> pg_backend_pid()
-                          AND pg_backend_pid() = ANY(pg_blocking_pids(waiter.pid))) AS "Value"
-                    """)
-                .SingleAsync(cancellationToken);
-            if (writerIsBlocked)
-            {
-                return;
-            }
+        private readonly TaskCompletionSource reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource resume = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+        public Task Reached => reached.Task;
+        public string? FailureSqlState { get; private set; }
+
+        public void Release() => resume.TrySetResult();
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (eventData.Context!.ChangeTracker.Entries<MemoryItem>().Any(entry =>
+                entry.State == EntityState.Modified && entry.Entity.Id == predecessorId &&
+                entry.Entity.Status == MemoryStatus.Archived) && reached.TrySetResult())
+            {
+                await resume.Task.WaitAsync(cancellationToken);
+            }
+            return result;
         }
 
-        throw new TimeoutException(
-            "PostgreSQL did not report a governance writer blocked by the held resource row lock.");
+        public override Task SaveChangesFailedAsync(
+            DbContextErrorEventData eventData, CancellationToken cancellationToken = default)
+        {
+            if (Reached.IsCompleted && eventData.Exception.GetBaseException() is PostgresException error)
+            {
+                FailureSqlState ??= error.SqlState;
+            }
+            return Task.CompletedTask;
+        }
     }
 
     private static void SetActor(IServiceProvider services, TenantUser user)
