@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Data;
 using System.Globalization;
 using System.Text;
 using Memory.Domain;
@@ -41,6 +42,8 @@ public sealed class PlatformFoundationStore(
     IClock clock,
     IEffectiveRightsEvaluator evaluator) : IPlatformFoundationStore
 {
+    private const string AuthorizationTopologyLockKey = "project-authorization-topology";
+
     public async Task<AuthorizationTopologyEdge> UpsertTopologyEdgeAsync(TopologyEdgeUpsertRequest request, CancellationToken cancellationToken)
     {
         var parent = ProjectContext.Normalize(request.ParentProjectId);
@@ -52,8 +55,16 @@ public sealed class PlatformFoundationStore(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         ActorAuthorization.EnsureProjectAllowed(actor, child, write: true);
         ActorAuthorization.EnsureProjectAllowed(actor, parent, write: false);
+
+        await using var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        if (!transaction.OwnsTransaction)
+        {
+            throw new InvalidOperationException("Authorization topology updates require an owned transaction.");
+        }
+        // Owner and tenant-wide views can overlap, and a cycle can span multiple projects.
+        await dbContext.AcquireTransactionLockAsync(AuthorizationTopologyLockKey, cancellationToken);
         var scoped = Scope(dbContext.ProjectHierarchies, actor);
-        var current = await scoped.AsNoTracking().Where(x => x.Dimension == dimension).Select(MapEdgeExpression).ToListAsync(cancellationToken);
+        var current = await scoped.AsNoTracking().Where(x => x.AuthorizationInheritable).Select(MapEdgeExpression).ToArrayAsync(cancellationToken);
         var entity = await scoped.SingleOrDefaultAsync(x => x.Dimension == dimension && Memory.Application.ProjectContext.Matches(x.ParentProjectId, parent) && Memory.Application.ProjectContext.Matches(x.ChildProjectId, child), cancellationToken);
         var currentRevision = entity?.Revision ?? 0;
         if (currentRevision != request.ExpectedRevision) throw new DbUpdateConcurrencyException("Topology revision conflict; reload before retrying.");
@@ -85,6 +96,7 @@ public sealed class PlatformFoundationStore(
 
         await BumpRevisionAsync(child, static revision => revision.TopologyRevision++, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         evaluator.InvalidateProjects(FindAuthorizationDescendants(child, current.Append(replacement)));
         return replacement;
     }
@@ -606,7 +618,9 @@ public static class AuthorizationTopologyValidator
         long expectedRevision)
     {
         if (replacement.Revision != expectedRevision + 1) throw new InvalidOperationException("Topology revision conflict; reload before retrying.");
-        var candidate = current.Where(x => !(string.Equals(x.Dimension, replacement.Dimension, StringComparison.OrdinalIgnoreCase)
+        if (!replacement.AuthorizationInheritable) return;
+
+        var candidate = current.Where(x => !(string.Equals(x.Dimension, replacement.Dimension, StringComparison.Ordinal)
             && Memory.Application.ProjectContext.Matches(x.ParentProjectId, replacement.ParentProjectId)
             && Memory.Application.ProjectContext.Matches(x.ChildProjectId, replacement.ChildProjectId))).Append(replacement).ToArray();
         _ = new EffectiveRightsEvaluator().Evaluate(new EffectiveRightsRequest(
