@@ -231,10 +231,89 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         events.Should().Equal("ReviewReceived", "ReviewCompleted", "ScheduledDecisionProjected");
     }
 
+    [DockerRequiredFact]
+    public async Task Receipt_reads_and_initial_review_replay_honor_current_project_grants()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var provider = scope.ServiceProvider;
+        var actor = UseBootstrapActor(provider);
+        var db = provider.GetRequiredService<MemoryDbContext>();
+        var receipts = provider.GetRequiredService<IGovernanceRunReceiptService>();
+        var reliability = provider.GetRequiredService<IScheduledGovernanceReliabilityService>();
+        var projectId = $"ReceiptGrant-{Guid.NewGuid():N}";
+        var restricted = new ScheduledGovernanceReviewRequest($"receipt-grant-{Guid.NewGuid():N}");
+        var shared = new ScheduledGovernanceReviewRequest($"receipt-shared-{Guid.NewGuid():N}");
+        var grant = new TenantProjectGrant
+        {
+            TenantId = actor.TenantId!.Value,
+            ProjectId = projectId.ToUpperInvariant(),
+            CanRead = true,
+            CanWrite = true
+        };
+        db.TenantProjectGrants.Add(grant);
+        await db.SaveChangesAsync();
+        try
+        {
+            var service = CreateService(provider, async (request, token) =>
+            {
+                var runId = request.GovernanceRunId!;
+                var review = CreateGenericReview(runId, CurrentScheduledIdentity(), $"kg:snapshot:{runId}", durableCount: 1);
+                if (runId == restricted.GovernanceRunId)
+                {
+                    review = review with
+                    {
+                        Projects = [.. review.Projects, new AccessibleProjectResult(projectId, true, true)],
+                        DurableMemoryCoverage = review.DurableMemoryCoverage! with
+                        {
+                            GovernanceProjectIds = [ProjectContext.SharedProjectId, projectId]
+                        }
+                    };
+                }
+                await receipts.RecordReviewAsync(review, DateTimeOffset.UtcNow, token);
+                return review;
+            }, reliability);
+            var first = await service.ReviewAsync(restricted, default);
+            await service.ReviewAsync(shared, default);
+
+            grant.CanWrite = false;
+            await db.SaveChangesAsync();
+            (await service.ReviewAsync(restricted, default)).Should().BeEquivalentTo(first);
+            var authorized = await service.GetReceiptAsync(restricted.GovernanceRunId, default);
+            authorized.Reliability!.Runs.Should().Contain(run => run.GovernanceRunId == restricted.GovernanceRunId);
+
+            grant.CanRead = false;
+            await db.SaveChangesAsync();
+            Func<Task> read = () => service.GetReceiptAsync(restricted.GovernanceRunId, default);
+            Func<Task> get = () => receipts.GetAsync(restricted.GovernanceRunId, default);
+            Func<Task> replay = () => service.ReviewAsync(restricted, default);
+            await read.Should().ThrowAsync<UnauthorizedAccessException>();
+            await get.Should().ThrowAsync<UnauthorizedAccessException>();
+            await replay.Should().ThrowAsync<UnauthorizedAccessException>();
+            var page = await receipts.ListAsync(new(), default);
+            page.Should().NotContain(receipt => receipt.GovernanceRunId == restricted.GovernanceRunId);
+            page.Should().Contain(receipt => receipt.GovernanceRunId == shared.GovernanceRunId);
+            var sharedReceipt = await service.GetReceiptAsync(shared.GovernanceRunId, default);
+            sharedReceipt.Received.Should().BeTrue();
+            sharedReceipt.Reliability.Should().BeNull();
+
+            grant.CanRead = true;
+            await db.SaveChangesAsync();
+            (await service.GetReceiptAsync(restricted.GovernanceRunId, default)).ReceiptId.Should().Be(authorized.ReceiptId);
+            (await service.GetReceiptAsync(shared.GovernanceRunId, default)).Reliability!.Runs
+                .Should().Contain(run => run.GovernanceRunId == restricted.GovernanceRunId);
+        }
+        finally
+        {
+            db.TenantProjectGrants.Remove(grant);
+            await db.SaveChangesAsync();
+        }
+    }
+
     private static ScheduledGovernanceService CreateService(IServiceProvider provider,
-        Func<KnowledgeReviewRequest, CancellationToken, Task<KnowledgeReviewResult>> review) => new(
+        Func<KnowledgeReviewRequest, CancellationToken, Task<KnowledgeReviewResult>> review,
+        IScheduledGovernanceReliabilityService? reliability = null) => new(
         new CallbackKnowledgeReview(review), provider.GetRequiredService<IGovernanceBatchExecutor>(),
-        provider.GetRequiredService<IGovernanceRunReceiptService>(), provider.GetRequiredService<IRequestActorAccessor>());
+        provider.GetRequiredService<IGovernanceRunReceiptService>(), provider.GetRequiredService<IRequestActorAccessor>(), reliability);
 
     private sealed class CallbackKnowledgeReview(
         Func<KnowledgeReviewRequest, CancellationToken, Task<KnowledgeReviewResult>> review) : IKnowledgeReviewService
