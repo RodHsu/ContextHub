@@ -174,6 +174,61 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
     }
 
     [DockerRequiredFact]
+    public async Task Failed_unwrap_releases_the_active_slot_without_refunding_the_use()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var actorAccessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var user = await db.TenantUsers.SingleAsync(x => x.Username == "contract-test-admin");
+        actorAccessor.Current = Actor(user, interactive: true);
+        var keys = new TestSecretKeyAuthority();
+        var service = CreateSecretService(db, actorAccessor, keys, new AllowApproval());
+        var proof = Proof();
+        var secret = await service.CreateAsync(new("ContextHub", $"unwrap-recovery-{Guid.NewGuid():N}", SecretKind.Opaque, proof), default);
+        var testMaterial = RandomNumberGenerator.GetBytes(16);
+        var version = await service.AddVersionAsync(new(secret.Id, testMaterial, secret.Revision, "version-1", proof), default);
+        CryptographicOperations.ZeroMemory(testMaterial);
+        await SeedRulesAsync(db, user, secret.Id, user.Id.ToString("D"), SecretRight.Use, AuthorizationEffect.Allow);
+
+        const string purpose = "test:lease-recovery";
+        const string target = "https://example.test/recovery";
+        var lease = await service.CreateLeaseAsync(new(secret.Id, SecretLeaseKind.Use, purpose, target,
+            "lease-1", version.SecretRevision, 2, 1, TimeSpan.FromMinutes(5), null, proof), default);
+        var first = new SecretUseRequest(lease.LeaseId, lease.Capability, lease.Revision, "use-unwrap-failure", purpose, target);
+        var consumer = new CapturingConsumer();
+        keys.FailNextUnwrap = true;
+        var fail = () => service.UseAsync(first, consumer, default);
+        await fail.Should().ThrowAsync<CryptographicException>();
+        consumer.Calls.Should().Be(0);
+
+        var committed = await db.SecretLeases.AsNoTracking().SingleAsync(x => x.Id == lease.LeaseId);
+        committed.ActiveUses.Should().Be(0);
+        committed.UsedCount.Should().Be(1);
+        committed.Revision.Should().Be(lease.Revision + 1);
+        committed.State.Should().Be(SecretLeaseState.Active);
+        var useAudits = db.SecretAccessEvents.Where(x => x.LeaseId == lease.LeaseId &&
+            x.Operation == SecretAccessOperation.Use && x.Allowed && x.ReasonCode == "UseStarted");
+        (await useAudits.Select(x => x.RequestId).ToArrayAsync()).Should().Equal(first.RequestId);
+
+        var next = first with { ExpectedRevision = committed.Revision };
+        var replay = () => service.UseAsync(next, consumer, default);
+        await replay.Should().ThrowAsync<UnauthorizedAccessException>();
+        consumer.Calls.Should().Be(0);
+
+        const string recoveryRequestId = "use-after-recovery";
+        var recovered = await service.UseAsync(next with { RequestId = recoveryRequestId }, consumer, default);
+        consumer.Calls.Should().Be(1);
+        consumer.Captured.Should().HaveCount(testMaterial.Length);
+        CryptographicOperations.ZeroMemory(consumer.Captured);
+        recovered.UsedCount.Should().Be(2);
+        recovered.Revision.Should().Be(committed.Revision + 1);
+        recovered.State.Should().Be(SecretLeaseState.Exhausted);
+        (await db.SecretLeases.AsNoTracking().SingleAsync(x => x.Id == lease.LeaseId)).ActiveUses.Should().Be(0);
+        (await useAudits.OrderBy(x => x.RequestId).Select(x => x.RequestId).ToArrayAsync())
+            .Should().Equal(recoveryRequestId, first.RequestId);
+    }
+
+    [DockerRequiredFact]
     public async Task Ssh_certificate_issue_proactive_renew_max_lifetime_actor_binding_and_krl_must_fail_closed()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -343,8 +398,10 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
     private sealed class CapturingConsumer : ISecretMaterialConsumer
     {
         public byte[] Captured { get; private set; } = [];
+        public int Calls { get; private set; }
         public Task ExecuteAsync(SecretUseContext context, ReadOnlyMemory<byte> material, CancellationToken cancellationToken)
         {
+            Calls++;
             Captured = material.ToArray();
             return Task.CompletedTask;
         }
@@ -372,6 +429,7 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
         };
 
         public string CurrentKeyId { get; set; } = "kek-v1";
+        public bool FailNextUnwrap { get; set; }
         public void Remove(string keyId) { if (keys.Remove(keyId, out var key)) CryptographicOperations.ZeroMemory(key); }
 
         public WrappedSecretKey Wrap(Guid secretId, Guid versionId, ReadOnlySpan<byte> plaintextKey)
@@ -386,6 +444,12 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
 
         public byte[] Unwrap(Guid secretId, Guid versionId, WrappedSecretKey wrappedKey)
         {
+            if (FailNextUnwrap)
+            {
+                FailNextUnwrap = false;
+                throw new CryptographicException("Test key provider is temporarily unavailable.");
+            }
+
             if (!keys.TryGetValue(wrappedKey.KeyId, out var key)) throw new CryptographicException("Missing historical KEK.");
             var plaintext = new byte[wrappedKey.Ciphertext.Length];
             using var aes = new AesGcm(key, 16);

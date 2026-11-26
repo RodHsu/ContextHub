@@ -193,6 +193,7 @@ public sealed class ManagedTransferService(
 
         var now = clock.UtcNow;
         var (session, token) = CreateSession(managedObject, actor, request.Purpose, request.AgentId, request.ExecutionId, ManagedTransferOperation.Download, managedObject.PlaintextLength, now, settings);
+        session.FileVersionId = request.FileVersionId;
         session.Operations.Add(new ManagedTransferOperationRecord
         {
             RequestId = request.IdempotencyKey,
@@ -212,7 +213,8 @@ public sealed class ManagedTransferService(
             return await dbContext.ExecuteInTransactionAsync(async transactionToken =>
             {
                 await dbContext.AcquireTransactionLockAsync($"managed-transfer:{request.SessionId:D}", transactionToken);
-                var session = await LoadSessionAsync(request.SessionId, request.Capability, ManagedTransferOperation.Upload, request.ExpectedRevision, transactionToken);
+                var session = await LoadSessionAsync(request.SessionId, request.Capability, ManagedTransferOperation.Upload, null, transactionToken);
+                var recorded = await FindUploadOperationAsync(session, request.RequestId, request.ExpectedRevision, transactionToken);
                 var managedObject = session.ManagedObject!;
                 if (request.ChunkIndex < 0 || request.ChunkIndex >= managedObject.ChunkCount)
                 {
@@ -230,9 +232,8 @@ public sealed class ManagedTransferService(
                 var suppliedHash = NormalizeSha256(request.PlaintextSha256);
                 var actualHash = Convert.ToHexString(SHA256.HashData(request.Plaintext)).ToLowerInvariant();
                 if (!FixedEquals(suppliedHash, actualHash)) throw new CryptographicException("Chunk integrity validation failed.");
-                var requestHash = HashRequest("upload", session.Id.ToString("D"), session.Revision.ToString(), request.ChunkIndex.ToString(), actualHash);
-                var replay = await CheckReplayAsync(session, request.RequestId, requestHash, transactionToken);
-                if (replay is not null) return replay;
+                var requestHash = HashRequest("upload", session.Id.ToString("D"), request.ExpectedRevision.ToString(), request.ChunkIndex.ToString(), actualHash);
+                if (recorded is not null) return ReplayUploadOperation(session, recorded, request.ExpectedRevision, requestHash);
                 if (managedObject.Chunks.Any(x => x.ChunkIndex == request.ChunkIndex)) throw new InvalidOperationException("Chunk already exists; use the original request identity for an idempotent retry.");
                 EnsureRateLimit(session, request.Plaintext.Length, managedObject.ChunkSize);
 
@@ -294,11 +295,11 @@ public sealed class ManagedTransferService(
         => dbContext.ExecuteInTransactionAsync(async transactionToken =>
         {
             await dbContext.AcquireTransactionLockAsync($"managed-transfer:{sessionId:D}", transactionToken);
-            var session = await LoadSessionAsync(sessionId, capability, ManagedTransferOperation.Upload, expectedRevision, transactionToken);
+            var session = await LoadSessionAsync(sessionId, capability, ManagedTransferOperation.Upload, null, transactionToken);
             var managedObject = session.ManagedObject!;
-            var requestHash = HashRequest("complete", session.Id.ToString("D"), session.Revision.ToString());
-            var replay = await CheckReplayAsync(session, requestId, requestHash, transactionToken);
-            if (replay is not null) return replay;
+            var recorded = await FindUploadOperationAsync(session, requestId, expectedRevision, transactionToken);
+            var requestHash = HashRequest("complete", session.Id.ToString("D"), expectedRevision.ToString());
+            if (recorded is not null) return ReplayUploadOperation(session, recorded, expectedRevision, requestHash);
             if (managedObject.Chunks.Count != managedObject.ChunkCount || session.UsedBytes != managedObject.PlaintextLength)
             {
                 throw new InvalidOperationException("Managed upload is incomplete.");
@@ -322,6 +323,10 @@ public sealed class ManagedTransferService(
         {
             await dbContext.AcquireTransactionLockAsync($"managed-transfer:{request.SessionId:D}", transactionToken);
             var session = await LoadSessionAsync(request.SessionId, request.Capability, ManagedTransferOperation.Download, request.ExpectedRevision, transactionToken);
+            var current = await ManagedDownloadAuthorization.AuthorizeAsync(dbContext, foundation, actorAccessor.Current,
+                session.ProjectId, session.ManagedObjectId, session.FileVersionId, session.Purpose, transactionToken);
+            if (current.EncryptionGeneration != session.EncryptionGeneration)
+                throw new UnauthorizedAccessException("Transfer capability revision is stale.");
             var managedObject = session.ManagedObject!;
             if (request.Offset < 0 || request.Length <= 0 || request.Length > options.Value.NormalizedMaxRangeBytes || request.Offset > managedObject.PlaintextLength || request.Length > managedObject.PlaintextLength - request.Offset)
             {
@@ -426,7 +431,7 @@ public sealed class ManagedTransferService(
         return actor;
     }
 
-    private async Task<ManagedTransferSession> LoadSessionAsync(Guid id, string capability, ManagedTransferOperation operation, long expectedRevision, CancellationToken cancellationToken)
+    private async Task<ManagedTransferSession> LoadSessionAsync(Guid id, string capability, ManagedTransferOperation operation, long? expectedRevision, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, operation == ManagedTransferOperation.Upload ? SecurityScopes.MemoryWrite : SecurityScopes.MemoryRead);
@@ -436,11 +441,15 @@ public sealed class ManagedTransferService(
             .SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new UnauthorizedAccessException("Transfer capability is invalid.");
         ActorAuthorization.EnsureProjectAllowed(actor, session.ProjectId, operation == ManagedTransferOperation.Upload);
-        if (session.Operation != operation || session.State != ManagedTransferSessionState.Active || session.ExpiresAt <= clock.UtcNow)
+        var mayReplayUpload = operation == ManagedTransferOperation.Upload && !expectedRevision.HasValue;
+        if (session.Operation != operation || session.ExpiresAt <= clock.UtcNow ||
+            (session.State != ManagedTransferSessionState.Active &&
+             !(mayReplayUpload && session.State == ManagedTransferSessionState.Completed)))
         {
             throw new UnauthorizedAccessException("Transfer capability is not active.");
         }
-        if (session.Revision != expectedRevision || session.EncryptionGeneration != session.ManagedObject!.EncryptionGeneration)
+        if ((expectedRevision.HasValue && session.Revision != expectedRevision.Value) ||
+            session.EncryptionGeneration != session.ManagedObject!.EncryptionGeneration)
         {
             throw new UnauthorizedAccessException("Transfer capability revision is stale.");
         }
@@ -464,7 +473,6 @@ public sealed class ManagedTransferService(
         return (new ManagedTransferSession
         {
             ManagedObjectId = managedObject.Id,
-            ManagedObject = managedObject,
             TenantId = actor.TenantId,
             OwnerUserId = actor.UserId,
             ProjectId = managedObject.ProjectId,
@@ -487,14 +495,30 @@ public sealed class ManagedTransferService(
     private static ManagedTransferSessionResult Result(ManagedTransferSession session, ManagedObject managedObject, string token, int chunkBytes)
         => new(session.Id, session.CapabilityId, token, new ManagedObjectRef(managedObject.Id, managedObject.EncryptionGeneration), session.Operation, session.Revision, chunkBytes, session.MaxBytes, session.ExpiresAt, $"/api/transfers/{session.Id:D}");
 
-    private async Task<ManagedTransferMutationResult?> CheckReplayAsync(ManagedTransferSession session, string requestId, string requestHash, CancellationToken cancellationToken)
+    private async Task<ManagedTransferOperationRecord?> FindUploadOperationAsync(
+        ManagedTransferSession session, string requestId, long expectedRevision, CancellationToken cancellationToken)
     {
         ValidateRequestId(requestId);
         var normalizedRequestId = requestId.Trim();
         var existing = await dbContext.ManagedTransferOperationRecords.AsNoTracking().SingleOrDefaultAsync(x => x.SessionId == session.Id && x.RequestId == normalizedRequestId, cancellationToken);
-        if (existing is null) return null;
-        if (!FixedEquals(existing.RequestHash, requestHash)) throw new UnauthorizedAccessException("Transfer request identity replay does not match the original operation.");
-        return new ManagedTransferMutationResult(session.Id, session.Revision, existing.BytesTransferred, true);
+        if (existing is null)
+        {
+            if (session.State != ManagedTransferSessionState.Active)
+                throw new UnauthorizedAccessException("Transfer capability is not active.");
+            if (session.Revision != expectedRevision)
+                throw new UnauthorizedAccessException("Transfer capability revision is stale.");
+        }
+        return existing;
+    }
+
+    private static ManagedTransferMutationResult ReplayUploadOperation(
+        ManagedTransferSession session, ManagedTransferOperationRecord recorded, long expectedRevision, string requestHash)
+    {
+        if (!FixedEquals(recorded.RequestHash, requestHash))
+            throw new UnauthorizedAccessException("Transfer request identity replay does not match the original operation.");
+
+        // Each committed upload operation increments its original request revision exactly once.
+        return new ManagedTransferMutationResult(session.Id, checked(expectedRevision + 1), recorded.BytesTransferred, true);
     }
 
     private ManagedTransferOperationRecord NewOperation(string requestId, string requestHash, long bytes)

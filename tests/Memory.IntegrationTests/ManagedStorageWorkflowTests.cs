@@ -73,7 +73,28 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
             await foreignTenant.Should().ThrowAsync<UnauthorizedAccessException>();
             actorAccessor.Current = actor;
 
-            await service.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "complete", CancellationToken.None);
+            var completed = await service.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "complete", CancellationToken.None);
+            var replayedCompletion = await service.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "complete", CancellationToken.None);
+            replayedCompletion.Should().Be(completed with { Replayed = true });
+
+            var firstChunk = original.AsSpan(0, transferSettings.NormalizedChunkBytes).ToArray();
+            var firstHash = Convert.ToHexString(SHA256.HashData(firstChunk)).ToLowerInvariant();
+            var firstRequest = new ManagedChunkWriteRequest(
+                upload.SessionId, upload.Capability, upload.Revision, "chunk-0", 0, firstChunk, firstHash);
+            var replayedChunk = await service.UploadChunkAsync(firstRequest, CancellationToken.None);
+            replayedChunk.Should().Be(new ManagedTransferMutationResult(
+                upload.SessionId, upload.Revision + 1, transferSettings.NormalizedChunkBytes, true));
+
+            var alteredChunk = original.AsSpan(0, transferSettings.NormalizedChunkBytes).ToArray();
+            alteredChunk[0] ^= 1;
+            var alteredHash = Convert.ToHexString(SHA256.HashData(alteredChunk)).ToLowerInvariant();
+            var alteredReplay = () => service.UploadChunkAsync(
+                firstRequest with { Plaintext = alteredChunk, PlaintextSha256 = alteredHash }, CancellationToken.None);
+            await alteredReplay.Should().ThrowAsync<UnauthorizedAccessException>();
+            var newCompletion = () => service.CompleteUploadAsync(
+                upload.SessionId, upload.Capability, completed.Revision, "new-completion", CancellationToken.None);
+            await newCompletion.Should().ThrowAsync<UnauthorizedAccessException>();
+            (await db.ManagedTransferOperationRecords.CountAsync(x => x.SessionId == upload.SessionId)).Should().Be(5);
             var persisted = await db.ManagedObjects.Include(x => x.Chunks).SingleAsync(x => x.Id == upload.Object.ObjectId);
             persisted.State.Should().Be(ManagedObjectState.Ready);
             persisted.Chunks.Select(x => Convert.ToHexString(x.Nonce)).Should().OnlyHaveUniqueItems();
@@ -128,6 +149,255 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
                 rateLimited.SessionId, rateLimited.Capability, firstRateWrite.Revision, "rate-2", 1, secondRateChunk, secondRateChecksum), CancellationToken.None);
 
             actor.Username.Should().NotContain("ChatGPT").And.NotContain("Codex").And.NotContain("Gemini");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Concurrent_exact_retries_commit_once_and_multichunk_ranges_preserve_content()
+    {
+        var factory = environment.GetFactory();
+        using var first = factory.Services.CreateScope();
+        using var second = factory.Services.CreateScope();
+        UseBootstrapActor(first.ServiceProvider);
+        UseBootstrapActor(second.ServiceProvider);
+        var db = first.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var secondDb = second.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var root = Path.Combine(FindRepositoryRoot(), ".agent", "local", "managed-storage-tests", Guid.NewGuid().ToString("N"));
+        var clock = new MutableClock(DateTimeOffset.UtcNow);
+        var settings = new ManagedTransferOptions
+        {
+            ChunkBytes = 1024 * 1024,
+            MaxRangeBytes = 4 * 1024 * 1024,
+            MaxBytesPerSecond = 128L * 1024 * 1024
+        };
+        var store = new FileSystemManagedObjectStore(Options.Create(new ManagedObjectStorageOptions
+        {
+            Enabled = true,
+            RootPath = root
+        }));
+        var authority = new AesGcmManagedFileKeyAuthority(Options.Create(new ManagedFileKeyAuthorityOptions
+        {
+            CurrentKeyId = "test-key",
+            Keys = { ["test-key"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) }
+        }));
+        ManagedTransferService CreateTransfer(IServiceProvider services) => new(
+            services.GetRequiredService<MemoryDbContext>(),
+            services.GetRequiredService<IRequestActorAccessor>(), clock, store, authority,
+            services.GetRequiredService<IPlatformFoundationStore>(), Options.Create(settings));
+
+        var writer = CreateTransfer(first.ServiceProvider);
+        var retry = CreateTransfer(second.ServiceProvider);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var token = timeout.Token;
+        try
+        {
+            var original = RandomNumberGenerator.GetBytes(32 * settings.ChunkBytes + 13);
+            var fileHash = SHA256.HashData(original);
+            var project = $"multichunk-{Guid.NewGuid():N}";
+            var upload = await writer.CreateUploadAsync(new CreateManagedUploadRequest(
+                project, original.Length, "integration", "create"), token);
+
+            ManagedChunkWriteRequest Chunk(int index, long revision)
+            {
+                var offset = index * settings.ChunkBytes;
+                var bytes = original.AsSpan(offset, Math.Min(settings.ChunkBytes, original.Length - offset)).ToArray();
+                return new ManagedChunkWriteRequest(upload.SessionId, upload.Capability, revision, $"chunk-{index}", index,
+                    bytes, Convert.ToHexString(SHA256.HashData(bytes)));
+            }
+
+            var firstChunk = await Task.WhenAll(
+                writer.UploadChunkAsync(Chunk(0, upload.Revision), token),
+                retry.UploadChunkAsync(Chunk(0, upload.Revision), token));
+            firstChunk.Should().ContainSingle(result => result.Replayed);
+            firstChunk.Should().OnlyContain(result =>
+                result.Revision == upload.Revision + 1 && result.BytesTransferred == settings.ChunkBytes);
+            db.ChangeTracker.Clear();
+            secondDb.ChangeTracker.Clear();
+            var revision = firstChunk[0].Revision;
+            var chunkCount = (original.Length + settings.ChunkBytes - 1) / settings.ChunkBytes;
+            for (var index = 1; index < chunkCount; index++)
+            {
+                var result = await writer.UploadChunkAsync(Chunk(index, revision), token);
+                result.Replayed.Should().BeFalse();
+                revision = result.Revision;
+            }
+
+            var completion = await Task.WhenAll(
+                writer.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "finish", token),
+                retry.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "finish", token));
+            completion.Should().ContainSingle(result => result.Replayed);
+            completion.Should().OnlyContain(result => result.Revision == revision + 1 && result.BytesTransferred == 0);
+
+            db.ChangeTracker.Clear();
+            var session = await db.ManagedTransferSessions.AsNoTracking()
+                .SingleAsync(item => item.Id == upload.SessionId, token);
+            session.UsedBytes.Should().Be(original.Length);
+            session.Revision.Should().Be(upload.Revision + chunkCount + 1);
+            (await db.ManagedTransferOperationRecords.CountAsync(item => item.SessionId == upload.SessionId, token))
+                .Should().Be(chunkCount + 2);
+            var stored = await db.ManagedObjects.AsNoTracking().Include(item => item.Chunks)
+                .SingleAsync(item => item.Id == upload.Object.ObjectId, token);
+            stored.Chunks.Should().HaveCount(chunkCount);
+            stored.PlaintextSha256.Should().Be(Convert.ToHexString(fileHash).ToLowerInvariant());
+
+            var download = await writer.CreateDownloadAsync(new CreateManagedDownloadRequest(
+                project, stored.Id, "integration", "download"), token);
+            var downloadedPath = Path.Combine(root, "downloaded.bin");
+            await using (var output = File.Create(downloadedPath))
+            {
+                var rangeBytes = 3 * settings.ChunkBytes + 23;
+                var rangeRevision = download.Revision;
+                for (var offset = 0; offset < original.Length; offset += rangeBytes)
+                {
+                    var length = Math.Min(rangeBytes, original.Length - offset);
+                    var copied = await writer.CopyRangeAsync(new ManagedRangeReadRequest(
+                        download.SessionId, download.Capability, rangeRevision, $"range-{offset}", offset, length), output, token);
+                    copied.Should().Be(length);
+                    rangeRevision++;
+                }
+            }
+
+            await using var downloaded = File.OpenRead(downloadedPath);
+            downloaded.Length.Should().Be(original.Length);
+            (await SHA256.HashDataAsync(downloaded, token)).Should().Equal(fileHash);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Rewrapped_object_should_read_in_a_fresh_scope_with_only_the_new_key_and_unchanged_ciphertext()
+    {
+        var factory = environment.GetFactory();
+        var root = Path.Combine(FindRepositoryRoot(), ".agent", "local", "managed-storage-tests", Guid.NewGuid().ToString("N"));
+        var clock = new MutableClock(DateTimeOffset.UtcNow);
+        var settings = new ManagedTransferOptions { ChunkBytes = 64 * 1024, MaxRangeBytes = 256 * 1024 };
+        var oldKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var newKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var projectId = $"managed-key-rotation-{Guid.NewGuid():N}";
+        var chunkBytes = settings.NormalizedChunkBytes;
+        var original = RandomNumberGenerator.GetBytes(2 * chunkBytes + 31);
+        var originalHash = SHA256.HashData(original);
+        const int chunkCount = 3;
+
+        ManagedTransferService CreateTransfer(IServiceProvider services, string currentKeyId, Dictionary<string, string> keys)
+        {
+            UseBootstrapActor(services);
+            return new ManagedTransferService(
+                services.GetRequiredService<MemoryDbContext>(),
+                services.GetRequiredService<IRequestActorAccessor>(),
+                clock,
+                new FileSystemManagedObjectStore(Options.Create(new ManagedObjectStorageOptions { Enabled = true, RootPath = root })),
+                new AesGcmManagedFileKeyAuthority(Options.Create(new ManagedFileKeyAuthorityOptions
+                {
+                    CurrentKeyId = currentKeyId,
+                    Keys = keys
+                })),
+                services.GetRequiredService<IPlatformFoundationStore>(),
+                Options.Create(settings));
+        }
+
+        async Task<string[]> HashStoredChunksAsync(string storageId)
+        {
+            var objectPath = Path.Combine(root, storageId[..2], storageId);
+            var paths = Directory.GetFiles(objectPath, "*.bin").Order(StringComparer.Ordinal).ToArray();
+            paths.Should().HaveCount(chunkCount);
+
+            var hashes = new string[paths.Length];
+            for (var index = 0; index < paths.Length; index++)
+            {
+                await using var ciphertext = File.OpenRead(paths[index]);
+                hashes[index] = Convert.ToHexString(await SHA256.HashDataAsync(ciphertext)).ToLowerInvariant();
+            }
+            return hashes;
+        }
+
+        try
+        {
+            ManagedObject uploaded;
+            using (var uploadScope = factory.Services.CreateScope())
+            {
+                var writer = CreateTransfer(uploadScope.ServiceProvider, "v1", new() { ["v1"] = oldKey });
+                var upload = await writer.CreateUploadAsync(new CreateManagedUploadRequest(
+                    projectId, original.Length, "rotation-test", "create-upload"), CancellationToken.None);
+                var revision = upload.Revision;
+                for (var index = 0; index < chunkCount; index++)
+                {
+                    var offset = index * chunkBytes;
+                    var chunk = original.AsSpan(offset, Math.Min(chunkBytes, original.Length - offset)).ToArray();
+                    var result = await writer.UploadChunkAsync(new ManagedChunkWriteRequest(
+                        upload.SessionId, upload.Capability, revision, $"chunk-{index}", index, chunk,
+                        Convert.ToHexString(SHA256.HashData(chunk))), CancellationToken.None);
+                    revision = result.Revision;
+                }
+                await writer.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "complete-upload", CancellationToken.None);
+
+                var db = uploadScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+                uploaded = await db.ManagedObjects.AsNoTracking().Include(item => item.Chunks)
+                    .SingleAsync(item => item.Id == upload.Object.ObjectId);
+                uploaded.KeyId.Should().Be("v1");
+                uploaded.State.Should().Be(ManagedObjectState.Ready);
+            }
+
+            var ciphertextHashes = await HashStoredChunksAsync(uploaded.StorageId);
+            ciphertextHashes.Should().Equal(uploaded.Chunks.OrderBy(chunk => chunk.ChunkIndex).Select(chunk => chunk.CiphertextSha256));
+
+            ManagedRangeReadRequest read;
+            using (var missingKeyScope = factory.Services.CreateScope())
+            {
+                var reader = CreateTransfer(missingKeyScope.ServiceProvider, "v2", new() { ["v2"] = newKey });
+                var download = await reader.CreateDownloadAsync(new CreateManagedDownloadRequest(
+                    projectId, uploaded.Id, "rotation-test", "create-download"), CancellationToken.None);
+                read = new ManagedRangeReadRequest(
+                    download.SessionId, download.Capability, download.Revision, "range", 0, original.Length);
+                await using var rejectedOutput = new MemoryStream();
+                var fetch = () => reader.CopyRangeAsync(read, rejectedOutput, CancellationToken.None);
+                await fetch.Should().ThrowAsync<CryptographicException>()
+                    .WithMessage("Managed file Key Authority does not contain the required key version.");
+                rejectedOutput.Length.Should().Be(0);
+            }
+
+            using (var rotationScope = factory.Services.CreateScope())
+            {
+                var rotator = CreateTransfer(rotationScope.ServiceProvider, "v2", new() { ["v1"] = oldKey, ["v2"] = newKey });
+                var db = rotationScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+                var rejectedSession = await db.ManagedTransferSessions.AsNoTracking().SingleAsync(session => session.Id == read.SessionId);
+                rejectedSession.Revision.Should().Be(read.ExpectedRevision);
+                rejectedSession.UsedBytes.Should().Be(0);
+                (await db.ManagedTransferOperationRecords.AnyAsync(record =>
+                    record.SessionId == read.SessionId && record.RequestId == read.RequestId)).Should().BeFalse();
+
+                await rotator.RewrapObjectKeyAsync(uploaded.Id, CancellationToken.None);
+            }
+
+            using var recoveryScope = factory.Services.CreateScope();
+            var recoveredReader = CreateTransfer(recoveryScope.ServiceProvider, "v2", new() { ["v2"] = newKey });
+            var recoveryDb = recoveryScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var rewrapped = await recoveryDb.ManagedObjects.AsNoTracking().SingleAsync(item => item.Id == uploaded.Id);
+            rewrapped.KeyId.Should().Be("v2");
+            rewrapped.EncryptionGeneration.Should().Be(uploaded.EncryptionGeneration);
+            rewrapped.StorageId.Should().Be(uploaded.StorageId);
+            (await HashStoredChunksAsync(rewrapped.StorageId)).Should().Equal(ciphertextHashes);
+
+            await using var recoveredOutput = new MemoryStream();
+            var copied = await recoveredReader.CopyRangeAsync(read, recoveredOutput, CancellationToken.None);
+            copied.Should().Be(original.Length);
+            recoveredOutput.Length.Should().Be(original.Length);
+            recoveredOutput.Position = 0;
+            (await SHA256.HashDataAsync(recoveredOutput)).Should().Equal(originalHash);
+
+            var recoveredSession = await recoveryDb.ManagedTransferSessions.AsNoTracking().SingleAsync(session => session.Id == read.SessionId);
+            recoveredSession.Revision.Should().Be(read.ExpectedRevision + 1);
+            recoveredSession.UsedBytes.Should().Be(original.Length);
+            var receipt = await recoveryDb.ManagedTransferOperationRecords.AsNoTracking().SingleAsync(record =>
+                record.SessionId == read.SessionId && record.RequestId == read.RequestId);
+            receipt.BytesTransferred.Should().Be(original.Length);
         }
         finally
         {

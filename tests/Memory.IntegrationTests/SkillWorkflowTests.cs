@@ -143,6 +143,129 @@ public sealed class SkillWorkflowTests(ContainerTestEnvironment environment) : I
     }
 
     [DockerRequiredFact]
+    public async Task Skill_search_ranks_canonical_and_alias_tags_once_after_scope_and_policy_filters()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        UseBootstrapActor(scope.ServiceProvider);
+        var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var actors = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var actor = actors.Current;
+        var suffix = Guid.NewGuid().ToString("N")[..12];
+        var project = $"tag-scope-{suffix}";
+        var canonicalSlug = $"canonical-{suffix}";
+        var aliasSlug = $"alias-{suffix}";
+        var now = DateTimeOffset.UtcNow;
+
+        Task<SkillImportResult> PublishFixtureAsync(string name)
+            => ImportAndPublishAsync(service, $"tag-{name}-{suffix}", $"Tag ranking {name} {suffix}",
+                "Synthetic fixture skill", [], $"tag-rank-{name}-{suffix}");
+
+        var active = await PublishFixtureAsync("active");
+        var removed = await PublishFixtureAsync("removed");
+        var otherProject = await PublishFixtureAsync("other");
+        var disabled = await PublishFixtureAsync("disabled");
+        await service.UpsertBindingAsync(new(disabled.Skill.Id, SkillBindingScope.Project, project,
+            SkillBindingMode.Disabled, "*", null, $"disable-{suffix}"), CancellationToken.None);
+
+        var otherOwner = new TenantUser
+        {
+            TenantId = actor.TenantId!.Value,
+            Username = $"tag-owner-{suffix}",
+            DisplayName = "Isolated fixture owner",
+            Role = TenantUserRole.Owner,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.TenantUsers.Add(otherOwner);
+        await db.SaveChangesAsync();
+        actors.Current = actor with { UserId = otherOwner.Id, Username = otherOwner.Username };
+        var foreign = await PublishFixtureAsync("foreign");
+        actors.Current = actor;
+
+        var definition = new CanonicalTagDefinition
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = project,
+            CanonicalName = canonicalSlug,
+            NormalizedName = canonicalSlug,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        var collidingDefinition = new CanonicalTagDefinition
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = project,
+            CanonicalName = "Incident",
+            NormalizedName = "incident",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.CanonicalTagDefinitions.AddRange(definition, collidingDefinition);
+        await db.SaveChangesAsync();
+        CanonicalTagAlias Alias(string key) => new()
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            ProjectId = project,
+            DefinitionId = definition.Id,
+            Alias = key,
+            NormalizedAlias = key
+        };
+        db.CanonicalTagAliases.AddRange(Alias(aliasSlug), Alias("incident"));
+        CanonicalTagBinding Binding(SkillImportResult skill, string bindingProject, string status) => new()
+        {
+            TenantId = actor.TenantId,
+            OwnerUserId = actor.UserId,
+            DefinitionId = definition.Id,
+            ProjectId = bindingProject,
+            ResourceType = "Skill",
+            ResourceId = skill.Skill.Id.ToString("D"),
+            Status = status,
+            CreatedAt = now
+        };
+        db.CanonicalTagBindings.AddRange(Binding(active, project, "Active"), Binding(removed, project, "Removed"),
+            Binding(otherProject, project + "-other", "Active"), Binding(disabled, project, "Active"),
+            Binding(foreign, project, "Active"));
+        await db.SaveChangesAsync();
+
+        // Keep keyword and embedding contributions neutral for these fixtures. The production scoring path is unchanged.
+        Guid[] fixtureVersions = [active.Version.Id, removed.Version.Id, otherProject.Version.Id, disabled.Version.Id, foreign.Version.Id];
+        await db.SkillSearchDocuments.Where(document => fixtureVersions.Contains(document.SkillVersionId))
+            .ExecuteUpdateAsync(update => update.SetProperty(document => document.TermsJson, "[]")
+                .SetProperty(document => document.EmbeddingJson, "[]"));
+        db.ChangeTracker.Clear();
+        Task<SkillSearchForExecutionResult> RankAsync(params string[] tags) => service.SearchForExecutionAsync(new(
+            Guid.NewGuid(), null, project.ToUpperInvariant(), "neutralrepo", "neutralagent", "unmatchedgoal",
+            [], tags, [], [], [], [], new SkillSearchPolicy(TopN: 50, Threshold: 0m), $"tag-search-{Guid.NewGuid():N}"),
+            CancellationToken.None);
+
+        foreach (var result in new[] { await RankAsync(canonicalSlug), await RankAsync(aliasSlug),
+                     await RankAsync(canonicalSlug, aliasSlug, aliasSlug.ToUpperInvariant()) })
+        {
+            var matched = result.Candidates.Should().ContainSingle(candidate => candidate.SkillId == active.Skill.Id).Subject;
+            matched.Score.Should().Be(0.10m);
+            matched.MatchReasons.Should().Equal("tags", "canonical-tags");
+            foreach (var skill in new[] { removed, otherProject })
+            {
+                var unbound = result.Candidates.Should().ContainSingle(candidate => candidate.SkillId == skill.Skill.Id).Subject;
+                unbound.Score.Should().Be(0m);
+                unbound.MatchReasons.Should().NotContain("canonical-tags");
+            }
+            result.Candidates.Should().NotContain(candidate => candidate.SkillId == disabled.Skill.Id || candidate.SkillId == foreign.Skill.Id);
+        }
+
+        foreach (var term in new[] { "incident", "log" })
+        {
+            var legacy = (await RankAsync(term)).Candidates.Single(candidate => candidate.SkillId == active.Skill.Id);
+            legacy.Score.Should().Be(0.10m);
+            legacy.MatchReasons.Should().Equal("tags");
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Required_dependency_should_be_pinned_with_multi_skill_selection()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

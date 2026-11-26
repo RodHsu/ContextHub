@@ -13,6 +13,7 @@ public sealed class SkillService(
     IEmbeddingProvider embeddingProvider,
     ISkillMaterializationStore materializationStore,
     ISkillSandboxSelfTestRunner sandboxSelfTestRunner,
+    ICanonicalTagResolver canonicalTagResolver,
     TimeProvider timeProvider) : ISkillService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -625,22 +626,32 @@ public sealed class SkillService(
                 .ThenInclude(skill => skill.Bindings)
             .Where(version => versionIds.Contains(version.Id))
             .ToListAsync(cancellationToken);
-        var documentByVersion = documents.ToDictionary(document => document.SkillVersionId);
-        var ranked = new List<RankedCandidate>();
+        var eligible = new List<(SkillVersion Version, bool Explicit, SkillBindingMode BindingMode, string FilterReason)>();
         foreach (var version in versions)
         {
             var explicitCandidate = request.ExplicitSkillVersionId == version.Id || request.ExplicitSkillId == version.SkillId;
-            if (!PassesHardFilters(version, request, projectId, explicitCandidate, out var bindingMode, out var filterReason))
+            if (PassesHardFilters(version, request, projectId, explicitCandidate, out var bindingMode, out var filterReason))
             {
-                continue;
+                eligible.Add((version, explicitCandidate, bindingMode, filterReason));
             }
+        }
 
+        var requestedTags = NormalizeValues(request.Tags);
+        Dictionary<Guid, decimal> canonicalTagScores = string.IsNullOrWhiteSpace(request.ProjectId)
+            ? []
+            : await ReadCanonicalTagScoresAsync(actor, projectId, requestedTags,
+                eligible.Select(item => item.Version.SkillId).Distinct().ToArray(), cancellationToken);
+        var documentByVersion = documents.ToDictionary(document => document.SkillVersionId);
+        var ranked = new List<RankedCandidate>();
+        foreach (var (version, explicitCandidate, bindingMode, filterReason) in eligible)
+        {
             var document = documentByVersion[version.Id];
             var terms = Deserialize<string[]>(document.TermsJson);
             var keyword = SkillText.KeywordScore(queryTerms, terms);
             var semantic = degraded ? 0m : SkillText.CosineScore(queryEmbedding, Deserialize<float[]>(document.EmbeddingJson));
-            var requestedTags = NormalizeValues(request.Tags);
-            var tag = requestedTags.Length == 0 ? 0m : SkillText.KeywordScore(requestedTags, version.Skill!.Tags.Select(SkillText.NormalizeToken).ToArray());
+            var rawTag = requestedTags.Length == 0 ? 0m : SkillText.KeywordScore(requestedTags, version.Skill!.Tags.Select(SkillText.NormalizeToken).ToArray());
+            var canonicalTag = canonicalTagScores.GetValueOrDefault(version.SkillId);
+            var tag = Math.Max(rawTag, canonicalTag);
             var when = SkillText.KeywordScore(queryTerms, SkillText.Tokenize(version.Skill!.WhenToUse));
             var score = keyword * 0.45m + semantic * 0.35m + tag * 0.10m + when * 0.10m;
             if (bindingMode == SkillBindingMode.Required) score += 0.10m;
@@ -657,6 +668,7 @@ public sealed class SkillService(
             if (keyword > 0) reasons.Add("keyword");
             if (semantic > 0) reasons.Add("semantic");
             if (tag > 0) reasons.Add("tags");
+            if (canonicalTag > 0 && canonicalTag >= rawTag) reasons.Add("canonical-tags");
             if (when > 0) reasons.Add("when-to-use");
             if (bindingMode is SkillBindingMode.Required or SkillBindingMode.Auto) reasons.Add($"binding:{bindingMode}");
             if (explicitCandidate) reasons.Add("explicit-request");
@@ -723,6 +735,59 @@ public sealed class SkillService(
 
         await dbContext.SaveChangesAsync(cancellationToken);
         return await BuildSearchResultAsync(resolution, false, cancellationToken, degraded, generation);
+    }
+
+    private async Task<Dictionary<Guid, decimal>> ReadCanonicalTagScoresAsync(ContextHubRequestActor actor, string projectId,
+        string[] requestedTags, Guid[] eligibleSkillIds, CancellationToken cancellationToken)
+    {
+        if (!actor.HasUser || requestedTags.Length == 0 || eligibleSkillIds.Length == 0)
+            return [];
+
+        var keys = requestedTags.Select(CanonicalTagResolver.NormalizeTag).Where(key => key.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
+        if (keys.Length == 0)
+            return [];
+
+        var aliases = await dbContext.CanonicalTagAliases.AsNoTracking()
+            .Where(alias => alias.TenantId == actor.TenantId && alias.OwnerUserId == actor.UserId &&
+                ProjectContext.Matches(alias.ProjectId, projectId) && keys.Contains(alias.NormalizedAlias))
+            .ToArrayAsync(cancellationToken);
+        var aliasIds = aliases.Select(alias => alias.DefinitionId).Distinct().ToArray();
+        var definitions = await dbContext.CanonicalTagDefinitions.AsNoTracking()
+            .Where(definition => definition.TenantId == actor.TenantId && definition.OwnerUserId == actor.UserId &&
+                ProjectContext.Matches(definition.ProjectId, projectId) && definition.Status == CanonicalTagStatus.Active &&
+                (keys.Contains(definition.NormalizedName) || aliasIds.Contains(definition.Id)))
+            .ToArrayAsync(cancellationToken);
+        if (definitions.Length == 0)
+            return [];
+
+        var definitionIds = new HashSet<Guid>();
+        var unresolved = 0;
+        var noAuthorizedResources = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var key in keys)
+        {
+            var matches = canonicalTagResolver.Resolve(key, definitions, aliases, [], noAuthorizedResources).Candidates
+                .Where(candidate => candidate.MatchKind is "Canonical" or "Alias")
+                .Select(candidate => candidate.DefinitionId).Distinct().Take(2).ToArray();
+            if (matches.Length == 1)
+                definitionIds.Add(matches[0]);
+            else
+                unresolved++;
+        }
+        if (definitionIds.Count == 0)
+            return [];
+
+        var resourceIds = eligibleSkillIds.Select(id => id.ToString("D")).ToArray();
+        var resolvedIds = definitionIds.ToArray();
+        var bindings = await dbContext.CanonicalTagBindings.AsNoTracking()
+            .Where(binding => binding.TenantId == actor.TenantId && binding.OwnerUserId == actor.UserId &&
+                ProjectContext.Matches(binding.ProjectId, projectId) && binding.ResourceType == "Skill" && binding.Status == "Active" &&
+                resourceIds.Contains(binding.ResourceId) && resolvedIds.Contains(binding.DefinitionId))
+            .Select(binding => new { binding.ResourceId, binding.DefinitionId })
+            .ToArrayAsync(cancellationToken);
+        var termCount = definitionIds.Count + unresolved;
+        return bindings.GroupBy(binding => binding.ResourceId, StringComparer.Ordinal)
+            .ToDictionary(group => Guid.ParseExact(group.Key, "D"), group =>
+                decimal.Divide(group.Select(binding => binding.DefinitionId).Distinct().Count(), termCount));
     }
 
     public async Task<IReadOnlyList<SkillResolutionDetailResult>> ListResolutionsAsync(

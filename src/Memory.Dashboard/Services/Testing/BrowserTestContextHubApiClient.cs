@@ -2,12 +2,15 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using Memory.Application;
 using Memory.Domain;
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.WebUtilities;
 
 namespace Memory.Dashboard.Services.Testing;
 
 internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 {
     private readonly DashboardBrowserTestProfileAccessor _profileAccessor;
+    private readonly NavigationManager _navigation;
     private ProjectInformationResult? _projectInformation;
     private readonly Dictionary<string, int> _inventoryPermissionReads = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, UserPreferenceResult>> MetadataPreferenceSessions = new();
@@ -19,9 +22,10 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             "Synthetic browser regression", ["user-preference", "ToolingPreference", "custom-alpha", "custom-beta"],
             0.41m, 0.73m, MemoryStatus.Active, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch)) }));
 
-    public BrowserTestContextHubApiClient(DashboardBrowserTestProfileAccessor profileAccessor)
+    public BrowserTestContextHubApiClient(DashboardBrowserTestProfileAccessor profileAccessor, NavigationManager navigation)
     {
         _profileAccessor = profileAccessor;
+        _navigation = navigation;
     }
 
     private DashboardBrowserTestProfile Profile => _profileAccessor.Current;
@@ -2114,16 +2118,26 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         => RevokeApiTokenAsync(tokenId, cancellationToken);
 
     public Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken)
-        => Task.FromResult<IReadOnlyList<SkillSummaryResult>>([]);
+        => Task.FromResult<IReadOnlyList<SkillSummaryResult>>(UseSkillsExecutionFixture(projectId) ? [BrowserSkill] : []);
 
     public Task<AgentExecutionDashboardResult> GetAgentExecutionDashboardAsync(string projectId, CancellationToken cancellationToken)
-        => Task.FromResult(new AgentExecutionDashboardResult(projectId, Enum.GetValues<AgentExecutionStatus>().ToDictionary(x => x, _ => 0), 0, 0, 0, []));
+    {
+        var useFixture = UseSkillsExecutionFixture(projectId);
+        var counts = Enum.GetValues<AgentExecutionStatus>().ToDictionary(status => status, _ => 0);
+        if (useFixture)
+            counts[BrowserExecution.Status] = 1;
+
+        return Task.FromResult(new AgentExecutionDashboardResult(projectId, counts, 0, 0, 0,
+            useFixture ? [BrowserExecution] : []));
+    }
 
     public Task<IReadOnlyList<AgentExecutionResult>> GetAgentExecutionsAsync(AgentExecutionListRequest request, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<AgentExecutionResult>>([]);
 
     public Task<AgentExecutionResult?> GetAgentExecutionAsync(Guid executionId, CancellationToken cancellationToken)
-        => Task.FromResult<AgentExecutionResult?>(null);
+        => Task.FromResult<AgentExecutionResult?>(UseSkillsExecutionFixture() && executionId == BrowserExecution.Id
+            ? BrowserExecution
+            : null);
 
     public Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<SkillTelemetryAggregateResult>>([]);
@@ -2177,5 +2191,63 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         => throw new NotSupportedException();
 
     public Task<IReadOnlyList<SkillResolutionDetailResult>> GetSkillResolutionsAsync(string? projectId, int limit, CancellationToken cancellationToken)
-        => Task.FromResult<IReadOnlyList<SkillResolutionDetailResult>>([]);
+        => Task.FromResult<IReadOnlyList<SkillResolutionDetailResult>>(UseSkillsExecutionFixture(projectId) && limit > 0
+            ? [BrowserSkillResolution]
+            : []);
+
+    private bool UseSkillsExecutionFixture(string? projectId = null)
+        => (projectId is null || projectId == BrowserExecution.ProjectId)
+            && QueryHelpers.ParseQuery(_navigation.ToAbsoluteUri(_navigation.Uri).Query)
+                .TryGetValue("skillsExecutionFixture", out var enabled)
+            && enabled == "true";
+
+    private static readonly Guid BrowserExecutionId = Guid.Parse("483d7042-fcab-4351-94bc-142ea3435546");
+    private static readonly Guid BrowserExecutionWorkItemId = Guid.Parse("4a6e80be-8cf1-46bb-92ce-d64a82fe7c12");
+    private static readonly Guid BrowserSkillId = Guid.Parse("17fcf100-5960-4b7b-8bd3-6c735bb2a637");
+    private static readonly Guid BrowserSkillVersionId = Guid.Parse("85c86188-4dcb-4410-8b74-dca90d1f7712");
+    private const string BrowserSkillName = "Execution audit fixture skill";
+    private const string BrowserSkillVersionNumber = "1.2.3";
+    private static readonly string BrowserSkillContentHash = new('a', 64);
+    private static readonly string BrowserPackageHash = new('b', 64);
+    private static readonly DateTimeOffset BrowserAuditTime = DateTimeOffset.UnixEpoch.AddDays(20_000);
+
+    private static readonly AgentExecutionResult BrowserExecution = new(
+        BrowserExecutionId, BrowserExecutionWorkItemId, null, "ContextHub", "browser-audit-repository", "Codex",
+        AgentExecutionStatus.Completed, Priority: 50, Attempt: 1, MaxAttempts: 3,
+        ClaimedByAgentId: "browser-audit-worker", LeaseVersion: 1, LeaseExpiresAt: null,
+        FailureClass: string.Empty, StructuredReasonJson: "{}", PackageHash: BrowserPackageHash,
+        Package: new(AgentExecutionContract.Version, BrowserExecutionId, BrowserExecutionWorkItemId,
+            "ContextHub", "browser-audit-repository", "Read back the execution and its pinned skill",
+            [], [], [], [], [], "Codex", [], "browser-fixture", null),
+        CreatedAt: BrowserAuditTime, UpdatedAt: BrowserAuditTime, StartedAt: BrowserAuditTime, CompletedAt: BrowserAuditTime,
+        Events:
+        [
+            new(Guid.Parse("944b216c-5f3a-4c5c-8a00-210c0dfd6020"), AgentExecutionEventType.Completed, 1,
+                "browser-audit-worker", """{"evidence":"browser-audit-completion"}""", BrowserAuditTime)
+        ]);
+
+    private static readonly SkillSummaryResult BrowserSkill = new(
+        BrowserSkillId, "execution-audit-fixture", BrowserSkillName, "Synthetic skill for execution audit readback",
+        "Use while reading execution evidence", [], [], "MIT", [], SkillRiskLevel.Low, MetadataVersion: 1,
+        MetadataHash: new string('c', 64), DefaultVersionId: BrowserSkillVersionId, Bindings: [],
+        Versions:
+        [
+            new(BrowserSkillVersionId, BrowserSkillId, BrowserSkillVersionNumber, SkillLifecycleStatus.Published,
+                BrowserSkillContentHash, [], [], [], SkillSourceKind.LocalUpload, "browser-fixture", "fixture-1",
+                SkillTrustLevel.Unverified, SignatureVerified: false, CreatedAt: BrowserAuditTime,
+                PublishedAt: BrowserAuditTime, DeprecatedAt: null, RevokedAt: null, ArchivedAt: null)
+        ],
+        CreatedAt: BrowserAuditTime, UpdatedAt: BrowserAuditTime, ArchivedAt: null);
+
+    private static readonly SkillResolutionDetailResult BrowserSkillResolution = new(
+        Guid.Parse("244dcee5-f60c-4dd6-8f43-b9ee37eb125f"), BrowserExecution.Id, BrowserExecution.WorkItemId,
+        BrowserExecution.ProjectId, BrowserExecution.RepositoryId, BrowserExecution.AgentType, Round: 1, MaxSearchRounds: 2,
+        Status: SkillResolutionStatus.Completed, QueryHash: new string('d', 64),
+        SearchGenerationId: Guid.Parse("c4478e4a-824d-425b-9b71-557c05b7515b"),
+        Candidates:
+        [
+            new(BrowserSkillVersionId, BrowserSkillVersionNumber, BrowserSkillName, Rank: 1, Score: 0.9m, Threshold: 0.5m,
+                MatchReasons: ["fixture"], Pinned: true, Released: false, ContentHash: BrowserSkillContentHash)
+        ],
+        Events: [], CreatedAt: BrowserAuditTime, UpdatedAt: BrowserAuditTime);
 }

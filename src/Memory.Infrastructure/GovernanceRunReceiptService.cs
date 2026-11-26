@@ -510,6 +510,7 @@ public sealed class GovernanceRunReceiptService(
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(governanceRunId);
+        await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
         var requestHash = ReviewRequestIdentityHash(runId, isReReview: false);
         var initialEvents = dbContext.GovernanceRunReceipts.AsNoTracking()
             .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId &&
@@ -522,8 +523,9 @@ public sealed class GovernanceRunReceiptService(
             return null;
         }
 
+        var scopes = await GovernanceProjectScopeResolver.ReadRecordedRunScopesAsync(dbContext, actor, [runId], cancellationToken);
+        await EnsureReceiptProjectsAllowedAsync(actor, scopes[runId].ToArray(), cancellationToken);
         var projectIds = DeserializeStrings(decision.ProjectIdsJson);
-        await EnsureReceiptProjectsAllowedAsync(actor, projectIds, cancellationToken);
         var runtime = ScheduledGovernanceContract.RuntimeIdentity;
         if (!ReceiptIdentityMatches(decision, CurrentScheduledContractIdentity) ||
             !string.Equals(decision.RuntimeEvidenceVersion, ScheduledRuntimeEvidenceVersion, StringComparison.Ordinal) ||
@@ -587,6 +589,8 @@ public sealed class GovernanceRunReceiptService(
                 decision.SkillSignalCountsJson, new Dictionary<string, int>())
         };
         ValidateScheduledCountInvariant(replay);
+        if (transaction is not null)
+            await transaction.CommitAsync(cancellationToken);
         return replay;
     }
 

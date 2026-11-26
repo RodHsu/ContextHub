@@ -1736,6 +1736,7 @@ public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> op
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Id).HasColumnName("id");
             entity.Property(x => x.ManagedObjectId).HasColumnName("managed_object_id");
+            entity.Property(x => x.FileVersionId).HasColumnName("file_version_id");
             entity.Property(x => x.TenantId).HasColumnName("tenant_id");
             entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
             entity.Property(x => x.ProjectId).HasColumnName("project_id");

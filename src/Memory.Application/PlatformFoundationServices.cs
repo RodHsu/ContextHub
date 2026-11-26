@@ -129,7 +129,10 @@ public sealed class PlatformFoundationStore(
         var rules = policies.Select(x => MapRule(x, AuthorizationRuleSource.PolicyDerived))
             .Concat(grants.Select(x => MapRule(x, AuthorizationRuleSource.ExplicitGrant)))
             .ToArray();
-        return evaluator.Evaluate(new EffectiveRightsRequest(project, principalId, rights, edges, rules, revisions, resourceType, resourceId));
+        return evaluator.Evaluate(new EffectiveRightsRequest(project, principalId, rights, edges, rules, revisions, resourceType, resourceId)
+        {
+            AuthorityScope = EffectiveRightsAuthorityScope.FromActor(actor)
+        });
     }
 
     public async Task<CanonicalTagSuggestion> SuggestTagAsync(CanonicalTagSuggestionRequest request, CancellationToken cancellationToken)
@@ -219,9 +222,12 @@ public sealed class PlatformFoundationStore(
     }
 
     private static IQueryable<TEntity> Scope<TEntity>(IQueryable<TEntity> query, ContextHubRequestActor actor) where TEntity : class
-        => !actor.HasUser ? query : actor.IsServiceActor
-            ? query.Where(x => EF.Property<Guid?>(x, "TenantId") == actor.TenantId)
-            : query.Where(x => EF.Property<Guid?>(x, "TenantId") == actor.TenantId && EF.Property<Guid?>(x, "OwnerUserId") == actor.UserId);
+    {
+        var scope = EffectiveRightsAuthorityScope.FromActor(actor);
+        return scope.TenantId is null ? query : scope.OwnerUserId is null
+            ? query.Where(x => EF.Property<Guid?>(x, "TenantId") == scope.TenantId)
+            : query.Where(x => EF.Property<Guid?>(x, "TenantId") == scope.TenantId && EF.Property<Guid?>(x, "OwnerUserId") == scope.OwnerUserId);
+    }
 
     private static readonly System.Linq.Expressions.Expression<Func<ProjectHierarchy, AuthorizationTopologyEdge>> MapEdgeExpression =
         x => new AuthorizationTopologyEdge(x.ParentProjectId, x.ChildProjectId, x.Dimension, x.AuthorizationInheritable, x.Revision);
@@ -312,6 +318,12 @@ public sealed record AuthorizationRule(
 
 public sealed record SecurityRevisionVector(long Topology, long Policy, long Grant, long Tag);
 
+internal readonly record struct EffectiveRightsAuthorityScope(Guid? TenantId, Guid? OwnerUserId)
+{
+    internal static EffectiveRightsAuthorityScope FromActor(ContextHubRequestActor actor)
+        => actor.HasUser ? new(actor.TenantId, actor.IsServiceActor ? null : actor.UserId) : default;
+}
+
 public sealed record EffectiveRightsRequest(
     string ProjectId,
     string PrincipalId,
@@ -320,7 +332,10 @@ public sealed record EffectiveRightsRequest(
     IReadOnlyList<AuthorizationRule> Rules,
     SecurityRevisionVector Revisions,
     string? ResourceType = null,
-    string? ResourceId = null);
+    string? ResourceId = null)
+{
+    internal EffectiveRightsAuthorityScope AuthorityScope { get; init; }
+}
 
 public sealed record EffectiveRightDecision(
     string Right,
@@ -344,19 +359,19 @@ public interface IEffectiveRightsEvaluator
 
 public sealed class EffectiveRightsEvaluator : IEffectiveRightsEvaluator
 {
-    private readonly ConcurrentDictionary<string, EffectiveRightsResult> cache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<(EffectiveRightsAuthorityScope Authority, string Request), EffectiveRightsResult> cache = new();
 
     public EffectiveRightsResult Evaluate(EffectiveRightsRequest request)
     {
         Validate(request);
-        var key = BuildCacheKey(request);
+        var key = (request.AuthorityScope, BuildCacheKey(request));
         return cache.GetOrAdd(key, _ => EvaluateCore(request));
     }
 
     public void InvalidateProject(string projectId)
     {
         var prefix = $"{Normalize(projectId)}\n";
-        foreach (var key in cache.Keys.Where(x => x.StartsWith(prefix, StringComparison.Ordinal)))
+        foreach (var key in cache.Keys.Where(x => x.Request.StartsWith(prefix, StringComparison.Ordinal)))
         {
             cache.TryRemove(key, out _);
         }

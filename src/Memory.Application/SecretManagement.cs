@@ -251,15 +251,17 @@ public sealed class SecretManagementService(
             await transaction.CommitAsync(cancellationToken);
         }
 
-        var plaintext = Decrypt(version, secret.Id);
+        byte[]? plaintext = null;
         try
         {
+            plaintext = Decrypt(version, secret.Id);
             var context = new SecretUseContext(secret.Id, version.Id, lease.Id, secret.ProjectId, lease.Purpose, lease.Target, lease.ExecutionId);
             await consumer.ExecuteAsync(context, plaintext, cancellationToken);
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(plaintext);
+            if (plaintext is not null)
+                CryptographicOperations.ZeroMemory(plaintext);
             await ReleaseActiveUseAsync(lease.Id, actor, cancellationToken);
         }
         return new SecretUseResult(lease.Revision, lease.UsedCount, Math.Max(0, lease.MaxUses - lease.UsedCount), lease.State);

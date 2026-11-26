@@ -26,6 +26,8 @@ The REST-only binary path is rooted at `/api/transfers`:
 
 Capabilities are random bearer values; only SHA-256 hashes are persisted. The stored binding includes tenant, owner/actor, project, optional agent/execution, logical object, operation, purpose, expiry, revision, encryption generation, byte limit, sustained byte-rate limit, and concurrency limit. A bounded first-chunk/range burst is allowed, after which the persisted session rate is enforced. Database advisory locking serializes each session. Foreign, expired, revoked, stale-revision, over-limit, and mutated-replay requests fail closed.
 
+An exact retry of a committed upload chunk or completion uses the original request ID and expected revision. It returns the committed operation's revision and byte count with `replayed=true`, including after upload completion, while the original capability is still authorized and unexpired. A new upload operation requires an active session and the current revision. Download range request IDs remain single-use.
+
 ### Logical FileVersion download initialization
 
 Trusted transport clients can initialize a download without receiving or supplying an internal object reference:
@@ -40,7 +42,7 @@ The response contains `fileId`, `fileVersionId`, `sessionId`, `capabilityId`, th
 
 Initial download creation retains the existing semantics: its request identity is recorded on a new session, but repeating initialization creates a different session and bearer. A lost initialization response is an unknown outcome; clients must not automatically replay it or claim recovery of the original bearer. This endpoint does not implement session status/recovery or terminal integrity receipts.
 
-Initialization reuses the current security checks; it does not introduce an atomic create-versus-delete/security-change lock. Subsequent range reads retain existing actor/project, capability, revision, expiry, generation and rate checks, but do not re-evaluate the current FileVersion classification, deletion state or effective download grant. Immediate policy revocation during an active session and production acceptance remain separate work; this endpoint must not be presented as proving them. Metadata hash/size reader policy and normalized/redacted access-audit policy remain separate from this transport composition.
+Migration `062_managed_download_file_version_pin.sql` saves the validated FileVersion ID on new download sessions. Before each range sends bytes, the server rechecks the object, exact version, file lifecycle, classification, rescan state, purpose and effective download right, in addition to the existing capability checks. A missing or inaccessible pin is rejected. Earlier sessions without a pin still work for unlinked managed objects. Once an object has any linked FileVersion, an unpinned session must be replaced with an authorized version-pinned session. The check applies to new range requests. It does not interrupt a stream after bytes have started or establish Production acceptance.
 
 ## Lifecycle and recovery
 

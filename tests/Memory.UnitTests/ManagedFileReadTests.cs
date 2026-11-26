@@ -15,7 +15,7 @@ public sealed class ManagedFileReadTests
     [Fact]
     public async Task Denied_prefix_does_not_truncate_visible_paging_or_leak_into_has_more()
     {
-        var setup = new Fixture();
+        var setup = new Fixture(timeProvider: new DeadlineClock());
         for (var i = 0; i < 351; i++) setup.AddFile(allowed: false);
         var expected = Enumerable.Range(0, 4).Select(_ => setup.AddFile()).ToArray();
         var first = await setup.Service.ListAsync("ContextHub", 2, 0, CancellationToken.None);

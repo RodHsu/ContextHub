@@ -205,6 +205,7 @@ public sealed class ManagedTransferSession
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid ManagedObjectId { get; set; }
+    public Guid? FileVersionId { get; set; }
     public Guid? TenantId { get; set; }
     public Guid? OwnerUserId { get; set; }
     public string ProjectId { get; set; } = string.Empty;
