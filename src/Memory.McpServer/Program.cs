@@ -2145,6 +2145,14 @@ transfers.MapPut("/{sessionId:guid}/chunks/{chunkIndex:int}", async (
         buffer = [];
         return Results.Ok(result);
     }
+    catch (ManagedObjectWriteUnavailableException)
+    {
+        httpRequest.HttpContext.Response.Headers.CacheControl = "no-store";
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Managed object storage is unavailable for writing.",
+            extensions: new Dictionary<string, object?> { ["code"] = "StorageUnavailable" });
+    }
     finally
     {
         if (buffer.Length > 0) CryptographicOperations.ZeroMemory(buffer);

@@ -127,21 +127,33 @@ public sealed class FileSystemManagedObjectStore(IOptions<ManagedObjectStorageOp
 {
     public async Task PutChunkAsync(string storageId, int chunkIndex, ReadOnlyMemory<byte> ciphertext, CancellationToken cancellationToken)
     {
-        var path = ResolveChunkPath(storageId, chunkIndex, createDirectory: true);
-        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".pending";
+        cancellationToken.ThrowIfCancellationRequested();
+        string? temporary = null;
         try
         {
-            await using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
+            var path = ResolveChunkPath(storageId, chunkIndex, createDirectory: true);
+            var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".pending";
+            await using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
+                temporary = temporaryPath;
                 await stream.WriteAsync(ciphertext, cancellationToken);
                 await stream.FlushAsync(cancellationToken);
             }
-            File.Move(temporary, path, overwrite: false);
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporaryPath, path, overwrite: false);
+            temporary = null;
         }
-        catch
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException
+            or NotSupportedException or InvalidOperationException or System.Security.SecurityException)
         {
-            TryDelete(temporary);
-            throw new IOException("Managed object storage operation failed.");
+            throw new ManagedObjectWriteUnavailableException();
+        }
+        finally
+        {
+            if (temporary is not null)
+            {
+                TryDelete(temporary);
+            }
         }
     }
 
