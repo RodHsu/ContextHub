@@ -144,7 +144,7 @@ public sealed class FileSystemManagedObjectStore(IOptions<ManagedObjectStorageOp
             temporary = null;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException
-            or NotSupportedException or InvalidOperationException or System.Security.SecurityException)
+            or NotSupportedException or System.Security.SecurityException)
         {
             throw new ManagedObjectWriteUnavailableException();
         }
