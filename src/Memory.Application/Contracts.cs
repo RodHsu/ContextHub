@@ -2194,6 +2194,10 @@ public interface IApplicationDbContext
     Task<IApplicationTransaction> BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken = default);
     void ClearTrackedChanges();
     Task AcquireTransactionLockAsync(string lockKey, CancellationToken cancellationToken = default);
+    Task<EffectiveRightsAuthoritySnapshot> ReadEffectiveRightsAuthorityAsync(
+        string projectId, string principalId, IReadOnlyList<string> rights, Guid? tenantId, Guid? ownerUserId,
+        CancellationToken cancellationToken)
+        => throw new NotSupportedException("A consistent effective rights authority read is required.");
     Task<bool> LockMemoryEvidenceAsync(Guid memoryId, Guid tenantId, Guid ownerUserId, string projectId,
         CancellationToken cancellationToken) => throw new NotSupportedException("Transactional memory evidence locking is required.");
     Task<bool> LockAdjudicationInsightEvidenceAsync(Guid insightId, Guid linkedInsightId, Guid tenantId, Guid ownerUserId,
