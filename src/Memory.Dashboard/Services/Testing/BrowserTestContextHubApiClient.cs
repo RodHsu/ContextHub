@@ -326,10 +326,48 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         return Task.FromResult<IReadOnlyList<SecretSummary>>(Profile == DashboardBrowserTestProfile.Empty
             ? []
             : [
-                new SecretSummary(Guid.Parse("bbbbbbbb-1000-0000-0000-000000000001"), projectId, "deployment-credential", SecretKind.ApiToken, SecretState.Active, 4, 12, DateTimeOffset.UtcNow.AddMinutes(-30)),
+                new SecretSummary(ManagementFixtureSecretId, projectId, "deployment-credential", SecretKind.ApiToken, SecretState.Active, 4, 12, DateTimeOffset.UtcNow.AddMinutes(-30)),
                 new SecretSummary(Guid.Parse("bbbbbbbb-1000-0000-0000-000000000002"), projectId, "ssh-signing-authority", SecretKind.SshCertificateAuthorityReference, SecretState.Compromised, 2, 9, DateTimeOffset.UtcNow.AddHours(-3))
             ]);
     }
+
+    private static readonly Guid ManagementFixtureSecretId = Guid.Parse("bbbbbbbb-1000-0000-0000-000000000001");
+    private const int ManagementFixtureRowCount = 26;
+
+    public Task<SecretManagementExpiry?> GetSecretManagementExpiryAsync(string projectId, Guid secretId, CancellationToken cancellationToken)
+        => Task.FromResult<SecretManagementExpiry?>(UseSecretManagementFixture(projectId, secretId)
+            ? new(secretId, 12, 4, SecretVersionState.Active, DateTimeOffset.UtcNow.AddDays(30))
+            : null);
+
+    public Task<SecretManagementLeasePage?> GetSecretManagementLeasesAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken cancellationToken)
+    {
+        if (!UseSecretManagementFixture(projectId, secretId)) return Task.FromResult<SecretManagementLeasePage?>(null);
+        var expires = DateTimeOffset.UtcNow.AddHours(2);
+        var rows = Enumerable.Range(0, ManagementFixtureRowCount).Skip(offset).Take(limit)
+            .Select(index => index == ManagementFixtureRowCount - 1
+                ? new SecretManagementLeaseEntry(SecretLeaseKind.Use, SecretLeaseState.Revoked, expires, false, 3, 0, 0)
+                : new SecretManagementLeaseEntry(SecretLeaseKind.Use, SecretLeaseState.Active, expires, false, 1, 2, 0))
+            .ToArray();
+        return Task.FromResult<SecretManagementLeasePage?>(new(secretId, rows, limit, offset, offset + rows.Length < ManagementFixtureRowCount));
+    }
+
+    public Task<SecretManagementHistoryPage?> GetSecretManagementHistoryAsync(string projectId, Guid secretId, int limit, int offset, CancellationToken cancellationToken)
+    {
+        if (!UseSecretManagementFixture(projectId, secretId)) return Task.FromResult<SecretManagementHistoryPage?>(null);
+        var now = DateTimeOffset.UtcNow;
+        var rows = Enumerable.Range(0, ManagementFixtureRowCount).Skip(offset).Take(limit)
+            .Select(index => new SecretManagementHistoryEntry(
+                index == ManagementFixtureRowCount - 1 ? SecretAccessOperation.AddVersion : SecretAccessOperation.Use, now.AddMinutes(-index)))
+            .ToArray();
+        return Task.FromResult<SecretManagementHistoryPage?>(new(secretId, rows, limit, offset, offset + rows.Length < ManagementFixtureRowCount));
+    }
+
+    private bool UseSecretManagementFixture(string projectId, Guid secretId)
+        => secretId == ManagementFixtureSecretId
+            && ProjectContext.Matches(projectId, ProjectContext.DefaultProjectId)
+            && QueryHelpers.ParseQuery(_navigation.ToAbsoluteUri(_navigation.Uri).Query)
+                .TryGetValue("secretManagementFixture", out var enabled)
+            && enabled == "true";
 
     private void CheckInventoryPermission(string projectId)
     {
