@@ -3,7 +3,7 @@
 
 <PageTitle>Context Hub | Agent Executions</PageTitle>
 
-<PageViewport Title="Agent Executions" Subtitle="權威執行佇列、lease、retry、checkpoint 與 Skills runtime 狀態；不等同 Work Item 商務生命週期。" BodyClass="page-viewport-body">
+<PageViewport Title="Agent Executions" Subtitle="權威執行佇列、lease、retry、checkpoint 與 Skills runtime 狀態；不等同 Work Item 商務生命週期。" BodyClass="page-viewport-body agent-executions-page-body">
     <Actions>
         <div class="page-actions-secondary"><label>ProjectId <input @bind="_projectId" /></label></div>
         <div class="page-actions-primary"><button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>

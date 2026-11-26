@@ -401,6 +401,10 @@ textarea {
     min-height: 0;
 }
 
+.agent-executions-page-body {
+    grid-auto-rows: max-content;
+}
+
 .home-page-body {
     grid-template-rows: auto auto minmax(0, 1fr);
 }
