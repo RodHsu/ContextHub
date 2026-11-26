@@ -242,6 +242,7 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
         var reliability = provider.GetRequiredService<IScheduledGovernanceReliabilityService>();
         var projectId = $"ReceiptGrant-{Guid.NewGuid():N}";
         var restricted = new ScheduledGovernanceReviewRequest($"receipt-grant-{Guid.NewGuid():N}");
+        var expanded = new ScheduledGovernanceReviewRequest($"receipt-expanded-{Guid.NewGuid():N}");
         var shared = new ScheduledGovernanceReviewRequest($"receipt-shared-{Guid.NewGuid():N}");
         var grant = new TenantProjectGrant
         {
@@ -257,8 +258,13 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             var service = CreateService(provider, async (request, token) =>
             {
                 var runId = request.GovernanceRunId!;
-                var review = CreateGenericReview(runId, CurrentScheduledIdentity(), $"kg:snapshot:{runId}", durableCount: 1);
-                if (runId == restricted.GovernanceRunId)
+                var snapshot = $"kg:snapshot:{runId}:{request.IsReReview}";
+                var review = CreateGenericReview(runId, CurrentScheduledIdentity(), snapshot, durableCount: 1) with
+                {
+                    IsReReview = request.IsReReview
+                };
+                if (runId == restricted.GovernanceRunId ||
+                    (runId == expanded.GovernanceRunId && request.IsReReview))
                 {
                     review = review with
                     {
@@ -273,11 +279,17 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
                 return review;
             }, reliability);
             var first = await service.ReviewAsync(restricted, default);
+            var initial = await service.ReviewAsync(expanded, default);
+            var reReviewed = await service.ReviewAsync(expanded with { IsReReview = true }, default);
+            reReviewed.ResolvedProjectIds.Should().Contain(projectId);
+            initial.ResolvedProjectIds.Should().NotContain(projectId);
             await service.ReviewAsync(shared, default);
 
             grant.CanWrite = false;
             await db.SaveChangesAsync();
             (await service.ReviewAsync(restricted, default)).Should().BeEquivalentTo(first);
+            (await receipts.GetScheduledInitialReviewReplayAsync(expanded.GovernanceRunId, default))
+                .Should().BeEquivalentTo(initial);
             var authorized = await service.GetReceiptAsync(restricted.GovernanceRunId, default);
             authorized.Reliability!.Runs.Should().Contain(run => run.GovernanceRunId == restricted.GovernanceRunId);
 
@@ -293,6 +305,8 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             await get.Should().ThrowAsync<UnauthorizedAccessException>();
             await replay.Should().ThrowAsync<UnauthorizedAccessException>();
             await reReview.Should().ThrowAsync<UnauthorizedAccessException>();
+            Func<Task> replayExpanded = () => receipts.GetScheduledInitialReviewReplayAsync(expanded.GovernanceRunId, default);
+            await replayExpanded.Should().ThrowAsync<UnauthorizedAccessException>();
             (await runEvents.CountAsync()).Should().Be(receiptCount);
             var page = await receipts.ListAsync(new(), default);
             page.Should().NotContain(receipt => receipt.GovernanceRunId == restricted.GovernanceRunId);
@@ -304,6 +318,8 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             grant.CanRead = true;
             await db.SaveChangesAsync();
             (await service.GetReceiptAsync(restricted.GovernanceRunId, default)).ReceiptId.Should().Be(authorized.ReceiptId);
+            (await receipts.GetScheduledInitialReviewReplayAsync(expanded.GovernanceRunId, default))
+                .Should().BeEquivalentTo(initial);
             (await service.GetReceiptAsync(shared.GovernanceRunId, default)).Reliability!.Runs
                 .Should().Contain(run => run.GovernanceRunId == restricted.GovernanceRunId);
         }
