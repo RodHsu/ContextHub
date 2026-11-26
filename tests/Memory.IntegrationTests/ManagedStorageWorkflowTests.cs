@@ -73,7 +73,28 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
             await foreignTenant.Should().ThrowAsync<UnauthorizedAccessException>();
             actorAccessor.Current = actor;
 
-            await service.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "complete", CancellationToken.None);
+            var completed = await service.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "complete", CancellationToken.None);
+            var replayedCompletion = await service.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "complete", CancellationToken.None);
+            replayedCompletion.Should().Be(completed with { Replayed = true });
+
+            var firstChunk = original.AsSpan(0, transferSettings.NormalizedChunkBytes).ToArray();
+            var firstHash = Convert.ToHexString(SHA256.HashData(firstChunk)).ToLowerInvariant();
+            var firstRequest = new ManagedChunkWriteRequest(
+                upload.SessionId, upload.Capability, upload.Revision, "chunk-0", 0, firstChunk, firstHash);
+            var replayedChunk = await service.UploadChunkAsync(firstRequest, CancellationToken.None);
+            replayedChunk.Should().Be(new ManagedTransferMutationResult(
+                upload.SessionId, upload.Revision + 1, transferSettings.NormalizedChunkBytes, true));
+
+            var alteredChunk = original.AsSpan(0, transferSettings.NormalizedChunkBytes).ToArray();
+            alteredChunk[0] ^= 1;
+            var alteredHash = Convert.ToHexString(SHA256.HashData(alteredChunk)).ToLowerInvariant();
+            var alteredReplay = () => service.UploadChunkAsync(
+                firstRequest with { Plaintext = alteredChunk, PlaintextSha256 = alteredHash }, CancellationToken.None);
+            await alteredReplay.Should().ThrowAsync<UnauthorizedAccessException>();
+            var newCompletion = () => service.CompleteUploadAsync(
+                upload.SessionId, upload.Capability, completed.Revision, "new-completion", CancellationToken.None);
+            await newCompletion.Should().ThrowAsync<UnauthorizedAccessException>();
+            (await db.ManagedTransferOperationRecords.CountAsync(x => x.SessionId == upload.SessionId)).Should().Be(5);
             var persisted = await db.ManagedObjects.Include(x => x.Chunks).SingleAsync(x => x.Id == upload.Object.ObjectId);
             persisted.State.Should().Be(ManagedObjectState.Ready);
             persisted.Chunks.Select(x => Convert.ToHexString(x.Nonce)).Should().OnlyHaveUniqueItems();

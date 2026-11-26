@@ -26,6 +26,8 @@ The REST-only binary path is rooted at `/api/transfers`:
 
 Capabilities are random bearer values; only SHA-256 hashes are persisted. The stored binding includes tenant, owner/actor, project, optional agent/execution, logical object, operation, purpose, expiry, revision, encryption generation, byte limit, sustained byte-rate limit, and concurrency limit. A bounded first-chunk/range burst is allowed, after which the persisted session rate is enforced. Database advisory locking serializes each session. Foreign, expired, revoked, stale-revision, over-limit, and mutated-replay requests fail closed.
 
+An exact retry of a committed upload chunk or completion uses the original request ID and expected revision. It returns the committed operation's revision and byte count with `replayed=true`, including after upload completion, while the original capability is still authorized and unexpired. A new upload operation requires an active session and the current revision. Download range request IDs remain single-use.
+
 ### Logical FileVersion download initialization
 
 Trusted transport clients can initialize a download without receiving or supplying an internal object reference:
