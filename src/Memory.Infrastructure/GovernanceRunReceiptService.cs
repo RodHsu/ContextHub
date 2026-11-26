@@ -499,7 +499,7 @@ public sealed class GovernanceRunReceiptService(
         var receipt = await GetAsync(governanceRunId, cancellationToken);
         var lineage = receipt is null
             ? null
-            : await GetScheduledLineageAsync(governanceRunId, expectedContractIdentity, cancellationToken);
+            : await GetScheduledLineageCoreAsync(governanceRunId, expectedContractIdentity, cancellationToken, scopeAlreadyChecked: true);
         await transaction.CommitAsync(cancellationToken);
         return receipt is not null && lineage is not null ? (receipt, lineage) : null;
     }
@@ -590,10 +590,17 @@ public sealed class GovernanceRunReceiptService(
         return replay;
     }
 
-    public async Task<GovernanceRunLineageResult> GetScheduledLineageAsync(
+    public Task<GovernanceRunLineageResult> GetScheduledLineageAsync(
         string governanceRunId,
         GovernanceReceiptContractIdentity expectedContractIdentity,
         CancellationToken cancellationToken)
+        => GetScheduledLineageCoreAsync(governanceRunId, expectedContractIdentity, cancellationToken);
+
+    private async Task<GovernanceRunLineageResult> GetScheduledLineageCoreAsync(
+        string governanceRunId,
+        GovernanceReceiptContractIdentity expectedContractIdentity,
+        CancellationToken cancellationToken,
+        bool scopeAlreadyChecked = false)
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(governanceRunId);
@@ -615,6 +622,13 @@ public sealed class GovernanceRunReceiptService(
                 ContractMatches: false,
                 Status: "NotReceived",
                 Reason: "No receipt event exists for this governance run and actor.");
+        }
+
+        if (!scopeAlreadyChecked)
+        {
+            var projects = await GovernanceProjectScopeResolver.ReadRecordedRunScopesAsync(
+                dbContext, actor, [runId], cancellationToken);
+            await EnsureReceiptProjectsAllowedAsync(actor, projects[runId].ToArray(), cancellationToken);
         }
 
         if (events.Length > 1_000)

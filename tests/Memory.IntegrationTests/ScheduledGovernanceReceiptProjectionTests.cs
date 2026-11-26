@@ -286,9 +286,14 @@ public sealed class ScheduledGovernanceReceiptProjectionTests(ContainerTestEnvir
             Func<Task> read = () => service.GetReceiptAsync(restricted.GovernanceRunId, default);
             Func<Task> get = () => receipts.GetAsync(restricted.GovernanceRunId, default);
             Func<Task> replay = () => service.ReviewAsync(restricted, default);
+            Func<Task> reReview = () => service.ReviewAsync(restricted with { IsReReview = true }, default);
+            var runEvents = db.GovernanceRunReceipts.Where(row => row.GovernanceRunId == restricted.GovernanceRunId);
+            var receiptCount = await runEvents.CountAsync();
             await read.Should().ThrowAsync<UnauthorizedAccessException>();
             await get.Should().ThrowAsync<UnauthorizedAccessException>();
             await replay.Should().ThrowAsync<UnauthorizedAccessException>();
+            await reReview.Should().ThrowAsync<UnauthorizedAccessException>();
+            (await runEvents.CountAsync()).Should().Be(receiptCount);
             var page = await receipts.ListAsync(new(), default);
             page.Should().NotContain(receipt => receipt.GovernanceRunId == restricted.GovernanceRunId);
             page.Should().Contain(receipt => receipt.GovernanceRunId == shared.GovernanceRunId);
