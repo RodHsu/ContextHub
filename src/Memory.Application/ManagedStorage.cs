@@ -193,6 +193,7 @@ public sealed class ManagedTransferService(
 
         var now = clock.UtcNow;
         var (session, token) = CreateSession(managedObject, actor, request.Purpose, request.AgentId, request.ExecutionId, ManagedTransferOperation.Download, managedObject.PlaintextLength, now, settings);
+        session.FileVersionId = request.FileVersionId;
         session.Operations.Add(new ManagedTransferOperationRecord
         {
             RequestId = request.IdempotencyKey,
@@ -322,6 +323,10 @@ public sealed class ManagedTransferService(
         {
             await dbContext.AcquireTransactionLockAsync($"managed-transfer:{request.SessionId:D}", transactionToken);
             var session = await LoadSessionAsync(request.SessionId, request.Capability, ManagedTransferOperation.Download, request.ExpectedRevision, transactionToken);
+            var current = await ManagedDownloadAuthorization.AuthorizeAsync(dbContext, foundation, actorAccessor.Current,
+                session.ProjectId, session.ManagedObjectId, session.FileVersionId, session.Purpose, transactionToken);
+            if (current.EncryptionGeneration != session.EncryptionGeneration)
+                throw new UnauthorizedAccessException("Transfer capability revision is stale.");
             var managedObject = session.ManagedObject!;
             if (request.Offset < 0 || request.Length <= 0 || request.Length > options.Value.NormalizedMaxRangeBytes || request.Offset > managedObject.PlaintextLength || request.Length > managedObject.PlaintextLength - request.Offset)
             {
@@ -468,7 +473,6 @@ public sealed class ManagedTransferService(
         return (new ManagedTransferSession
         {
             ManagedObjectId = managedObject.Id,
-            ManagedObject = managedObject,
             TenantId = actor.TenantId,
             OwnerUserId = actor.UserId,
             ProjectId = managedObject.ProjectId,

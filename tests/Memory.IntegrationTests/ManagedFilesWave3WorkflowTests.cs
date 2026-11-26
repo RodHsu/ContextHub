@@ -109,6 +109,8 @@ public sealed class ManagedFilesWave3WorkflowTests(ContainerTestEnvironment envi
         try
         {
             var firstObjectId = await UploadAsync(transfer, projectId, payload, "first");
+            var unpinnedSession = await transfer.CreateDownloadAsync(
+                new(projectId, firstObjectId, "review", "before-file-registration"), CancellationToken.None);
             var first = await files.CreateAsync(new(firstObjectId, "security.txt", "text/plain", "test", "create-1", projectId, ManagedFileCreateIntent.CreateNewFile), CancellationToken.None);
             first.Outcome.Should().Be(ManagedFileCreateOutcome.Created);
             first.Classification.Should().Be(FileClassification.Restricted, "new files must fail closed until scanned");
@@ -141,11 +143,57 @@ public sealed class ManagedFilesWave3WorkflowTests(ContainerTestEnvironment envi
             assessed.Classification.Should().Be(FileClassification.Sensitive);
             assessed.Lifecycle.Should().Be(FileVersionLifecycle.Ready);
 
+            var foundation = scope.ServiceProvider.GetRequiredService<IPlatformFoundationStore>();
+            var ruleRequest = new AuthorizationRuleUpsertRequest(Guid.NewGuid(), projectId, actor.UserId!.Value.ToString("D"),
+                "download", AuthorizationEffect.Allow, "integration-test", 0, "File", first.FileId!.Value.ToString("D"));
+            await foundation.UpsertExplicitGrantAsync(ruleRequest, CancellationToken.None);
+            var pinnedSession = await transfer.CreateDownloadAsync(new(projectId, firstObjectId, "review",
+                "before-policy-change", FileVersionId: first.FileVersionId), CancellationToken.None);
+            await foundation.UpsertExplicitGrantAsync(ruleRequest with
+            {
+                Effect = AuthorizationEffect.Deny,
+                ExpectedRevision = 1
+            }, CancellationToken.None);
+            await using var deniedContent = new MemoryStream();
+            var revokedGrant = () => transfer.CopyRangeAsync(new(pinnedSession.SessionId, pinnedSession.Capability,
+                pinnedSession.Revision, "revoked-grant", 0, payload.Length), deniedContent, CancellationToken.None);
+            await revokedGrant.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*effective rights*");
+            deniedContent.Length.Should().Be(0);
+            await foundation.UpsertExplicitGrantAsync(ruleRequest with
+            {
+                ExpectedRevision = 2
+            }, CancellationToken.None);
+            var unpinnedRead = () => transfer.CopyRangeAsync(new(unpinnedSession.SessionId, unpinnedSession.Capability,
+                unpinnedSession.Revision, "no-longer-unlinked", 0, payload.Length), deniedContent, CancellationToken.None);
+            await unpinnedRead.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*FileVersion*");
+            deniedContent.Length.Should().Be(0);
+
+            var olderPin = await transfer.CreateDownloadAsync(new(projectId, firstObjectId, "review",
+                "still-authorized-old-version", FileVersionId: first.FileVersionId), CancellationToken.None);
+            await using var allowedContent = new MemoryStream();
+            await transfer.CopyRangeAsync(new(olderPin.SessionId, olderPin.Capability, olderPin.Revision,
+                "older-version-range", 0, payload.Length), allowedContent, CancellationToken.None);
+            allowedContent.ToArray().Should().Equal(payload);
+
+            await files.ApplySecurityAssessmentAsync(alias.FileVersionId!.Value, sensitive, CancellationToken.None);
             var representation = await files.AddRepresentationAsync(new(first.FileVersionId.Value, FileRepresentationKind.SearchProjection, Hash("projection"), FileClassification.Sensitive), CancellationToken.None);
             representation.InvalidatedAt.Should().BeNull();
             var quarantined = await files.ApplySecurityAssessmentAsync(first.FileVersionId.Value, scanner.Scan("EICAR-STANDARD-ANTIVIRUS-TEST-FILE"u8, "text/plain", "scanner-2", "policy-2"), CancellationToken.None);
             quarantined.Classification.Should().Be(FileClassification.Quarantined);
             quarantined.SearchProjectionAllowed.Should().BeFalse();
+            using var rangeScope = environment.GetFactory().Services.CreateScope();
+            UseBootstrapActor(rangeScope.ServiceProvider);
+            var rangeDb = rangeScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var rangeTransfer = CreateTransfer(rangeScope.ServiceProvider, rangeDb, root);
+            var quarantinedRead = () => rangeTransfer.CopyRangeAsync(new(pinnedSession.SessionId, pinnedSession.Capability,
+                pinnedSession.Revision, "after-quarantine", 0, payload.Length), deniedContent, CancellationToken.None);
+            await quarantinedRead.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*successfully scanned*");
+            deniedContent.Length.Should().Be(0);
+            var unchanged = await rangeDb.ManagedTransferSessions.AsNoTracking()
+                .SingleAsync(session => session.Id == pinnedSession.SessionId);
+            unchanged.Revision.Should().Be(pinnedSession.Revision);
+            unchanged.UsedBytes.Should().Be(0);
+            (await rangeDb.ManagedTransferOperationRecords.CountAsync(row => row.SessionId == pinnedSession.SessionId)).Should().Be(1);
             (await db.FileRepresentations.SingleAsync(x => x.Id == representation.Id)).InvalidatedAt.Should().NotBeNull();
             var projection = await db.FileSearchProjections.SingleAsync(x => x.FileVersionId == first.FileVersionId);
             projection.ContentSearchEnabled.Should().BeFalse();

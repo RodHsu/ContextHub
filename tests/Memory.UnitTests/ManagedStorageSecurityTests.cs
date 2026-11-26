@@ -324,8 +324,8 @@ public sealed class ManagedStorageSecurityTests
         fixture.Operations[1].RequestId.Should().Be("consumed-range");
     }
 
-    // These seeded current-revision records isolate identity lookup, not historical commit recovery.
-    // They do not prove a real post-commit retry can pass the unchanged revision/state gates.
+    // Seed a receipt to exercise lookup and guards. The integration suite establishes
+    // commit and replay with persistent state.
     [Theory]
     [InlineData(false, "lookup-id")]
     [InlineData(false, " \tlookup-id\r\n ")]
@@ -338,7 +338,7 @@ public sealed class ManagedStorageSecurityTests
 
         var result = await fixture.UploadAsync(complete, requestId);
 
-        result.Should().Be(new ManagedTransferMutationResult(fixture.Session.Id, 1, original.BytesTransferred, true));
+        result.Should().Be(new ManagedTransferMutationResult(fixture.Session.Id, 2, original.BytesTransferred, true));
         AssertUploadLookupHasNoWrites(fixture, original);
         fixture.Proxy.OperationReads.Should().Be(1);
     }
@@ -363,33 +363,36 @@ public sealed class ManagedStorageSecurityTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Identity_lookup_does_not_bypass_expected_revision_gate(bool complete)
+    public async Task Unrecorded_upload_identity_does_not_bypass_expected_revision_gate(bool complete)
     {
         var fixture = new RangeFixture(ManagedTransferOperation.Upload);
         var original = fixture.AddUploadLookupRecord(complete, matchingHash: true);
 
-        await FluentActions.Awaiting(() => fixture.UploadAsync(complete, " lookup-id ", fixture.Session.Revision + 1))
+        await FluentActions.Awaiting(() => fixture.UploadAsync(complete, "unrecorded", fixture.Session.Revision + 1))
             .Should().ThrowAsync<UnauthorizedAccessException>()
             .WithMessage("Transfer capability revision is stale.");
         AssertUploadLookupHasNoWrites(fixture, original);
-        fixture.Proxy.OperationReads.Should().Be(0);
+        fixture.Proxy.OperationReads.Should().Be(1);
     }
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Identity_lookup_does_not_enable_completed_session_replay(bool complete)
+    public async Task Completed_upload_session_replays_only_a_recorded_identity(bool complete)
     {
         var fixture = new RangeFixture(ManagedTransferOperation.Upload);
         var original = fixture.AddUploadLookupRecord(complete, matchingHash: true);
         fixture.Session.State = ManagedTransferSessionState.Completed;
 
-        await FluentActions.Awaiting(() => fixture.UploadAsync(complete, " lookup-id "))
+        var replay = await fixture.UploadAsync(complete, " lookup-id ");
+        replay.Should().Be(new ManagedTransferMutationResult(fixture.Session.Id, 2, original.BytesTransferred, true));
+
+        await FluentActions.Awaiting(() => fixture.UploadAsync(complete, "unrecorded"))
             .Should().ThrowAsync<UnauthorizedAccessException>()
             .WithMessage("Transfer capability is not active.");
         AssertUploadLookupHasNoWrites(fixture, original);
         fixture.Session.State.Should().Be(ManagedTransferSessionState.Completed);
-        fixture.Proxy.OperationReads.Should().Be(0);
+        fixture.Proxy.OperationReads.Should().Be(2);
     }
 
     private static void AssertUploadLookupHasNoWrites(RangeFixture fixture, ManagedTransferOperationRecord original)
@@ -658,6 +661,7 @@ public sealed class ManagedStorageSecurityTests
             };
             var db = DispatchProxy.Create<IApplicationDbContext, RangeDbProxy>();
             Proxy = (RangeDbProxy)(object)db;
+            Proxy.ObjectSet = new RangeSet<ManagedObject>([Object]);
             Proxy.SessionSet = new RangeSet<ManagedTransferSession>([Session]);
             Proxy.OperationSet = new RangeSet<ManagedTransferOperationRecord>(Operations);
             service = new ManagedTransferService(db, actor, new RangeClock(), Store, Keys, null!,
@@ -696,6 +700,7 @@ public sealed class ManagedStorageSecurityTests
 
     public class RangeDbProxy : DispatchProxy
     {
+        public DbSet<ManagedObject> ObjectSet { get; set; } = null!;
         public DbSet<ManagedTransferSession> SessionSet { get; set; } = null!;
         public DbSet<ManagedTransferOperationRecord> OperationSet { get; set; } = null!;
         public int OperationReads { get; private set; }
@@ -704,6 +709,8 @@ public sealed class ManagedStorageSecurityTests
         {
             switch (method!.Name)
             {
+                case "get_ManagedObjects": return ObjectSet;
+                case "get_FileVersions": return new RangeSet<FileVersion>([]);
                 case "get_ManagedTransferSessions": return SessionSet;
                 case "get_ManagedTransferOperationRecords": OperationReads++; return OperationSet;
                 case "AcquireTransactionLockAsync": return Task.CompletedTask;
