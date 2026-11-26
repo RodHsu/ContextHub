@@ -176,16 +176,22 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
         {
             var latest = await api.GetManagedFileMetadataAsync(project, file.FileId, token);
             if (!Current(request, _selectionRequest)) return;
-            if (latest is null && !Legacy)
+            var selected = latest ?? file;
+            if ((latest is null && !Legacy) || !MatchesFile(selected, project, file.FileId))
             {
                 DetailUnavailable = true;
                 return;
             }
-            var selected = latest ?? file;
             var version = versionId.HasValue
                 ? await api.GetManagedFileVersionAsync(project, file.FileId, versionId.Value, token)
                 : selected;
             if (!Current(request, _selectionRequest)) return;
+            if (versionId.HasValue && version is not null &&
+                (!MatchesFile(version, project, file.FileId) || version.FileVersionId != versionId.Value))
+            {
+                DetailUnavailable = true;
+                return;
+            }
             var versions = await api.GetManagedFileVersionsAsync(project, file.FileId, PageSize, versionsOffset, token);
             if (!Current(request, _selectionRequest)) return;
             var rights = await api.GetEffectiveRightsAsync(project, ["metadata", "read", "download", "searchindex", "securityrelease", "delete"], "File", file.FileId.ToString("D"), token);
@@ -211,6 +217,9 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
         }
         finally { if (Current(request, _selectionRequest)) SelectionLoading = false; }
     }
+
+    private static bool MatchesFile(ManagedFileInventoryResult result, string projectId, Guid fileId)
+        => result.FileId == fileId && ProjectContext.Matches(result.ProjectId, projectId);
 
     private bool Current(CancellationTokenSource request, CancellationTokenSource? active)
         => !_disposed && ReferenceEquals(request, active);
