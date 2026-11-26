@@ -156,6 +156,121 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
         }
     }
 
+    [DockerRequiredFact]
+    public async Task Concurrent_exact_retries_commit_once_and_multichunk_ranges_preserve_content()
+    {
+        var factory = environment.GetFactory();
+        using var first = factory.Services.CreateScope();
+        using var second = factory.Services.CreateScope();
+        UseBootstrapActor(first.ServiceProvider);
+        UseBootstrapActor(second.ServiceProvider);
+        var db = first.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var secondDb = second.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var root = Path.Combine(FindRepositoryRoot(), ".agent", "local", "managed-storage-tests", Guid.NewGuid().ToString("N"));
+        var clock = new MutableClock(DateTimeOffset.UtcNow);
+        var settings = new ManagedTransferOptions
+        {
+            ChunkBytes = 1024 * 1024,
+            MaxRangeBytes = 4 * 1024 * 1024,
+            MaxBytesPerSecond = 128L * 1024 * 1024
+        };
+        var store = new FileSystemManagedObjectStore(Options.Create(new ManagedObjectStorageOptions
+        {
+            Enabled = true,
+            RootPath = root
+        }));
+        var authority = new AesGcmManagedFileKeyAuthority(Options.Create(new ManagedFileKeyAuthorityOptions
+        {
+            CurrentKeyId = "test-key",
+            Keys = { ["test-key"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) }
+        }));
+        ManagedTransferService CreateTransfer(IServiceProvider services) => new(
+            services.GetRequiredService<MemoryDbContext>(),
+            services.GetRequiredService<IRequestActorAccessor>(), clock, store, authority,
+            services.GetRequiredService<IPlatformFoundationStore>(), Options.Create(settings));
+
+        var writer = CreateTransfer(first.ServiceProvider);
+        var retry = CreateTransfer(second.ServiceProvider);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var token = timeout.Token;
+        try
+        {
+            var original = RandomNumberGenerator.GetBytes(32 * settings.ChunkBytes + 13);
+            var fileHash = SHA256.HashData(original);
+            var project = $"multichunk-{Guid.NewGuid():N}";
+            var upload = await writer.CreateUploadAsync(new CreateManagedUploadRequest(
+                project, original.Length, "integration", "create"), token);
+
+            ManagedChunkWriteRequest Chunk(int index, long revision)
+            {
+                var offset = index * settings.ChunkBytes;
+                var bytes = original.AsSpan(offset, Math.Min(settings.ChunkBytes, original.Length - offset)).ToArray();
+                return new ManagedChunkWriteRequest(upload.SessionId, upload.Capability, revision, $"chunk-{index}", index,
+                    bytes, Convert.ToHexString(SHA256.HashData(bytes)));
+            }
+
+            var firstChunk = await Task.WhenAll(
+                writer.UploadChunkAsync(Chunk(0, upload.Revision), token),
+                retry.UploadChunkAsync(Chunk(0, upload.Revision), token));
+            firstChunk.Should().ContainSingle(result => result.Replayed);
+            firstChunk.Should().OnlyContain(result =>
+                result.Revision == upload.Revision + 1 && result.BytesTransferred == settings.ChunkBytes);
+            db.ChangeTracker.Clear();
+            secondDb.ChangeTracker.Clear();
+            var revision = firstChunk[0].Revision;
+            var chunkCount = (original.Length + settings.ChunkBytes - 1) / settings.ChunkBytes;
+            for (var index = 1; index < chunkCount; index++)
+            {
+                var result = await writer.UploadChunkAsync(Chunk(index, revision), token);
+                result.Replayed.Should().BeFalse();
+                revision = result.Revision;
+            }
+
+            var completion = await Task.WhenAll(
+                writer.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "finish", token),
+                retry.CompleteUploadAsync(upload.SessionId, upload.Capability, revision, "finish", token));
+            completion.Should().ContainSingle(result => result.Replayed);
+            completion.Should().OnlyContain(result => result.Revision == revision + 1 && result.BytesTransferred == 0);
+
+            db.ChangeTracker.Clear();
+            var session = await db.ManagedTransferSessions.AsNoTracking()
+                .SingleAsync(item => item.Id == upload.SessionId, token);
+            session.UsedBytes.Should().Be(original.Length);
+            session.Revision.Should().Be(upload.Revision + chunkCount + 1);
+            (await db.ManagedTransferOperationRecords.CountAsync(item => item.SessionId == upload.SessionId, token))
+                .Should().Be(chunkCount + 2);
+            var stored = await db.ManagedObjects.AsNoTracking().Include(item => item.Chunks)
+                .SingleAsync(item => item.Id == upload.Object.ObjectId, token);
+            stored.Chunks.Should().HaveCount(chunkCount);
+            stored.PlaintextSha256.Should().Be(Convert.ToHexString(fileHash).ToLowerInvariant());
+
+            var download = await writer.CreateDownloadAsync(new CreateManagedDownloadRequest(
+                project, stored.Id, "integration", "download"), token);
+            var downloadedPath = Path.Combine(root, "downloaded.bin");
+            await using (var output = File.Create(downloadedPath))
+            {
+                var rangeBytes = 3 * settings.ChunkBytes + 23;
+                var rangeRevision = download.Revision;
+                for (var offset = 0; offset < original.Length; offset += rangeBytes)
+                {
+                    var length = Math.Min(rangeBytes, original.Length - offset);
+                    var copied = await writer.CopyRangeAsync(new ManagedRangeReadRequest(
+                        download.SessionId, download.Capability, rangeRevision, $"range-{offset}", offset, length), output, token);
+                    copied.Should().Be(length);
+                    rangeRevision++;
+                }
+            }
+
+            await using var downloaded = File.OpenRead(downloadedPath);
+            downloaded.Length.Should().Be(original.Length);
+            (await SHA256.HashDataAsync(downloaded, token)).Should().Equal(fileHash);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private sealed class MutableClock(DateTimeOffset value) : IClock
     {
         public DateTimeOffset UtcNow { get; set; } = value;
