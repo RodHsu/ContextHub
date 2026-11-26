@@ -166,7 +166,6 @@ public sealed class CanonicalTagGovernanceService(
 
     public async Task<CanonicalTagMergePreview> PreviewMergeAsync(string projectId, Guid sourceId, Guid targetId, CancellationToken cancellationToken)
     {
-        if (sourceId == targetId) throw new InvalidOperationException("A tag cannot merge into itself.");
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var normalized = ProjectContext.Normalize(projectId);
         await LoadDefinitionsAsync(normalized, sourceId, targetId, actor, cancellationToken);
@@ -330,6 +329,7 @@ public sealed class CanonicalTagGovernanceService(
     private async Task<(CanonicalTagDefinition Source, CanonicalTagDefinition Target)> LoadDefinitionsAsync(string projectId, Guid sourceId, Guid targetId, ContextHubRequestActor actor, CancellationToken cancellationToken)
     {
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: actor.HasScope(SecurityScopes.MemoryWrite));
+        if (sourceId == targetId) throw new InvalidOperationException("A tag cannot merge into itself.");
         var definitions = await Scope(dbContext.CanonicalTagDefinitions, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && (x.Id == sourceId || x.Id == targetId)).ToArrayAsync(cancellationToken);
         return (definitions.SingleOrDefault(x => x.Id == sourceId) ?? throw new UnauthorizedAccessException("Source tag is not available."), definitions.SingleOrDefault(x => x.Id == targetId) ?? throw new UnauthorizedAccessException("Target tag is not available."));
     }

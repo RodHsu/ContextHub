@@ -234,6 +234,67 @@ public sealed class ManagedFilesWave3WorkflowTests(ContainerTestEnvironment envi
     }
 
     [DockerRequiredFact]
+    public async Task Canonical_tag_self_merge_is_rejected_without_changing_bindings_or_audit()
+    {
+        var factory = environment.GetFactory();
+        var projectId = $"canonical-tag-invariant-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        var tag = new CanonicalTagDefinition
+        {
+            ProjectId = projectId,
+            CanonicalName = "Synthetic tag",
+            NormalizedName = "synthetic-tag",
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        using (var setup = factory.Services.CreateScope())
+        {
+            var actor = UseBootstrapActor(setup.ServiceProvider);
+            var db = setup.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            tag.TenantId = actor.TenantId;
+            tag.OwnerUserId = actor.UserId;
+            db.CanonicalTagDefinitions.Add(tag);
+            await db.SaveChangesAsync();
+            db.CanonicalTagBindings.Add(new CanonicalTagBinding
+            {
+                TenantId = actor.TenantId,
+                OwnerUserId = actor.UserId,
+                ProjectId = projectId,
+                DefinitionId = tag.Id,
+                ResourceType = "File",
+                ResourceId = "synthetic-file",
+                Source = "Manual",
+                Confidence = 1m,
+                Status = "Active",
+                CreatedAt = now
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using (var operation = factory.Services.CreateScope())
+        {
+            UseBootstrapActor(operation.ServiceProvider);
+            var service = operation.ServiceProvider.GetRequiredService<ICanonicalTagGovernanceService>();
+            var preview = () => service.PreviewMergeAsync(projectId, tag.Id, tag.Id, CancellationToken.None);
+            var apply = () => service.ApplyMergeAsync(projectId, tag.Id, tag.Id, tag.Revision, CancellationToken.None);
+            await preview.Should().ThrowAsync<InvalidOperationException>().WithMessage("A tag cannot merge into itself.");
+            await apply.Should().ThrowAsync<InvalidOperationException>().WithMessage("A tag cannot merge into itself.");
+        }
+
+        using var verification = factory.Services.CreateScope();
+        var verificationDb = verification.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var definition = await verificationDb.CanonicalTagDefinitions.AsNoTracking().SingleAsync(item => item.Id == tag.Id);
+        definition.Status.Should().Be(CanonicalTagStatus.Active);
+        definition.Revision.Should().Be(tag.Revision);
+        definition.RedirectToId.Should().BeNull();
+        var binding = await verificationDb.CanonicalTagBindings.AsNoTracking().SingleAsync(item => item.DefinitionId == tag.Id);
+        binding.Status.Should().Be("Active");
+        binding.LastValidatedAt.Should().BeNull();
+        (await verificationDb.CanonicalTagAliases.AnyAsync(item => item.DefinitionId == tag.Id)).Should().BeFalse();
+        (await verificationDb.CanonicalTagGovernanceProposals.AnyAsync(item => item.SourceDefinitionId == tag.Id)).Should().BeFalse();
+    }
+
+    [DockerRequiredFact]
     public async Task Canonical_tag_telemetry_aggregates_quality_merge_split_and_query_redaction_are_governed()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
