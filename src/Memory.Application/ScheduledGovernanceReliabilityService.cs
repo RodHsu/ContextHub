@@ -110,13 +110,15 @@ public sealed class ScheduledGovernanceReliabilityService(
         // Epoch readers require their own read-committed transaction. Check the current head
         // on both sides of the consistent history snapshot instead of reading it inside that snapshot.
         var observedAuthority = await ReadCommittedAuthorityAsync(actor, cancellationToken);
-        IReadOnlyList<ScheduledGovernanceReliabilityReceiptProjection> projections;
+        IReadOnlyList<ScheduledGovernanceReliabilityReceiptProjection>? projections;
         await using (var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken))
         {
             var rows = await ReadRowsAsync(actor, cancellationToken);
             projections = await BuildHistoryProjectionsAsync(actor, rows, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
         }
+        if (projections is null)
+            throw new UnauthorizedAccessException("The scheduled governance history is outside the current project authorization boundary.");
         var authority = await ConfirmAuthorityAsync(actor, observedAuthority, cancellationToken);
         return ToSummary(CreateCalculator(authority).Calculate(projections));
     }
@@ -330,7 +332,7 @@ public sealed class ScheduledGovernanceReliabilityService(
             .ThenBy(x => x.GovernanceRunId)
             .ToArrayAsync(cancellationToken);
 
-    private async Task<IReadOnlyList<ScheduledGovernanceReliabilityReceiptProjection>> BuildHistoryProjectionsAsync(
+    private async Task<IReadOnlyList<ScheduledGovernanceReliabilityReceiptProjection>?> BuildHistoryProjectionsAsync(
         ContextHubRequestActor actor,
         IReadOnlyList<ScheduledGovernanceReliabilityRun> rows,
         CancellationToken cancellationToken)
@@ -355,7 +357,7 @@ public sealed class ScheduledGovernanceReliabilityService(
                     entry.Projection.ProjectIds.Concat(scopes[entry.Row.GovernanceRunId]).ToArray(), denied)))
             {
                 // The reliability gate uses the whole history. A filtered streak would have a different meaning.
-                throw new UnauthorizedAccessException("The scheduled governance history is outside the current project authorization boundary.");
+                return null;
             }
         }
 

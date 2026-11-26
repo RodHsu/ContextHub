@@ -7,6 +7,7 @@ using System.Text.Json;
 using Memory.Application;
 using Memory.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace Memory.Infrastructure;
 
@@ -473,7 +474,7 @@ public sealed class GovernanceRunReceiptService(
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var runId = RequireGovernanceRunId(governanceRunId);
-        await using var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
         var entity = await LatestAsync(runId, actor, cancellationToken);
         if (entity is null)
         {
@@ -483,7 +484,8 @@ public sealed class GovernanceRunReceiptService(
         var projects = await GovernanceProjectScopeResolver.ReadRecordedRunScopesAsync(dbContext, actor, [runId], cancellationToken);
         await EnsureReceiptProjectsAllowedAsync(actor, projects[runId].ToArray(), cancellationToken);
         var result = await MapAsync(entity, actor, cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        if (transaction is not null)
+            await transaction.CommitAsync(cancellationToken);
         return result;
     }
 
@@ -680,7 +682,7 @@ public sealed class GovernanceRunReceiptService(
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var limit = Math.Clamp(request.Limit, 1, 100);
         var offset = Math.Max(0, request.Offset);
-        await using var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
         var recent = await dbContext.GovernanceRunReceipts.AsNoTracking()
             .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId)
             .OrderByDescending(x => x.EventSequence)
@@ -710,9 +712,15 @@ public sealed class GovernanceRunReceiptService(
         {
             results.Add(await MapAsync(entity, actor, cancellationToken));
         }
-        await transaction.CommitAsync(cancellationToken);
+        if (transaction is not null)
+            await transaction.CommitAsync(cancellationToken);
         return results;
     }
+
+    private async Task<IDbContextTransaction?> BeginReadSnapshotAsync(CancellationToken cancellationToken)
+        => dbContext.Database.CurrentTransaction is null
+            ? await dbContext.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken)
+            : null;
 
     private GovernanceRunReceipt NewReceipt(
         ContextHubRequestActor actor,

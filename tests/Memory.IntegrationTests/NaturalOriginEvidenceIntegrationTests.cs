@@ -101,7 +101,8 @@ public sealed class NaturalOriginEvidenceIntegrationTests(ContainerTestEnvironme
         actual.Runs.Single(run => run.GovernanceRunId == recorded[0].GovernanceRunId)
             .PlatformSignedNaturalOriginAttested.Should().BeTrue();
         actual.GatePassed.Should().BeFalse();
-        commandCount.Should().Be(10, "one actor history read, six safety reads, two ledger reads and one bound receipt read");
+        commandCount.Should().Be(12,
+            "one actor history read, two scope authorization reads, six safety reads, two ledger reads and one bound receipt read");
         commandCount.Should().BeLessThan(exactCommands);
         historyDb.ChangeTracker.HasChanges().Should().BeFalse();
 
