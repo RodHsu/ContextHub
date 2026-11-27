@@ -491,6 +491,22 @@ memories.MapGet("/{id:guid}/details", async (Guid id, IDashboardQueryService ser
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
 
+memories.MapGet("/{id:guid}/revisions", async (
+    Guid id, string projectId, int? page, int? pageSize, IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
+{
+    httpContext.Response.Headers.CacheControl = "no-store";
+    var result = await service.GetMemoryRevisionsAsync(projectId, id, page, pageSize, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+
+memories.MapGet("/{id:guid}/revisions/{revisionId:guid}", async (
+    Guid id, Guid revisionId, string projectId, IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
+{
+    httpContext.Response.Headers.CacheControl = "no-store";
+    var result = await service.GetMemoryRevisionAsync(projectId, id, revisionId, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+
 var projectInformation = app.MapGroup("/api/projects/information");
 projectInformation.RequireAuthIfEnabled(requireAuthentication);
 projectInformation.MapGet("/", async (bool? includeInactive, IProjectInformationService service, CancellationToken cancellationToken) =>

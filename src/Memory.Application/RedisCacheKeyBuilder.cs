@@ -72,7 +72,7 @@ public static class RedisCacheKeyBuilder
         => $"cache:v3:dashboard:memories:{Hash(version.Value)}:{Hash(Actor(actor))}:{Hash(DashboardMemoryRequest(request))}";
 
     public static string DashboardMemoryDetails(CacheVersionStamp version, Guid id, ContextHubRequestActor actor)
-        => $"cache:v3:dashboard:memory-details:{Hash(version.Value)}:{Hash(Actor(actor))}:{id:N}";
+        => $"cache:v4:dashboard:memory-details:{Hash(version.Value)}:{Hash(Actor(actor))}:{id:N}";
 
     public static string DashboardJobs(long jobVersion, JobListRequest request)
         => $"cache:dashboard:jobs:{jobVersion}:{Hash($"{request.Status}:{request.JobType}:{request.Page}:{request.PageSize}")}";

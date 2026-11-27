@@ -313,25 +313,7 @@
                             <pre class="detail-reader-body memory-detail-content-block">@_selected.Document.Content</pre>
                         </section>
 
-                        <section class="memory-detail-section">
-                            <div class="section-heading-row">
-                                <div>
-                                    <div class="subpanel-title">版本紀錄</div>
-                                    <div class="section-heading-meta">@DashboardFormatting.Integer(_selected.Revisions.Count) 筆版本紀錄</div>
-                                </div>
-                            </div>
-                            <div class="stack-list memory-revision-list memory-detail-list-scroll-shell"
-                                 data-scroll-viewport="true">
-                                @foreach (var revision in _selected.Revisions.Take(5))
-                                {
-                                    <article class="stack-item memory-revision-card">
-                                        <div class="stack-item-title">v@revision.Version / @ChangedByText(revision.ChangedBy)</div>
-                                        <div class="stack-item-copy memory-revision-summary">@revision.Title - @revision.Summary</div>
-                                        <div class="stack-item-meta"><ClientLocalTime Value="revision.CreatedAt" /></div>
-                                    </article>
-                                }
-                            </div>
-                        </section>
+                        <MemoryRevisionHistory @key="_selected" Details="_selected" />
 
                         <section class="memory-detail-section">
                             <div class="section-heading-row">
@@ -424,6 +406,7 @@
     private string? _tag;
     private PagedResult<MemoryListItemResult>? _page;
     private MemoryDetailsResult? _selected;
+    private long _selectionRequest;
     private IReadOnlyList<ConversationCheckpointSearchResult> _checkpointStaging = [];
     private bool _loading;
     private DateTimeOffset? _lastUpdatedAt;
@@ -444,6 +427,9 @@
 
     private async Task LoadAsync()
     {
+        var previousSelection = _selected?.Document.Id;
+        var minimumSelection = ++_selectionRequest;
+        _selected = null;
         _loading = true;
         await InvokeAsync(StateHasChanged);
         try
@@ -465,9 +451,10 @@
                     25),
                 CancellationToken.None);
 
-            if (_selected is not null)
+            if (minimumSelection == _selectionRequest && previousSelection is Guid selectedId &&
+                _page.Items.Any(item => item.Id == selectedId))
             {
-                _selected = await ApiClient.GetMemoryDetailsAsync(_selected.Document.Id, CancellationToken.None);
+                await SelectAsync(selectedId);
             }
 
             _checkpointStaging = _page.TotalCount == 0 && !string.IsNullOrWhiteSpace(_query)
@@ -482,7 +469,15 @@
     }
 
     private async Task SelectAsync(Guid id)
-        => _selected = await ApiClient.GetMemoryDetailsAsync(id, CancellationToken.None);
+    {
+        var request = ++_selectionRequest;
+        _selected = null;
+        var details = await ApiClient.GetMemoryDetailsAsync(id, CancellationToken.None);
+        if (request == _selectionRequest && details?.Document.Id == id)
+        {
+            _selected = details;
+        }
+    }
 
     private async Task<IReadOnlyList<ConversationCheckpointSearchResult>> LoadCheckpointStagingAsync()
     {
@@ -652,16 +647,6 @@
             "promotion-failed" => "promotion 失敗",
             "promoted" => "已正式入庫",
             _ => status
-        };
-
-    private static string ChangedByText(string changedBy)
-        => changedBy.ToLowerInvariant() switch
-        {
-            "upsert" => "寫入更新",
-            "update" => "內容更新",
-            "archive" => "封存",
-            "restore" => "還原",
-            _ => changedBy
         };
 
     private static string BuildTagSummary(IReadOnlyList<string> tags)

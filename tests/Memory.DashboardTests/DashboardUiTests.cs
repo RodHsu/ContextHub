@@ -1998,6 +1998,14 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
         return Task.FromResult<IReadOnlyList<ProjectSuggestionResult>>(projects.Take(limit).ToArray());
     }
 
+    public Task<PagedResult<MemoryRevisionResult>?> GetMemoryRevisionsAsync(
+        string projectId, Guid memoryId, int page, int pageSize, CancellationToken cancellationToken)
+        => Task.FromResult<PagedResult<MemoryRevisionResult>?>(null);
+
+    public Task<MemoryRevisionBodyResult?> GetMemoryRevisionAsync(
+        string projectId, Guid memoryId, Guid revisionId, CancellationToken cancellationToken)
+        => Task.FromResult<MemoryRevisionBodyResult?>(null);
+
     public Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)
         => Task.FromResult<MemoryDetailsResult?>(new MemoryDetailsResult(
             _memory,

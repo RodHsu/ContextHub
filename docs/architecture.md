@@ -930,3 +930,23 @@ To complete the approved review, a security-authorized assessment must supply th
 Logical deletion is archive-first and preserves legal holds and references. Primary deletion, backup-retention pending, fully expired, and verified states remain distinct so user-visible status does not claim provider backup deletion before evidence exists. Reconciliation is bounded and idempotent.
 
 Canonical tag telemetry stores a normalized query hash, result count, selected tag, locale, and source but not the raw query. Daily aggregates feed deterministic 7/30/90-day quality windows. Merge preview and apply preserve bindings and a redirect from the superseded tag; split preview never guesses membership and requires an explicit candidate set. Rename and deprecation are lifecycle operations, while background reconciliation rebuilds aggregates and expires stale suggestions without silently deleting canonical history.
+
+### Memory revision reads
+
+The Dashboard Memory detail API includes the newest 20 revision summaries and
+`hasMoreRevisions`. The summary payload omits historical bodies. Use
+`GET /api/memories/{memoryId}/revisions?projectId={projectId}&page=1&pageSize=20`
+for stable, bounded summary pages. Summaries are ordered by version, creation
+time, and revision ID, newest first. To read one body's source text and
+metadata, use
+`GET /api/memories/{memoryId}/revisions/{revisionId}?projectId={projectId}`.
+Specify the current ProjectId on both routes. The current memory's access
+rules continue to apply to the historical records, and inaccessible or
+mismatched resources return 404. Revision ID identifies a record even when
+legacy data contains duplicate version numbers. Both reads use `Cache-Control:
+no-store`.
+
+`CurrentOnly` controls project scope. Freshness, authority, archive state,
+and time validity are separate properties. A project Artifact preview links to
+the same memory ID for full current text. Binary file references use the
+managed file transfer contract.

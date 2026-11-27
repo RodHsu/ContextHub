@@ -2231,6 +2231,33 @@ public sealed partial class DashboardBrowserUiTests : IClassFixture<DashboardBro
     }
 
     [Fact]
+    public async Task Memories_Should_Open_Exact_Historical_Body_And_Clear_It_On_Scope_Change()
+    {
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("desktop", 1440, 900));
+        var page = await context.NewPageAsync();
+        await LoginAndOpenAsync(page, "/memories?uiProfile=dense");
+
+        await page.Locator(".memories-select-button").First.ClickAsync();
+        var history = page.GetByRole(AriaRole.Region, new() { Name = "版本紀錄", Exact = true });
+        await history.GetByRole(AriaRole.Button, new() { Name = "下一頁", Exact = true }).ClickAsync();
+        await history.GetByText("第 2 頁，共 7 筆", new() { Exact = true }).WaitForAsync();
+        var readers = history.GetByRole(AriaRole.Button, new() { NameRegex = new Regex("^讀取版本 ") });
+        (await readers.CountAsync()).Should().Be(2);
+        await readers.First.ClickAsync();
+        var body = page.GetByRole(AriaRole.Region, new() { Name = "歷史版本內容" });
+        await body.WaitForAsync();
+        (await body.InnerTextAsync()).Should().Contain("歷史版本內容 ");
+        await body.GetByRole(AriaRole.Button, new() { Name = "關閉歷史內容" }).ClickAsync();
+        await body.WaitForAsync(new() { State = WaitForSelectorState.Detached });
+
+        await history.GetByRole(AriaRole.Button, new() { NameRegex = new Regex("^讀取版本 ") }).First.ClickAsync();
+        await body.WaitForAsync();
+        await page.GetByRole(AriaRole.Button, new() { Name = "查看共用綜合層", Exact = true }).ClickAsync();
+        await body.WaitForAsync(new() { State = WaitForSelectorState.Detached });
+    }
+
+    [Fact]
     public async Task Memories_Detail_Readers_Should_Frame_Long_Content_And_Keep_Copyable_Text_On_Desktop_And_TabS7()
     {
         await _fixture.EnsureDashboardRunningAsync();
