@@ -93,6 +93,8 @@ public sealed class DurableMemoryGovernanceService(
             .Where(x => x.Status == GovernanceFindingStatus.Open)
             .Select(MapCandidate)
             .ToArray();
+        var mergePairs = await CaptureReviewedMergePairsAsync(
+            findings, tenantId, ownerUserId, normalizedProjects, cancellationToken);
         var projectCandidates = candidates.Where(x => !ProjectContext.IsShared(x.ProjectId)).ToArray();
         var sharedCandidates = candidates.Where(x => ProjectContext.IsShared(x.ProjectId)).ToArray();
         var snapshotId = Guid.NewGuid();
@@ -125,7 +127,8 @@ public sealed class DurableMemoryGovernanceService(
             RequiresUserDecisionCount = findings.Count(x => x.Status == GovernanceFindingStatus.RequiresUserDecision),
             HostBlockedCount = findings.Count(x => x.Status == GovernanceFindingStatus.HostBlocked),
             FindingIds = findings.Select(x => x.Id).ToArray(),
-            ExceptionStates = findings.Where(IsGovernedException).Select(MapExceptionState).ToArray()
+            ExceptionStates = findings.Where(IsGovernedException).Select(MapExceptionState).ToArray(),
+            ReviewedMergePairs = mergePairs
         };
         var resultJson = JsonSerializer.Serialize(result, JsonOptions);
         await dbContext.KnowledgeGovernanceSnapshots.AddAsync(new KnowledgeGovernanceSnapshot
@@ -225,6 +228,38 @@ public sealed class DurableMemoryGovernanceService(
         await GovernanceProjectScopeResolver.EnsureDurableGrantsAsync(
             dbContext, tenantId, projectIds, requireWriteAuthorization, cancellationToken);
         return await ApplyLiveLifecycleOverlayAsync(result, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<ReviewedGovernanceMemoryPair>> CaptureReviewedMergePairsAsync(
+        IReadOnlyList<GovernanceFinding> findings,
+        Guid tenantId,
+        Guid ownerUserId,
+        IReadOnlyList<string> projectIds,
+        CancellationToken cancellationToken)
+    {
+        var candidates = findings.Where(finding => finding.Status == GovernanceFindingStatus.Open &&
+            ReviewedGovernanceMemoryPair.IsMergeFinding(finding.Type) && finding.PrimaryMemoryId.HasValue &&
+            finding.SecondaryMemoryId.HasValue && finding.PrimaryMemoryId != finding.SecondaryMemoryId).ToArray();
+        if (candidates.Length == 0) return [];
+
+        var ids = candidates.SelectMany(finding => new[] { finding.PrimaryMemoryId!.Value, finding.SecondaryMemoryId!.Value })
+            .Distinct().ToArray();
+        var projectKeys = ProjectContext.IdentityKeys(projectIds);
+        var memories = await dbContext.MemoryItems.AsNoTracking()
+            .Where(memory => memory.TenantId == tenantId && memory.OwnerUserId == ownerUserId && ids.Contains(memory.Id) &&
+                projectKeys.Contains(ProjectContext.IdentityKey(memory.ProjectId)))
+            .ToDictionaryAsync(memory => memory.Id, cancellationToken);
+        var result = new List<ReviewedGovernanceMemoryPair>();
+        foreach (var finding in candidates)
+        {
+            if (memories.TryGetValue(finding.PrimaryMemoryId!.Value, out var left) &&
+                memories.TryGetValue(finding.SecondaryMemoryId!.Value, out var right) &&
+                ReviewedGovernanceMemoryPair.Capture(finding, left, right) is { } pair)
+            {
+                result.Add(pair);
+            }
+        }
+        return result;
     }
 
     private Task<bool> HasCompletedExecutionAfterAsync(
