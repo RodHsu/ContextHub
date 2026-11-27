@@ -636,10 +636,11 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("suggested_actions_list");
         mcpToolsHtml.Should().Contain("連線面總覽");
         mcpToolsHtml.Should().Contain("目前發布數量");
+        var toolCatalog = McpPublishedToolCatalog.Describe();
         mcpToolsHtml.Should().Contain("Direct MCP");
-        mcpToolsHtml.Should().Contain("89</strong> 支工具");
+        mcpToolsHtml.Should().Contain($"{toolCatalog.BackendToolCount}</strong> 支工具");
         mcpToolsHtml.Should().Contain("ChatGPT App-facing");
-        mcpToolsHtml.Should().Contain("89</strong> 支工具");
+        mcpToolsHtml.Should().Contain($"{toolCatalog.AppFacingToolCount}</strong> 支工具");
         mcpToolsHtml.Should().Contain("可能刪除");
         mcpToolsHtml.Should().Contain("3</strong> 支工具");
         mcpToolsHtml.Should().Contain("Direct MCP 工具");
