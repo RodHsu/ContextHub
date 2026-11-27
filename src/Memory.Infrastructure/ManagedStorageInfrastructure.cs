@@ -125,13 +125,16 @@ public sealed class AesGcmManagedFileKeyAuthority(IOptions<ManagedFileKeyAuthori
 
 public sealed class FileSystemManagedObjectStore(IOptions<ManagedObjectStorageOptions> options) : IManagedObjectStore
 {
-    public async Task PutChunkAsync(string storageId, int chunkIndex, ReadOnlyMemory<byte> ciphertext, CancellationToken cancellationToken)
+    public Task PutChunkAsync(string storageId, int chunkIndex, ReadOnlyMemory<byte> ciphertext, CancellationToken cancellationToken)
+        => PutChunkAsync(new ManagedChunkAddress(storageId, chunkIndex), ciphertext, cancellationToken);
+
+    public async Task PutChunkAsync(ManagedChunkAddress address, ReadOnlyMemory<byte> ciphertext, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         string? temporary = null;
         try
         {
-            var path = ResolveChunkPath(storageId, chunkIndex, createDirectory: true);
+            var path = ResolveChunkPath(address, createDirectory: true);
             var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".pending";
             await using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
@@ -157,9 +160,12 @@ public sealed class FileSystemManagedObjectStore(IOptions<ManagedObjectStorageOp
         }
     }
 
-    public async Task<int> ReadChunkAsync(string storageId, int chunkIndex, Memory<byte> destination, CancellationToken cancellationToken)
+    public Task<int> ReadChunkAsync(string storageId, int chunkIndex, Memory<byte> destination, CancellationToken cancellationToken)
+        => ReadChunkAsync(new ManagedChunkAddress(storageId, chunkIndex), destination, cancellationToken);
+
+    public async Task<int> ReadChunkAsync(ManagedChunkAddress address, Memory<byte> destination, CancellationToken cancellationToken)
     {
-        var path = ResolveChunkPath(storageId, chunkIndex, createDirectory: false);
+        var path = ResolveChunkPath(address, createDirectory: false);
         try
         {
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
@@ -184,9 +190,12 @@ public sealed class FileSystemManagedObjectStore(IOptions<ManagedObjectStorageOp
     }
 
     public Task<bool> ChunkExistsAsync(string storageId, int chunkIndex, CancellationToken cancellationToken)
+        => ChunkExistsAsync(new ManagedChunkAddress(storageId, chunkIndex), cancellationToken);
+
+    public Task<bool> ChunkExistsAsync(ManagedChunkAddress address, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(EntryExists(ResolveChunkPath(storageId, chunkIndex, createDirectory: false), isDirectory: false));
+        return Task.FromResult(EntryExists(ResolveChunkPath(address, createDirectory: false), isDirectory: false));
     }
 
     public Task DeleteObjectAsync(string storageId, CancellationToken cancellationToken)
@@ -242,10 +251,14 @@ public sealed class FileSystemManagedObjectStore(IOptions<ManagedObjectStorageOp
         throw new IOException("Managed object storage is unavailable.");
     }
 
-    private string ResolveChunkPath(string storageId, int chunkIndex, bool createDirectory)
+    private string ResolveChunkPath(ManagedChunkAddress address, bool createDirectory)
     {
-        if (chunkIndex < 0) throw new InvalidOperationException("Managed object chunk index is invalid.");
-        return Path.Combine(ResolveObjectDirectory(storageId, createDirectory), chunkIndex.ToString("D10") + ".bin");
+        if (address.ChunkIndex < 0 || address.AttemptId == Guid.Empty)
+            throw new InvalidOperationException("Managed object chunk address is invalid.");
+        var fileName = address.AttemptId is { } attemptId
+            ? $"{address.ChunkIndex:D10}.{attemptId:N}.bin"
+            : $"{address.ChunkIndex:D10}.bin";
+        return Path.Combine(ResolveObjectDirectory(address.StorageId, createDirectory), fileName);
     }
 
     private string ResolveObjectDirectory(string storageId, bool createDirectory)
