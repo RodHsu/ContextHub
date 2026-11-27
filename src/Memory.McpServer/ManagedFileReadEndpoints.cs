@@ -6,6 +6,15 @@ public static class ManagedFileReadEndpoints
 {
     public static RouteGroupBuilder MapFileMetadataReadEndpoints(this RouteGroupBuilder files, bool requireAuthentication)
     {
+        files.MapGet("/dlp-summary", (string? projectId, HttpContext context, IManagedFileReadService service, CancellationToken ct) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            return ReadAsync(async () =>
+            {
+                try { return Results.Ok(await service.GetDlpSummaryAsync(projectId, ct)); }
+                catch (ArgumentException ex) when (ex.ParamName == nameof(projectId)) { return Results.BadRequest(); }
+            }, ct);
+        }).RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
         files.MapGet("/inventory", (string projectId, int? limit, int? offset, IManagedFileReadService service, CancellationToken ct)
             => ReadAsync(async () => Results.Ok(await service.ListAsync(projectId, limit ?? 50, offset ?? 0, ct)), ct))
             .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
