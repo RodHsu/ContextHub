@@ -388,6 +388,46 @@ public sealed class FileMetadataReadTests
     }
 
     [Fact]
+    public async Task Dlp_summary_should_follow_the_authorized_page_search()
+    {
+        var clean = File();
+        var isolated = File(Guid.NewGuid()) with
+        {
+            FileName = "Isolated.zip",
+            Classification = FileClassification.Quarantined,
+            Lifecycle = FileVersionLifecycle.Quarantined,
+            NeedsRescan = true,
+            OpenSecurityFindings = 3
+        };
+        var api = Api((method, _) => method switch
+        {
+            nameof(IContextHubApiClient.GetManagedFilePageAsync) => Task.FromResult<ManagedFileMetadataPage?>(new([clean, isolated], 25, 0, true)),
+            nameof(IContextHubApiClient.GetManagedFileMetadataAsync) => Task.FromResult<ManagedFileInventoryResult?>(clean),
+            nameof(IContextHubApiClient.GetProjectInformationProjectsAsync) => Task.FromResult<IReadOnlyList<ProjectInformationListItem>>([]),
+            _ => null
+        });
+        using var services = await CreatePageServicesAsync(api);
+        var renderer = new WorkItemEditorTestRenderer(services, services.GetRequiredService<ILoggerFactory>());
+        try
+        {
+            await renderer.MountAsync<Files>();
+            Counts().Should().Equal("2", "1", "1", "3");
+
+            var search = renderer.Elements().Single(element => element.Attribute("type") as string == "search");
+            await renderer.DispatchAsync(search, "oninput", new ChangeEventArgs { Value = clean.FileName });
+            Counts().Should().Equal("1", "0", "0", "0");
+            renderer.Elements().Where(element => element.Tag == "button")
+                .Should().NotContain(element => element.Text == isolated.FileName);
+        }
+        finally
+        {
+            await renderer.DisposeRendererAsync();
+        }
+
+        IEnumerable<string> Counts() => renderer.Elements().Where(element => element.Tag == "strong").Take(4).Select(element => element.Text.Trim());
+    }
+
+    [Fact]
     public async Task Rendered_legacy_page_should_explain_unknown_paging_and_not_enable_next()
     {
         var api = Api((method, _) => method switch
@@ -523,18 +563,23 @@ public sealed class FileMetadataReadTests
 
     private static async Task<string> RenderAsync(IContextHubApiClient api)
     {
-        var fakeSettings = new FakeInstanceSettingsService(Options.Create(new DashboardOptions()));
-        var snapshot = await fakeSettings.GetSnapshotAsync(CancellationToken.None);
-        snapshot = snapshot with { Behavior = snapshot.Behavior with { DefaultProjectId = "p" } };
-        using var services = new ServiceCollection().AddLogging().AddSingleton(api)
-            .AddSingleton<NavigationManager>(new TestNavigationManager())
-            .AddSingleton<IDashboardRuntimeSettingsAccessor>(new TestRuntimeSettings(snapshot)).BuildServiceProvider();
+        using var services = await CreatePageServicesAsync(api);
         await using var renderer = new HtmlRenderer(services, services.GetRequiredService<ILoggerFactory>());
         return await renderer.Dispatcher.InvokeAsync(async () =>
         {
             var rendered = await renderer.RenderComponentAsync<Files>(ParameterView.Empty);
             return rendered.ToHtmlString();
         });
+    }
+
+    private static async Task<ServiceProvider> CreatePageServicesAsync(IContextHubApiClient api)
+    {
+        var fakeSettings = new FakeInstanceSettingsService(Options.Create(new DashboardOptions()));
+        var snapshot = await fakeSettings.GetSnapshotAsync(CancellationToken.None);
+        snapshot = snapshot with { Behavior = snapshot.Behavior with { DefaultProjectId = "p" } };
+        return new ServiceCollection().AddLogging().AddSingleton(api)
+            .AddSingleton<NavigationManager>(new TestNavigationManager())
+            .AddSingleton<IDashboardRuntimeSettingsAccessor>(new TestRuntimeSettings(snapshot)).BuildServiceProvider();
     }
 
     private sealed class TestNavigationManager : NavigationManager

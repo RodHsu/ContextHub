@@ -44,21 +44,22 @@
         }
         else
         {
+            var visibleFiles = FilteredFiles;
             @if (!string.IsNullOrWhiteSpace(_loadError))
             {
                 <DashboardAsyncState State="degraded" Title="顯示上次成功資料" Message="@_loadError" />
             }
 
-            <section class="domain-summary-grid" aria-label="受管檔案摘要">
-                <article class="panel"><span>本頁可見檔案</span><strong>@DashboardFormatting.Integer(FilteredFiles.Count)</strong><small>本頁已套用 project 與 metadata authorization；不是檔案總數</small></article>
-                <article class="panel"><span>Quarantine</span><strong>@DashboardFormatting.Integer(_files.Count(x => x.Classification == FileClassification.Quarantined))</strong><small>不進入 extract、embedding 或 transfer</small></article>
-                <article class="panel"><span>需要重掃</span><strong>@DashboardFormatting.Integer(_files.Count(x => x.NeedsRescan))</strong><small>classification revision 必須 read-back</small></article>
-                <article class="panel"><span>Open findings</span><strong>@DashboardFormatting.Integer(_files.Sum(x => x.OpenSecurityFindings))</strong><small>僅顯示正規化的安全分類</small></article>
+            <section class="domain-summary-grid" aria-label="本頁搜尋結果的受管檔案摘要">
+                <article class="panel"><span>本頁可見檔案</span><strong>@DashboardFormatting.Integer(visibleFiles.Count)</strong><small>僅統計本頁符合搜尋且有權查看的檔案</small></article>
+                <article class="panel"><span>本頁隔離檔案</span><strong>@DashboardFormatting.Integer(visibleFiles.Count(x => x.Classification == FileClassification.Quarantined))</strong><small>隔離期間停用擷取、向量化及傳輸</small></article>
+                <article class="panel"><span>本頁需重掃</span><strong>@DashboardFormatting.Integer(visibleFiles.Count(x => x.NeedsRescan))</strong></article>
+                <article class="panel"><span>本頁未結案發現</span><strong>@DashboardFormatting.Integer(visibleFiles.Sum(x => (long)x.OpenSecurityFindings))</strong></article>
             </section>
 
             <nav class="file-pagination" aria-label="檔案清單分頁">
                 <button class="ghost-button" @onclick="PreviousPageAsync" disabled="@(_loading || _state.Legacy || _state.Offset == 0)">上一頁檔案</button>
-                <span>本頁起點 @_state.Offset；本頁搜尋符合 @FilteredFiles.Count 筆</span>
+                <span role="status">本頁起點 @_state.Offset；本頁搜尋符合 @visibleFiles.Count 筆</span>
                 <button class="ghost-button" @onclick="NextPageAsync" disabled="@(_loading || !_state.HasMore)">下一頁檔案</button>
             </nav>
             @if (_state.Legacy)
@@ -80,7 +81,7 @@
                             <table class="data-table">
                                 <thead><tr><th>檔案</th><th>版本</th><th>Classification</th><th>Lifecycle</th><th>Findings</th><th>更新時間</th></tr></thead>
                                 <tbody>
-                                    @foreach (var file in FilteredFiles)
+                                    @foreach (var file in visibleFiles)
                                     {
                                         <tr class="@SelectedClass(file.FileId)">
                                             <td><button class="file-select-button" @onclick="@(() => SelectAsync(file))" disabled="@(_loadError is not null)">@file.FileName</button><small>@file.FileId</small></td>
