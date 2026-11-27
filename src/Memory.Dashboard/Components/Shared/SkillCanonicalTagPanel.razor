@@ -1,0 +1,179 @@
+@implements IDisposable
+@inject IContextHubApiClient ApiClient
+
+<section class="panel" aria-label="Canonical tag 綁定">
+    <div class="panel-title">Canonical tag 綁定</div>
+    @if (_loadingProjects)
+    {
+        <p role="status">正在讀取專案清單。</p>
+    }
+    else if (_projects.Count == 0)
+    {
+        <p role="status">目前無法取得可選專案。</p>
+    }
+    else
+    {
+        <label class="dashboard-scope-field">
+            <span>Canonical tag 專案</span>
+            <select value="@_project" @onchange="ChangeProjectAsync" required>
+                <option value="" disabled>選擇專案</option>
+                @foreach (var project in _projects)
+                {
+                    <option value="@project.ProjectId">@project.ProjectId</option>
+                }
+            </select>
+        </label>
+        @if (_loadingPage)
+        {
+            <p role="status">正在讀取標籤綁定。</p>
+        }
+        else if (_page is { } page)
+        {
+            @if (page.Items.Count == 0)
+            {
+                <p role="status">此專案目前沒有此 Skill 的有效標籤綁定。</p>
+            }
+            else
+            {
+                <ul class="stack-list">
+                    @foreach (var tag in page.Items)
+                    {
+                        <li class="stack-item">@tag.Name <span class="muted">修訂 @tag.TagRevision</span></li>
+                    }
+                </ul>
+            }
+            @if (page.Offset > 0 || page.HasMore)
+            {
+                <nav class="file-pagination" aria-label="標籤綁定分頁">
+                    <button type="button" class="ghost-button" disabled="@(page.Offset == 0)" @onclick="() => ReadPageAsync(Math.Max(0, page.Offset - PageSize))">上頁標籤</button>
+                    <button type="button" class="ghost-button" disabled="@(!page.HasMore || page.Offset >= MaxOffset)" @onclick="() => ReadPageAsync(page.Offset + PageSize)">下頁標籤</button>
+                </nav>
+            }
+        }
+        else if (_project.Length > 0)
+        {
+            <p role="status">目前無法取得此專案的標籤綁定。</p>
+        }
+    }
+</section>
+
+@code {
+    [Parameter] public Guid SkillId { get; set; }
+    [Parameter] public long RefreshGeneration { get; set; }
+
+    private const int PageSize = 25;
+    private const int MaxOffset = 10_000;
+    private readonly CancellationTokenSource _lifetime = new();
+    private CancellationTokenSource? _request;
+    private IReadOnlyList<ProjectInformationResult> _projects = [];
+    private SkillCanonicalTagBindingsResult? _page;
+    private string _project = string.Empty;
+    private Guid _appliedSkillId;
+    private long _appliedRefreshGeneration;
+    private int _offset;
+    private bool _loadingProjects = true;
+    private bool _loadingPage;
+    private bool _disposed;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var token = _lifetime.Token;
+        try
+        {
+            var projects = await ApiClient.GetProjectInformationProjectsAsync(false, token);
+            if (!_disposed)
+            {
+                _projects = projects.Select(item => item.Information with { ProjectId = item.Information.ProjectId.Trim() })
+                    .Where(IsOrdinaryProject)
+                    .DistinctBy(item => item.ProjectId, ProjectContext.IdentityComparer).ToArray();
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception) { _projects = []; }
+        finally { _loadingProjects = false; }
+    }
+
+    protected override Task OnParametersSetAsync()
+    {
+        if (_appliedSkillId != SkillId)
+        {
+            _appliedSkillId = SkillId;
+            _appliedRefreshGeneration = RefreshGeneration;
+            _project = string.Empty;
+            return ReadPageAsync(0);
+        }
+        if (_appliedRefreshGeneration == RefreshGeneration) return Task.CompletedTask;
+        _appliedRefreshGeneration = RefreshGeneration;
+        return ReadPageAsync(_offset);
+    }
+
+    private Task ChangeProjectAsync(ChangeEventArgs args)
+    {
+        var chosen = args.Value?.ToString();
+        _project = _projects.FirstOrDefault(item => ProjectContext.Matches(item.ProjectId, chosen))?.ProjectId ?? string.Empty;
+        return ReadPageAsync(0);
+    }
+
+    private async Task ReadPageAsync(int offset)
+    {
+        CancelRequest();
+        _offset = offset;
+        _page = null;
+        _loadingPage = false;
+        if (_disposed || _project.Length == 0 || offset is < 0 or > MaxOffset) return;
+
+        var project = _project;
+        var skill = SkillId;
+        var request = _request = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        var token = request.Token;
+        _loadingPage = true;
+        try
+        {
+            var page = await ApiClient.GetSkillCanonicalTagsAsync(skill, project, offset, PageSize, token);
+            if (IsCurrent(request, skill, project, offset) &&
+                page is { Items: not null } && page.SkillId == skill && page.Offset == offset &&
+                ProjectContext.Matches(page.ProjectId, project))
+            {
+                _page = page;
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception) { }
+        finally
+        {
+            if (IsCurrent(request, skill, project, offset))
+            {
+                _loadingPage = false;
+                _request = null;
+                request.Dispose();
+            }
+        }
+    }
+
+    private bool IsCurrent(CancellationTokenSource request, Guid skill, string project, int offset)
+        => !_disposed && ReferenceEquals(_request, request) && SkillId == skill &&
+            _offset == offset && ProjectContext.Matches(_project, project);
+
+    private static bool IsOrdinaryProject(ProjectInformationResult item)
+        => !item.IsHidden && !item.IsArchived && !string.IsNullOrWhiteSpace(item.ProjectId) &&
+            !item.ProjectId.Contains(ProjectContext.AllProjectIdsSentinel, StringComparison.Ordinal) &&
+            !ProjectContext.Matches(item.ProjectId, ProjectContext.DefaultProjectId) &&
+            !ProjectContext.IsShared(item.ProjectId) && !ProjectContext.IsUser(item.ProjectId);
+
+    private void CancelRequest()
+    {
+        var prior = _request;
+        _request = null;
+        prior?.Cancel();
+        prior?.Dispose();
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        CancelRequest();
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}
