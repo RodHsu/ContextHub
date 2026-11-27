@@ -2204,7 +2204,9 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
         => RevokeApiTokenAsync(tokenId, cancellationToken);
 
     public Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken)
-        => Task.FromResult<IReadOnlyList<SkillSummaryResult>>(UseSkillsExecutionFixture(projectId) ? [BrowserSkill] : []);
+        => Task.FromResult<IReadOnlyList<SkillSummaryResult>>(SkillsObservationFixtureOutcome() is not null
+            ? [BrowserSkill, BrowserOtherSkill]
+            : UseSkillsExecutionFixture(projectId) ? [BrowserSkill] : []);
 
     public Task<AgentExecutionDashboardResult> GetAgentExecutionDashboardAsync(string projectId, CancellationToken cancellationToken)
     {
@@ -2246,8 +2248,24 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<SkillTelemetryReconciliationResult> ReconcileSkillTelemetryAsync(SkillTelemetryReconciliationRequest request, CancellationToken cancellationToken)
         => Task.FromResult(new SkillTelemetryReconciliationResult(Guid.NewGuid(), 0, 0, 0, 0, 0, request.RawEventRetentionDays, request.AggregateRetentionDays, DateTimeOffset.UtcNow, false));
 
-    public Task<SkillImportPreviewResult> PreviewSkillImportAsync(SkillImportPreviewRequest request, CancellationToken cancellationToken)
-        => throw new NotSupportedException();
+    public async Task<SkillImportPreviewResult> PreviewSkillImportAsync(SkillImportPreviewRequest request, CancellationToken cancellationToken)
+    {
+        if (SkillsObservationFixtureOutcome() is null)
+        {
+            throw new NotSupportedException();
+        }
+
+        _releaseFirstSkillObservation.TrySetResult();
+        var released = await _firstSkillObservationReleased.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+        if (!released)
+        {
+            throw new InvalidOperationException("The delayed Skill observation did not complete through the fixture gate.");
+        }
+
+        await Task.Yield();
+        return new(request.StableKey, request.Version, BrowserSkillContentHash, 0, string.Empty, [], [],
+            new("browser-fixture", BrowserSkillContentHash, true, false, false, false, [], []), false, false);
+    }
 
     public Task<SkillImportResult> ImportSkillAsync(SkillImportRequest request, CancellationToken cancellationToken)
         => throw new NotSupportedException();
@@ -2270,8 +2288,46 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
     public Task<SkillVersionDiffResult> DiffSkillVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken)
         => throw new NotSupportedException();
 
-    public Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken)
-        => Task.FromResult<IReadOnlyList<SkillSourceObservationResult>>([]);
+    public async Task<IReadOnlyList<SkillSourceObservationResult>> GetSkillSourceObservationsAsync(Guid skillId, CancellationToken cancellationToken)
+    {
+        if (SkillsObservationFixtureOutcome() is not { } outcome)
+        {
+            return [];
+        }
+
+        if (skillId == BrowserOtherSkill.Id)
+        {
+            return [BrowserObservation(skillId, "current-beta-revision")];
+        }
+
+        if (skillId != BrowserSkill.Id)
+        {
+            return [];
+        }
+
+        if (Interlocked.Increment(ref _firstSkillObservationReadCount) > 1)
+        {
+            return [BrowserObservation(skillId, "current-alpha-revision")];
+        }
+
+        try
+        {
+            await _releaseFirstSkillObservation.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+            _firstSkillObservationReleased.TrySetResult(true);
+        }
+        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
+        {
+            _firstSkillObservationReleased.TrySetResult(false);
+            throw;
+        }
+
+        return outcome switch
+        {
+            "error" => throw new InvalidOperationException("stale-alpha-observation-error"),
+            "empty" => [],
+            _ => [BrowserObservation(skillId, "stale-alpha-revision")]
+        };
+    }
 
     public Task<SkillSourceObservationResult> RecordSkillSourceObservationAsync(SkillSourceObservationRequest request, CancellationToken cancellationToken)
         => throw new NotSupportedException();
@@ -2286,6 +2342,21 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             && QueryHelpers.ParseQuery(_navigation.ToAbsoluteUri(_navigation.Uri).Query)
                 .TryGetValue("skillsExecutionFixture", out var enabled)
             && enabled == "true";
+
+    private readonly TaskCompletionSource _releaseFirstSkillObservation = new();
+    private readonly TaskCompletionSource<bool> _firstSkillObservationReleased = new();
+    private int _firstSkillObservationReadCount;
+
+    private string? SkillsObservationFixtureOutcome()
+        => QueryHelpers.ParseQuery(_navigation.ToAbsoluteUri(_navigation.Uri).Query)
+                .TryGetValue("skillsObservationFixture", out var outcome)
+            && outcome.ToString() is "success" or "error" or "empty"
+            ? outcome.ToString()
+            : null;
+
+    private static SkillSourceObservationResult BrowserObservation(Guid skillId, string revision)
+        => new(Guid.NewGuid(), skillId, SkillSourceDriftStatus.InSync, "browser-fixture", revision, BrowserSkillContentHash,
+            true, false, false, false, "{}", BrowserAuditTime, false);
 
     private static readonly Guid BrowserExecutionId = Guid.Parse("483d7042-fcab-4351-94bc-142ea3435546");
     private static readonly Guid BrowserExecutionWorkItemId = Guid.Parse("4a6e80be-8cf1-46bb-92ce-d64a82fe7c12");
@@ -2324,6 +2395,15 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 PublishedAt: BrowserAuditTime, DeprecatedAt: null, RevokedAt: null, ArchivedAt: null)
         ],
         CreatedAt: BrowserAuditTime, UpdatedAt: BrowserAuditTime, ArchivedAt: null);
+
+    private static readonly SkillSummaryResult BrowserOtherSkill = BrowserSkill with
+    {
+        Id = Guid.Parse("753bbee1-bbb3-4d1b-8065-e86684945930"),
+        StableKey = "source-observation-fixture-beta",
+        Name = "Source observation fixture beta",
+        DefaultVersionId = null,
+        Versions = []
+    };
 
     private static readonly SkillResolutionDetailResult BrowserSkillResolution = new(
         Guid.Parse("244dcee5-f60c-4dd6-8f43-b9ee37eb125f"), BrowserExecution.Id, BrowserExecution.WorkItemId,
