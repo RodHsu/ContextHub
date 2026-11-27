@@ -1,3 +1,7 @@
+using System.Globalization;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
 using FluentAssertions;
@@ -13,6 +17,199 @@ namespace Memory.IntegrationTests;
 
 public sealed class ManagedFilesWave3WorkflowTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
+    private static ReadOnlySpan<byte> QuarantineFixtureContent => "inert quarantine review fixture"u8;
+
+    [DockerRequiredFact]
+    public async Task Approved_quarantine_release_requires_current_complete_covered_rescan_and_preserves_evidence()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var actor = UseBootstrapActor(services);
+        var db = services.GetRequiredService<MemoryDbContext>();
+        var root = Path.Combine(Path.GetTempPath(), "contexthub-quarantine-release", Guid.NewGuid().ToString("N"));
+        var project = "quarantine-release-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            var files = services.GetRequiredService<IManagedFileService>();
+            var (versionId, quarantinedAt, dangerousReport) = await CreateQuarantinedFileAsync(services, db, root, project);
+            var report = new ManagedFileContentScanner().Scan(QuarantineFixtureContent, "text/plain", "scanner-2", "policy-2");
+            var priorFinding = await db.FileSecurityFindings.AsNoTracking().SingleAsync(x => x.FileVersionId == versionId);
+
+            var withoutApproval = () => files.ApplySecurityAssessmentAsync(versionId, report, CancellationToken.None);
+            await withoutApproval.Should().ThrowAsync<InvalidOperationException>().WithMessage("*cannot be downgraded*");
+            // A legacy pending flag alone cannot grant authority.
+            await db.FileVersions.Where(x => x.Id == versionId)
+                .ExecuteUpdateAsync(update => update.SetProperty(x => x.NeedsRescan, true));
+            db.ChangeTracker.Clear();
+            var withoutApprovalEvent = () => files.ApplySecurityAssessmentAsync(versionId,
+                report with { ExpectedClassificationRevision = quarantinedAt }, CancellationToken.None);
+            await withoutApprovalEvent.Should().ThrowAsync<InvalidOperationException>().WithMessage("*requires recorded approval*");
+            var approval = new ScopedQuarantineApproval(actor.UserId!.Value, versionId, quarantinedAt);
+            var verifiedFiles = CreateFileService(services, db, approval);
+            var denied = await verifiedFiles.RequestQuarantineReleaseAsync(new(versionId, "review", "wrong-approval", quarantinedAt), CancellationToken.None);
+            denied.RequiresExternalApproval.Should().BeTrue();
+
+            var accessor = services.GetRequiredService<IRequestActorAccessor>();
+            accessor.Current = actor with { AllowedProjectIds = ["another-project"] };
+            var wrongProject = () => verifiedFiles.RequestQuarantineReleaseAsync(new(versionId, "review", approval.Reference, quarantinedAt), CancellationToken.None);
+            await wrongProject.Should().ThrowAsync<UnauthorizedAccessException>();
+            accessor.Current = actor;
+
+            var release = await verifiedFiles.RequestQuarantineReleaseAsync(new(versionId, "review", approval.Reference, quarantinedAt), CancellationToken.None);
+            release.Should().Be(new QuarantineReleaseResult(true, false, quarantinedAt + 1, FileVersionLifecycle.Quarantined));
+            var reviewRevision = release.ClassificationRevision;
+            var pending = await db.FileVersions.AsNoTracking().SingleAsync(x => x.Id == versionId);
+            pending.Classification.Should().Be(FileClassification.Quarantined);
+            pending.NeedsRescan.Should().BeTrue();
+            pending.SearchProjectionAllowed.Should().BeFalse();
+            var missingRevision = () => files.ApplySecurityAssessmentAsync(versionId, report, CancellationToken.None);
+            await missingRevision.Should().ThrowAsync<FileClassificationConflictException>();
+            using var client = environment.GetFactory().CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
+            var assessmentEndpoint = $"/api/files/{versionId:D}/security-assessments";
+            using var staleAssessment = await client.PostAsJsonAsync(assessmentEndpoint,
+                report with { ExpectedClassificationRevision = quarantinedAt });
+            using var staleRelease = await client.PostAsJsonAsync($"/api/files/{versionId:D}/quarantine-release", new
+            {
+                reason = "retry",
+                externalApprovalReference = approval.Reference,
+                expectedClassificationRevision = quarantinedAt
+            });
+            foreach (var conflict in new[] { staleAssessment, staleRelease })
+            {
+                conflict.StatusCode.Should().Be(HttpStatusCode.Conflict);
+                var problem = await conflict.Content.ReadFromJsonAsync<JsonElement>();
+                problem.GetProperty("code").GetString().Should().Be("FileClassificationConflict");
+                problem.GetRawText().Should().NotContain(versionId.ToString("D")).And.NotContain(approval.Reference);
+            }
+
+            var complete = report with
+            {
+                ExpectedClassificationRevision = reviewRevision,
+                CompletedScannerRuleIds = dangerousReport.Findings.Select(x => x.ScannerRuleId).ToArray()
+            };
+            foreach (var incomplete in new[]
+            {
+                complete with { ScannerAvailable = false },
+                complete with { ParserSupported = false },
+                complete with { ScannerSetVersion = "scanner-1" },
+                complete with { SecurityPolicyVersion = "policy-1" },
+                complete with { CompletedScannerRuleIds = ["different-rule"] },
+                complete with { CompletedScannerRuleIds = null }
+            })
+            {
+                var held = await files.ApplySecurityAssessmentAsync(versionId, incomplete, CancellationToken.None);
+                held.Classification.Should().Be(FileClassification.Quarantined);
+                held.Lifecycle.Should().Be(FileVersionLifecycle.Quarantined);
+                held.ClassificationRevision.Should().Be(reviewRevision);
+                held.NeedsRescan.Should().BeTrue();
+                held.SearchProjectionAllowed.Should().BeFalse();
+            }
+            (await db.FileVersions.AsNoTracking().SingleAsync(x => x.Id == versionId)).LastScanAt.Should().Be(pending.LastScanAt);
+            (await db.FileSecurityFindings.AsNoTracking().SingleAsync(x => x.FileVersionId == versionId))
+                .Disposition.Should().Be(SecurityFindingDisposition.Confirmed);
+
+            using var clearedResponse = await client.PostAsJsonAsync(assessmentEndpoint, complete);
+            clearedResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+            db.ChangeTracker.Clear();
+            var cleared = await db.FileVersions.AsNoTracking().SingleAsync(x => x.Id == versionId);
+            cleared.Classification.Should().Be(FileClassification.Normal);
+            cleared.Lifecycle.Should().Be(FileVersionLifecycle.Ready);
+            cleared.ClassificationRevision.Should().Be(reviewRevision + 1);
+            cleared.NeedsRescan.Should().BeFalse();
+            var historical = await db.FileSecurityFindings.AsNoTracking().SingleAsync(x => x.FileVersionId == versionId);
+            historical.Should().BeEquivalentTo(priorFinding, options => options.Excluding(x => x.Disposition));
+            historical.Disposition.Should().Be(SecurityFindingDisposition.Resolved);
+            var projection = await db.FileSearchProjections.AsNoTracking().SingleAsync(x => x.FileVersionId == versionId);
+            projection.ClassificationRevision.Should().Be(cleared.ClassificationRevision);
+            projection.RedactedText.Should().BeEmpty();
+            var events = await db.FileAccessEvents.AsNoTracking().Where(x => x.FileVersionId == versionId).ToArrayAsync();
+            events.Should().ContainSingle(x => x.FileAssetId == cleared.FileAssetId && x.Operation == FileOperation.SecurityRelease && x.Allowed &&
+                x.ReasonCode == $"ExternalApprovalVerifiedRescanRequired:{reviewRevision.ToString(CultureInfo.InvariantCulture)}");
+            events.Should().ContainSingle(x => x.Operation == FileOperation.SecurityRescan && x.Allowed &&
+                x.ReasonCode == "QuarantineClearedAfterVerifiedRescan");
+            events.Should().Contain(x => x.Operation == FileOperation.SecurityRescan && !x.Allowed && x.ReasonCode == "ScannerRuleCoverageRequired");
+
+            var repeated = await files.ApplySecurityAssessmentAsync(versionId, dangerousReport, CancellationToken.None);
+            repeated.Classification.Should().Be(FileClassification.Quarantined);
+            (await db.FileSecurityFindings.AsNoTracking().SingleAsync(x => x.FileVersionId == versionId))
+                .Disposition.Should().Be(SecurityFindingDisposition.Confirmed);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [DockerRequiredFact]
+    public async Task Approved_quarantine_rescan_retains_reproduced_high_findings_and_accepts_only_one_concurrent_completion()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var actor = UseBootstrapActor(services);
+        var db = services.GetRequiredService<MemoryDbContext>();
+        var root = Path.Combine(Path.GetTempPath(), "contexthub-quarantine-race", Guid.NewGuid().ToString("N"));
+        var project = "quarantine-race-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            var (versionId, quarantinedAt, dangerousReport) = await CreateQuarantinedFileAsync(services, db, root, project);
+            var approval = new ScopedQuarantineApproval(actor.UserId!.Value, versionId, quarantinedAt);
+            var verifiedFiles = CreateFileService(services, db, approval);
+            var release = await verifiedFiles.RequestQuarantineReleaseAsync(new(versionId, "review", approval.Reference, quarantinedAt), CancellationToken.None);
+            var reproducedFinding = dangerousReport.Findings.Single();
+            var rules = new[] { reproducedFinding.ScannerRuleId };
+            var held = await verifiedFiles.ApplySecurityAssessmentAsync(versionId, dangerousReport with
+            {
+                Findings = [reproducedFinding with { Severity = SecurityFindingSeverity.Low }],
+                ExpectedClassificationRevision = release.ClassificationRevision,
+                CompletedScannerRuleIds = rules
+            }, CancellationToken.None);
+            held.Classification.Should().Be(FileClassification.Quarantined);
+            held.Lifecycle.Should().Be(FileVersionLifecycle.Quarantined);
+            var heldRevision = held.ClassificationRevision;
+            var persistedFinding = await db.FileSecurityFindings.AsNoTracking().SingleAsync(x => x.FileVersionId == versionId);
+            persistedFinding.Disposition.Should().Be(SecurityFindingDisposition.Confirmed);
+            persistedFinding.Severity.Should().Be(reproducedFinding.Severity);
+            var usedApproval = await verifiedFiles.RequestQuarantineReleaseAsync(new(versionId, "review", approval.Reference, heldRevision), CancellationToken.None);
+            usedApproval.RequiresExternalApproval.Should().BeTrue();
+
+            var newApproval = new ScopedQuarantineApproval(actor.UserId.Value, versionId, heldRevision);
+            var newRelease = await CreateFileService(services, db, newApproval).RequestQuarantineReleaseAsync(
+                new(versionId, "review", newApproval.Reference, heldRevision), CancellationToken.None);
+            var clean = dangerousReport with
+            {
+                Findings = [],
+                ExpectedClassificationRevision = newRelease.ClassificationRevision,
+                CompletedScannerRuleIds = rules
+            };
+            async Task<bool> CompleteInFreshScopeAsync()
+            {
+                using var candidate = environment.GetFactory().Services.CreateScope();
+                candidate.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = actor;
+                try
+                {
+                    var result = await candidate.ServiceProvider.GetRequiredService<IManagedFileService>()
+                        .ApplySecurityAssessmentAsync(versionId, clean, CancellationToken.None);
+                    result.Classification.Should().Be(FileClassification.Normal);
+                    return true;
+                }
+                catch (FileClassificationConflictException)
+                {
+                    return false;
+                }
+            }
+
+            (await Task.WhenAll(CompleteInFreshScopeAsync(), CompleteInFreshScopeAsync())).Should().BeEquivalentTo(new[] { true, false });
+            var events = await db.FileAccessEvents.AsNoTracking().Where(x => x.FileVersionId == versionId && x.Operation == FileOperation.SecurityRescan).ToArrayAsync();
+            events.Should().ContainSingle(x => x.Allowed && x.ReasonCode == "QuarantineClearedAfterVerifiedRescan");
+            events.Should().ContainSingle(x => !x.Allowed && x.ReasonCode == "RescanConfirmedHighFinding");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     [DockerRequiredFact]
     public async Task Dedup_is_concurrency_safe_and_does_not_disclose_cross_owner_existence_or_unassigned_files()
     {
@@ -470,6 +667,38 @@ public sealed class ManagedFilesWave3WorkflowTests(ContainerTestEnvironment envi
             new AesGcmManagedFileKeyAuthority(Options.Create(keys)),
             services.GetRequiredService<IPlatformFoundationStore>(),
             Options.Create(new ManagedTransferOptions { ChunkBytes = 64 * 1024 }));
+    }
+
+    private static IManagedFileService CreateFileService(IServiceProvider services, MemoryDbContext db, IHighAssuranceApprovalVerifier approval)
+        => new ManagedFileService(db, services.GetRequiredService<IRequestActorAccessor>(), services.GetRequiredService<IClock>(),
+            services.GetRequiredService<IPlatformFoundationStore>(), approval);
+
+    private static async Task<(Guid VersionId, long Revision, FileSecurityAssessment Report)> CreateQuarantinedFileAsync(
+        IServiceProvider services, MemoryDbContext db, string root, string project)
+    {
+        var payload = QuarantineFixtureContent.ToArray();
+        var objectId = await UploadAsync(CreateTransfer(services, db, root), project, payload, project + "-upload");
+        var service = services.GetRequiredService<IManagedFileService>();
+        var file = await service.CreateAsync(new(objectId, "quarantine-fixture.txt", "text/plain", "test", project + "-create", project),
+            CancellationToken.None);
+        var falsePositive = new ManagedFileContentScanner().Scan("EICAR-STANDARD-ANTIVIRUS-TEST-FILE"u8, "text/plain", "scanner-2", "policy-2");
+        var report = falsePositive with { Findings = [falsePositive.Findings.Single() with { EvidenceHash = Hash(payload) }] };
+        var quarantined = await service.ApplySecurityAssessmentAsync(file.FileVersionId!.Value, report, CancellationToken.None);
+        quarantined.Classification.Should().Be(FileClassification.Quarantined);
+        quarantined.FileAsset!.ProjectId.Should().Be(project);
+        return (quarantined.Id, quarantined.ClassificationRevision, report);
+    }
+
+    private sealed class ScopedQuarantineApproval(Guid actorId, Guid fileVersionId, long expectedRevision) : IHighAssuranceApprovalVerifier
+    {
+        public string Reference { get; } = "test-external-approval";
+
+        public Task<bool> VerifyAsync(string callerActorId, string approvalReference, string purpose, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var expectedPurpose = $"quarantine-release:{fileVersionId:D}:{expectedRevision.ToString(CultureInfo.InvariantCulture)}";
+            return Task.FromResult(callerActorId == actorId.ToString("D") && approvalReference == Reference && purpose == expectedPurpose);
+        }
     }
 
     private static ContextHubRequestActor UseBootstrapActor(IServiceProvider services)
