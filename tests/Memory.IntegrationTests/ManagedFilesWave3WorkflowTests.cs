@@ -20,6 +20,115 @@ public sealed class ManagedFilesWave3WorkflowTests(ContainerTestEnvironment envi
     private static ReadOnlySpan<byte> QuarantineFixtureContent => "inert quarantine review fixture"u8;
 
     [DockerRequiredFact]
+    public async Task File_readiness_gates_content_operations_and_representations_preserving_metadata_and_audit()
+    {
+        var factory = environment.GetFactory();
+        using var scope = factory.Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var actor = UseBootstrapActor(services);
+        var actors = services.GetRequiredService<IRequestActorAccessor>();
+        var db = services.GetRequiredService<MemoryDbContext>();
+        var files = services.GetRequiredService<IManagedFileService>();
+        var foundation = services.GetRequiredService<IPlatformFoundationStore>();
+        var root = Path.Combine(Path.GetTempPath(), "contexthub-file-readiness", Guid.NewGuid().ToString("N"));
+        var project = $"file-readiness-{Guid.NewGuid():N}";
+        var operations = new[]
+        {
+            FileOperation.Read, FileOperation.Download, FileOperation.Extract, FileOperation.Ocr,
+            FileOperation.Embed, FileOperation.SearchIndex, FileOperation.AutoShare, FileOperation.CrossProjectShare
+        };
+
+        try
+        {
+            var transfer = CreateTransfer(services, db, root);
+            var objectId = await UploadAsync(transfer, project, "synthetic readiness fixture"u8.ToArray(), "readiness");
+            var created = await files.CreateAsync(new(objectId, "readiness.txt", "text/plain", "readiness", "file", project,
+                ManagedFileCreateIntent.CreateNewFile), CancellationToken.None);
+            var versionId = created.FileVersionId!.Value;
+            var fileId = created.FileId!.Value;
+            foreach (var operation in operations.Append(FileOperation.Metadata))
+            {
+                await foundation.UpsertExplicitGrantAsync(new(null, project, actor.UserId!.Value.ToString("D"),
+                    operation.ToString().ToLowerInvariant(), AuthorizationEffect.Allow, "readiness-fixture", 0,
+                    "File", fileId.ToString("D")), CancellationToken.None);
+            }
+
+            using var client = factory.CreateClient();
+            var authorizePath = $"/api/files/{versionId:D}/authorize";
+            var representationPath = $"/api/files/{versionId:D}/representations";
+            var pending = await DecideAsync(FileOperation.Read, "pending");
+            pending.Allowed.Should().BeFalse();
+            pending.ReasonCode.Should().Be("SecurityScanRequired");
+            (await DecideAsync(FileOperation.Embed, "pending")).ReasonCode.Should().Be("RestrictedProjectionDenied");
+            (await DecideAsync(FileOperation.Metadata, "pending-metadata")).Allowed.Should().BeTrue();
+            using var pendingWrite = await client.PostAsJsonAsync(representationPath,
+                new { Kind = FileRepresentationKind.Preview, ContentHash = Hash("pending"), Classification = FileClassification.Restricted });
+            pendingWrite.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+
+            foreach (var unauthorized in new[]
+                     {
+                         actor with { AllowedProjectIds = [$"{project}-other"] },
+                         actor with { Role = TenantUserRole.Member, UserId = Guid.NewGuid(), Scopes = [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite] },
+                         actor with { TenantId = Guid.NewGuid() }
+                     })
+            {
+                actors.Current = unauthorized;
+                var unauthorizedDecision = () => files.AuthorizeOperationAsync(versionId, FileOperation.Metadata, "out-of-scope", CancellationToken.None);
+                var unauthorizedWrite = () => files.AddRepresentationAsync(new(versionId, FileRepresentationKind.Preview,
+                    Hash("out-of-scope"), FileClassification.Restricted), CancellationToken.None);
+                await unauthorizedDecision.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("File version is not available.");
+                await unauthorizedWrite.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("File version is not available.");
+            }
+            actors.Current = actor;
+
+            var assessed = await files.ApplySecurityAssessmentAsync(versionId,
+                new FileSecurityAssessment(true, true, "fixture-scanner", "fixture-policy", []), CancellationToken.None);
+            assessed.Lifecycle.Should().Be(FileVersionLifecycle.Ready);
+            foreach (var operation in operations)
+                (await DecideAsync(operation, "fresh")).Allowed.Should().BeTrue();
+            using var readyWrite = await client.PostAsJsonAsync(representationPath,
+                new { Kind = FileRepresentationKind.Preview, ContentHash = Hash("fresh"), Classification = FileClassification.Normal });
+            readyWrite.StatusCode.Should().Be(HttpStatusCode.OK);
+
+            await db.FileVersions.Where(version => version.Id == versionId).ExecuteUpdateAsync(set => set.SetProperty(version => version.NeedsRescan, true));
+            foreach (var operation in operations)
+            {
+                var stale = await DecideAsync(operation, "rescan-required");
+                stale.Allowed.Should().BeFalse();
+                stale.ReasonCode.Should().Be("SecurityScanRequired");
+            }
+            (await DecideAsync(FileOperation.Metadata, "stale-metadata")).Allowed.Should().BeTrue();
+            // This service scope still tracks the formerly fresh source. A new derived write must read the current state.
+            var staleWrite = () => files.AddRepresentationAsync(new(versionId, FileRepresentationKind.SearchProjection,
+                Hash("stale"), FileClassification.Normal), CancellationToken.None);
+            await staleWrite.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("File content requires a completed security scan.");
+
+            var retained = await db.FileRepresentations.AsNoTracking().SingleAsync(row => row.FileVersionId == versionId);
+            retained.SourceClassificationRevision.Should().Be(assessed.ClassificationRevision);
+            retained.ContentHash.Should().Be(Hash("fresh"));
+            var events = await db.FileAccessEvents.AsNoTracking().Where(row => row.FileVersionId == versionId).ToArrayAsync();
+            events.Should().NotContain(row => row.Purpose == "out-of-scope");
+            events.Should().ContainSingle(row => row.Purpose == "pending" && row.Operation == FileOperation.Read && !row.Allowed &&
+                row.ReasonCode == "SecurityScanRequired");
+            var blocked = events.Where(row => row.Purpose == "rescan-required").ToArray();
+            blocked.Select(row => row.Operation).Should().BeEquivalentTo(operations);
+            blocked.Should().OnlyContain(row => !row.Allowed && row.ReasonCode == "SecurityScanRequired");
+
+            async Task<FileOperationDecision> DecideAsync(FileOperation operation, string purpose)
+            {
+                using var response = await client.PostAsJsonAsync(authorizePath, new { Operation = operation, Purpose = purpose });
+                response.StatusCode.Should().Be(HttpStatusCode.OK);
+                return (await response.Content.ReadFromJsonAsync<FileOperationDecision>())!;
+            }
+        }
+        finally
+        {
+            actors.Current = actor;
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Approved_quarantine_release_requires_current_complete_covered_rescan_and_preserves_evidence()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
