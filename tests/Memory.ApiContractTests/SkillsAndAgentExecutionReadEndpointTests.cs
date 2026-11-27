@@ -5,13 +5,108 @@ using System.Text.Json;
 using FluentAssertions;
 using Memory.Application;
 using Memory.Domain;
+using Memory.Infrastructure;
 using Memory.Tests.Shared;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Memory.ApiContractTests;
 
 public sealed class SkillsAndAgentExecutionReadEndpointTests(ContainerTestEnvironment environment)
     : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Skill_canonical_tags_list_is_bounded_and_scoped_to_current_project_and_owner()
+    {
+        var fixture = Guid.NewGuid();
+        var project = $"Canonical-Skills-{fixture:N}";
+        var otherProject = $"Other-Skills-{fixture:N}";
+        var skill = new Skill { StableKey = $"canonical-{fixture:N}"[..30], Name = "Synthetic canonical tags" };
+        var now = DateTimeOffset.UtcNow;
+        var factory = environment.GetFactory();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var user = await db.TenantUsers.SingleAsync(candidate => candidate.Username == "contract-test-admin");
+            skill.TenantId = user.TenantId;
+            skill.OwnerUserId = user.Id;
+            skill.CreatedAt = skill.UpdatedAt = now;
+            db.Skills.Add(skill);
+            var seeds = new[]
+            {
+                (Definition: CreateTag("Alpha", project), Status: "Active"),
+                (Definition: CreateTag("Bravo", project), Status: "Active"),
+                (Definition: CreateTag("HiddenInactive", project), Status: "Removed"),
+                (Definition: CreateTag("HiddenForeign", otherProject), Status: "Active")
+            };
+            await using (var transaction = await db.Database.BeginTransactionAsync())
+            {
+                db.CanonicalTagDefinitions.AddRange(seeds.Select(seed => seed.Definition));
+                await db.SaveChangesAsync();
+                db.CanonicalTagBindings.AddRange(seeds.Select(seed => new CanonicalTagBinding
+                {
+                    TenantId = user.TenantId,
+                    OwnerUserId = user.Id,
+                    DefinitionId = seed.Definition.Id,
+                    ProjectId = project,
+                    ResourceType = "Skill",
+                    ResourceId = skill.Id.ToString("D"),
+                    Status = seed.Status,
+                    EvidenceRef = "synthetic-private-evidence",
+                    CreatedAt = now
+                }));
+                await db.SaveChangesAsync();
+                await transaction.CommitAsync();
+            }
+
+            var actors = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+            var service = scope.ServiceProvider.GetRequiredService<ISkillService>();
+            var permitted = new ContextHubRequestActor(user.TenantId, user.Id, user.Username, TenantUserRole.Member,
+                [SecurityScopes.SkillsRead], [project], true);
+            actors.Current = permitted with { UserId = Guid.NewGuid() };
+            (await service.ListCanonicalTagBindingsAsync(skill.Id, project, 0, 10, default)).Should().BeNull();
+            actors.Current = permitted with { AllowedProjectIds = [otherProject] };
+            Func<Task> forbidden = () => service.ListCanonicalTagBindingsAsync(skill.Id, project, 0, 10, default);
+            await forbidden.Should().ThrowAsync<UnauthorizedAccessException>();
+
+            CanonicalTagDefinition CreateTag(string name, string definitionProject)
+                => new()
+                {
+                    TenantId = user.TenantId,
+                    OwnerUserId = user.Id,
+                    ProjectId = definitionProject,
+                    CanonicalName = name,
+                    NormalizedName = name.ToLowerInvariant(),
+                    CreatedAt = now,
+                    UpdatedAt = now
+                };
+        }
+
+        using var client = factory.CreateClient();
+        var path = $"/api/skills/{skill.Id:D}/canonical-tags";
+        var query = $"projectId={Uri.EscapeDataString(project.ToLowerInvariant())}&limit=1";
+        using var firstResponse = await client.GetAsync($"{path}?{query}");
+        firstResponse.EnsureSuccessStatusCode();
+        firstResponse.Headers.CacheControl!.NoStore.Should().BeTrue();
+        (await firstResponse.Content.ReadAsStringAsync()).Should().NotContain("synthetic-private-evidence");
+        var first = (await firstResponse.Content.ReadFromJsonAsync<SkillCanonicalTagBindingsResult>())!;
+        first.SkillId.Should().Be(skill.Id);
+        first.HasMore.Should().BeTrue();
+        first.Items.Should().ContainSingle(item => item.Name == "Alpha" && item.TagRevision == 1);
+
+        var second = (await client.GetFromJsonAsync<SkillCanonicalTagBindingsResult>($"{path}?{query}&offset=1"))!;
+        second.Offset.Should().Be(1);
+        second.HasMore.Should().BeFalse();
+        second.Items.Should().ContainSingle(item => item.Name == "Bravo");
+
+        using var missing = await client.GetAsync($"/api/skills/{Guid.NewGuid():D}/canonical-tags?{query}");
+        missing.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        using var noProject = await client.GetAsync(path);
+        noProject.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        using var excessive = await client.GetAsync($"{path}?{query}&offset=10001");
+        excessive.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
     [DockerRequiredFact]
     public async Task Skills_list_reads_back_the_published_default_version()
     {
