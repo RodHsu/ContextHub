@@ -198,6 +198,8 @@ Do not write:
 | `memory_get` | Reading one known memory item in full |
 | `memory_upsert` | Creating or replacing stable durable knowledge |
 | `memory_update` | Correcting or extending existing durable knowledge |
+| `memory_edit` | Editing durable knowledge with the original read version and a stable request ID |
+| `memory_edit_receipt_get` | Recovering the exact committed result of a direct memory edit |
 | `memory_archive` | Archiving or restoring one memory item while preserving the item |
 | `memory_restore` | Restoring one archived memory item |
 | `memory_move` | Moving one memory item to another ProjectId after access and duplicate-key checks |
@@ -258,7 +260,7 @@ Do not write:
 
 The Dashboard also exposes this catalog in Traditional Chinese at `/mcp-tools`.
 
-The catalog summary is generated from the canonical policy used by `/mcp-chat`. This source publishes General catalog `2026-11-27-v15` with 92 App-facing tools, including 10 `agent_execution_*` tools and seven Skills tools. The summary also reports the backend `/mcp` count and the counts for read, mutation, delete-capable, and proposal-gated tools. The distinct `/mcp-automation` surface exposes four tools. Release validation checks the host-compatible projection, including non-destructive annotations and structured schemas for AgentExecution and the read-only annotations for `governance_contract_get`, `governance_run_get`, and `governance_runs_list`. App-facing validation accepts JSON Schema outputs rooted at `object` or `array`.
+The catalog summary is generated from the canonical policy used by `/mcp-chat`. This source publishes General catalog `2026-11-27-v16` with 94 App-facing tools, including 10 `agent_execution_*` tools and seven Skills tools. The summary also reports the backend `/mcp` count and the counts for read, mutation, delete-capable, and proposal-gated tools. The distinct `/mcp-automation` surface exposes four tools. Release validation checks the host-compatible projection, including non-destructive annotations and structured schemas for AgentExecution and read-only annotations for receipt and governance query tools. App-facing validation accepts JSON Schema outputs rooted at `object` or `array`.
 
 ## Cross-Project Discussions
 
