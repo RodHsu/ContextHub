@@ -2658,6 +2658,7 @@ public static class DependencyInjection
         services.AddScoped<ISkillService, SkillService>();
         services.AddScoped<ISuggestedActionReconciliationService, SuggestedActionReconciliationService>();
         services.AddScoped<IMemoryService, MemoryService>();
+        services.AddScoped<IMemoryEditingService, MemoryEditingService>();
         services.AddScoped<IProjectArtifactExchangeService, ProjectArtifactExchangeService>();
         services.AddScoped<IDashboardQueryService, DashboardQueryService>();
         services.AddScoped<IDashboardMemoryGraphIndexBuilder, DashboardMemoryGraphIndexBuilder>();

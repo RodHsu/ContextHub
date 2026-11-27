@@ -32,6 +32,7 @@ public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> op
     public DbSet<SecurityAuditEvent> SecurityAuditEvents => Set<SecurityAuditEvent>();
     public DbSet<MemoryItem> MemoryItems => Set<MemoryItem>();
     public DbSet<MemoryItemRevision> MemoryItemRevisions => Set<MemoryItemRevision>();
+    public DbSet<MemoryEditReceiptRecord> MemoryEditReceipts => Set<MemoryEditReceiptRecord>();
     public DbSet<MemoryItemChunk> MemoryItemChunks => Set<MemoryItemChunk>();
     public DbSet<MemoryChunkVector> MemoryChunkVectors => Set<MemoryChunkVector>();
     public DbSet<MemoryLink> MemoryLinks => Set<MemoryLink>();
@@ -587,7 +588,7 @@ public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> op
             entity.Property(x => x.SourceRef).HasColumnName("source_ref");
             entity.Property(x => x.Importance).HasColumnName("importance");
             entity.Property(x => x.Confidence).HasColumnName("confidence");
-            entity.Property(x => x.Version).HasColumnName("version");
+            entity.Property(x => x.Version).HasColumnName("version").IsConcurrencyToken();
             entity.Property(x => x.Status).HasColumnName("status").HasConversion<string>();
             entity.Property(x => x.AuthorityState).HasColumnName("authority_state").HasConversion<string>();
             entity.Property(x => x.SupersedesId).HasColumnName("supersedes_id");
@@ -654,6 +655,27 @@ public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> op
             entity.Property(x => x.MetadataJson).HasColumnName("metadata_json");
             entity.Property(x => x.ChangedBy).HasColumnName("changed_by");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at");
+        });
+
+        modelBuilder.Entity<MemoryEditReceiptRecord>(entity =>
+        {
+            entity.ToTable("memory_edit_receipts");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).HasColumnName("id");
+            entity.Property(x => x.TenantId).HasColumnName("tenant_id");
+            entity.Property(x => x.OwnerUserId).HasColumnName("owner_user_id");
+            entity.Property(x => x.ProjectId).HasColumnName("project_id");
+            entity.Property(x => x.ProjectKey).HasColumnName("project_key");
+            entity.Property(x => x.MemoryItemId).HasColumnName("memory_item_id");
+            entity.Property(x => x.RequestId).HasColumnName("request_id");
+            entity.Property(x => x.RequestHash).HasColumnName("request_hash");
+            entity.Property(x => x.HashVersion).HasColumnName("hash_version");
+            entity.Property(x => x.PreviousVersion).HasColumnName("previous_version");
+            entity.Property(x => x.Version).HasColumnName("version");
+            entity.Property(x => x.RevisionId).HasColumnName("revision_id");
+            entity.Property(x => x.CommittedAt).HasColumnName("committed_at");
+            entity.HasIndex(x => new { x.TenantId, x.OwnerUserId, x.ProjectKey, x.MemoryItemId, x.RequestId })
+                .HasDatabaseName("ux_memory_edit_receipt_scope_request").IsUnique();
         });
 
         modelBuilder.Entity<MemoryItemChunk>(entity =>
