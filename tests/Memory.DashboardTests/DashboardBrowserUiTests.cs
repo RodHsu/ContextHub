@@ -4689,6 +4689,7 @@ public sealed partial class DashboardBrowserFixture : IAsyncLifetime
     private Process? _process;
     private int _listeningPort;
     private readonly int _port = GetFreeTcpPort();
+    private readonly TimeSpan _dashboardReadinessTimeout = ReadDashboardReadinessTimeout();
     private readonly List<DashboardProcessStartupDiagnostics> _startupDiagnostics = [];
     private DashboardProcessStartupDiagnostics? _currentStartupDiagnostics;
     private DashboardFixtureTestClass? _fixtureTestClass;
@@ -5059,7 +5060,7 @@ public sealed partial class DashboardBrowserFixture : IAsyncLifetime
         };
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "browser-test-dashboard-token");
 
-        var deadline = DateTime.UtcNow.AddSeconds(30);
+        var deadline = DateTime.UtcNow.Add(_dashboardReadinessTimeout);
         int? lastStatus = null;
         string? lastFailure = null;
         while (DateTime.UtcNow < deadline)
@@ -5094,6 +5095,24 @@ public sealed partial class DashboardBrowserFixture : IAsyncLifetime
 
         _currentStartupDiagnostics?.RecordListeningPort(_listeningPort);
         throw new TimeoutException($"Dashboard browser test host readiness failed: listeningPort={_listeningPort}, expectedPort={_port}, lastStatus={lastStatus}, lastFailure={lastFailure}.");
+    }
+
+    private static TimeSpan ReadDashboardReadinessTimeout()
+    {
+        const string settingName = "CONTEXTHUB_TEST_DASHBOARD_READINESS_SECONDS";
+        var configuredValue = Environment.GetEnvironmentVariable(settingName);
+        if (configuredValue is null)
+        {
+            return TimeSpan.FromSeconds(30);
+        }
+
+        if (!int.TryParse(configuredValue, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
+            || seconds is < 30 or > 180)
+        {
+            throw new InvalidOperationException($"{settingName} must be an integer from 30 through 180.");
+        }
+
+        return TimeSpan.FromSeconds(seconds);
     }
 
     private static int GetFreeTcpPort()
