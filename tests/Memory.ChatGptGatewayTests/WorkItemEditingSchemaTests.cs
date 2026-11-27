@@ -60,6 +60,31 @@ public sealed class WorkItemEditingSchemaTests
         McpPublishedToolCatalog.DirectMutationToolNames.Should().NotContain(name);
     }
 
+    [Theory]
+    [InlineData("memory_revisions_list", false)]
+    [InlineData("memory_revision_get", true)]
+    public void Memory_history_tools_have_matching_scoped_read_only_wire_schemas(string name, bool requiresRevision)
+    {
+        var backend = Schema(typeof(BackendTools), name);
+        var gateway = Schema(typeof(ChatGptGatewayTools), name);
+        JsonNode.DeepEquals(JsonNode.Parse(backend.GetRawText()), JsonNode.Parse(gateway.GetRawText())).Should().BeTrue();
+        var required = requiresRevision ? new[] { "projectId", "memoryId", "revisionId" } : ["projectId", "memoryId"];
+        gateway.GetProperty("required").EnumerateArray().Select(value => value.GetString()).Should().BeEquivalentTo(required);
+
+        foreach (var type in new[] { typeof(BackendTools), typeof(ChatGptGatewayTools) })
+        {
+            var tool = McpServerTool.Create(type.GetMethod(name)!, RuntimeHelpers.GetUninitializedObject(type), new McpServerToolCreateOptions());
+            var annotations = JsonSerializer.SerializeToElement(tool.ProtocolTool).GetProperty("annotations");
+            annotations.GetProperty("readOnlyHint").GetBoolean().Should().BeTrue();
+            annotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("idempotentHint").GetBoolean().Should().BeTrue();
+            annotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
+        }
+        McpPublishedToolCatalog.QueryToolNames.Should().Contain(name);
+        McpPublishedToolCatalog.RestrictedToolNames.Should().Contain(name);
+        McpPublishedToolCatalog.DirectMutationToolNames.Should().NotContain(name);
+    }
+
     [Fact]
     public void By_id_lookup_requires_project_and_item_and_has_matching_read_only_wire_schemas()
     {

@@ -942,7 +942,8 @@ metadata, use
 `GET /api/memories/{memoryId}/revisions/{revisionId}?projectId={projectId}`.
 Specify the current ProjectId on both routes. The current memory's access
 rules continue to apply to the historical records, and inaccessible or
-mismatched resources return 404. Revision ID identifies a record even when
+mismatched resources return 404. The general MCP tools `memory_revisions_list`
+and `memory_revision_get` apply the same scope and ordering. Revision ID identifies a record even when
 legacy data contains duplicate version numbers. Both reads use `Cache-Control:
 no-store`.
 

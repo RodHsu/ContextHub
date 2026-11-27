@@ -56,6 +56,8 @@ public sealed class ArrivalRequestClassificationTests
     [InlineData("project_work_item_create", "work-item-write")]
     [InlineData("project_work_items_list", "work-item-read")]
     [InlineData("project_work_item_get", "work-item-read")]
+    [InlineData("memory_revision_get", "memory-read")]
+    [InlineData("memory_revisions_list", "memory-read")]
     [InlineData("governance_batch_execute", "governance-write")]
     [InlineData("scheduled_governance_run_get", "governance-read")]
     [InlineData("memory_search_SECRET_TOOL", "unknown")]

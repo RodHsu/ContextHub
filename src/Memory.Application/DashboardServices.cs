@@ -854,7 +854,8 @@ public sealed class DashboardQueryService(
 
     private static bool IsMemoryRevisionProjectReadable(string project, ContextHubRequestActor actor)
     {
-        if (project.Length == 0 || project == ProjectContext.AllProjectIdsSentinel)
+        if (project.Length == 0 || project == ProjectContext.AllProjectIdsSentinel ||
+            (actor.IsAuthenticated && !actor.HasScope(SecurityScopes.MemoryRead)))
         {
             return false;
         }

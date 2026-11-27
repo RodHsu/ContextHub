@@ -216,6 +216,62 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Streamable_http_memory_history_lists_summaries_and_requires_exact_existing_scope_for_body()
+    {
+        var projectId = $"Mcp-History-{Guid.NewGuid():N}";
+        var factory = environment.GetFactory();
+        Guid memoryId;
+        const string previousBody = "Synthetic previous version text.";
+        using (var scope = factory.Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            var service = scope.ServiceProvider.GetRequiredService<IMemoryService>();
+            var request = new MemoryUpsertRequest(
+                ExternalKey: $"fixture:{projectId}",
+                Scope: MemoryScope.Project,
+                MemoryType: MemoryType.Fact,
+                Title: "Historical fixture",
+                Content: previousBody,
+                Summary: "A distinct historical summary.",
+                SourceType: "test",
+                SourceRef: "memory-history-protocol",
+                Tags: [],
+                Importance: 0.6m,
+                Confidence: 1m,
+                ProjectId: projectId);
+            var created = await service.UpsertAsync(request, default);
+            memoryId = created.Id;
+            await service.UpsertAsync(request with { Content = "Current version text." }, default);
+        }
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
+        var history = ExtractToolJson(await SendMcpAsync(client, null, 41, "tools/call", new
+        {
+            name = "memory_revisions_list",
+            arguments = new { projectId = projectId.ToLowerInvariant(), memoryId, page = 2, pageSize = 1 }
+        }));
+        history.GetProperty("totalCount").GetInt32().Should().Be(2);
+        var row = history.GetProperty("items").EnumerateArray().Single();
+        row.TryGetProperty("content", out _).Should().BeFalse();
+        row.GetProperty("version").GetInt32().Should().Be(1);
+        var revisionId = row.GetProperty("id").GetGuid();
+        var body = ExtractToolJson(await BodyAsync(42, projectId.ToLowerInvariant(), revisionId));
+        body.GetProperty("projectId").GetString().Should().Be(projectId);
+        body.GetProperty("content").GetString().Should().Be(previousBody);
+        var absent = ExtractSseJson(await BodyAsync(43, projectId, Guid.NewGuid())).GetProperty("result");
+        ExtractSseJson(await BodyAsync(44, projectId + "-other", revisionId)).GetProperty("result").GetRawText()
+            .Should().Be(absent.GetRawText());
+
+        Task<string> BodyAsync(int callId, string requestedProjectId, Guid requestedRevisionId)
+            => SendMcpAsync(client, null, callId, "tools/call", new
+            {
+                name = "memory_revision_get",
+                arguments = new { projectId = requestedProjectId, memoryId, revisionId = requestedRevisionId }
+            });
+    }
+
+    [DockerRequiredFact]
     public async Task Streamable_http_work_item_lookup_reads_current_revision_only_in_its_explicit_project()
     {
         var projectId = $"work-item-lookup-{Guid.NewGuid():N}";
@@ -775,7 +831,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_items_list");
         var governanceBatchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
-        listedTools.GetArrayLength().Should().Be(90);
+        listedTools.GetArrayLength().Should().Be(92);
         var bootstrapResult = ExtractSseJson(bootstrapPayload).GetProperty("result");
 
         toolsPayload.Should().Contain("describe_context_hub");
@@ -1144,6 +1200,8 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             "project_work_item_archive",
             "project_work_item_restore",
             "project_work_item_get",
+            "memory_revisions_list",
+            "memory_revision_get",
             "project_work_items_list",
             "knowledge_review",
             "conversation_insight_set_disposition",

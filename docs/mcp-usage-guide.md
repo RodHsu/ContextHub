@@ -258,7 +258,7 @@ Do not write:
 
 The Dashboard also exposes this catalog in Traditional Chinese at `/mcp-tools`.
 
-The catalog summary is generated from the canonical policy used by `/mcp-chat`. This source publishes General catalog `2026-11-27-v14` with 90 App-facing tools, including 10 `agent_execution_*` tools and seven Skills tools. The summary also reports the backend `/mcp` count and the counts for read, mutation, delete-capable, and proposal-gated tools. The distinct `/mcp-automation` surface exposes four tools. Release validation checks the host-compatible projection, including non-destructive annotations and structured schemas for AgentExecution and the read-only annotations for `governance_contract_get`, `governance_run_get`, and `governance_runs_list`. App-facing validation accepts JSON Schema outputs rooted at `object` or `array`.
+The catalog summary is generated from the canonical policy used by `/mcp-chat`. This source publishes General catalog `2026-11-27-v15` with 92 App-facing tools, including 10 `agent_execution_*` tools and seven Skills tools. The summary also reports the backend `/mcp` count and the counts for read, mutation, delete-capable, and proposal-gated tools. The distinct `/mcp-automation` surface exposes four tools. Release validation checks the host-compatible projection, including non-destructive annotations and structured schemas for AgentExecution and the read-only annotations for `governance_contract_get`, `governance_run_get`, and `governance_runs_list`. App-facing validation accepts JSON Schema outputs rooted at `object` or `array`.
 
 ## Cross-Project Discussions
 

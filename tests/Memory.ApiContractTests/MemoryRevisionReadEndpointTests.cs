@@ -58,6 +58,9 @@ public sealed class MemoryRevisionReadEndpointTests(ContainerTestEnvironment env
             actors.Current = permitted with { AllowedProjectIds = ["Another-Project"] };
             (await service.GetMemoryRevisionAsync(project, memoryId, original.Id, default)).Should().BeNull();
             (await service.GetMemoryRevisionsAsync(project, memoryId, null, null, default)).Should().BeNull();
+            actors.Current = permitted with { Scopes = [] };
+            (await service.GetMemoryRevisionAsync(project, memoryId, original.Id, default)).Should().BeNull();
+            (await service.GetMemoryRevisionsAsync(project, memoryId, null, null, default)).Should().BeNull();
             actors.Current = permitted with { UserId = Guid.NewGuid() };
             (await service.GetMemoryRevisionAsync(project, memoryId, original.Id, default)).Should().BeNull();
             actors.Current = permitted with { TenantId = Guid.NewGuid() };

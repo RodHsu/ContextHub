@@ -10,6 +10,7 @@ namespace Memory.McpServer;
 public sealed class MemoryMcpTools(
     IContextHubBootstrapService bootstrapService,
     IMemoryService memoryService,
+    IDashboardQueryService dashboardQueryService,
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
     IConversationAdjudicationService conversationAdjudicationService,
@@ -82,6 +83,18 @@ public sealed class MemoryMcpTools(
     [McpServerTool(UseStructuredContent = true), Description("Get a single memory item by id.")]
     public Task<MemoryDocument?> memory_get(Guid id, CancellationToken cancellationToken = default)
         => memoryService.GetAsync(id, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read a bounded page of historical memory revision summaries. Requires explicit ProjectId and MemoryId; access uses the current memory scope. The summary does not contain the historical body.")]
+    public Task<PagedResult<MemoryRevisionResult>?> memory_revisions_list(
+        string projectId, Guid memoryId, int page = 1, int pageSize = 20, CancellationToken cancellationToken = default)
+        => dashboardQueryService.GetMemoryRevisionsAsync(projectId, memoryId, page, pageSize, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read one historical memory revision body by explicit ProjectId, MemoryId and RevisionId. Missing, mismatched and inaccessible items all return unavailable.")]
+    public Task<MemoryRevisionBodyResult?> memory_revision_get(
+        string projectId, Guid memoryId, Guid revisionId, CancellationToken cancellationToken = default)
+        => dashboardQueryService.GetMemoryRevisionAsync(projectId, memoryId, revisionId, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Read the durable project information that agents must use as fixed background before task-specific memory retrieval.")]
     public Task<ProjectInformationResult?> project_information_get(string projectId, CancellationToken cancellationToken = default)
