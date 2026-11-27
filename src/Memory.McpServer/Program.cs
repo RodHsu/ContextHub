@@ -297,6 +297,7 @@ dashboard.MapGet("/operations", async (string? projectId, IDashboardQueryService
 var memories = app.MapGroup("/api/memories");
 memories.RequireAuthIfEnabled(requireAuthentication);
 memories.RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
+memories.MapMemoryEditingEndpoints(requireAuthentication);
 memories.MapPost("/manifest/read", async (MemoryManifestReadRequest request, IMemoryManifestService service, CancellationToken cancellationToken) =>
 {
     try { return Results.Ok(await service.ReadAsync(request, cancellationToken)); }
