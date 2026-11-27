@@ -4774,6 +4774,87 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     }
 
     [DockerRequiredFact]
+    public async Task Versioned_Memory_Edit_Proposal_Applies_Once_And_Direct_Receipt_Requires_Exact_Intent()
+    {
+        await using var factory = new ChatGptGatewayApplicationFactory(
+            environment.PostgresConnectionString, environment.RedisConnectionString, selfHostedOAuth: true);
+        await ConfigureSelfHostedUserAsync(factory);
+        MemoryDocument memory;
+        MemoryEditCommand directEdit;
+        MemoryEditReceipt directReceipt;
+        using (var scope = factory.Services.CreateScope())
+        {
+            UseGatewayActor(scope.ServiceProvider);
+            memory = await scope.ServiceProvider.GetRequiredService<IMemoryService>().UpsertAsync(new(
+                $"gateway-memory-edit:{Guid.NewGuid():N}", MemoryScope.Project, MemoryType.Fact,
+                "Original title", "Original body", "", "test", "memory-edit-gateway", [], 0.5m, 0.5m,
+                ProjectId: ProjectId), default);
+            directEdit = new(ProjectId, memory.Id, memory.Version, Guid.NewGuid().ToString("N"),
+                new(Title: "Direct edit title"));
+            directReceipt = await scope.ServiceProvider.GetRequiredService<IMemoryEditingService>().ApplyAsync(directEdit, default);
+        }
+
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var token = await CompleteSelfHostedOAuthCodeFlowAsync(client, SelfHostedClientId,
+            "https://chatgpt.com/connector/oauth/memory-edit", PublicMcpUrl);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var reader = factory.Services.CreateScope();
+        var db = reader.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var lookup = new MemoryEditRecoveryRequest(ProjectId, memory.Id, directEdit.RequestId, directReceipt.RequestHash);
+        var directRead = ExtractToolJson(await CallAsync(80, "memory_edit_receipt_get", lookup))
+            .Deserialize<MemoryEditReceipt>(JsonSerializerOptions.Web)!;
+        directRead.Should().BeEquivalentTo(directReceipt with { Replayed = true });
+        var deniedLookup = ExtractSseJson(await CallAsync(81, "memory_edit_receipt_get",
+            lookup with { ProjectId = $"{ProjectId}-wrong" })).GetProperty("result");
+        deniedLookup.GetRawText().Should().NotContain(directReceipt.ReceiptId.ToString("D"));
+
+        var edit = new MemoryEditCommand(ProjectId, memory.Id, directReceipt.Version, Guid.NewGuid().ToString("N"),
+            new(Content: "Memory edit proposal synthetic body"));
+        var proposal = ExtractToolJson(await CallAsync(82, "memory_edit", edit));
+        proposal.GetProperty("status").GetString().Should().Be("Pending");
+        proposal.GetProperty("toolName").GetString().Should().Be(MemoryEditProposalContract.ToolName);
+        var proposalId = proposal.GetProperty("id").GetGuid();
+        var replay = ExtractToolJson(await CallAsync(83, "memory_edit", edit));
+        replay.GetProperty("id").GetGuid().Should().Be(proposalId);
+        var beforeApproval = await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id);
+        beforeApproval.Content.Should().Be("Original body");
+        beforeApproval.Version.Should().Be(directReceipt.Version);
+
+        var mismatch = ExtractSseJson(await CallAsync(84, "memory_edit",
+            edit with { Patch = new(Content: "Different intent") })).GetProperty("result");
+        mismatch.GetProperty("isError").GetBoolean().Should().BeTrue();
+        mismatch.GetRawText().Should().Contain(SafeEditConflictCodes.RequestIdentityMismatch).And.NotContain("Different intent");
+        var denied = ExtractSseJson(await CallAsync(85, "memory_edit",
+            edit with { ProjectId = $"{ProjectId}-wrong" })).GetProperty("result");
+        denied.GetProperty("isError").GetBoolean().Should().BeTrue();
+        denied.GetRawText().Should().NotContain(memory.Id.ToString("D"));
+
+        var applied = ExtractToolJson(await CallAsync(86, "chatgpt_proposal_approve", new ChatGptProposalDecisionRequest(proposalId)));
+        applied.GetProperty("status").GetString().Should().Be("Applied");
+        applied.GetProperty("appliedResourceId").GetGuid().Should().Be(memory.Id);
+        var recoveredProposal = ExtractToolJson(await CallAsync(87, "chatgpt_proposal_approve", new ChatGptProposalDecisionRequest(proposalId)));
+        recoveredProposal.GetRawText().Should().Be(applied.GetRawText());
+        var after = await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id);
+        after.Version.Should().Be(directReceipt.Version + 1);
+        after.Content.Should().Be(edit.Patch.Content);
+        (await db.MemoryEditReceipts.CountAsync(x => x.MemoryItemId == memory.Id)).Should().Be(2);
+        (await db.MemoryEditReceipts.CountAsync(x => x.MemoryItemId == memory.Id &&
+            x.RequestId == MemoryEditProposalContract.ReceiptRequestId(proposalId))).Should().Be(1);
+        var decisionAudit = await db.SecurityAuditEvents.AsNoTracking()
+            .Where(x => x.EventType == SecurityAuditEventType.ConversationInsightGovernanceUpdated)
+            .Select(x => x.DetailsJson)
+            .ToListAsync();
+        var transitions = decisionAudit.Select(detail => JsonSerializer.Deserialize<JsonElement>(detail))
+            .Where(detail => detail.TryGetProperty("proposalId", out var id) &&
+                id.ValueKind == JsonValueKind.String && id.TryGetGuid(out var key) && key == proposalId)
+            .Select(detail => detail.GetProperty("transition").GetString());
+        transitions.Should().BeEquivalentTo("Create", "Approve");
+
+        Task<string> CallAsync(int id, string name, object request) => SendMcpAsync(client, null, id, "tools/call",
+            new { name, arguments = new { request = JsonSerializer.SerializeToElement(request, JsonSerializerOptions.Web) } });
+    }
+
+    [DockerRequiredFact]
     public async Task Proposal_Approval_Should_Bridge_ChatGpt_And_Codex_Read_Paths()
     {
         var externalKey = $"chatgpt-gateway:{Guid.NewGuid():N}";
@@ -4806,16 +4887,22 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
-        listedToolNames.Should().HaveCount(92);
-        listedToolNames.Should().Contain(["memory_revisions_list", "memory_revision_get"]);
+        listedToolNames.Should().HaveCount(94);
+        listedToolNames.Should().Contain(["memory_revisions_list", "memory_revision_get", "memory_edit", "memory_edit_receipt_get"]);
+        var editTool = listedTools.EnumerateArray().Single(tool => tool.GetProperty("name").GetString() == "memory_edit");
+        var editInput = editTool.GetProperty("inputSchema").GetProperty("properties").GetProperty("request");
+        editInput.GetProperty("required").EnumerateArray().Select(field => field.GetString()).Should()
+            .BeEquivalentTo("projectId", "memoryId", "expectedVersion", "requestId", "patch");
+        McpPublishedToolCatalog.ProposalWriteToolNames.Should().Contain("memory_edit");
+        McpPublishedToolCatalog.QueryToolNames.Should().Contain("memory_edit_receipt_get");
         listedToolNames.Count(name => name.StartsWith("agent_execution_", StringComparison.Ordinal)).Should().Be(10);
         listedToolNames.Count(name => name.StartsWith("skill_", StringComparison.Ordinal) ||
                                       name.StartsWith("skills_", StringComparison.Ordinal)).Should().Be(7);
         listedToolNames.Should().NotContain(ScheduledGovernanceToolCatalog.PublishedToolNames);
         var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
         appFacingProjection.IsValid.Should().BeTrue();
-        appFacingProjection.PublishedToolCount.Should().Be(92);
-        appFacingProjection.AppCallableToolCount.Should().Be(92);
+        appFacingProjection.PublishedToolCount.Should().Be(94);
+        appFacingProjection.AppCallableToolCount.Should().Be(94);
         appFacingProjection.MissingPublishedTools.Should().BeEmpty();
         appFacingProjection.UnexpectedPublishedTools.Should().BeEmpty();
         appFacingProjection.MissingAppCallableTools.Should().BeEmpty();
@@ -4823,9 +4910,10 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         {
             "governance_contract_get",
             "governance_run_get",
-            "governance_runs_list"
+            "governance_runs_list",
+            "memory_edit_receipt_get"
         };
-        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(92 - receiptAndContractTools.Length);
+        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(94 - receiptAndContractTools.Length);
         foreach (var toolName in receiptAndContractTools)
         {
             var projectedTool = appFacingProjection.Tools.Single(tool => tool.Name == toolName);

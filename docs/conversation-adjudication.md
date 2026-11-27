@@ -56,4 +56,4 @@ General `knowledge_review` also exposes current `unresolvedHumanDecisionCount` a
 
 Review exception identity uses the underlying finding/insight ID, excluding refresh timestamps. Legacy receipt keys are normalized during comparison without rewriting old receipts. Semantic changes appear as escalations, while timestamp-only refreshes remain unchanged. Execution cursors remain version-bound. Unknown actions such as `NeedsReview` count as human decisions, not executable actions. A general execution candidate still requires the executor's current policy checks; this count is not Scheduled execution authorization.
 
-This source publishes general catalog `2026-11-27-v15` with 92 tools. Deployment and fresh authenticated host acceptance are separate from local tests.
+This source publishes general catalog `2026-11-27-v16` with 94 tools. Deployment and fresh authenticated host acceptance are separate from local tests.

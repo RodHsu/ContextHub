@@ -30,7 +30,8 @@ public sealed class MemoryMcpTools(
     IMaintenanceCoordinator maintenanceCoordinator,
     IMemoryManifestService manifestService,
     IWorkItemEditingService? workItemEditing = null,
-    ILogger<MemoryMcpTools>? logger = null)
+    ILogger<MemoryMcpTools>? logger = null,
+    IMemoryEditingService? memoryEditing = null)
 {
     [McpServerTool(UseStructuredContent = true), Description("Freeze or resume a bounded metadata-only immutable memory ID/version manifest. Reuse requestId after timeout; no content read or governance execution. Historical snapshots without a manifest cannot be reconstructed.")]
     public async Task<MemoryManifestPage> memory_manifest_read(MemoryManifestReadRequest request, CancellationToken cancellationToken = default)
@@ -151,6 +152,16 @@ public sealed class MemoryMcpTools(
         ValidateScoresForMcp(() => MemoryScoreContract.Validate(applicationRequest));
         return memoryService.UpdateAsync(applicationRequest, cancellationToken);
     }
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Apply a versioned edit using the explicit ProjectId, MemoryId, original ExpectedVersion and stable RequestId. Replay the original intent to recover its committed receipt.")]
+    public Task<MemoryEditReceipt> memory_edit(MemoryEditCommand request, CancellationToken cancellationToken = default)
+        => MemoryEditBoundaryAsync(() => RequireMemoryEditing().ApplyAsync(request, cancellationToken), cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read a committed direct memory edit receipt using the original ProjectId, MemoryId, RequestId, intent hash and hash version. Requires current access to the memory.")]
+    public Task<MemoryEditReceipt?> memory_edit_receipt_get(MemoryEditRecoveryRequest request, CancellationToken cancellationToken = default)
+        => MemoryEditBoundaryAsync(() => RequireMemoryEditing().ReadReceiptAsync(request, cancellationToken), cancellationToken);
 
     [McpServerTool(UseStructuredContent = true), Description("Archive or restore an existing memory item by id.")]
     public Task<MemoryDocument> memory_archive(MemoryArchiveRequest request, CancellationToken cancellationToken = default)
@@ -490,6 +501,30 @@ public sealed class MemoryMcpTools(
         {
             logger?.LogError(error, "Work item operation outcome could not be confirmed.");
             throw new McpException("RequestOutcomeUnknown: recover the original request identity and intent hash; do not automatically replay or create a new request.");
+        }
+    }
+
+    private IMemoryEditingService RequireMemoryEditing()
+        => memoryEditing ?? throw new InvalidOperationException("Memory editing is unavailable.");
+
+    private async Task<T> MemoryEditBoundaryAsync<T>(Func<Task<T>> operation, CancellationToken cancellationToken)
+    {
+        try { return await operation(); }
+        catch (SafeEditConflictException error)
+        {
+            var currentVersion = error.Code == SafeEditConflictCodes.StaleReadVersion ? error.CurrentRevision : null;
+            throw new McpException(JsonSerializer.Serialize(new { code = error.Code, currentVersion }));
+        }
+        catch (Exception error) when (error is UnauthorizedAccessException or KeyNotFoundException)
+        { throw new McpException("{\"code\":\"EditUnavailable\"}"); }
+        catch (Exception error) when (error is ArgumentException or MemoryScoreValidationException)
+        { throw new McpException("{\"code\":\"InvalidEditIntent\"}"); }
+        catch (MaintenanceUnavailableException) { throw new McpException("{\"code\":\"MaintenanceUnavailable\"}"); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception)
+        {
+            logger?.LogWarning("The original memory edit outcome could not be confirmed.");
+            throw new McpException("{\"code\":\"RequestOutcomeUnknown\"}");
         }
     }
 }

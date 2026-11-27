@@ -36,7 +36,8 @@ public sealed class ChatGptGatewayTools(
     IHttpContextAccessor httpContextAccessor,
     IMemoryManifestService manifestService,
     IWorkItemEditingService? workItemEditing = null,
-    ILogger<ChatGptGatewayTools>? logger = null)
+    ILogger<ChatGptGatewayTools>? logger = null,
+    IMemoryEditingService? memoryEditing = null)
 {
     [McpServerTool(UseStructuredContent = true), Description("Freeze or resume a bounded metadata-only immutable memory ID/version manifest. Reuse requestId after timeout; no content read or governance execution. Historical snapshots without a manifest cannot be reconstructed.")]
     public async Task<MemoryManifestPage> memory_manifest_read(MemoryManifestReadRequest request, CancellationToken cancellationToken = default)
@@ -397,6 +398,34 @@ public sealed class ChatGptGatewayTools(
     public Task<ChatGptProposalResult> memory_update(MemoryUpdateRequest request, CancellationToken cancellationToken = default)
         => CreateProposalAsync("memory_update", request.ProjectId ?? ProjectContext.DefaultProjectId, "Update memory item", $"Update memory item {request.Id:D}.", request, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Create a versioned memory edit proposal using the explicit ProjectId, MemoryId, original ExpectedVersion and stable RequestId. A separate approval applies the edit. Reuse the original intent to recover its proposal.")]
+    public Task<ChatGptProposalResult> memory_edit(MemoryEditCommand request, CancellationToken cancellationToken = default)
+        => ProposalBoundaryAsync(() => CreateProposalAsync(MemoryEditProposalContract.ToolName, request.ProjectId,
+            "Edit memory item", $"Edit memory item {request.MemoryId:D}.", request, cancellationToken), cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read a committed direct memory edit receipt using the original ProjectId, MemoryId, RequestId, intent hash and hash version. Requires current access. Recover proposal edits using the original proposal.")]
+    public async Task<MemoryEditReceipt?> memory_edit_receipt_get(MemoryEditRecoveryRequest request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await (memoryEditing ?? throw new InvalidOperationException("Memory editing is unavailable."))
+                .ReadReceiptAsync(request, cancellationToken);
+        }
+        catch (SafeEditConflictException error)
+        { throw new McpException(JsonSerializer.Serialize(new { code = error.Code })); }
+        catch (Exception error) when (error is UnauthorizedAccessException or KeyNotFoundException)
+        { throw new McpException("{\"code\":\"EditUnavailable\"}"); }
+        catch (ArgumentException) { throw new McpException("{\"code\":\"InvalidEditIntent\"}"); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception)
+        {
+            logger?.LogWarning("The original memory edit receipt could not be read.");
+            throw new McpException("{\"code\":\"RequestOutcomeUnknown\"}");
+        }
+    }
+
     [McpServerTool(UseStructuredContent = true), Description("Create a pending proposal to archive or restore a durable ContextHub memory item. Approval is required before the memory is changed.")]
     public Task<ChatGptProposalResult> memory_archive(MemoryArchiveRequest request, CancellationToken cancellationToken = default)
         => CreateProposalAsync("memory_archive", request.ProjectId ?? ProjectContext.DefaultProjectId, "Archive memory item", $"Change archive state for memory item {request.Id:D}.", request, cancellationToken);
@@ -562,6 +591,7 @@ public sealed class ChatGptGatewayTools(
     private async Task<ChatGptProposalResult> ProposalBoundaryAsync(Func<Task<ChatGptProposalResult>> action, CancellationToken cancellationToken)
     {
         try { return await action(); }
+        catch (McpException) { throw; }
         catch (MemoryScoreValidationException error) { throw new McpException(error.Message, error); }
         catch (SafeEditConflictException error)
         { throw new McpException(JsonSerializer.Serialize(new { code = error.Code, currentRevision = error.CurrentRevision, detail = error.Message })); }
@@ -570,9 +600,9 @@ public sealed class ChatGptGatewayTools(
         catch (ArgumentException) { throw new McpException("Invalid proposal intent. Retain the original proposal and read version."); }
         catch (InvalidOperationException) { throw new McpException("Invalid proposal state. Reload without replacing its original intent."); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error)
+        catch (Exception)
         {
-            logger?.LogWarning(error, "Proposal outcome requires original receipt recovery.");
+            logger?.LogWarning("Proposal outcome requires original receipt recovery.");
             throw new McpException("{\"code\":\"ProposalOutcomeUnknown\",\"detail\":\"Recover the original proposal receipt; do not create another request.\"}");
         }
     }
