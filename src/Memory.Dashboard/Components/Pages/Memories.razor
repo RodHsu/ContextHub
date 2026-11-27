@@ -72,7 +72,7 @@
             </div>
             <label class="dashboard-scope-field">
                 <span>查詢模式</span>
-                <select @bind="_queryMode">
+                <select @bind="_queryMode" @bind:after="InvalidateSelection">
                     <option value="@MemoryQueryMode.CurrentOnly">目前專案</option>
                     <option value="@MemoryQueryMode.CurrentPlusReferencedProjects">目前 + 參考專案</option>
                     <option value="@MemoryQueryMode.SummaryOnly">共用綜合層</option>
@@ -80,7 +80,7 @@
             </label>
             <label class="dashboard-scope-field">
                 <span>記憶範圍</span>
-                <select @bind="_scope">
+                <select @bind="_scope" @bind:after="InvalidateSelection">
                     <option value="">全部範圍</option>
                     @foreach (var scope in Enum.GetValues<MemoryScope>())
                     {
@@ -107,7 +107,7 @@
             <div class="filter-grid advanced-filter-grid memories-advanced-filter-grid">
                 <label class="dashboard-scope-field">
                     <span>參考專案</span>
-                    <input @bind="_includedProjectIds" placeholder="參考專案，以逗號分隔" />
+                    <input @bind="_includedProjectIds" @bind:after="InvalidateSelection" placeholder="參考專案，以逗號分隔" />
                 </label>
                 <label class="dashboard-scope-field">
                     <span>記憶狀態</span>
@@ -128,7 +128,7 @@
                     <input @bind="_tag" placeholder="標籤 (Tag)" />
                 </label>
                 <label class="toggle-field">
-                    <input type="checkbox" @bind="_useSummaryLayer" />
+                    <input type="checkbox" @bind="_useSummaryLayer" @bind:after="InvalidateSelection" />
                     <span>一併讀取綜合層</span>
                 </label>
             </div>
@@ -250,6 +250,8 @@
         <section class="panel detail-panel memories-detail-panel">
             <div class="panel-title">細節</div>
             <div class="panel-scroll-body detail-scroll-shell memory-detail-shell">
+                <MemoryEditorPanel Document="@(_loadedScope && _queryMode != MemoryQueryMode.SummaryOnly ? _selected?.Document : null)"
+                                   Committed="RefreshEditedMemoryAsync" />
                 @if (_selected is null)
                 {
                     <div class="empty-inline">點選左側記憶條目後顯示版本紀錄、內容片段與向量。</div>
@@ -407,6 +409,8 @@
     private PagedResult<MemoryListItemResult>? _page;
     private MemoryDetailsResult? _selected;
     private long _selectionRequest;
+    private long _scopeGeneration;
+    private bool _loadedScope;
     private IReadOnlyList<ConversationCheckpointSearchResult> _checkpointStaging = [];
     private bool _loading;
     private DateTimeOffset? _lastUpdatedAt;
@@ -429,12 +433,14 @@
     {
         var previousSelection = _selected?.Document.Id;
         var minimumSelection = ++_selectionRequest;
+        var scope = _scopeGeneration;
+        _loadedScope = false;
         _selected = null;
         _loading = true;
         await InvokeAsync(StateHasChanged);
         try
         {
-            _page = await ApiClient.GetMemoriesAsync(
+            var page = await ApiClient.GetMemoriesAsync(
                 new MemoryListRequest(
                     _query,
                     Parse<MemoryScope>(_scope),
@@ -451,15 +457,20 @@
                     25),
                 CancellationToken.None);
 
+            if (scope != _scopeGeneration) return;
+            _page = page;
+            _loadedScope = true;
             if (minimumSelection == _selectionRequest && previousSelection is Guid selectedId &&
                 _page.Items.Any(item => item.Id == selectedId))
             {
                 await SelectAsync(selectedId);
             }
 
-            _checkpointStaging = _page.TotalCount == 0 && !string.IsNullOrWhiteSpace(_query)
+            var checkpoints = page.TotalCount == 0 && !string.IsNullOrWhiteSpace(_query)
                 ? await LoadCheckpointStagingAsync()
                 : [];
+            if (scope != _scopeGeneration) return;
+            _checkpointStaging = checkpoints;
             _lastUpdatedAt = DateTimeOffset.UtcNow;
         }
         finally
@@ -472,10 +483,41 @@
     {
         var request = ++_selectionRequest;
         _selected = null;
+        var project = _page?.Items.FirstOrDefault(item => item.Id == id)?.ProjectId;
         var details = await ApiClient.GetMemoryDetailsAsync(id, CancellationToken.None);
-        if (request == _selectionRequest && details?.Document.Id == id)
+        if (request == _selectionRequest && details?.Document.Id == id &&
+            project is not null && ProjectContext.Matches(project, details.Document.ProjectId))
         {
             _selected = details;
+        }
+    }
+
+    private void InvalidateSelection()
+    {
+        _scopeGeneration++;
+        _selectionRequest++;
+        _loadedScope = false;
+        _selected = null;
+    }
+
+    private async Task RefreshEditedMemoryAsync(MemoryEditReceipt receipt)
+    {
+        if (!_loadedScope || _selected?.Document.Id != receipt.MemoryId ||
+            !ProjectContext.Matches(_selected.Document.ProjectId, receipt.ProjectId))
+            return;
+
+        var selection = _selectionRequest;
+        try
+        {
+            var details = await ApiClient.GetMemoryDetailsAsync(receipt.MemoryId, CancellationToken.None);
+            if (selection == _selectionRequest && details?.Document.Id == receipt.MemoryId &&
+                details.Document.Version >= receipt.Version && ProjectContext.Matches(details.Document.ProjectId, receipt.ProjectId))
+                _selected = details;
+        }
+        catch (Exception error) when (error is HttpRequestException or InvalidOperationException or
+            System.Text.Json.JsonException or OperationCanceledException)
+        {
+            // Keep the receipt confirmation. Re-reading display details is independent of the edit.
         }
     }
 
@@ -500,6 +542,7 @@
     private async Task LoadSharedSummaryAsync()
     {
         CaptureProjectShortcutState();
+        InvalidateSelection();
         _selectedProjectId = null;
         _projectIdInput = null;
         _projectSuggestions = [];
@@ -512,6 +555,7 @@
     private async Task LoadCurrentProjectAsync()
     {
         RestoreProjectShortcutState();
+        InvalidateSelection();
         _projectSuggestions = [];
         _queryMode = MemoryQueryMode.CurrentOnly;
         _useSummaryLayer = false;
@@ -572,6 +616,7 @@
 
     private async Task HandleProjectIdInputAsync()
     {
+        InvalidateSelection();
         if (!string.Equals(NormalizeEmpty(_projectIdInput), _selectedProjectId, StringComparison.OrdinalIgnoreCase))
         {
             _selectedProjectId = null;
@@ -585,6 +630,7 @@
 
     private async Task SelectProjectSuggestionAsync(string projectId)
     {
+        InvalidateSelection();
         _selectedProjectId = projectId;
         _projectIdInput = projectId;
         _projectSuggestions = [];

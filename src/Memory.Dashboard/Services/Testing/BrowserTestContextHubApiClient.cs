@@ -673,6 +673,28 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
                 ["browser-tests", "graph-page"])));
     }
 
+    private int _memoryEditVersionOffset;
+
+    public Task<MemoryDocument?> GetMemoryForEditAsync(string projectId, Guid memoryId, CancellationToken cancellationToken)
+    {
+        var document = BuildMemories().SingleOrDefault(memory =>
+            memory.Id == memoryId && ProjectContext.Matches(memory.ProjectId, projectId));
+        return Task.FromResult(document is null || _memoryEditVersionOffset == 0
+            ? document : document with { Version = document.Version + _memoryEditVersionOffset, Title = "其他編輯者的版本" });
+    }
+
+    public async Task<MemoryEditReceipt> ApplyMemoryEditAsync(MemoryEditCommand command, CancellationToken cancellationToken)
+    {
+        if (!QueryHelpers.ParseQuery(_navigation.ToAbsoluteUri(_navigation.Uri).Query)
+            .TryGetValue("memoryEditFixture", out var enabled) || !bool.TryParse(enabled.ToString(), out var active) || !active)
+            throw new NotSupportedException("Versioned memory edits are unavailable in this test profile.");
+
+        var document = await GetMemoryForEditAsync(command.ProjectId, command.MemoryId, cancellationToken);
+        if (document is null) throw new InvalidOperationException("The synthetic memory edit target is unavailable.");
+        _memoryEditVersionOffset++;
+        throw new SafeEditConflictException(SafeEditConflictCodes.StaleReadVersion, document.Version + 1);
+    }
+
     public Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, DashboardExportAccount account, CancellationToken cancellationToken)
         => Task.FromResult(new MemoryTransferDownloadResult(
             "demo-export.json",

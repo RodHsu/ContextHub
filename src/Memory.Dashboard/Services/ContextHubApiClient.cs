@@ -7,7 +7,7 @@ using Microsoft.AspNetCore.WebUtilities;
 
 namespace Memory.Dashboard.Services;
 
-public interface IContextHubApiClient : IWorkItemEditingApi
+public interface IContextHubApiClient : IWorkItemEditingApi, IMemoryEditingApi
 {
     Task<SystemStatusResult> GetStatusAsync(CancellationToken cancellationToken);
     Task<DashboardOverviewResult> GetOverviewAsync(CancellationToken cancellationToken);
@@ -668,6 +668,62 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         }
 
         return await ReadRequiredAsync<MemoryDetailsResult>(response, cancellationToken);
+    }
+
+    public async Task<MemoryDocument?> GetMemoryForEditAsync(string projectId, Guid memoryId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(projectId) || memoryId == Guid.Empty)
+            throw new ArgumentException("An explicit memory edit target is required.");
+        using var response = await httpClient.GetAsync($"/api/memories/{memoryId:D}", cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        response.EnsureSuccessStatusCode();
+        var document = await response.Content.ReadFromJsonAsync<MemoryDocument>(cancellationToken: cancellationToken);
+        return document is not null && document.Id == memoryId && ProjectContext.Matches(document.ProjectId, projectId)
+            ? document : null;
+    }
+
+    public async Task<MemoryEditReceipt> ApplyMemoryEditAsync(MemoryEditCommand command, CancellationToken cancellationToken)
+    {
+        var normalized = MemoryEditContract.Normalize(command);
+        try
+        {
+            using var response = await httpClient.PostAsJsonAsync($"/api/memories/{normalized.MemoryId:D}/edits", normalized, cancellationToken);
+            await EnsureMemoryEditResponseAsync(response, cancellationToken);
+            return await response.Content.ReadFromJsonAsync<MemoryEditReceipt>(cancellationToken: cancellationToken)
+                ?? throw new InvalidDataException("The memory edit receipt is unavailable.");
+        }
+        catch (NotSupportedException error)
+        {
+            throw new InvalidDataException("The memory edit response could not be decoded.", error);
+        }
+    }
+
+    public async Task<MemoryEditReceipt?> RecoverMemoryEditAsync(MemoryEditRecoveryRequest request, CancellationToken cancellationToken)
+    {
+        var normalized = MemoryEditContract.Normalize(request);
+        using var response = await httpClient.PostAsJsonAsync($"/api/memories/{normalized.MemoryId:D}/edits/receipt", normalized, cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        await EnsureMemoryEditResponseAsync(response, cancellationToken);
+        return await response.Content.ReadFromJsonAsync<MemoryEditReceipt>(cancellationToken: cancellationToken);
+    }
+
+    private static async Task EnsureMemoryEditResponseAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        if (response.StatusCode == HttpStatusCode.Conflict)
+        {
+            using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken),
+                cancellationToken: cancellationToken);
+            var root = document.RootElement;
+            var code = root.TryGetProperty("code", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+            if (code is not (SafeEditConflictCodes.MissingReadVersion or SafeEditConflictCodes.StaleReadVersion or
+                SafeEditConflictCodes.RequestIdentityMismatch))
+                throw new InvalidDataException("The memory edit conflict response is unsupported.");
+            long? version = code == SafeEditConflictCodes.StaleReadVersion &&
+                root.TryGetProperty("currentVersion", out var current) && current.ValueKind == JsonValueKind.Number &&
+                current.TryGetInt32(out var parsed) && parsed > 0 ? parsed : null;
+            throw new SafeEditConflictException(code, version);
+        }
+        response.EnsureSuccessStatusCode();
     }
 
     public Task<PagedResult<MemoryRevisionResult>?> GetMemoryRevisionsAsync(

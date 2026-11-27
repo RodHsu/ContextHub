@@ -1,0 +1,169 @@
+@implements IDisposable
+@inject IContextHubApiClient ApiClient
+
+@if (State.IsEditable)
+{
+    var selection = State.SelectionGeneration;
+    <section class="memory-detail-section memory-editor" aria-label="記憶編輯">
+        @if (State.Base is null && !State.OutcomeUnknown)
+        {
+            <button type="button" class="ghost-button" data-testid="memory-edit-open" disabled="@State.Busy"
+                    @onclick="() => OpenAsync(selection)">編輯記憶</button>
+        }
+        @if (State.Base is { } original)
+        {
+            <form @onsubmit="() => SubmitAsync(selection, State.ApplyAsync)" @onsubmit:preventDefault
+                  autocomplete="off" aria-label="編輯記憶表單">
+                <p class="stack-item-meta">原讀取版本 @original.Version</p>
+                <fieldset disabled="@(!State.CanChangeDraft)" class="memory-editor-fields">
+                    <label>
+                        <span>標題</span>
+                        <input value="@(State.Draft.Title ?? original.Title)" data-testid="memory-edit-title"
+                               @oninput="args => Change(selection, State.Draft with { Title = Text(args) })" />
+                    </label>
+                    <label>
+                        <span>摘要</span>
+                        <textarea rows="2" value="@(State.Draft.Summary ?? original.Summary)"
+                                  @oninput="args => Change(selection, State.Draft with { Summary = Text(args) })"></textarea>
+                    </label>
+                    <label>
+                        <span>內容</span>
+                        <textarea rows="5" data-testid="memory-edit-content" value="@(State.Draft.Content ?? original.Content)"
+                                  @oninput="args => Change(selection, State.Draft with { Content = Text(args) })"></textarea>
+                    </label>
+                    <label>
+                        <span>標籤（逗號分隔）</span>
+                        <input value="@_tagText" @oninput="args => ChangeTags(selection, args)" />
+                    </label>
+                </fieldset>
+                <div class="memory-editor-actions">
+                    <button type="submit" class="primary-button" data-testid="memory-edit-submit" disabled="@(!State.CanApply)">儲存編輯</button>
+                    <button type="button" class="ghost-button" disabled="@(State.Busy || State.OutcomeUnknown)"
+                            @onclick="() => Close(selection)">捨棄草稿</button>
+                </div>
+            </form>
+        }
+        <p role="status" class="stack-item-meta" data-testid="memory-edit-status">@State.Message</p>
+        @if (State.OutcomeUnknown)
+        {
+            <button type="button" class="ghost-button" data-testid="memory-edit-recover"
+                    @onclick="() => SubmitAsync(selection, State.RecoverAsync)">核對原請求回執</button>
+        }
+        @if (State.ConflictCode is not null)
+        {
+            @if (State.ServerVersion is long serverVersion)
+            {
+                <p class="stack-item-meta">伺服器回報版本 @serverVersion</p>
+            }
+            <button type="button" class="ghost-button" data-testid="memory-edit-reload" disabled="@State.Busy"
+                    @onclick="() => ReloadAsync(selection)">重新讀取並比較</button>
+        }
+        @if (State.Comparison is { } latest)
+        {
+            <section class="detail-reader" aria-label="重新讀取的記憶">
+                <div class="detail-reader-header">
+                    <div class="detail-reader-title">版本 @latest.Version · @latest.Title</div>
+                </div>
+                <p>@latest.Summary</p>
+                <p class="stack-item-meta">@string.Join("、", latest.Tags)</p>
+                <pre class="detail-reader-body memory-editor-comparison">@latest.Content</pre>
+                <button type="button" class="ghost-button" data-testid="memory-edit-adopt" disabled="@State.Busy"
+                        @onclick="() => Adopt(selection)">採用此版本並保留草稿</button>
+            </section>
+        }
+    </section>
+}
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationState { get; set; }
+    [Parameter] public MemoryDocument? Document { get; set; }
+    [Parameter] public EventCallback<MemoryEditReceipt> Committed { get; set; }
+
+    private MemoryEditDraftState? _state;
+    private MemoryEditDraftState State => _state ??= new(ApiClient);
+    private string _tagText = string.Empty;
+    private long _parameterGeneration;
+    private bool _disposed;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var generation = ++_parameterGeneration;
+        var authentication = AuthenticationState;
+        if (authentication?.IsCompletedSuccessfully != true)
+            Bind(string.Empty, null);
+        AuthenticationState? resolved;
+        try { resolved = authentication is null ? null : await authentication; }
+        catch (Exception) { resolved = null; }
+        if (!_disposed && generation == _parameterGeneration)
+            Bind(WorkItemEditorIdentity.SubjectKey(resolved?.User), Document);
+    }
+
+    private void Bind(string subject, MemoryDocument? document)
+    {
+        var previous = State.SelectionGeneration;
+        State.Bind(subject, document);
+        if (previous != State.SelectionGeneration) _tagText = string.Empty;
+    }
+
+    private bool Current(long selection) => !_disposed && selection == State.SelectionGeneration;
+
+    private async Task OpenAsync(long selection)
+    {
+        if (!Current(selection)) return;
+        await State.OpenAsync();
+        if (Current(selection) && State.Base is { } document) _tagText = string.Join(", ", document.Tags);
+    }
+
+    private Task ReloadAsync(long selection) => Current(selection) ? State.ReloadForComparisonAsync() : Task.CompletedTask;
+
+    private void Change(long selection, MemoryEditPatch patch)
+    {
+        if (Current(selection)) State.SetDraft(patch);
+    }
+
+    private void ChangeTags(long selection, ChangeEventArgs args)
+    {
+        if (!Current(selection) || !State.CanChangeDraft) return;
+        _tagText = Text(args);
+        State.SetDraft(State.Draft with
+        {
+            Tags = _tagText.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+        });
+    }
+
+    private void Adopt(long selection)
+    {
+        if (!Current(selection)) return;
+        var keepTags = State.Draft.Tags is not null;
+        State.AdoptComparison();
+        if (!keepTags && State.Base is { } document) _tagText = string.Join(", ", document.Tags);
+    }
+
+    private void Close(long selection)
+    {
+        if (!Current(selection) || State.Busy || State.OutcomeUnknown) return;
+        State.Close();
+        _tagText = string.Empty;
+    }
+
+    private async Task SubmitAsync(long selection, Func<Task> operation)
+    {
+        if (!Current(selection)) return;
+        var previousReceipt = State.LastReceipt;
+        await operation();
+        if (Current(selection) && State.LastReceipt is { } receipt && receipt != previousReceipt)
+        {
+            _tagText = string.Empty;
+            await Committed.InvokeAsync(receipt);
+        }
+    }
+
+    private static string Text(ChangeEventArgs args) => args.Value?.ToString() ?? string.Empty;
+
+    public void Dispose()
+    {
+        _disposed = true;
+        _tagText = string.Empty;
+        _state?.Dispose();
+    }
+}
