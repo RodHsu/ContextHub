@@ -401,7 +401,8 @@ textarea {
     min-height: 0;
 }
 
-.agent-executions-page-body {
+.agent-executions-page-body,
+.skills-page-body {
     grid-auto-rows: max-content;
 }
 
