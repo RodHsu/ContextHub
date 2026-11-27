@@ -147,7 +147,12 @@ public sealed class ManagedFileService(
             var projectId = string.IsNullOrWhiteSpace(request.ProjectId) ? null : ProjectContext.Normalize(request.ProjectId);
             if (projectId is not null) ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
 
-            await dbContext.AcquireTransactionLockAsync($"managed-file:{actor.TenantId}:{actor.UserId}:{projectId}:{normalizedFileName}", ct);
+            var actorId = ActorId(actor);
+            var receiptProject = projectId ?? string.Empty;
+            var projectKey = ProjectContext.IdentityKey(receiptProject);
+            var receiptReason = "Created:" + idempotencyKey;
+            await dbContext.AcquireTransactionLockAsync($"managed-file-create-request:{actor.TenantId}:{actor.UserId}:{projectKey}:{Hash(idempotencyKey)}", ct);
+            await dbContext.AcquireTransactionLockAsync($"managed-file:{actor.TenantId}:{actor.UserId}:{projectKey}:{normalizedFileName}", ct);
             var managedObject = await Scope(dbContext.ManagedObjects, actor)
                 .SingleOrDefaultAsync(x => x.Id == request.ManagedObjectId, ct)
                 ?? throw new UnauthorizedAccessException("Managed object is not available.");
@@ -156,14 +161,26 @@ public sealed class ManagedFileService(
                 throw new InvalidOperationException("Managed file content must be integrity verified and ready before logical file creation.");
             }
 
-            var replay = await Scope(dbContext.FileAccessEvents.AsNoTracking(), actor)
-                .Where(x => x.Operation == FileOperation.Metadata && x.ReasonCode == "Created:" + idempotencyKey)
+            var replay = await dbContext.FileAccessEvents.AsNoTracking()
+                .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && x.ActorId == actorId &&
+                            x.Operation == FileOperation.Metadata && x.Allowed && x.ReasonCode == receiptReason &&
+                            Memory.Application.ProjectContext.Matches(x.ProjectId, receiptProject))
                 .OrderByDescending(x => x.CreatedAt)
+                .ThenByDescending(x => x.Id)
                 .FirstOrDefaultAsync(ct);
-            if (replay?.FileVersionId is Guid replayVersionId)
+            if (replay is not null)
             {
-                var replayVersion = await dbContext.FileVersions.AsNoTracking().SingleAsync(x => x.Id == replayVersionId, ct);
-                return Result(ManagedFileCreateOutcome.Created, replay.FileAssetId, replayVersion, [], true);
+                var replayVersionId = replay.FileVersionId ?? throw new UnauthorizedAccessException("File version is not available.");
+                var replayVersions = dbContext.FileVersions.AsNoTracking()
+                    .Where(x => x.FileAssetId == replay.FileAssetId &&
+                                x.FileAsset!.TenantId == actor.TenantId && x.FileAsset.OwnerUserId == actor.UserId &&
+                                x.FileAsset.State != FileAssetState.LogicalDeleted && x.Lifecycle != FileVersionLifecycle.LogicalDeleted);
+                replayVersions = projectId is null
+                    ? replayVersions.Where(x => x.FileAsset!.ProjectId == null)
+                    : replayVersions.Where(x => Memory.Application.ProjectContext.Matches(x.FileAsset!.ProjectId, projectId));
+                var replayVersion = await replayVersions.SingleOrDefaultAsync(x => x.Id == replayVersionId, ct)
+                    ?? throw new UnauthorizedAccessException("File version is not available.");
+                return Result(ManagedFileCreateOutcome.Created, replayVersion.FileAssetId, replayVersion, [], true);
             }
 
             var visibleAssets = await Scope(dbContext.FileAssets, actor)
@@ -214,7 +231,7 @@ public sealed class ManagedFileService(
                     LogicalFileName = fileName,
                     NormalizedFileName = normalizedFileName,
                     State = projectId is null ? FileAssetState.Unassigned : FileAssetState.Active,
-                    CreatedByActorId = ActorId(actor),
+                    CreatedByActorId = actorId,
                     GovernanceReminderAt = projectId is null ? clock.UtcNow.AddDays(7) : null,
                     CreatedAt = clock.UtcNow,
                     UpdatedAt = clock.UtcNow
@@ -254,12 +271,12 @@ public sealed class ManagedFileService(
                 FileVersionId = version.Id,
                 TenantId = actor.TenantId,
                 OwnerUserId = actor.UserId,
-                ProjectId = projectId ?? string.Empty,
-                ActorId = ActorId(actor),
+                ProjectId = receiptProject,
+                ActorId = actorId,
                 Operation = FileOperation.Metadata,
                 Purpose = purpose,
                 Allowed = true,
-                ReasonCode = "Created:" + idempotencyKey,
+                ReasonCode = receiptReason,
                 CreatedAt = clock.UtcNow
             }, ct);
             await dbContext.SaveChangesAsync(ct);
