@@ -591,6 +591,11 @@ public sealed class SkillService(
             .SingleOrDefaultAsync(item => item.TenantId == actor.TenantId && item.OwnerUserId == actor.UserId && item.IdempotencyKey == request.IdempotencyKey, cancellationToken);
         if (replay is not null)
         {
+            if (!ProjectContext.Matches(replay.ProjectId, projectId))
+            {
+                throw new UnauthorizedAccessException("Skill resolution is not available.");
+            }
+
             return await BuildSearchResultAsync(replay, true, cancellationToken);
         }
 
