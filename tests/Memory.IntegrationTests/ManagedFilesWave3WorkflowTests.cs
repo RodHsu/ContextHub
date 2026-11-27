@@ -295,6 +295,108 @@ public sealed class ManagedFilesWave3WorkflowTests(ContainerTestEnvironment envi
     }
 
     [DockerRequiredFact]
+    public async Task Canonical_tag_merge_preserves_definition_owner_when_run_by_a_tenant_administrator()
+    {
+        var factory = environment.GetFactory();
+        var projectId = $"canonical-tag-merge-{Guid.NewGuid():N}";
+        var now = DateTimeOffset.UtcNow;
+        Guid actorId;
+        Guid ownerId;
+        CanonicalTagDefinition source;
+        CanonicalTagDefinition target;
+        CanonicalTagMergePreview preview;
+        using (var setup = factory.Services.CreateScope())
+        {
+            var administrator = UseBootstrapActor(setup.ServiceProvider);
+            administrator.IsAdmin.Should().BeTrue();
+            var db = setup.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            actorId = administrator.UserId!.Value;
+            var owner = new TenantUser
+            {
+                TenantId = administrator.TenantId!.Value,
+                Username = $"tag-owner-{Guid.NewGuid():N}",
+                DisplayName = "Synthetic Tag Owner",
+                Role = TenantUserRole.Member,
+                Status = TenantUserStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            ownerId = owner.Id;
+            db.TenantUsers.Add(owner);
+            await db.SaveChangesAsync();
+
+            source = Definition("Old Tag", "old-tag");
+            target = Definition("New Tag", "new-tag");
+            db.CanonicalTagDefinitions.AddRange(source, target);
+            await db.SaveChangesAsync();
+
+            db.CanonicalTagBindings.AddRange(
+                Binding(source.Id, ownerId, "owned-resource"),
+                Binding(source.Id, actorId, "legacy-resource"),
+                Binding(target.Id, actorId, "owned-resource"));
+            await db.SaveChangesAsync();
+
+            CanonicalTagDefinition Definition(string name, string normalizedName) => new()
+            {
+                TenantId = owner.TenantId,
+                OwnerUserId = ownerId,
+                ProjectId = projectId,
+                CanonicalName = name,
+                NormalizedName = normalizedName,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            CanonicalTagBinding Binding(Guid definitionId, Guid bindingOwnerId, string resourceId) => new()
+            {
+                TenantId = owner.TenantId,
+                OwnerUserId = bindingOwnerId,
+                DefinitionId = definitionId,
+                ProjectId = projectId,
+                ResourceType = "Skill",
+                ResourceId = resourceId,
+                Status = "Active",
+                CreatedAt = now
+            };
+        }
+
+        using (var operation = factory.Services.CreateScope())
+        {
+            UseBootstrapActor(operation.ServiceProvider);
+            var service = operation.ServiceProvider.GetRequiredService<ICanonicalTagGovernanceService>();
+            preview = await service.PreviewMergeAsync(projectId, source.Id, target.Id, CancellationToken.None);
+            preview.AffectedBindings.Should().Be(1);
+            preview.ConflictingBindings.Should().Be(0);
+            preview.SampleResourceIds.Should().Equal("Skill:owned-resource");
+            await service.ApplyMergeAsync(projectId, source.Id, target.Id, source.Revision, CancellationToken.None);
+        }
+
+        using var verification = factory.Services.CreateScope();
+        var verificationDb = verification.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var redirect = await verificationDb.CanonicalTagDefinitions.AsNoTracking().SingleAsync(item => item.Id == source.Id);
+        redirect.Status.Should().Be(CanonicalTagStatus.Superseded);
+        redirect.RedirectToId.Should().Be(target.Id);
+        var alias = await verificationDb.CanonicalTagAliases.AsNoTracking().SingleAsync(item => item.DefinitionId == target.Id);
+        alias.OwnerUserId.Should().Be(ownerId);
+        alias.TenantId.Should().Be(target.TenantId);
+        alias.NormalizedAlias.Should().Be(source.NormalizedName);
+
+        var bindings = await verificationDb.CanonicalTagBindings.AsNoTracking()
+            .Where(item => item.DefinitionId == source.Id || item.DefinitionId == target.Id).ToArrayAsync();
+        var migrated = bindings.Should().ContainSingle(item => item.DefinitionId == target.Id && item.OwnerUserId == ownerId).Subject;
+        migrated.Status.Should().Be("Active");
+        migrated.TenantId.Should().Be(target.TenantId);
+        migrated.ResourceId.Should().Be("owned-resource");
+        bindings.Should().ContainSingle(item => item.DefinitionId == source.Id && item.OwnerUserId == ownerId && item.Status == "Superseded");
+        bindings.Where(item => item.OwnerUserId == actorId).Should().HaveCount(2).And.OnlyContain(item => item.Status == "Active");
+
+        var proposal = await verificationDb.CanonicalTagGovernanceProposals.AsNoTracking()
+            .SingleAsync(item => item.SourceDefinitionId == source.Id);
+        proposal.OwnerUserId.Should().Be(actorId);
+        proposal.Status.Should().Be(CanonicalTagGovernanceProposalStatus.Applied);
+        proposal.AffectedBindingCount.Should().Be(preview.AffectedBindings);
+    }
+
+    [DockerRequiredFact]
     public async Task Canonical_tag_telemetry_aggregates_quality_merge_split_and_query_redaction_are_governed()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
