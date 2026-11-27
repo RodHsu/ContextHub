@@ -8,12 +8,15 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
 {
     public const int PageSize = 25;
     private CancellationTokenSource? _pageRequest;
+    private CancellationTokenSource? _dlpSummaryRequest;
     private CancellationTokenSource? _selectionRequest;
     private CancellationTokenSource? _contentRequest;
     private CancellationTokenSource? _auditRequest;
     private bool _disposed;
     public string ProjectId { get; private set; } = string.Empty;
     public IReadOnlyList<ManagedFileInventoryResult> Files { get; private set; } = [];
+    public ManagedFileDlpSummary? DlpSummary { get; private set; }
+    public bool DlpSummaryLoading { get; private set; }
     public ManagedFileInventoryResult? Selected { get; private set; }
     public ManagedFileInventoryResult? Version { get; private set; }
     public ManagedFileMetadataPage? Versions { get; private set; }
@@ -97,7 +100,7 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
         => Current(request, active) && ReferenceEquals(selection, _selectionRequest) && ProjectContext.Matches(project, ProjectId)
             && Version?.FileId == version.FileId && Version.FileVersionId == version.FileVersionId;
 
-    public async Task LoadAsync(string projectId, int offset = 0)
+    public async Task LoadAsync(string projectId, int offset = 0, bool refreshDlpSummary = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
@@ -106,6 +109,7 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
         var request = _pageRequest = new();
         var token = request.Token;
         var project = projectId.Trim();
+        if (refreshDlpSummary || !ProjectContext.Matches(ProjectId, project)) ClearDlpSummary();
         var samePage = string.Equals(ProjectId, project, StringComparison.Ordinal) && Offset == offset;
         var cachedFiles = samePage ? Files : [];
         var cachedAt = samePage ? LastUpdatedAt : null;
@@ -130,8 +134,10 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
             HasMore = page?.HasMore ?? false;
             Files = files;
             LastUpdatedAt = DateTimeOffset.UtcNow;
+            var dlpRead = refreshDlpSummary ? ReadDlpSummaryAsync(project) : Task.CompletedTask;
             var selected = Files.FirstOrDefault(file => file.FileId == selectedId) ?? Files.FirstOrDefault();
             if (selected is not null) await SelectAsync(selected);
+            await dlpRead;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception exception) when (IsAccessDenied(exception))
@@ -156,6 +162,30 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
         }
         finally { if (Current(request, _pageRequest)) Loading = false; }
     }
+
+    private async Task ReadDlpSummaryAsync(string project)
+    {
+        var request = _dlpSummaryRequest = new();
+        var token = request.Token;
+        DlpSummaryLoading = true;
+        try
+        {
+            var result = await api.GetManagedFileDlpSummaryAsync(project, token);
+            if (CurrentDlpSummary(request, project)) DlpSummary = result;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            if (CurrentDlpSummary(request, project)) DlpSummary = null;
+        }
+        finally
+        {
+            if (CurrentDlpSummary(request, project)) DlpSummaryLoading = false;
+        }
+    }
+
+    private bool CurrentDlpSummary(CancellationTokenSource request, string project)
+        => Current(request, _dlpSummaryRequest) && ProjectContext.Matches(ProjectId, project);
 
     public async Task SelectAsync(ManagedFileInventoryResult file, Guid? versionId = null, int versionsOffset = 0)
     {
@@ -230,9 +260,17 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
     private void DenyInventory()
     {
         Cancel(ref _selectionRequest);
+        ClearDlpSummary();
         ClearInventory();
         PermissionDenied = true;
         Error = null;
+    }
+
+    private void ClearDlpSummary()
+    {
+        Cancel(ref _dlpSummaryRequest);
+        DlpSummary = null;
+        DlpSummaryLoading = false;
     }
 
     private void ClearInventory()
@@ -272,6 +310,7 @@ public sealed class FileMetadataReadState(IContextHubApiClient api) : IDisposabl
         _disposed = true;
         Cancel(ref _pageRequest);
         Cancel(ref _selectionRequest);
+        ClearDlpSummary();
         ClearInventory();
         Loading = false;
     }
