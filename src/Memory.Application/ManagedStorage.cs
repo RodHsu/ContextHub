@@ -275,6 +275,7 @@ public sealed class ManagedTransferService(
                         ManagedObjectId = managedObject.Id,
                         ManagedObject = managedObject,
                         ChunkIndex = request.ChunkIndex,
+                        LocatorFormat = ManagedChunkLocatorFormat.ImmutableAttempt,
                         PlaintextOffset = (long)request.ChunkIndex * managedObject.ChunkSize,
                         PlaintextLength = request.Plaintext.Length,
                         CiphertextLength = ciphertext.Length,
@@ -284,6 +285,8 @@ public sealed class ManagedTransferService(
                         CiphertextSha256 = Convert.ToHexString(SHA256.HashData(ciphertext)).ToLowerInvariant(),
                         CreatedAt = clock.UtcNow
                     };
+                    // A retry after rollback writes a fresh immutable attempt. Only committed
+                    // chunk metadata selects an address, so an uncertain commit cannot lose bytes.
                     await objectStore.PutChunkAsync(ManagedChunkAddress.ForChunk(managedObject.StorageId, chunk), ciphertext, transactionToken);
                     await dbContext.ManagedObjectChunks.AddAsync(chunk, transactionToken);
                     session.UsedBytes = checked(session.UsedBytes + request.Plaintext.Length);
