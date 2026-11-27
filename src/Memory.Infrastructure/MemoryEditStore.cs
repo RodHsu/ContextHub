@@ -20,29 +20,46 @@ public sealed class MemoryEditStore(
     {
         if (ambient.Database.CurrentTransaction is not null)
             throw new InvalidOperationException("Memory edits require their own commit transaction.");
-        if (!ProjectContext.Matches(command.ProjectId, scope.ProjectId)) throw Unavailable();
-        var hash = MemoryEditContract.Hash(command);
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        var receipt = await StageAsync(db, scope, command, cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new SafeEditConflictException(SafeEditConflictCodes.StaleReadVersion);
+        }
+        return receipt;
+    }
+
+    internal static async Task<MemoryItem> LockTargetAsync(MemoryDbContext db, MemoryEditScope scope, Guid memoryId, CancellationToken cancellationToken)
+    {
+        if (db.Database.CurrentTransaction is null) throw new InvalidOperationException("A memory edit transaction is required.");
         // PostgreSQL only locks a row that still belongs to the expected owner and project after waiting.
         var memory = await db.MemoryItems.FromSqlInterpolated($"""
             SELECT *
             FROM memory_items
-            WHERE id = {command.MemoryId}
+            WHERE id = {memoryId}
               AND tenant_id = {scope.TenantId}
               AND owner_user_id = {scope.OwnerUserId}
               AND public.project_identity_equals(project_id, {scope.ProjectId})
             FOR UPDATE
             """).SingleOrDefaultAsync(cancellationToken) ?? throw Unavailable();
         if (memory.IsReadOnly || memory.MemoryType == MemoryType.Preference) throw Unavailable();
+        return memory;
+    }
 
-        var existing = await ReceiptQuery(db, scope, command.MemoryId, command.RequestId).SingleOrDefaultAsync(cancellationToken);
-        if (existing is not null)
-        {
-            var replay = ReadBoundReceipt(existing, hash);
-            await transaction.CommitAsync(cancellationToken);
-            return replay;
-        }
+    internal async Task<MemoryEditReceipt> StageAsync(MemoryDbContext db, MemoryEditScope scope, MemoryEditCommand command, CancellationToken cancellationToken)
+    {
+        if (!ProjectContext.Matches(command.ProjectId, scope.ProjectId)) throw Unavailable();
+        var hash = MemoryEditContract.Hash(command);
+        var memory = await LockTargetAsync(db, scope, command.MemoryId, cancellationToken);
+        var replay = await FindCommittedReceiptAsync(db, scope, command, hash, cancellationToken);
+        if (replay is not null) return replay;
+
         if (memory.Version != command.ExpectedVersion)
             throw new SafeEditConflictException(SafeEditConflictCodes.StaleReadVersion, memory.Version);
         if (memory.Version == int.MaxValue) throw new InvalidOperationException("Memory version limit reached.");
@@ -104,16 +121,14 @@ public sealed class MemoryEditStore(
             CommittedAt = now
         };
         db.MemoryEditReceipts.Add(receipt);
-        try
-        {
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        }
-        catch (DbUpdateConcurrencyException)
-        {
-            throw new SafeEditConflictException(SafeEditConflictCodes.StaleReadVersion);
-        }
         return Map(receipt, replayed: false);
+    }
+
+    internal static async Task<MemoryEditReceipt?> FindCommittedReceiptAsync(MemoryDbContext db, MemoryEditScope scope,
+        MemoryEditCommand command, string hash, CancellationToken cancellationToken)
+    {
+        var record = await ReceiptQuery(db, scope, command.MemoryId, command.RequestId).SingleOrDefaultAsync(cancellationToken);
+        return record is null ? null : ReadBoundReceipt(record, hash);
     }
 
     public async Task<MemoryEditReceipt?> ReadReceiptAsync(MemoryEditScope scope, MemoryEditRecoveryRequest request, CancellationToken cancellationToken)

@@ -19,7 +19,8 @@ public sealed class ChatGptProposalService(
     IRequestActorAccessor actorAccessor,
     IClock clock,
     ILogger<ChatGptProposalService> logger,
-    Func<IWorkItemProposalWorkflow>? workItemWorkflow = null) : IChatGptProposalService
+    Func<IWorkItemProposalWorkflow>? workItemWorkflow = null,
+    Func<IMemoryEditProposalWorkflow>? memoryEditWorkflow = null) : IChatGptProposalService
 {
     public const string SourceSystem = "chatgpt-mcp-gateway";
     private const string ProposalTag = "chatgpt-proposal";
@@ -53,6 +54,8 @@ public sealed class ChatGptProposalService(
 
     public async Task<ChatGptProposalResult> CreateAsync(ChatGptProposalCreateRequest request, CancellationToken cancellationToken)
     {
+        if (request.ToolName.Trim() == MemoryEditProposalContract.ToolName)
+            return await RequireMemoryEditWorkflow().CreateAsync(request, cancellationToken);
         ValidateCreate(request);
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
@@ -211,6 +214,8 @@ public sealed class ChatGptProposalService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var proposal = await LoadProposalForWriteAsync(request.ProposalId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, proposal.ProjectId, write: true);
+        if (IsMemoryEditProposal(proposal))
+            return await RequireMemoryEditWorkflow().ApproveAsync(request, cancellationToken);
         if (IsWorkItemProposal(proposal))
             return await (workItemWorkflow?.Invoke() ?? throw new WorkItemProposalOutcomeUnknownException())
                 .ApproveAsync(request, cancellationToken);
@@ -271,6 +276,8 @@ public sealed class ChatGptProposalService(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var proposal = await LoadProposalForWriteAsync(request.ProposalId, actor, cancellationToken);
         ActorAuthorization.EnsureProjectAllowed(actor, proposal.ProjectId, write: true);
+        if (IsMemoryEditProposal(proposal))
+            return await RequireMemoryEditWorkflow().RejectAsync(request, cancellationToken);
         if (IsWorkItemProposal(proposal))
             return await (workItemWorkflow?.Invoke() ?? throw new WorkItemProposalOutcomeUnknownException())
                 .RejectAsync(request, cancellationToken);
@@ -428,6 +435,13 @@ public sealed class ChatGptProposalService(
             CreatedAt = now
         }, cancellationToken);
     }
+
+    private IMemoryEditProposalWorkflow RequireMemoryEditWorkflow()
+        => memoryEditWorkflow?.Invoke() ?? throw new InvalidOperationException("Memory edit proposal workflow is unavailable.");
+
+    private static bool IsMemoryEditProposal(ConversationInsight proposal)
+        => proposal.Tags.Contains(MemoryEditProposalContract.ToolTag, StringComparer.Ordinal)
+            || string.Equals(proposal.SourceRef, $"{SourceSystem}:{MemoryEditProposalContract.ToolName}", StringComparison.Ordinal);
 
     private static bool IsWorkItemProposal(ConversationInsight proposal)
         => proposal.Tags.Contains("tool:" + WorkItemProposalContract.ToolName, StringComparer.Ordinal)

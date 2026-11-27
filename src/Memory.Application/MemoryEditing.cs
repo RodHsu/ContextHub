@@ -166,6 +166,7 @@ public sealed class MemoryEditingService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         var normalized = MemoryEditContract.Normalize(command);
+        MemoryEditProposalContract.RequireDirectRequestId(normalized.RequestId);
         ActorAuthorization.EnsureProjectAllowed(actor, normalized.ProjectId, write: true);
         if (!actor.IsServiceActor) await maintenance.EnsureWriteAllowedAsync("memory_edit", cancellationToken);
         return await store.ApplyAsync(new(actor.TenantId!.Value, actor.UserId!.Value, normalized.ProjectId), normalized, cancellationToken);
@@ -176,6 +177,7 @@ public sealed class MemoryEditingService(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         var normalized = MemoryEditContract.Normalize(request);
+        MemoryEditProposalContract.RequireDirectRequestId(normalized.RequestId);
         ActorAuthorization.EnsureProjectAllowed(actor, normalized.ProjectId, write: false);
         return store.ReadReceiptAsync(new(actor.TenantId!.Value, actor.UserId!.Value, normalized.ProjectId), normalized, cancellationToken);
     }
