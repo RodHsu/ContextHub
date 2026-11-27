@@ -457,9 +457,24 @@
             });
         };
         const resizeObserver = new ResizeObserver(scheduleRefresh);
+        const panel = viewport.closest(".graph-canvas-panel");
         const physicalFrame = viewport.closest(".graph-viewport-frame");
         const previousPhysicalHeight = physicalFrame?.style.getPropertyValue("--graph-physical-height");
         const previousPhysicalAttribute = physicalFrame?.getAttribute("data-physical-height");
+        if (panel) {
+            let expanded = panel.classList.contains("graph-canvas-panel-expanded");
+            const expansionObserver = new MutationObserver(() => {
+                const nextExpanded = panel.classList.contains("graph-canvas-panel-expanded");
+                if (instance.disposed || nextExpanded === expanded) {
+                    return;
+                }
+                // Fit against the new physical owner as soon as the DOM changes modes.
+                expanded = nextExpanded;
+                fitContent(viewport, true);
+            });
+            expansionObserver.observe(panel, { attributes: true, attributeFilter: ["class"] });
+            instance.cleanup.push(() => expansionObserver.disconnect());
+        }
         // Do not observe the pan element's style: applyTransform would trigger a feedback loop.
         const contentObserver = new MutationObserver(records => {
             if (records.some(record => !(record.target === instance.content && record.type === "attributes" && record.attributeName === "style"))) {
@@ -481,7 +496,7 @@
         viewport.addEventListener("click", handleClick, true);
         viewport.addEventListener("dblclick", handleDoubleClick);
         resizeObserver.observe(viewport);
-        for (const element of [viewport.closest(".content"), viewport.closest(".graph-canvas-panel"), physicalFrame?.querySelector(".graph-viewport-controls")]) {
+        for (const element of [viewport.closest(".content"), panel, physicalFrame?.querySelector(".graph-viewport-controls")]) {
             if (element) {
                 resizeObserver.observe(element);
             }

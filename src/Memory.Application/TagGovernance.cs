@@ -166,12 +166,12 @@ public sealed class CanonicalTagGovernanceService(
 
     public async Task<CanonicalTagMergePreview> PreviewMergeAsync(string projectId, Guid sourceId, Guid targetId, CancellationToken cancellationToken)
     {
-        if (sourceId == targetId) throw new InvalidOperationException("A tag cannot merge into itself.");
         var actor = RequireActor(SecurityScopes.MemoryRead);
         var normalized = ProjectContext.Normalize(projectId);
-        await LoadDefinitionsAsync(normalized, sourceId, targetId, actor, cancellationToken);
-        var sourceBindings = await Scope(dbContext.CanonicalTagBindings, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == sourceId && x.Status == "Active").ToArrayAsync(cancellationToken);
-        var targetKeys = await Scope(dbContext.CanonicalTagBindings, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == targetId && x.Status == "Active")
+        var (source, target) = await LoadDefinitionsAsync(normalized, sourceId, targetId, actor, cancellationToken);
+        var sameOwner = HasSameOwner(source, target);
+        var sourceBindings = await ActiveMergeBindings(normalized, source, actor, sameOwner).ToArrayAsync(cancellationToken);
+        var targetKeys = await ActiveMergeBindings(normalized, target, actor, sameOwner)
             .Select(x => x.ResourceType + "\u001f" + x.ResourceId).ToArrayAsync(cancellationToken);
         var set = targetKeys.ToHashSet(StringComparer.Ordinal);
         var conflicts = sourceBindings.Count(x => set.Contains(x.ResourceType + "\u001f" + x.ResourceId));
@@ -187,8 +187,11 @@ public sealed class CanonicalTagGovernanceService(
             var (source, target) = await LoadDefinitionsAsync(normalized, sourceId, targetId, actor, ct);
             if (source.Revision != expectedSourceRevision) throw new DbUpdateConcurrencyException("Canonical tag revision conflict; reload before retrying.");
             if (source.Status != CanonicalTagStatus.Active || target.Status != CanonicalTagStatus.Active) throw new InvalidOperationException("Only active canonical tags can be merged.");
-            var sourceBindings = await Scope(dbContext.CanonicalTagBindings, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == sourceId && x.Status == "Active").ToArrayAsync(ct);
-            var targetKeys = (await Scope(dbContext.CanonicalTagBindings, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, normalized) && x.DefinitionId == targetId && x.Status == "Active").ToArrayAsync(ct))
+            var sameOwner = HasSameOwner(source, target);
+            var tenantId = sameOwner ? target.TenantId : actor.TenantId;
+            var ownerUserId = sameOwner ? target.OwnerUserId : actor.UserId;
+            var sourceBindings = await ActiveMergeBindings(normalized, source, actor, sameOwner).ToArrayAsync(ct);
+            var targetKeys = (await ActiveMergeBindings(normalized, target, actor, sameOwner).ToArrayAsync(ct))
                 .ToDictionary(x => x.ResourceType + "\u001f" + x.ResourceId, StringComparer.Ordinal);
             foreach (var binding in sourceBindings)
             {
@@ -197,8 +200,8 @@ public sealed class CanonicalTagGovernanceService(
                 {
                     await dbContext.CanonicalTagBindings.AddAsync(new CanonicalTagBinding
                     {
-                        TenantId = actor.TenantId,
-                        OwnerUserId = actor.UserId,
+                        TenantId = tenantId,
+                        OwnerUserId = ownerUserId,
                         DefinitionId = targetId,
                         ProjectId = normalized,
                         ResourceType = binding.ResourceType,
@@ -221,8 +224,8 @@ public sealed class CanonicalTagGovernanceService(
             source.UpdatedAt = clock.UtcNow;
             await dbContext.CanonicalTagAliases.AddAsync(new CanonicalTagAlias
             {
-                TenantId = actor.TenantId,
-                OwnerUserId = actor.UserId,
+                TenantId = tenantId,
+                OwnerUserId = ownerUserId,
                 DefinitionId = targetId,
                 ProjectId = normalized,
                 Alias = source.CanonicalName,
@@ -327,9 +330,23 @@ public sealed class CanonicalTagGovernanceService(
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    private static bool HasSameOwner(CanonicalTagDefinition source, CanonicalTagDefinition target)
+        => source.TenantId == target.TenantId && source.OwnerUserId == target.OwnerUserId;
+
+    private IQueryable<CanonicalTagBinding> ActiveMergeBindings(
+        string projectId, CanonicalTagDefinition definition, ContextHubRequestActor actor, bool sameOwner)
+    {
+        var bindings = Scope(dbContext.CanonicalTagBindings, actor).Where(binding =>
+            ProjectContext.Matches(binding.ProjectId, projectId) && binding.DefinitionId == definition.Id && binding.Status == "Active");
+        return sameOwner
+            ? bindings.Where(binding => binding.TenantId == definition.TenantId && binding.OwnerUserId == definition.OwnerUserId)
+            : bindings;
+    }
+
     private async Task<(CanonicalTagDefinition Source, CanonicalTagDefinition Target)> LoadDefinitionsAsync(string projectId, Guid sourceId, Guid targetId, ContextHubRequestActor actor, CancellationToken cancellationToken)
     {
         ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: actor.HasScope(SecurityScopes.MemoryWrite));
+        if (sourceId == targetId) throw new InvalidOperationException("A tag cannot merge into itself.");
         var definitions = await Scope(dbContext.CanonicalTagDefinitions, actor).Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId) && (x.Id == sourceId || x.Id == targetId)).ToArrayAsync(cancellationToken);
         return (definitions.SingleOrDefault(x => x.Id == sourceId) ?? throw new UnauthorizedAccessException("Source tag is not available."), definitions.SingleOrDefault(x => x.Id == targetId) ?? throw new UnauthorizedAccessException("Target tag is not available."));
     }

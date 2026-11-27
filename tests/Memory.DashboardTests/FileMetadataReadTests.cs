@@ -266,6 +266,80 @@ public sealed class FileMetadataReadTests
     }
 
     [Fact]
+    public async Task Matching_project_alias_and_new_latest_version_should_preserve_version_reads()
+    {
+        var file = File();
+        var latest = file with { ProjectId = "P", FileVersionId = Guid.NewGuid(), VersionNumber = 3 };
+        var pinned = file with { ProjectId = "P" };
+        var api = Api((method, _) => method switch
+        {
+            nameof(IContextHubApiClient.GetManagedFilePageAsync) => Task.FromResult<ManagedFileMetadataPage?>(new([file], 25, 0, false)),
+            nameof(IContextHubApiClient.GetManagedFileMetadataAsync) => Task.FromResult<ManagedFileInventoryResult?>(latest),
+            nameof(IContextHubApiClient.GetManagedFileVersionAsync) => Task.FromResult<ManagedFileInventoryResult?>(pinned),
+            _ => null
+        });
+        using var state = new FileMetadataReadState(api);
+
+        await state.LoadAsync("p");
+        state.Version.Should().Be(latest);
+        await state.SelectAsync(state.Selected!, pinned.FileVersionId);
+
+        state.Selected.Should().Be(latest);
+        state.Version.Should().Be(pinned);
+        state.DetailUnavailable.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(false, "project")]
+    [InlineData(false, "file")]
+    [InlineData(true, "project")]
+    [InlineData(true, "file")]
+    [InlineData(true, "version")]
+    public async Task Mismatched_file_metadata_should_not_publish_or_request_release_authority(bool pinned, string mismatch)
+    {
+        var file = File();
+        var pin = Guid.NewGuid();
+        var expected = pinned ? file with { FileVersionId = pin } : file;
+        var wrong = mismatch switch
+        {
+            "project" => expected with { ProjectId = "different-project" },
+            "file" => expected with { FileId = Guid.NewGuid() },
+            "version" => expected with { FileVersionId = Guid.NewGuid() },
+            _ => throw new ArgumentOutOfRangeException(nameof(mismatch))
+        };
+        var latest = file;
+        var calls = new List<string>();
+        var api = Api((method, _) => method switch
+        {
+            nameof(IContextHubApiClient.GetManagedFilePageAsync) => Task.FromResult<ManagedFileMetadataPage?>(new([file], 25, 0, false)),
+            nameof(IContextHubApiClient.GetManagedFileMetadataAsync) => Task.FromResult<ManagedFileInventoryResult?>(latest),
+            nameof(IContextHubApiClient.GetManagedFileVersionAsync) => Task.FromResult<ManagedFileInventoryResult?>(wrong),
+            _ => null
+        });
+        ((FileReadApiProxy)(object)api).Observe = (method, _) => calls.Add(method);
+        using var state = new FileMetadataReadState(api);
+        await state.LoadAsync("p");
+        state.Version.Should().Be(file);
+        calls.Clear();
+        if (!pinned) latest = wrong;
+
+        await state.SelectAsync(file, pinned ? pin : null);
+        await state.ReadContentMetadataAsync("synthetic");
+        await state.ReadAuditAsync();
+
+        state.Selected.Should().Be(file);
+        state.Version.Should().BeNull();
+        state.DetailUnavailable.Should().BeTrue();
+        state.SelectionLoading.Should().BeFalse();
+        state.Rights.Should().BeNull();
+        state.ReleaseRequirement.Should().BeNull();
+        if (pinned)
+            calls.Should().Equal(nameof(IContextHubApiClient.GetManagedFileMetadataAsync), nameof(IContextHubApiClient.GetManagedFileVersionAsync));
+        else
+            calls.Should().Equal(nameof(IContextHubApiClient.GetManagedFileMetadataAsync));
+    }
+
+    [Fact]
     public async Task Missing_pin_survives_actual_history_next_and_previous_handlers()
     {
         var file = File(); var pin = Guid.NewGuid(); var requested = new List<Guid>();

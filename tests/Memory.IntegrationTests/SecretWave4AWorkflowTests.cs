@@ -229,6 +229,163 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
     }
 
     [DockerRequiredFact]
+    public async Task Canceled_secret_consumer_releases_the_slot_without_refunding_its_use()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var user = await db.TenantUsers.SingleAsync(item => item.Username == "contract-test-admin");
+        accessor.Current = Actor(user, interactive: true);
+        var service = CreateSecretService(db, accessor, new TestSecretKeyAuthority(), new AllowApproval());
+        var proof = Proof();
+        var secret = await service.CreateAsync(new("ContextHub", $"canceled-use-{Guid.NewGuid():N}", SecretKind.Opaque, proof), CancellationToken.None);
+        var material = RandomNumberGenerator.GetBytes(16);
+        SecretVersionResult version;
+        try
+        {
+            version = await service.AddVersionAsync(new(secret.Id, material, secret.Revision, "version", proof), CancellationToken.None);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(material);
+        }
+        await SeedRulesAsync(db, user, secret.Id, user.Id.ToString("D"), SecretRight.Use, AuthorizationEffect.Allow);
+
+        const string purpose = "test:lease-cancellation";
+        const string target = "https://example.test/cancellation";
+        var lease = await service.CreateLeaseAsync(new(secret.Id, SecretLeaseKind.Use, purpose, target,
+            "lease", version.SecretRevision, 2, 1, TimeSpan.FromMinutes(5), null, proof), CancellationToken.None);
+        var first = new SecretUseRequest(lease.LeaseId, lease.Capability, lease.Revision, "canceled-use", purpose, target);
+        using var cancellation = new CancellationTokenSource();
+        var expected = new OperationCanceledException(cancellation.Token);
+        var consumer = new CancelingConsumer(cancellation, expected);
+        var use = () => service.UseAsync(first, consumer, cancellation.Token);
+        var canceled = await use.Should().ThrowAsync<OperationCanceledException>();
+        canceled.Which.Should().BeSameAs(expected);
+
+        var released = await db.SecretLeases.AsNoTracking().SingleAsync(item => item.Id == lease.LeaseId);
+        released.ActiveUses.Should().Be(0);
+        released.UsedCount.Should().Be(1);
+        released.Revision.Should().Be(lease.Revision + 1);
+        released.State.Should().Be(SecretLeaseState.Active);
+        var useAudits = db.SecretAccessEvents.AsNoTracking().Where(item =>
+            item.LeaseId == lease.LeaseId && item.Operation == SecretAccessOperation.Use && item.Allowed && item.ReasonCode == "UseStarted");
+        (await useAudits.Select(item => item.RequestId).ToArrayAsync()).Should().Equal(first.RequestId);
+
+        var second = first with { ExpectedRevision = released.Revision, RequestId = "next-use" };
+        var nextConsumer = new GatedConsumer();
+        nextConsumer.Finish();
+        var result = await service.UseAsync(second, nextConsumer, CancellationToken.None);
+        nextConsumer.Entered.IsCompletedSuccessfully.Should().BeTrue();
+        result.Should().Be(new SecretUseResult(lease.Revision + 2, 2, 0, SecretLeaseState.Exhausted));
+        var finished = await db.SecretLeases.AsNoTracking().SingleAsync(item => item.Id == lease.LeaseId);
+        finished.ActiveUses.Should().Be(0);
+        finished.UsedCount.Should().Be(2);
+        finished.Revision.Should().Be(lease.Revision + 2);
+        (await useAudits.Select(item => item.RequestId).ToArrayAsync()).Should().BeEquivalentTo(new[] { first.RequestId, second.RequestId });
+    }
+
+    [DockerRequiredFact]
+    public async Task Concurrent_consumers_release_only_their_own_active_lease_slot()
+    {
+        var factory = environment.GetFactory();
+        var keys = new TestSecretKeyAuthority();
+        const string purpose = "test:lease-concurrency";
+        const string target = "https://example.test/concurrency";
+        ContextHubRequestActor actor;
+        SecretLeaseResult lease;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var cancellationToken = deadline.Token;
+        using (var setup = factory.Services.CreateScope())
+        {
+            var db = setup.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var accessor = setup.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+            var user = await db.TenantUsers.SingleAsync(item => item.Username == "contract-test-admin", cancellationToken);
+            actor = Actor(user, interactive: true);
+            accessor.Current = actor;
+            var service = CreateSecretService(db, accessor, keys, new AllowApproval());
+            var proof = Proof();
+            var secret = await service.CreateAsync(new("ContextHub", $"concurrent-use-{Guid.NewGuid():N}", SecretKind.Opaque, proof), cancellationToken);
+            var material = RandomNumberGenerator.GetBytes(16);
+            SecretVersionResult version;
+            try
+            {
+                version = await service.AddVersionAsync(new(secret.Id, material, secret.Revision, "version", proof), cancellationToken);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(material);
+            }
+            await SeedRulesAsync(db, user, secret.Id, user.Id.ToString("D"), SecretRight.Use, AuthorizationEffect.Allow);
+            lease = await service.CreateLeaseAsync(new(secret.Id, SecretLeaseKind.Use, purpose, target,
+                "lease", version.SecretRevision, 2, 2, TimeSpan.FromMinutes(5), null, proof), cancellationToken);
+        }
+
+        using var firstScope = factory.Services.CreateScope();
+        using var secondScope = factory.Services.CreateScope();
+        using var verificationScope = factory.Services.CreateScope();
+        var firstDb = firstScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var secondDb = secondScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var firstAccessor = firstScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var secondAccessor = secondScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        firstAccessor.Current = actor;
+        secondAccessor.Current = actor;
+        var firstService = CreateSecretService(firstDb, firstAccessor, keys, new AllowApproval());
+        var secondService = CreateSecretService(secondDb, secondAccessor, keys, new AllowApproval());
+        var firstConsumer = new GatedConsumer();
+        var secondConsumer = new GatedConsumer();
+        var firstRequest = new SecretUseRequest(lease.LeaseId, lease.Capability, lease.Revision, "first-use", purpose, target);
+        var secondRequest = firstRequest with { ExpectedRevision = lease.Revision + 1, RequestId = "second-use" };
+
+        var firstUse = firstService.UseAsync(firstRequest, firstConsumer, cancellationToken);
+        Task<SecretUseResult>? secondUse = null;
+        try
+        {
+            await firstConsumer.Entered.WaitAsync(cancellationToken);
+            secondUse = secondService.UseAsync(secondRequest, secondConsumer, cancellationToken);
+            await secondConsumer.Entered.WaitAsync(cancellationToken);
+
+            var bothActive = await ReadLeaseAsync();
+            bothActive.ActiveUses.Should().Be(2);
+            bothActive.UsedCount.Should().Be(2);
+
+            firstConsumer.Finish();
+            (await firstUse).Should().Be(new SecretUseResult(lease.Revision + 1, 1, 1, SecretLeaseState.Active));
+            secondUse.IsCompleted.Should().BeFalse();
+            var afterFirst = await ReadLeaseAsync();
+            afterFirst.ActiveUses.Should().Be(1);
+            afterFirst.UsedCount.Should().Be(2);
+            afterFirst.Revision.Should().Be(lease.Revision + 2);
+            afterFirst.State.Should().Be(SecretLeaseState.Exhausted);
+            var tracked = firstDb.SecretLeases.Local.Single(item => item.Id == lease.LeaseId);
+            tracked.ActiveUses.Should().Be(afterFirst.ActiveUses);
+            tracked.Revision.Should().Be(afterFirst.Revision);
+
+            secondConsumer.Finish();
+            (await secondUse).Should().Be(new SecretUseResult(lease.Revision + 2, 2, 0, SecretLeaseState.Exhausted));
+            var afterSecond = await ReadLeaseAsync();
+            afterSecond.ActiveUses.Should().Be(0);
+            afterSecond.UsedCount.Should().Be(2);
+            afterSecond.Revision.Should().Be(lease.Revision + 2);
+            afterSecond.State.Should().Be(SecretLeaseState.Exhausted);
+            var audits = await verificationDb.SecretAccessEvents.AsNoTracking()
+                .Where(item => item.LeaseId == lease.LeaseId && item.Operation == SecretAccessOperation.Use && item.Allowed && item.ReasonCode == "UseStarted")
+                .Select(item => item.RequestId).ToArrayAsync(cancellationToken);
+            audits.Should().BeEquivalentTo(new[] { firstRequest.RequestId, secondRequest.RequestId });
+        }
+        finally
+        {
+            firstConsumer.Finish();
+            secondConsumer.Finish();
+            await Task.WhenAll(firstUse, secondUse ?? Task.CompletedTask);
+        }
+
+        Task<SecretLease> ReadLeaseAsync() => verificationDb.SecretLeases.AsNoTracking()
+            .SingleAsync(item => item.Id == lease.LeaseId, cancellationToken);
+    }
+
+    [DockerRequiredFact]
     public async Task Ssh_certificate_issue_proactive_renew_max_lifetime_actor_binding_and_krl_must_fail_closed()
     {
         using var scope = environment.GetFactory().Services.CreateScope();
@@ -405,6 +562,31 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
             Captured = material.ToArray();
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class CancelingConsumer(CancellationTokenSource request, OperationCanceledException failure) : ISecretMaterialConsumer
+    {
+        public Task ExecuteAsync(SecretUseContext context, ReadOnlyMemory<byte> material, CancellationToken cancellationToken)
+        {
+            request.Cancel();
+            return Task.FromException(failure);
+        }
+    }
+
+    private sealed class GatedConsumer : ISecretMaterialConsumer
+    {
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _finish = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Entered => _entered.Task;
+
+        public Task ExecuteAsync(SecretUseContext context, ReadOnlyMemory<byte> material, CancellationToken cancellationToken)
+        {
+            _entered.SetResult();
+            return _finish.Task.WaitAsync(cancellationToken);
+        }
+
+        public void Finish() => _finish.TrySetResult();
     }
 
     private const string TestPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEZha2VQdWJsaWNLZXlGb3JXYXZlNEFUZXN0";

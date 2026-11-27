@@ -186,22 +186,60 @@ public sealed class FileSystemManagedObjectStore(IOptions<ManagedObjectStorageOp
     public Task<bool> ChunkExistsAsync(string storageId, int chunkIndex, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(File.Exists(ResolveChunkPath(storageId, chunkIndex, createDirectory: false)));
+        return Task.FromResult(EntryExists(ResolveChunkPath(storageId, chunkIndex, createDirectory: false), isDirectory: false));
     }
 
     public Task DeleteObjectAsync(string storageId, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var directory = ResolveObjectDirectory(storageId, createDirectory: false);
+        if (!EntryExists(directory, isDirectory: true)) return Task.CompletedTask;
+
         try
         {
-            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+            Directory.Delete(directory, recursive: true);
             return Task.CompletedTask;
         }
-        catch
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
             throw new IOException("Managed object storage operation failed.");
         }
+    }
+
+    private bool EntryExists(string path, bool isDirectory)
+    {
+        try
+        {
+            if (((File.GetAttributes(path) & FileAttributes.Directory) != 0) == isDirectory)
+                return true;
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            EnsureStoreRootAvailable();
+            return false;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            throw new IOException("Managed object storage operation failed.");
+        }
+
+        throw new IOException("Managed object storage operation failed.");
+    }
+
+    private void EnsureStoreRootAvailable()
+    {
+        // Only treat an object as absent after checking that its storage root is reachable.
+        try
+        {
+            if ((File.GetAttributes(Path.GetFullPath(options.Value.RootPath)) & FileAttributes.Directory) != 0)
+                return;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            throw new IOException("Managed object storage is unavailable.");
+        }
+
+        throw new IOException("Managed object storage is unavailable.");
     }
 
     private string ResolveChunkPath(string storageId, int chunkIndex, bool createDirectory)

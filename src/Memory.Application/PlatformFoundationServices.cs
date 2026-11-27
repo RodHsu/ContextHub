@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Data;
 using System.Globalization;
 using System.Text;
 using Memory.Domain;
@@ -41,6 +42,8 @@ public sealed class PlatformFoundationStore(
     IClock clock,
     IEffectiveRightsEvaluator evaluator) : IPlatformFoundationStore
 {
+    private const string AuthorizationTopologyLockKey = "project-authorization-topology";
+
     public async Task<AuthorizationTopologyEdge> UpsertTopologyEdgeAsync(TopologyEdgeUpsertRequest request, CancellationToken cancellationToken)
     {
         var parent = ProjectContext.Normalize(request.ParentProjectId);
@@ -52,8 +55,16 @@ public sealed class PlatformFoundationStore(
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
         ActorAuthorization.EnsureProjectAllowed(actor, child, write: true);
         ActorAuthorization.EnsureProjectAllowed(actor, parent, write: false);
+
+        await using var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        if (!transaction.OwnsTransaction)
+        {
+            throw new InvalidOperationException("Authorization topology updates require an owned transaction.");
+        }
+        // Owner and tenant-wide views can overlap, and a cycle can span multiple projects.
+        await dbContext.AcquireTransactionLockAsync(AuthorizationTopologyLockKey, cancellationToken);
         var scoped = Scope(dbContext.ProjectHierarchies, actor);
-        var current = await scoped.AsNoTracking().Where(x => x.Dimension == dimension).Select(MapEdgeExpression).ToListAsync(cancellationToken);
+        var current = await scoped.AsNoTracking().Where(x => x.AuthorizationInheritable).Select(MapEdgeExpression).ToArrayAsync(cancellationToken);
         var entity = await scoped.SingleOrDefaultAsync(x => x.Dimension == dimension && Memory.Application.ProjectContext.Matches(x.ParentProjectId, parent) && Memory.Application.ProjectContext.Matches(x.ChildProjectId, child), cancellationToken);
         var currentRevision = entity?.Revision ?? 0;
         if (currentRevision != request.ExpectedRevision) throw new DbUpdateConcurrencyException("Topology revision conflict; reload before retrying.");
@@ -85,6 +96,7 @@ public sealed class PlatformFoundationStore(
 
         await BumpRevisionAsync(child, static revision => revision.TopologyRevision++, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         evaluator.InvalidateProjects(FindAuthorizationDescendants(child, current.Append(replacement)));
         return replacement;
     }
@@ -107,31 +119,13 @@ public sealed class PlatformFoundationStore(
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
         ActorAuthorization.EnsureProjectAllowed(actor, project, write: false);
-        var edges = await Scope(dbContext.ProjectHierarchies.AsNoTracking(), actor)
-            .Where(x => x.AuthorizationInheritable)
-            .Select(MapEdgeExpression)
-            .ToArrayAsync(cancellationToken);
-        var relevantProjects = FindAuthorizationAncestors(project, edges);
-        var policies = await Scope(dbContext.ProjectAuthorizationPolicies.AsNoTracking(), actor)
-            .Where(x => Memory.Application.ProjectContext.IdentityKeys(relevantProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && (x.PrincipalId == principalId || x.PrincipalId == "*") && rights.Contains(x.Right))
-            .ToArrayAsync(cancellationToken);
-        var grants = await Scope(dbContext.ProjectExplicitGrants.AsNoTracking(), actor)
-            .Where(x => Memory.Application.ProjectContext.IdentityKeys(relevantProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)) && (x.PrincipalId == principalId || x.PrincipalId == "*") && rights.Contains(x.Right))
-            .ToArrayAsync(cancellationToken);
-        var revisionRows = await Scope(dbContext.ProjectSecurityRevisions.AsNoTracking(), actor)
-            .Where(x => Memory.Application.ProjectContext.IdentityKeys(relevantProjects).Contains(Memory.Application.ProjectContext.IdentityKey(x.ProjectId)))
-            .ToArrayAsync(cancellationToken);
-        var revisions = new SecurityRevisionVector(
-            CheckedSum(revisionRows.Select(x => x.TopologyRevision)),
-            CheckedSum(revisionRows.Select(x => x.PolicyRevision)),
-            CheckedSum(revisionRows.Select(x => x.GrantRevision)),
-            CheckedSum(revisionRows.Select(x => x.TagRevision)));
-        var rules = policies.Select(x => MapRule(x, AuthorizationRuleSource.PolicyDerived))
-            .Concat(grants.Select(x => MapRule(x, AuthorizationRuleSource.ExplicitGrant)))
-            .ToArray();
-        return evaluator.Evaluate(new EffectiveRightsRequest(project, principalId, rights, edges, rules, revisions, resourceType, resourceId)
+        var authorityScope = EffectiveRightsAuthorityScope.FromActor(actor);
+        var authority = await dbContext.ReadEffectiveRightsAuthorityAsync(
+            project, principalId, rights, authorityScope.TenantId, authorityScope.OwnerUserId, cancellationToken);
+        return evaluator.Evaluate(new EffectiveRightsRequest(
+            project, principalId, rights, authority.Edges, authority.Rules, authority.Revisions, resourceType, resourceId)
         {
-            AuthorityScope = EffectiveRightsAuthorityScope.FromActor(actor)
+            AuthorityScope = authorityScope
         });
     }
 
@@ -232,27 +226,6 @@ public sealed class PlatformFoundationStore(
     private static readonly System.Linq.Expressions.Expression<Func<ProjectHierarchy, AuthorizationTopologyEdge>> MapEdgeExpression =
         x => new AuthorizationTopologyEdge(x.ParentProjectId, x.ChildProjectId, x.Dimension, x.AuthorizationInheritable, x.Revision);
 
-    private static AuthorizationRule MapRule(ProjectAuthorizationPolicy rule, AuthorizationRuleSource source)
-        => new(rule.ProjectId, rule.PrincipalId, rule.Right, rule.Effect, source, rule.EvidenceRef, rule.ResourceType, rule.ResourceId);
-
-    private static AuthorizationRule MapRule(ProjectExplicitGrant rule, AuthorizationRuleSource source)
-        => new(rule.ProjectId, rule.PrincipalId, rule.Right, rule.Effect, source, rule.EvidenceRef, rule.ResourceType, rule.ResourceId);
-
-    private static HashSet<string> FindAuthorizationAncestors(string projectId, IReadOnlyList<AuthorizationTopologyEdge> edges)
-    {
-        var result = new HashSet<string>(ProjectContext.IdentityComparer) { projectId };
-        var queue = new Queue<string>();
-        queue.Enqueue(projectId);
-        while (queue.TryDequeue(out var child))
-        {
-            foreach (var parent in edges.Where(x => x.AuthorizationInheritable && Memory.Application.ProjectContext.Matches(x.ChildProjectId, child)).Select(x => x.ParentProjectId))
-            {
-                if (result.Add(parent)) queue.Enqueue(parent);
-            }
-        }
-        return result;
-    }
-
     private static HashSet<string> FindAuthorizationDescendants(string projectId, IEnumerable<AuthorizationTopologyEdge> edges)
     {
         var result = new HashSet<string>(ProjectContext.IdentityComparer) { projectId };
@@ -266,13 +239,6 @@ public sealed class PlatformFoundationStore(
                 if (result.Add(child)) queue.Enqueue(child);
             }
         }
-        return result;
-    }
-
-    private static long CheckedSum(IEnumerable<long> values)
-    {
-        long result = 0;
-        foreach (var value in values) result = checked(result + value);
         return result;
     }
 
@@ -317,6 +283,11 @@ public sealed record AuthorizationRule(
     string? ResourceId = null);
 
 public sealed record SecurityRevisionVector(long Topology, long Policy, long Grant, long Tag);
+
+public sealed record EffectiveRightsAuthoritySnapshot(
+    IReadOnlyList<AuthorizationTopologyEdge> Edges,
+    IReadOnlyList<AuthorizationRule> Rules,
+    SecurityRevisionVector Revisions);
 
 internal readonly record struct EffectiveRightsAuthorityScope(Guid? TenantId, Guid? OwnerUserId)
 {
@@ -606,7 +577,9 @@ public static class AuthorizationTopologyValidator
         long expectedRevision)
     {
         if (replacement.Revision != expectedRevision + 1) throw new InvalidOperationException("Topology revision conflict; reload before retrying.");
-        var candidate = current.Where(x => !(string.Equals(x.Dimension, replacement.Dimension, StringComparison.OrdinalIgnoreCase)
+        if (!replacement.AuthorizationInheritable) return;
+
+        var candidate = current.Where(x => !(string.Equals(x.Dimension, replacement.Dimension, StringComparison.Ordinal)
             && Memory.Application.ProjectContext.Matches(x.ParentProjectId, replacement.ParentProjectId)
             && Memory.Application.ProjectContext.Matches(x.ChildProjectId, replacement.ChildProjectId))).Append(replacement).ToArray();
         _ = new EffectiveRightsEvaluator().Evaluate(new EffectiveRightsRequest(

@@ -144,6 +144,78 @@ public sealed class MemoryWorkflowTests(ContainerTestEnvironment environment) : 
     }
 
     [DockerRequiredFact]
+    public async Task Memory_update_requires_the_actual_project_in_the_actor_allow_list()
+    {
+        var factory = environment.GetFactory();
+        var projectId = $"memory-update-{Guid.NewGuid():N}";
+        const string original = "Original synthetic memory content";
+        const string updatedContent = "Authorized synthetic memory content";
+        MemoryDocument created;
+        ContextHubRequestActor owner;
+        using (var setup = factory.Services.CreateScope())
+        {
+            UseBootstrapActor(setup.ServiceProvider);
+            owner = setup.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current;
+            var writer = setup.ServiceProvider.GetRequiredService<IMemoryService>();
+            created = await writer.UpsertAsync(new MemoryUpsertRequest(
+                "memory-update-guard", MemoryScope.Project, MemoryType.Fact, "Project guard fixture",
+                original, "Synthetic project guard fixture", "test", "memory-update-guard",
+                [], 0.5m, 0.5m, ProjectId: projectId), CancellationToken.None);
+        }
+
+        using (var deniedScope = factory.Services.CreateScope())
+        {
+            deniedScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = owner with
+            {
+                Scopes = [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite],
+                AllowedProjectIds = [$"{projectId}-other"]
+            };
+            var editor = deniedScope.ServiceProvider.GetRequiredService<IMemoryService>();
+            foreach (var requestedProject in new[] { null, projectId })
+            {
+                var edit = () => editor.UpdateAsync(new MemoryUpdateRequest(
+                    created.Id, Content: updatedContent, ProjectId: requestedProject), CancellationToken.None);
+                await edit.Should().ThrowAsync<UnauthorizedAccessException>();
+            }
+        }
+
+        var allowedActor = owner with
+        {
+            Scopes = [SecurityScopes.MemoryRead, SecurityScopes.MemoryWrite],
+            AllowedProjectIds = [projectId]
+        };
+        using (var allowedScope = factory.Services.CreateScope())
+        {
+            var db = allowedScope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+            var stored = await db.MemoryItems.AsNoTracking().SingleAsync(item => item.Id == created.Id);
+            stored.Version.Should().Be(created.Version);
+            stored.Content.Should().Be(original);
+            var history = await db.MemoryItemRevisions.AsNoTracking().SingleAsync(item => item.MemoryItemId == created.Id);
+            history.Version.Should().Be(created.Version);
+            history.Content.Should().Be(original);
+            history.ChangedBy.Should().Be("upsert");
+
+            allowedScope.ServiceProvider.GetRequiredService<IRequestActorAccessor>().Current = allowedActor;
+            var editor = allowedScope.ServiceProvider.GetRequiredService<IMemoryService>();
+            var updated = await editor.UpdateAsync(new MemoryUpdateRequest(
+                created.Id, Content: updatedContent), CancellationToken.None);
+            updated.Content.Should().Be(updatedContent);
+            updated.Version.Should().Be(created.Version + 1);
+        }
+
+        using var verification = factory.Services.CreateScope();
+        var finalDb = verification.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var final = await finalDb.MemoryItems.AsNoTracking().SingleAsync(item => item.Id == created.Id);
+        final.Content.Should().Be(updatedContent);
+        final.Version.Should().Be(created.Version + 1);
+        var revisions = await finalDb.MemoryItemRevisions.AsNoTracking().Where(item => item.MemoryItemId == created.Id)
+            .OrderBy(item => item.Version).ToListAsync();
+        revisions.Select(item => item.Version).Should().Equal(created.Version, created.Version + 1);
+        revisions.Select(item => item.Content).Should().Equal(original, updatedContent);
+        revisions.Select(item => item.ChangedBy).Should().Equal("upsert", "update");
+    }
+
+    [DockerRequiredFact]
     public async Task Upsert_ProcessJob_And_Search_Should_Return_Result()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

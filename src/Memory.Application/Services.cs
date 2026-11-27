@@ -492,14 +492,9 @@ public sealed class MemoryService(
     {
         MemoryScoreContract.Validate(request);
         await EnsureWriteAllowedUnlessServiceAsync("memory_update", cancellationToken);
-        var projectId = request.ProjectId == null ? null : ProjectContext.Normalize(request.ProjectId);
         var actor = actorAccessor.Current;
         EnsureScopeAllowed(actor, SecurityScopes.MemoryWrite);
-        var entity = await dbContext.MemoryItems
-            .Where(x => x.Id == request.Id && (projectId == null || Memory.Application.ProjectContext.Matches(x.ProjectId, projectId)))
-            .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
-            .FirstOrDefaultAsync(cancellationToken)
-            ?? throw new InvalidOperationException($"Memory item '{request.Id}' was not found.");
+        var entity = await LoadMemoryForWriteAsync(request.Id, request.ProjectId, actor, cancellationToken);
         var previousType = entity.MemoryType;
 
         EnsureMemoryWritable(entity);
