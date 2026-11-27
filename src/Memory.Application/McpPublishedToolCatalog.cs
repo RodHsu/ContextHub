@@ -2,7 +2,7 @@ namespace Memory.Application;
 
 public static class McpPublishedToolCatalog
 {
-    public const string AppFacingCatalogVersion = "2026-11-22-v13";
+    public const string AppFacingCatalogVersion = "2026-11-27-v15";
 
     public static IReadOnlySet<string> RestrictedToolNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -33,6 +33,8 @@ public static class McpPublishedToolCatalog
         "build_working_context",
         "memory_search",
         "memory_get",
+        "memory_revisions_list",
+        "memory_revision_get",
         "project_information_get",
         "discussion_threads_list",
         "discussion_thread_get",
@@ -44,6 +46,7 @@ public static class McpPublishedToolCatalog
         "project_hierarchy_get_children",
         "project_hierarchy_set_children",
         "project_work_items_list",
+        "project_work_item_get",
         "project_work_item_edit_receipt_get",
         "project_work_item_create",
         "project_work_item_update",
@@ -142,11 +145,14 @@ public static class McpPublishedToolCatalog
         "build_working_context",
         "memory_search",
         "memory_get",
+        "memory_revisions_list",
+        "memory_revision_get",
         "project_information_get",
         "discussion_threads_list",
         "discussion_thread_get",
         "project_hierarchy_get_children",
         "project_work_items_list",
+        "project_work_item_get",
         "project_work_item_edit_receipt_get",
         "agent_execution_get",
         "project_artifacts_list",

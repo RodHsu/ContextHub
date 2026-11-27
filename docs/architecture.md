@@ -921,8 +921,33 @@ Managed Files separate logical identity from encrypted storage. `FileAsset` is t
 
 The create-intent path acquires an owner-scoped advisory lock before evaluating authorized candidates. Exact same-name/same-content uploads reuse the existing logical version, same-name/different-content creates a new version, and different-name/same-content may reuse the encrypted blob while keeping a distinct logical asset. Candidates outside the actor's effective project/owner scope are indistinguishable from absence. Unassigned uploads remain visible only to their owner or an administrator.
 
-The DLP state machine is monotonic for a version: scanner or parser failure, malware, credential material, unsupported content, archive bombs, embedded payloads, and classification ambiguity are quarantined or blocked rather than treated as clean. Download authorization first resolves the logical version, then requires an allowed DLP state and the Foundation A `download` right. Representations inherit their source classification. Quarantine release is an audited state transition gated by an external high-assurance approval verifier; when that authority is unavailable, the operation returns `RequiresExternalApproval` without mutation.
+The DLP state machine preserves or raises existing classification during ordinary assessments. Scanner or parser failure, malware, credential material, unsupported content, archive bombs, embedded payloads, and classification ambiguity are quarantined or blocked. Download authorization first resolves the logical version, then requires an allowed DLP state and the Foundation A `download` right. Representations inherit their source classification.
+
+An external high-assurance approval binds the quarantine release to the actor, file version, and current classification revision. A successful request returns `StartedRescan` and records an approved pending review. The file version keeps its `Quarantined` lifecycle and classification with `NeedsRescan` set. When the authority is unavailable, the operation returns `RequiresExternalApproval` and keeps the file version's state.
+
+To complete the approved review, a security-authorized assessment must supply the returned `expectedClassificationRevision`, a complete scanner and parser assessment using the recorded scanner-set and policy versions, and `completedScannerRuleIds` covering every active finding absent from the report. Current high-severity findings and reproduced prior high-severity evidence keep the version quarantined. A qualifying assessment preserves historical finding evidence, resolves findings covered by the rescan, and records the new classification and audit outcome. Both file security endpoints return HTTP 409 with `FileClassificationConflict` when the expected revision is stale or a pending rescan omits it.
 
 Logical deletion is archive-first and preserves legal holds and references. Primary deletion, backup-retention pending, fully expired, and verified states remain distinct so user-visible status does not claim provider backup deletion before evidence exists. Reconciliation is bounded and idempotent.
 
 Canonical tag telemetry stores a normalized query hash, result count, selected tag, locale, and source but not the raw query. Daily aggregates feed deterministic 7/30/90-day quality windows. Merge preview and apply preserve bindings and a redirect from the superseded tag; split preview never guesses membership and requires an explicit candidate set. Rename and deprecation are lifecycle operations, while background reconciliation rebuilds aggregates and expires stale suggestions without silently deleting canonical history.
+
+### Memory revision reads
+
+The Dashboard Memory detail API includes the newest 20 revision summaries and
+`hasMoreRevisions`. The summary payload omits historical bodies. Use
+`GET /api/memories/{memoryId}/revisions?projectId={projectId}&page=1&pageSize=20`
+for stable, bounded summary pages. Summaries are ordered by version, creation
+time, and revision ID, newest first. To read one body's source text and
+metadata, use
+`GET /api/memories/{memoryId}/revisions/{revisionId}?projectId={projectId}`.
+Specify the current ProjectId on both routes. The current memory's access
+rules continue to apply to the historical records, and inaccessible or
+mismatched resources return 404. The general MCP tools `memory_revisions_list`
+and `memory_revision_get` apply the same scope and ordering. Revision ID identifies a record even when
+legacy data contains duplicate version numbers. Both reads use `Cache-Control:
+no-store`.
+
+`CurrentOnly` controls project scope. Freshness, authority, archive state,
+and time validity are separate properties. A project Artifact preview links to
+the same memory ID for full current text. Binary file references use the
+managed file transfer contract.

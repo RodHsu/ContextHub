@@ -273,6 +273,7 @@ public sealed class ProjectWorkItemReadEndpointTests
         public ProjectWorkItemResult? Result { get; set; }
         public Exception? Failure { get; init; }
         public Task<ProjectWorkItemResult?> GetAsync(Guid id, bool includeArchived, CancellationToken cancellationToken) { GetRequest = (id, includeArchived); return Failure is null ? Task.FromResult(Result) : Task.FromException<ProjectWorkItemResult?>(Failure); }
+        public Task<ProjectWorkItemResult?> GetInProjectAsync(string projectId, Guid workItemId, bool includeArchived, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken) { ListRequest = request; return Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>([]); }
         public Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<ProjectWorkItemResult> UpdateAsync(ProjectWorkItemUpdateRequest request, CancellationToken ct) => throw new NotSupportedException();

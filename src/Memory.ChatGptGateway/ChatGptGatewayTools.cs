@@ -11,6 +11,7 @@ namespace Memory.ChatGptGateway;
 public sealed class ChatGptGatewayTools(
     IContextHubBootstrapService bootstrapService,
     IMemoryService memoryService,
+    IDashboardQueryService dashboardQueryService,
     ILogQueryService logQueryService,
     IConversationAutomationService conversationAutomationService,
     IConversationAdjudicationService conversationAdjudicationService,
@@ -205,6 +206,18 @@ public sealed class ChatGptGatewayTools(
     public Task<MemoryDocument?> memory_get(Guid id, CancellationToken cancellationToken = default)
         => memoryService.GetAsync(id, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read a bounded page of historical memory revision summaries. Requires explicit ProjectId and MemoryId; access uses the current memory scope. The summary does not contain the historical body.")]
+    public Task<PagedResult<MemoryRevisionResult>?> memory_revisions_list(
+        string projectId, Guid memoryId, int page = 1, int pageSize = 20, CancellationToken cancellationToken = default)
+        => dashboardQueryService.GetMemoryRevisionsAsync(projectId, memoryId, page, pageSize, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read one historical memory revision body by explicit ProjectId, MemoryId and RevisionId. Missing, mismatched and inaccessible items all return unavailable.")]
+    public Task<MemoryRevisionBodyResult?> memory_revision_get(
+        string projectId, Guid memoryId, Guid revisionId, CancellationToken cancellationToken = default)
+        => dashboardQueryService.GetMemoryRevisionAsync(projectId, memoryId, revisionId, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true), Description("Read durable project information before starting work in a ProjectId.")]
     public Task<ProjectInformationResult?> project_information_get(string projectId, CancellationToken cancellationToken = default)
         => projectInformationService.GetAsync(projectId, cancellationToken);
@@ -248,6 +261,11 @@ public sealed class ChatGptGatewayTools(
     [McpServerTool(UseStructuredContent = true), Description("List user-managed project work items for one explicitly authorized ProjectId.")]
     public Task<IReadOnlyList<ProjectWorkItemResult>> project_work_items_list(ProjectWorkItemListRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.ListAsync(request, cancellationToken);
+
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read the current work item and its original-read Revision by explicit ProjectId and WorkItemId. Archived items require IncludeArchived. Missing or inaccessible items return the same unavailable result.")]
+    public Task<ProjectWorkItemResult?> project_work_item_get(string projectId, Guid workItemId, bool includeArchived = false, CancellationToken cancellationToken = default)
+        => projectWorkItemService.GetInProjectAsync(projectId, workItemId, includeArchived, cancellationToken);
 
     [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Create one immutable, versioned execution package for an active project work item. This management operation never completes or cancels the business work item.")]
     public Task<AgentExecutionResult> agent_execution_prepare(AgentExecutionPrepareRequest request, CancellationToken cancellationToken = default)

@@ -61,6 +61,72 @@ public sealed class WorkItemEditingSchemaTests
     }
 
     [Theory]
+    [InlineData("memory_revisions_list", false)]
+    [InlineData("memory_revision_get", true)]
+    public void Memory_history_tools_have_matching_scoped_read_only_wire_schemas(string name, bool requiresRevision)
+    {
+        var backend = Schema(typeof(BackendTools), name);
+        var gateway = Schema(typeof(ChatGptGatewayTools), name);
+        JsonNode.DeepEquals(JsonNode.Parse(backend.GetRawText()), JsonNode.Parse(gateway.GetRawText())).Should().BeTrue();
+        var required = requiresRevision ? new[] { "projectId", "memoryId", "revisionId" } : ["projectId", "memoryId"];
+        gateway.GetProperty("required").EnumerateArray().Select(value => value.GetString()).Should().BeEquivalentTo(required);
+
+        foreach (var type in new[] { typeof(BackendTools), typeof(ChatGptGatewayTools) })
+        {
+            var tool = McpServerTool.Create(type.GetMethod(name)!, RuntimeHelpers.GetUninitializedObject(type), new McpServerToolCreateOptions());
+            var annotations = JsonSerializer.SerializeToElement(tool.ProtocolTool).GetProperty("annotations");
+            annotations.GetProperty("readOnlyHint").GetBoolean().Should().BeTrue();
+            annotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("idempotentHint").GetBoolean().Should().BeTrue();
+            annotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
+        }
+        McpPublishedToolCatalog.QueryToolNames.Should().Contain(name);
+        McpPublishedToolCatalog.RestrictedToolNames.Should().Contain(name);
+        McpPublishedToolCatalog.DirectMutationToolNames.Should().NotContain(name);
+    }
+
+    [Fact]
+    public void By_id_lookup_requires_project_and_item_and_has_matching_read_only_wire_schemas()
+    {
+        const string name = "project_work_item_get";
+        var backend = Schema(typeof(BackendTools), name);
+        var gateway = Schema(typeof(ChatGptGatewayTools), name);
+        JsonNode.DeepEquals(JsonNode.Parse(backend.GetRawText()), JsonNode.Parse(gateway.GetRawText())).Should().BeTrue();
+        gateway.GetProperty("required").EnumerateArray().Select(value => value.GetString())
+            .Should().BeEquivalentTo(new[] { "projectId", "workItemId" });
+        var properties = gateway.GetProperty("properties");
+        properties.GetProperty("includeArchived").GetProperty("type").GetString().Should().Be("boolean");
+        properties.TryGetProperty("cancellationToken", out _).Should().BeFalse();
+
+        foreach (var type in new[] { typeof(BackendTools), typeof(ChatGptGatewayTools) })
+        {
+            var tool = McpServerTool.Create(type.GetMethod(name)!, RuntimeHelpers.GetUninitializedObject(type), new McpServerToolCreateOptions());
+            var annotations = JsonSerializer.SerializeToElement(tool.ProtocolTool).GetProperty("annotations");
+            annotations.GetProperty("readOnlyHint").GetBoolean().Should().BeTrue();
+            annotations.GetProperty("destructiveHint").GetBoolean().Should().BeFalse();
+            annotations.GetProperty("idempotentHint").GetBoolean().Should().BeTrue();
+            annotations.GetProperty("openWorldHint").GetBoolean().Should().BeFalse();
+        }
+        McpPublishedToolCatalog.QueryToolNames.Should().Contain(name);
+        McpPublishedToolCatalog.RestrictedToolNames.Should().Contain(name);
+        McpPublishedToolCatalog.DirectMutationToolNames.Should().NotContain(name);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task By_id_lookup_forwards_explicit_project_and_archive_option(bool gateway)
+    {
+        var service = new WorkItems();
+        var tools = Tools(gateway, service, new Editing());
+        var id = Guid.NewGuid();
+
+        await Invoke(tools, "project_work_item_get", "ContextHub", id, true, CancellationToken.None);
+
+        service.Lookup.Should().Be(("ContextHub", id, true));
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Scalar_wrappers_forward_original_preconditions_into_typed_application_requests(bool gateway)
@@ -117,6 +183,7 @@ public sealed class WorkItemEditingSchemaTests
     {
         public ProjectWorkItemArchiveRequest? Archive { get; private set; }
         public ProjectWorkItemChecklistUpdateRequest? Checklist { get; private set; }
+        public (string ProjectId, Guid Id, bool IncludeArchived)? Lookup { get; private set; }
         public Exception? Failure { get; set; }
         private static ProjectWorkItemResult Result(Guid id) => new(id, "ContextHub", "synthetic", "", [], [], ProjectWorkItemStatus.Pending, 0, null,
             DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, null)
@@ -128,6 +195,11 @@ public sealed class WorkItemEditingSchemaTests
         public Task<ProjectWorkItemResult> SetChecklistItemCompletionAsync(ProjectWorkItemChecklistUpdateRequest request, CancellationToken ct)
         { Checklist = request; return Task.FromResult(Result(request.WorkItemId)); }
         public Task<ProjectWorkItemResult?> GetAsync(Guid id, bool includeArchived, CancellationToken ct) => Task.FromResult<ProjectWorkItemResult?>(null);
+        public Task<ProjectWorkItemResult?> GetInProjectAsync(string projectId, Guid workItemId, bool includeArchived, CancellationToken ct)
+        {
+            Lookup = (projectId, workItemId, includeArchived);
+            return Task.FromResult<ProjectWorkItemResult?>(null);
+        }
         public Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken ct) => Task.FromResult<IReadOnlyList<ProjectWorkItemResult>>([]);
         public Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken ct) => throw new NotSupportedException();

@@ -4819,15 +4819,16 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         searchTool.TryGetProperty("outputSchema", out var searchOutputSchema).Should().BeTrue();
         searchOutputSchema.ValueKind.Should().Be(JsonValueKind.Object);
         listedToolNames.Should().BeEquivalentTo(ChatGptGatewayToolCatalog.PublishedToolNames);
-        listedToolNames.Should().HaveCount(89);
+        listedToolNames.Should().HaveCount(92);
+        listedToolNames.Should().Contain(["memory_revisions_list", "memory_revision_get"]);
         listedToolNames.Count(name => name.StartsWith("agent_execution_", StringComparison.Ordinal)).Should().Be(10);
         listedToolNames.Count(name => name.StartsWith("skill_", StringComparison.Ordinal) ||
                                       name.StartsWith("skills_", StringComparison.Ordinal)).Should().Be(7);
         listedToolNames.Should().NotContain(ScheduledGovernanceToolCatalog.PublishedToolNames);
         var appFacingProjection = ChatGptAppCatalogProjection.Project(listedTools);
         appFacingProjection.IsValid.Should().BeTrue();
-        appFacingProjection.PublishedToolCount.Should().Be(89);
-        appFacingProjection.AppCallableToolCount.Should().Be(89);
+        appFacingProjection.PublishedToolCount.Should().Be(92);
+        appFacingProjection.AppCallableToolCount.Should().Be(92);
         appFacingProjection.MissingPublishedTools.Should().BeEmpty();
         appFacingProjection.UnexpectedPublishedTools.Should().BeEmpty();
         appFacingProjection.MissingAppCallableTools.Should().BeEmpty();
@@ -4837,7 +4838,7 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
             "governance_run_get",
             "governance_runs_list"
         };
-        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(89 - receiptAndContractTools.Length);
+        listedToolNames.Except(receiptAndContractTools, StringComparer.Ordinal).Should().HaveCount(92 - receiptAndContractTools.Length);
         foreach (var toolName in receiptAndContractTools)
         {
             var projectedTool = appFacingProjection.Tools.Single(tool => tool.Name == toolName);

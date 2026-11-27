@@ -585,6 +585,40 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
             .ToArray());
     }
 
+    public Task<PagedResult<MemoryRevisionResult>?> GetMemoryRevisionsAsync(string projectId, Guid memoryId, int page, int pageSize, CancellationToken cancellationToken)
+    {
+        var document = BuildMemories().SingleOrDefault(memory => memory.Id == memoryId && ProjectContext.Matches(memory.ProjectId, projectId));
+        if (document is null) return Task.FromResult<PagedResult<MemoryRevisionResult>?>(null);
+        var revisions = BuildMemoryRevisions(document);
+        return Task.FromResult<PagedResult<MemoryRevisionResult>?>(new(
+            revisions.Skip((page - 1) * pageSize).Take(pageSize).ToArray(), page, pageSize, revisions.Length));
+    }
+
+    public Task<MemoryRevisionBodyResult?> GetMemoryRevisionAsync(string projectId, Guid memoryId, Guid revisionId, CancellationToken cancellationToken)
+    {
+        var document = BuildMemories().SingleOrDefault(memory => memory.Id == memoryId && ProjectContext.Matches(memory.ProjectId, projectId));
+        var revision = document is null ? null : BuildMemoryRevisions(document).SingleOrDefault(item => item.Id == revisionId);
+        if (document is null || revision is null) return Task.FromResult<MemoryRevisionBodyResult?>(null);
+        return Task.FromResult<MemoryRevisionBodyResult?>(new(revision.Id, document.Id, document.ProjectId, revision.Version,
+            revision.Title, $"歷史版本內容 {revision.Version}", revision.Summary, "{}", revision.ChangedBy, revision.CreatedAt));
+    }
+
+    private MemoryRevisionResult[] BuildMemoryRevisions(MemoryDocument document)
+        => Enumerable.Range(1, Profile == DashboardBrowserTestProfile.Dense ? 7 : 1)
+            .Select(index =>
+            {
+                var revisionId = document.Id.ToByteArray();
+                revisionId[0] ^= (byte)index;
+                return new MemoryRevisionResult(
+                    new Guid(revisionId),
+                    document.Version - (index - 1),
+                    $"{document.Title} v{index}",
+                    $"{document.Summary} / revision {index}",
+                    index == 1 ? "update" : "refresh-shared-summary-layer",
+                    DateTimeOffset.UnixEpoch.AddHours(-index));
+            })
+            .ToArray();
+
     public Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)
     {
         var document = BuildMemories().FirstOrDefault(memory => memory.Id == id) ?? BuildMemories().FirstOrDefault();
@@ -599,15 +633,7 @@ internal sealed class BrowserTestContextHubApiClient : IContextHubApiClient
 
         return Task.FromResult<MemoryDetailsResult?>(new MemoryDetailsResult(
             document,
-            Enumerable.Range(1, Profile == DashboardBrowserTestProfile.Dense ? 5 : 1)
-                .Select(index => new MemoryRevisionResult(
-                    Guid.NewGuid(),
-                    document.Version - (index - 1),
-                    $"{document.Title} v{index}",
-                    $"{document.Summary} / revision {index}",
-                    index == 1 ? "update" : "refresh-shared-summary-layer",
-                    DateTimeOffset.UtcNow.AddHours(-index)))
-                .ToArray(),
+            BuildMemoryRevisions(document),
             Enumerable.Range(0, Profile == DashboardBrowserTestProfile.Dense ? 5 : 1)
                 .Select(index => new MemoryChunkResult(
                     Guid.NewGuid(),

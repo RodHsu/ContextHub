@@ -458,6 +458,18 @@ public sealed record MemoryRevisionResult(
     string ChangedBy,
     DateTimeOffset CreatedAt);
 
+public sealed record MemoryRevisionBodyResult(
+    Guid Id,
+    Guid MemoryId,
+    string ProjectId,
+    int Version,
+    string Title,
+    string Content,
+    string Summary,
+    string MetadataJson,
+    string ChangedBy,
+    DateTimeOffset CreatedAt);
+
 public sealed record MemoryVectorResult(
     Guid Id,
     string ModelKey,
@@ -480,7 +492,8 @@ public sealed record MemoryDetailsResult(
     IReadOnlyList<MemoryChunkResult> Chunks,
     IReadOnlyList<MemoryLinkResult>? Links = null,
     IReadOnlyList<MemoryGovernanceFindingSummaryResult>? Findings = null,
-    MemorySourceContextResult? SourceContext = null);
+    MemorySourceContextResult? SourceContext = null,
+    bool HasMoreRevisions = false);
 
 public enum MemoryGraphMode
 {
@@ -646,6 +659,8 @@ public interface IDashboardQueryService
     Task<PagedResult<MemoryListItemResult>> GetMemoriesAsync(MemoryListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectSuggestionResult>> GetProjectSuggestionsAsync(string? query, int limit, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
+    Task<PagedResult<MemoryRevisionResult>?> GetMemoryRevisionsAsync(string projectId, Guid memoryId, int? page, int? pageSize, CancellationToken cancellationToken);
+    Task<MemoryRevisionBodyResult?> GetMemoryRevisionAsync(string projectId, Guid memoryId, Guid revisionId, CancellationToken cancellationToken);
     Task<MemoryGraphResult> GetMemoryGraphAsync(MemoryGraphRequest request, CancellationToken cancellationToken);
     Task<PagedResult<JobListItemResult>> GetJobsAsync(JobListRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<StorageTableSummaryResult>> GetStorageTablesAsync(CancellationToken cancellationToken);

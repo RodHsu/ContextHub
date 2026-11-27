@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -58,7 +59,9 @@ public sealed record FileSecurityAssessment(
     bool ParserSupported,
     string ScannerSetVersion,
     string SecurityPolicyVersion,
-    IReadOnlyList<FileSecurityFindingDraft> Findings);
+    IReadOnlyList<FileSecurityFindingDraft> Findings,
+    long? ExpectedClassificationRevision = null,
+    IReadOnlyList<string>? CompletedScannerRuleIds = null);
 
 public sealed record FileOperationDecision(bool Allowed, string ReasonCode, FileClassification Classification, long ClassificationRevision);
 public sealed record ManagedFileSearchResult(Guid FileId, Guid FileVersionId, string FileName, string ProjectId, FileClassification Classification, string Snippet);
@@ -89,6 +92,9 @@ public sealed record CreateFileRepresentationRequest(
 public sealed record QuarantineReleaseRequest(Guid FileVersionId, string Reason, string ExternalApprovalReference, long ExpectedClassificationRevision);
 
 public sealed record QuarantineReleaseResult(bool StartedRescan, bool RequiresExternalApproval, long ClassificationRevision, FileVersionLifecycle Lifecycle);
+
+public sealed class FileClassificationConflictException()
+    : DbUpdateConcurrencyException("Classification revision conflict; reload before retrying.");
 
 public sealed record FileDeleteRequest(
     Guid FileId,
@@ -141,7 +147,12 @@ public sealed class ManagedFileService(
             var projectId = string.IsNullOrWhiteSpace(request.ProjectId) ? null : ProjectContext.Normalize(request.ProjectId);
             if (projectId is not null) ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
 
-            await dbContext.AcquireTransactionLockAsync($"managed-file:{actor.TenantId}:{actor.UserId}:{projectId}:{normalizedFileName}", ct);
+            var actorId = ActorId(actor);
+            var receiptProject = projectId ?? string.Empty;
+            var projectKey = ProjectContext.IdentityKey(receiptProject);
+            var receiptReason = "Created:" + idempotencyKey;
+            await dbContext.AcquireTransactionLockAsync($"managed-file-create-request:{actor.TenantId}:{actor.UserId}:{projectKey}:{Hash(idempotencyKey)}", ct);
+            await dbContext.AcquireTransactionLockAsync($"managed-file:{actor.TenantId}:{actor.UserId}:{projectKey}:{normalizedFileName}", ct);
             var managedObject = await Scope(dbContext.ManagedObjects, actor)
                 .SingleOrDefaultAsync(x => x.Id == request.ManagedObjectId, ct)
                 ?? throw new UnauthorizedAccessException("Managed object is not available.");
@@ -150,14 +161,26 @@ public sealed class ManagedFileService(
                 throw new InvalidOperationException("Managed file content must be integrity verified and ready before logical file creation.");
             }
 
-            var replay = await Scope(dbContext.FileAccessEvents.AsNoTracking(), actor)
-                .Where(x => x.Operation == FileOperation.Metadata && x.ReasonCode == "Created:" + idempotencyKey)
+            var replay = await dbContext.FileAccessEvents.AsNoTracking()
+                .Where(x => x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId && x.ActorId == actorId &&
+                            x.Operation == FileOperation.Metadata && x.Allowed && x.ReasonCode == receiptReason &&
+                            Memory.Application.ProjectContext.Matches(x.ProjectId, receiptProject))
                 .OrderByDescending(x => x.CreatedAt)
+                .ThenByDescending(x => x.Id)
                 .FirstOrDefaultAsync(ct);
-            if (replay?.FileVersionId is Guid replayVersionId)
+            if (replay is not null)
             {
-                var replayVersion = await dbContext.FileVersions.AsNoTracking().SingleAsync(x => x.Id == replayVersionId, ct);
-                return Result(ManagedFileCreateOutcome.Created, replay.FileAssetId, replayVersion, [], true);
+                var replayVersionId = replay.FileVersionId ?? throw new UnauthorizedAccessException("File version is not available.");
+                var replayVersions = dbContext.FileVersions.AsNoTracking()
+                    .Where(x => x.FileAssetId == replay.FileAssetId &&
+                                x.FileAsset!.TenantId == actor.TenantId && x.FileAsset.OwnerUserId == actor.UserId &&
+                                x.FileAsset.State != FileAssetState.LogicalDeleted && x.Lifecycle != FileVersionLifecycle.LogicalDeleted);
+                replayVersions = projectId is null
+                    ? replayVersions.Where(x => x.FileAsset!.ProjectId == null)
+                    : replayVersions.Where(x => Memory.Application.ProjectContext.Matches(x.FileAsset!.ProjectId, projectId));
+                var replayVersion = await replayVersions.SingleOrDefaultAsync(x => x.Id == replayVersionId, ct)
+                    ?? throw new UnauthorizedAccessException("File version is not available.");
+                return Result(ManagedFileCreateOutcome.Created, replayVersion.FileAssetId, replayVersion, [], true);
             }
 
             var visibleAssets = await Scope(dbContext.FileAssets, actor)
@@ -208,7 +231,7 @@ public sealed class ManagedFileService(
                     LogicalFileName = fileName,
                     NormalizedFileName = normalizedFileName,
                     State = projectId is null ? FileAssetState.Unassigned : FileAssetState.Active,
-                    CreatedByActorId = ActorId(actor),
+                    CreatedByActorId = actorId,
                     GovernanceReminderAt = projectId is null ? clock.UtcNow.AddDays(7) : null,
                     CreatedAt = clock.UtcNow,
                     UpdatedAt = clock.UtcNow
@@ -248,12 +271,12 @@ public sealed class ManagedFileService(
                 FileVersionId = version.Id,
                 TenantId = actor.TenantId,
                 OwnerUserId = actor.UserId,
-                ProjectId = projectId ?? string.Empty,
-                ActorId = ActorId(actor),
+                ProjectId = receiptProject,
+                ActorId = actorId,
                 Operation = FileOperation.Metadata,
                 Purpose = purpose,
                 Allowed = true,
-                ReasonCode = "Created:" + idempotencyKey,
+                ReasonCode = receiptReason,
                 CreatedAt = clock.UtcNow
             }, ct);
             await dbContext.SaveChangesAsync(ct);
@@ -264,9 +287,29 @@ public sealed class ManagedFileService(
         => dbContext.ExecuteInTransactionAsync(async ct =>
         {
             var actor = RequireActor(SecurityScopes.SecurityManage);
-            var version = await LoadVersionAsync(fileVersionId, actor, ct);
             await dbContext.AcquireTransactionLockAsync($"file-security:{fileVersionId}", ct);
+            var version = await LoadVersionAsync(fileVersionId, actor, ct);
+            EnsureFileSecurityScope(version, actor);
+            var isQuarantineRescan = version.Classification == FileClassification.Quarantined &&
+                                     version.Lifecycle == FileVersionLifecycle.Quarantined && version.NeedsRescan;
+            if ((assessment.ExpectedClassificationRevision is long expectedRevision && expectedRevision != version.ClassificationRevision) ||
+                (isQuarantineRescan && !assessment.ExpectedClassificationRevision.HasValue))
+            {
+                throw new FileClassificationConflictException();
+            }
+            if (isQuarantineRescan && !await HasQuarantineRescanApprovalAsync(version, actor, ct))
+                throw new InvalidOperationException("The current quarantine rescan requires recorded approval.");
             var now = clock.UtcNow;
+            var scannerSetVersion = RequireText(assessment.ScannerSetVersion, nameof(assessment.ScannerSetVersion), 100);
+            var policyVersion = RequireText(assessment.SecurityPolicyVersion, nameof(assessment.SecurityPolicyVersion), 100);
+            if (isQuarantineRescan && (!assessment.ScannerAvailable || !assessment.ParserSupported ||
+                !string.Equals(version.ScannerSetVersion, scannerSetVersion, StringComparison.Ordinal) ||
+                !string.Equals(version.SecurityPolicyVersion, policyVersion, StringComparison.Ordinal)))
+            {
+                await RecordAccessAsync(version, actor, FileOperation.SecurityRescan, "quarantine-rescan", false, "CurrentCompleteScanRequired", ct);
+                return version;
+            }
+
             var drafts = assessment.Findings.Select(ValidateFinding).ToArray();
             if (!assessment.ScannerAvailable)
             {
@@ -278,33 +321,53 @@ public sealed class ManagedFileService(
             }
 
             var next = FileSecurityPolicy.Classify(drafts, assessment.ScannerAvailable, assessment.ParserSupported);
+            if (isQuarantineRescan)
+            {
+                var reviewed = await ReviewQuarantineFindingsAsync(version.Id, next, drafts, assessment.CompletedScannerRuleIds, ct);
+                if (!reviewed.HasValue)
+                {
+                    await RecordAccessAsync(version, actor, FileOperation.SecurityRescan, "quarantine-rescan", false, "ScannerRuleCoverageRequired", ct);
+                    return version;
+                }
+                next = reviewed.Value;
+            }
+
             var escalation = next > version.Classification;
-            if (next < version.Classification && version.LastScanAt.HasValue)
+            if (next < version.Classification && version.LastScanAt.HasValue && !isQuarantineRescan)
             {
                 throw new InvalidOperationException("Security classification cannot be downgraded automatically.");
             }
             foreach (var draft in drafts)
             {
-                var exists = await dbContext.FileSecurityFindings.AnyAsync(x => x.FileVersionId == fileVersionId && x.ScannerRuleId == draft.ScannerRuleId && x.EvidenceHash == draft.EvidenceHash, ct);
-                if (!exists) await dbContext.FileSecurityFindings.AddAsync(new FileSecurityFinding
+                var existing = await dbContext.FileSecurityFindings.SingleOrDefaultAsync(
+                    x => x.FileVersionId == fileVersionId && x.ScannerRuleId == draft.ScannerRuleId && x.EvidenceHash == draft.EvidenceHash, ct);
+                if (existing is not null)
                 {
-                    FileVersionId = fileVersionId,
-                    ScannerRuleId = draft.ScannerRuleId,
-                    Category = draft.Category,
-                    Severity = draft.Severity,
-                    Confidence = draft.Confidence,
-                    ScannerVersion = draft.ScannerVersion,
-                    DetectedAt = now,
-                    Disposition = SecurityFindingDisposition.Confirmed,
-                    EvidenceHash = draft.EvidenceHash,
-                    RedactedEvidence = draft.RedactedEvidence
-                }, ct);
+                    if (existing.Disposition == SecurityFindingDisposition.Resolved)
+                        existing.Disposition = SecurityFindingDisposition.Confirmed;
+                }
+                else
+                {
+                    await dbContext.FileSecurityFindings.AddAsync(new FileSecurityFinding
+                    {
+                        FileVersionId = fileVersionId,
+                        ScannerRuleId = draft.ScannerRuleId,
+                        Category = draft.Category,
+                        Severity = draft.Severity,
+                        Confidence = draft.Confidence,
+                        ScannerVersion = draft.ScannerVersion,
+                        DetectedAt = now,
+                        Disposition = SecurityFindingDisposition.Confirmed,
+                        EvidenceHash = draft.EvidenceHash,
+                        RedactedEvidence = draft.RedactedEvidence
+                    }, ct);
+                }
             }
             version.Classification = next;
             version.ClassificationRevision++;
             version.LastScanAt = now;
-            version.ScannerSetVersion = RequireText(assessment.ScannerSetVersion, nameof(assessment.ScannerSetVersion), 100);
-            version.SecurityPolicyVersion = RequireText(assessment.SecurityPolicyVersion, nameof(assessment.SecurityPolicyVersion), 100);
+            version.ScannerSetVersion = scannerSetVersion;
+            version.SecurityPolicyVersion = policyVersion;
             version.NeedsRescan = !assessment.ScannerAvailable || !assessment.ParserSupported;
             version.Lifecycle = next == FileClassification.Quarantined
                 ? FileVersionLifecycle.Quarantined
@@ -314,9 +377,44 @@ public sealed class ManagedFileService(
             version.UpdatedAt = now;
             if (escalation || !version.SearchProjectionAllowed) await InvalidateRepresentationsAsync(version, now, ct);
             await UpsertSearchProjectionAsync(version, now, ct);
-            await dbContext.SaveChangesAsync(ct);
+            if (isQuarantineRescan)
+            {
+                var cleared = next != FileClassification.Quarantined;
+                await RecordAccessAsync(version, actor, FileOperation.SecurityRescan, "quarantine-rescan", cleared,
+                    cleared ? "QuarantineClearedAfterVerifiedRescan" : "RescanConfirmedHighFinding", ct);
+            }
+            else
+            {
+                await dbContext.SaveChangesAsync(ct);
+            }
             return version;
         }, cancellationToken);
+
+    private async Task<FileClassification?> ReviewQuarantineFindingsAsync(Guid versionId, FileClassification proposedClassification,
+        IReadOnlyList<FileSecurityFindingDraft> findings, IReadOnlyList<string>? completedScannerRuleIds, CancellationToken cancellationToken)
+    {
+        if (findings.Any(finding => finding.Severity >= SecurityFindingSeverity.High))
+            return FileClassification.Quarantined;
+
+        var reproduced = findings.Select(finding => (finding.ScannerRuleId, finding.EvidenceHash)).ToHashSet();
+        var activeFindings = await dbContext.FileSecurityFindings
+            .Where(finding => finding.FileVersionId == versionId &&
+                (finding.Disposition == SecurityFindingDisposition.Open || finding.Disposition == SecurityFindingDisposition.Confirmed))
+            .ToArrayAsync(cancellationToken);
+        if (activeFindings.Any(finding => finding.Severity >= SecurityFindingSeverity.High &&
+            reproduced.Contains((finding.ScannerRuleId, finding.EvidenceHash))))
+            return FileClassification.Quarantined;
+
+        var completedRules = (completedScannerRuleIds ?? [])
+            .Select(rule => RequireText(rule, nameof(completedScannerRuleIds), 200))
+            .ToHashSet(StringComparer.Ordinal);
+        var absentFindings = activeFindings.Where(finding => !reproduced.Contains((finding.ScannerRuleId, finding.EvidenceHash))).ToArray();
+        if (completedRules.Count == 0 || absentFindings.Any(finding => !completedRules.Contains(finding.ScannerRuleId)))
+            return null;
+
+        foreach (var finding in absentFindings) finding.Disposition = SecurityFindingDisposition.Resolved;
+        return proposedClassification;
+    }
 
     public async Task<FileOperationDecision> AuthorizeOperationAsync(Guid fileVersionId, FileOperation operation, string purpose, CancellationToken cancellationToken)
     {
@@ -376,26 +474,61 @@ public sealed class ManagedFileService(
         => dbContext.ExecuteInTransactionAsync(async ct =>
         {
             var actor = RequireActor(SecurityScopes.SecurityManage);
+            await dbContext.AcquireTransactionLockAsync($"file-security:{request.FileVersionId}", ct);
             var version = await LoadVersionAsync(request.FileVersionId, actor, ct);
+            EnsureFileSecurityScope(version, actor);
+            if (version.ClassificationRevision != request.ExpectedClassificationRevision) throw new FileClassificationConflictException();
             if (version.Classification != FileClassification.Quarantined || version.Lifecycle != FileVersionLifecycle.Quarantined) throw new InvalidOperationException("Only quarantined files can enter release review.");
-            if (version.ClassificationRevision != request.ExpectedClassificationRevision) throw new DbUpdateConcurrencyException("Classification revision conflict; reload before retrying.");
+            if (version.NeedsRescan && await HasQuarantineRescanApprovalAsync(version, actor, ct))
+                throw new InvalidOperationException("This version already has a quarantine rescan pending.");
             var reason = RequireText(request.Reason, nameof(request.Reason), 1000);
             var approval = request.ExternalApprovalReference?.Trim() ?? string.Empty;
-            var verified = approval.Length > 0 && await approvalVerifier.VerifyAsync(ActorId(actor), approval, "quarantine-release", ct);
+            var approvalPurpose = $"quarantine-release:{version.Id:D}:{version.ClassificationRevision.ToString(CultureInfo.InvariantCulture)}";
+            var verified = approval.Length > 0 && await approvalVerifier.VerifyAsync(ActorId(actor), approval, approvalPurpose, ct);
             if (!verified)
             {
                 await RecordAccessAsync(version, actor, FileOperation.SecurityRelease, reason, false, "RequiresExternalApproval", ct);
                 return new QuarantineReleaseResult(false, true, version.ClassificationRevision, version.Lifecycle);
             }
-            version.Lifecycle = FileVersionLifecycle.SecurityScanning;
+            // The database requires Quarantined lifecycle for Quarantined classification.
+            // Keep both while the approved review is pending.
             version.NeedsRescan = true;
             version.ClassificationRevision++;
             version.UpdatedAt = clock.UtcNow;
             await InvalidateRepresentationsAsync(version, clock.UtcNow, ct);
-            await RecordAccessAsync(version, actor, FileOperation.SecurityRelease, reason, true, "ExternalApprovalVerifiedRescanRequired", ct);
-            await dbContext.SaveChangesAsync(ct);
+            await RecordAccessAsync(version, actor, FileOperation.SecurityRelease, reason, true,
+                QuarantineRescanApprovalReason(version.ClassificationRevision), ct);
             return new QuarantineReleaseResult(true, false, version.ClassificationRevision, version.Lifecycle);
         }, cancellationToken);
+
+    private Task<bool> HasQuarantineRescanApprovalAsync(FileVersion version, ContextHubRequestActor actor, CancellationToken cancellationToken)
+    {
+        var approvalReason = QuarantineRescanApprovalReason(version.ClassificationRevision);
+        return dbContext.FileAccessEvents.AsNoTracking().AnyAsync(
+            x => x.FileAssetId == version.FileAssetId && x.FileVersionId == version.Id && x.TenantId == actor.TenantId &&
+                 x.Operation == FileOperation.SecurityRelease && x.Allowed && x.ReasonCode == approvalReason, cancellationToken);
+    }
+
+    private static string QuarantineRescanApprovalReason(long revision)
+        => $"ExternalApprovalVerifiedRescanRequired:{revision.ToString(CultureInfo.InvariantCulture)}";
+
+    private static void EnsureFileSecurityScope(FileVersion version, ContextHubRequestActor actor)
+    {
+        if (version.FileAsset is null || version.FileAsset.State == FileAssetState.LogicalDeleted ||
+            version.Lifecycle == FileVersionLifecycle.LogicalDeleted)
+            throw new UnauthorizedAccessException("File version is not available.");
+        if (version.FileAsset.ProjectId is string projectId)
+        {
+            try
+            {
+                ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new UnauthorizedAccessException("File version is not available.");
+            }
+        }
+    }
 
     public Task<FileDeleteResult> RequestDeleteAsync(FileDeleteRequest request, CancellationToken cancellationToken)
         => dbContext.ExecuteInTransactionAsync<FileDeleteResult>(async ct =>

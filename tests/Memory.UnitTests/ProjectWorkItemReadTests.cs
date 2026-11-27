@@ -133,6 +133,47 @@ public sealed class ProjectWorkItemReadTests
     }
 
     [Fact]
+    public async Task Scoped_get_requires_matching_project_authority_and_keeps_the_current_revision()
+    {
+        var active = Item();
+        active.Revision = 7;
+        var archived = Item();
+        archived.ArchivedAt = DateTimeOffset.UnixEpoch;
+        var otherProject = Item();
+        otherProject.ProjectId = "AnotherProject";
+        var otherOwner = Item(owner: Guid.NewGuid());
+        var otherTenant = Item(tenant: Guid.NewGuid());
+        var actor = Actor() with { AllowedProjectIds = ["ContextHub", "AnotherProject"] };
+        var service = Service(actor, active, archived, otherProject, otherOwner, otherTenant);
+
+        var result = await service.GetInProjectAsync(" contexthub ", active.Id, false, default);
+        result!.ProjectId.Should().Be("ContextHub");
+        result.Revision.Should().Be(7);
+        (await service.GetInProjectAsync("AnotherProject", active.Id, true, default)).Should().BeNull();
+        (await service.GetInProjectAsync("ContextHub", otherProject.Id, true, default)).Should().BeNull();
+        (await service.GetInProjectAsync("ContextHub", otherOwner.Id, true, default)).Should().BeNull();
+        (await service.GetInProjectAsync("ContextHub", otherTenant.Id, true, default)).Should().BeNull();
+        (await service.GetInProjectAsync("ContextHub", Guid.NewGuid(), true, default)).Should().BeNull();
+        (await Service(Actor(), otherProject).GetInProjectAsync("AnotherProject", otherProject.Id, true, default)).Should().BeNull();
+        (await service.GetInProjectAsync("ContextHub", archived.Id, false, default)).Should().BeNull();
+        (await service.GetInProjectAsync("ContextHub", archived.Id, true, default))!.IsArchived.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("*")]
+    [InlineData("shared")]
+    [InlineData("user")]
+    public async Task Scoped_get_does_not_fall_back_or_use_a_non_project_scope(string? projectId)
+    {
+        var item = Item();
+        var service = Service(Actor() with { AllowedProjectIds = [] }, item);
+        (await service.GetInProjectAsync(projectId!, item.Id, true, default)).Should().BeNull();
+    }
+
+    [Fact]
     public async Task Get_requires_read_scope_before_resolving_item_visibility()
     {
         var item = Item();

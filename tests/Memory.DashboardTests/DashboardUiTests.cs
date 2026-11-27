@@ -636,10 +636,11 @@ public sealed class DashboardUiTests : IClassFixture<DashboardApplicationFactory
         mcpToolsHtml.Should().Contain("suggested_actions_list");
         mcpToolsHtml.Should().Contain("連線面總覽");
         mcpToolsHtml.Should().Contain("目前發布數量");
+        var toolCatalog = McpPublishedToolCatalog.Describe();
         mcpToolsHtml.Should().Contain("Direct MCP");
-        mcpToolsHtml.Should().Contain("89</strong> 支工具");
+        mcpToolsHtml.Should().Contain($"{toolCatalog.BackendToolCount}</strong> 支工具");
         mcpToolsHtml.Should().Contain("ChatGPT App-facing");
-        mcpToolsHtml.Should().Contain("89</strong> 支工具");
+        mcpToolsHtml.Should().Contain($"{toolCatalog.AppFacingToolCount}</strong> 支工具");
         mcpToolsHtml.Should().Contain("可能刪除");
         mcpToolsHtml.Should().Contain("3</strong> 支工具");
         mcpToolsHtml.Should().Contain("Direct MCP 工具");
@@ -1997,6 +1998,14 @@ internal sealed class FakeContextHubApiClient : IContextHubApiClient
 
         return Task.FromResult<IReadOnlyList<ProjectSuggestionResult>>(projects.Take(limit).ToArray());
     }
+
+    public Task<PagedResult<MemoryRevisionResult>?> GetMemoryRevisionsAsync(
+        string projectId, Guid memoryId, int page, int pageSize, CancellationToken cancellationToken)
+        => Task.FromResult<PagedResult<MemoryRevisionResult>?>(null);
+
+    public Task<MemoryRevisionBodyResult?> GetMemoryRevisionAsync(
+        string projectId, Guid memoryId, Guid revisionId, CancellationToken cancellationToken)
+        => Task.FromResult<MemoryRevisionBodyResult?>(null);
 
     public Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)
         => Task.FromResult<MemoryDetailsResult?>(new MemoryDetailsResult(

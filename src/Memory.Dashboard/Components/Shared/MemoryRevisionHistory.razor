@@ -1,0 +1,149 @@
+@implements IDisposable
+@inject IContextHubApiClient ApiClient
+
+<section class="memory-detail-section" aria-labelledby="memory-revision-heading">
+    <div class="section-heading-row">
+        <div>
+            <div class="subpanel-title" id="memory-revision-heading">版本紀錄</div>
+            @if (_page is not null)
+            {
+                <div class="section-heading-meta">第 @_page.Page 頁，共 @DashboardFormatting.Integer(_page.TotalCount) 筆</div>
+            }
+            else
+            {
+                <div class="section-heading-meta">@(Details.HasMoreRevisions ? "最近版本" : $"{DashboardFormatting.Integer(Details.Revisions.Count)} 筆版本紀錄")</div>
+            }
+        </div>
+    </div>
+    <div class="stack-list memory-revision-list memory-detail-list-scroll-shell" data-scroll-viewport="true">
+        @foreach (var revision in Revisions)
+        {
+            <article class="stack-item memory-revision-card" @key="revision.Id">
+                <div class="stack-item-title">v@revision.Version / @ChangedByText(revision.ChangedBy)</div>
+                <div class="stack-item-copy memory-revision-summary">@revision.Title - @revision.Summary</div>
+                <div class="stack-item-meta"><ClientLocalTime Value="revision.CreatedAt" /></div>
+                <button class="ghost-button" type="button" disabled="@_busy"
+                        aria-label="@($"讀取版本 {revision.Version}：{revision.Title}")"
+                        @onclick="() => OpenAsync(revision.Id)">讀取內容</button>
+            </article>
+        }
+    </div>
+    @if (PageNumber > 1 || HasNext)
+    {
+        <div class="section-heading-row" aria-label="版本紀錄分頁">
+            <button class="ghost-button" type="button" disabled="@(_busy || PageNumber <= 1)"
+                    @onclick="() => LoadPageAsync(PageNumber - 1)">上一頁</button>
+            <button class="ghost-button" type="button" disabled="@(_busy || !HasNext)"
+                    @onclick="() => LoadPageAsync(PageNumber + 1)">下一頁</button>
+        </div>
+    }
+    <div role="status" class="stack-item-meta">@_message</div>
+    @if (_revision is not null)
+    {
+        <section class="detail-reader" aria-label="歷史版本內容">
+            <div class="detail-reader-header">
+                <div class="detail-reader-title">v@_revision.Version / @_revision.Title</div>
+                <button class="ghost-button" type="button" @onclick="Close">關閉歷史內容</button>
+            </div>
+            <pre class="detail-reader-body memory-detail-content-block">@_revision.Content</pre>
+        </section>
+    }
+</section>
+
+@code {
+    private const int PageSize = 5;
+    private readonly CancellationTokenSource _cancel = new();
+    private PagedResult<MemoryRevisionResult>? _page;
+    private MemoryRevisionBodyResult? _revision;
+    private bool _busy;
+    private string? _message;
+
+    [Parameter, EditorRequired] public MemoryDetailsResult Details { get; set; } = default!;
+
+    private IEnumerable<MemoryRevisionResult> Revisions => _page?.Items ?? Details.Revisions.Take(PageSize);
+    private int PageNumber => _page?.Page ?? 1;
+    private bool HasNext => _page is null
+        ? Details.HasMoreRevisions || Details.Revisions.Count > PageSize
+        : (long)_page.Page * _page.PageSize < _page.TotalCount;
+
+    private async Task LoadPageAsync(int page)
+    {
+        if (_busy) return;
+        _busy = true;
+        _revision = null;
+        _message = "正在載入版本紀錄。";
+        try
+        {
+            var result = await ApiClient.GetMemoryRevisionsAsync(Details.Document.ProjectId, Details.Document.Id, page, PageSize, _cancel.Token);
+            if (result is null || result.Page != page || result.PageSize != PageSize)
+            {
+                _message = "無法載入版本紀錄。";
+                return;
+            }
+
+            _page = result;
+            _message = $"已載入版本紀錄第 {result.Page} 頁。";
+        }
+        catch (OperationCanceledException) when (_cancel.IsCancellationRequested) { }
+        catch (Exception error) when (error is HttpRequestException or InvalidOperationException or System.Text.Json.JsonException)
+        {
+            _message = "無法載入版本紀錄。";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task OpenAsync(Guid revisionId)
+    {
+        if (_busy) return;
+        _busy = true;
+        _revision = null;
+        _message = "正在讀取歷史版本。";
+        try
+        {
+            var result = await ApiClient.GetMemoryRevisionAsync(Details.Document.ProjectId, Details.Document.Id, revisionId, _cancel.Token);
+            if (result is null || result.Id != revisionId || result.MemoryId != Details.Document.Id ||
+                !ProjectContext.Matches(result.ProjectId, Details.Document.ProjectId))
+            {
+                _message = "這個版本已無法讀取。";
+                return;
+            }
+
+            _revision = result;
+            _message = $"已讀取歷史版本 {result.Version}。";
+        }
+        catch (OperationCanceledException) when (_cancel.IsCancellationRequested) { }
+        catch (Exception error) when (error is HttpRequestException or InvalidOperationException or System.Text.Json.JsonException)
+        {
+            _message = "無法讀取歷史版本。";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private void Close()
+    {
+        _revision = null;
+        _message = null;
+    }
+
+    public void Dispose()
+    {
+        _cancel.Cancel();
+        _cancel.Dispose();
+    }
+
+    private static string ChangedByText(string changedBy)
+        => changedBy.ToLowerInvariant() switch
+        {
+            "upsert" => "寫入更新",
+            "update" => "內容更新",
+            "archive" => "封存",
+            "restore" => "還原",
+            _ => changedBy
+        };
+}

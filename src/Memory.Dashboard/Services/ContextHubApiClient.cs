@@ -69,6 +69,8 @@ public interface IContextHubApiClient : IWorkItemEditingApi
     Task<ProjectWorkItemResult> CreateProjectWorkItemAsync(ProjectWorkItemCreateRequest request, CancellationToken cancellationToken);
     Task<ProjectWorkItemResult> UpdateProjectWorkItemAsync(ProjectWorkItemUpdateRequest request, CancellationToken cancellationToken);
     Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken);
+    Task<PagedResult<MemoryRevisionResult>?> GetMemoryRevisionsAsync(string projectId, Guid memoryId, int page, int pageSize, CancellationToken cancellationToken);
+    Task<MemoryRevisionBodyResult?> GetMemoryRevisionAsync(string projectId, Guid memoryId, Guid revisionId, CancellationToken cancellationToken);
     Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, DashboardExportAccount account, CancellationToken cancellationToken);
     Task<IReadOnlyList<UserPreferenceResult>> ExportPreferencesAsync(int limit, DashboardExportAccount account, CancellationToken cancellationToken);
     Task<MemoryImportPreviewResult> PreviewMemoryImportAsync(MemoryImportRequest request, CancellationToken cancellationToken);
@@ -666,6 +668,27 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
         }
 
         return await ReadRequiredAsync<MemoryDetailsResult>(response, cancellationToken);
+    }
+
+    public Task<PagedResult<MemoryRevisionResult>?> GetMemoryRevisionsAsync(
+        string projectId, Guid memoryId, int page, int pageSize, CancellationToken cancellationToken)
+        => GetMemoryHistoryAsync<PagedResult<MemoryRevisionResult>>(
+            QueryHelpers.AddQueryString($"/api/memories/{memoryId}/revisions", new Dictionary<string, string?>
+            {
+                ["projectId"] = projectId,
+                ["page"] = page.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["pageSize"] = pageSize.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            }), cancellationToken);
+
+    public Task<MemoryRevisionBodyResult?> GetMemoryRevisionAsync(string projectId, Guid memoryId, Guid revisionId, CancellationToken cancellationToken)
+        => GetMemoryHistoryAsync<MemoryRevisionBodyResult>(
+            QueryHelpers.AddQueryString($"/api/memories/{memoryId}/revisions/{revisionId}", "projectId", projectId), cancellationToken);
+
+    private async Task<T?> GetMemoryHistoryAsync<T>(string url, CancellationToken cancellationToken) where T : class
+    {
+        using var response = await httpClient.GetAsync(url, cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        return await ReadRequiredAsync<T>(response, cancellationToken);
     }
 
     public async Task<MemoryTransferDownloadResult> ExportMemoriesAsync(MemoryExportRequest request, DashboardExportAccount account, CancellationToken cancellationToken)

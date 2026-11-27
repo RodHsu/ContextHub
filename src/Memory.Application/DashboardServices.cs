@@ -677,6 +677,9 @@ public sealed class DashboardQueryService(
         return FilterProjectSuggestions(visibleFallbackProjects, query, normalizedLimit);
     }
 
+    private const int InlineMemoryRevisionLimit = 20;
+    private const int MaxMemoryRevisionPageSize = 100;
+
     public async Task<MemoryDetailsResult?> GetMemoryDetailsAsync(Guid id, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
@@ -699,7 +702,6 @@ public sealed class DashboardQueryService(
 
         var entity = await dbContext.MemoryItems
             .AsNoTracking()
-            .Include(x => x.Revisions)
             .Include(x => x.Chunks)
                 .ThenInclude(x => x.Vectors)
             .Where(x => !actor.HasUser || (x.TenantId == actor.TenantId && x.OwnerUserId == actor.UserId))
@@ -731,17 +733,15 @@ public sealed class DashboardQueryService(
             entity.ProjectId,
             entity.IsReadOnly);
 
-        var revisions = entity.Revisions
-            .OrderByDescending(x => x.Version)
-            .ThenByDescending(x => x.CreatedAt)
-            .Select(x => new MemoryRevisionResult(
-                x.Id,
-                x.Version,
-                x.Title,
-                x.Summary,
-                x.ChangedBy,
-                x.CreatedAt))
-            .ToArray();
+        var revisions = await SelectMemoryRevisions(ScopedMemoryRevisions(projectId, id, actor)
+                .Where(revision => revision.Version <= entity.Version))
+            .Take(InlineMemoryRevisionLimit + 1)
+            .ToListAsync(cancellationToken);
+        var hasMoreRevisions = revisions.Count > InlineMemoryRevisionLimit;
+        if (hasMoreRevisions)
+        {
+            revisions.RemoveAt(InlineMemoryRevisionLimit);
+        }
 
         var chunks = entity.Chunks
             .OrderBy(x => x.ChunkIndex)
@@ -787,10 +787,109 @@ public sealed class DashboardQueryService(
             .ToListAsync(cancellationToken);
         var sourceContext = BuildSourceContext(entity);
 
-        var result = new MemoryDetailsResult(document, revisions, chunks, links, findings, sourceContext);
+        var result = new MemoryDetailsResult(document, revisions, chunks, links, findings, sourceContext, hasMoreRevisions);
         await objectCache.SetAsync(cacheKey, "dashboard-memory-details", result, TimeSpan.FromSeconds(60), cancellationToken);
         return result;
     }
+
+    public async Task<PagedResult<MemoryRevisionResult>?> GetMemoryRevisionsAsync(
+        string projectId,
+        Guid memoryId,
+        int? page,
+        int? pageSize,
+        CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        var project = ProjectContext.Normalize(projectId, string.Empty);
+        if (!IsMemoryRevisionProjectReadable(project, actor) ||
+            !await ScopedMemory(project, memoryId, actor).AnyAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        var (normalizedPage, normalizedPageSize) = Normalize(page ?? 1, pageSize ?? InlineMemoryRevisionLimit, MaxMemoryRevisionPageSize);
+        var revisions = ScopedMemoryRevisions(project, memoryId, actor);
+        var total = await revisions.CountAsync(cancellationToken);
+        var offset = ((long)normalizedPage - 1) * normalizedPageSize;
+        if (offset >= total)
+        {
+            return new PagedResult<MemoryRevisionResult>([], normalizedPage, normalizedPageSize, total);
+        }
+
+        var results = await SelectMemoryRevisions(revisions)
+            .Skip((int)offset)
+            .Take(normalizedPageSize)
+            .ToListAsync(cancellationToken);
+        return new PagedResult<MemoryRevisionResult>(results, normalizedPage, normalizedPageSize, total);
+    }
+
+    public async Task<MemoryRevisionBodyResult?> GetMemoryRevisionAsync(
+        string projectId,
+        Guid memoryId,
+        Guid revisionId,
+        CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        var project = ProjectContext.Normalize(projectId, string.Empty);
+        if (!IsMemoryRevisionProjectReadable(project, actor))
+        {
+            return null;
+        }
+
+        return await ScopedMemoryRevisions(project, memoryId, actor)
+            .Where(revision => revision.Id == revisionId)
+            .Select(revision => new MemoryRevisionBodyResult(
+                revision.Id,
+                revision.MemoryItemId,
+                revision.MemoryItem!.ProjectId,
+                revision.Version,
+                revision.Title,
+                revision.Content,
+                revision.Summary,
+                revision.MetadataJson,
+                revision.ChangedBy,
+                revision.CreatedAt))
+            .SingleOrDefaultAsync(cancellationToken);
+    }
+
+    private static bool IsMemoryRevisionProjectReadable(string project, ContextHubRequestActor actor)
+    {
+        if (project.Length == 0 || project == ProjectContext.AllProjectIdsSentinel ||
+            (actor.IsAuthenticated && !actor.HasScope(SecurityScopes.MemoryRead)))
+        {
+            return false;
+        }
+
+        try
+        {
+            ActorAuthorization.EnsureProjectAllowed(actor, project, write: false);
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private IQueryable<MemoryItem> ScopedMemory(string project, Guid memoryId, ContextHubRequestActor actor)
+        => dbContext.MemoryItems.AsNoTracking().ForActor(actor)
+            .Where(item => item.Id == memoryId && ProjectContext.Matches(item.ProjectId, project));
+
+    private IQueryable<MemoryItemRevision> ScopedMemoryRevisions(string project, Guid memoryId, ContextHubRequestActor actor)
+        => dbContext.MemoryItemRevisions.AsNoTracking()
+            .Join(ScopedMemory(project, memoryId, actor), revision => revision.MemoryItemId, item => item.Id, (revision, _) => revision);
+
+    private static IQueryable<MemoryRevisionResult> SelectMemoryRevisions(IQueryable<MemoryItemRevision> revisions)
+        => revisions.OrderByDescending(revision => revision.Version)
+            .ThenByDescending(revision => revision.CreatedAt)
+            .ThenByDescending(revision => revision.Id)
+            .Select(revision => new MemoryRevisionResult(
+                revision.Id,
+                revision.Version,
+                revision.Title,
+                revision.Summary,
+                revision.ChangedBy,
+                revision.CreatedAt));
 
     public async Task<PagedResult<JobListItemResult>> GetJobsAsync(JobListRequest request, CancellationToken cancellationToken)
     {

@@ -491,6 +491,22 @@ memories.MapGet("/{id:guid}/details", async (Guid id, IDashboardQueryService ser
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
 
+memories.MapGet("/{id:guid}/revisions", async (
+    Guid id, string projectId, int? page, int? pageSize, IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
+{
+    httpContext.Response.Headers.CacheControl = "no-store";
+    var result = await service.GetMemoryRevisionsAsync(projectId, id, page, pageSize, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+
+memories.MapGet("/{id:guid}/revisions/{revisionId:guid}", async (
+    Guid id, Guid revisionId, string projectId, IDashboardQueryService service, HttpContext httpContext, CancellationToken cancellationToken) =>
+{
+    httpContext.Response.Headers.CacheControl = "no-store";
+    var result = await service.GetMemoryRevisionAsync(projectId, id, revisionId, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+
 var projectInformation = app.MapGroup("/api/projects/information");
 projectInformation.RequireAuthIfEnabled(requireAuthentication);
 projectInformation.MapGet("/", async (bool? includeInactive, IProjectInformationService service, CancellationToken cancellationToken) =>
@@ -2213,8 +2229,15 @@ files.MapGet("/search", async (string projectId, string query, int? limit, IMana
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryRead);
 files.MapPost("/{fileVersionId:guid}/security-assessments", async (Guid fileVersionId, FileSecurityAssessment request, IManagedFileService service, CancellationToken cancellationToken) =>
 {
-    var result = await service.ApplySecurityAssessmentAsync(fileVersionId, request, cancellationToken);
-    return Results.Ok(ToFileVersionContract(result));
+    try
+    {
+        var result = await service.ApplySecurityAssessmentAsync(fileVersionId, request, cancellationToken);
+        return Results.Ok(ToFileVersionContract(result));
+    }
+    catch (FileClassificationConflictException)
+    {
+        return FileClassificationConflict();
+    }
 })
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecurityManage);
 files.MapPost("/{fileVersionId:guid}/authorize", async (Guid fileVersionId, FileOperationBody request, IManagedFileService service, CancellationToken cancellationToken) =>
@@ -2227,7 +2250,17 @@ files.MapPost("/{fileVersionId:guid}/representations", async (Guid fileVersionId
 })
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.MemoryWrite);
 files.MapPost("/{fileVersionId:guid}/quarantine-release", async (Guid fileVersionId, QuarantineReleaseBody request, IManagedFileService service, CancellationToken cancellationToken) =>
-    Results.Ok(await service.RequestQuarantineReleaseAsync(new QuarantineReleaseRequest(fileVersionId, request.Reason, request.ExternalApprovalReference, request.ExpectedClassificationRevision), cancellationToken)))
+{
+    try
+    {
+        return Results.Ok(await service.RequestQuarantineReleaseAsync(
+            new QuarantineReleaseRequest(fileVersionId, request.Reason, request.ExternalApprovalReference, request.ExpectedClassificationRevision), cancellationToken));
+    }
+    catch (FileClassificationConflictException)
+    {
+        return FileClassificationConflict();
+    }
+})
     .RequireScopeIfEnabled(requireAuthentication, SecurityScopes.SecurityManage);
 files.MapPost("/{fileId:guid}/delete", async (Guid fileId, FileDeleteBody request, IManagedFileService service, CancellationToken cancellationToken) =>
 {
@@ -2553,6 +2586,11 @@ static long RequireTransferRevision(HttpRequest request)
         ? revision
         : throw new BadHttpRequestException("X-Transfer-Revision must be a positive integer.");
 }
+
+static IResult FileClassificationConflict()
+    => Results.Problem(title: "File classification revision is stale. Reload before retrying.",
+        statusCode: StatusCodes.Status409Conflict,
+        extensions: new Dictionary<string, object?> { ["code"] = "FileClassificationConflict" });
 
 static object ToFileVersionContract(FileVersion result) => new
 {
