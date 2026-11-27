@@ -1626,6 +1626,24 @@ skills.MapGet(string.Empty, async (string? projectId, bool? includeArchived, ISk
     => Results.Ok(await service.ListAsync(projectId, includeArchived ?? false, cancellationToken)));
 skills.MapGet("/{skillId:guid}", async (Guid skillId, ISkillService service, CancellationToken cancellationToken)
     => await service.GetAsync(skillId, cancellationToken) is { } skill ? Results.Ok(skill) : Results.NotFound());
+skills.MapGet("/{skillId:guid}/canonical-tags", async (Guid skillId, string? projectId, int? offset, int? limit,
+    ISkillService service, HttpContext context, CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    try
+    {
+        var page = await service.ListCanonicalTagBindingsAsync(skillId, projectId ?? string.Empty, offset ?? 0, limit ?? 50, cancellationToken);
+        return page is null ? Results.NotFound() : Results.Ok(page);
+    }
+    catch (UnauthorizedAccessException)
+    {
+        return Results.NotFound();
+    }
+    catch (ArgumentException error)
+    {
+        return Results.BadRequest(error.Message);
+    }
+});
 skills.MapPost("/import/preview", async (SkillImportPreviewRequest request, ISkillService service, CancellationToken cancellationToken)
     => Results.Ok(await service.PreviewImportAsync(request, cancellationToken)));
 skills.MapPost("/import", async (SkillImportRequest request, ISkillService service, CancellationToken cancellationToken)

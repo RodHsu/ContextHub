@@ -425,6 +425,38 @@ public sealed class SkillService(
         return skill is null ? null : ToSummary(skill);
     }
 
+    public async Task<SkillCanonicalTagBindingsResult?> ListCanonicalTagBindingsAsync(Guid skillId, string projectId, int offset, int limit, CancellationToken cancellationToken)
+    {
+        var actor = actorAccessor.Current;
+        ActorAuthorization.EnsureAuthenticatedUser(actor);
+        EnsureReadAccess();
+        if (skillId == Guid.Empty || string.IsNullOrWhiteSpace(projectId) || offset is < 0 or > 10_000 || limit is < 1 or > 100)
+            throw new ArgumentException("A Skill ID, explicit ProjectId, offset 0–10000 and limit 1–100 are required.");
+
+        var project = ProjectContext.Normalize(projectId);
+        if (project == ProjectContext.AllProjectIdsSentinel)
+            throw new ArgumentException("A single ProjectId is required.");
+        ActorAuthorization.EnsureProjectAllowed(actor, project, write: false);
+        if (!await ScopedSkills(includeArchived: false).AnyAsync(skill => skill.Id == skillId, cancellationToken))
+            return null;
+
+        var resourceId = skillId.ToString("D");
+        var bindings = dbContext.CanonicalTagBindings.AsNoTracking().Where(binding =>
+            binding.TenantId == actor.TenantId && binding.OwnerUserId == actor.UserId &&
+            ProjectContext.Matches(binding.ProjectId, project) && binding.ResourceType == "Skill" &&
+            binding.ResourceId == resourceId && binding.Status == "Active");
+        var definitions = dbContext.CanonicalTagDefinitions.AsNoTracking().Where(definition =>
+            definition.TenantId == actor.TenantId && definition.OwnerUserId == actor.UserId &&
+            ProjectContext.Matches(definition.ProjectId, project) && definition.Status == CanonicalTagStatus.Active);
+        var rows = await (from binding in bindings
+                          join definition in definitions on binding.DefinitionId equals definition.Id
+                          orderby definition.NormalizedName, definition.Id, binding.Id
+                          select new SkillCanonicalTagBindingResult(binding.Id, definition.Id, definition.CanonicalName,
+                              definition.Revision, binding.Source, binding.Confidence))
+            .Skip(offset).Take(limit + 1).ToArrayAsync(cancellationToken);
+        return new(skillId, project, offset, rows.Length > limit, rows.Take(limit).ToArray());
+    }
+
     public async Task<PortableSkillBundle> ExportAsync(Guid skillVersionId, CancellationToken cancellationToken)
     {
         ActorAuthorization.EnsureAuthenticatedUser(actorAccessor.Current);
