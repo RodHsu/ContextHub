@@ -669,19 +669,19 @@
     private static string NetSavingsText(DashboardContextSavingsWindowResult window)
     {
         if (!HasUsableSavings(window)) return window.UnusableSampleCount > 0 ? "未知（樣本缺值或無效）" : "無可用樣本";
-        var net = (long)window.BaselineTokenEstimate - window.ReturnedTokenEstimate;
+        var net = window.BaselineTokenEstimate - window.ReturnedTokenEstimate;
         return $"{(net < 0 ? "淨增加" : "淨節省")} {DashboardFormatting.Integer(Math.Abs(net))} tokens";
     }
 
     private static string NetSavingsPercentText(DashboardContextSavingsWindowResult window)
         => !HasUsableSavings(window) ? "未知" : window.BaselineTokenEstimate == 0 ? "不適用（baseline 為零）"
-            : DashboardFormatting.Percent(((long)window.BaselineTokenEstimate - window.ReturnedTokenEstimate) / (double)window.BaselineTokenEstimate * 100d);
+            : DashboardFormatting.Percent((window.BaselineTokenEstimate - window.ReturnedTokenEstimate) / (double)window.BaselineTokenEstimate * 100d);
 
     private static string SavingsPartText(DashboardContextSavingsWindowResult window, bool positive)
     {
         if (!HasUsableSavings(window) || window.SavingsCalculationVersion != "net-br-v1" ||
             window.PositiveSavedTokens is not { } p || p < 0 || window.IncreasedTokens is not { } i || i < 0 ||
-            p - i != (long)window.BaselineTokenEstimate - window.ReturnedTokenEstimate)
+            p - i != window.BaselineTokenEstimate - window.ReturnedTokenEstimate)
             return "未知（沒有可核分項）";
         return $"{DashboardFormatting.Integer(positive ? p : i)} tokens";
     }
@@ -702,7 +702,7 @@
     private static IReadOnlyList<string> BuildSavingsLineSegments(IReadOnlyList<DashboardContextSavingsTrendPointResult> points)
     {
         var percentages = points.Select(x => x.BaselineTokenEstimate > 0 && x.ReturnedTokenEstimate >= 0
-            ? ((long)x.BaselineTokenEstimate - x.ReturnedTokenEstimate) / (double)x.BaselineTokenEstimate * 100d : (double?)null).ToArray();
+            ? (x.BaselineTokenEstimate - x.ReturnedTokenEstimate) / (double)x.BaselineTokenEstimate * 100d : (double?)null).ToArray();
         var known = percentages.Where(x => x.HasValue).Select(x => x!.Value).ToArray();
         if (known.Length == 0) return [];
         var min = Math.Min(0d, known.Min());

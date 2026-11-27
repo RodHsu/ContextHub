@@ -9,11 +9,53 @@ using Memory.Infrastructure;
 using Memory.Tests.Shared;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using StackExchange.Redis;
 
 namespace Memory.IntegrationTests;
 
 public sealed class CacheMonitoringEndpointTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
+    [DockerRequiredFact]
+    public async Task Context_savings_snapshot_widening_preserves_the_retained_dashboard_cache_entry()
+    {
+        var services = environment.GetFactory().Services;
+        var redis = services.GetRequiredService<IConnectionMultiplexer>();
+        var db = redis.GetDatabase();
+        var name = $"token-widening-test-{Guid.NewGuid():N}";
+        var store = new RedisDashboardSnapshotStore(redis, Options.Create(new MemoryOptions { Namespace = name }), TimeProvider.System);
+        var key = DashboardSnapshotKeys.ContextSavings;
+        RedisKey oldKey = $"memory:{name}:dashboard:snapshot:{key}";
+        RedisKey wideKey = $"{oldKey}:wide";
+        var now = DateTimeOffset.UtcNow;
+        var baseline = new DashboardContextSavingsResult(
+            true, 1, 100, 20, 80, 80d, "High", 100d, 0d, now.AddHours(-1), now, []);
+        var legacy = new DashboardSnapshotEnvelope<DashboardContextSavingsSnapshotPayload>(
+            key, now, 30, now.AddMinutes(1), string.Empty, new(baseline));
+        var legacyJson = JsonSerializer.Serialize(legacy, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        try
+        {
+            await db.StringSetAsync(oldKey, legacyJson, TimeSpan.FromMinutes(1));
+            var fallback = await store.GetAsync<DashboardContextSavingsSnapshotPayload>(key, default);
+            fallback!.Payload.Savings.BaselineTokenEstimate.Should().Be(100);
+
+            var expanded = baseline with { BaselineTokenEstimate = 4_500_000_000L, EstimatedSavedTokens = 4_499_999_980L };
+            await store.SetAsync(legacy with { Payload = new(expanded) }, default);
+            var current = await store.GetAsync<DashboardContextSavingsSnapshotPayload>(key, default);
+            current!.Payload.Savings.BaselineTokenEstimate.Should().Be(4_500_000_000L);
+            current.Payload.Savings.EstimatedSavedTokens.Should().Be(4_499_999_980L);
+            (await db.StringGetAsync(oldKey)).ToString().Should().Be(legacyJson);
+            using var retained = JsonDocument.Parse((await db.StringGetAsync(oldKey)).ToString());
+            retained.RootElement.GetProperty("payload").GetProperty("savings")
+                .GetProperty("baselineTokenEstimate").GetInt32().Should().Be(100);
+            (await db.KeyExistsAsync(wideKey)).Should().BeTrue();
+        }
+        finally
+        {
+            await db.KeyDeleteAsync(new[] { oldKey, wideKey });
+        }
+    }
+
     [DockerRequiredFact]
     public async Task Restricted_token_should_keep_project_grants_on_cold_and_warm_catalog_and_detail_reads()
     {

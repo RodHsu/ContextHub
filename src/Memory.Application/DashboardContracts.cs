@@ -171,9 +171,9 @@ public sealed record DashboardDiscussionHostCountResult(
 public sealed record DashboardContextSavingsResult(
     bool HasData,
     int SampleCount,
-    int BaselineTokenEstimate,
-    int ReturnedTokenEstimate,
-    int EstimatedSavedTokens,
+    long BaselineTokenEstimate,
+    long ReturnedTokenEstimate,
+    long EstimatedSavedTokens,
     double AverageSavingPercent,
     string Confidence,
     double SourceCoveragePercent,
@@ -194,9 +194,9 @@ public sealed record DashboardContextSavingsWindowResult(
     string Label,
     bool HasData,
     int SampleCount,
-    int BaselineTokenEstimate,
-    int ReturnedTokenEstimate,
-    int EstimatedSavedTokens,
+    long BaselineTokenEstimate,
+    long ReturnedTokenEstimate,
+    long EstimatedSavedTokens,
     double SavingPercent,
     string Confidence,
     double SourceCoveragePercent,
@@ -214,9 +214,9 @@ public sealed record DashboardContextSavingsWindowResult(
 
 public sealed record DashboardContextSavingsTrendPointResult(
     DateTimeOffset TimestampUtc,
-    int BaselineTokenEstimate,
-    int ReturnedTokenEstimate,
-    int EstimatedSavedTokens,
+    long BaselineTokenEstimate,
+    long ReturnedTokenEstimate,
+    long EstimatedSavedTokens,
     double SavingPercent,
     double ExactCoveragePercent = 0d,
     string TokenCountingMode = TokenCountingModes.Approximate);

@@ -44,7 +44,11 @@ public sealed class RedisDashboardSnapshotStore(
     public async Task<DashboardSnapshotEnvelope<TPayload>?> GetAsync<TPayload>(string key, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var value = await _database.StringGetAsync($"{_prefix}{key}");
+        var value = await _database.StringGetAsync(StorageKey(key));
+        if (value.IsNullOrEmpty && key == DashboardSnapshotKeys.ContextSavings)
+        {
+            value = await _database.StringGetAsync($"{_prefix}{key}");
+        }
         return value.IsNullOrEmpty
             ? null
             : JsonSerializer.Deserialize<DashboardSnapshotEnvelope<TPayload>>(value.ToString(), JsonOptions);
@@ -55,8 +59,12 @@ public sealed class RedisDashboardSnapshotStore(
         cancellationToken.ThrowIfCancellationRequested();
         var payload = JsonSerializer.Serialize(envelope, JsonOptions);
         var expiration = DashboardSnapshotRetentionPolicy.ComputeExpiration(envelope, _timeProvider.GetUtcNow());
-        await _database.StringSetAsync($"{_prefix}{envelope.Key}", payload, expiration);
+        await _database.StringSetAsync(StorageKey(envelope.Key), payload, expiration);
     }
+
+    // Retained readers expect Int32 totals at the legacy key. Keep widened snapshots isolated.
+    private string StorageKey(string key)
+        => key == DashboardSnapshotKeys.ContextSavings ? $"{_prefix}{key}:wide" : $"{_prefix}{key}";
 }
 
 internal sealed record DockerRuntimeSnapshot(
