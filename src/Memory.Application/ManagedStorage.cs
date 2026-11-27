@@ -192,8 +192,8 @@ public sealed class ManagedTransferService(
             request.ObjectId, request.FileVersionId, request.Purpose, cancellationToken);
 
         var now = clock.UtcNow;
-        var (session, token) = CreateSession(managedObject, actor, request.Purpose, request.AgentId, request.ExecutionId, ManagedTransferOperation.Download, managedObject.PlaintextLength, now, settings);
-        session.FileVersionId = request.FileVersionId;
+        var (session, token) = CreateSession(managedObject, actor, request.Purpose, request.AgentId, request.ExecutionId,
+            ManagedTransferOperation.Download, managedObject.PlaintextLength, now, settings, request.FileVersionId);
         session.Operations.Add(new ManagedTransferOperationRecord
         {
             RequestId = request.IdempotencyKey,
@@ -453,7 +453,7 @@ public sealed class ManagedTransferService(
         {
             throw new UnauthorizedAccessException("Transfer capability revision is stale.");
         }
-        var tokenHash = HashCapability(capability);
+        var tokenHash = HashCapability(capability, session.FileVersionId);
         if (!FixedEquals(session.CapabilityHash, tokenHash)) throw new UnauthorizedAccessException("Transfer capability is invalid.");
         return session;
     }
@@ -467,7 +467,8 @@ public sealed class ManagedTransferService(
         ManagedTransferOperation operation,
         long maxBytes,
         DateTimeOffset now,
-        ManagedTransferOptions settings)
+        ManagedTransferOptions settings,
+        Guid? fileVersionId = null)
     {
         var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         return (new ManagedTransferSession
@@ -479,7 +480,8 @@ public sealed class ManagedTransferService(
             ActorId = actor.UserId?.ToString("D") ?? throw new UnauthorizedAccessException("A tenant actor is required."),
             AgentId = string.IsNullOrWhiteSpace(agentId) ? null : agentId.Trim(),
             ExecutionId = executionId,
-            CapabilityHash = HashCapability(token),
+            CapabilityHash = HashCapability(token, fileVersionId),
+            FileVersionId = fileVersionId,
             Operation = operation,
             Purpose = purpose.Trim(),
             MaxBytes = maxBytes,
@@ -569,10 +571,19 @@ public sealed class ManagedTransferService(
     private static byte[] BuildAad(ManagedObject value, int chunkIndex, int plaintextLength)
         => Encoding.UTF8.GetBytes(string.Join('|', "ContextHub.ManagedFile", value.EncryptionSchemaVersion, value.TenantId, value.ProjectId, value.Id, value.EncryptionGeneration, chunkIndex, plaintextLength));
 
-    private static string HashCapability(string capability)
+    private static string HashCapability(string capability, Guid? fileVersionId)
     {
         if (string.IsNullOrWhiteSpace(capability)) throw new UnauthorizedAccessException("Transfer capability is required.");
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(capability))).ToLowerInvariant();
+        if (fileVersionId is not { } version)
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(capability))).ToLowerInvariant();
+
+        var scopedHash = HashRequest("ContextHub.ManagedFile.PinnedDownloadCapability.v1", version.ToString("D"), capability);
+        Span<byte> frame = stackalloc byte[1 + scopedHash.Length];
+        // The old verifier hashes UTF-8 text. Keep the pinned verifier's binary input
+        // domain disjoint without changing the persisted lowercase hex representation.
+        frame[0] = 0xff;
+        Encoding.ASCII.GetBytes(scopedHash.AsSpan(), frame[1..]);
+        return Convert.ToHexString(SHA256.HashData(frame)).ToLowerInvariant();
     }
 
     private static string HashRequest(params string[] values)

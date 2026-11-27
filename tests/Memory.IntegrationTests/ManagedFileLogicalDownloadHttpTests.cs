@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using Memory.Application;
@@ -132,6 +133,12 @@ public sealed class ManagedFileLogicalDownloadHttpTests(ContainerTestEnvironment
             persisted.FileVersionId.Should().Be(historicalVersionId);
             persisted.ManagedObjectId.Should().Be(historicalObjectId);
             persisted.UsedBytes.Should().Be(historicalBytes.Length);
+            var legacyHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(session.Capability)));
+            var versionInput = $"ContextHub.ManagedFile.PinnedDownloadCapability.v1|{historicalVersionId:D}|{session.Capability}";
+            var versionHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(versionInput)));
+            byte[] pinnedInput = [0xff, .. Encoding.ASCII.GetBytes(versionHash)];
+            var expectedPinnedHash = Convert.ToHexStringLower(SHA256.HashData(pinnedInput));
+            persisted.CapabilityHash.Should().Be(expectedPinnedHash).And.NotBe(legacyHash);
         }
         finally
         {
