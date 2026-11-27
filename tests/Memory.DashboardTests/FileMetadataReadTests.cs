@@ -35,6 +35,28 @@ public sealed class FileMetadataReadTests
         handler.Requests[3].Uri.AbsolutePath.Should().EndWith($"/versions/{file.FileVersionId:D}");
     }
 
+    [Fact]
+    public async Task Dlp_client_uses_an_explicit_scoped_get_and_preserves_valid_zero_counts()
+    {
+        var summary = new ManagedFileDlpSummary(0, 0, 0, 0);
+        using var handler = new MetadataHandler(_ => JsonContent.Create(summary));
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("https://context-hub.example.test") };
+        var api = new ContextHubApiClient(http);
+
+        (await api.GetManagedFileDlpSummaryAsync(" team/one ", default)).Should().Be(summary);
+        var request = handler.Requests.Should().ContainSingle().Subject;
+        request.Method.Should().Be(HttpMethod.Get);
+        request.Uri.AbsolutePath.Should().Be("/api/files/dlp-summary");
+        request.Uri.Query.Should().Be("?projectId=team%2Fone");
+
+        foreach (var invalid in new[] { "", "*", "p*", "DeFaUlT" })
+        {
+            var read = () => api.GetManagedFileDlpSummaryAsync(invalid, default);
+            await read.Should().ThrowAsync<ArgumentException>();
+        }
+        handler.Requests.Should().ContainSingle();
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.NotFound)]
     [InlineData(HttpStatusCode.NotImplemented)]
@@ -388,7 +410,7 @@ public sealed class FileMetadataReadTests
     }
 
     [Fact]
-    public async Task Dlp_summary_should_follow_the_authorized_page_search()
+    public async Task Page_summary_follows_search_and_pagination_while_project_summary_keeps_its_scope()
     {
         var clean = File();
         var isolated = File(Guid.NewGuid()) with
@@ -399,9 +421,13 @@ public sealed class FileMetadataReadTests
             NeedsRescan = true,
             OpenSecurityFindings = 3
         };
-        var api = Api((method, _) => method switch
+        var summaryCalls = 0;
+        var api = Api((method, args) => method switch
         {
-            nameof(IContextHubApiClient.GetManagedFilePageAsync) => Task.FromResult<ManagedFileMetadataPage?>(new([clean, isolated], 25, 0, true)),
+            nameof(IContextHubApiClient.GetManagedFilePageAsync) => (int)args[2]! == 0
+                ? Task.FromResult<ManagedFileMetadataPage?>(new([clean, isolated], 25, 0, true))
+                : Task.FromResult<ManagedFileMetadataPage?>(new([isolated], 25, 25, false)),
+            nameof(IContextHubApiClient.GetManagedFileDlpSummaryAsync) => Summary(),
             nameof(IContextHubApiClient.GetManagedFileMetadataAsync) => Task.FromResult<ManagedFileInventoryResult?>(clean),
             nameof(IContextHubApiClient.GetProjectInformationProjectsAsync) => Task.FromResult<IReadOnlyList<ProjectInformationListItem>>([]),
             _ => null
@@ -411,20 +437,109 @@ public sealed class FileMetadataReadTests
         try
         {
             await renderer.MountAsync<Files>();
-            Counts().Should().Equal("2", "1", "1", "3");
+            Counts().Should().Equal("120", "9", "13", "7", "2", "1", "1", "3");
 
             var search = renderer.Elements().Single(element => element.Attribute("type") as string == "search");
             await renderer.DispatchAsync(search, "oninput", new ChangeEventArgs { Value = clean.FileName });
-            Counts().Should().Equal("1", "0", "0", "0");
+            Counts().Should().Equal("120", "9", "13", "7", "1", "0", "0", "0");
             renderer.Elements().Where(element => element.Tag == "button")
                 .Should().NotContain(element => element.Text == isolated.FileName);
+
+            var next = renderer.Elements().Single(element => element.Tag == "button" && element.Text.Trim() == "下一頁檔案");
+            await renderer.DispatchAsync(next, "onclick", new MouseEventArgs());
+            Counts().Should().Equal("120", "9", "13", "7", "0", "0", "0", "0");
+            summaryCalls.Should().Be(1);
         }
         finally
         {
             await renderer.DisposeRendererAsync();
         }
 
-        IEnumerable<string> Counts() => renderer.Elements().Where(element => element.Tag == "strong").Take(4).Select(element => element.Text.Trim());
+        IEnumerable<string> Counts() => renderer.Elements().Where(element => element.Tag == "strong").Take(8).Select(element => element.Text.Trim());
+
+        Task<ManagedFileDlpSummary?> Summary()
+        {
+            summaryCalls++;
+            return Task.FromResult<ManagedFileDlpSummary?>(new(120, 9, 13, 7));
+        }
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden, "private-origin")]
+    [InlineData(HttpStatusCode.NotFound, "private-origin")]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "private-origin")]
+    [InlineData(HttpStatusCode.OK, "{invalid-json private-origin")]
+    [InlineData(HttpStatusCode.OK, "{\"visibleLatestVersions\":1,\"quarantined\":0,\"needsRescan\":0}")]
+    [InlineData(HttpStatusCode.OK, "{\"visibleLatestVersions\":1,\"quarantined\":2,\"needsRescan\":0,\"initialPending\":0}")]
+    public async Task Switching_project_clears_counters_when_new_summary_is_unavailable(HttpStatusCode status, string payload)
+    {
+        using var handler = new MetadataHandler(_ => new StringContent(payload, System.Text.Encoding.UTF8, "application/json"), status);
+        using var http = new HttpClient(handler) { BaseAddress = new Uri("https://context-hub.example.test") };
+        var client = new ContextHubApiClient(http);
+        var other = new ProjectInformationListItem(new(Guid.NewGuid(), "other", "other", "Synthetic project", DateTimeOffset.UnixEpoch), 0);
+        var api = Api((method, args) => method switch
+        {
+            nameof(IContextHubApiClient.GetProjectInformationProjectsAsync) => Task.FromResult<IReadOnlyList<ProjectInformationListItem>>([other]),
+            nameof(IContextHubApiClient.GetManagedFilePageAsync) => Task.FromResult<ManagedFileMetadataPage?>(new([], 25, 0, false)),
+            nameof(IContextHubApiClient.GetManagedFileDlpSummaryAsync) => (string)args[0]! == "p"
+                ? Task.FromResult<ManagedFileDlpSummary?>(new(121, 1, 2, 1))
+                : client.GetManagedFileDlpSummaryAsync((string)args[0]!, (CancellationToken)args[1]!),
+            _ => null
+        });
+        using var services = await CreatePageServicesAsync(api);
+        var renderer = new WorkItemEditorTestRenderer(services, services.GetRequiredService<ILoggerFactory>());
+        try
+        {
+            await renderer.MountAsync<Files>();
+            renderer.Elements().Should().Contain(element => element.Tag == "strong" && element.Text.Trim() == "121");
+            var select = renderer.Elements().Single(element => element.Tag == "select");
+            await renderer.DispatchAsync(select, "onchange", new ChangeEventArgs { Value = "other" });
+
+            var elements = renderer.Elements();
+            elements.Should().NotContain(element => (string?)element.Attribute("aria-label") == "本專案 DLP 摘要");
+            elements.Should().NotContain(element => element.Tag == "strong" && element.Text.Trim() == "121");
+            elements.Should().Contain(element => element.Text.Contains("專案 DLP 摘要無法取得", StringComparison.Ordinal));
+            elements.Should().NotContain(element => element.Text.Contains("private-origin", StringComparison.Ordinal));
+            handler.Requests.Should().ContainSingle().Which.Uri.PathAndQuery.Should().Be("/api/files/dlp-summary?projectId=other");
+        }
+        finally
+        {
+            await renderer.DisposeRendererAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Dlp_summary_ignores_previous_project_completion_after_scope_change(bool error)
+    {
+        var stale = new TaskCompletionSource<ManagedFileDlpSummary?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationToken staleToken = default;
+        var api = Api((method, args) => method switch
+        {
+            nameof(IContextHubApiClient.GetManagedFilePageAsync) => Task.FromResult<ManagedFileMetadataPage?>(new([], 25, 0, false)),
+            nameof(IContextHubApiClient.GetManagedFileDlpSummaryAsync) => (string)args[0]! == "p"
+                ? Previous((CancellationToken)args[1]!)
+                : Task.FromResult<ManagedFileDlpSummary?>(new(7, 1, 2, 1)),
+            _ => null
+        });
+        using var state = new FileMetadataReadState(api);
+        var old = state.LoadAsync("p", refreshDlpSummary: true);
+        state.DlpSummaryLoading.Should().BeTrue();
+        await state.LoadAsync("other", refreshDlpSummary: true);
+        staleToken.IsCancellationRequested.Should().BeTrue();
+        if (error) stale.SetException(new HttpRequestException("old-provider", null, HttpStatusCode.ServiceUnavailable));
+        else stale.SetResult(new(88, 2, 4, 2));
+        await old;
+
+        state.DlpSummary.Should().Be(new ManagedFileDlpSummary(7, 1, 2, 1));
+        state.DlpSummaryLoading.Should().BeFalse();
+
+        Task<ManagedFileDlpSummary?> Previous(CancellationToken token)
+        {
+            staleToken = token;
+            return stale.Task;
+        }
     }
 
     [Fact]

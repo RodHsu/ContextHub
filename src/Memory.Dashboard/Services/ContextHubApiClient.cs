@@ -21,6 +21,8 @@ public interface IContextHubApiClient : IWorkItemEditingApi, IMemoryEditingApi
     Task<IReadOnlyList<ManagedFileInventoryResult>> GetManagedFilesAsync(string projectId, int limit, CancellationToken cancellationToken);
     Task<ManagedFileMetadataPage?> GetManagedFilePageAsync(string projectId, int limit, int offset, CancellationToken cancellationToken)
         => Task.FromResult<ManagedFileMetadataPage?>(null);
+    Task<ManagedFileDlpSummary?> GetManagedFileDlpSummaryAsync(string projectId, CancellationToken cancellationToken)
+        => Task.FromResult<ManagedFileDlpSummary?>(null);
     Task<ManagedFileInventoryResult?> GetManagedFileMetadataAsync(string projectId, Guid fileId, CancellationToken cancellationToken)
         => Task.FromResult<ManagedFileInventoryResult?>(null);
     Task<ManagedFileMetadataPage?> GetManagedFileVersionsAsync(string projectId, Guid fileId, int limit, int offset, CancellationToken cancellationToken)
@@ -205,6 +207,29 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
 
     public Task<ManagedFileMetadataPage?> GetManagedFilePageAsync(string projectId, int limit, int offset, CancellationToken cancellationToken)
         => GetOptionalTelemetryAsync<ManagedFileMetadataPage>(FileMetadataUrl("/api/files/inventory", projectId, limit, offset), cancellationToken, preserveFailureStatusCode: true);
+
+    public async Task<ManagedFileDlpSummary?> GetManagedFileDlpSummaryAsync(string projectId, CancellationToken cancellationToken)
+    {
+        var project = ProjectContext.Normalize(projectId);
+        if (ProjectContext.Matches(project, ProjectContext.DefaultProjectId) ||
+            project.Contains(ProjectContext.AllProjectIdsSentinel, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("An explicit project is required.", nameof(projectId));
+        }
+
+        var payload = await GetOptionalTelemetryAsync<DlpSummaryPayload>(FileMetadataUrl("/api/files/dlp-summary", project),
+            cancellationToken, preserveFailureStatusCode: true);
+        if (payload is not { VisibleLatestVersions: long visible, Quarantined: long quarantined, NeedsRescan: long rescan, InitialPending: long pending } ||
+            visible < 0 || quarantined < 0 || rescan < 0 || pending < 0 ||
+            quarantined > visible || rescan > visible || pending > visible)
+        {
+            return null;
+        }
+
+        return new(visible, quarantined, rescan, pending);
+    }
+
+    private sealed record DlpSummaryPayload(long? VisibleLatestVersions, long? Quarantined, long? NeedsRescan, long? InitialPending);
 
     public Task<ManagedFileInventoryResult?> GetManagedFileMetadataAsync(string projectId, Guid fileId, CancellationToken cancellationToken)
         => GetOptionalTelemetryAsync<ManagedFileInventoryResult>(FileMetadataUrl($"/api/files/{fileId:D}", projectId), cancellationToken, preserveFailureStatusCode: true);

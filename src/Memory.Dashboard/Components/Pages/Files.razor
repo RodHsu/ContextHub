@@ -50,6 +50,24 @@
                 <DashboardAsyncState State="degraded" Title="顯示上次成功資料" Message="@_loadError" />
             }
 
+            @if (_state.DlpSummary is { } projectSummary)
+            {
+                <section class="domain-summary-grid" aria-label="本專案 DLP 摘要">
+                    <article class="panel"><span>專案可見檔案</span><strong>@DashboardFormatting.Integer(projectSummary.VisibleLatestVersions)</strong><small>統計有權檢視的最新檔案版本</small></article>
+                    <article class="panel"><span>專案隔離檔案</span><strong>@DashboardFormatting.Integer(projectSummary.Quarantined)</strong></article>
+                    <article class="panel"><span>專案需重掃</span><strong>@DashboardFormatting.Integer(projectSummary.NeedsRescan)</strong><small>可與隔離或待首次掃描重疊</small></article>
+                    <article class="panel"><span>專案待首次掃描</span><strong>@DashboardFormatting.Integer(projectSummary.InitialPending)</strong></article>
+                </section>
+            }
+            else if (_state.DlpSummaryLoading)
+            {
+                <DashboardAsyncState State="loading" Title="載入專案 DLP 摘要" Message="正在讀取此專案的安全狀態計數。" />
+            }
+            else
+            {
+                <DashboardAsyncState State="degraded" Title="專案 DLP 摘要無法取得" Message="目前的專案計數未知，可刷新重試。" />
+            }
+
             <section class="domain-summary-grid" aria-label="本頁搜尋結果的受管檔案摘要">
                 <article class="panel"><span>本頁可見檔案</span><strong>@DashboardFormatting.Integer(visibleFiles.Count)</strong><small>僅統計本頁符合搜尋且有權查看的檔案</small></article>
                 <article class="panel"><span>本頁隔離檔案</span><strong>@DashboardFormatting.Integer(visibleFiles.Count(x => x.Classification == FileClassification.Quarantined))</strong><small>隔離期間停用擷取、向量化及傳輸</small></article>
@@ -284,7 +302,7 @@
         _contentPurpose = string.Empty;
         _projectId = projectId;
         _searchText = string.Empty;
-        await _state.LoadAsync(_projectId);
+        await _state.LoadAsync(_projectId, refreshDlpSummary: true);
     }
 
     private Task ChangeSearch(string value)
@@ -293,7 +311,7 @@
         return InvokeAsync(StateHasChanged);
     }
 
-    private Task LoadAsync() => WithFreshPurpose(() => _state.LoadAsync(_projectId, _state.Offset));
+    private Task LoadAsync() => WithFreshPurpose(() => _state.LoadAsync(_projectId, _state.Offset, refreshDlpSummary: true));
     private Task PreviousPageAsync() => WithFreshPurpose(() => _state.LoadAsync(_projectId, Math.Max(0, _state.Offset - FileMetadataReadState.PageSize)));
     private Task NextPageAsync() => WithFreshPurpose(() => _state.LoadAsync(_projectId, _state.Offset + FileMetadataReadState.PageSize));
     private Task SelectAsync(ManagedFileInventoryResult file) { _contentPurpose = string.Empty; return _state.SelectAsync(file); }
