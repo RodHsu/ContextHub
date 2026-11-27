@@ -26,7 +26,7 @@ The managed component tests dispatch real Blazor render-tree events through the 
 
 ### Tool-surface review
 
-`project_work_item_edit_receipt_get` is a read-only query on the general backend and restricted gateway. It uses existing MemoryRead permission, current resource authority and the exact actor-scoped request fingerprint. Both surfaces share the same Application use case and SDK input schema. The general catalog is `2026-11-22-v13`. The dedicated Scheduled Governance catalog continues to expose four tools. A deployment must confirm host discovery and schema refresh separately.
+`project_work_item_get` reads the current work item and revision by explicit project and item ID. `project_work_item_edit_receipt_get` reads an original committed edit result using the exact actor-scoped request fingerprint. Both queries use the existing MemoryRead permission and current resource authority, and share the same Application use cases and SDK input schemas across the general backend and restricted gateway. The general catalog is `2026-11-27-v14`. The dedicated Scheduled Governance catalog exposes four tools. A deployment must confirm host discovery and schema refresh separately.
 
 ## Aggregate and commit
 

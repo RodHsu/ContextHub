@@ -286,6 +286,11 @@ public sealed class MemoryMcpTools(
     public Task<IReadOnlyList<ProjectWorkItemResult>> project_work_items_list(ProjectWorkItemListRequest request, CancellationToken cancellationToken = default)
         => projectWorkItemService.ListAsync(request, cancellationToken);
 
+    [McpServerTool(UseStructuredContent = true, ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+        Description("Read the current work item and its original-read Revision by explicit ProjectId and WorkItemId. Archived items require IncludeArchived. Missing or inaccessible items return the same unavailable result.")]
+    public Task<ProjectWorkItemResult?> project_work_item_get(string projectId, Guid workItemId, bool includeArchived = false, CancellationToken cancellationToken = default)
+        => projectWorkItemService.GetInProjectAsync(projectId, workItemId, includeArchived, cancellationToken);
+
     [McpServerTool(UseStructuredContent = true, ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description("Create one immutable, versioned execution package for an active project work item. This management operation never completes or cancels the business work item.")]
     public Task<AgentExecutionResult> agent_execution_prepare(AgentExecutionPrepareRequest request, CancellationToken cancellationToken = default)
         => agentExecutionService.PrepareAsync(request, cancellationToken);

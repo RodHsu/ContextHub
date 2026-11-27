@@ -65,24 +65,45 @@ public sealed class ProjectWorkItemService(
         return ApplyVersionedAsync(request.Id, request.ExpectedRevision, request.RequestId, request.Operation, patch, cancellationToken);
     }
 
-    public async Task<ProjectWorkItemResult?> GetAsync(Guid workItemId, bool includeArchived, CancellationToken cancellationToken)
+    public Task<ProjectWorkItemResult?> GetAsync(Guid workItemId, bool includeArchived, CancellationToken cancellationToken)
+        => ReadAsync(workItemId, includeArchived, null, cancellationToken);
+
+    public Task<ProjectWorkItemResult?> GetInProjectAsync(string projectId, Guid workItemId, bool includeArchived, CancellationToken cancellationToken)
+        => ReadAsync(workItemId, includeArchived, projectId?.Trim() ?? string.Empty, cancellationToken);
+
+    private async Task<ProjectWorkItemResult?> ReadAsync(Guid workItemId, bool includeArchived, string? projectId, CancellationToken cancellationToken)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, SecurityScopes.MemoryRead);
+        if (projectId is not null &&
+            (projectId.Length == 0 || ProjectContext.IsShared(projectId) || ProjectContext.IsUser(projectId) ||
+             projectId == ProjectContext.AllProjectIdsSentinel || !CanReadProject(actor, projectId)))
+        {
+            return null;
+        }
         var query = ApplyActorScope(dbContext.ProjectWorkItems.AsNoTracking().Include(x => x.ChecklistItems), actor);
+        if (projectId is not null)
+        {
+            query = query.Where(x => Memory.Application.ProjectContext.Matches(x.ProjectId, projectId));
+        }
         if (!includeArchived) query = query.Where(x => x.ArchivedAt == null);
         var entity = await query.SingleOrDefaultAsync(x => x.Id == workItemId, cancellationToken);
-        if (entity is null) return null;
+        if (entity is null || (projectId is null && !CanReadProject(actor, entity.ProjectId))) return null;
+        return Map(entity);
+    }
+
+    private static bool CanReadProject(ContextHubRequestActor actor, string projectId)
+    {
         try
         {
-            ActorAuthorization.EnsureProjectAllowed(actor, entity.ProjectId, write: false);
+            ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: false);
+            return true;
         }
         catch (UnauthorizedAccessException)
         {
             // An ID-based read must not disclose an inaccessible item's existence or project.
-            return null;
+            return false;
         }
-        return Map(entity);
     }
 
     public async Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken cancellationToken)

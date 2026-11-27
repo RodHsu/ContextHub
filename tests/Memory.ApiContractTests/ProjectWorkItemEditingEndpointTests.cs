@@ -324,6 +324,7 @@ public sealed class ProjectWorkItemEditingEndpointTests
         public Task<ProjectWorkItemResult> SetGovernanceExclusionAsync(ProjectWorkItemGovernanceExclusionRequest request, CancellationToken ct)
         { ExclusionRequest = request; return Result(request.WorkItemId); }
         public Task<ProjectWorkItemResult?> GetAsync(Guid id, bool includeArchived, CancellationToken ct) => throw new NotSupportedException();
+        public Task<ProjectWorkItemResult?> GetInProjectAsync(string projectId, Guid workItemId, bool includeArchived, CancellationToken ct) => throw new NotSupportedException();
         public Task<IReadOnlyList<ProjectWorkItemResult>> ListAsync(ProjectWorkItemListRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<ProjectWorkItemResult> CreateAsync(ProjectWorkItemCreateRequest request, CancellationToken ct) => throw new NotSupportedException();
     }

@@ -216,6 +216,44 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Streamable_http_work_item_lookup_reads_current_revision_only_in_its_explicit_project()
+    {
+        var projectId = $"work-item-lookup-{Guid.NewGuid():N}";
+        using var client = environment.GetFactory().CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
+        var created = ExtractToolJson(await SendMcpAsync(client, null, 30, "tools/call", new
+        {
+            name = "project_work_item_create",
+            arguments = new { request = new { projectId, title = "Lookup by scoped identity" } }
+        }));
+        var id = created.GetProperty("id").GetGuid();
+        var current = ExtractToolJson(await LookupAsync(31, projectId.ToUpperInvariant(), id, false));
+        current.GetProperty("projectId").GetString().Should().Be(projectId);
+        current.GetProperty("revision").GetInt64().Should().Be(created.GetProperty("revision").GetInt64());
+        var unavailable = ExtractSseJson(await LookupAsync(32, projectId, Guid.NewGuid(), true)).GetProperty("result");
+        ExtractSseJson(await LookupAsync(33, projectId + "-other", id, true)).GetProperty("result").GetRawText()
+            .Should().Be(unavailable.GetRawText());
+
+        await SendMcpAsync(client, null, 34, "tools/call", new
+        {
+            name = "project_work_item_archive",
+            arguments = new { workItemId = id, expectedRevision = current.GetProperty("revision").GetInt64(), requestId = Guid.NewGuid().ToString("N") }
+        });
+        ExtractSseJson(await LookupAsync(35, projectId, id, false)).GetProperty("result").GetRawText()
+            .Should().Be(unavailable.GetRawText());
+        var archived = ExtractToolJson(await LookupAsync(36, projectId, id, true));
+        archived.GetProperty("isArchived").GetBoolean().Should().BeTrue();
+        archived.GetProperty("revision").GetInt64().Should().Be(current.GetProperty("revision").GetInt64() + 1);
+
+        Task<string> LookupAsync(int messageId, string scope, Guid workItemId, bool includeArchived)
+            => SendMcpAsync(client, null, messageId, "tools/call", new
+            {
+                name = "project_work_item_get",
+                arguments = new { projectId = scope, workItemId, includeArchived }
+            });
+    }
+
+    [DockerRequiredFact]
     public async Task Streamable_http_project_aliases_update_one_record_and_preserve_its_original_spelling()
     {
         var factory = environment.GetFactory();
@@ -737,7 +775,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_items_list");
         var governanceBatchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
-        listedTools.GetArrayLength().Should().Be(89);
+        listedTools.GetArrayLength().Should().Be(90);
         var bootstrapResult = ExtractSseJson(bootstrapPayload).GetProperty("result");
 
         toolsPayload.Should().Contain("describe_context_hub");
@@ -1105,6 +1143,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             "project_work_item_checklist_update",
             "project_work_item_archive",
             "project_work_item_restore",
+            "project_work_item_get",
             "project_work_items_list",
             "knowledge_review",
             "conversation_insight_set_disposition",
