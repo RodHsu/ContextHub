@@ -79,6 +79,7 @@
                     @foreach (var version in selected.Versions) { <div class="code-block">@version.Version dependencies: @string.Join(", ", (version.Dependencies ?? []).Select(item => $"{item.Kind}:{item.TargetSkillId:D}@{item.VersionConstraint}"))<br/>publish checks: @string.Join(", ", version.PublishEvidence?.Checks ?? []) · self-test @(version.PublishEvidence?.SandboxSelfTestExecuted == true ? (version.PublishEvidence.SandboxSelfTestPassed ? "sandbox PASS" : $"sandbox FAIL ({version.PublishEvidence.SandboxFailureCode})") : version.PublishEvidence?.SelfTestExecuted == true ? (version.PublishEvidence.SelfTestPassed ? "declarative PASS" : "declarative FAIL") : "not executed") @if (!string.IsNullOrWhiteSpace(version.PublishEvidence?.SandboxReceiptId)) { <span> · receipt @version.PublishEvidence.SandboxReceiptId · @version.PublishEvidence.SandboxDurationMilliseconds ms</span> }</div> }
                     <div class="form-grid"><label>Binding scope<select @bind="_bindingScope">@foreach (var value in Enum.GetValues<SkillBindingScope>()) { <option value="@value">@value</option> }</select></label><label>Mode<select @bind="_bindingMode">@foreach (var value in Enum.GetValues<SkillBindingMode>()) { <option value="@value">@value</option> }</select></label><label>Scope value<input @bind="_bindingScopeValue" /></label><label>Version constraint<input @bind="_bindingVersionConstraint" /></label></div><button class="ghost-button" @onclick="() => UpsertBindingAsync(selected)">Upsert binding</button>
                     @foreach (var binding in selected.Bindings) { <span class="status-badge neutral">@binding.Scope:@binding.ScopeValue · @binding.Mode · @binding.VersionConstraint · r@binding.Revision</span> }
+                    <SkillCanonicalTagPanel @key="selected.Id" SkillId="selected.Id" RefreshGeneration="_canonicalTagsRefreshGeneration" />
                     <div class="form-grid"><label>Observed revision<input @bind="_observedRevision" /></label><label>Observed hash<input @bind="_observedHash" /></label><label><input type="checkbox" @bind="_sourceAvailable" /> Source available</label><label><input type="checkbox" @bind="_signatureVerified" /> Signature verified</label></div><button class="ghost-button" @onclick="() => ObserveSourceAsync(selected)">Record source observation</button>
                     @foreach (var observation in _sourceObservations) { <span class="status-badge @StatusClass(observation.Status)">@observation.Status · @observation.ObservedRevision · @ShortHash(observation.ObservedContentHash)</span> }
                     @if (!string.IsNullOrWhiteSpace(_exportJson)) { <div class="code-block">@_exportJson</div> }
@@ -109,6 +110,7 @@
     private SkillVersionDiffResult? _versionDiff;
     private Guid? _selectedSkillId;
     private long _sourceObservationGeneration;
+    private long _canonicalTagsRefreshGeneration;
     private string _sourceObservationError = string.Empty;
     private int _windowDays = 30;
     private bool _loading;
@@ -130,6 +132,7 @@
     {
         _loading = true;
         _error = _notice = string.Empty;
+        _canonicalTagsRefreshGeneration++;
         ClearSourceObservations();
         try
         {

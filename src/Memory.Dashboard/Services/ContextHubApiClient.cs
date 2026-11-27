@@ -135,6 +135,8 @@ public interface IContextHubApiClient : IWorkItemEditingApi, IMemoryEditingApi
     Task<IReadOnlyList<AgentConnectivitySummaryResult>> GetAgentConnectivitySummariesAsync(AgentConnectivitySummaryQuery request, CancellationToken cancellationToken);
     Task<IReadOnlyList<AgentConnectivityRecentObservationResult>> GetRecentAgentConnectivityObservationsAsync(string? projectId, string? agentId, int limit, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillSummaryResult>> GetSkillsAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken);
+    Task<SkillCanonicalTagBindingsResult?> GetSkillCanonicalTagsAsync(Guid skillId, string projectId, int offset, int limit, CancellationToken cancellationToken)
+        => Task.FromResult<SkillCanonicalTagBindingsResult?>(null);
     Task<IReadOnlyList<SkillTelemetryAggregateResult>> GetSkillAnalyticsAsync(string? projectId, int windowDays, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillTelemetryTrendPointResult>> GetSkillAnalyticsTrendAsync(string? projectId, int windowDays, CancellationToken cancellationToken);
     Task<SkillMetadataGovernanceReviewResult> GetSkillGovernanceAsync(CancellationToken cancellationToken);
@@ -327,6 +329,18 @@ public sealed class ContextHubApiClient(HttpClient httpClient) : IContextHubApiC
             ["projectId"] = projectId,
             ["includeArchived"] = includeArchived.ToString()
         }), cancellationToken);
+
+    public Task<SkillCanonicalTagBindingsResult?> GetSkillCanonicalTagsAsync(Guid skillId, string projectId, int offset, int limit, CancellationToken cancellationToken)
+    {
+        if (skillId == Guid.Empty) throw new ArgumentException("A Skill is required.", nameof(skillId));
+        if (offset > 10_000) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (string.IsNullOrWhiteSpace(projectId) || projectId.Contains(ProjectContext.AllProjectIdsSentinel, StringComparison.Ordinal))
+            throw new ArgumentException("An explicit project is required.", nameof(projectId));
+
+        return GetOptionalTelemetryAsync<SkillCanonicalTagBindingsResult>(
+            FileMetadataUrl($"/api/skills/{skillId:D}/canonical-tags", projectId, limit, offset),
+            cancellationToken, preserveFailureStatusCode: true);
+    }
 
     public Task<AgentExecutionDashboardResult> GetAgentExecutionDashboardAsync(string projectId, CancellationToken cancellationToken)
         => GetRequiredAsync<AgentExecutionDashboardResult>($"/api/agent-executions/dashboard/{Uri.EscapeDataString(projectId)}", cancellationToken);
