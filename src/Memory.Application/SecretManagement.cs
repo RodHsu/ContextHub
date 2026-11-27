@@ -254,17 +254,30 @@ public sealed class SecretManagementService(
         }
 
         byte[]? plaintext = null;
+        var requestCanceled = false;
         try
         {
             plaintext = Decrypt(version, secret.Id);
             var context = new SecretUseContext(secret.Id, version.Id, lease.Id, secret.ProjectId, lease.Purpose, lease.Target, lease.ExecutionId);
             await consumer.ExecuteAsync(context, plaintext, cancellationToken);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            requestCanceled = true;
+            throw;
+        }
         finally
         {
             if (plaintext is not null)
                 CryptographicOperations.ZeroMemory(plaintext);
-            await ReleaseActiveUseAsync(lease, actor, cancellationToken);
+            try
+            {
+                await ReleaseActiveUseAsync(lease, actor);
+            }
+            catch (Exception) when (requestCanceled)
+            {
+                // Preserve the caller's cancellation. Reconciliation clears expired counters if release failed.
+            }
         }
         return reservation;
     }
@@ -461,26 +474,21 @@ public sealed class SecretManagementService(
         await EnsureSecretRuleAsync(actor, secret, right, cancellationToken);
     }
 
-    private async Task ReleaseActiveUseAsync(SecretLease lease, ContextHubRequestActor actor, CancellationToken cancellationToken)
+    private async Task ReleaseActiveUseAsync(SecretLease lease, ContextHubRequestActor actor)
     {
-        try
-        {
-            await using var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-            await dbContext.AcquireTransactionLockAsync($"secret-lease:{lease.Id:D}", cancellationToken);
-            var now = clock.UtcNow;
-            var updated = await Scope(dbContext.SecretLeases, actor).Where(x => x.Id == lease.Id)
-                .ExecuteUpdateAsync(update => update
-                    .SetProperty(x => x.ActiveUses, x => x.ActiveUses > 0 ? x.ActiveUses - 1 : 0)
-                    .SetProperty(x => x.UpdatedAt, now), cancellationToken);
-            if (updated != 1) throw Unavailable();
+        // The committed reservation must be released even after the caller disconnects.
+        var cancellationToken = CancellationToken.None;
+        await using var transaction = await dbContext.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await dbContext.AcquireTransactionLockAsync($"secret-lease:{lease.Id:D}", cancellationToken);
+        var now = clock.UtcNow;
+        var updated = await Scope(dbContext.SecretLeases, actor).Where(x => x.Id == lease.Id)
+            .ExecuteUpdateAsync(update => update
+                .SetProperty(x => x.ActiveUses, x => x.ActiveUses > 0 ? x.ActiveUses - 1 : 0)
+                .SetProperty(x => x.UpdatedAt, now), cancellationToken);
+        if (updated != 1) throw Unavailable();
 
-            await dbContext.SecretLeases.Entry(lease).ReloadAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        }
-        catch when (cancellationToken.IsCancellationRequested)
-        {
-            // Scheduled reconciliation clears expired in-flight counters after an interrupted consumer.
-        }
+        await dbContext.SecretLeases.Entry(lease).ReloadAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     private async Task EnsureFoundationRightAsync(ContextHubRequestActor actor, string projectId, SecretRight right, Guid? secretId, CancellationToken cancellationToken)

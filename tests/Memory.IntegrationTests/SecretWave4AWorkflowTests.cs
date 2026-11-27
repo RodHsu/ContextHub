@@ -229,6 +229,63 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
     }
 
     [DockerRequiredFact]
+    public async Task Canceled_secret_consumer_releases_the_slot_without_refunding_its_use()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var accessor = scope.ServiceProvider.GetRequiredService<IRequestActorAccessor>();
+        var user = await db.TenantUsers.SingleAsync(item => item.Username == "contract-test-admin");
+        accessor.Current = Actor(user, interactive: true);
+        var service = CreateSecretService(db, accessor, new TestSecretKeyAuthority(), new AllowApproval());
+        var proof = Proof();
+        var secret = await service.CreateAsync(new("ContextHub", $"canceled-use-{Guid.NewGuid():N}", SecretKind.Opaque, proof), CancellationToken.None);
+        var material = RandomNumberGenerator.GetBytes(16);
+        SecretVersionResult version;
+        try
+        {
+            version = await service.AddVersionAsync(new(secret.Id, material, secret.Revision, "version", proof), CancellationToken.None);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(material);
+        }
+        await SeedRulesAsync(db, user, secret.Id, user.Id.ToString("D"), SecretRight.Use, AuthorizationEffect.Allow);
+
+        const string purpose = "test:lease-cancellation";
+        const string target = "https://example.test/cancellation";
+        var lease = await service.CreateLeaseAsync(new(secret.Id, SecretLeaseKind.Use, purpose, target,
+            "lease", version.SecretRevision, 2, 1, TimeSpan.FromMinutes(5), null, proof), CancellationToken.None);
+        var first = new SecretUseRequest(lease.LeaseId, lease.Capability, lease.Revision, "canceled-use", purpose, target);
+        using var cancellation = new CancellationTokenSource();
+        var expected = new OperationCanceledException(cancellation.Token);
+        var consumer = new CancelingConsumer(cancellation, expected);
+        var use = () => service.UseAsync(first, consumer, cancellation.Token);
+        var canceled = await use.Should().ThrowAsync<OperationCanceledException>();
+        canceled.Which.Should().BeSameAs(expected);
+
+        var released = await db.SecretLeases.AsNoTracking().SingleAsync(item => item.Id == lease.LeaseId);
+        released.ActiveUses.Should().Be(0);
+        released.UsedCount.Should().Be(1);
+        released.Revision.Should().Be(lease.Revision + 1);
+        released.State.Should().Be(SecretLeaseState.Active);
+        var useAudits = db.SecretAccessEvents.AsNoTracking().Where(item =>
+            item.LeaseId == lease.LeaseId && item.Operation == SecretAccessOperation.Use && item.Allowed && item.ReasonCode == "UseStarted");
+        (await useAudits.Select(item => item.RequestId).ToArrayAsync()).Should().Equal(first.RequestId);
+
+        var second = first with { ExpectedRevision = released.Revision, RequestId = "next-use" };
+        var nextConsumer = new GatedConsumer();
+        nextConsumer.Finish();
+        var result = await service.UseAsync(second, nextConsumer, CancellationToken.None);
+        nextConsumer.Entered.IsCompletedSuccessfully.Should().BeTrue();
+        result.Should().Be(new SecretUseResult(lease.Revision + 2, 2, 0, SecretLeaseState.Exhausted));
+        var finished = await db.SecretLeases.AsNoTracking().SingleAsync(item => item.Id == lease.LeaseId);
+        finished.ActiveUses.Should().Be(0);
+        finished.UsedCount.Should().Be(2);
+        finished.Revision.Should().Be(lease.Revision + 2);
+        (await useAudits.Select(item => item.RequestId).ToArrayAsync()).Should().BeEquivalentTo(new[] { first.RequestId, second.RequestId });
+    }
+
+    [DockerRequiredFact]
     public async Task Concurrent_consumers_release_only_their_own_active_lease_slot()
     {
         var factory = environment.GetFactory();
@@ -504,6 +561,15 @@ public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environme
             Calls++;
             Captured = material.ToArray();
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CancelingConsumer(CancellationTokenSource request, OperationCanceledException failure) : ISecretMaterialConsumer
+    {
+        public Task ExecuteAsync(SecretUseContext context, ReadOnlyMemory<byte> material, CancellationToken cancellationToken)
+        {
+            request.Cancel();
+            return Task.FromException(failure);
         }
     }
 
