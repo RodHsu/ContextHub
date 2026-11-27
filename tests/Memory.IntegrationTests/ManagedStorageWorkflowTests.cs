@@ -111,6 +111,22 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
             copied.Should().Be(80_000);
             output.ToArray().Should().Equal(original.AsSpan(60_000, 80_000).ToArray());
 
+            var firstChunkMetadata = persisted.Chunks.Single(chunk => chunk.ChunkIndex == 0);
+            firstChunkMetadata.LocatorFormat.Should().Be(ManagedChunkLocatorFormat.LegacyIndex);
+            var immutablePath = Path.Combine(root, persisted.StorageId[..2], persisted.StorageId,
+                $"{firstChunkMetadata.ChunkIndex:D10}.{firstChunkMetadata.Id:N}.bin");
+            File.Move(firstCiphertextPath, immutablePath, overwrite: false);
+            (await db.ManagedObjectChunks.Where(chunk => chunk.Id == firstChunkMetadata.Id)
+                .ExecuteUpdateAsync(update => update.SetProperty(chunk => chunk.LocatorFormat, ManagedChunkLocatorFormat.ImmutableAttempt)))
+                .Should().Be(1);
+            db.ChangeTracker.Clear();
+            var mixed = await service.CreateDownloadAsync(new CreateManagedDownloadRequest(
+                persisted.ProjectId, persisted.Id, "mixed-locator-format", Guid.NewGuid().ToString("N")), CancellationToken.None);
+            await using var mixedOutput = new MemoryStream();
+            await service.CopyRangeAsync(new ManagedRangeReadRequest(mixed.SessionId, mixed.Capability, mixed.Revision, "mixed-range", 60_000, 80_000),
+                mixedOutput, CancellationToken.None);
+            mixedOutput.ToArray().Should().Equal(original.AsSpan(60_000, 80_000).ToArray());
+
             keySettings.CurrentKeyId = "kek-new";
             await service.RewrapObjectKeyAsync(persisted.Id, CancellationToken.None);
             db.ChangeTracker.Clear();
@@ -123,7 +139,7 @@ public sealed class ManagedStorageWorkflowTests(ContainerTestEnvironment environ
             rotatedOutput.ToArray().Should().Equal(original.AsSpan(0, 1024).ToArray());
 
             firstCiphertext[0] ^= 0x80;
-            await File.WriteAllBytesAsync(firstCiphertextPath, firstCiphertext);
+            await File.WriteAllBytesAsync(immutablePath, firstCiphertext);
             var tampered = await service.CreateDownloadAsync(new CreateManagedDownloadRequest(
                 persisted.ProjectId, persisted.Id, "tamper", Guid.NewGuid().ToString("N")), CancellationToken.None);
             await using var sink = new MemoryStream();

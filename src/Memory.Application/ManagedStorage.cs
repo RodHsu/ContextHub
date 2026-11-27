@@ -87,12 +87,35 @@ public interface IManagedFileKeyAuthority
     WrappedManagedKey Rewrap(Guid objectId, int generation, WrappedManagedKey wrappedKey);
 }
 
+public readonly record struct ManagedChunkAddress(string StorageId, int ChunkIndex, Guid? AttemptId = null)
+{
+    internal static ManagedChunkAddress ForChunk(string storageId, ManagedObjectChunk chunk)
+        => chunk.LocatorFormat switch
+        {
+            ManagedChunkLocatorFormat.LegacyIndex => new(storageId, chunk.ChunkIndex),
+            ManagedChunkLocatorFormat.ImmutableAttempt when chunk.Id != Guid.Empty => new(storageId, chunk.ChunkIndex, chunk.Id),
+            _ => throw new InvalidOperationException("Managed object chunk address is invalid.")
+        };
+}
+
 public interface IManagedObjectStore
 {
     Task PutChunkAsync(string storageId, int chunkIndex, ReadOnlyMemory<byte> ciphertext, CancellationToken cancellationToken);
     Task<int> ReadChunkAsync(string storageId, int chunkIndex, Memory<byte> destination, CancellationToken cancellationToken);
     Task<bool> ChunkExistsAsync(string storageId, int chunkIndex, CancellationToken cancellationToken);
     Task DeleteObjectAsync(string storageId, CancellationToken cancellationToken);
+
+    Task PutChunkAsync(ManagedChunkAddress address, ReadOnlyMemory<byte> ciphertext, CancellationToken cancellationToken)
+        => address.AttemptId is null ? PutChunkAsync(address.StorageId, address.ChunkIndex, ciphertext, cancellationToken)
+            : throw new NotSupportedException("Immutable managed chunk addresses are required.");
+
+    Task<int> ReadChunkAsync(ManagedChunkAddress address, Memory<byte> destination, CancellationToken cancellationToken)
+        => address.AttemptId is null ? ReadChunkAsync(address.StorageId, address.ChunkIndex, destination, cancellationToken)
+            : throw new NotSupportedException("Immutable managed chunk addresses are required.");
+
+    Task<bool> ChunkExistsAsync(ManagedChunkAddress address, CancellationToken cancellationToken)
+        => address.AttemptId is null ? ChunkExistsAsync(address.StorageId, address.ChunkIndex, cancellationToken)
+            : throw new NotSupportedException("Immutable managed chunk addresses are required.");
 }
 
 public interface IManagedTransferService
@@ -213,7 +236,8 @@ public sealed class ManagedTransferService(
             return await dbContext.ExecuteInTransactionAsync(async transactionToken =>
             {
                 await dbContext.AcquireTransactionLockAsync($"managed-transfer:{request.SessionId:D}", transactionToken);
-                var session = await LoadSessionAsync(request.SessionId, request.Capability, ManagedTransferOperation.Upload, null, transactionToken);
+                var session = await LoadSessionAsync(request.SessionId, request.Capability, ManagedTransferOperation.Upload, null,
+                    transactionToken, onlyChunkIndex: request.ChunkIndex);
                 var recorded = await FindUploadOperationAsync(session, request.RequestId, request.ExpectedRevision, transactionToken);
                 var managedObject = session.ManagedObject!;
                 if (request.ChunkIndex < 0 || request.ChunkIndex >= managedObject.ChunkCount)
@@ -246,7 +270,6 @@ public sealed class ManagedTransferService(
                     var aad = BuildAad(managedObject, request.ChunkIndex, request.Plaintext.Length);
                     using var aes = new AesGcm(dek, TagBytes);
                     aes.Encrypt(nonce, request.Plaintext, ciphertext, tag, aad);
-                    await objectStore.PutChunkAsync(managedObject.StorageId, request.ChunkIndex, ciphertext, transactionToken);
                     var chunk = new ManagedObjectChunk
                     {
                         ManagedObjectId = managedObject.Id,
@@ -261,6 +284,7 @@ public sealed class ManagedTransferService(
                         CiphertextSha256 = Convert.ToHexString(SHA256.HashData(ciphertext)).ToLowerInvariant(),
                         CreatedAt = clock.UtcNow
                     };
+                    await objectStore.PutChunkAsync(ManagedChunkAddress.ForChunk(managedObject.StorageId, chunk), ciphertext, transactionToken);
                     await dbContext.ManagedObjectChunks.AddAsync(chunk, transactionToken);
                     session.UsedBytes = checked(session.UsedBytes + request.Plaintext.Length);
                     session.Revision++;
@@ -355,7 +379,8 @@ public sealed class ManagedTransferService(
                 {
                     var chunk = managedObject.Chunks.SingleOrDefault(x => x.ChunkIndex == index)
                         ?? throw new CryptographicException("Managed object chunk metadata is incomplete.");
-                    var read = await objectStore.ReadChunkAsync(managedObject.StorageId, index, buffer.AsMemory(0, chunk.CiphertextLength), transactionToken);
+                    var read = await objectStore.ReadChunkAsync(ManagedChunkAddress.ForChunk(managedObject.StorageId, chunk),
+                        buffer.AsMemory(0, chunk.CiphertextLength), transactionToken);
                     if (read != chunk.CiphertextLength || !FixedEquals(chunk.CiphertextSha256, Convert.ToHexString(SHA256.HashData(buffer.AsSpan(0, read))).ToLowerInvariant()))
                     {
                         managedObject.State = ManagedObjectState.Corrupt;
@@ -431,13 +456,14 @@ public sealed class ManagedTransferService(
         return actor;
     }
 
-    private async Task<ManagedTransferSession> LoadSessionAsync(Guid id, string capability, ManagedTransferOperation operation, long? expectedRevision, CancellationToken cancellationToken)
+    private async Task<ManagedTransferSession> LoadSessionAsync(Guid id, string capability, ManagedTransferOperation operation,
+        long? expectedRevision, CancellationToken cancellationToken, int? onlyChunkIndex = null)
     {
         var actor = actorAccessor.Current;
         ActorAuthorization.EnsureScopeAllowed(actor, operation == ManagedTransferOperation.Upload ? SecurityScopes.MemoryWrite : SecurityScopes.MemoryRead);
         var session = await Scope(dbContext.ManagedTransferSessions, actor)
-            .Include(x => x.ManagedObject)!.ThenInclude(x => x!.Chunks)
-            .Include(x => x.Operations)
+            .Include(x => x.ManagedObject)!.ThenInclude(x =>
+                x!.Chunks.Where(chunk => onlyChunkIndex == null || chunk.ChunkIndex == onlyChunkIndex))
             .SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new UnauthorizedAccessException("Transfer capability is invalid.");
         ActorAuthorization.EnsureProjectAllowed(actor, session.ProjectId, operation == ManagedTransferOperation.Upload);
@@ -542,7 +568,8 @@ public sealed class ManagedTransferService(
         {
             foreach (var chunk in managedObject.Chunks.OrderBy(x => x.ChunkIndex))
             {
-                var read = await objectStore.ReadChunkAsync(managedObject.StorageId, chunk.ChunkIndex, ciphertext.AsMemory(0, chunk.CiphertextLength), cancellationToken);
+                var read = await objectStore.ReadChunkAsync(ManagedChunkAddress.ForChunk(managedObject.StorageId, chunk),
+                    ciphertext.AsMemory(0, chunk.CiphertextLength), cancellationToken);
                 if (read != chunk.CiphertextLength || !FixedEquals(chunk.CiphertextSha256, Convert.ToHexString(SHA256.HashData(ciphertext.AsSpan(0, read))).ToLowerInvariant()))
                 {
                     managedObject.State = ManagedObjectState.Corrupt;
@@ -663,7 +690,7 @@ public sealed class ManagedObjectReconciliationService(
             }
             foreach (var chunk in item.Chunks)
             {
-                if (!await objectStore.ChunkExistsAsync(item.StorageId, chunk.ChunkIndex, cancellationToken))
+                if (!await objectStore.ChunkExistsAsync(ManagedChunkAddress.ForChunk(item.StorageId, chunk), cancellationToken))
                 {
                     item.State = ManagedObjectState.Missing;
                     item.UpdatedAt = now;

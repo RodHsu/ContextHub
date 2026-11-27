@@ -1719,6 +1719,7 @@ public sealed partial class MemoryDbContext(DbContextOptions<MemoryDbContext> op
             entity.Property(x => x.Id).HasColumnName("id");
             entity.Property(x => x.ManagedObjectId).HasColumnName("managed_object_id");
             entity.Property(x => x.ChunkIndex).HasColumnName("chunk_index");
+            entity.Property(x => x.LocatorFormat).HasColumnName("locator_format").HasConversion<string>();
             entity.Property(x => x.PlaintextOffset).HasColumnName("plaintext_offset");
             entity.Property(x => x.PlaintextLength).HasColumnName("plaintext_length");
             entity.Property(x => x.CiphertextLength).HasColumnName("ciphertext_length");

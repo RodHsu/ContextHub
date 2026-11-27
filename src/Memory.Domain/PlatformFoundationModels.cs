@@ -185,11 +185,18 @@ public sealed class ManagedObject
     public ICollection<ManagedObjectChunk> Chunks { get; set; } = [];
 }
 
+public enum ManagedChunkLocatorFormat
+{
+    LegacyIndex,
+    ImmutableAttempt
+}
+
 public sealed class ManagedObjectChunk
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid ManagedObjectId { get; set; }
     public int ChunkIndex { get; set; }
+    public ManagedChunkLocatorFormat LocatorFormat { get; set; }
     public long PlaintextOffset { get; set; }
     public int PlaintextLength { get; set; }
     public int CiphertextLength { get; set; }
