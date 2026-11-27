@@ -289,10 +289,9 @@ public sealed class ManagedFileService(
             var actor = RequireActor(SecurityScopes.SecurityManage);
             await dbContext.AcquireTransactionLockAsync($"file-security:{fileVersionId}", ct);
             var version = await LoadVersionAsync(fileVersionId, actor, ct);
+            EnsureFileSecurityScope(version, actor);
             var isQuarantineRescan = version.Classification == FileClassification.Quarantined &&
                                      version.Lifecycle == FileVersionLifecycle.Quarantined && version.NeedsRescan;
-            if (isQuarantineRescan || assessment.ExpectedClassificationRevision.HasValue)
-                EnsureQuarantineReviewScope(version, actor);
             if ((assessment.ExpectedClassificationRevision is long expectedRevision && expectedRevision != version.ClassificationRevision) ||
                 (isQuarantineRescan && !assessment.ExpectedClassificationRevision.HasValue))
             {
@@ -477,7 +476,7 @@ public sealed class ManagedFileService(
             var actor = RequireActor(SecurityScopes.SecurityManage);
             await dbContext.AcquireTransactionLockAsync($"file-security:{request.FileVersionId}", ct);
             var version = await LoadVersionAsync(request.FileVersionId, actor, ct);
-            EnsureQuarantineReviewScope(version, actor);
+            EnsureFileSecurityScope(version, actor);
             if (version.ClassificationRevision != request.ExpectedClassificationRevision) throw new FileClassificationConflictException();
             if (version.Classification != FileClassification.Quarantined || version.Lifecycle != FileVersionLifecycle.Quarantined) throw new InvalidOperationException("Only quarantined files can enter release review.");
             if (version.NeedsRescan && await HasQuarantineRescanApprovalAsync(version, actor, ct))
@@ -513,12 +512,22 @@ public sealed class ManagedFileService(
     private static string QuarantineRescanApprovalReason(long revision)
         => $"ExternalApprovalVerifiedRescanRequired:{revision.ToString(CultureInfo.InvariantCulture)}";
 
-    private static void EnsureQuarantineReviewScope(FileVersion version, ContextHubRequestActor actor)
+    private static void EnsureFileSecurityScope(FileVersion version, ContextHubRequestActor actor)
     {
-        if (version.FileAsset is null || version.FileAsset.State == FileAssetState.LogicalDeleted)
+        if (version.FileAsset is null || version.FileAsset.State == FileAssetState.LogicalDeleted ||
+            version.Lifecycle == FileVersionLifecycle.LogicalDeleted)
             throw new UnauthorizedAccessException("File version is not available.");
         if (version.FileAsset.ProjectId is string projectId)
-            ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
+        {
+            try
+            {
+                ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new UnauthorizedAccessException("File version is not available.");
+            }
+        }
     }
 
     public Task<FileDeleteResult> RequestDeleteAsync(FileDeleteRequest request, CancellationToken cancellationToken)
