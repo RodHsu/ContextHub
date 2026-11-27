@@ -6,7 +6,7 @@
 
 <PageTitle>Context Hub | Agent Skills</PageTitle>
 
-<PageViewport Title="Agent Skills" Subtitle="可攜式 Registry、不可變版本、搜尋 generation、執行品質與 metadata governance。" BodyClass="page-viewport-body">
+<PageViewport Title="Agent Skills" Subtitle="可攜式 Registry、不可變版本、搜尋 generation、執行品質與 metadata governance。" BodyClass="page-viewport-body skills-page-body">
     <Actions>
         <div class="page-actions-secondary"><button class="ghost-button" @onclick="ReconcileAsync" disabled="@_loading">彙總 Telemetry</button><button class="ghost-button" @onclick="ReindexAsync" disabled="@_loading">Shadow Reindex</button></div>
         <div class="page-actions-primary"><button class="primary-button" @onclick="LoadAsync" disabled="@_loading">重新整理</button></div>
