@@ -16,7 +16,7 @@
                           Authority="Skill / immutable SkillVersion / binding / invocation authority"
                           CurrentHref="/skills"
                           Links="AgentLinks" />
-        @if (!string.IsNullOrWhiteSpace(_error)) { <div class="inline-error">@_error</div> }
+        @if (!string.IsNullOrWhiteSpace(PageError)) { <div class="inline-error">@PageError</div> }
         @if (!string.IsNullOrWhiteSpace(_notice)) { <div class="inline-success">@_notice</div> }
         <div class="metric-grid">
             <section class="panel metric-card metric-card-inline"><div class="metric-inline-line"><span class="metric-label-inline">Skills：</span><span class="metric-value-inline">@_skills.Count</span></div></section>
@@ -108,6 +108,8 @@
     private SkillImportPreviewResult? _importPreview;
     private SkillVersionDiffResult? _versionDiff;
     private Guid? _selectedSkillId;
+    private long _sourceObservationGeneration;
+    private string _sourceObservationError = string.Empty;
     private int _windowDays = 30;
     private bool _loading;
     private string _error = string.Empty, _notice = string.Empty, _exportJson = string.Empty;
@@ -117,6 +119,7 @@
     private string _bindingScopeValue = "ContextHub", _bindingVersionConstraint = "*", _observedRevision = string.Empty, _observedHash = string.Empty;
     private bool _sourceAvailable = true, _signatureVerified;
     private SkillSummaryResult? SelectedSkill => _skills.FirstOrDefault(x => x.Id == _selectedSkillId);
+    private string PageError => string.IsNullOrWhiteSpace(_error) ? _sourceObservationError : _error;
     private int PublishedCount => _skills.Sum(x => x.Versions.Count(v => v.Status == SkillLifecycleStatus.Published));
     private IReadOnlyList<SkillTelemetryAggregateResult> CurrentAnalytics => Analytics(_windowDays);
     private decimal SuccessRate => CurrentAnalytics.Sum(x => x.InvocationCount) == 0 ? 0 : decimal.Divide(CurrentAnalytics.Sum(x => x.SuccessCount), CurrentAnalytics.Sum(x => x.InvocationCount));
@@ -127,6 +130,7 @@
     {
         _loading = true;
         _error = _notice = string.Empty;
+        ClearSourceObservations();
         try
         {
             _skills = await ApiClient.GetSkillsAsync(null, false, CancellationToken.None);
@@ -138,14 +142,62 @@
             _governance = await ApiClient.GetSkillGovernanceAsync(CancellationToken.None);
             _generations = await ApiClient.GetSkillSearchGenerationsAsync(CancellationToken.None);
             _resolutions = await ApiClient.GetSkillResolutionsAsync(null, 50, CancellationToken.None);
-            if (_selectedSkillId is not null && SelectedSkill is null) _selectedSkillId = null;
-            if (_selectedSkillId is not null) _sourceObservations = await ApiClient.GetSkillSourceObservationsAsync(_selectedSkillId.Value, CancellationToken.None);
+            if (SelectedSkill is { } selected)
+            {
+                await LoadSourceObservationsAsync(selected.Id);
+            }
+            else
+            {
+                _selectedSkillId = null;
+                ClearSourceObservations();
+            }
         }
         catch (Exception ex) { _error = ex.Message; }
         finally { _loading = false; }
     }
-    private void SelectSkill(Guid id) { _selectedSkillId = id; _exportJson = string.Empty; _versionDiff = null; _ = LoadSourceObservationsAsync(id); }
-    private async Task LoadSourceObservationsAsync(Guid id) { try { _sourceObservations = await ApiClient.GetSkillSourceObservationsAsync(id, CancellationToken.None); await InvokeAsync(StateHasChanged); } catch (Exception ex) { _error = ex.Message; } }
+    private Task SelectSkill(Guid id)
+    {
+        _selectedSkillId = id;
+        _exportJson = string.Empty;
+        _versionDiff = null;
+        return LoadSourceObservationsAsync(id);
+    }
+
+    private async Task LoadSourceObservationsAsync(Guid id)
+    {
+        if (_selectedSkillId != id)
+        {
+            return;
+        }
+
+        ClearSourceObservations();
+        var generation = _sourceObservationGeneration;
+        try
+        {
+            var observations = await ApiClient.GetSkillSourceObservationsAsync(id, CancellationToken.None);
+            if (IsCurrentSourceObservationRequest(id, generation))
+            {
+                _sourceObservations = observations;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (IsCurrentSourceObservationRequest(id, generation))
+            {
+                _sourceObservationError = ex.Message;
+            }
+        }
+    }
+
+    private bool IsCurrentSourceObservationRequest(Guid id, long generation)
+        => _selectedSkillId == id && _sourceObservationGeneration == generation;
+
+    private void ClearSourceObservations()
+    {
+        _sourceObservationGeneration++;
+        _sourceObservations = [];
+        _sourceObservationError = string.Empty;
+    }
     private SkillImportPreviewRequest BuildImport() => new(_importStableKey, _importName, _importDescription, _importWhenToUse, _importVersion, new PortableSkillBundle([new PortableSkillFile("SKILL.md", Convert.ToBase64String(Encoding.UTF8.GetBytes(_importMarkdown)))]), SkillSourceKind.LocalUpload, _importSourceRef, "manual", _importLicense);
     private async Task PreviewImportAsync() => await RunAsync(async () => { _importPreview = await ApiClient.PreviewSkillImportAsync(BuildImport(), CancellationToken.None); _notice = "Import preview 已完成。"; });
     private async Task ImportAsync() => await RunAsync(async () => { var result = await ApiClient.ImportSkillAsync(new(BuildImport(), $"dashboard-import-{Guid.NewGuid():N}"), CancellationToken.None); _selectedSkillId = result.Skill.Id; await LoadAsync(); });
