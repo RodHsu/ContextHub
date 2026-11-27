@@ -426,9 +426,12 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
     [DockerRequiredFact]
     public async Task Automation_Review_Should_Reach_Handler_And_Publish_Recoverable_Receipt()
     {
+        // Scheduled review scans the actor's full scope. Give this test only its own fixture data.
+        await using var isolatedEnvironment = new ChatGptGatewayTestEnvironment();
+        await isolatedEnvironment.InitializeAsync();
         await using var factory = new ChatGptGatewayApplicationFactory(
-            environment.PostgresConnectionString,
-            environment.RedisConnectionString,
+            isolatedEnvironment.PostgresConnectionString,
+            isolatedEnvironment.RedisConnectionString,
             surface: ChatGptGatewaySurface.Automation);
         using var client = CreateAuthorizedClient(factory);
 
@@ -3467,12 +3470,22 @@ public sealed class ChatGptGatewayMcpTests(ChatGptGatewayTestEnvironment environ
         historicalEntity.UpdatedAt = now.AddDays(-120);
         await dbContext.SaveChangesAsync();
 
-        await dbContext.Database.ExecuteSqlInterpolatedAsync($$"""
-            INSERT INTO runtime_log_entries
-                (project_id, service_name, category, level, message, exception, trace_id, request_id, payload_json, created_at)
-            SELECT {{projectId}}, 'synthetic-governance', 'fixture', 'Information', 'bounded log fixture', '', '', '', '{}', {{now.AddDays(-45)}}
-            FROM generate_series(1, 100001)
-            """);
+        const int logFixtureCount = 100_001;
+        const int seedBatchSize = 10_000;
+        await using (var seedTransaction = await dbContext.Database.BeginTransactionAsync())
+        {
+            for (var inserted = 0; inserted < logFixtureCount; inserted += seedBatchSize)
+            {
+                var batchCount = Math.Min(seedBatchSize, logFixtureCount - inserted);
+                await dbContext.Database.ExecuteSqlInterpolatedAsync($$"""
+                    INSERT INTO runtime_log_entries
+                        (project_id, service_name, category, level, message, exception, trace_id, request_id, payload_json, created_at)
+                    SELECT {{projectId}}, 'synthetic-governance', 'fixture', 'Information', 'bounded log fixture', '', '', '', '{}', {{now.AddDays(-45)}}
+                    FROM generate_series(1, {{batchCount}})
+                    """);
+            }
+            await seedTransaction.CommitAsync();
+        }
         dbContext.RuntimeLogEntries.Add(new RuntimeLogEntry
         {
             ProjectId = projectId,
