@@ -216,6 +216,65 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
     }
 
     [DockerRequiredFact]
+    public async Task Streamable_http_memory_edits_use_original_intent_and_return_only_the_exact_scoped_receipt()
+    {
+        var projectId = $"Mcp-Memory-Edit-{Guid.NewGuid():N}";
+        var factory = environment.GetFactory();
+        MemoryDocument memory;
+        using (var scope = factory.Services.CreateScope())
+        {
+            UseBootstrapActor(scope.ServiceProvider);
+            memory = await scope.ServiceProvider.GetRequiredService<IMemoryService>().UpsertAsync(new(
+                projectId, MemoryScope.Project, MemoryType.Fact, "Original title", "Original body",
+                "", "test", "memory-edit-protocol", [], 0.5m, 0.5m, ProjectId: projectId), default);
+        }
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MemoryApplicationFactory.TestBootstrapToken);
+        var edit = new MemoryEditCommand(projectId.ToLowerInvariant(), memory.Id, memory.Version,
+            Guid.NewGuid().ToString("N"), new(Content: "Updated synthetic content"));
+        (await ErrorAsync(41, edit with { ExpectedVersion = 0 })).Should().Contain(SafeEditConflictCodes.MissingReadVersion);
+        var first = ExtractToolJson(await CallAsync(42, "memory_edit", edit)).Deserialize<MemoryEditReceipt>(JsonSerializerOptions.Web)!;
+        first.PreviousVersion.Should().Be(memory.Version);
+        first.Version.Should().Be(memory.Version + 1);
+        first.ProjectId.Should().Be(projectId);
+        first.RequestHash.Should().Be(MemoryEditContract.Hash(edit));
+        first.Replayed.Should().BeFalse();
+        var replay = ExtractToolJson(await CallAsync(43, "memory_edit", edit)).Deserialize<MemoryEditReceipt>(JsonSerializerOptions.Web)!;
+        replay.Should().BeEquivalentTo(first with { Replayed = true });
+        (await ErrorAsync(44, edit with { Patch = new(Title: "Changed intent") })).Should().Contain(SafeEditConflictCodes.RequestIdentityMismatch);
+        (await ErrorAsync(45, edit with { RequestId = Guid.NewGuid().ToString("N") })).Should().Contain(SafeEditConflictCodes.StaleReadVersion);
+
+        var lookup = new MemoryEditRecoveryRequest(projectId, memory.Id, edit.RequestId, MemoryEditContract.Hash(edit));
+        var recovered = ExtractToolJson(await CallAsync(46, "memory_edit_receipt_get", lookup)).Deserialize<MemoryEditReceipt>(JsonSerializerOptions.Web)!;
+        recovered.Should().BeEquivalentTo(first with { Replayed = true });
+        var mismatch = ExtractSseJson(await CallAsync(47, "memory_edit_receipt_get",
+            lookup with { ExpectedRequestHash = new string('0', 64) })).GetProperty("result");
+        mismatch.GetProperty("isError").GetBoolean().Should().BeTrue();
+        mismatch.GetRawText().Should().Contain(SafeEditConflictCodes.RequestIdentityMismatch);
+        var absent = ExtractSseJson(await CallAsync(48, "memory_edit_receipt_get", lookup with { MemoryId = Guid.NewGuid() })).GetProperty("result");
+        var wrongProject = ExtractSseJson(await CallAsync(49, "memory_edit_receipt_get", lookup with { ProjectId = projectId + "-wrong" })).GetProperty("result");
+        wrongProject.GetRawText().Should().Be(absent.GetRawText());
+
+        using var verification = factory.Services.CreateScope();
+        var db = verification.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        (await db.MemoryItems.AsNoTracking().SingleAsync(x => x.Id == memory.Id)).Version.Should().Be(first.Version);
+        (await db.MemoryEditReceipts.CountAsync(x => x.MemoryItemId == memory.Id)).Should().Be(1);
+
+        Task<string> CallAsync(int id, string name, object request) =>
+            SendMcpAsync(client, null, id, "tools/call", new { name, arguments = new { request = JsonSerializer.SerializeToElement(request, JsonSerializerOptions.Web) } });
+
+        async Task<string> ErrorAsync(int id, MemoryEditCommand request)
+        {
+            var result = ExtractSseJson(await CallAsync(id, "memory_edit", request)).GetProperty("result");
+            result.GetProperty("isError").GetBoolean().Should().BeTrue();
+            var error = result.GetRawText();
+            error.Should().NotContain(request.Patch.Content ?? request.Patch.Title!);
+            return error;
+        }
+    }
+
+    [DockerRequiredFact]
     public async Task Streamable_http_memory_history_lists_summaries_and_requires_exact_existing_scope_for_body()
     {
         var projectId = $"Mcp-History-{Guid.NewGuid():N}";
@@ -831,7 +890,7 @@ public sealed class McpProtocolTests(ContainerTestEnvironment environment) : ICl
             .Single(tool => tool.GetProperty("name").GetString() == "project_work_items_list");
         var governanceBatchTool = listedTools.EnumerateArray()
             .Single(tool => tool.GetProperty("name").GetString() == "governance_batch_execute");
-        listedTools.GetArrayLength().Should().Be(92);
+        listedTools.GetArrayLength().Should().Be(94);
         var bootstrapResult = ExtractSseJson(bootstrapPayload).GetProperty("result");
 
         toolsPayload.Should().Contain("describe_context_hub");

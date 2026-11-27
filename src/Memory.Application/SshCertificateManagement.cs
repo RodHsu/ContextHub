@@ -375,6 +375,8 @@ public sealed class SecretReconciliationService(IApplicationDbContext dbContext,
         var now = clock.UtcNow;
         var expiredLeases = await dbContext.SecretLeases.Where(x => x.State == SecretLeaseState.Active && x.ExpiresAt <= now)
             .ExecuteUpdateAsync(update => update.SetProperty(x => x.State, SecretLeaseState.Expired).SetProperty(x => x.ActiveUses, 0).SetProperty(x => x.UpdatedAt, now), cancellationToken);
+        await dbContext.SecretLeases.Where(x => x.State == SecretLeaseState.Exhausted && x.ExpiresAt <= now && x.ActiveUses > 0)
+            .ExecuteUpdateAsync(update => update.SetProperty(x => x.ActiveUses, 0).SetProperty(x => x.UpdatedAt, now), cancellationToken);
         var expiredCertificates = await dbContext.SshCertificateLeases.Where(x => x.State == SshCertificateState.Active && x.ValidBefore <= now)
             .ExecuteUpdateAsync(update => update.SetProperty(x => x.State, SshCertificateState.Expired).SetProperty(x => x.UpdatedAt, now), cancellationToken);
         var staleRelations = await dbContext.SecretRelations.CountAsync(x => x.IsStale, cancellationToken);

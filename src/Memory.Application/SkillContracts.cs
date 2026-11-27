@@ -676,6 +676,10 @@ public sealed record SkillMetadataProposalDecisionRequest(
     SkillRiskLevel? RiskLevel = null,
     string? Note = null);
 
+public sealed record SkillCanonicalTagBindingResult(Guid BindingId, Guid TagId, string Name, long TagRevision, string Source, decimal Confidence);
+
+public sealed record SkillCanonicalTagBindingsResult(Guid SkillId, string ProjectId, int Offset, bool HasMore, IReadOnlyList<SkillCanonicalTagBindingResult> Items);
+
 public interface ISkillService
 {
     Task<SkillImportPreviewResult> PreviewImportAsync(SkillImportPreviewRequest request, CancellationToken cancellationToken);
@@ -686,6 +690,7 @@ public interface ISkillService
     Task<SkillBindingResult> UpsertBindingAsync(SkillBindingUpsertRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<SkillSummaryResult>> ListAsync(string? projectId, bool includeArchived, CancellationToken cancellationToken);
     Task<SkillSummaryResult?> GetAsync(Guid skillId, CancellationToken cancellationToken);
+    Task<SkillCanonicalTagBindingsResult?> ListCanonicalTagBindingsAsync(Guid skillId, string projectId, int offset, int limit, CancellationToken cancellationToken);
     Task<PortableSkillBundle> ExportAsync(Guid skillVersionId, CancellationToken cancellationToken);
     Task<SkillVersionDiffResult> DiffVersionsAsync(Guid skillId, Guid leftVersionId, Guid rightVersionId, CancellationToken cancellationToken);
     Task<SkillSourceObservationResult> RecordSourceObservationAsync(SkillSourceObservationRequest request, CancellationToken cancellationToken);

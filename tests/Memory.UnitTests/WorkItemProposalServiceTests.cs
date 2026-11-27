@@ -404,10 +404,16 @@ public sealed class WorkItemProposalServiceTests
         IQueryProvider IQueryable.Provider => Query.Provider;
         IEnumerator<T> IEnumerable<T>.GetEnumerator() => Rows.GetEnumerator();
         IEnumerator IEnumerable.GetEnumerator() => Rows.GetEnumerator();
+        public override EntityEntry<T> Add(T entity)
+        {
+            Rows.Add(entity);
+            return null!;
+        }
+
         public override ValueTask<EntityEntry<T>> AddAsync(T entity, CancellationToken cancellationToken = default)
         {
-            cancellationToken.ThrowIfCancellationRequested(); Rows.Add(entity);
-            return ValueTask.FromResult<EntityEntry<T>>(null!);
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(Add(entity));
         }
     }
 

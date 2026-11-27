@@ -409,7 +409,10 @@ public sealed class GovernanceBatchExecutor(
                 planItems.Select(x => x.Key).ToHashSet(StringComparer.Ordinal),
                 cancellationToken);
         }
-        var executablePlanItems = planItems.Where(x => !terminalItemKeys.Contains(x.Key)).ToList();
+        var reviewedMergePairs = snapshot.ReviewedMergePairs.ToDictionary(pair => pair.FindingId);
+        // PlanJson is not a substitute for the immutable review even for interactive execution.
+        var executablePlanItems = planItems.Where(x => !terminalItemKeys.Contains(x.Key))
+            .Select(item => item with { ReviewedMergePair = reviewedMergePairs.GetValueOrDefault(item.Id) }).ToList();
         var index = 0;
         var lastItemKey = cursorPayload?.ItemKey ?? string.Empty;
         var logicalPositionBase = terminalItemKeys.Count;
@@ -514,7 +517,10 @@ public sealed class GovernanceBatchExecutor(
             {
                 try
                 {
-                    itemResult = await ProcessItemAsync(item, request, allowed, actor, cancellationToken);
+                    itemResult = await ProcessItemAsync(item, request, allowed, actor, (merge, ct) =>
+                        PersistProgressAsync(run, execution, accumulator.WithItem(merge), logicalPositionBase + index + 1,
+                            item.Key, actorHash, projectSetHash, policyHash, executablePlanItems.Count - index - 1,
+                            stopwatch, "Running", advance: true, ct), cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -524,6 +530,7 @@ public sealed class GovernanceBatchExecutor(
                     execution = await dbContext.GovernanceBatchExecutions.SingleAsync(
                         x => x.Id == execution.Id,
                         CancellationToken.None);
+                    if (RecoverCommittedMergeProgress(execution, item) is { } recovered) return recovered;
                     var failureAudit = await AddAuditAsync(actor, SecurityAuditEventType.GovernanceBatchItemProcessed,
                         "UnknownResult", new { item.Key, item.Kind, item.Id, error = "Execution cancelled; outcome unknown.", retryable = false }, CancellationToken.None);
                     itemResult = Failed(item, "The item outcome is unknown because execution was cancelled.", retryable: false, "NotAdvancedUnknown") with
@@ -545,6 +552,7 @@ public sealed class GovernanceBatchExecutor(
                     execution = await dbContext.GovernanceBatchExecutions.SingleAsync(
                         x => x.Id == execution.Id,
                         CancellationToken.None);
+                    if (RecoverCommittedMergeProgress(execution, item) is { } recovered) return recovered;
                     var failureAudit = await AddAuditAsync(actor, SecurityAuditEventType.GovernanceBatchItemProcessed,
                         "Failed", new { item.Key, item.Kind, item.Id, error = ex.Message, retryable = true }, CancellationToken.None);
                     itemResult = Failed(item, ex.Message, retryable: true, "NotAdvancedRetryable") with { AuditIds = [failureAudit] };
@@ -567,14 +575,30 @@ public sealed class GovernanceBatchExecutor(
 
             index++;
             lastItemKey = item.Key;
-            await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
-                executablePlanItems.Count - index, stopwatch, "Running", advance: true, cancellationToken);
+            if (!IsAppliedMerge(itemResult))
+            {
+                await PersistProgressAsync(run, execution, accumulator, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash,
+                    executablePlanItems.Count - index, stopwatch, "Running", advance: true, cancellationToken);
+            }
         }
 
         var hasMore = index < executablePlanItems.Count;
         var nextCursor = request.DryRun
             ? (string.IsNullOrWhiteSpace(run.LastCursor) ? null : run.LastCursor)
             : hasMore ? BuildCursor(run, logicalPositionBase + index, lastItemKey, actorHash, projectSetHash, policyHash) : null;
+        var retentionReview = await autonomousRetention.ReviewAsync(projectIds, request.GovernanceRunId.Trim(), CancellationToken.None,
+            allowCancelledReactivation: false,
+            persistStateChanges: request.ExecutionMode != GovernanceBatchExecutionMode.Scheduled);
+        accumulator.ApplyRetentionReview(retentionReview);
+
+        // Commit terminal status with the final result and completion audit after the retention review's writes.
+        var completionAudit = StageAudit(
+            actor,
+            SecurityAuditEventType.GovernanceBatchExecutionCompleted,
+            stoppedReason,
+            new { runId = run.Id, executionId = execution.Id, accumulator.ScannedCount, accumulator.AttemptedCount, accumulator.AppliedCount, hasMore, hardDeleteCount = accumulator.AutoDeletedCount });
+        accumulator.AuditIds.Add(completionAudit);
+        var result = accumulator.ToResult(nextCursor, hasMore, stopwatch.ElapsedMilliseconds, stoppedReason);
         if (!request.DryRun)
         {
             run.LastCursor = nextCursor ?? string.Empty;
@@ -584,18 +608,6 @@ public sealed class GovernanceBatchExecutor(
         execution.Status = "Completed";
         execution.CompletedAt = clock.UtcNow;
         execution.UpdatedAt = clock.UtcNow;
-        var retentionReview = await autonomousRetention.ReviewAsync(projectIds, request.GovernanceRunId.Trim(), CancellationToken.None,
-            allowCancelledReactivation: false,
-            persistStateChanges: request.ExecutionMode != GovernanceBatchExecutionMode.Scheduled);
-        accumulator.ApplyRetentionReview(retentionReview);
-        var completionAudit = await AddAuditAsync(
-            actor,
-            SecurityAuditEventType.GovernanceBatchExecutionCompleted,
-            stoppedReason,
-            new { runId = run.Id, executionId = execution.Id, accumulator.ScannedCount, accumulator.AttemptedCount, accumulator.AppliedCount, hasMore, hardDeleteCount = accumulator.AutoDeletedCount },
-            CancellationToken.None);
-        accumulator.AuditIds.Add(completionAudit);
-        var result = accumulator.ToResult(nextCursor, hasMore, stopwatch.ElapsedMilliseconds, stoppedReason);
         execution.ResultJson = JsonSerializer.Serialize(result, JsonOptions);
         await dbContext.SaveChangesAsync(CancellationToken.None);
         return result;
@@ -705,6 +717,7 @@ public sealed class GovernanceBatchExecutor(
         GovernanceBatchExecuteRequest request,
         IReadOnlySet<GovernanceBatchActionType> allowed,
         ContextHubRequestActor actor,
+        Func<GovernanceBatchItemResult, CancellationToken, Task> persistMergeProgress,
         CancellationToken cancellationToken)
     {
         if (request.ExecutionMode == GovernanceBatchExecutionMode.Scheduled)
@@ -729,7 +742,7 @@ public sealed class GovernanceBatchExecutor(
 
         return item.Kind switch
         {
-            "Finding" => await ProcessFindingAsync(item, request, allowed, actor, cancellationToken),
+            "Finding" => await ProcessFindingAsync(item, request, allowed, actor, persistMergeProgress, cancellationToken),
             "SuggestedAction" => await ProcessSuggestedActionAsync(item, request, allowed, actor, cancellationToken),
             "ConversationInsight" => await ProcessInsightAsync(item, request, allowed, actor, cancellationToken),
             "Proposal" => await ProcessPendingProposalAsync(item, request, actor, cancellationToken),
@@ -977,14 +990,33 @@ public sealed class GovernanceBatchExecutor(
         GovernanceBatchExecuteRequest request,
         IReadOnlySet<GovernanceBatchActionType> allowed,
         ContextHubRequestActor actor,
+        Func<GovernanceBatchItemResult, CancellationToken, Task> persistMergeProgress,
         CancellationToken cancellationToken)
     {
         await using var transaction = await dbContext.BeginTransactionAsync(
             IsolationLevel.Serializable,
             cancellationToken);
         var result = await ProcessFindingCoreAsync(item, request, allowed, actor, cancellationToken);
+        if (IsAppliedMerge(result)) await persistMergeProgress(result, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return result;
+    }
+
+    private static bool IsAppliedMerge(GovernanceBatchItemResult result)
+        => result.ActionType == GovernanceBatchActionType.Merge && result.Disposition == GovernanceBatchItemDisposition.Applied;
+
+    private static GovernanceBatchExecuteResult? RecoverCommittedMergeProgress(GovernanceBatchExecution execution, BatchPlanItem item)
+    {
+        if (item.ReviewedMergePair is not { } pair) return null;
+        var progress = DeserializeResult(execution.ResultJson);
+        var secondaryId = pair.PrimaryId == pair.Left.Id ? pair.Right.Id : pair.Left.Id;
+        if (!progress.Items.Any(result => IsAppliedMerge(result) && result.ItemKey == item.Key &&
+            result.ResourceId == pair.FindingId && ProjectContext.Matches(result.ProjectId, pair.ProjectId) &&
+            result.ResourceIds.SequenceEqual([pair.PrimaryId, secondaryId])))
+        {
+            return null;
+        }
+        return progress with { IsReplay = true, StoppedReason = "UnknownResult", RequiresReReview = true };
     }
 
     private async Task<GovernanceBatchItemResult> ProcessFindingCoreAsync(
@@ -1000,6 +1032,18 @@ public sealed class GovernanceBatchExecutor(
             return await AuditedResultAsync(item, null, GovernanceBatchItemDisposition.NoOp, "Finding is already terminal or no longer exists.", [], [], actor, cancellationToken);
         }
         ActorAuthorization.EnsureProjectAllowed(actor, finding.ProjectId, write: true);
+
+        if (item.ReviewedMergePair is { } reviewed && !reviewed.MatchesFinding(finding))
+        {
+            return await ReviewedMergeChangedAsync(item, actor, cancellationToken);
+        }
+        var reviewedMergeClassification = Enum.TryParse<GovernanceFindingType>(item.Classification, out var classification) &&
+            ReviewedGovernanceMemoryPair.IsMergeFinding(classification);
+        if (allowed.Contains(GovernanceBatchActionType.Merge) &&
+            (item.ReviewedMergePair is not null || reviewedMergeClassification || ReviewedGovernanceMemoryPair.IsMergeFinding(finding.Type)))
+        {
+            return await MergeExactDuplicateAsync(item, finding, request, actor, cancellationToken);
+        }
 
         if (finding.Type is GovernanceFindingType.ConflictCandidate or
             GovernanceFindingType.MoveMemoryCandidate or
@@ -1029,12 +1073,6 @@ public sealed class GovernanceBatchExecutor(
             await governanceService.AcceptAsync(finding.Id, cancellationToken);
             return await AuditedResultAsync(item, GovernanceBatchActionType.Reindex, GovernanceBatchItemDisposition.Applied,
                 "Reindex job was proposal-applied and returned a durable job reference.", [proposal.Id], [proposal.AppliedResourceId.Value], actor, cancellationToken);
-        }
-
-        if ((finding.Type is GovernanceFindingType.DuplicateCandidate or GovernanceFindingType.DuplicateMemoryCandidate or GovernanceFindingType.MergeMemoryCandidate) &&
-            allowed.Contains(GovernanceBatchActionType.Merge))
-        {
-            return await MergeExactDuplicateAsync(item, finding, request, actor, cancellationToken);
         }
 
         if ((finding.Type is GovernanceFindingType.SupersededMemoryCandidate or GovernanceFindingType.ReplacementChainCandidate or GovernanceFindingType.AuthoritativeSourceCandidate) &&
@@ -1154,17 +1192,22 @@ public sealed class GovernanceBatchExecutor(
         ContextHubRequestActor actor,
         CancellationToken cancellationToken)
     {
-        if (!finding.PrimaryMemoryId.HasValue || !finding.SecondaryMemoryId.HasValue)
+        var reviewed = item.ReviewedMergePair;
+        if (reviewed is null || !reviewed.MatchesFinding(finding) ||
+            !ProjectContext.Matches(item.ProjectId, reviewed.ProjectId) ||
+            finding.TenantId != actor.TenantId || finding.OwnerUserId != actor.UserId)
         {
-            return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.Deferred, "Merge requires two concrete MemoryIds.", actor, cancellationToken);
+            return await ReviewedMergeChangedAsync(item, actor, cancellationToken);
         }
-        var left = await memoryService.GetAsync(finding.PrimaryMemoryId.Value, cancellationToken);
-        var right = await memoryService.GetAsync(finding.SecondaryMemoryId.Value, cancellationToken);
-        if (left is null || right is null || !Memory.Application.ProjectContext.Matches(left.ProjectId, right.ProjectId))
+        var locked = await dbContext.LoadLockedArtifactPairAsync(reviewed.Left.Id, reviewed.Right.Id,
+            actor.TenantId!.Value, actor.UserId!.Value, reviewed.ProjectId, cancellationToken);
+        var left = locked.SingleOrDefault(memory => memory.Id == reviewed.Left.Id);
+        var right = locked.SingleOrDefault(memory => memory.Id == reviewed.Right.Id);
+        if (left is null || right is null)
         {
-            return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.RequiresUserDecision, "Merge candidates are missing or cross ProjectId.", actor, cancellationToken);
+            return await ReviewedMergeChangedAsync(item, actor, cancellationToken);
         }
-        if (IsProtected(left) || IsProtected(right))
+        if (left.IsReadOnly || right.IsReadOnly || IsProtected(left) || IsProtected(right))
         {
             return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.RequiresUserDecision, "High-value or protected memory requires explicit authority review.", actor, cancellationToken);
         }
@@ -1173,7 +1216,12 @@ public sealed class GovernanceBatchExecutor(
             return await SetFindingDispositionAsync(item, finding, GovernanceFindingDisposition.RequiresUserDecision, "The pair is not an exact or same-key mechanical duplicate.", actor, cancellationToken);
         }
 
-        var primary = AuthorityScore(left) >= AuthorityScore(right) ? left : right;
+        if (!reviewed.MatchesMemory(left, right))
+        {
+            return await ReviewedMergeChangedAsync(item, actor, cancellationToken);
+        }
+
+        var primary = reviewed.PrimaryId == left.Id ? left : right;
         var secondary = primary.Id == left.Id ? right : left;
         var typedAuthorityConflict = await GetTypedReplacementConflictAsync(
             primary.Id, secondary.Id, primary.ProjectId, actor, cancellationToken);
@@ -1265,6 +1313,12 @@ public sealed class GovernanceBatchExecutor(
         return await AuditedResultAsync(item, GovernanceBatchActionType.Merge, GovernanceBatchItemDisposition.Applied,
             $"Merged {secondary.Id:D} into {primary.Id:D}; replacement chain read-back passed before Suggested Action convergence.", proposals, [primary.Id, secondary.Id], actor, cancellationToken);
     }
+
+    private Task<GovernanceBatchItemResult> ReviewedMergeChangedAsync(
+        BatchPlanItem item, ContextHubRequestActor actor, CancellationToken cancellationToken)
+        => AuditedResultAsync(item, GovernanceBatchActionType.Merge, GovernanceBatchItemDisposition.RequiresUserDecision,
+            "The reviewed original memory pair is unavailable or has changed. Perform a fresh governance review before merging.",
+            [], item.RelatedResourceIds, actor, cancellationToken);
 
     private async Task<string?> GetTypedReplacementConflictAsync(
         Guid primaryId,
@@ -1812,6 +1866,13 @@ public sealed class GovernanceBatchExecutor(
 
     private async Task<Guid> AddAuditAsync(ContextHubRequestActor actor, SecurityAuditEventType eventType, string outcome, object details, CancellationToken cancellationToken)
     {
+        var auditId = StageAudit(actor, eventType, outcome, details);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return auditId;
+    }
+
+    private Guid StageAudit(ContextHubRequestActor actor, SecurityAuditEventType eventType, string outcome, object details)
+    {
         var audit = new SecurityAuditEvent
         {
             TenantId = actor.TenantId,
@@ -1821,8 +1882,7 @@ public sealed class GovernanceBatchExecutor(
             DetailsJson = JsonSerializer.Serialize(details, JsonOptions),
             CreatedAt = clock.UtcNow
         };
-        await dbContext.SecurityAuditEvents.AddAsync(audit, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        dbContext.SecurityAuditEvents.Add(audit);
         return audit.Id;
     }
 
@@ -1838,6 +1898,7 @@ public sealed class GovernanceBatchExecutor(
         var fullPlan = await fullGovernance.BuildAsync(projectIds, governanceRunId, snapshot, cancellationToken,
             allowCancelledRetentionReactivation: false,
             persistResourceChanges: persistResourceChanges);
+        var reviewedMergePairs = snapshot.ReviewedMergePairs.ToDictionary(pair => pair.FindingId);
         return fullPlan.Items.Select(x => new BatchPlanItem(
                 x.ItemKey,
                 DispatchKindFor(x.ItemKind),
@@ -1859,6 +1920,9 @@ public sealed class GovernanceBatchExecutor(
                 x.ReasonCodes,
                 x.ItemKind == GovernanceItemKind.ConversationInsight && x.SemanticEvidenceHash.Length > 0
                     ? x.SemanticEvidenceHash
+                    : null,
+                x.ItemKind == GovernanceItemKind.Memory
+                    ? reviewedMergePairs.GetValueOrDefault(ParseItemId(x.ItemKey, x.AuthorityResourceId))
                     : null))
              .OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.ProjectId, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Key, StringComparer.Ordinal).ToList();
     }
@@ -1968,6 +2032,7 @@ public sealed class GovernanceBatchExecutor(
            persisted.CanonicalKind == rebuilt.CanonicalKind &&
            persisted.AuthorityResourceId == rebuilt.AuthorityResourceId &&
            string.Equals(persisted.DeferredInsightEvidenceHash, rebuilt.DeferredInsightEvidenceHash, StringComparison.Ordinal) &&
+           persisted.ReviewedMergePair == rebuilt.ReviewedMergePair &&
            persisted.RelatedResourceIds.OrderBy(x => x).SequenceEqual(rebuilt.RelatedResourceIds.OrderBy(x => x)) &&
            persisted.ReasonCodes!.OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(
                rebuilt.ReasonCodes!.OrderBy(x => x, StringComparer.Ordinal), StringComparer.Ordinal);
@@ -2283,14 +2348,14 @@ public sealed class GovernanceBatchExecutor(
         => new(item.Key, item.Kind, item.Id, item.ProjectId, null, GovernanceBatchItemDisposition.Failed,
             "Item failed in isolation.", error, retryable, cursorDisposition, [], [], []);
 
-    private static bool IsProtected(MemoryDocument memory)
+    private static bool IsProtected(MemoryItem memory)
         => memory.Importance >= 0.85m || memory.Confidence >= 0.95m ||
            memory.Tags.Any(x => string.Equals(x, "protected", StringComparison.OrdinalIgnoreCase) ||
                                 string.Equals(x, "legal", StringComparison.OrdinalIgnoreCase) ||
                                 string.Equals(x, "security-sensitive", StringComparison.OrdinalIgnoreCase) ||
                                 string.Equals(x, "secret", StringComparison.OrdinalIgnoreCase));
 
-    private static bool IsExactOrSameKeyDuplicate(MemoryDocument left, MemoryDocument right)
+    private static bool IsExactOrSameKeyDuplicate(MemoryItem left, MemoryItem right)
     {
         if (left.MemoryType != right.MemoryType || left.Status != MemoryStatus.Active || right.Status != MemoryStatus.Active) return false;
         if (ProjectArtifactExchangeService.GetDuplicateIdentity(left) is not { } identity ||
@@ -2299,13 +2364,6 @@ public sealed class GovernanceBatchExecutor(
         var sameKey = !string.IsNullOrWhiteSpace(left.ExternalKey) && string.Equals(left.ExternalKey, right.ExternalKey, StringComparison.OrdinalIgnoreCase);
         var contained = Normalize(left.Content).Contains(Normalize(right.Content), StringComparison.Ordinal) || Normalize(right.Content).Contains(Normalize(left.Content), StringComparison.Ordinal);
         return exact || (sameKey && contained);
-    }
-
-    private static decimal AuthorityScore(MemoryDocument memory)
-    {
-        var score = memory.Confidence * 3m + memory.Importance * 2m + Math.Min(memory.Version, 20) / 20m;
-        if (memory.Tags.Any(x => string.Equals(x, "authoritative", StringComparison.OrdinalIgnoreCase) || string.Equals(x, "source-of-truth", StringComparison.OrdinalIgnoreCase))) score += 10m;
-        return score;
     }
 
     private static string MergeText(string primary, string secondary)
@@ -2425,7 +2483,8 @@ public sealed class GovernanceBatchExecutor(
         GovernanceItemKind? CanonicalKind = null,
         Guid? AuthorityResourceId = null,
         IReadOnlyList<string>? ReasonCodes = null,
-        string? DeferredInsightEvidenceHash = null)
+        string? DeferredInsightEvidenceHash = null,
+        ReviewedGovernanceMemoryPair? ReviewedMergePair = null)
     {
         public IReadOnlyList<Guid> RelatedResourceIds => RelatedIds ?? [];
     }
@@ -2453,8 +2512,17 @@ public sealed class GovernanceBatchExecutor(
         public int TombstonedCount { get; private set; }
         public int SemanticAutoResolvedCount { get; private set; }
         public int ProtectedRetentionCount { get; private set; }
-        public List<GovernanceBatchItemResult> Items { get; } = [];
-        public List<Guid> AuditIds { get; } = [];
+        public List<GovernanceBatchItemResult> Items { get; private set; } = [];
+        public List<Guid> AuditIds { get; private set; } = [];
+
+        public BatchAccumulator WithItem(GovernanceBatchItemResult item)
+        {
+            var copy = (BatchAccumulator)MemberwiseClone();
+            copy.Items = [.. Items];
+            copy.AuditIds = [.. AuditIds];
+            copy.Add(item);
+            return copy;
+        }
 
         public void Add(GovernanceBatchItemResult item)
         {

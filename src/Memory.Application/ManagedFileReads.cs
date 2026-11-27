@@ -10,9 +10,20 @@ public sealed record ManagedFileMetadataPage(
     int Offset,
     bool HasMore);
 
+/// <summary>
+/// Counts the latest visible version of each active file. The status counts can overlap.
+/// Initial pending means integrity verified with no recorded assessment. A failed assessment contributes to NeedsRescan.
+/// </summary>
+public sealed record ManagedFileDlpSummary(
+    long VisibleLatestVersions,
+    long Quarantined,
+    long NeedsRescan,
+    long InitialPending);
+
 public interface IManagedFileReadService
 {
     Task<ManagedFileMetadataPage> ListAsync(string projectId, int limit, int offset, CancellationToken cancellationToken);
+    Task<ManagedFileDlpSummary> GetDlpSummaryAsync(string? projectId, CancellationToken cancellationToken);
     Task<ManagedFileInventoryResult?> GetAsync(string projectId, Guid fileId, CancellationToken cancellationToken);
     Task<ManagedFileMetadataPage?> ListVersionsAsync(string projectId, Guid fileId, int limit, int offset, CancellationToken cancellationToken);
     Task<ManagedFileInventoryResult?> GetVersionAsync(string projectId, Guid fileId, Guid versionId, CancellationToken cancellationToken);
@@ -26,6 +37,46 @@ public sealed class ManagedFileReadService(
     TimeProvider? timeProvider = null) : IManagedFileReadService
 {
     private const int CandidateBatchSize = 100;
+
+    public async Task<ManagedFileDlpSummary> GetDlpSummaryAsync(string? projectId, CancellationToken cancellationToken)
+    {
+        var requestedProject = ProjectContext.Normalize(projectId);
+        if (ProjectContext.Matches(requestedProject, ProjectContext.DefaultProjectId) ||
+            requestedProject.Contains(ProjectContext.AllProjectIdsSentinel, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("An explicit project is required.", nameof(projectId));
+        }
+
+        var (actor, project) = RequireActor(requestedProject);
+        var tenantId = actor.TenantId ?? throw new UnauthorizedAccessException("A tenant-scoped actor is required.");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15), timeProvider ?? TimeProvider.System);
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+        cancellationToken = operation.Token;
+
+        Guid? afterFileId = null;
+        long visible = 0, quarantined = 0, needsRescan = 0, initialPending = 0;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var batch = await DlpSummaryBatch(actor, project, tenantId, afterFileId).ToArrayAsync(cancellationToken);
+            foreach (var version in batch)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!await CanReadMetadataAsync(actor, project, version.FileAssetId, cancellationToken)) continue;
+
+                visible++;
+                if (version.Classification == FileClassification.Quarantined) quarantined++;
+                if (version.NeedsRescan) needsRescan++;
+                if (version.Lifecycle == FileVersionLifecycle.IntegrityVerified && version.LastScanAt is null) initialPending++;
+            }
+
+            if (batch.Length < CandidateBatchSize) break;
+            afterFileId = batch[^1].FileAssetId;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return new(visible, quarantined, needsRescan, initialPending);
+    }
 
     public async Task<ManagedFileMetadataPage> ListAsync(string projectId, int limit, int offset, CancellationToken cancellationToken)
     {
@@ -142,11 +193,29 @@ public sealed class ManagedFileReadService(
            where version.Lifecycle != FileVersionLifecycle.LogicalDeleted
            select version;
 
-    private IQueryable<ManagedFileInventoryResult> LatestMetadata(ContextHubRequestActor actor, string project, Guid[] ids)
+    private IQueryable<FileVersion> LatestVersions(ContextHubRequestActor actor, string project)
         => Versions(actor, project)
-            .Where(version => ids.Contains(version.FileAssetId) && version.VersionNumber ==
+            .Where(version => version.VersionNumber ==
                 dbContext.FileVersions.Where(other => other.FileAssetId == version.FileAssetId &&
-                    other.Lifecycle != FileVersionLifecycle.LogicalDeleted).Max(other => other.VersionNumber))
+                    other.Lifecycle != FileVersionLifecycle.LogicalDeleted).Max(other => other.VersionNumber));
+
+    private IQueryable<DlpSummaryCandidate> DlpSummaryBatch(ContextHubRequestActor actor, string project, Guid tenantId, Guid? afterFileId)
+    {
+        var versions = LatestVersions(actor, project).Where(version => version.FileAsset!.TenantId == tenantId);
+        if (afterFileId is Guid after)
+        {
+            versions = versions.Where(version => version.FileAssetId.CompareTo(after) > 0);
+        }
+        return versions.OrderBy(version => version.FileAssetId).Take(CandidateBatchSize)
+            .Select(version => new DlpSummaryCandidate(version.FileAssetId, version.Lifecycle, version.Classification,
+                version.NeedsRescan, version.LastScanAt));
+    }
+
+    private sealed record DlpSummaryCandidate(Guid FileAssetId, FileVersionLifecycle Lifecycle, FileClassification Classification,
+        bool NeedsRescan, DateTimeOffset? LastScanAt);
+
+    private IQueryable<ManagedFileInventoryResult> LatestMetadata(ContextHubRequestActor actor, string project, Guid[] ids)
+        => LatestVersions(actor, project).Where(version => ids.Contains(version.FileAssetId))
             .Select(MetadataProjection);
 
     private async Task<bool> IsVisibleAsync(ContextHubRequestActor actor, string project, Guid fileId, CancellationToken cancellationToken)

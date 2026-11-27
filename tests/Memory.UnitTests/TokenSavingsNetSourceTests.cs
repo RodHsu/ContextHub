@@ -176,6 +176,30 @@ public sealed class TokenSavingsNetSourceTests
         wire.GetProperty("savingsCalculationVersion").ValueKind.Should().Be(JsonValueKind.Null);
     }
 
+    [Theory]
+    [InlineData(1_500_000_000, 100_000_000, 4_500_000_000L, 300_000_000L, 4_200_000_000L)]
+    [InlineData(100_000_000, 1_500_000_000, 300_000_000L, 4_500_000_000L, -4_200_000_000L)]
+    public void Wide_window_and_trend_keep_signed_totals_when_individually_valid_events_exceed_Int32(
+        int baseline, int returned, long totalBaseline, long totalReturned, long net)
+    {
+        var snapshot = RoundTrip(Build(Event(baseline, returned), Event(baseline, returned), Event(baseline, returned)), out _);
+        var result = snapshot.Payload.Savings;
+        var day = result.Windows!.Single(window => window.Key == "24h");
+        day.SampleCount.Should().Be(3);
+        day.BaselineTokenEstimate.Should().Be(totalBaseline);
+        day.ReturnedTokenEstimate.Should().Be(totalReturned);
+        day.EstimatedSavedTokens.Should().Be(net);
+        (day.PositiveSavedTokens - day.IncreasedTokens).Should().Be(net);
+        day.SavingPercent.Should().Be(Math.Round(net / (double)totalBaseline * 100, 2));
+        result.BaselineTokenEstimate.Should().Be(totalBaseline);
+        result.ReturnedTokenEstimate.Should().Be(totalReturned);
+        result.EstimatedSavedTokens.Should().Be(net);
+        var point = result.Trend.Should().ContainSingle().Subject;
+        point.BaselineTokenEstimate.Should().Be(totalBaseline);
+        point.ReturnedTokenEstimate.Should().Be(totalReturned);
+        point.EstimatedSavedTokens.Should().Be(net);
+    }
+
     [Fact]
     public void Contract_roundtrip_distinguishes_no_samples_invalid_samples_and_valid_zero_baseline()
     {
@@ -216,7 +240,7 @@ public sealed class TokenSavingsNetSourceTests
         day.IncreasedTokens.Should().Be(150);
         day.EstimatedSavedTokens.Should().Be(-60);
         day.SavingPercent.Should().Be(-30);
-        var threeDays = result.Windows.Single(x => x.Key == "3d");
+        var threeDays = result.Windows!.Single(x => x.Key == "3d");
         threeDays.SampleCount.Should().Be(3);
         threeDays.UnusableSampleCount.Should().Be(1);
         threeDays.BaselineTokenEstimate.Should().Be(1100);

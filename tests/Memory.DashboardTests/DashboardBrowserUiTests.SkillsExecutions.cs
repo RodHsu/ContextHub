@@ -6,6 +6,53 @@ namespace Memory.DashboardTests;
 
 public sealed partial class DashboardBrowserUiTests
 {
+    [Theory]
+    [InlineData("success", "switch", "current-beta-revision")]
+    [InlineData("error", "switch", "current-beta-revision")]
+    [InlineData("empty", "refresh", "current-alpha-revision")]
+    [InlineData("success", "reselect", "current-alpha-revision")]
+    public async Task Skills_Should_Ignore_Superseded_Source_Observation_Results(
+        string staleOutcome, string selectionChange, string expectedRevision)
+    {
+        const string firstSkill = "Execution audit fixture skill";
+        const string secondSkill = "Source observation fixture beta";
+        await _fixture.EnsureDashboardRunningAsync();
+        await using var context = await _fixture.CreateContextAsync(new DashboardViewport("skills-observations", 1366, 768));
+        var page = await context.NewPageAsync();
+        await LoginAndOpenAsync(page, $"/skills?skillsObservationFixture={staleOutcome}");
+
+        var registry = page.Locator("section.panel").Filter(new()
+        {
+            Has = page.GetByText("Registry / versions / bindings", new() { Exact = true })
+        });
+        var firstRow = registry.Locator("article.stack-item").Filter(new() { HasText = firstSkill });
+        await firstRow.ClickAsync();
+        await Expect(registry.GetByText($"{firstSkill} details", new() { Exact = true })).ToBeVisibleAsync();
+
+        if (selectionChange == "refresh")
+        {
+            await page.GetByRole(AriaRole.Button, new() { Name = "重新整理", Exact = true }).ClickAsync();
+        }
+        else if (selectionChange == "switch")
+        {
+            await registry.Locator("article.stack-item").Filter(new() { HasText = secondSkill }).ClickAsync();
+        }
+        else
+        {
+            await firstRow.ClickAsync();
+        }
+
+        var details = registry.Locator(".subpanel");
+        await Expect(details).ToContainTextAsync(expectedRevision);
+
+        // Preview releases the fixture's blocked first read and renders after its continuation.
+        await page.GetByRole(AriaRole.Button, new() { Name = "Preview", Exact = true }).PressAsync("Enter");
+        await Expect(page.GetByText("Import preview 已完成。", new() { Exact = true })).ToBeVisibleAsync();
+        await Expect(details).ToContainTextAsync(expectedRevision);
+        await Expect(details).Not.ToContainTextAsync("stale-alpha-revision");
+        await Expect(page.Locator(".inline-error")).ToHaveCountAsync(0);
+    }
+
     [Fact]
     public async Task Skills_And_Executions_Should_Read_Back_The_Same_Execution_In_Audit_Details()
     {

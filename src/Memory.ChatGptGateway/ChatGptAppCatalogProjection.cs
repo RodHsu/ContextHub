@@ -11,6 +11,7 @@ public static class ChatGptAppCatalogProjection
         "governance_runs_list",
         "memory_revisions_list",
         "memory_revision_get",
+        "memory_edit_receipt_get",
         "project_work_item_get",
         "project_work_item_edit_receipt_get"
     };

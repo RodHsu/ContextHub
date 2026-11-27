@@ -2538,6 +2538,7 @@ public sealed record DurableMemoryGovernanceSnapshotResult(
     public int HostBlockedCount { get; init; }
     public IReadOnlyList<Guid> FindingIds { get; init; } = [];
     public IReadOnlyList<GovernanceExceptionStateResult> ExceptionStates { get; init; } = [];
+    public IReadOnlyList<ReviewedGovernanceMemoryPair> ReviewedMergePairs { get; init; } = [];
 }
 
 public interface IProjectArtifactExchangeService

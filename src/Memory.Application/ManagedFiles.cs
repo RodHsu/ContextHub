@@ -419,7 +419,8 @@ public sealed class ManagedFileService(
     public async Task<FileOperationDecision> AuthorizeOperationAsync(Guid fileVersionId, FileOperation operation, string purpose, CancellationToken cancellationToken)
     {
         var actor = RequireActor(SecurityScopes.MemoryRead);
-        var version = await LoadVersionAsync(fileVersionId, actor, cancellationToken);
+        var version = await LoadVersionAsync(fileVersionId, actor, cancellationToken, track: false);
+        EnsureFileSecurityScope(version, actor, write: false);
         var projectId = version.FileAsset!.ProjectId;
         var normalizedPurpose = purpose?.Trim() ?? string.Empty;
         var policy = FileSecurityPolicy.Authorize(version.Classification, operation, normalizedPurpose, actor.IsAdmin || actor.HasScope(SecurityScopes.SecurityManage));
@@ -438,37 +439,46 @@ public sealed class ManagedFileService(
             allowed = false;
             reason = "UnassignedUploaderOrAdminOnly";
         }
+        if (allowed && RequiresScannedContent(operation) && !IsContentReady(version))
+        {
+            allowed = false;
+            reason = "SecurityScanRequired";
+        }
         await RecordAccessAsync(version, actor, operation, normalizedPurpose, allowed, reason, cancellationToken);
         return new(allowed, reason, version.Classification, version.ClassificationRevision);
     }
 
-    public async Task<FileRepresentation> AddRepresentationAsync(CreateFileRepresentationRequest request, CancellationToken cancellationToken)
-    {
-        var actor = RequireActor(SecurityScopes.MemoryWrite);
-        var version = await LoadVersionAsync(request.FileVersionId, actor, cancellationToken);
-        if (request.Classification < version.Classification) throw new InvalidOperationException("Derived representations cannot downgrade source classification.");
-        var operation = request.Kind switch
+    public Task<FileRepresentation> AddRepresentationAsync(CreateFileRepresentationRequest request, CancellationToken cancellationToken)
+        => dbContext.ExecuteInTransactionAsync(async ct =>
         {
-            FileRepresentationKind.Ocr => FileOperation.Ocr,
-            FileRepresentationKind.SearchProjection => FileOperation.SearchIndex,
-            _ => FileOperation.Extract
-        };
-        var decision = FileSecurityPolicy.Authorize(version.Classification, operation, "controlled-service", actor.IsAdmin || actor.HasScope(SecurityScopes.SecurityManage));
-        if (!decision.Allowed) throw new UnauthorizedAccessException("The current classification forbids this derived representation.");
-        var representation = new FileRepresentation
-        {
-            FileVersionId = version.Id,
-            ManagedObjectId = request.ManagedObjectId,
-            Kind = request.Kind,
-            Classification = request.Classification,
-            SourceClassificationRevision = version.ClassificationRevision,
-            ContentHash = NormalizeHash(request.ContentHash),
-            CreatedAt = clock.UtcNow
-        };
-        await dbContext.FileRepresentations.AddAsync(representation, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return representation;
-    }
+            var actor = RequireActor(SecurityScopes.MemoryWrite);
+            await dbContext.AcquireTransactionLockAsync($"file-security:{request.FileVersionId}", ct);
+            var version = await LoadVersionAsync(request.FileVersionId, actor, ct, track: false);
+            EnsureFileSecurityScope(version, actor);
+            if (request.Classification < version.Classification) throw new InvalidOperationException("Derived representations cannot downgrade source classification.");
+            var operation = request.Kind switch
+            {
+                FileRepresentationKind.Ocr => FileOperation.Ocr,
+                FileRepresentationKind.SearchProjection => FileOperation.SearchIndex,
+                _ => FileOperation.Extract
+            };
+            var decision = FileSecurityPolicy.Authorize(version.Classification, operation, "controlled-service", actor.IsAdmin || actor.HasScope(SecurityScopes.SecurityManage));
+            if (!decision.Allowed) throw new UnauthorizedAccessException("The current classification forbids this derived representation.");
+            if (!IsContentReady(version)) throw new UnauthorizedAccessException("File content requires a completed security scan.");
+            var representation = new FileRepresentation
+            {
+                FileVersionId = version.Id,
+                ManagedObjectId = request.ManagedObjectId,
+                Kind = request.Kind,
+                Classification = request.Classification,
+                SourceClassificationRevision = version.ClassificationRevision,
+                ContentHash = NormalizeHash(request.ContentHash),
+                CreatedAt = clock.UtcNow
+            };
+            await dbContext.FileRepresentations.AddAsync(representation, ct);
+            await dbContext.SaveChangesAsync(ct);
+            return representation;
+        }, cancellationToken);
 
     public Task<QuarantineReleaseResult> RequestQuarantineReleaseAsync(QuarantineReleaseRequest request, CancellationToken cancellationToken)
         => dbContext.ExecuteInTransactionAsync(async ct =>
@@ -512,7 +522,7 @@ public sealed class ManagedFileService(
     private static string QuarantineRescanApprovalReason(long revision)
         => $"ExternalApprovalVerifiedRescanRequired:{revision.ToString(CultureInfo.InvariantCulture)}";
 
-    private static void EnsureFileSecurityScope(FileVersion version, ContextHubRequestActor actor)
+    private static void EnsureFileSecurityScope(FileVersion version, ContextHubRequestActor actor, bool write = true)
     {
         if (version.FileAsset is null || version.FileAsset.State == FileAssetState.LogicalDeleted ||
             version.Lifecycle == FileVersionLifecycle.LogicalDeleted)
@@ -521,7 +531,7 @@ public sealed class ManagedFileService(
         {
             try
             {
-                ActorAuthorization.EnsureProjectAllowed(actor, projectId, write: true);
+                ActorAuthorization.EnsureProjectAllowed(actor, projectId, write);
             }
             catch (UnauthorizedAccessException)
             {
@@ -667,9 +677,17 @@ public sealed class ManagedFileService(
         return results;
     }
 
-    private async Task<FileVersion> LoadVersionAsync(Guid id, ContextHubRequestActor actor, CancellationToken cancellationToken)
+    private static bool RequiresScannedContent(FileOperation operation)
+        => operation is FileOperation.Read or FileOperation.Download or FileOperation.Extract or FileOperation.Ocr or
+            FileOperation.Embed or FileOperation.SearchIndex or FileOperation.AutoShare or FileOperation.CrossProjectShare;
+
+    private static bool IsContentReady(FileVersion version)
+        => version.Lifecycle == FileVersionLifecycle.Ready && !version.NeedsRescan;
+
+    private async Task<FileVersion> LoadVersionAsync(Guid id, ContextHubRequestActor actor, CancellationToken cancellationToken, bool track = true)
     {
-        var query = dbContext.FileVersions.Include(x => x.FileAsset).Include(x => x.Representations);
+        var versions = dbContext.FileVersions.Include(x => x.FileAsset);
+        var query = track ? versions.Include(x => x.Representations) : versions.AsNoTracking();
         var version = await ScopeByAsset(query, actor).SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
         return version ?? throw new UnauthorizedAccessException("File version is not available.");
     }

@@ -15,6 +15,87 @@ namespace Memory.IntegrationTests;
 public sealed class SecretWave4AWorkflowTests(ContainerTestEnvironment environment) : IClassFixture<ContainerTestEnvironment>
 {
     [DockerRequiredFact]
+    public async Task Reconciliation_clears_abandoned_uses_only_after_exhausted_leases_expire()
+    {
+        using var scope = environment.GetFactory().Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MemoryDbContext>();
+        var now = new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var createdAt = now.AddMinutes(-20);
+        var projectId = $"reconciliation-{Guid.NewGuid():N}";
+        var secret = new Secret
+        {
+            ProjectId = projectId,
+            Name = projectId,
+            NormalizedName = projectId,
+            Kind = SecretKind.ApiToken,
+            CreatedAt = createdAt,
+            UpdatedAt = createdAt
+        };
+        db.Secrets.Add(secret);
+        await db.SaveChangesAsync();
+
+        var expiredExhausted = Lease(SecretLeaseState.Exhausted, now.AddMinutes(-1), activeUses: 2);
+        var boundaryExhausted = Lease(SecretLeaseState.Exhausted, now);
+        var freshExhausted = Lease(SecretLeaseState.Exhausted, now.AddMinutes(10));
+        var clearedExhausted = Lease(SecretLeaseState.Exhausted, now, activeUses: 0);
+        var expiredActive = Lease(SecretLeaseState.Active, now);
+        var freshActive = Lease(SecretLeaseState.Active, now.AddMinutes(10));
+        var revoked = Lease(SecretLeaseState.Revoked, now);
+        SecretLease[] leases = [expiredExhausted, boundaryExhausted, freshExhausted, clearedExhausted, expiredActive, freshActive, revoked];
+        db.SecretLeases.AddRange(leases);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var clock = new ReconciliationClock(now);
+        var service = new SecretReconciliationService(db, clock);
+        (await service.RunAsync(CancellationToken.None)).ExpiredLeases.Should().Be(1);
+
+        expiredActive.State = SecretLeaseState.Expired;
+        foreach (var lease in new[] { expiredExhausted, boundaryExhausted, expiredActive })
+        {
+            lease.ActiveUses = 0;
+            lease.UpdatedAt = now;
+        }
+        (await ReadLeasesAsync()).Should().BeEquivalentTo(leases);
+
+        clock.UtcNow = now.AddMinutes(1);
+        (await service.RunAsync(CancellationToken.None)).ExpiredLeases.Should().Be(0);
+        (await ReadLeasesAsync()).Should().BeEquivalentTo(leases);
+
+        SecretLease Lease(SecretLeaseState state, DateTimeOffset expiresAt, int activeUses = 1)
+            => new()
+            {
+                SecretId = secret.Id,
+                SecretVersionId = Guid.NewGuid(),
+                ProjectId = projectId,
+                ActorId = "reconciliation-fixture",
+                Kind = SecretLeaseKind.Use,
+                Purpose = "reconciliation-fixture",
+                Target = "reconciliation-fixture",
+                CapabilityHash = new string('0', 64),
+                AuthorityRevision = 3,
+                Revision = 7,
+                MaxUses = 2,
+                UsedCount = state == SecretLeaseState.Exhausted ? 2 : 1,
+                MaxConcurrency = 2,
+                ActiveUses = activeUses,
+                State = state,
+                ExpiresAt = expiresAt,
+                CreatedAt = createdAt,
+                UpdatedAt = createdAt,
+                RevokedAt = state == SecretLeaseState.Revoked ? createdAt : null
+            };
+
+        Task<SecretLease[]> ReadLeasesAsync() => db.SecretLeases.AsNoTracking()
+            .Where(lease => lease.SecretId == secret.Id).ToArrayAsync();
+    }
+
+    private sealed class ReconciliationClock(DateTimeOffset now) : IClock
+    {
+        public DateTimeOffset UtcNow { get; set; } = now;
+    }
+
+    [DockerRequiredFact]
     public async Task Password_step_up_must_bind_session_purpose_resource_and_block_agent_or_replay()
     {
         using var scope = environment.GetFactory().Services.CreateScope();

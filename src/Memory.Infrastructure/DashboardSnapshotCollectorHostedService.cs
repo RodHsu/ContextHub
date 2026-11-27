@@ -901,8 +901,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
 
         // Recompute from the same valid B/R pairs, including old clamped events.
         // Never rewrite telemetry or trust its historical saved field.
-        var baseline = windowSamples.Sum(x => x.Savings!.BaselineTokenEstimate);
-        var returned = windowSamples.Sum(x => x.Savings!.ReturnedTokenEstimate);
+        var baseline = windowSamples.Sum(x => (long)x.Savings!.BaselineTokenEstimate);
+        var returned = windowSamples.Sum(x => (long)x.Savings!.ReturnedTokenEstimate);
         var saved = baseline - returned;
         var positive = windowSamples.Sum(x => Math.Max(0L, (long)x.Savings!.BaselineTokenEstimate - x.Savings.ReturnedTokenEstimate));
         var increased = windowSamples.Sum(x => Math.Max(0L, (long)x.Savings!.ReturnedTokenEstimate - x.Savings.BaselineTokenEstimate));
@@ -962,8 +962,8 @@ public sealed class DashboardSnapshotCollectorHostedService(
             .Select(group =>
             {
                 var bucketSamples = group.ToArray();
-                var baseline = bucketSamples.Sum(x => x.Savings!.BaselineTokenEstimate);
-                var returned = bucketSamples.Sum(x => x.Savings!.ReturnedTokenEstimate);
+                var baseline = bucketSamples.Sum(x => (long)x.Savings!.BaselineTokenEstimate);
+                var returned = bucketSamples.Sum(x => (long)x.Savings!.ReturnedTokenEstimate);
                 var saved = baseline - returned;
                 var savingPercent = baseline > 0
                     ? saved / (double)baseline * 100d
@@ -981,7 +981,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
             .ToArray();
     }
 
-    private static double WeightedAverageCoverage(IReadOnlyList<ContextSavingsTelemetrySample> samples, int baseline)
+    private static double WeightedAverageCoverage(IReadOnlyList<ContextSavingsTelemetrySample> samples, long baseline)
     {
         if (samples.Count == 0)
         {
@@ -996,7 +996,7 @@ public sealed class DashboardSnapshotCollectorHostedService(
         return samples.Sum(x => Math.Max(0, x.Savings!.BaselineTokenEstimate) * x.Savings!.SourceCoveragePercent) / baseline;
     }
 
-    private static double WeightedAverageExactCoverage(IReadOnlyList<ContextSavingsTelemetrySample> samples, int baseline)
+    private static double WeightedAverageExactCoverage(IReadOnlyList<ContextSavingsTelemetrySample> samples, long baseline)
     {
         if (samples.Count == 0)
         {

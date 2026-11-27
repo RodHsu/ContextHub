@@ -2658,6 +2658,7 @@ public static class DependencyInjection
         services.AddScoped<ISkillService, SkillService>();
         services.AddScoped<ISuggestedActionReconciliationService, SuggestedActionReconciliationService>();
         services.AddScoped<IMemoryService, MemoryService>();
+        services.AddScoped<IMemoryEditingService, MemoryEditingService>();
         services.AddScoped<IProjectArtifactExchangeService, ProjectArtifactExchangeService>();
         services.AddScoped<IDashboardQueryService, DashboardQueryService>();
         services.AddScoped<IDashboardMemoryGraphIndexBuilder, DashboardMemoryGraphIndexBuilder>();
@@ -2675,7 +2676,8 @@ public static class DependencyInjection
             provider.GetRequiredService<IManagedFileService>(), provider.GetRequiredService<IProjectDiscussionService>(),
             provider.GetRequiredService<ISuggestedActionService>(), provider.GetRequiredService<IRequestActorAccessor>(),
             provider.GetRequiredService<IClock>(), provider.GetRequiredService<ILogger<ChatGptProposalService>>(),
-            () => provider.GetRequiredService<IWorkItemProposalWorkflow>()));
+            () => provider.GetRequiredService<IWorkItemProposalWorkflow>(),
+            () => provider.GetRequiredService<IMemoryEditProposalWorkflow>()));
         services.AddScoped<ITenantSecurityService, TenantSecurityService>();
         services.AddScoped<ISourceConnectionService, SourceConnectionService>();
         services.AddScoped<ISourceSyncService, SourceSyncService>();
